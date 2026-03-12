@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.expo/
+*.env
+.env.local
+.env.*.local
+*.tgz
+.DS_Store
+.turbo/
+coverage/
+.nyc_output/
+*.log
+ios/
+android/
+web-build/

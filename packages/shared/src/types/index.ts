@@ -1,0 +1,325 @@
+/**
+ * Roybal Restoration — Shared TypeScript Types
+ *
+ * These types mirror the Supabase Postgres schema exactly.
+ * All dollar amounts are in cents (integer). All dates are UTC ISO strings.
+ */
+
+// ============================================================
+// ENUMS
+// ============================================================
+export type JobStatus =
+  | "new"
+  | "active"
+  | "drying"
+  | "final_inspection"
+  | "invoicing"
+  | "closed";
+
+export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
+  new: "New",
+  active: "Active",
+  drying: "Drying",
+  final_inspection: "Final Inspection",
+  invoicing: "Invoicing",
+  closed: "Closed",
+};
+
+export const JOB_STATUS_ORDER: JobStatus[] = [
+  "new",
+  "active",
+  "drying",
+  "final_inspection",
+  "invoicing",
+  "closed",
+];
+
+export type LossType = "water" | "fire" | "mold" | "smoke" | "other";
+export type LossCategory = "cat1" | "cat2" | "cat3";
+export type PhotoCategory =
+  | "before"
+  | "during"
+  | "after"
+  | "moisture"
+  | "equipment"
+  | "general";
+
+export type EquipmentType =
+  | "lgr_dehumidifier"
+  | "refrigerant_dehumidifier"
+  | "air_mover"
+  | "hepa_scrubber"
+  | "hepa_vac"
+  | "axial_fan"
+  | "other";
+
+export const EQUIPMENT_TYPE_LABELS: Record<EquipmentType, string> = {
+  lgr_dehumidifier: "LGR Dehumidifier",
+  refrigerant_dehumidifier: "Refrigerant Dehumidifier",
+  air_mover: "Air Mover",
+  hepa_scrubber: "HEPA Air Scrubber",
+  hepa_vac: "HEPA Vacuum",
+  axial_fan: "Axial Fan",
+  other: "Other",
+};
+
+export type BillingType = "tm" | "scope";
+export type UserRole = "admin" | "tech" | "viewer";
+
+// ============================================================
+// DATABASE ROW TYPES
+// ============================================================
+export interface Profile {
+  id: string;
+  full_name: string;
+  role: UserRole;
+  phone: string | null;
+  avatar_url: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Job {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  job_number: string;
+  status: JobStatus;
+  loss_type: LossType | null;
+  loss_category: LossCategory | null;
+  date_of_loss: string | null;
+  property_address: string;
+  owner_name: string | null;
+  owner_phone: string | null;
+  owner_email: string | null;
+  insurance_carrier: string | null;
+  claim_number: string | null;
+  adjuster_name: string | null;
+  adjuster_phone: string | null;
+  adjuster_email: string | null;
+  assigned_tech_ids: string[];
+  magicplan_project_id: string | null;
+  notes: string | null;
+  created_by: string | null;
+}
+
+export interface Room {
+  id: string;
+  job_id: string;
+  name: string;
+  floor_level: string;
+  affected: boolean;
+  created_at: string;
+}
+
+export interface Photo {
+  id: string;
+  job_id: string;
+  room_id: string | null;
+  uploaded_by: string | null;
+  storage_path: string;
+  caption: string | null;
+  category: PhotoCategory;
+  taken_at: string;
+  gps_lat: number | null;
+  gps_lng: number | null;
+  created_at: string;
+  /** Resolved public/signed URL — populated by the app, not stored in DB */
+  url?: string;
+}
+
+export interface MoistureReading {
+  id: string;
+  job_id: string;
+  room_id: string;
+  reading_date: string;
+  location_description: string;
+  material_type: string;
+  moisture_pct: number;
+  is_dry: boolean;
+  recorded_by: string | null;
+  created_at: string;
+}
+
+export interface EquipmentLog {
+  id: string;
+  job_id: string;
+  room_id: string | null;
+  equipment_type: EquipmentType;
+  equipment_name: string;
+  asset_number: string | null;
+  serial_number: string | null;
+  date_placed: string;
+  date_removed: string | null;
+  days_on_site: number; // computed by DB
+  placed_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LineItem {
+  id: string;
+  job_id: string;
+  room_id: string | null;
+  category: string;
+  description: string;
+  quantity: number;
+  unit: string;
+  /** Stored as cents: $12.50 = 1250 */
+  unit_price: number;
+  /** Computed by DB: round(quantity * unit_price) */
+  total_cents: number;
+  notes: string | null;
+  billing_type: BillingType;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FloorPlan {
+  id: string;
+  job_id: string;
+  magicplan_project_id: string;
+  file_url: string | null;
+  storage_path: string | null;
+  version: number;
+  synced_at: string;
+  created_at: string;
+}
+
+// ============================================================
+// FORM / INPUT TYPES (used by create/update flows)
+// ============================================================
+export type CreateJobInput = Omit<
+  Job,
+  "id" | "created_at" | "updated_at" | "job_number" | "assigned_tech_ids"
+> & {
+  assigned_tech_ids?: string[];
+};
+
+export type UpdateJobInput = Partial<CreateJobInput>;
+
+export type CreateRoomInput = Omit<Room, "id" | "created_at">;
+
+export type CreatePhotoInput = Omit<Photo, "id" | "created_at" | "url">;
+
+export type CreateMoistureReadingInput = Omit<
+  MoistureReading,
+  "id" | "is_dry" | "created_at"
+>;
+
+export type CreateEquipmentLogInput = Omit<
+  EquipmentLog,
+  "id" | "days_on_site" | "created_at" | "updated_at"
+>;
+
+export type CreateLineItemInput = Omit<
+  LineItem,
+  "id" | "total_cents" | "created_at" | "updated_at"
+>;
+
+// ============================================================
+// MOISTURE DRY STANDARDS (IICRC S500)
+// ============================================================
+export interface DryStandard {
+  label: string;
+  maxPct: number;
+}
+
+/** Map of lowercase material keywords to their dry standard */
+export const DRY_STANDARDS: Record<string, DryStandard> = {
+  drywall: { label: "Drywall", maxPct: 1.0 },
+  gypsum: { label: "Gypsum", maxPct: 1.0 },
+  sheetrock: { label: "Sheetrock", maxPct: 1.0 },
+  wood: { label: "Wood", maxPct: 19.0 },
+  hardwood: { label: "Hardwood", maxPct: 19.0 },
+  subfloor: { label: "Subfloor", maxPct: 19.0 },
+  osb: { label: "OSB", maxPct: 19.0 },
+  plywood: { label: "Plywood", maxPct: 19.0 },
+  concrete: { label: "Concrete", maxPct: 4.0 },
+  slab: { label: "Concrete Slab", maxPct: 4.0 },
+  block: { label: "Block", maxPct: 4.0 },
+};
+
+export function getDryStandard(materialType: string): DryStandard {
+  const key = materialType.toLowerCase();
+  for (const [keyword, standard] of Object.entries(DRY_STANDARDS)) {
+    if (key.includes(keyword)) return standard;
+  }
+  return { label: materialType, maxPct: 16.0 }; // generic
+}
+
+export type MoistureStatus = "dry" | "monitoring" | "wet";
+
+/** Returns moisture status for UI color coding */
+export function getMoistureStatus(
+  moisture: number,
+  materialType: string
+): MoistureStatus {
+  const { maxPct } = getDryStandard(materialType);
+  if (moisture <= maxPct) return "dry";
+  if (moisture <= maxPct * 1.5) return "monitoring";
+  return "wet";
+}
+
+// ============================================================
+// CURRENCY HELPERS
+// ============================================================
+/** Convert cents integer to display string: 1250 → "$12.50" */
+export function centsToDisplay(cents: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(cents / 100);
+}
+
+/** Convert dollar string/number to cents: "12.50" → 1250 */
+export function dollarsToCents(dollars: number | string): number {
+  return Math.round(parseFloat(String(dollars)) * 100);
+}
+
+// ============================================================
+// DATE HELPERS
+// ============================================================
+const ALASKA_TZ = "America/Anchorage";
+
+/** Format a UTC ISO date string for display in Alaska time */
+export function formatAlaskaDate(isoString: string | null | undefined): string {
+  if (!isoString) return "—";
+  return new Date(isoString).toLocaleDateString("en-US", {
+    timeZone: ALASKA_TZ,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+export function formatAlaskaDateTime(isoString: string | null | undefined): string {
+  if (!isoString) return "—";
+  return new Date(isoString).toLocaleString("en-US", {
+    timeZone: ALASKA_TZ,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+// ============================================================
+// MAGICPLAN TYPES
+// ============================================================
+export interface MagicplanProject {
+  id: string;
+  name: string;
+  external_reference_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MagicplanFile {
+  type: "pdf" | "image" | "json";
+  url: string;
+  name: string;
+}

@@ -1,0 +1,19 @@
+{
+  "name": "roybal-restoration-app",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/mobile",
+    "apps/web",
+    "packages/shared"
+  ],
+  "scripts": {
+    "mobile": "npm run start --workspace=apps/mobile",
+    "web": "npm run dev --workspace=apps/web",
+    "shared:build": "npm run build --workspace=packages/shared",
+    "setup": "npm install && npm run shared:build"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

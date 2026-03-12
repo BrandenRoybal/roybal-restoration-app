@@ -1,0 +1,71 @@
+{
+  "expo": {
+    "name": "Roybal Restoration",
+    "slug": "roybal-restoration",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A1628"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.roybalrestoration.field",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Used to photograph job sites and document water damage.",
+        "NSPhotoLibraryUsageDescription": "Used to select existing photos for job documentation.",
+        "NSLocationWhenInUseUsageDescription": "Used to geotag photos with the job site location.",
+        "NSLocationAlwaysUsageDescription": "Used to geotag photos with the job site location."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0A1628"
+      },
+      "package": "com.roybalrestoration.field",
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Roybal Restoration uses your camera to document job site conditions."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Roybal Restoration accesses your photos to upload job documentation."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Roybal Restoration uses location to geotag job site photos."
+        }
+      ],
+      "@nozbe/watermelondb/native"
+    ],
+    "scheme": "roybal",
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
