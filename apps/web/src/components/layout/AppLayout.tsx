@@ -42,15 +42,26 @@ export default function AppLayout() {
         )}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-5 py-5 border-b border-[#1E293B]">
-          <div className="w-8 h-8 rounded bg-[#F97316] flex items-center justify-center flex-shrink-0">
-            <span className="text-white font-black text-sm">RR</span>
-          </div>
-          <div>
-            <p className="text-white font-bold text-sm leading-tight">Roybal</p>
-            <p className="text-[#F97316] text-xs font-semibold leading-tight tracking-widest">
-              RESTORATION
-            </p>
+        <div className="flex items-center gap-3 px-4 py-4 border-b border-[#1E293B]">
+          <img
+            src="/logo.png"
+            alt="Roybal Restoration"
+            className="h-10 w-auto object-contain"
+            onError={(e) => {
+              const target = e.currentTarget;
+              target.style.display = 'none';
+              const fallback = target.nextElementSibling as HTMLElement;
+              if (fallback) fallback.style.display = 'flex';
+            }}
+          />
+          <div className="hidden items-center gap-3" id="logo-fallback">
+            <div className="w-8 h-8 rounded bg-[#F97316] flex items-center justify-center flex-shrink-0">
+              <span className="text-white font-black text-sm">RR</span>
+            </div>
+            <div>
+              <p className="text-white font-bold text-sm leading-tight">Roybal</p>
+              <p className="text-[#F97316] text-xs font-semibold leading-tight tracking-widest">RESTORATION</p>
+            </div>
           </div>
           <button
             className="ml-auto lg:hidden text-slate-400"

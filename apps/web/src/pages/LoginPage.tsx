@@ -32,11 +32,24 @@ export default function LoginPage() {
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[#F97316] mb-4">
-            <span className="text-white font-black text-2xl">RR</span>
+          <img
+            src="/logo.png"
+            alt="Roybal Restoration"
+            className="h-24 w-auto object-contain mx-auto mb-4"
+            onError={(e) => {
+              const target = e.currentTarget;
+              target.style.display = 'none';
+              const fallback = document.getElementById('login-logo-fallback');
+              if (fallback) fallback.style.display = 'flex';
+            }}
+          />
+          <div id="login-logo-fallback" className="hidden flex-col items-center mb-4">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[#F97316] mb-4">
+              <span className="text-white font-black text-2xl">RR</span>
+            </div>
+            <h1 className="text-3xl font-black text-white tracking-wider">ROYBAL</h1>
+            <p className="text-[#F97316] text-xs font-bold tracking-[0.4em] mt-0.5">RESTORATION</p>
           </div>
-          <h1 className="text-3xl font-black text-white tracking-wider">ROYBAL</h1>
-          <p className="text-[#F97316] text-xs font-bold tracking-[0.4em] mt-0.5">RESTORATION</p>
           <div className="w-12 h-0.5 bg-[#F97316] mx-auto mt-3 rounded-full" />
           <p className="text-slate-400 text-sm mt-3">Admin Dashboard</p>
         </div>
