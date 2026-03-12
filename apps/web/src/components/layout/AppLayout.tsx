@@ -77,7 +77,7 @@ export default function AppLayout() {
             <NavLink
               key={to}
               to={to}
-              end={exact}
+              end={!!exact}
               className={({ isActive }) =>
                 clsx(
                   "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors",

@@ -44,12 +44,13 @@ export class MagicplanService {
 
     const res = await this.request("POST", "/projects", body);
 
-    const magicplanProjectId: string = res.id ?? res.project_id ?? res.data?.id;
+    const data = res['data'] as Record<string, unknown> | undefined;
+    const magicplanProjectId = (res['id'] ?? res['project_id'] ?? data?.['id']) as string | undefined;
     if (!magicplanProjectId) {
       throw new Error("Magicplan createProject: no project ID in response");
     }
 
-    return { magicplanProjectId, project: res as MagicplanProject };
+    return { magicplanProjectId, project: res as unknown as MagicplanProject };
   }
 
   // ------------------------------------------------------------------
@@ -58,7 +59,7 @@ export class MagicplanService {
   // ------------------------------------------------------------------
   async getProjectFiles(magicplanProjectId: string): Promise<MagicplanFile[]> {
     const res = await this.request("GET", `/projects/${magicplanProjectId}/files`);
-    const rawFiles: unknown[] = res.files ?? res.data ?? [];
+    const rawFiles = (res['files'] ?? res['data'] ?? []) as unknown[];
     return rawFiles as MagicplanFile[];
   }
 
@@ -68,7 +69,7 @@ export class MagicplanService {
   // ------------------------------------------------------------------
   async getProject(magicplanProjectId: string): Promise<MagicplanProject> {
     const res = await this.request("GET", `/projects/${magicplanProjectId}`);
-    return res as MagicplanProject;
+    return res as unknown as MagicplanProject;
   }
 
   // ------------------------------------------------------------------
@@ -137,7 +138,7 @@ export class MagicplanService {
     const res = await fetch(url, {
       method,
       headers: this.headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      body: body !== undefined ? JSON.stringify(body) : null,
     });
 
     if (!res.ok) {
