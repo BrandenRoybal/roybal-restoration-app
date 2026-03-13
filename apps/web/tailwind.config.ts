@@ -6,14 +6,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        navy: {
-          DEFAULT: "#0A1628",
-          dark: "#0F172A",
-          border: "#1E293B",
+        brand: {
+          bg: "#140D03",
+          card: "#2B1D09",
+          input: "#1C1306",
+          border: "#4A3318",
+          muted: "#9A7A4A",
         },
-        orange: {
-          DEFAULT: "#F97316",
-          hover: "#EA6C0C",
+        gold: {
+          DEFAULT: "#C9A84C",
+          hover: "#A8842A",
         },
         success: "#22C55E",
         warning: "#EAB308",

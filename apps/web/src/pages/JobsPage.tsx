@@ -1,5 +1,5 @@
 /**
- * Jobs list page with filter, search, and new job button.
+ * Jobs list page with filter, search, new job button, and delete.
  */
 
 import { useEffect, useState, useCallback } from "react";
@@ -7,12 +7,12 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import type { Job, JobStatus } from "@roybal/shared";
 import { JOB_STATUS_LABELS, JOB_STATUS_ORDER, formatAlaskaDate } from "@roybal/shared";
-import { Plus, Search, X } from "lucide-react";
+import { Plus, Search, X, Trash2 } from "lucide-react";
 import clsx from "clsx";
 
 const STATUS_COLORS: Record<JobStatus, string> = {
   new: "#64748B",
-  active: "#F97316",
+  active: "#C9A84C",
   drying: "#3B82F6",
   final_inspection: "#EAB308",
   invoicing: "#A855F7",
@@ -28,6 +28,8 @@ export default function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<JobStatus | "all">(initialStatus ?? "all");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchJobs = useCallback(async () => {
     setLoading(true);
@@ -51,6 +53,14 @@ export default function JobsPage() {
     );
   });
 
+  const handleDelete = async (jobId: string) => {
+    setDeleting(true);
+    await supabase.from("jobs").delete().eq("id", jobId);
+    setJobs((prev) => prev.filter((j) => j.id !== jobId));
+    setConfirmDeleteId(null);
+    setDeleting(false);
+  };
+
   return (
     <div className="p-6 max-w-7xl mx-auto">
       {/* Header */}
@@ -61,7 +71,7 @@ export default function JobsPage() {
         </div>
         <button
           onClick={() => navigate("/jobs/new")}
-          className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-white font-bold px-4 h-10 rounded-xl transition-colors"
+          className="flex items-center gap-2 bg-[#C9A84C] hover:bg-[#A8842A] text-[#140D03] font-bold px-4 h-10 rounded-xl transition-colors"
         >
           <Plus size={18} />
           New Job
@@ -77,7 +87,7 @@ export default function JobsPage() {
             placeholder="Search address, job #, owner…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-[#0A1628] border border-[#1E293B] rounded-xl pl-9 pr-9 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
+            className="w-full bg-[#2B1D09] border border-[#4A3318] rounded-xl pl-9 pr-9 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#C9A84C] transition-colors"
           />
           {search && (
             <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300">
@@ -93,8 +103,8 @@ export default function JobsPage() {
               className={clsx(
                 "px-3 h-9 rounded-xl text-xs font-bold transition-colors border",
                 statusFilter === s
-                  ? "bg-[#F97316] border-[#F97316] text-white"
-                  : "bg-[#0A1628] border-[#1E293B] text-slate-400 hover:text-slate-200"
+                  ? "bg-[#C9A84C] border-[#C9A84C] text-[#140D03]"
+                  : "bg-[#2B1D09] border-[#4A3318] text-slate-400 hover:text-slate-200"
               )}
             >
               {s === "all" ? "All" : JOB_STATUS_LABELS[s]}
@@ -104,12 +114,12 @@ export default function JobsPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+      <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[#1E293B]">
-                {["Job #", "Address", "Owner", "Status", "Loss Type", "Date of Loss", "Carrier"].map((h) => (
+              <tr className="border-b border-[#4A3318]">
+                {["Job #", "Address", "Owner", "Status", "Loss Type", "Date of Loss", "Carrier", ""].map((h) => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">
                     {h}
                   </th>
@@ -118,42 +128,75 @@ export default function JobsPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">Loading…</td></tr>
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-600">Loading…</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No jobs found.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-600">No jobs found.</td></tr>
               ) : (
                 filtered.map((job) => (
-                  <tr
-                    key={job.id}
-                    onClick={() => navigate(`/jobs/${job.id}`)}
-                    className="border-b border-[#1E293B]/50 hover:bg-[#0F172A] cursor-pointer transition-colors group"
-                  >
-                    <td className="px-4 py-3">
-                      <span className="font-mono text-xs text-slate-400 group-hover:text-[#F97316] transition-colors">
-                        {job.job_number}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-200 font-semibold max-w-xs truncate">
-                      {job.property_address}
-                    </td>
-                    <td className="px-4 py-3 text-slate-400 truncate">{job.owner_name ?? "—"}</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className="px-2.5 py-1 rounded-full text-xs font-bold"
-                        style={{
-                          backgroundColor: (STATUS_COLORS[job.status] ?? "#64748B") + "22",
-                          color: STATUS_COLORS[job.status] ?? "#64748B",
-                        }}
-                      >
-                        {JOB_STATUS_LABELS[job.status]}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-400 uppercase text-xs">
-                      {job.loss_type ?? "—"} {job.loss_category ? `/ ${job.loss_category}` : ""}
-                    </td>
-                    <td className="px-4 py-3 text-slate-400">{formatAlaskaDate(job.date_of_loss)}</td>
-                    <td className="px-4 py-3 text-slate-400">{job.insurance_carrier ?? "—"}</td>
-                  </tr>
+                  confirmDeleteId === job.id ? (
+                    <tr key={job.id} className="border-b border-[#4A3318]/50 bg-red-950/20">
+                      <td colSpan={8} className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <p className="text-sm text-red-300 flex-1">
+                            Delete <span className="font-bold">{job.job_number} — {job.property_address}</span>? This cannot be undone.
+                          </p>
+                          <button
+                            onClick={() => handleDelete(job.id)}
+                            disabled={deleting}
+                            className="px-3 h-8 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg disabled:opacity-60 transition-colors"
+                          >
+                            {deleting ? "Deleting…" : "Yes, Delete"}
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="px-3 h-8 bg-[#4A3318] text-slate-300 text-xs font-bold rounded-lg hover:bg-[#6B4A20] transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr
+                      key={job.id}
+                      className="border-b border-[#4A3318]/50 hover:bg-[#140D03] cursor-pointer transition-colors group"
+                    >
+                      <td className="px-4 py-3" onClick={() => navigate(`/jobs/${job.id}`)}>
+                        <span className="font-mono text-xs text-slate-400 group-hover:text-[#C9A84C] transition-colors">
+                          {job.job_number}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-200 font-semibold max-w-xs truncate" onClick={() => navigate(`/jobs/${job.id}`)}>
+                        {job.property_address}
+                      </td>
+                      <td className="px-4 py-3 text-slate-400 truncate" onClick={() => navigate(`/jobs/${job.id}`)}>{job.owner_name ?? "—"}</td>
+                      <td className="px-4 py-3" onClick={() => navigate(`/jobs/${job.id}`)}>
+                        <span
+                          className="px-2.5 py-1 rounded-full text-xs font-bold"
+                          style={{
+                            backgroundColor: (STATUS_COLORS[job.status] ?? "#64748B") + "22",
+                            color: STATUS_COLORS[job.status] ?? "#64748B",
+                          }}
+                        >
+                          {JOB_STATUS_LABELS[job.status]}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-400 uppercase text-xs" onClick={() => navigate(`/jobs/${job.id}`)}>
+                        {job.loss_type ?? "—"} {job.loss_category ? `/ ${job.loss_category}` : ""}
+                      </td>
+                      <td className="px-4 py-3 text-slate-400" onClick={() => navigate(`/jobs/${job.id}`)}>{formatAlaskaDate(job.date_of_loss)}</td>
+                      <td className="px-4 py-3 text-slate-400" onClick={() => navigate(`/jobs/${job.id}`)}>{job.insurance_carrier ?? "—"}</td>
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(job.id); }}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                          title="Delete job"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </td>
+                    </tr>
+                  )
                 ))
               )}
             </tbody>

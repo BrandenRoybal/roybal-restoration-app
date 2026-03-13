@@ -140,8 +140,8 @@ export default function JobNewPage() {
                 onClick={() => set("loss_type", t.value)}
                 className={`px-4 py-2 rounded-xl text-sm font-bold border transition-colors ${
                   form.loss_type === t.value
-                    ? "bg-[#F97316]/15 border-[#F97316] text-[#F97316]"
-                    : "bg-[#0F172A] border-[#1E293B] text-slate-400 hover:text-slate-200"
+                    ? "bg-[#C9A84C]/15 border-[#C9A84C] text-[#C9A84C]"
+                    : "bg-[#140D03] border-[#4A3318] text-slate-400 hover:text-slate-200"
                 }`}
               >
                 {t.label}
@@ -156,8 +156,8 @@ export default function JobNewPage() {
                 onClick={() => set("loss_category", c.value)}
                 className={`px-4 py-2 rounded-xl text-sm font-bold border transition-colors ${
                   form.loss_category === c.value
-                    ? "bg-[#F97316]/15 border-[#F97316] text-[#F97316]"
-                    : "bg-[#0F172A] border-[#1E293B] text-slate-400 hover:text-slate-200"
+                    ? "bg-[#C9A84C]/15 border-[#C9A84C] text-[#C9A84C]"
+                    : "bg-[#140D03] border-[#4A3318] text-slate-400 hover:text-slate-200"
                 }`}
               >
                 {c.label} — {c.desc}
@@ -199,7 +199,7 @@ export default function JobNewPage() {
             onChange={(e) => set("notes", e.target.value)}
             placeholder="Initial observations, scope notes, emergency contacts…"
             rows={4}
-            className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors resize-none"
+            className="w-full bg-[#140D03] border border-[#4A3318] rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#C9A84C] transition-colors resize-none"
           />
         </FormSection>
 
@@ -207,10 +207,10 @@ export default function JobNewPage() {
           <button
             type="submit"
             disabled={loading}
-            className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-60 text-white font-bold px-6 h-11 rounded-xl transition-colors"
+            className="flex items-center gap-2 bg-[#C9A84C] hover:bg-[#A8842A] disabled:opacity-60 text-[#140D03] font-bold px-6 h-11 rounded-xl transition-colors"
           >
             {loading ? (
-              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              <div className="w-4 h-4 border-2 border-[#140D03]/30 border-t-[#140D03] rounded-full animate-spin" />
             ) : (
               <Save size={16} />
             )}
@@ -224,8 +224,8 @@ export default function JobNewPage() {
 
 function FormSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6">
-      <h3 className="text-sm font-bold text-slate-300 mb-4 pb-3 border-b border-[#1E293B]">{title}</h3>
+    <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-6">
+      <h3 className="text-sm font-bold text-slate-300 mb-4 pb-3 border-b border-[#4A3318]">{title}</h3>
       {children}
     </div>
   );
@@ -255,7 +255,7 @@ function Input({
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       required={required}
-      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
+      className="w-full bg-[#140D03] border border-[#4A3318] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#C9A84C] transition-colors"
     />
   );
 }
