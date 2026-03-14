@@ -15,9 +15,11 @@ import {
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown } from "lucide-react";
 import clsx from "clsx";
-import { MagicplanService } from "@roybal/shared";
+import { MagicplanService, PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
+import { pdf } from "@react-pdf/renderer";
+import React from "react";
 
 const PHOTO_CATEGORIES: { value: PhotoCategory; label: string }[] = [
   { value: "before", label: "Before" },
@@ -256,6 +258,43 @@ export default function JobDetailPage() {
     const { data } = await supabase.from("equipment_logs").update({ date_removed: today }).eq("id", equipId).select().single();
     if (data) setEquipment((prev) => prev.map((e) => e.id === equipId ? data as EquipmentLog : e));
     setRemovingEquip(null);
+  };
+
+  // PDF generation
+  const [generatingReport, setGeneratingReport] = useState<string | null>(null);
+
+  const generateReport = async (type: "photos" | "moisture" | "equipment" | "scope") => {
+    if (!job) return;
+    setGeneratingReport(type);
+    try {
+      const photosWithUrls = photos.map((p) => ({ ...p, url: p.url ?? getPhotoUrl(p.storage_path) }));
+      let element: React.ReactElement;
+      let filename: string;
+      if (type === "photos") {
+        element = React.createElement(PhotoReport, { job, photos: photosWithUrls, rooms });
+        filename = `${job.job_number}-photo-report.pdf`;
+      } else if (type === "moisture") {
+        element = React.createElement(MoistureDryingReport, { job, rooms, moistureReadings: moisture, equipmentLogs: equipment });
+        filename = `${job.job_number}-moisture-drying-report.pdf`;
+      } else if (type === "equipment") {
+        element = React.createElement(EquipmentLogReport, { job, equipmentLogs: equipment, rooms });
+        filename = `${job.job_number}-equipment-log.pdf`;
+      } else {
+        element = React.createElement(ScopeInvoiceReport, { job, lineItems, rooms });
+        filename = `${job.job_number}-invoice.pdf`;
+      }
+      const blob = await pdf(element).toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("PDF generation failed:", err);
+      alert("PDF generation failed: " + (err instanceof Error ? err.message : String(err)));
+    }
+    setGeneratingReport(null);
   };
 
   const totalCents = lineItems.reduce((sum, li) => sum + li.total_cents, 0);
@@ -858,19 +897,29 @@ export default function JobDetailPage() {
 
         {activeTab === "report" && (
           <div className="max-w-2xl">
-            <p className="text-slate-400 text-sm mb-6">Generate and download PDF reports for this job.</p>
+            <p className="text-slate-400 text-sm mb-6">Generate and download PDF reports. Each opens a download dialog.</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {[
-                { title: "Photo Report", desc: "Photos organized by room and category" },
-                { title: "Moisture / Drying Report", desc: "Daily readings + equipment summary" },
-                { title: "Equipment Log", desc: "Placement dates, locations, days on site" },
-                { title: "Scope of Work / Invoice", desc: "Line items, totals, signature block" },
+                { key: "photos" as const, title: "Photo Report", desc: `${photos.length} photo${photos.length !== 1 ? "s" : ""} organized by category`, warn: photos.length === 0 ? "No photos yet" : null },
+                { key: "moisture" as const, title: "Moisture / Drying Report", desc: `${moisture.length} reading${moisture.length !== 1 ? "s" : ""} + ${equipment.length} equipment log${equipment.length !== 1 ? "s" : ""}`, warn: moisture.length === 0 ? "No readings yet" : null },
+                { key: "equipment" as const, title: "Equipment Log", desc: `${equipment.length} piece${equipment.length !== 1 ? "s" : ""} · ${equipment.filter(e => !e.date_removed).length} active`, warn: equipment.length === 0 ? "No equipment logged yet" : null },
+                { key: "scope" as const, title: "Scope of Work / Invoice", desc: `${lineItems.length} line item${lineItems.length !== 1 ? "s" : ""} · Total: ${centsToDisplay(totalCents)}`, warn: lineItems.length === 0 ? "No line items yet" : null },
               ].map((r) => (
-                <div key={r.title} className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-5">
+                <div key={r.key} className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-5">
                   <p className="font-bold text-slate-200 mb-1">{r.title}</p>
-                  <p className="text-xs text-slate-500 mb-4">{r.desc}</p>
-                  <button className="w-full bg-[#D97757]/10 border border-[#D97757]/30 text-[#D97757] font-bold text-sm h-9 rounded-xl hover:bg-[#D97757]/20 transition-colors">
-                    Generate PDF
+                  <p className="text-xs text-slate-500 mb-1">{r.desc}</p>
+                  {r.warn && <p className="text-xs text-amber-500/80 mb-3">⚠ {r.warn} — PDF will be mostly empty</p>}
+                  {!r.warn && <div className="mb-3" />}
+                  <button
+                    onClick={() => generateReport(r.key)}
+                    disabled={generatingReport !== null}
+                    className="w-full flex items-center justify-center gap-2 bg-[#D97757]/10 border border-[#D97757]/30 text-[#D97757] font-bold text-sm h-9 rounded-xl hover:bg-[#D97757]/20 disabled:opacity-50 transition-colors"
+                  >
+                    {generatingReport === r.key ? (
+                      <><RefreshCw size={14} className="animate-spin" /> Generating…</>
+                    ) : (
+                      <><FileDown size={14} /> Download PDF</>
+                    )}
                   </button>
                 </div>
               ))}

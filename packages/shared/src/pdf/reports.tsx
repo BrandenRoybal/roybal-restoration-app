@@ -204,7 +204,7 @@ export function MoistureDryingReport({
               const status = getMoistureStatus(m.moisture_pct, m.material_type);
               const standard = getDryStandard(m.material_type);
               return (
-                <View key={m.id} style={[pdfStyles.tableRow, i % 2 === 1 && pdfStyles.tableRowAlt]}>
+                <View key={m.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
                   <Text style={pdfStyles.tableCell}>{formatAlaskaDate(m.reading_date)}</Text>
                   <Text style={pdfStyles.tableCell}>{roomMap[m.room_id] ?? "—"}</Text>
                   <Text style={pdfStyles.tableCell}>{m.location_description}</Text>
@@ -283,7 +283,7 @@ export function EquipmentLogReport({ job, equipmentLogs, rooms }: EquipmentLogRe
               ))}
             </View>
             {equipmentLogs.map((e, i) => (
-              <View key={e.id} style={[pdfStyles.tableRow, i % 2 === 1 && pdfStyles.tableRowAlt]}>
+              <View key={e.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
                 <Text style={pdfStyles.tableCellBold}>{e.equipment_name}</Text>
                 <Text style={pdfStyles.tableCell}>{EQUIPMENT_TYPE_LABELS[e.equipment_type]}</Text>
                 <Text style={pdfStyles.tableCell}>{e.asset_number ?? "—"}</Text>
@@ -388,7 +388,7 @@ export function ScopeInvoiceReport({
                     ))}
                   </View>
                   {items.map((li, i) => (
-                    <View key={li.id} style={[pdfStyles.tableRow, i % 2 === 1 && pdfStyles.tableRowAlt]}>
+                    <View key={li.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
                       <Text style={[pdfStyles.tableCellBold, { flex: 2 }]}>{li.description}</Text>
                       <Text style={pdfStyles.tableCell}>{li.category}</Text>
                       <Text style={pdfStyles.tableCell}>{li.quantity}</Text>

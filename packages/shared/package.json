@@ -12,6 +12,7 @@
     "typescript": "^5.4.5"
   },
   "dependencies": {
+    "@react-pdf/renderer": "^4.3.2",
     "@supabase/supabase-js": "^2.99.1"
   }
 }
