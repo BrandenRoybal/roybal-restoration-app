@@ -42,11 +42,11 @@ export default function AppLayout() {
         )}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-4 py-4 border-b border-[#3D3530]">
+        <div className="flex items-center gap-3 px-4 py-5 border-b border-[#3D3530]">
           <img
             src="/logo.png"
             alt="Roybal Construction"
-            className="h-10 w-auto object-contain"
+            className="h-14 w-auto object-contain"
             onError={(e) => {
               const target = e.currentTarget;
               target.style.display = 'none';
