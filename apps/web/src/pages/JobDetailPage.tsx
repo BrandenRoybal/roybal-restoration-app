@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import type { Job, Room, MoistureReading, EquipmentLog, LineItem, FloorPlan, Photo } from "@roybal/shared";
+import type { Job, Room, MoistureReading, EquipmentLog, LineItem, FloorPlan, Photo, PhotoCategory, EquipmentType } from "@roybal/shared";
 import {
   JOB_STATUS_LABELS,
   JOB_STATUS_ORDER,
@@ -15,9 +15,18 @@ import {
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X } from "lucide-react";
 import clsx from "clsx";
 import { MagicplanService } from "@roybal/shared";
+
+const PHOTO_CATEGORIES: { value: PhotoCategory; label: string }[] = [
+  { value: "before", label: "Before" },
+  { value: "during", label: "During" },
+  { value: "after", label: "After" },
+  { value: "moisture", label: "Moisture Map" },
+  { value: "equipment", label: "Equipment" },
+  { value: "general", label: "General" },
+];
 
 const getMagicplanService = () => {
   const apiKey = import.meta.env.VITE_MAGICPLAN_API_KEY as string | undefined;
@@ -55,6 +64,23 @@ export default function JobDetailPage() {
   const [magicplanCreating, setMagicplanCreating] = useState(false);
   const [magicplanSyncing, setMagicplanSyncing] = useState(false);
   const [magicplanError, setMagicplanError] = useState("");
+
+  // Photos
+  const [photoCategory, setPhotoCategory] = useState<PhotoCategory>("general");
+  const [uploadingPhotos, setUploadingPhotos] = useState(false);
+  const [photoError, setPhotoError] = useState("");
+  const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
+
+  // Moisture form
+  const [showMoistureForm, setShowMoistureForm] = useState(false);
+  const [moistureForm, setMoistureForm] = useState({ room_id: "", reading_date: new Date().toISOString().slice(0, 10), location_description: "", material_type: "", moisture_pct: "" });
+  const [savingMoisture, setSavingMoisture] = useState(false);
+
+  // Equipment form
+  const [showEquipForm, setShowEquipForm] = useState(false);
+  const [equipForm, setEquipForm] = useState({ equipment_type: "air_mover" as EquipmentType, equipment_name: "", asset_number: "", room_id: "", date_placed: new Date().toISOString().slice(0, 10) });
+  const [savingEquip, setSavingEquip] = useState(false);
+  const [removingEquip, setRemovingEquip] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -154,6 +180,82 @@ export default function JobDetailPage() {
     if (data) setJob(data as Job);
     setMagicplanEditing(false);
     setMagicplanSaving(false);
+  };
+
+  // Photo upload
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length || !job) return;
+    setUploadingPhotos(true);
+    setPhotoError("");
+    for (const file of files) {
+      const ext = file.name.split(".").pop();
+      const path = `${job.id}/${crypto.randomUUID()}.${ext}`;
+      const { error: upErr } = await supabase.storage.from("job-photos").upload(path, file, { upsert: false });
+      if (upErr) { setPhotoError(`Upload failed: ${upErr.message}`); continue; }
+      const { data: { publicUrl } } = supabase.storage.from("job-photos").getPublicUrl(path);
+      const { data: photoData } = await supabase.from("photos").insert({
+        job_id: job.id, storage_path: path, category: photoCategory,
+        taken_at: new Date().toISOString(),
+      }).select().single();
+      if (photoData) setPhotos((prev) => [{ ...(photoData as Photo), url: publicUrl }, ...prev]);
+    }
+    setUploadingPhotos(false);
+    e.target.value = "";
+  };
+
+  // Load photo URLs on mount
+  const getPhotoUrl = (path: string) =>
+    supabase.storage.from("job-photos").getPublicUrl(path).data.publicUrl;
+
+  // Add moisture reading
+  const addMoistureReading = async () => {
+    if (!job || !moistureForm.room_id || !moistureForm.moisture_pct) return;
+    setSavingMoisture(true);
+    const { data } = await supabase.from("moisture_readings").insert({
+      job_id: job.id,
+      room_id: moistureForm.room_id,
+      reading_date: moistureForm.reading_date,
+      location_description: moistureForm.location_description,
+      material_type: moistureForm.material_type,
+      moisture_pct: parseFloat(moistureForm.moisture_pct),
+      is_dry: parseFloat(moistureForm.moisture_pct) < 16,
+    }).select().single();
+    if (data) {
+      setMoisture((prev) => [data as MoistureReading, ...prev]);
+      setMoistureForm({ room_id: "", reading_date: new Date().toISOString().slice(0, 10), location_description: "", material_type: "", moisture_pct: "" });
+      setShowMoistureForm(false);
+    }
+    setSavingMoisture(false);
+  };
+
+  // Log equipment
+  const logEquipment = async () => {
+    if (!job || !equipForm.equipment_name) return;
+    setSavingEquip(true);
+    const { data } = await supabase.from("equipment_logs").insert({
+      job_id: job.id,
+      equipment_type: equipForm.equipment_type,
+      equipment_name: equipForm.equipment_name,
+      asset_number: equipForm.asset_number || null,
+      room_id: equipForm.room_id || null,
+      date_placed: equipForm.date_placed,
+    }).select().single();
+    if (data) {
+      setEquipment((prev) => [...prev, data as EquipmentLog]);
+      setEquipForm({ equipment_type: "air_mover", equipment_name: "", asset_number: "", room_id: "", date_placed: new Date().toISOString().slice(0, 10) });
+      setShowEquipForm(false);
+    }
+    setSavingEquip(false);
+  };
+
+  // Remove equipment (set date_removed = today)
+  const removeEquipment = async (equipId: string) => {
+    setRemovingEquip(equipId);
+    const today = new Date().toISOString().slice(0, 10);
+    const { data } = await supabase.from("equipment_logs").update({ date_removed: today }).eq("id", equipId).select().single();
+    if (data) setEquipment((prev) => prev.map((e) => e.id === equipId ? data as EquipmentLog : e));
+    setRemovingEquip(null);
   };
 
   const totalCents = lineItems.reduce((sum, li) => sum + li.total_cents, 0);
@@ -318,6 +420,65 @@ export default function JobDetailPage() {
 
         {activeTab === "moisture" && (
           <div className="max-w-5xl">
+            {/* Add reading button */}
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-slate-400 text-sm">{moisture.length} reading{moisture.length !== 1 ? "s" : ""}</p>
+              <button
+                onClick={() => setShowMoistureForm((v) => !v)}
+                className="flex items-center gap-2 bg-[#D97757] hover:bg-[#C4623D] text-[#1C1917] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+              >
+                <Plus size={16} /> Add Reading
+              </button>
+            </div>
+
+            {/* Inline form */}
+            {showMoistureForm && (
+              <div className="bg-[#28221E] border border-[#D97757]/30 rounded-2xl p-5 mb-4">
+                <h3 className="text-sm font-bold text-slate-300 mb-4">New Moisture Reading</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Date</label>
+                    <input type="date" value={moistureForm.reading_date} onChange={(e) => setMoistureForm((f) => ({ ...f, reading_date: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Room *</label>
+                    <select value={moistureForm.room_id} onChange={(e) => setMoistureForm((f) => ({ ...f, room_id: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
+                      <option value="">Select room…</option>
+                      {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Moisture % *</label>
+                    <input type="number" min="0" max="100" step="0.1" placeholder="e.g. 18.5" value={moistureForm.moisture_pct}
+                      onChange={(e) => setMoistureForm((f) => ({ ...f, moisture_pct: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Location</label>
+                    <input type="text" placeholder="e.g. NW corner, baseboard" value={moistureForm.location_description}
+                      onChange={(e) => setMoistureForm((f) => ({ ...f, location_description: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Material</label>
+                    <input type="text" placeholder="e.g. Drywall, Wood" value={moistureForm.material_type}
+                      onChange={(e) => setMoistureForm((f) => ({ ...f, material_type: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={addMoistureReading} disabled={savingMoisture || !moistureForm.room_id || !moistureForm.moisture_pct}
+                    className="flex items-center gap-2 bg-[#D97757] hover:bg-[#C4623D] disabled:opacity-50 text-[#1C1917] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+                    {savingMoisture ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
+                    {savingMoisture ? "Saving…" : "Save Reading"}
+                  </button>
+                  <button onClick={() => setShowMoistureForm(false)} className="text-sm text-slate-500 hover:text-slate-300 px-3">Cancel</button>
+                </div>
+              </div>
+            )}
+
             <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -330,7 +491,7 @@ export default function JobDetailPage() {
                   </thead>
                   <tbody>
                     {moisture.length === 0 ? (
-                      <tr><td colSpan={6} className="px-4 py-12 text-center text-slate-600">No moisture readings yet.</td></tr>
+                      <tr><td colSpan={6} className="px-4 py-12 text-center text-slate-600">No readings yet — click Add Reading above.</td></tr>
                     ) : moisture.map((m) => {
                       const status = getMoistureStatus(m.moisture_pct, m.material_type);
                       return (
@@ -357,19 +518,79 @@ export default function JobDetailPage() {
 
         {activeTab === "equipment" && (
           <div className="max-w-5xl">
+            {/* Add equipment button */}
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-slate-400 text-sm">{equipment.filter((e) => !e.date_removed).length} active · {equipment.filter((e) => e.date_removed).length} removed</p>
+              <button
+                onClick={() => setShowEquipForm((v) => !v)}
+                className="flex items-center gap-2 bg-[#D97757] hover:bg-[#C4623D] text-[#1C1917] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+              >
+                <Plus size={16} /> Log Equipment
+              </button>
+            </div>
+
+            {/* Inline form */}
+            {showEquipForm && (
+              <div className="bg-[#28221E] border border-[#D97757]/30 rounded-2xl p-5 mb-4">
+                <h3 className="text-sm font-bold text-slate-300 mb-4">Log Equipment Placement</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Type *</label>
+                    <select value={equipForm.equipment_type} onChange={(e) => setEquipForm((f) => ({ ...f, equipment_type: e.target.value as EquipmentType, equipment_name: EQUIPMENT_TYPE_LABELS[e.target.value as EquipmentType] }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
+                      {Object.entries(EQUIPMENT_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Name *</label>
+                    <input type="text" placeholder="e.g. Dri-Eaz LGR 2800i" value={equipForm.equipment_name}
+                      onChange={(e) => setEquipForm((f) => ({ ...f, equipment_name: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Asset #</label>
+                    <input type="text" placeholder="e.g. RC-042" value={equipForm.asset_number}
+                      onChange={(e) => setEquipForm((f) => ({ ...f, asset_number: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Room</label>
+                    <select value={equipForm.room_id} onChange={(e) => setEquipForm((f) => ({ ...f, room_id: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
+                      <option value="">No room</option>
+                      {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Date Placed</label>
+                    <input type="date" value={equipForm.date_placed} onChange={(e) => setEquipForm((f) => ({ ...f, date_placed: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={logEquipment} disabled={savingEquip || !equipForm.equipment_name}
+                    className="flex items-center gap-2 bg-[#D97757] hover:bg-[#C4623D] disabled:opacity-50 text-[#1C1917] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+                    {savingEquip ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
+                    {savingEquip ? "Saving…" : "Log Equipment"}
+                  </button>
+                  <button onClick={() => setShowEquipForm(false)} className="text-sm text-slate-500 hover:text-slate-300 px-3">Cancel</button>
+                </div>
+              </div>
+            )}
+
             <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[#3D3530]">
-                      {["Equipment", "Asset #", "Room", "Placed", "Removed", "Days"].map((h) => (
+                      {["Equipment", "Asset #", "Room", "Placed", "Removed", "Days", ""].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {equipment.length === 0 ? (
-                      <tr><td colSpan={6} className="px-4 py-12 text-center text-slate-600">No equipment logged.</td></tr>
+                      <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No equipment logged — click Log Equipment above.</td></tr>
                     ) : equipment.map((e) => (
                       <tr key={e.id} className="border-b border-[#3D3530]/50">
                         <td className="px-4 py-3">
@@ -379,8 +600,19 @@ export default function JobDetailPage() {
                         <td className="px-4 py-3 text-slate-400 font-mono text-xs">{e.asset_number ?? "—"}</td>
                         <td className="px-4 py-3 text-slate-400">{e.room_id ? (roomMap[e.room_id] ?? "—") : "—"}</td>
                         <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(e.date_placed)}</td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#D97757]">Active</span>}</td>
+                        <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#D97757] font-semibold">Active</span>}</td>
                         <td className="px-4 py-3 font-bold text-slate-200">{e.days_on_site}</td>
+                        <td className="px-4 py-3">
+                          {!e.date_removed && (
+                            <button
+                              onClick={() => removeEquipment(e.id)}
+                              disabled={removingEquip === e.id}
+                              className="text-xs font-bold text-slate-500 hover:text-red-400 border border-[#3D3530] hover:border-red-500/30 px-2 py-1 rounded-lg transition-colors disabled:opacity-50"
+                            >
+                              {removingEquip === e.id ? "…" : "Remove"}
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -546,22 +778,79 @@ export default function JobDetailPage() {
 
         {activeTab === "photos" && (
           <div className="max-w-5xl">
+            {/* Upload bar */}
+            <div className="flex items-center gap-3 mb-5 flex-wrap">
+              <select
+                value={photoCategory}
+                onChange={(e) => setPhotoCategory(e.target.value as PhotoCategory)}
+                className="bg-[#28221E] border border-[#3D3530] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#D97757] transition-colors"
+              >
+                {PHOTO_CATEGORIES.map((c) => (
+                  <option key={c.value} value={c.value}>{c.label}</option>
+                ))}
+              </select>
+              <label className={clsx(
+                "flex items-center gap-2 cursor-pointer font-bold px-4 h-10 rounded-xl transition-colors text-sm",
+                uploadingPhotos ? "bg-[#3D3530] text-slate-400 cursor-not-allowed" : "bg-[#D97757] hover:bg-[#C4623D] text-[#1C1917]"
+              )}>
+                {uploadingPhotos ? (
+                  <><RefreshCw size={16} className="animate-spin" /> Uploading…</>
+                ) : (
+                  <><Upload size={16} /> Upload Photos</>
+                )}
+                <input type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} disabled={uploadingPhotos} />
+              </label>
+              <span className="text-xs text-slate-500">Select multiple photos at once</span>
+            </div>
+            {photoError && <p className="text-red-400 text-sm mb-4">{photoError}</p>}
+
             {photos.length === 0 ? (
-              <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-12 text-center">
-                <p className="text-slate-500">No photos uploaded yet. Use the mobile app to capture photos on-site.</p>
+              <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-16 text-center">
+                <Camera size={36} className="text-slate-600 mx-auto mb-3" />
+                <p className="text-slate-500 mb-1">No photos yet.</p>
+                <p className="text-slate-600 text-sm">Choose a category above and click Upload Photos.</p>
               </div>
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
-                {photos.map((p) => (
-                  <div key={p.id} className="relative bg-[#28221E] border border-[#3D3530] rounded-xl overflow-hidden aspect-square">
-                    <div className="w-full h-full bg-[#3D3530] flex items-center justify-center text-slate-600 text-xs">{p.category}</div>
-                    {p.caption && (
-                      <div className="absolute bottom-0 left-0 right-0 bg-black/70 px-2 py-1">
-                        <p className="text-white text-xs truncate">{p.caption}</p>
-                      </div>
-                    )}
+              <>
+                {/* Group by category */}
+                {PHOTO_CATEGORIES.filter((c) => photos.some((p) => p.category === c.value)).map((cat) => (
+                  <div key={cat.value} className="mb-6">
+                    <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">{cat.label}</h3>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                      {photos.filter((p) => p.category === cat.value).map((p) => {
+                        const url = p.url ?? getPhotoUrl(p.storage_path);
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => setSelectedPhoto(p)}
+                            className="relative bg-[#28221E] border border-[#3D3530] rounded-xl overflow-hidden aspect-square hover:border-[#D97757]/60 transition-colors group"
+                          >
+                            <img src={url} alt={p.caption ?? cat.label} className="w-full h-full object-cover" />
+                            {p.caption && (
+                              <div className="absolute bottom-0 left-0 right-0 bg-black/70 px-2 py-1">
+                                <p className="text-white text-xs truncate">{p.caption}</p>
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 ))}
+              </>
+            )}
+
+            {/* Lightbox */}
+            {selectedPhoto && (
+              <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4" onClick={() => setSelectedPhoto(null)}>
+                <button className="absolute top-4 right-4 text-white/70 hover:text-white"><X size={28} /></button>
+                <img
+                  src={selectedPhoto.url ?? getPhotoUrl(selectedPhoto.storage_path)}
+                  alt={selectedPhoto.caption ?? ""}
+                  className="max-h-[90vh] max-w-full rounded-xl object-contain"
+                  onClick={(e) => e.stopPropagation()}
+                />
+                {selectedPhoto.caption && <p className="absolute bottom-6 text-white text-sm bg-black/60 px-4 py-2 rounded-full">{selectedPhoto.caption}</p>}
               </div>
             )}
           </div>
