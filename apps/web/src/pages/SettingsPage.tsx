@@ -17,7 +17,7 @@ const ROLE_LABELS: Record<Role, string> = {
 };
 
 const ROLE_COLORS: Record<Role, string> = {
-  admin: "#C9A84C",
+  admin: "#D97757",
   tech: "#3B82F6",
   viewer: "#64748B",
 };
@@ -96,9 +96,9 @@ export default function SettingsPage() {
       <h1 className="text-2xl font-bold text-white mb-6">Settings</h1>
 
       {/* Company Info */}
-      <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-6 mb-6">
+      <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-6 mb-6">
         <div className="flex items-center gap-2 mb-4">
-          <Building2 size={18} className="text-[#C9A84C]" />
+          <Building2 size={18} className="text-[#D97757]" />
           <h2 className="text-base font-bold text-white">Company</h2>
         </div>
         <div className="grid grid-cols-2 gap-4 text-sm">
@@ -112,9 +112,9 @@ export default function SettingsPage() {
       {myProfile?.role === "admin" && (
         <>
           {/* Invite new user */}
-          <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-6 mb-6">
+          <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-6 mb-6">
             <div className="flex items-center gap-2 mb-4">
-              <UserPlus size={18} className="text-[#C9A84C]" />
+              <UserPlus size={18} className="text-[#D97757]" />
               <h2 className="text-base font-bold text-white">Invite User</h2>
             </div>
 
@@ -127,7 +127,7 @@ export default function SettingsPage() {
                     value={inviteName}
                     onChange={(e) => setInviteName(e.target.value)}
                     placeholder="John Smith"
-                    className="w-full bg-[#1C1306] border border-[#4A3318] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#C9A84C] transition-colors"
+                    className="w-full bg-[#211B17] border border-[#3D3530] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#D97757] transition-colors"
                   />
                 </div>
                 <div>
@@ -138,7 +138,7 @@ export default function SettingsPage() {
                     onChange={(e) => setInviteEmail(e.target.value)}
                     placeholder="tech@roybalconstruction.com"
                     required
-                    className="w-full bg-[#1C1306] border border-[#4A3318] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#C9A84C] transition-colors"
+                    className="w-full bg-[#211B17] border border-[#3D3530] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#D97757] transition-colors"
                   />
                 </div>
               </div>
@@ -154,8 +154,8 @@ export default function SettingsPage() {
                       onClick={() => setInviteRole(r)}
                       className={`text-left p-3 rounded-xl border transition-colors ${
                         inviteRole === r
-                          ? "border-[#C9A84C] bg-[#C9A84C]/10"
-                          : "border-[#4A3318] bg-[#1C1306] hover:border-[#6B4A20]"
+                          ? "border-[#D97757] bg-[#D97757]/10"
+                          : "border-[#3D3530] bg-[#211B17] hover:border-[#4A4440]"
                       }`}
                     >
                       <p className="text-sm font-bold" style={{ color: ROLE_COLORS[r] }}>{ROLE_LABELS[r]}</p>
@@ -179,10 +179,10 @@ export default function SettingsPage() {
               <button
                 type="submit"
                 disabled={inviteLoading}
-                className="flex items-center gap-2 bg-[#C9A84C] hover:bg-[#A8842A] disabled:opacity-60 text-[#140D03] font-bold px-5 h-10 rounded-xl transition-colors"
+                className="flex items-center gap-2 bg-[#D97757] hover:bg-[#C4623D] disabled:opacity-60 text-[#1C1917] font-bold px-5 h-10 rounded-xl transition-colors"
               >
                 {inviteLoading ? (
-                  <div className="w-4 h-4 border-2 border-[#140D03]/30 border-t-[#140D03] rounded-full animate-spin" />
+                  <div className="w-4 h-4 border-2 border-[#1C1917]/30 border-t-[#1C1917] rounded-full animate-spin" />
                 ) : (
                   <UserPlus size={15} />
                 )}
@@ -192,9 +192,9 @@ export default function SettingsPage() {
           </div>
 
           {/* Existing users */}
-          <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-6 mb-6">
+          <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-6 mb-6">
             <div className="flex items-center gap-2 mb-4">
-              <Users size={18} className="text-[#C9A84C]" />
+              <Users size={18} className="text-[#D97757]" />
               <h2 className="text-base font-bold text-white">Users</h2>
               <span className="ml-auto text-xs text-slate-500">{users.length} total</span>
             </div>
@@ -205,9 +205,9 @@ export default function SettingsPage() {
             ) : (
               <div className="space-y-2">
                 {users.map((u) => (
-                  <div key={u.id} className="flex items-center gap-3 bg-[#1C1306] rounded-xl p-3 border border-[#4A3318]">
-                    <div className="w-9 h-9 rounded-full bg-[#C9A84C] flex items-center justify-center flex-shrink-0">
-                      <span className="text-[#140D03] font-bold text-sm">{(u.full_name[0] ?? "?").toUpperCase()}</span>
+                  <div key={u.id} className="flex items-center gap-3 bg-[#211B17] rounded-xl p-3 border border-[#3D3530]">
+                    <div className="w-9 h-9 rounded-full bg-[#D97757] flex items-center justify-center flex-shrink-0">
+                      <span className="text-[#1C1917] font-bold text-sm">{(u.full_name[0] ?? "?").toUpperCase()}</span>
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-slate-200">{u.full_name}</p>
@@ -261,7 +261,7 @@ export default function SettingsPage() {
       )}
 
       {/* Security */}
-      <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-6">
+      <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-6">
         <div className="flex items-center gap-2 mb-3">
           <ShieldCheck size={18} className="text-[#22C55E]" />
           <h2 className="text-base font-bold text-white">Security</h2>

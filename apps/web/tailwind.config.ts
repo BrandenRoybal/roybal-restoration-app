@@ -7,15 +7,15 @@ export default {
     extend: {
       colors: {
         brand: {
-          bg: "#140D03",
-          card: "#2B1D09",
-          input: "#1C1306",
-          border: "#4A3318",
-          muted: "#9A7A4A",
+          bg: "#1C1917",
+          card: "#28221E",
+          input: "#211B17",
+          border: "#3D3530",
+          muted: "#A09890",
         },
         gold: {
-          DEFAULT: "#C9A84C",
-          hover: "#A8842A",
+          DEFAULT: "#D97757",
+          hover: "#C4623D",
         },
         success: "#22C55E",
         warning: "#EAB308",

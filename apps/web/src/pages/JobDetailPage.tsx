@@ -29,7 +29,7 @@ const getMagicplanService = () => {
 type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report";
 
 const STATUS_COLORS: Record<string, string> = {
-  new: "#64748B", active: "#C9A84C", drying: "#3B82F6",
+  new: "#64748B", active: "#D97757", drying: "#3B82F6",
   final_inspection: "#EAB308", invoicing: "#A855F7", closed: "#22C55E",
 };
 
@@ -172,7 +172,7 @@ export default function JobDetailPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="w-8 h-8 border-2 border-[#C9A84C] border-t-transparent rounded-full animate-spin" />
+        <div className="w-8 h-8 border-2 border-[#D97757] border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
@@ -184,7 +184,7 @@ export default function JobDetailPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="bg-[#2B1D09] border-b border-[#4A3318] px-6 py-4">
+      <div className="bg-[#28221E] border-b border-[#3D3530] px-6 py-4">
         <div className="flex items-start gap-4 flex-wrap">
           <button onClick={() => navigate("/jobs")} className="text-slate-400 hover:text-slate-200 mt-0.5">
             <ChevronLeft size={22} />
@@ -262,8 +262,8 @@ export default function JobDetailPage() {
               className={clsx(
                 "px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors",
                 activeTab === tab.key
-                  ? "bg-[#C9A84C]/15 text-[#C9A84C]"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-[#4A3318]"
+                  ? "bg-[#D97757]/15 text-[#D97757]"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-[#3D3530]"
               )}
             >
               {tab.label}
@@ -318,11 +318,11 @@ export default function JobDetailPage() {
 
         {activeTab === "moisture" && (
           <div className="max-w-5xl">
-            <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl overflow-hidden">
+            <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#4A3318]">
+                    <tr className="border-b border-[#3D3530]">
                       {["Date", "Room", "Location", "Material", "Reading", "Status"].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
@@ -334,7 +334,7 @@ export default function JobDetailPage() {
                     ) : moisture.map((m) => {
                       const status = getMoistureStatus(m.moisture_pct, m.material_type);
                       return (
-                        <tr key={m.id} className="border-b border-[#4A3318]/50">
+                        <tr key={m.id} className="border-b border-[#3D3530]/50">
                           <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(m.reading_date)}</td>
                           <td className="px-4 py-3 text-slate-300">{roomMap[m.room_id] ?? "—"}</td>
                           <td className="px-4 py-3 text-slate-300">{m.location_description}</td>
@@ -357,11 +357,11 @@ export default function JobDetailPage() {
 
         {activeTab === "equipment" && (
           <div className="max-w-5xl">
-            <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl overflow-hidden">
+            <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#4A3318]">
+                    <tr className="border-b border-[#3D3530]">
                       {["Equipment", "Asset #", "Room", "Placed", "Removed", "Days"].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
@@ -371,7 +371,7 @@ export default function JobDetailPage() {
                     {equipment.length === 0 ? (
                       <tr><td colSpan={6} className="px-4 py-12 text-center text-slate-600">No equipment logged.</td></tr>
                     ) : equipment.map((e) => (
-                      <tr key={e.id} className="border-b border-[#4A3318]/50">
+                      <tr key={e.id} className="border-b border-[#3D3530]/50">
                         <td className="px-4 py-3">
                           <p className="text-slate-200 font-semibold">{e.equipment_name}</p>
                           <p className="text-slate-500 text-xs">{EQUIPMENT_TYPE_LABELS[e.equipment_type]}</p>
@@ -379,7 +379,7 @@ export default function JobDetailPage() {
                         <td className="px-4 py-3 text-slate-400 font-mono text-xs">{e.asset_number ?? "—"}</td>
                         <td className="px-4 py-3 text-slate-400">{e.room_id ? (roomMap[e.room_id] ?? "—") : "—"}</td>
                         <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(e.date_placed)}</td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#C9A84C]">Active</span>}</td>
+                        <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#D97757]">Active</span>}</td>
                         <td className="px-4 py-3 font-bold text-slate-200">{e.days_on_site}</td>
                       </tr>
                     ))}
@@ -392,11 +392,11 @@ export default function JobDetailPage() {
 
         {activeTab === "scope" && (
           <div className="max-w-5xl">
-            <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl overflow-hidden">
+            <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#4A3318]">
+                    <tr className="border-b border-[#3D3530]">
                       {["Category", "Description", "Room", "Qty", "Unit", "Unit Price", "Total"].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
@@ -406,7 +406,7 @@ export default function JobDetailPage() {
                     {lineItems.length === 0 ? (
                       <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No line items.</td></tr>
                     ) : lineItems.map((li) => (
-                      <tr key={li.id} className="border-b border-[#4A3318]/50">
+                      <tr key={li.id} className="border-b border-[#3D3530]/50">
                         <td className="px-4 py-3 text-xs text-slate-500 uppercase">{li.category}</td>
                         <td className="px-4 py-3 text-slate-200">{li.description}</td>
                         <td className="px-4 py-3 text-slate-400 text-xs">{li.room_id ? (roomMap[li.room_id] ?? "—") : "All"}</td>
@@ -419,7 +419,7 @@ export default function JobDetailPage() {
                   </tbody>
                   {lineItems.length > 0 && (
                     <tfoot>
-                      <tr className="border-t border-[#4A3318] bg-[#140D03]">
+                      <tr className="border-t border-[#3D3530] bg-[#1C1917]">
                         <td colSpan={6} className="px-4 py-3 text-right font-bold text-slate-300">Grand Total</td>
                         <td className="px-4 py-3 font-black text-white font-mono text-base">{centsToDisplay(totalCents)}</td>
                       </tr>
@@ -434,20 +434,20 @@ export default function JobDetailPage() {
         {activeTab === "floorplan" && (
           <div className="max-w-4xl space-y-4">
             {/* Magicplan project link */}
-            <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-5">
+            <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-5">
               <div className="flex items-center gap-2 mb-3">
-                <Link size={16} className="text-[#C9A84C]" />
+                <Link size={16} className="text-[#D97757]" />
                 <h3 className="text-sm font-bold text-slate-300">Magicplan Project</h3>
               </div>
 
               {job.magicplan_project_id && !magicplanEditing ? (
                 <div className="flex items-center gap-3">
-                  <code className="text-sm font-mono text-[#C9A84C] bg-[#4A3318] px-3 py-1.5 rounded-lg flex-1 truncate">
+                  <code className="text-sm font-mono text-[#D97757] bg-[#3D3530] px-3 py-1.5 rounded-lg flex-1 truncate">
                     {job.magicplan_project_id}
                   </code>
                   <button
                     onClick={() => { setMagicplanInput(job.magicplan_project_id ?? ""); setMagicplanEditing(true); }}
-                    className="text-xs font-bold text-slate-400 hover:text-slate-200 transition-colors px-3 py-1.5 rounded-lg border border-[#4A3318] hover:border-[#6B4A20]"
+                    className="text-xs font-bold text-slate-400 hover:text-slate-200 transition-colors px-3 py-1.5 rounded-lg border border-[#3D3530] hover:border-[#4A4440]"
                   >
                     Edit
                   </button>
@@ -459,12 +459,12 @@ export default function JobDetailPage() {
                     value={magicplanInput}
                     onChange={(e) => setMagicplanInput(e.target.value)}
                     placeholder="Enter Magicplan project ID…"
-                    className="flex-1 bg-[#140D03] border border-[#4A3318] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#C9A84C] transition-colors font-mono"
+                    className="flex-1 bg-[#1C1917] border border-[#3D3530] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#D97757] transition-colors font-mono"
                   />
                   <button
                     onClick={saveMagicplanId}
                     disabled={magicplanSaving}
-                    className="flex items-center gap-1.5 text-xs font-bold bg-[#C9A84C] hover:bg-[#A8842A] text-[#140D03] px-3 h-10 rounded-xl disabled:opacity-60 transition-colors"
+                    className="flex items-center gap-1.5 text-xs font-bold bg-[#D97757] hover:bg-[#C4623D] text-[#1C1917] px-3 h-10 rounded-xl disabled:opacity-60 transition-colors"
                   >
                     <RefreshCw size={13} className={magicplanSaving ? "animate-spin" : ""} />
                     {magicplanSaving ? "Saving…" : "Save"}
@@ -485,7 +485,7 @@ export default function JobDetailPage() {
                   <button
                     onClick={createMagicplanProject}
                     disabled={magicplanCreating}
-                    className="flex items-center gap-1.5 text-xs font-bold bg-[#C9A84C]/10 border border-[#C9A84C]/30 text-[#C9A84C] px-3 h-8 rounded-lg hover:bg-[#C9A84C]/20 disabled:opacity-60 transition-colors"
+                    className="flex items-center gap-1.5 text-xs font-bold bg-[#D97757]/10 border border-[#D97757]/30 text-[#D97757] px-3 h-8 rounded-lg hover:bg-[#D97757]/20 disabled:opacity-60 transition-colors"
                   >
                     <Plus size={12} className={magicplanCreating ? "animate-spin" : ""} />
                     {magicplanCreating ? "Creating…" : "Create in Magicplan"}
@@ -500,7 +500,7 @@ export default function JobDetailPage() {
                   <button
                     onClick={syncFromMagicplan}
                     disabled={magicplanSyncing}
-                    className="flex items-center gap-1.5 text-xs font-bold bg-[#C9A84C]/10 border border-[#C9A84C]/30 text-[#C9A84C] px-3 h-8 rounded-lg hover:bg-[#C9A84C]/20 disabled:opacity-60 transition-colors"
+                    className="flex items-center gap-1.5 text-xs font-bold bg-[#D97757]/10 border border-[#D97757]/30 text-[#D97757] px-3 h-8 rounded-lg hover:bg-[#D97757]/20 disabled:opacity-60 transition-colors"
                   >
                     <RefreshCw size={12} className={magicplanSyncing ? "animate-spin" : ""} />
                     {magicplanSyncing ? "Syncing…" : "Sync Now"}
@@ -515,7 +515,7 @@ export default function JobDetailPage() {
 
             {/* Floor plan versions */}
             {floorPlans.length === 0 ? (
-              <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-12 text-center">
+              <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-12 text-center">
                 <p className="text-slate-500 mb-2">No floor plans synced yet.</p>
                 <p className="text-slate-600 text-sm">
                   {job.magicplan_project_id
@@ -526,14 +526,14 @@ export default function JobDetailPage() {
             ) : (
               <div className="space-y-3">
                 {floorPlans.map((fp) => (
-                  <div key={fp.id} className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-4 flex items-center gap-4">
+                  <div key={fp.id} className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-4 flex items-center gap-4">
                     <div className="flex-1">
                       <p className="text-sm font-bold text-slate-200">Version {fp.version}</p>
                       <p className="text-xs text-slate-500">Synced: {formatAlaskaDateTime(fp.synced_at)}</p>
                     </div>
                     {fp.file_url && (
                       <a href={fp.file_url} target="_blank" rel="noreferrer"
-                        className="flex items-center gap-2 text-sm font-bold text-[#C9A84C] hover:underline">
+                        className="flex items-center gap-2 text-sm font-bold text-[#D97757] hover:underline">
                         View <ExternalLink size={14} />
                       </a>
                     )}
@@ -547,14 +547,14 @@ export default function JobDetailPage() {
         {activeTab === "photos" && (
           <div className="max-w-5xl">
             {photos.length === 0 ? (
-              <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-12 text-center">
+              <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-12 text-center">
                 <p className="text-slate-500">No photos uploaded yet. Use the mobile app to capture photos on-site.</p>
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
                 {photos.map((p) => (
-                  <div key={p.id} className="relative bg-[#2B1D09] border border-[#4A3318] rounded-xl overflow-hidden aspect-square">
-                    <div className="w-full h-full bg-[#4A3318] flex items-center justify-center text-slate-600 text-xs">{p.category}</div>
+                  <div key={p.id} className="relative bg-[#28221E] border border-[#3D3530] rounded-xl overflow-hidden aspect-square">
+                    <div className="w-full h-full bg-[#3D3530] flex items-center justify-center text-slate-600 text-xs">{p.category}</div>
                     {p.caption && (
                       <div className="absolute bottom-0 left-0 right-0 bg-black/70 px-2 py-1">
                         <p className="text-white text-xs truncate">{p.caption}</p>
@@ -577,10 +577,10 @@ export default function JobDetailPage() {
                 { title: "Equipment Log", desc: "Placement dates, locations, days on site" },
                 { title: "Scope of Work / Invoice", desc: "Line items, totals, signature block" },
               ].map((r) => (
-                <div key={r.title} className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-5">
+                <div key={r.title} className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-5">
                   <p className="font-bold text-slate-200 mb-1">{r.title}</p>
                   <p className="text-xs text-slate-500 mb-4">{r.desc}</p>
-                  <button className="w-full bg-[#C9A84C]/10 border border-[#C9A84C]/30 text-[#C9A84C] font-bold text-sm h-9 rounded-xl hover:bg-[#C9A84C]/20 transition-colors">
+                  <button className="w-full bg-[#D97757]/10 border border-[#D97757]/30 text-[#D97757] font-bold text-sm h-9 rounded-xl hover:bg-[#D97757]/20 transition-colors">
                     Generate PDF
                   </button>
                 </div>
@@ -595,8 +595,8 @@ export default function JobDetailPage() {
 
 function InfoCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[#2B1D09] border border-[#4A3318] rounded-2xl p-5">
-      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-[#4A3318]">{title}</h3>
+    <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-5">
+      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-[#3D3530]">{title}</h3>
       <div className="space-y-2.5">{children}</div>
     </div>
   );

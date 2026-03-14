@@ -32,17 +32,17 @@ export default function AppLayout() {
   };
 
   return (
-    <div className="flex h-screen bg-[#140D03] overflow-hidden">
+    <div className="flex h-screen bg-[#1C1917] overflow-hidden">
       {/* Sidebar */}
       <aside
         className={clsx(
-          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 bg-[#2B1D09] border-r border-[#4A3318] transition-transform duration-200",
+          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 bg-[#28221E] border-r border-[#3D3530] transition-transform duration-200",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
           "lg:relative lg:translate-x-0"
         )}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-4 py-4 border-b border-[#4A3318]">
+        <div className="flex items-center gap-3 px-4 py-4 border-b border-[#3D3530]">
           <img
             src="/logo.png"
             alt="Roybal Construction"
@@ -55,12 +55,12 @@ export default function AppLayout() {
             }}
           />
           <div className="hidden items-center gap-3" id="logo-fallback">
-            <div className="w-8 h-8 rounded bg-[#C9A84C] flex items-center justify-center flex-shrink-0">
-              <span className="text-[#140D03] font-black text-sm">RC</span>
+            <div className="w-8 h-8 rounded bg-[#D97757] flex items-center justify-center flex-shrink-0">
+              <span className="text-[#1C1917] font-black text-sm">RC</span>
             </div>
             <div>
               <p className="text-white font-bold text-sm leading-tight">Roybal</p>
-              <p className="text-[#C9A84C] text-xs font-semibold leading-tight tracking-widest">CONSTRUCTION</p>
+              <p className="text-[#D97757] text-xs font-semibold leading-tight tracking-widest">CONSTRUCTION</p>
             </div>
           </div>
           <button
@@ -82,8 +82,8 @@ export default function AppLayout() {
                 clsx(
                   "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors",
                   isActive
-                    ? "bg-[#C9A84C]/15 text-[#C9A84C]"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-[#4A3318]"
+                    ? "bg-[#D97757]/15 text-[#D97757]"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-[#3D3530]"
                 )
               }
             >
@@ -94,10 +94,10 @@ export default function AppLayout() {
         </nav>
 
         {/* Profile + Sign out */}
-        <div className="border-t border-[#4A3318] p-4">
+        <div className="border-t border-[#3D3530] p-4">
           <div className="flex items-center gap-3 mb-3">
-            <div className="w-8 h-8 rounded-full bg-[#C9A84C] flex items-center justify-center flex-shrink-0">
-              <span className="text-[#140D03] font-bold text-sm">
+            <div className="w-8 h-8 rounded-full bg-[#D97757] flex items-center justify-center flex-shrink-0">
+              <span className="text-[#1C1917] font-bold text-sm">
                 {(profile?.full_name ?? "?")[0]?.toUpperCase() ?? "?"}
               </span>
             </div>
@@ -129,7 +129,7 @@ export default function AppLayout() {
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Mobile topbar */}
-        <header className="lg:hidden flex items-center gap-3 px-4 py-3 bg-[#2B1D09] border-b border-[#4A3318]">
+        <header className="lg:hidden flex items-center gap-3 px-4 py-3 bg-[#28221E] border-b border-[#3D3530]">
           <button
             onClick={() => setSidebarOpen(true)}
             className="text-slate-400 hover:text-slate-200"
