@@ -4,7 +4,7 @@
 
 -- QB Time OAuth tokens (one row per connected company)
 create table qb_time_tokens (
-  id            uuid primary key default uuid_generate_v4(),
+  id            uuid primary key default gen_random_uuid(),
   realm_id      text not null unique,     -- Intuit company/realm ID
   access_token  text not null,
   refresh_token text not null,
@@ -20,7 +20,7 @@ create trigger qb_time_tokens_updated_at
 
 -- Cache of QB Time job codes (synced from QB Time account)
 create table qb_time_jobcodes (
-  id           uuid primary key default uuid_generate_v4(),
+  id           uuid primary key default gen_random_uuid(),
   qb_id        text not null unique,      -- QB Time jobcode ID
   name         text not null,
   parent_id    text,                      -- parent jobcode QB ID (for nested codes)
