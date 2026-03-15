@@ -12,7 +12,7 @@ import clsx from "clsx";
 
 const STATUS_COLORS: Record<JobStatus, string> = {
   new: "#64748B",
-  active: "#D97757",
+  active: "#F97316",
   drying: "#3B82F6",
   final_inspection: "#EAB308",
   invoicing: "#A855F7",
@@ -71,7 +71,7 @@ export default function JobsPage() {
         </div>
         <button
           onClick={() => navigate("/jobs/new")}
-          className="flex items-center gap-2 bg-[#D97757] hover:bg-[#C4623D] text-[#1C1917] font-bold px-4 h-10 rounded-xl transition-colors"
+          className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-10 rounded-xl transition-colors"
         >
           <Plus size={18} />
           New Job
@@ -87,7 +87,7 @@ export default function JobsPage() {
             placeholder="Search address, job #, owner…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-[#28221E] border border-[#3D3530] rounded-xl pl-9 pr-9 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#D97757] transition-colors"
+            className="w-full bg-[#0A1628] border border-[#1E293B] rounded-xl pl-9 pr-9 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
           />
           {search && (
             <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300">
@@ -103,8 +103,8 @@ export default function JobsPage() {
               className={clsx(
                 "px-3 h-9 rounded-xl text-xs font-bold transition-colors border",
                 statusFilter === s
-                  ? "bg-[#D97757] border-[#D97757] text-[#1C1917]"
-                  : "bg-[#28221E] border-[#3D3530] text-slate-400 hover:text-slate-200"
+                  ? "bg-[#F97316] border-[#F97316] text-[#0F172A]"
+                  : "bg-[#0A1628] border-[#1E293B] text-slate-400 hover:text-slate-200"
               )}
             >
               {s === "all" ? "All" : JOB_STATUS_LABELS[s]}
@@ -114,11 +114,11 @@ export default function JobsPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden">
+      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[#3D3530]">
+              <tr className="border-b border-[#1E293B]">
                 {["Job #", "Address", "Owner", "Status", "Loss Type", "Date of Loss", "Carrier", ""].map((h) => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">
                     {h}
@@ -134,7 +134,7 @@ export default function JobsPage() {
               ) : (
                 filtered.map((job) => (
                   confirmDeleteId === job.id ? (
-                    <tr key={job.id} className="border-b border-[#3D3530]/50 bg-red-950/20">
+                    <tr key={job.id} className="border-b border-[#1E293B]/50 bg-red-950/20">
                       <td colSpan={8} className="px-4 py-3">
                         <div className="flex items-center gap-3">
                           <p className="text-sm text-red-300 flex-1">
@@ -149,7 +149,7 @@ export default function JobsPage() {
                           </button>
                           <button
                             onClick={() => setConfirmDeleteId(null)}
-                            className="px-3 h-8 bg-[#3D3530] text-slate-300 text-xs font-bold rounded-lg hover:bg-[#4A4440] transition-colors"
+                            className="px-3 h-8 bg-[#1E293B] text-slate-300 text-xs font-bold rounded-lg hover:bg-[#4A4440] transition-colors"
                           >
                             Cancel
                           </button>
@@ -159,10 +159,10 @@ export default function JobsPage() {
                   ) : (
                     <tr
                       key={job.id}
-                      className="border-b border-[#3D3530]/50 hover:bg-[#1C1917] cursor-pointer transition-colors group"
+                      className="border-b border-[#1E293B]/50 hover:bg-[#0F172A] cursor-pointer transition-colors group"
                     >
                       <td className="px-4 py-3" onClick={() => navigate(`/jobs/${job.id}`)}>
-                        <span className="font-mono text-xs text-slate-400 group-hover:text-[#D97757] transition-colors">
+                        <span className="font-mono text-xs text-slate-400 group-hover:text-[#F97316] transition-colors">
                           {job.job_number}
                         </span>
                       </td>

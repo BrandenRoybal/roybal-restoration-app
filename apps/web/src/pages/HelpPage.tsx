@@ -18,8 +18,8 @@ interface Section {
 }
 
 const Tip = ({ children }: { children: React.ReactNode }) => (
-  <div className="flex gap-2.5 bg-[#D97757]/10 border border-[#D97757]/20 rounded-xl p-3 my-3">
-    <Info size={15} className="text-[#D97757] flex-shrink-0 mt-0.5" />
+  <div className="flex gap-2.5 bg-[#F97316]/10 border border-[#F97316]/20 rounded-xl p-3 my-3">
+    <Info size={15} className="text-[#F97316] flex-shrink-0 mt-0.5" />
     <p className="text-sm text-slate-300">{children}</p>
   </div>
 );
@@ -33,14 +33,14 @@ const Note = ({ children }: { children: React.ReactNode }) => (
 
 const Step = ({ n, children }: { n: number; children: React.ReactNode }) => (
   <div className="flex gap-3 mb-2">
-    <span className="w-6 h-6 rounded-full bg-[#D97757] text-[#1C1917] text-xs font-black flex items-center justify-center flex-shrink-0 mt-0.5">{n}</span>
+    <span className="w-6 h-6 rounded-full bg-[#F97316] text-[#0F172A] text-xs font-black flex items-center justify-center flex-shrink-0 mt-0.5">{n}</span>
     <p className="text-sm text-slate-300">{children}</p>
   </div>
 );
 
 const Bullet = ({ children }: { children: React.ReactNode }) => (
   <div className="flex gap-2.5 mb-1.5">
-    <CheckCircle2 size={14} className="text-[#D97757] flex-shrink-0 mt-0.5" />
+    <CheckCircle2 size={14} className="text-[#F97316] flex-shrink-0 mt-0.5" />
     <p className="text-sm text-slate-300">{children}</p>
   </div>
 );
@@ -54,7 +54,7 @@ const SECTIONS: Section[] = [
     id: "jobs",
     icon: <Briefcase size={18} />,
     title: "Creating & Managing Jobs",
-    color: "#D97757",
+    color: "#F97316",
     content: (
       <div>
         <p className="text-sm text-slate-400 mb-4">
@@ -72,13 +72,13 @@ const SECTIONS: Section[] = [
         <div className="grid grid-cols-2 gap-2 mb-3">
           {[
             { s: "New", c: "#64748B", d: "Job created, not yet active" },
-            { s: "Active", c: "#D97757", d: "Work is in progress on site" },
+            { s: "Active", c: "#F97316", d: "Work is in progress on site" },
             { s: "Drying", c: "#3B82F6", d: "Equipment placed, daily monitoring" },
             { s: "Final Inspection", c: "#EAB308", d: "Ready for final moisture check" },
             { s: "Invoicing", c: "#A855F7", d: "Scope complete, billing in progress" },
             { s: "Closed", c: "#22C55E", d: "Job complete and paid" },
           ].map(({ s, c, d }) => (
-            <div key={s} className="flex items-start gap-2 bg-[#211C19] rounded-xl p-3">
+            <div key={s} className="flex items-start gap-2 bg-[#0A1628] rounded-xl p-3">
               <span className="px-2 py-0.5 rounded-full text-xs font-bold flex-shrink-0 mt-0.5" style={{ backgroundColor: c + "22", color: c }}>{s}</span>
               <p className="text-xs text-slate-500">{d}</p>
             </div>
@@ -150,7 +150,7 @@ const SECTIONS: Section[] = [
             { c: "Equipment", d: "Drying equipment placement" },
             { c: "General", d: "Any other site photos" },
           ].map(({ c, d }) => (
-            <div key={c} className="bg-[#211C19] rounded-xl p-3">
+            <div key={c} className="bg-[#0A1628] rounded-xl p-3">
               <p className="text-xs font-bold text-white mb-0.5">{c}</p>
               <p className="text-xs text-slate-500">{d}</p>
             </div>
@@ -226,7 +226,7 @@ const SECTIONS: Section[] = [
         <H3>Equipment types</H3>
         <div className="grid grid-cols-2 gap-2 mb-3">
           {["LGR Dehumidifier","Refrigerant Dehumidifier","Air Mover","HEPA Air Scrubber","HEPA Vacuum","Axial Fan","Other"].map((t) => (
-            <p key={t} className="text-xs text-slate-400 bg-[#211C19] rounded-lg px-3 py-2">{t}</p>
+            <p key={t} className="text-xs text-slate-400 bg-[#0A1628] rounded-lg px-3 py-2">{t}</p>
           ))}
         </div>
 
@@ -269,8 +269,8 @@ const SECTIONS: Section[] = [
             { u: "SY", d: "Square yards" },
             { u: "CF", d: "Cubic feet" },
           ].map(({ u, d }) => (
-            <div key={u} className="bg-[#211C19] rounded-xl p-2">
-              <p className="text-xs font-bold text-[#D97757]">{u}</p>
+            <div key={u} className="bg-[#0A1628] rounded-xl p-2">
+              <p className="text-xs font-bold text-[#F97316]">{u}</p>
               <p className="text-xs text-slate-500">{d}</p>
             </div>
           ))}
@@ -290,7 +290,7 @@ const SECTIONS: Section[] = [
     id: "reports",
     icon: <FileText size={18} />,
     title: "Reports",
-    color: "#D97757",
+    color: "#F97316",
     content: (
       <div>
         <p className="text-sm text-slate-400 mb-4">
@@ -321,10 +321,10 @@ const SECTIONS: Section[] = [
               needs: "Line items added in the Scope tab.",
             },
           ].map(({ title, desc, needs }) => (
-            <div key={title} className="bg-[#211C19] rounded-2xl p-4">
+            <div key={title} className="bg-[#0A1628] rounded-2xl p-4">
               <p className="text-sm font-bold text-white mb-1">{title}</p>
               <p className="text-xs text-slate-400 mb-2">{desc}</p>
-              <p className="text-xs text-[#D97757]">Requires: {needs}</p>
+              <p className="text-xs text-[#F97316]">Requires: {needs}</p>
             </div>
           ))}
         </div>
@@ -387,11 +387,11 @@ const SECTIONS: Section[] = [
         <H3>Roles</H3>
         <div className="space-y-2 mb-4">
           {[
-            { role: "Admin", c: "#D97757", d: "Full access — create/edit/delete jobs, manage users, access all settings. Typically for office staff and project managers." },
+            { role: "Admin", c: "#F97316", d: "Full access — create/edit/delete jobs, manage users, access all settings. Typically for office staff and project managers." },
             { role: "Field Tech", c: "#3B82F6", d: "Can view and edit jobs, log moisture readings, place equipment, and upload photos. Cannot delete jobs or manage users." },
             { role: "Viewer", c: "#64748B", d: "Read-only access — can view jobs and reports but cannot make any changes. Good for insurance adjusters or supervisors." },
           ].map(({ role, c, d }) => (
-            <div key={role} className="bg-[#211C19] rounded-xl p-3">
+            <div key={role} className="bg-[#0A1628] rounded-xl p-3">
               <div className="flex items-center gap-2 mb-1">
                 <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ backgroundColor: c + "22", color: c }}>{role}</span>
               </div>
@@ -427,8 +427,8 @@ export default function HelpPage() {
       {/* Header */}
       <div className="mb-8">
         <div className="flex items-center gap-3 mb-2">
-          <div className="w-10 h-10 rounded-xl bg-[#D97757]/15 border border-[#D97757]/30 flex items-center justify-center">
-            <BookOpen size={20} className="text-[#D97757]" />
+          <div className="w-10 h-10 rounded-xl bg-[#F97316]/15 border border-[#F97316]/30 flex items-center justify-center">
+            <BookOpen size={20} className="text-[#F97316]" />
           </div>
           <div>
             <h1 className="text-2xl font-black text-white">Help & User Guide</h1>
@@ -442,7 +442,7 @@ export default function HelpPage() {
       </div>
 
       {/* Quick reference */}
-      <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl p-5 mb-6">
+      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5 mb-6">
         <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Quick Reference — Job Workflow</p>
         <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
           {[
@@ -458,7 +458,7 @@ export default function HelpPage() {
             "10. Close Job",
           ].map((step, i) => (
             <span key={i} className="flex items-center gap-1.5">
-              <span className="bg-[#D97757]/15 text-[#D97757] px-2.5 py-1 rounded-lg font-medium">{step}</span>
+              <span className="bg-[#F97316]/15 text-[#F97316] px-2.5 py-1 rounded-lg font-medium">{step}</span>
               {i < 9 && <ChevronRight size={12} className="text-slate-700" />}
             </span>
           ))}
@@ -472,11 +472,11 @@ export default function HelpPage() {
           return (
             <div
               key={section.id}
-              className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden"
+              className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden"
             >
               <button
                 onClick={() => toggle(section.id)}
-                className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-[#3D3530]/30 transition-colors"
+                className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-[#1E293B]/30 transition-colors"
               >
                 <span
                   className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
@@ -492,7 +492,7 @@ export default function HelpPage() {
               </button>
 
               {isOpen && (
-                <div className="px-5 pb-5 border-t border-[#3D3530]">
+                <div className="px-5 pb-5 border-t border-[#1E293B]">
                   <div className="pt-4">{section.content}</div>
                 </div>
               )}
