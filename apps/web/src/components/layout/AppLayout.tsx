@@ -10,6 +10,7 @@ import {
   LogOut,
   Menu,
   X,
+  BookOpen,
 } from "lucide-react";
 import { useState } from "react";
 import { useAuthStore } from "../../store/auth";
@@ -19,6 +20,7 @@ const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, exact: true },
   { to: "/jobs", label: "Jobs", icon: Briefcase },
   { to: "/settings", label: "Settings", icon: Settings },
+  { to: "/help", label: "Help", icon: BookOpen },
 ];
 
 export default function AppLayout() {

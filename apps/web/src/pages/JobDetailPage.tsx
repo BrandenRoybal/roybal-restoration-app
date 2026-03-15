@@ -89,6 +89,11 @@ export default function JobDetailPage() {
   const [savingEquip, setSavingEquip] = useState(false);
   const [removingEquip, setRemovingEquip] = useState<string | null>(null);
 
+  // Scope / line items form
+  const [showScopeForm, setShowScopeForm] = useState(false);
+  const [scopeForm, setScopeForm] = useState({ category: "demo", description: "", room_id: "", quantity: "", unit: "EA", unit_price: "" });
+  const [savingScope, setSavingScope] = useState(false);
+
   useEffect(() => {
     if (!id) return;
     Promise.all([
@@ -297,6 +302,35 @@ export default function JobDetailPage() {
     await supabase.storage.from("job-photos").remove([photo.storage_path]);
     await supabase.from("photos").delete().eq("id", photo.id);
     setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+  };
+
+  const addLineItem = async () => {
+    if (!job || !scopeForm.description || !scopeForm.quantity || !scopeForm.unit_price) return;
+    setSavingScope(true);
+    const unit_price = Math.round(parseFloat(scopeForm.unit_price) * 100);
+    const quantity = parseFloat(scopeForm.quantity);
+    const { data } = await supabase.from("line_items").insert({
+      job_id: job.id,
+      category: scopeForm.category,
+      description: scopeForm.description,
+      room_id: scopeForm.room_id || null,
+      quantity,
+      unit: scopeForm.unit,
+      unit_price,
+      billing_type: "scope",
+      sort_order: lineItems.length,
+    }).select().single();
+    if (data) {
+      setLineItems((prev) => [...prev, data as LineItem]);
+      setScopeForm({ category: "demo", description: "", room_id: "", quantity: "", unit: "EA", unit_price: "" });
+      setShowScopeForm(false);
+    }
+    setSavingScope(false);
+  };
+
+  const deleteLineItem = async (itemId: string) => {
+    await supabase.from("line_items").delete().eq("id", itemId);
+    setLineItems((prev) => prev.filter((li) => li.id !== itemId));
   };
 
   // PDF generation
@@ -776,21 +810,96 @@ export default function JobDetailPage() {
 
         {activeTab === "scope" && (
           <div className="max-w-5xl">
+            {/* Add line item button */}
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-slate-400 text-sm">{lineItems.length} item{lineItems.length !== 1 ? "s" : ""} · Total: <span className="text-white font-bold">{centsToDisplay(totalCents)}</span></p>
+              <button
+                onClick={() => setShowScopeForm((v) => !v)}
+                className="flex items-center gap-2 bg-[#D97757] hover:bg-[#C4623D] text-[#1C1917] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+              >
+                <Plus size={16} /> Add Line Item
+              </button>
+            </div>
+
+            {/* Inline form */}
+            {showScopeForm && (
+              <div className="bg-[#28221E] border border-[#D97757]/30 rounded-2xl p-5 mb-4">
+                <p className="text-sm font-bold text-slate-200 mb-4">New Line Item</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Category</label>
+                    <select value={scopeForm.category} onChange={(e) => setScopeForm((f) => ({ ...f, category: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
+                      {["demo","dry","equip","labor","material","disposal","other"].map((c) => (
+                        <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-span-2 sm:col-span-2">
+                    <label className="text-xs text-slate-500 mb-1 block">Description *</label>
+                    <input type="text" placeholder="e.g. Carpet removal and disposal" value={scopeForm.description}
+                      onChange={(e) => setScopeForm((f) => ({ ...f, description: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Room</label>
+                    <select value={scopeForm.room_id} onChange={(e) => setScopeForm((f) => ({ ...f, room_id: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
+                      <option value="">All / General</option>
+                      {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Qty *</label>
+                    <input type="number" min="0" step="any" placeholder="1" value={scopeForm.quantity}
+                      onChange={(e) => setScopeForm((f) => ({ ...f, quantity: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Unit</label>
+                    <select value={scopeForm.unit} onChange={(e) => setScopeForm((f) => ({ ...f, unit: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
+                      {["EA","SF","LF","HR","Day","LS","CY","SY","CF"].map((u) => <option key={u} value={u}>{u}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Unit Price ($) *</label>
+                    <input type="number" min="0" step="0.01" placeholder="0.00" value={scopeForm.unit_price}
+                      onChange={(e) => setScopeForm((f) => ({ ...f, unit_price: e.target.value }))}
+                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#D97757]" />
+                  </div>
+                  {scopeForm.quantity && scopeForm.unit_price && (
+                    <div className="flex items-end pb-1">
+                      <p className="text-sm text-slate-400">Line total: <span className="text-white font-bold">{centsToDisplay(Math.round(parseFloat(scopeForm.quantity || "0") * parseFloat(scopeForm.unit_price || "0") * 100))}</span></p>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-3 pt-2 border-t border-[#3D3530]">
+                  <button onClick={addLineItem} disabled={savingScope || !scopeForm.description || !scopeForm.quantity || !scopeForm.unit_price}
+                    className="flex items-center gap-1.5 bg-[#D97757] hover:bg-[#C4623D] text-[#1C1917] font-bold px-4 h-9 rounded-xl text-sm disabled:opacity-50 transition-colors">
+                    {savingScope ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
+                    {savingScope ? "Saving…" : "Add Item"}
+                  </button>
+                  <button onClick={() => setShowScopeForm(false)} className="text-sm text-slate-500 hover:text-slate-300 px-3">Cancel</button>
+                </div>
+              </div>
+            )}
+
             <div className="bg-[#28221E] border border-[#3D3530] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[#3D3530]">
-                      {["Category", "Description", "Room", "Qty", "Unit", "Unit Price", "Total"].map((h) => (
+                      {["Category", "Description", "Room", "Qty", "Unit", "Unit Price", "Total", ""].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {lineItems.length === 0 ? (
-                      <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No line items.</td></tr>
+                      <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-600">No line items yet — click Add Line Item above.</td></tr>
                     ) : lineItems.map((li) => (
-                      <tr key={li.id} className="border-b border-[#3D3530]/50">
+                      <tr key={li.id} className="border-b border-[#3D3530]/50 group">
                         <td className="px-4 py-3 text-xs text-slate-500 uppercase">{li.category}</td>
                         <td className="px-4 py-3 text-slate-200">{li.description}</td>
                         <td className="px-4 py-3 text-slate-400 text-xs">{li.room_id ? (roomMap[li.room_id] ?? "—") : "All"}</td>
@@ -798,13 +907,20 @@ export default function JobDetailPage() {
                         <td className="px-4 py-3 text-slate-500 text-xs">{li.unit}</td>
                         <td className="px-4 py-3 text-slate-300 font-mono">{centsToDisplay(li.unit_price)}</td>
                         <td className="px-4 py-3 font-bold text-slate-200 font-mono">{centsToDisplay(li.total_cents)}</td>
+                        <td className="px-4 py-3">
+                          <button onClick={() => deleteLineItem(li.id)}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                            title="Delete line item">
+                            <Trash2 size={14} />
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                   {lineItems.length > 0 && (
                     <tfoot>
                       <tr className="border-t border-[#3D3530] bg-[#1C1917]">
-                        <td colSpan={6} className="px-4 py-3 text-right font-bold text-slate-300">Grand Total</td>
+                        <td colSpan={7} className="px-4 py-3 text-right font-bold text-slate-300">Grand Total</td>
                         <td className="px-4 py-3 font-black text-white font-mono text-base">{centsToDisplay(totalCents)}</td>
                       </tr>
                     </tfoot>
