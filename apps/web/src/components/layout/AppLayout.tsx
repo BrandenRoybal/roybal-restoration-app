@@ -48,7 +48,7 @@ export default function AppLayout() {
           <img
             src="/logo.png"
             alt="Roybal Construction"
-            className="h-14 w-auto object-contain"
+            className="h-20 w-auto object-contain"
             onError={(e) => {
               const target = e.currentTarget;
               target.style.display = 'none';
