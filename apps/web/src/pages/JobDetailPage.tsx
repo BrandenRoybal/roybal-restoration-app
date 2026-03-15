@@ -15,7 +15,7 @@ import {
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users } from "lucide-react";
 import clsx from "clsx";
 import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
@@ -40,7 +40,7 @@ const mpProxy = async (action: string, params: Record<string, unknown> = {}) => 
   return data.data;
 };
 
-type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report";
+type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report" | "time";
 
 const STATUS_COLORS: Record<string, string> = {
   new: "#64748B", active: "#F97316", drying: "#3B82F6",
@@ -96,6 +96,21 @@ export default function JobDetailPage() {
   const [showScopeForm, setShowScopeForm] = useState(false);
   const [scopeForm, setScopeForm] = useState({ category: "demo", description: "", room_id: "", quantity: "", unit: "EA", unit_price: "" });
   const [savingScope, setSavingScope] = useState(false);
+
+  // QB Time
+  type QBTimesheet = { id: number; user_id: number; jobcode_id: number; start: string; end: string; duration: number; date: string; notes: string };
+  type QBUser = { id: number; first_name: string; last_name: string; email: string };
+  type QBClockEntry = { user_id: number; jobcode_id: number; shift_seconds: number; on_the_clock: boolean };
+  const [qbConnected, setQbConnected] = useState<boolean | null>(null);
+  const [qbJobcodes, setQbJobcodes] = useState<{ qb_id: string; name: string }[]>([]);
+  const [qbTimesheets, setQbTimesheets] = useState<QBTimesheet[]>([]);
+  const [qbUsers, setQbUsers] = useState<Record<string, QBUser>>({});
+  const [qbClockedIn, setQbClockedIn] = useState<QBClockEntry[]>([]);
+  const [qbClockUsers, setQbClockUsers] = useState<Record<string, { first_name: string; last_name: string }>>({});
+  const [qbLoading, setQbLoading] = useState(false);
+  const [qbSaving, setQbSaving] = useState(false);
+  const [qbError, setQbError] = useState("");
+  const [qbJobcodeInput, setQbJobcodeInput] = useState("");
 
   useEffect(() => {
     if (!id) return;
@@ -335,6 +350,62 @@ export default function JobDetailPage() {
     setLineItems((prev) => prev.filter((li) => li.id !== itemId));
   };
 
+  // QB Time helpers
+  const loadQBTime = async () => {
+    if (!job) return;
+    setQbLoading(true);
+    setQbError("");
+    try {
+      // Check connection
+      const { data: statusData } = await supabase.functions.invoke("qb-time-proxy", { body: { action: "getStatus" } });
+      const connected = statusData?.data?.connected ?? false;
+      setQbConnected(connected);
+      if (!connected) { setQbLoading(false); return; }
+
+      // Load job codes from DB cache
+      const { data: jcData } = await supabase.from("qb_time_jobcodes").select("qb_id, name").eq("active", true).order("name");
+      setQbJobcodes((jcData ?? []) as { qb_id: string; name: string }[]);
+      setQbJobcodeInput((job as Job & { qb_jobcode_id?: string }).qb_jobcode_id ?? "");
+
+      // If job has a jobcode linked, fetch timesheets
+      const jobcodeId = (job as Job & { qb_jobcode_id?: string }).qb_jobcode_id;
+      if (jobcodeId) {
+        const [tsRes, clockRes] = await Promise.all([
+          supabase.functions.invoke("qb-time-proxy", { body: { action: "getTimesheets", jobcodeId } }),
+          supabase.functions.invoke("qb-time-proxy", { body: { action: "getCurrentTotals" } }),
+        ]);
+        if (tsRes.data?.ok) {
+          setQbTimesheets(tsRes.data.data.timesheets ?? []);
+          setQbUsers(tsRes.data.data.users ?? {});
+        }
+        if (clockRes.data?.ok) {
+          const allClockedIn = clockRes.data.data.totals ?? [];
+          setQbClockedIn(allClockedIn.filter((t: { jobcode_id: number }) => String(t.jobcode_id) === jobcodeId));
+          setQbClockUsers(clockRes.data.data.users ?? {});
+        }
+      }
+    } catch (e) {
+      setQbError(e instanceof Error ? e.message : "Failed to load QB Time data");
+    }
+    setQbLoading(false);
+  };
+
+  const saveQBJobcode = async () => {
+    if (!job) return;
+    setQbSaving(true);
+    const { data } = await supabase.from("jobs").update({ qb_jobcode_id: qbJobcodeInput || null }).eq("id", job.id).select().single();
+    if (data) setJob(data as Job);
+    // Reload timesheets for new jobcode
+    setTimeout(loadQBTime, 500);
+    setQbSaving(false);
+  };
+
+  const formatDuration = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  };
+
   // PDF generation
   const [generatingReport, setGeneratingReport] = useState<string | null>(null);
 
@@ -404,9 +475,18 @@ export default function JobDetailPage() {
     { key: "moisture", label: `Moisture (${moisture.length})` },
     { key: "equipment", label: `Equipment (${equipment.length})` },
     { key: "scope", label: `Scope (${centsToDisplay(totalCents)})` },
+    { key: "time", label: "Time" },
     { key: "floorplan", label: "Floor Plan" },
     { key: "report", label: "Reports" },
   ];
+
+  // Load QB Time data when Time tab is opened
+  useEffect(() => {
+    if (activeTab === "time" && qbConnected === null) {
+      loadQBTime();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   if (loading) {
     return (
@@ -953,6 +1033,161 @@ export default function JobDetailPage() {
                 </table>
               </div>
             </div>
+          </div>
+        )}
+
+        {activeTab === "time" && (
+          <div className="max-w-4xl space-y-4">
+            {qbLoading ? (
+              <div className="flex items-center justify-center py-16">
+                <div className="w-7 h-7 border-2 border-[#F97316] border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : qbConnected === false ? (
+              <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-8 text-center">
+                <Clock size={36} className="mx-auto mb-3 text-slate-600" />
+                <h3 className="text-white font-bold mb-2">QuickBooks Time Not Connected</h3>
+                <p className="text-slate-400 text-sm mb-4">Connect your QuickBooks Time account in Settings to track employee hours by job.</p>
+                <a href="/settings" className="inline-flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-5 h-10 rounded-xl text-sm transition-colors">
+                  <Clock size={15} /> Go to Settings
+                </a>
+              </div>
+            ) : (
+              <>
+                {qbError && (
+                  <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
+                    <X size={14} /> {qbError}
+                  </div>
+                )}
+
+                {/* Link job code */}
+                <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Link size={16} className="text-[#F97316]" />
+                    <h3 className="text-sm font-bold text-slate-300">QB Time Job Code</h3>
+                  </div>
+                  <p className="text-xs text-slate-500 mb-3">Link this job to a QuickBooks Time job code so time entries roll up here.</p>
+                  <div className="flex items-center gap-3">
+                    <select
+                      value={qbJobcodeInput}
+                      onChange={(e) => setQbJobcodeInput(e.target.value)}
+                      className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]"
+                    >
+                      <option value="">— No job code linked —</option>
+                      {qbJobcodes.map((jc) => (
+                        <option key={jc.qb_id} value={jc.qb_id}>{jc.name}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={saveQBJobcode}
+                      disabled={qbSaving}
+                      className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] px-4 h-10 rounded-xl disabled:opacity-60 transition-colors"
+                    >
+                      {qbSaving ? <RefreshCw size={13} className="animate-spin" /> : null}
+                      {qbSaving ? "Saving…" : "Save"}
+                    </button>
+                    <button
+                      onClick={loadQBTime}
+                      disabled={qbLoading}
+                      className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white border border-[#1E293B] hover:border-[#334155] px-4 h-10 rounded-xl transition-colors"
+                      title="Refresh time data"
+                    >
+                      <RefreshCw size={13} className={qbLoading ? "animate-spin" : ""} />
+                    </button>
+                  </div>
+                  {qbJobcodes.length === 0 && (
+                    <p className="text-xs text-slate-600 mt-2">No job codes found. <a href="/settings" className="text-[#F97316] hover:underline">Sync job codes in Settings</a>.</p>
+                  )}
+                </div>
+
+                {/* Currently clocked in */}
+                {qbClockedIn.length > 0 && (
+                  <div className="bg-[#0A1628] border border-green-500/30 rounded-2xl p-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                      <h3 className="text-sm font-bold text-green-400">Currently On Site</h3>
+                      <span className="ml-auto text-xs text-slate-500">{qbClockedIn.length} clocked in</span>
+                    </div>
+                    <div className="space-y-2">
+                      {qbClockedIn.map((entry) => {
+                        const u = qbClockUsers[String(entry.user_id)];
+                        return (
+                          <div key={entry.user_id} className="flex items-center gap-3 bg-green-500/5 rounded-xl px-4 py-2.5">
+                            <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center">
+                              <span className="text-xs font-bold text-green-400">
+                                {u ? u.first_name[0] : "?"}
+                              </span>
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-sm font-semibold text-slate-200">{u ? `${u.first_name} ${u.last_name}` : `User ${entry.user_id}`}</p>
+                            </div>
+                            <p className="text-xs font-mono text-green-400">{formatDuration(entry.shift_seconds)}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Time entries */}
+                {qbTimesheets.length > 0 ? (
+                  <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Users size={16} className="text-[#F97316]" />
+                      <h3 className="text-sm font-bold text-slate-300">Time Entries</h3>
+                      <span className="ml-auto text-xs text-slate-500">
+                        Total: <span className="text-white font-bold">
+                          {formatDuration(qbTimesheets.reduce((sum, t) => sum + (t.duration ?? 0), 0))}
+                        </span>
+                      </span>
+                    </div>
+
+                    {/* Group by employee */}
+                    {(() => {
+                      const byUser = qbTimesheets.reduce<Record<string, typeof qbTimesheets>>((acc, ts) => {
+                        const k = String(ts.user_id);
+                        if (!acc[k]) acc[k] = [];
+                        acc[k].push(ts);
+                        return acc;
+                      }, {});
+
+                      return Object.entries(byUser).map(([userId, entries]) => {
+                        const u = qbUsers[userId];
+                        const total = entries.reduce((s, e) => s + (e.duration ?? 0), 0);
+                        return (
+                          <div key={userId} className="mb-4 last:mb-0">
+                            <div className="flex items-center gap-3 mb-2">
+                              <div className="w-8 h-8 rounded-full bg-[#F97316]/20 flex items-center justify-center">
+                                <span className="text-xs font-bold text-[#F97316]">{u ? u.first_name[0] : "?"}</span>
+                              </div>
+                              <div className="flex-1">
+                                <p className="text-sm font-semibold text-slate-200">{u ? `${u.first_name} ${u.last_name}` : `User ${userId}`}</p>
+                              </div>
+                              <span className="text-sm font-bold text-white font-mono">{formatDuration(total)}</span>
+                            </div>
+                            <div className="ml-11 space-y-1">
+                              {entries.sort((a, b) => b.date.localeCompare(a.date)).map((ts) => (
+                                <div key={ts.id} className="flex items-center gap-3 text-xs text-slate-400 py-1 border-b border-[#1E293B] last:border-0">
+                                  <span className="text-slate-500 w-24 flex-shrink-0">{new Date(ts.date).toLocaleDateString()}</span>
+                                  <span className="flex-1 text-slate-400 truncate">{ts.notes || "—"}</span>
+                                  <span className="font-mono text-slate-300 flex-shrink-0">{formatDuration(ts.duration ?? 0)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+                ) : (
+                  (job as Job & { qb_jobcode_id?: string }).qb_jobcode_id && (
+                    <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-8 text-center">
+                      <Clock size={32} className="mx-auto mb-3 text-slate-600" />
+                      <p className="text-slate-500 text-sm">No time entries found for this job in the last 90 days.</p>
+                    </div>
+                  )
+                )}
+              </>
+            )}
           </div>
         )}
 
