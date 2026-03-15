@@ -78,6 +78,11 @@ export default function JobDetailPage() {
   const [moistureForm, setMoistureForm] = useState({ room_id: "", reading_date: new Date().toISOString().slice(0, 10), location_description: "", material_type: "", moisture_pct: "" });
   const [savingMoisture, setSavingMoisture] = useState(false);
 
+  // Room form
+  const [showRoomForm, setShowRoomForm] = useState(false);
+  const [roomForm, setRoomForm] = useState({ name: "", floor_level: "Main", affected: true });
+  const [savingRoom, setSavingRoom] = useState(false);
+
   // Equipment form
   const [showEquipForm, setShowEquipForm] = useState(false);
   const [equipForm, setEquipForm] = useState({ equipment_type: "air_mover" as EquipmentType, equipment_name: "", asset_number: "", room_id: "", date_placed: new Date().toISOString().slice(0, 10) });
@@ -121,6 +126,23 @@ export default function JobDetailPage() {
     setDeleting(true);
     await supabase.from("jobs").delete().eq("id", job.id);
     navigate("/jobs");
+  };
+
+  const addRoom = async () => {
+    if (!job || !roomForm.name.trim()) return;
+    setSavingRoom(true);
+    const { data } = await supabase.from("rooms").insert({
+      job_id: job.id,
+      name: roomForm.name.trim(),
+      floor_level: roomForm.floor_level,
+      affected: roomForm.affected,
+    }).select().single();
+    if (data) {
+      setRooms((prev) => [...prev, data as Room].sort((a, b) => a.name.localeCompare(b.name)));
+      setRoomForm({ name: "", floor_level: "Main", affected: true });
+      setShowRoomForm(false);
+    }
+    setSavingRoom(false);
   };
 
   const createMagicplanProject = async () => {
@@ -435,18 +457,67 @@ export default function JobDetailPage() {
               <InfoPair label="Adj. Email" value={job.adjuster_email ?? "—"} />
             </InfoCard>
             <InfoCard title="Rooms">
-              {rooms.length === 0 ? (
-                <p className="text-slate-600 text-sm">No rooms added yet.</p>
-              ) : (
-                <div className="space-y-1">
-                  {rooms.map((r) => (
-                    <div key={r.id} className="flex items-center gap-2 text-sm">
-                      <span className={clsx("w-2 h-2 rounded-full", r.affected ? "bg-[#EF4444]" : "bg-[#22C55E]")} />
-                      <span className="text-slate-200">{r.name}</span>
-                      <span className="text-slate-500 text-xs ml-auto">{r.floor_level}</span>
-                    </div>
-                  ))}
+              <div className="space-y-1 mb-3">
+                {rooms.length === 0 ? (
+                  <p className="text-slate-600 text-sm">No rooms yet — add them below.</p>
+                ) : rooms.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 text-sm">
+                    <span className={clsx("w-2 h-2 rounded-full flex-shrink-0", r.affected ? "bg-[#EF4444]" : "bg-[#22C55E]")} />
+                    <span className="text-slate-200 flex-1">{r.name}</span>
+                    <span className="text-slate-500 text-xs">{r.floor_level}</span>
+                  </div>
+                ))}
+              </div>
+
+              {showRoomForm ? (
+                <div className="border-t border-[#3D3530] pt-3 space-y-2">
+                  <input
+                    type="text"
+                    placeholder="Room name (e.g. Living Room)"
+                    value={roomForm.name}
+                    onChange={(e) => setRoomForm((f) => ({ ...f, name: e.target.value }))}
+                    autoFocus
+                    className="w-full bg-[#1C1917] border border-[#3D3530] rounded-lg px-3 h-8 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#D97757]"
+                  />
+                  <div className="flex gap-2">
+                    <select
+                      value={roomForm.floor_level}
+                      onChange={(e) => setRoomForm((f) => ({ ...f, floor_level: e.target.value }))}
+                      className="flex-1 bg-[#1C1917] border border-[#3D3530] rounded-lg px-2 h-8 text-xs text-slate-200 focus:outline-none focus:border-[#D97757]"
+                    >
+                      {["Basement", "Main", "Upper", "Attic", "Crawlspace"].map((l) => (
+                        <option key={l} value={l}>{l}</option>
+                      ))}
+                    </select>
+                    <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={roomForm.affected}
+                        onChange={(e) => setRoomForm((f) => ({ ...f, affected: e.target.checked }))}
+                        className="accent-[#D97757]"
+                      />
+                      Affected
+                    </label>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={addRoom}
+                      disabled={savingRoom || !roomForm.name.trim()}
+                      className="flex items-center gap-1 bg-[#D97757] hover:bg-[#C4623D] disabled:opacity-50 text-[#1C1917] font-bold px-3 h-7 rounded-lg text-xs transition-colors"
+                    >
+                      {savingRoom ? <RefreshCw size={11} className="animate-spin" /> : <Plus size={11} />}
+                      Add
+                    </button>
+                    <button onClick={() => setShowRoomForm(false)} className="text-xs text-slate-500 hover:text-slate-300">Cancel</button>
+                  </div>
                 </div>
+              ) : (
+                <button
+                  onClick={() => setShowRoomForm(true)}
+                  className="flex items-center gap-1 text-xs text-[#D97757] hover:text-[#C4623D] transition-colors mt-1"
+                >
+                  <Plus size={12} /> Add Room
+                </button>
               )}
             </InfoCard>
             <InfoCard title="Meta">
@@ -482,11 +553,18 @@ export default function JobDetailPage() {
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Room *</label>
-                    <select value={moistureForm.room_id} onChange={(e) => setMoistureForm((f) => ({ ...f, room_id: e.target.value }))}
-                      className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
-                      <option value="">Select room…</option>
-                      {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-                    </select>
+                    {rooms.length === 0 ? (
+                      <button onClick={() => { setShowMoistureForm(false); setActiveTab("overview"); setShowRoomForm(true); }}
+                        className="w-full bg-[#1C1917] border border-[#D97757]/40 rounded-xl px-3 h-9 text-xs text-[#D97757] text-left hover:bg-[#D97757]/10 transition-colors">
+                        + Add rooms in Overview tab first
+                      </button>
+                    ) : (
+                      <select value={moistureForm.room_id} onChange={(e) => setMoistureForm((f) => ({ ...f, room_id: e.target.value }))}
+                        className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
+                        <option value="">Select room…</option>
+                        {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                      </select>
+                    )}
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Moisture % *</label>
@@ -596,7 +674,7 @@ export default function JobDetailPage() {
                     <label className="block text-xs text-slate-500 mb-1">Room</label>
                     <select value={equipForm.room_id} onChange={(e) => setEquipForm((f) => ({ ...f, room_id: e.target.value }))}
                       className="w-full bg-[#1C1917] border border-[#3D3530] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#D97757]">
-                      <option value="">No room</option>
+                      <option value="">{rooms.length === 0 ? "No rooms — add in Overview" : "No room"}</option>
                       {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
                   </div>
