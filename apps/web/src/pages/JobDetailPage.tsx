@@ -282,6 +282,23 @@ export default function JobDetailPage() {
     setRemovingEquip(null);
   };
 
+  // Delete handlers
+  const deleteMoistureReading = async (readingId: string) => {
+    await supabase.from("moisture_readings").delete().eq("id", readingId);
+    setMoisture((prev) => prev.filter((m) => m.id !== readingId));
+  };
+
+  const deleteEquipmentLog = async (equipId: string) => {
+    await supabase.from("equipment_logs").delete().eq("id", equipId);
+    setEquipment((prev) => prev.filter((e) => e.id !== equipId));
+  };
+
+  const deletePhoto = async (photo: Photo) => {
+    await supabase.storage.from("job-photos").remove([photo.storage_path]);
+    await supabase.from("photos").delete().eq("id", photo.id);
+    setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+  };
+
   // PDF generation
   const [generatingReport, setGeneratingReport] = useState<string | null>(null);
 
@@ -601,18 +618,18 @@ export default function JobDetailPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-[#3D3530]">
-                      {["Date", "Room", "Location", "Material", "Reading", "Status"].map((h) => (
+                      {["Date", "Room", "Location", "Material", "Reading", "Status", ""].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {moisture.length === 0 ? (
-                      <tr><td colSpan={6} className="px-4 py-12 text-center text-slate-600">No readings yet — click Add Reading above.</td></tr>
+                      <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No readings yet — click Add Reading above.</td></tr>
                     ) : moisture.map((m) => {
                       const status = getMoistureStatus(m.moisture_pct, m.material_type);
                       return (
-                        <tr key={m.id} className="border-b border-[#3D3530]/50">
+                        <tr key={m.id} className="border-b border-[#3D3530]/50 group">
                           <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(m.reading_date)}</td>
                           <td className="px-4 py-3 text-slate-300">{roomMap[m.room_id] ?? "—"}</td>
                           <td className="px-4 py-3 text-slate-300">{m.location_description}</td>
@@ -622,6 +639,15 @@ export default function JobDetailPage() {
                             <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ backgroundColor: MOISTURE_COLORS[status] + "22", color: MOISTURE_COLORS[status] }}>
                               {status.charAt(0).toUpperCase() + status.slice(1)}
                             </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <button
+                              onClick={() => deleteMoistureReading(m.id)}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                              title="Delete reading"
+                            >
+                              <Trash2 size={14} />
+                            </button>
                           </td>
                         </tr>
                       );
@@ -709,7 +735,7 @@ export default function JobDetailPage() {
                     {equipment.length === 0 ? (
                       <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No equipment logged — click Log Equipment above.</td></tr>
                     ) : equipment.map((e) => (
-                      <tr key={e.id} className="border-b border-[#3D3530]/50">
+                      <tr key={e.id} className="border-b border-[#3D3530]/50 group">
                         <td className="px-4 py-3">
                           <p className="text-slate-200 font-semibold">{e.equipment_name}</p>
                           <p className="text-slate-500 text-xs">{EQUIPMENT_TYPE_LABELS[e.equipment_type]}</p>
@@ -720,15 +746,24 @@ export default function JobDetailPage() {
                         <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#D97757] font-semibold">Active</span>}</td>
                         <td className="px-4 py-3 font-bold text-slate-200">{e.days_on_site}</td>
                         <td className="px-4 py-3">
-                          {!e.date_removed && (
+                          <div className="flex items-center gap-1">
+                            {!e.date_removed && (
+                              <button
+                                onClick={() => removeEquipment(e.id)}
+                                disabled={removingEquip === e.id}
+                                className="text-xs font-bold text-slate-500 hover:text-amber-400 border border-[#3D3530] hover:border-amber-500/30 px-2 py-1 rounded-lg transition-colors disabled:opacity-50"
+                              >
+                                {removingEquip === e.id ? "…" : "Remove"}
+                              </button>
+                            )}
                             <button
-                              onClick={() => removeEquipment(e.id)}
-                              disabled={removingEquip === e.id}
-                              className="text-xs font-bold text-slate-500 hover:text-red-400 border border-[#3D3530] hover:border-red-500/30 px-2 py-1 rounded-lg transition-colors disabled:opacity-50"
+                              onClick={() => deleteEquipmentLog(e.id)}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                              title="Delete log entry"
                             >
-                              {removingEquip === e.id ? "…" : "Remove"}
+                              <Trash2 size={14} />
                             </button>
-                          )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -937,18 +972,26 @@ export default function JobDetailPage() {
                       {photos.filter((p) => p.category === cat.value).map((p) => {
                         const url = p.url ?? getPhotoUrl(p.storage_path);
                         return (
-                          <button
+                          <div
                             key={p.id}
-                            onClick={() => setSelectedPhoto(p)}
                             className="relative bg-[#28221E] border border-[#3D3530] rounded-xl overflow-hidden aspect-square hover:border-[#D97757]/60 transition-colors group"
                           >
-                            <img src={url} alt={p.caption ?? cat.label} className="w-full h-full object-cover" />
+                            <button onClick={() => setSelectedPhoto(p)} className="w-full h-full block">
+                              <img src={url} alt={p.caption ?? cat.label} className="w-full h-full object-cover" />
+                            </button>
                             {p.caption && (
-                              <div className="absolute bottom-0 left-0 right-0 bg-black/70 px-2 py-1">
+                              <div className="absolute bottom-0 left-0 right-0 bg-black/70 px-2 py-1 pointer-events-none">
                                 <p className="text-white text-xs truncate">{p.caption}</p>
                               </div>
                             )}
-                          </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deletePhoto(p); }}
+                              className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-black/70 hover:bg-red-600 text-white p-1.5 rounded-lg"
+                              title="Delete photo"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
                         );
                       })}
                     </div>
@@ -960,7 +1003,13 @@ export default function JobDetailPage() {
             {/* Lightbox */}
             {selectedPhoto && (
               <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4" onClick={() => setSelectedPhoto(null)}>
-                <button className="absolute top-4 right-4 text-white/70 hover:text-white"><X size={28} /></button>
+                <button className="absolute top-4 right-4 text-white/70 hover:text-white" onClick={() => setSelectedPhoto(null)}><X size={28} /></button>
+                <button
+                  className="absolute top-4 left-4 flex items-center gap-2 bg-red-600/80 hover:bg-red-600 text-white text-xs font-bold px-3 py-2 rounded-xl transition-colors"
+                  onClick={(e) => { e.stopPropagation(); deletePhoto(selectedPhoto); setSelectedPhoto(null); }}
+                >
+                  <Trash2 size={14} /> Delete Photo
+                </button>
                 <img
                   src={selectedPhoto.url ?? getPhotoUrl(selectedPhoto.storage_path)}
                   alt={selectedPhoto.caption ?? ""}
