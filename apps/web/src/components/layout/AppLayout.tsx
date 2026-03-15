@@ -46,7 +46,7 @@ export default function AppLayout() {
         {/* Logo */}
         <div className="flex items-center gap-3 px-4 py-5 border-b border-[#1E293B]">
           <img
-            src="/logo.png"
+            src="/logo.svg"
             alt="Roybal Construction"
             className="h-20 w-auto object-contain"
             onError={(e) => {

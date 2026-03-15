@@ -33,7 +33,7 @@ export default function LoginPage() {
         {/* Logo */}
         <div className="text-center mb-10">
           <img
-            src="/logo.png"
+            src="/logo.svg"
             alt="Roybal Construction"
             className="h-36 w-auto object-contain mx-auto mb-4"
             onError={(e) => {
