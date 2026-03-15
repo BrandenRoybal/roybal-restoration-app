@@ -17,7 +17,7 @@ import {
 } from "@roybal/shared";
 import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown } from "lucide-react";
 import clsx from "clsx";
-import { MagicplanService, PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
+import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
 import React from "react";
 
@@ -30,11 +30,14 @@ const PHOTO_CATEGORIES: { value: PhotoCategory; label: string }[] = [
   { value: "general", label: "General" },
 ];
 
-const getMagicplanService = () => {
-  const apiKey = import.meta.env.VITE_MAGICPLAN_API_KEY as string | undefined;
-  const customerId = import.meta.env.VITE_MAGICPLAN_CUSTOMER_ID as string | undefined;
-  if (!apiKey || !customerId || apiKey === "your-magicplan-api-key") return null;
-  return new MagicplanService(apiKey, customerId);
+// Call the Supabase Edge Function proxy instead of Magicplan directly (CORS)
+const mpProxy = async (action: string, params: Record<string, unknown> = {}) => {
+  const { data, error } = await supabase.functions.invoke("magicplan-proxy", {
+    body: { action, ...params },
+  });
+  if (error) throw new Error(error.message ?? "Magicplan proxy error");
+  if (!data.ok) throw new Error(data.error ?? "Magicplan proxy error");
+  return data.data;
 };
 
 type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report";
@@ -152,12 +155,11 @@ export default function JobDetailPage() {
 
   const createMagicplanProject = async () => {
     if (!job) return;
-    const mp = getMagicplanService();
-    if (!mp) { setMagicplanError("Magicplan API key not configured. Add VITE_MAGICPLAN_API_KEY to .env"); return; }
     setMagicplanCreating(true);
     setMagicplanError("");
     try {
-      const { magicplanProjectId } = await mp.createProject(job.id, job);
+      const result = await mpProxy("createProject", { jobId: job.id, jobData: job });
+      const magicplanProjectId = result.magicplanProjectId as string;
       const { data } = await supabase
         .from("jobs")
         .update({ magicplan_project_id: magicplanProjectId })
@@ -173,12 +175,12 @@ export default function JobDetailPage() {
 
   const syncFromMagicplan = async () => {
     if (!job?.magicplan_project_id) return;
-    const mp = getMagicplanService();
-    if (!mp) { setMagicplanError("Magicplan API key not configured. Add VITE_MAGICPLAN_API_KEY to .env"); return; }
     setMagicplanSyncing(true);
     setMagicplanError("");
     try {
-      const { fileUrl, fileType } = await mp.syncFloorPlan(job.magicplan_project_id);
+      const result = await mpProxy("syncFloorPlan", { projectId: job.magicplan_project_id });
+      const fileUrl = result.fileUrl as string | null;
+      const fileType = result.fileType as string | null;
       if (fileUrl) {
         const nextVersion = (floorPlans[0]?.version ?? 0) + 1;
         const { data } = await supabase
