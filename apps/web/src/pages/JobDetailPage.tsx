@@ -336,15 +336,38 @@ export default function JobDetailPage() {
   // PDF generation
   const [generatingReport, setGeneratingReport] = useState<string | null>(null);
 
+  // Convert a remote image URL to a base64 data URL so @react-pdf/renderer can embed it
+  const toBase64 = async (url: string): Promise<string> => {
+    try {
+      const res = await fetch(url);
+      const blob = await res.blob();
+      return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return url; // fallback — let react-pdf try the URL directly
+    }
+  };
+
   const generateReport = async (type: "photos" | "moisture" | "equipment" | "scope") => {
     if (!job) return;
     setGeneratingReport(type);
     try {
-      const photosWithUrls = photos.map((p) => ({ ...p, url: p.url ?? getPhotoUrl(p.storage_path) }));
+      // Fetch all photos as base64 so the PDF renderer can embed them without CORS issues
+      const photosWithBase64 = await Promise.all(
+        photos.map(async (p) => {
+          const rawUrl = p.url ?? getPhotoUrl(p.storage_path);
+          const base64 = await toBase64(rawUrl);
+          return { ...p, url: base64 };
+        })
+      );
       let element: React.ReactElement;
       let filename: string;
       if (type === "photos") {
-        element = React.createElement(PhotoReport, { job, photos: photosWithUrls, rooms });
+        element = React.createElement(PhotoReport, { job, photos: photosWithBase64, rooms });
         filename = `${job.job_number}-photo-report.pdf`;
       } else if (type === "moisture") {
         element = React.createElement(MoistureDryingReport, { job, rooms, moistureReadings: moisture, equipmentLogs: equipment });
