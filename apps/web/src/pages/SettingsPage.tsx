@@ -85,8 +85,9 @@ export default function SettingsPage() {
   }, []);
 
   const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+  const [qbCopied, setQbCopied] = useState(false);
 
-  const connectQBTime = () => {
+  const connectQBTime = async () => {
     const clientId = import.meta.env.VITE_QB_TIME_CLIENT_ID as string;
     const redirectUri = `${window.location.origin}/qb-callback`;
     if (!clientId) {
@@ -95,10 +96,15 @@ export default function SettingsPage() {
     }
     const authUrl = buildQBAuthUrl(clientId, redirectUri);
     if (isSafari) {
-      // On Safari, open the OAuth flow in Chrome using the googlechromes:// scheme.
-      // Chrome registers this scheme on macOS/iOS — it opens the URL directly in Chrome.
-      // The full OAuth flow (Intuit login → /qb-callback) will complete in Chrome.
-      window.open(authUrl.replace(/^https:\/\//, "googlechromes://"), "_blank");
+      // Safari blocks Intuit's OAuth login due to ITP/cookie restrictions.
+      // Copy the auth URL to clipboard so the user can paste it into Chrome.
+      try {
+        await navigator.clipboard.writeText(authUrl);
+        setQbCopied(true);
+        setTimeout(() => setQbCopied(false), 5000);
+      } catch {
+        setQbError("Could not copy link. Please open this page in Chrome to connect.");
+      }
     } else {
       window.location.href = authUrl;
     }
@@ -397,16 +403,22 @@ export default function SettingsPage() {
                 <X size={14} /> {qbError}
               </div>
             )}
+            {qbCopied && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-300 text-sm">
+                <Check size={14} />
+                Link copied! Open Chrome, paste it in the address bar, and complete the login there.
+              </div>
+            )}
             <button
               onClick={connectQBTime}
               className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-5 h-10 rounded-xl transition-colors text-sm"
             >
               <Clock size={15} />
-              {isSafari ? "Connect QuickBooks Time (opens in Chrome)" : "Connect QuickBooks Time"}
+              {isSafari ? "Copy QuickBooks Link (paste in Chrome)" : "Connect QuickBooks Time"}
             </button>
             <p className="text-xs text-slate-600">
               {isSafari
-                ? "Safari has compatibility issues with Intuit's login — clicking this will open the authorization in Chrome. Chrome must be installed."
+                ? "Safari is not compatible with Intuit's login. Click to copy the link, then paste it into Chrome to connect."
                 : "You'll be redirected to Intuit to authorize access. A paid QuickBooks Time subscription is required."}
             </p>
           </div>
