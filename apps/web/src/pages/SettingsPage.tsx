@@ -36,7 +36,6 @@ export default function SettingsPage() {
   const [editingRole, setEditingRole] = useState<string | null>(null);
   const [savingRole, setSavingRole] = useState<string | null>(null);
 
-  // QB Time state
   // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteName, setInviteName] = useState("");
