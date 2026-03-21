@@ -2,7 +2,7 @@
  * Job Detail page — full tabbed view with all modules.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import type { Job, Room, MoistureReading, EquipmentLog, LineItem, FloorPlan, Photo, PhotoCategory, EquipmentType } from "@roybal/shared";
@@ -15,11 +15,144 @@ import {
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, ChevronDown } from "lucide-react";
 import clsx from "clsx";
 import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
 import React from "react";
+
+// ─── Dropdown item lists with localStorage persistence ───────────────────────
+const DEFAULT_MATERIALS = ["Drywall", "Wood", "Hardwood", "Subfloor", "Concrete", "OSB", "Plywood", "Block"];
+const MATERIALS_KEY = "roybal_custom_materials";
+
+const DEFAULT_EQUIP_TYPES = Object.values(EQUIPMENT_TYPE_LABELS);
+const EQUIP_TYPES_KEY = "roybal_custom_equipment_types";
+
+const DEFAULT_EQUIP_NAMES = [
+  "Dri-Eaz LGR 2800i", "Dri-Eaz PHD 200", "Dri-Eaz Revolution LGR",
+  "Dri-Eaz Velo Pro", "Dri-Eaz Flex 970", "Dri-Eaz F203A Sahara",
+  "Alorair Sentinel HDi90", "Alorair Sentinel HD55",
+  "Xpower P-230AT", "Xpower P-80A",
+  "Legend Brands Drizair 1200", "Nikro PD10120",
+];
+const EQUIP_NAMES_KEY = "roybal_custom_equipment_names";
+
+function loadItems(key: string, defaults: string[]): string[] {
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored) return JSON.parse(stored) as string[];
+  } catch { /* ignore */ }
+  return defaults;
+}
+
+function saveItems(key: string, items: string[]) {
+  localStorage.setItem(key, JSON.stringify(items));
+}
+
+function ItemSelect({ value, onChange, storageKey, defaults, placeholder }: {
+  value: string;
+  onChange: (v: string) => void;
+  storageKey: string;
+  defaults: string[];
+  placeholder?: string;
+}) {
+  const [items, setItems] = useState<string[]>(() => loadItems(storageKey, defaults));
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newItem, setNewItem] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const addItem = () => {
+    const trimmed = newItem.trim();
+    if (!trimmed || items.includes(trimmed)) { setNewItem(""); setAdding(false); return; }
+    const updated = [...items, trimmed];
+    setItems(updated);
+    saveItems(storageKey, updated);
+    onChange(trimmed);
+    setNewItem("");
+    setAdding(false);
+    setOpen(false);
+  };
+
+  const deleteItem = (item: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updated = items.filter((i) => i !== item);
+    setItems(updated);
+    saveItems(storageKey, updated);
+    if (value === item) onChange("");
+  };
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm focus:outline-none focus:border-[#F97316] hover:border-[#4A4440] transition-colors"
+      >
+        <span className={value ? "text-slate-200" : "text-slate-500"}>{value || placeholder || "Select…"}</span>
+        <ChevronDown size={14} className="text-slate-500 flex-shrink-0" />
+      </button>
+
+      {open && (
+        <div className="absolute z-50 mt-1 w-full bg-[#0A1628] border border-[#1E293B] rounded-xl shadow-xl overflow-hidden">
+          <div className="max-h-52 overflow-y-auto">
+            {items.map((item) => (
+              <div
+                key={item}
+                className={`flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#F97316]/10 group ${value === item ? "bg-[#F97316]/15 text-[#F97316]" : "text-slate-200"}`}
+                onClick={() => { onChange(item); setOpen(false); }}
+              >
+                <span className="text-sm">{item}</span>
+                <button
+                  type="button"
+                  onClick={(e) => deleteItem(item, e)}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded text-slate-500 hover:text-red-400"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="border-t border-[#1E293B] p-2">
+            {adding ? (
+              <div className="flex gap-1.5">
+                <input
+                  autoFocus
+                  type="text"
+                  value={newItem}
+                  onChange={(e) => setNewItem(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") addItem(); if (e.key === "Escape") { setAdding(false); setNewItem(""); } }}
+                  placeholder="New item…"
+                  className="flex-1 bg-[#0F172A] border border-[#F97316]/50 rounded-lg px-2 h-7 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#F97316]"
+                />
+                <button type="button" onClick={addItem} className="px-2 h-7 rounded-lg bg-[#F97316] text-[#0F172A] text-xs font-bold">Add</button>
+                <button type="button" onClick={() => { setAdding(false); setNewItem(""); }} className="px-2 h-7 rounded-lg text-slate-400 text-xs">✕</button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAdding(true)}
+                className="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs text-[#F97316] hover:bg-[#F97316]/10 rounded-lg transition-colors"
+              >
+                <Plus size={12} /> Add item
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 const PHOTO_CATEGORIES: { value: PhotoCategory; label: string }[] = [
   { value: "before", label: "Before" },
@@ -40,7 +173,7 @@ const mpProxy = async (action: string, params: Record<string, unknown> = {}) => 
   return data.data;
 };
 
-type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report" | "time";
+type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report";
 
 const STATUS_COLORS: Record<string, string> = {
   new: "#64748B", active: "#F97316", drying: "#3B82F6",
@@ -97,20 +230,6 @@ export default function JobDetailPage() {
   const [scopeForm, setScopeForm] = useState({ category: "demo", description: "", room_id: "", quantity: "", unit: "EA", unit_price: "" });
   const [savingScope, setSavingScope] = useState(false);
 
-  // QB Time
-  type QBTimesheet = { id: number; user_id: number; jobcode_id: number; start: string; end: string; duration: number; date: string; notes: string };
-  type QBUser = { id: number; first_name: string; last_name: string; email: string };
-  type QBClockEntry = { user_id: number; jobcode_id: number; shift_seconds: number; on_the_clock: boolean };
-  const [qbConnected, setQbConnected] = useState<boolean | null>(null);
-  const [qbJobcodes, setQbJobcodes] = useState<{ qb_id: string; name: string }[]>([]);
-  const [qbTimesheets, setQbTimesheets] = useState<QBTimesheet[]>([]);
-  const [qbUsers, setQbUsers] = useState<Record<string, QBUser>>({});
-  const [qbClockedIn, setQbClockedIn] = useState<QBClockEntry[]>([]);
-  const [qbClockUsers, setQbClockUsers] = useState<Record<string, { first_name: string; last_name: string }>>({});
-  const [qbLoading, setQbLoading] = useState(false);
-  const [qbSaving, setQbSaving] = useState(false);
-  const [qbError, setQbError] = useState("");
-  const [qbJobcodeInput, setQbJobcodeInput] = useState("");
 
   useEffect(() => {
     if (!id) return;
@@ -350,62 +469,6 @@ export default function JobDetailPage() {
     setLineItems((prev) => prev.filter((li) => li.id !== itemId));
   };
 
-  // QB Time helpers
-  const loadQBTime = async () => {
-    if (!job) return;
-    setQbLoading(true);
-    setQbError("");
-    try {
-      // Check connection
-      const { data: statusData } = await supabase.functions.invoke("qb-time-proxy", { body: { action: "getStatus" } });
-      const connected = statusData?.data?.connected ?? false;
-      setQbConnected(connected);
-      if (!connected) { setQbLoading(false); return; }
-
-      // Load job codes from DB cache
-      const { data: jcData } = await supabase.from("qb_time_jobcodes").select("qb_id, name").eq("active", true).order("name");
-      setQbJobcodes((jcData ?? []) as { qb_id: string; name: string }[]);
-      setQbJobcodeInput((job as Job & { qb_jobcode_id?: string }).qb_jobcode_id ?? "");
-
-      // If job has a jobcode linked, fetch timesheets
-      const jobcodeId = (job as Job & { qb_jobcode_id?: string }).qb_jobcode_id;
-      if (jobcodeId) {
-        const [tsRes, clockRes] = await Promise.all([
-          supabase.functions.invoke("qb-time-proxy", { body: { action: "getTimesheets", jobcodeId } }),
-          supabase.functions.invoke("qb-time-proxy", { body: { action: "getCurrentTotals" } }),
-        ]);
-        if (tsRes.data?.ok) {
-          setQbTimesheets(tsRes.data.data.timesheets ?? []);
-          setQbUsers(tsRes.data.data.users ?? {});
-        }
-        if (clockRes.data?.ok) {
-          const allClockedIn = clockRes.data.data.totals ?? [];
-          setQbClockedIn(allClockedIn.filter((t: { jobcode_id: number }) => String(t.jobcode_id) === jobcodeId));
-          setQbClockUsers(clockRes.data.data.users ?? {});
-        }
-      }
-    } catch (e) {
-      setQbError(e instanceof Error ? e.message : "Failed to load QB Time data");
-    }
-    setQbLoading(false);
-  };
-
-  const saveQBJobcode = async () => {
-    if (!job) return;
-    setQbSaving(true);
-    const { data } = await supabase.from("jobs").update({ qb_jobcode_id: qbJobcodeInput || null }).eq("id", job.id).select().single();
-    if (data) setJob(data as Job);
-    // Reload timesheets for new jobcode
-    setTimeout(loadQBTime, 500);
-    setQbSaving(false);
-  };
-
-  const formatDuration = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
-  };
-
   // PDF generation
   const [generatingReport, setGeneratingReport] = useState<string | null>(null);
 
@@ -475,18 +538,10 @@ export default function JobDetailPage() {
     { key: "moisture", label: `Moisture (${moisture.length})` },
     { key: "equipment", label: `Equipment (${equipment.length})` },
     { key: "scope", label: `Scope (${centsToDisplay(totalCents)})` },
-    { key: "time", label: "Time" },
     { key: "floorplan", label: "Floor Plan" },
     { key: "report", label: "Reports" },
   ];
 
-  // Load QB Time data when Time tab is opened
-  useEffect(() => {
-    if (activeTab === "time" && qbConnected === null) {
-      loadQBTime();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab]);
 
   if (loading) {
     return (
@@ -736,9 +791,13 @@ export default function JobDetailPage() {
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Material</label>
-                    <input type="text" placeholder="e.g. Drywall, Wood" value={moistureForm.material_type}
-                      onChange={(e) => setMoistureForm((f) => ({ ...f, material_type: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                    <ItemSelect
+                      value={moistureForm.material_type}
+                      onChange={(v) => setMoistureForm((f) => ({ ...f, material_type: v }))}
+                      storageKey={MATERIALS_KEY}
+                      defaults={DEFAULT_MATERIALS}
+                      placeholder="e.g. Drywall, Wood"
+                    />
                   </div>
                 </div>
                 <div className="flex gap-3">
@@ -818,16 +877,27 @@ export default function JobDetailPage() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Type *</label>
-                    <select value={equipForm.equipment_type} onChange={(e) => setEquipForm((f) => ({ ...f, equipment_type: e.target.value as EquipmentType, equipment_name: EQUIPMENT_TYPE_LABELS[e.target.value as EquipmentType] }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
-                      {Object.entries(EQUIPMENT_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                    </select>
+                    <ItemSelect
+                      value={equipForm.equipment_type ? (EQUIPMENT_TYPE_LABELS[equipForm.equipment_type] ?? equipForm.equipment_type) : ""}
+                      onChange={(v) => {
+                        // Map label back to key, or store raw if custom
+                        const key = (Object.entries(EQUIPMENT_TYPE_LABELS).find(([, label]) => label === v)?.[0] ?? v) as EquipmentType;
+                        setEquipForm((f) => ({ ...f, equipment_type: key }));
+                      }}
+                      storageKey={EQUIP_TYPES_KEY}
+                      defaults={DEFAULT_EQUIP_TYPES}
+                      placeholder="Select type…"
+                    />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Name *</label>
-                    <input type="text" placeholder="e.g. Dri-Eaz LGR 2800i" value={equipForm.equipment_name}
-                      onChange={(e) => setEquipForm((f) => ({ ...f, equipment_name: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                    <ItemSelect
+                      value={equipForm.equipment_name}
+                      onChange={(v) => setEquipForm((f) => ({ ...f, equipment_name: v }))}
+                      storageKey={EQUIP_NAMES_KEY}
+                      defaults={DEFAULT_EQUIP_NAMES}
+                      placeholder="e.g. Dri-Eaz LGR 2800i"
+                    />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Asset #</label>
@@ -1036,160 +1106,6 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        {activeTab === "time" && (
-          <div className="max-w-4xl space-y-4">
-            {qbLoading ? (
-              <div className="flex items-center justify-center py-16">
-                <div className="w-7 h-7 border-2 border-[#F97316] border-t-transparent rounded-full animate-spin" />
-              </div>
-            ) : qbConnected === false ? (
-              <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-8 text-center">
-                <Clock size={36} className="mx-auto mb-3 text-slate-600" />
-                <h3 className="text-white font-bold mb-2">QuickBooks Time Not Connected</h3>
-                <p className="text-slate-400 text-sm mb-4">Connect your QuickBooks Time account in Settings to track employee hours by job.</p>
-                <a href="/settings" className="inline-flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-5 h-10 rounded-xl text-sm transition-colors">
-                  <Clock size={15} /> Go to Settings
-                </a>
-              </div>
-            ) : (
-              <>
-                {qbError && (
-                  <div className="flex items-center gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
-                    <X size={14} /> {qbError}
-                  </div>
-                )}
-
-                {/* Link job code */}
-                <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Link size={16} className="text-[#F97316]" />
-                    <h3 className="text-sm font-bold text-slate-300">QB Time Job Code</h3>
-                  </div>
-                  <p className="text-xs text-slate-500 mb-3">Link this job to a QuickBooks Time job code so time entries roll up here.</p>
-                  <div className="flex items-center gap-3">
-                    <select
-                      value={qbJobcodeInput}
-                      onChange={(e) => setQbJobcodeInput(e.target.value)}
-                      className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]"
-                    >
-                      <option value="">— No job code linked —</option>
-                      {qbJobcodes.map((jc) => (
-                        <option key={jc.qb_id} value={jc.qb_id}>{jc.name}</option>
-                      ))}
-                    </select>
-                    <button
-                      onClick={saveQBJobcode}
-                      disabled={qbSaving}
-                      className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] px-4 h-10 rounded-xl disabled:opacity-60 transition-colors"
-                    >
-                      {qbSaving ? <RefreshCw size={13} className="animate-spin" /> : null}
-                      {qbSaving ? "Saving…" : "Save"}
-                    </button>
-                    <button
-                      onClick={loadQBTime}
-                      disabled={qbLoading}
-                      className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white border border-[#1E293B] hover:border-[#334155] px-4 h-10 rounded-xl transition-colors"
-                      title="Refresh time data"
-                    >
-                      <RefreshCw size={13} className={qbLoading ? "animate-spin" : ""} />
-                    </button>
-                  </div>
-                  {qbJobcodes.length === 0 && (
-                    <p className="text-xs text-slate-600 mt-2">No job codes found. <a href="/settings" className="text-[#F97316] hover:underline">Sync job codes in Settings</a>.</p>
-                  )}
-                </div>
-
-                {/* Currently clocked in */}
-                {qbClockedIn.length > 0 && (
-                  <div className="bg-[#0A1628] border border-green-500/30 rounded-2xl p-5">
-                    <div className="flex items-center gap-2 mb-3">
-                      <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                      <h3 className="text-sm font-bold text-green-400">Currently On Site</h3>
-                      <span className="ml-auto text-xs text-slate-500">{qbClockedIn.length} clocked in</span>
-                    </div>
-                    <div className="space-y-2">
-                      {qbClockedIn.map((entry) => {
-                        const u = qbClockUsers[String(entry.user_id)];
-                        return (
-                          <div key={entry.user_id} className="flex items-center gap-3 bg-green-500/5 rounded-xl px-4 py-2.5">
-                            <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center">
-                              <span className="text-xs font-bold text-green-400">
-                                {u ? u.first_name[0] : "?"}
-                              </span>
-                            </div>
-                            <div className="flex-1">
-                              <p className="text-sm font-semibold text-slate-200">{u ? `${u.first_name} ${u.last_name}` : `User ${entry.user_id}`}</p>
-                            </div>
-                            <p className="text-xs font-mono text-green-400">{formatDuration(entry.shift_seconds)}</p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Time entries */}
-                {qbTimesheets.length > 0 ? (
-                  <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
-                    <div className="flex items-center gap-2 mb-4">
-                      <Users size={16} className="text-[#F97316]" />
-                      <h3 className="text-sm font-bold text-slate-300">Time Entries</h3>
-                      <span className="ml-auto text-xs text-slate-500">
-                        Total: <span className="text-white font-bold">
-                          {formatDuration(qbTimesheets.reduce((sum, t) => sum + (t.duration ?? 0), 0))}
-                        </span>
-                      </span>
-                    </div>
-
-                    {/* Group by employee */}
-                    {(() => {
-                      const byUser = qbTimesheets.reduce<Record<string, typeof qbTimesheets>>((acc, ts) => {
-                        const k = String(ts.user_id);
-                        if (!acc[k]) acc[k] = [];
-                        acc[k].push(ts);
-                        return acc;
-                      }, {});
-
-                      return Object.entries(byUser).map(([userId, entries]) => {
-                        const u = qbUsers[userId];
-                        const total = entries.reduce((s, e) => s + (e.duration ?? 0), 0);
-                        return (
-                          <div key={userId} className="mb-4 last:mb-0">
-                            <div className="flex items-center gap-3 mb-2">
-                              <div className="w-8 h-8 rounded-full bg-[#F97316]/20 flex items-center justify-center">
-                                <span className="text-xs font-bold text-[#F97316]">{u ? u.first_name[0] : "?"}</span>
-                              </div>
-                              <div className="flex-1">
-                                <p className="text-sm font-semibold text-slate-200">{u ? `${u.first_name} ${u.last_name}` : `User ${userId}`}</p>
-                              </div>
-                              <span className="text-sm font-bold text-white font-mono">{formatDuration(total)}</span>
-                            </div>
-                            <div className="ml-11 space-y-1">
-                              {entries.sort((a, b) => b.date.localeCompare(a.date)).map((ts) => (
-                                <div key={ts.id} className="flex items-center gap-3 text-xs text-slate-400 py-1 border-b border-[#1E293B] last:border-0">
-                                  <span className="text-slate-500 w-24 flex-shrink-0">{new Date(ts.date).toLocaleDateString()}</span>
-                                  <span className="flex-1 text-slate-400 truncate">{ts.notes || "—"}</span>
-                                  <span className="font-mono text-slate-300 flex-shrink-0">{formatDuration(ts.duration ?? 0)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      });
-                    })()}
-                  </div>
-                ) : (
-                  (job as Job & { qb_jobcode_id?: string }).qb_jobcode_id && (
-                    <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-8 text-center">
-                      <Clock size={32} className="mx-auto mb-3 text-slate-600" />
-                      <p className="text-slate-500 text-sm">No time entries found for this job in the last 90 days.</p>
-                    </div>
-                  )
-                )}
-              </>
-            )}
-          </div>
-        )}
 
         {activeTab === "floorplan" && (
           <div className="max-w-4xl space-y-4">
