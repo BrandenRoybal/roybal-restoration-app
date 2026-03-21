@@ -34,7 +34,9 @@ const QB_AUTH_BASE = "https://appcenter.intuit.com/connect/oauth2";
 
 function buildQBAuthUrl(clientId: string, redirectUri: string) {
   const state = crypto.randomUUID();
-  sessionStorage.setItem("qb_oauth_state", state);
+  // Use localStorage instead of sessionStorage — Safari ITP clears sessionStorage
+  // after cross-origin redirects (e.g. navigating to accounts.intuit.com and back).
+  localStorage.setItem("qb_oauth_state", state);
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,

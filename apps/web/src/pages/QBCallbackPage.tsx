@@ -7,12 +7,10 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { useAuthStore } from "../store/auth";
 import { CheckCircle, XCircle, Loader } from "lucide-react";
 
 export default function QBCallbackPage() {
   const navigate = useNavigate();
-  const { profile } = useAuthStore();
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [message, setMessage] = useState("Connecting to QuickBooks Time…");
 
@@ -36,17 +34,25 @@ export default function QBCallbackPage() {
 
     const exchange = async () => {
       try {
+        // Get userId directly from the Supabase session — more reliable than the
+        // auth store which may not have loaded yet (especially on Safari after a
+        // cross-origin redirect clears in-memory state).
+        const { data: { user } } = await supabase.auth.getUser();
+
         const { data, error } = await supabase.functions.invoke("qb-time-proxy", {
           body: {
             action: "exchangeCode",
             code,
             realmId,
-            userId: profile?.id ?? null,
+            userId: user?.id ?? null,
           },
         });
 
         if (error) throw new Error(error.message);
         if (!data?.ok) throw new Error(data?.error ?? "Token exchange failed");
+
+        // Clean up the state token now that the exchange succeeded
+        localStorage.removeItem("qb_oauth_state");
 
         setStatus("success");
         setMessage("QuickBooks Time connected successfully!");
@@ -64,7 +70,7 @@ export default function QBCallbackPage() {
     };
 
     exchange();
-  }, [navigate, profile?.id]);
+  }, [navigate]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-[#0F172A]">
