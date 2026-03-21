@@ -12,7 +12,6 @@ import JobDetailPage from "./pages/JobDetailPage";
 import JobNewPage from "./pages/JobNewPage";
 import SettingsPage from "./pages/SettingsPage";
 import HelpPage from "./pages/HelpPage";
-import QBCallbackPage from "./pages/QBCallbackPage";
 import AppLayout from "./components/layout/AppLayout";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -38,7 +37,6 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
-      <Route path="/qb-callback" element={<QBCallbackPage />} />
       <Route
         path="/"
         element={
