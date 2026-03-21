@@ -2,7 +2,7 @@
  * Job Detail page — full tabbed view with all modules.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import type { Job, Room, MoistureReading, EquipmentLog, LineItem, FloorPlan, Photo, PhotoCategory, EquipmentType } from "@roybal/shared";
@@ -15,11 +15,119 @@ import {
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users, ChevronDown } from "lucide-react";
 import clsx from "clsx";
 import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
 import React from "react";
+
+const DEFAULT_MATERIALS = ["Drywall", "Wood", "Hardwood", "Subfloor", "Concrete", "OSB", "Plywood", "Block"];
+const MATERIALS_STORAGE_KEY = "roybal_custom_materials";
+
+function MaterialSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [customMaterials, setCustomMaterials] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem(MATERIALS_STORAGE_KEY) ?? "[]"); } catch { return []; }
+  });
+  const [adding, setAdding] = useState(false);
+  const [newMaterial, setNewMaterial] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const saveCustom = () => {
+    const trimmed = newMaterial.trim();
+    if (!trimmed || [...DEFAULT_MATERIALS, ...customMaterials].map(m => m.toLowerCase()).includes(trimmed.toLowerCase())) return;
+    const updated = [...customMaterials, trimmed];
+    setCustomMaterials(updated);
+    localStorage.setItem(MATERIALS_STORAGE_KEY, JSON.stringify(updated));
+    onChange(trimmed);
+    setNewMaterial("");
+    setAdding(false);
+    setOpen(false);
+  };
+
+  const deleteMaterial = (mat: string) => {
+    const updated = customMaterials.filter((m) => m !== mat);
+    setCustomMaterials(updated);
+    localStorage.setItem(MATERIALS_STORAGE_KEY, JSON.stringify(updated));
+    if (value === mat) onChange("");
+  };
+
+  const allMaterials = [...DEFAULT_MATERIALS, ...customMaterials];
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-left flex items-center justify-between focus:outline-none focus:border-[#F97316] hover:border-[#F97316]/50 transition-colors"
+      >
+        <span className={value ? "text-slate-200" : "text-slate-600"}>{value || "Select material…"}</span>
+        <ChevronDown size={14} className="text-slate-500 flex-shrink-0" />
+      </button>
+      {open && (
+        <div className="absolute z-50 top-full mt-1 w-full bg-[#0A1628] border border-[#1E293B] rounded-xl shadow-xl overflow-hidden">
+          <div className="max-h-52 overflow-y-auto">
+            {allMaterials.map((mat) => (
+              <div key={mat} className="flex items-center group hover:bg-[#1E293B]/60">
+                <button
+                  type="button"
+                  onClick={() => { onChange(mat); setOpen(false); }}
+                  className={clsx("flex-1 px-3 py-2 text-sm text-left transition-colors", value === mat ? "text-[#F97316]" : "text-slate-300")}
+                >
+                  {mat}
+                </button>
+                {!DEFAULT_MATERIALS.includes(mat) && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); deleteMaterial(mat); }}
+                    className="px-2 py-2 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+                    title="Delete material"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="border-t border-[#1E293B]">
+            {adding ? (
+              <div className="flex items-center gap-2 px-3 py-2">
+                <input
+                  autoFocus
+                  type="text"
+                  placeholder="Material name…"
+                  value={newMaterial}
+                  onChange={(e) => setNewMaterial(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") saveCustom(); if (e.key === "Escape") { setAdding(false); setNewMaterial(""); } }}
+                  className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 h-7 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]"
+                />
+                <button type="button" onClick={saveCustom} className="text-[#F97316] text-xs font-bold hover:text-[#EA6C0C]">Add</button>
+                <button type="button" onClick={() => { setAdding(false); setNewMaterial(""); }} className="text-slate-500 text-xs hover:text-slate-300">Cancel</button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAdding(true)}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[#F97316] hover:bg-[#F97316]/10 transition-colors"
+              >
+                <Plus size={12} />
+                Add material…
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 const PHOTO_CATEGORIES: { value: PhotoCategory; label: string }[] = [
   { value: "before", label: "Before" },
@@ -736,9 +844,7 @@ export default function JobDetailPage() {
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Material</label>
-                    <input type="text" placeholder="e.g. Drywall, Wood" value={moistureForm.material_type}
-                      onChange={(e) => setMoistureForm((f) => ({ ...f, material_type: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                    <MaterialSelect value={moistureForm.material_type} onChange={(v) => setMoistureForm((f) => ({ ...f, material_type: v }))} />
                   </div>
                 </div>
                 <div className="flex gap-3">
