@@ -84,6 +84,8 @@ export default function SettingsPage() {
     }).catch(() => setQbLoading(false));
   }, []);
 
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
   const connectQBTime = () => {
     const clientId = import.meta.env.VITE_QB_TIME_CLIENT_ID as string;
     const redirectUri = `${window.location.origin}/qb-callback`;
@@ -91,7 +93,15 @@ export default function SettingsPage() {
       setQbError("VITE_QB_TIME_CLIENT_ID is not set in .env");
       return;
     }
-    window.location.href = buildQBAuthUrl(clientId, redirectUri);
+    const authUrl = buildQBAuthUrl(clientId, redirectUri);
+    if (isSafari) {
+      // On Safari, open the OAuth flow in Chrome using the googlechromes:// scheme.
+      // Chrome registers this scheme on macOS/iOS — it opens the URL directly in Chrome.
+      // The full OAuth flow (Intuit login → /qb-callback) will complete in Chrome.
+      window.open(authUrl.replace(/^https:\/\//, "googlechromes://"), "_blank");
+    } else {
+      window.location.href = authUrl;
+    }
   };
 
   const syncQBJobcodes = async () => {
@@ -392,10 +402,12 @@ export default function SettingsPage() {
               className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-5 h-10 rounded-xl transition-colors text-sm"
             >
               <Clock size={15} />
-              Connect QuickBooks Time
+              {isSafari ? "Connect QuickBooks Time (opens in Chrome)" : "Connect QuickBooks Time"}
             </button>
             <p className="text-xs text-slate-600">
-              You'll be redirected to Intuit to authorize access. A paid QuickBooks Time subscription is required.
+              {isSafari
+                ? "Safari has compatibility issues with Intuit's login — clicking this will open the authorization in Chrome. Chrome must be installed."
+                : "You'll be redirected to Intuit to authorize access. A paid QuickBooks Time subscription is required."}
             </p>
           </div>
         )}
