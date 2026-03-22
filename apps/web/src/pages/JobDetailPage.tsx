@@ -21,16 +21,45 @@ import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceRepo
 import { pdf } from "@react-pdf/renderer";
 import React from "react";
 
+// ─── Dropdown item lists with localStorage persistence ───────────────────────
 const DEFAULT_MATERIALS = ["Drywall", "Wood", "Hardwood", "Subfloor", "Concrete", "OSB", "Plywood", "Block"];
-const MATERIALS_STORAGE_KEY = "roybal_custom_materials";
+const MATERIALS_KEY = "roybal_custom_materials";
 
-function MaterialSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+const DEFAULT_EQUIP_TYPES = Object.values(EQUIPMENT_TYPE_LABELS);
+const EQUIP_TYPES_KEY = "roybal_custom_equipment_types";
+
+const DEFAULT_EQUIP_NAMES = [
+  "Dri-Eaz LGR 2800i", "Dri-Eaz PHD 200", "Dri-Eaz Revolution LGR",
+  "Dri-Eaz Velo Pro", "Dri-Eaz Flex 970", "Dri-Eaz F203A Sahara",
+  "Alorair Sentinel HDi90", "Alorair Sentinel HD55",
+  "Xpower P-230AT", "Xpower P-80A",
+  "Legend Brands Drizair 1200", "Nikro PD10120",
+];
+const EQUIP_NAMES_KEY = "roybal_custom_equipment_names";
+
+function loadItems(key: string, defaults: string[]): string[] {
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored) return JSON.parse(stored) as string[];
+  } catch { /* ignore */ }
+  return defaults;
+}
+
+function saveItems(key: string, items: string[]) {
+  localStorage.setItem(key, JSON.stringify(items));
+}
+
+function ItemSelect({ value, onChange, storageKey, defaults, placeholder }: {
+  value: string;
+  onChange: (v: string) => void;
+  storageKey: string;
+  defaults: string[];
+  placeholder?: string;
+}) {
+  const [items, setItems] = useState<string[]>(() => loadItems(storageKey, defaults));
   const [open, setOpen] = useState(false);
-  const [customMaterials, setCustomMaterials] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem(MATERIALS_STORAGE_KEY) ?? "[]"); } catch { return []; }
-  });
   const [adding, setAdding] = useState(false);
-  const [newMaterial, setNewMaterial] = useState("");
+  const [newItem, setNewItem] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,85 +70,80 @@ function MaterialSelect({ value, onChange }: { value: string; onChange: (v: stri
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const saveCustom = () => {
-    const trimmed = newMaterial.trim();
-    if (!trimmed || [...DEFAULT_MATERIALS, ...customMaterials].map(m => m.toLowerCase()).includes(trimmed.toLowerCase())) return;
-    const updated = [...customMaterials, trimmed];
-    setCustomMaterials(updated);
-    localStorage.setItem(MATERIALS_STORAGE_KEY, JSON.stringify(updated));
+  const addItem = () => {
+    const trimmed = newItem.trim();
+    if (!trimmed || items.includes(trimmed)) { setNewItem(""); setAdding(false); return; }
+    const updated = [...items, trimmed];
+    setItems(updated);
+    saveItems(storageKey, updated);
     onChange(trimmed);
-    setNewMaterial("");
+    setNewItem("");
     setAdding(false);
     setOpen(false);
   };
 
-  const deleteMaterial = (mat: string) => {
-    const updated = customMaterials.filter((m) => m !== mat);
-    setCustomMaterials(updated);
-    localStorage.setItem(MATERIALS_STORAGE_KEY, JSON.stringify(updated));
-    if (value === mat) onChange("");
+  const deleteItem = (item: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const updated = items.filter((i) => i !== item);
+    setItems(updated);
+    saveItems(storageKey, updated);
+    if (value === item) onChange("");
   };
-
-  const allMaterials = [...DEFAULT_MATERIALS, ...customMaterials];
 
   return (
     <div ref={ref} className="relative">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-left flex items-center justify-between focus:outline-none focus:border-[#F97316] hover:border-[#F97316]/50 transition-colors"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm focus:outline-none focus:border-[#F97316] hover:border-[#4A4440] transition-colors"
       >
-        <span className={value ? "text-slate-200" : "text-slate-600"}>{value || "Select material…"}</span>
+        <span className={value ? "text-slate-200" : "text-slate-500"}>{value || placeholder || "Select…"}</span>
         <ChevronDown size={14} className="text-slate-500 flex-shrink-0" />
       </button>
+
       {open && (
-        <div className="absolute z-50 top-full mt-1 w-full bg-[#0A1628] border border-[#1E293B] rounded-xl shadow-xl overflow-hidden">
+        <div className="absolute z-50 mt-1 w-full bg-[#0A1628] border border-[#1E293B] rounded-xl shadow-xl overflow-hidden">
           <div className="max-h-52 overflow-y-auto">
-            {allMaterials.map((mat) => (
-              <div key={mat} className="flex items-center group hover:bg-[#1E293B]/60">
+            {items.map((item) => (
+              <div
+                key={item}
+                className={`flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#F97316]/10 group ${value === item ? "bg-[#F97316]/15 text-[#F97316]" : "text-slate-200"}`}
+                onClick={() => { onChange(item); setOpen(false); }}
+              >
+                <span className="text-sm">{item}</span>
                 <button
                   type="button"
-                  onClick={() => { onChange(mat); setOpen(false); }}
-                  className={clsx("flex-1 px-3 py-2 text-sm text-left transition-colors", value === mat ? "text-[#F97316]" : "text-slate-300")}
+                  onClick={(e) => deleteItem(item, e)}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded text-slate-500 hover:text-red-400"
                 >
-                  {mat}
+                  <X size={12} />
                 </button>
-                {!DEFAULT_MATERIALS.includes(mat) && (
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); deleteMaterial(mat); }}
-                    className="px-2 py-2 text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
-                    title="Delete material"
-                  >
-                    <X size={12} />
-                  </button>
-                )}
               </div>
             ))}
           </div>
-          <div className="border-t border-[#1E293B]">
+
+          <div className="border-t border-[#1E293B] p-2">
             {adding ? (
-              <div className="flex items-center gap-2 px-3 py-2">
+              <div className="flex gap-1.5">
                 <input
                   autoFocus
                   type="text"
-                  placeholder="Material name…"
-                  value={newMaterial}
-                  onChange={(e) => setNewMaterial(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") saveCustom(); if (e.key === "Escape") { setAdding(false); setNewMaterial(""); } }}
-                  className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 h-7 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]"
+                  value={newItem}
+                  onChange={(e) => setNewItem(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") addItem(); if (e.key === "Escape") { setAdding(false); setNewItem(""); } }}
+                  placeholder="New item…"
+                  className="flex-1 bg-[#0F172A] border border-[#F97316]/50 rounded-lg px-2 h-7 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#F97316]"
                 />
-                <button type="button" onClick={saveCustom} className="text-[#F97316] text-xs font-bold hover:text-[#EA6C0C]">Add</button>
-                <button type="button" onClick={() => { setAdding(false); setNewMaterial(""); }} className="text-slate-500 text-xs hover:text-slate-300">Cancel</button>
+                <button type="button" onClick={addItem} className="px-2 h-7 rounded-lg bg-[#F97316] text-[#0F172A] text-xs font-bold">Add</button>
+                <button type="button" onClick={() => { setAdding(false); setNewItem(""); }} className="px-2 h-7 rounded-lg text-slate-400 text-xs">✕</button>
               </div>
             ) : (
               <button
                 type="button"
                 onClick={() => setAdding(true)}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[#F97316] hover:bg-[#F97316]/10 transition-colors"
+                className="w-full flex items-center gap-1.5 px-2 py-1.5 text-xs text-[#F97316] hover:bg-[#F97316]/10 rounded-lg transition-colors"
               >
-                <Plus size={12} />
-                Add material…
+                <Plus size={12} /> Add item
               </button>
             )}
           </div>
@@ -128,6 +152,7 @@ function MaterialSelect({ value, onChange }: { value: string; onChange: (v: stri
     </div>
   );
 }
+// ─────────────────────────────────────────────────────────────────────────────
 
 const PHOTO_CATEGORIES: { value: PhotoCategory; label: string }[] = [
   { value: "before", label: "Before" },
@@ -148,7 +173,7 @@ const mpProxy = async (action: string, params: Record<string, unknown> = {}) => 
   return data.data;
 };
 
-type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report" | "time";
+type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report";
 
 const STATUS_COLORS: Record<string, string> = {
   new: "#64748B", active: "#F97316", drying: "#3B82F6",
@@ -442,12 +467,6 @@ export default function JobDetailPage() {
   const deleteLineItem = async (itemId: string) => {
     await supabase.from("line_items").delete().eq("id", itemId);
     setLineItems((prev) => prev.filter((li) => li.id !== itemId));
-  };
-
-  const formatDuration = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
   };
 
   // PDF generation
@@ -772,7 +791,13 @@ export default function JobDetailPage() {
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Material</label>
-                    <MaterialSelect value={moistureForm.material_type} onChange={(v) => setMoistureForm((f) => ({ ...f, material_type: v }))} />
+                    <ItemSelect
+                      value={moistureForm.material_type}
+                      onChange={(v) => setMoistureForm((f) => ({ ...f, material_type: v }))}
+                      storageKey={MATERIALS_KEY}
+                      defaults={DEFAULT_MATERIALS}
+                      placeholder="e.g. Drywall, Wood"
+                    />
                   </div>
                 </div>
                 <div className="flex gap-3">
@@ -852,16 +877,27 @@ export default function JobDetailPage() {
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Type *</label>
-                    <select value={equipForm.equipment_type} onChange={(e) => setEquipForm((f) => ({ ...f, equipment_type: e.target.value as EquipmentType, equipment_name: EQUIPMENT_TYPE_LABELS[e.target.value as EquipmentType] }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
-                      {Object.entries(EQUIPMENT_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                    </select>
+                    <ItemSelect
+                      value={equipForm.equipment_type ? (EQUIPMENT_TYPE_LABELS[equipForm.equipment_type] ?? equipForm.equipment_type) : ""}
+                      onChange={(v) => {
+                        // Map label back to key, or store raw if custom
+                        const key = (Object.entries(EQUIPMENT_TYPE_LABELS).find(([, label]) => label === v)?.[0] ?? v) as EquipmentType;
+                        setEquipForm((f) => ({ ...f, equipment_type: key }));
+                      }}
+                      storageKey={EQUIP_TYPES_KEY}
+                      defaults={DEFAULT_EQUIP_TYPES}
+                      placeholder="Select type…"
+                    />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Name *</label>
-                    <input type="text" placeholder="e.g. Dri-Eaz LGR 2800i" value={equipForm.equipment_name}
-                      onChange={(e) => setEquipForm((f) => ({ ...f, equipment_name: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                    <ItemSelect
+                      value={equipForm.equipment_name}
+                      onChange={(v) => setEquipForm((f) => ({ ...f, equipment_name: v }))}
+                      storageKey={EQUIP_NAMES_KEY}
+                      defaults={DEFAULT_EQUIP_NAMES}
+                      placeholder="e.g. Dri-Eaz LGR 2800i"
+                    />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Asset #</label>
