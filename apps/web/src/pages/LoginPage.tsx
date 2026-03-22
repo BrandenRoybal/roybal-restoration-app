@@ -35,7 +35,7 @@ export default function LoginPage() {
           <img
             src="/logo.svg"
             alt="Roybal Construction"
-            className="h-36 w-auto object-contain mx-auto mb-4"
+            className="h-56 w-auto object-contain mx-auto mb-4"
             onError={(e) => {
               const target = e.currentTarget;
               target.style.display = 'none';

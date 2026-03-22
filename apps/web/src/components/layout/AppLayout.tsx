@@ -13,6 +13,7 @@ import {
   BookOpen,
   Sun,
   Moon,
+  BarChart2,
 } from "lucide-react";
 import { useState } from "react";
 import { useAuthStore } from "../../store/auth";
@@ -22,6 +23,7 @@ import clsx from "clsx";
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, exact: true },
   { to: "/jobs", label: "Jobs", icon: Briefcase },
+  { to: "/reports", label: "Reports", icon: BarChart2 },
   { to: "/settings", label: "Settings", icon: Settings },
   { to: "/help", label: "Help", icon: BookOpen },
 ];
@@ -42,17 +44,17 @@ export default function AppLayout() {
       {/* Sidebar */}
       <aside
         className={clsx(
-          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 bg-white dark:bg-[#0A1628] border-r border-slate-200 dark:border-[#1E293B] transition-transform duration-200",
+          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 bg-white dark:bg-[#0A1628] border-r border-slate-200 dark:border-[#1E293B] transition-transform duration-200 relative",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
           "lg:relative lg:translate-x-0"
         )}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-4 py-5 border-b border-slate-200 dark:border-[#1E293B]">
+        <div className="flex flex-col items-center justify-center px-4 py-6 border-b border-slate-200 dark:border-[#1E293B]">
           <img
             src="/logo.svg"
             alt="Roybal Construction"
-            className="h-20 w-auto object-contain"
+            className="h-32 w-auto object-contain mx-auto"
             onError={(e) => {
               const target = e.currentTarget;
               target.style.display = 'none';
@@ -70,7 +72,7 @@ export default function AppLayout() {
             </div>
           </div>
           <button
-            className="ml-auto lg:hidden text-slate-500 dark:text-slate-400"
+            className="absolute top-4 right-4 lg:hidden text-slate-500 dark:text-slate-400"
             onClick={() => setSidebarOpen(false)}
           >
             <X size={18} />

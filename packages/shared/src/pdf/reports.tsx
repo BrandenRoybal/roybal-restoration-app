@@ -28,6 +28,8 @@ import type {
   MoistureReading,
   EquipmentLog,
   LineItem,
+  Invoice,
+  Communication,
 } from "../types/index";
 import {
   getMoistureStatus,
@@ -36,6 +38,7 @@ import {
   formatAlaskaDate,
   formatAlaskaDateTime,
   EQUIPMENT_TYPE_LABELS,
+  INVOICE_STATUS_LABELS,
 } from "../types/index";
 
 // ============================================================
@@ -455,6 +458,422 @@ export function ScopeInvoiceReport({
 
         <PageFooter jobNumber={job.job_number} />
       </Page>
+    </Document>
+  );
+}
+
+// ============================================================
+// 5. CLAIM PACKAGE REPORT
+// ============================================================
+export interface ClaimPackageProps {
+  job: Job;
+  rooms: Room[];
+  photos: Photo[];
+  moistureReadings: MoistureReading[];
+  equipmentLogs: EquipmentLog[];
+  lineItems: LineItem[];
+  invoices: Invoice[];
+  communications: Communication[];
+}
+
+export function ClaimPackageReport({
+  job,
+  rooms,
+  photos,
+  moistureReadings,
+  equipmentLogs,
+  lineItems,
+  invoices,
+  communications,
+}: ClaimPackageProps) {
+  const now = new Date();
+  const generatedAt = now.toLocaleDateString("en-US", { timeZone: "America/Anchorage" });
+  const roomMap = Object.fromEntries(rooms.map((r) => [r.id, r.name]));
+
+  // Photo groups
+  const beforePhotos = photos.filter((p) => p.category === "before");
+  const afterPhotos = photos.filter((p) => p.category === "after");
+  const moisturePhotos = photos.filter((p) => p.category === "moisture");
+  const otherPhotos = photos.filter((p) => !["before", "after", "moisture"].includes(p.category));
+
+  // Financials
+  const subtotal = lineItems.reduce((sum, li) => sum + li.total_cents, 0);
+  const totalInvoiced = invoices.reduce((sum, i) => sum + i.amount_cents, 0);
+  const totalPaid = invoices.reduce((sum, i) => sum + (i.paid_cents ?? 0), 0);
+  const totalBalance = totalInvoiced - totalPaid;
+
+  // Moisture summary
+  const allDry = moistureReadings.length > 0 && moistureReadings.every((m) => m.is_dry);
+  const totalEquipDays = equipmentLogs.reduce((sum, e) => sum + e.days_on_site, 0);
+
+  // Recent comms
+  const recentComms = [...communications]
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))
+    .slice(0, 10);
+
+  const renderPhotoGrid = (photoList: Photo[], sectionTitle: string) => {
+    if (photoList.length === 0) return null;
+    const byRoom: Record<string, Photo[]> = {};
+    photoList.forEach((p) => {
+      const key = p.room_id ?? "__general__";
+      if (!byRoom[key]) byRoom[key] = [];
+      byRoom[key]!.push(p);
+    });
+    return (
+      <Page key={sectionTitle} size="LETTER" style={pdfStyles.page}>
+        <ReportHeader job={job} reportTitle="Claim Package" generatedAt={now.toISOString()} />
+        <View style={pdfStyles.body}>
+          <SectionHeader title={sectionTitle} />
+          {Object.entries(byRoom).map(([roomId, roomPhotos]) => (
+            <View key={roomId} style={{ marginBottom: 12 }}>
+              <Text style={{ fontSize: 9, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textSecondary, marginBottom: 6 }}>
+                {roomId === "__general__" ? "General / Unassigned" : (roomMap[roomId] ?? "Unknown Room")}
+              </Text>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+                {roomPhotos.map((photo) => (
+                  <View key={photo.id} style={{ width: "31%", marginBottom: 8 }}>
+                    {photo.url ? (
+                      <Image src={photo.url} style={{ width: "100%", aspectRatio: 1.33, borderRadius: 3 }} />
+                    ) : (
+                      <View style={{ width: "100%", aspectRatio: 1.33, borderRadius: 3, backgroundColor: "#E2E8F0", alignItems: "center", justifyContent: "center" }}>
+                        <Text style={{ fontSize: 7, color: PDF_COLORS.textMuted }}>No image</Text>
+                      </View>
+                    )}
+                    <Text style={{ fontSize: 7, color: PDF_COLORS.textSecondary, marginTop: 3 }}>
+                      {photo.caption ?? formatAlaskaDateTime(photo.taken_at)}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          ))}
+        </View>
+        <PageFooter jobNumber={job.job_number} />
+      </Page>
+    );
+  };
+
+  return (
+    <Document
+      title={`${job.job_number} — Claim Package`}
+      author="Roybal Construction LLC"
+      subject="Insurance Claim Documentation Package"
+    >
+      {/* Cover Page */}
+      <Page size="LETTER" style={{ backgroundColor: "#0A1628", padding: 40 }}>
+        <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+          <Text style={{ color: "#F97316", fontSize: 10, letterSpacing: 4, marginBottom: 8 }}>
+            ROYBAL CONSTRUCTION LLC
+          </Text>
+          <Text style={{ color: "white", fontSize: 28, fontFamily: "Helvetica-Bold", textAlign: "center", marginBottom: 4 }}>
+            CLAIM PACKAGE
+          </Text>
+          <Text style={{ color: "#94A3B8", fontSize: 14, marginBottom: 40 }}>{job.job_number}</Text>
+          <View style={{ width: 60, height: 2, backgroundColor: "#F97316", marginBottom: 40 }} />
+          <Text style={{ color: "white", fontSize: 16, marginBottom: 8, textAlign: "center" }}>{job.property_address}</Text>
+          {job.owner_name ? (
+            <Text style={{ color: "#94A3B8", fontSize: 12, marginBottom: 4 }}>Insured: {job.owner_name}</Text>
+          ) : null}
+          {job.insurance_carrier ? (
+            <Text style={{ color: "#94A3B8", fontSize: 12, marginBottom: 4 }}>Carrier: {job.insurance_carrier}</Text>
+          ) : null}
+          {job.claim_number ? (
+            <Text style={{ color: "#94A3B8", fontSize: 12, marginBottom: 4 }}>Claim #: {job.claim_number}</Text>
+          ) : null}
+          {job.date_of_loss ? (
+            <Text style={{ color: "#94A3B8", fontSize: 12, marginBottom: 4 }}>Date of Loss: {formatAlaskaDate(job.date_of_loss)}</Text>
+          ) : null}
+          <Text style={{ color: "#64748B", fontSize: 10, marginTop: 40 }}>Generated: {generatedAt}</Text>
+        </View>
+      </Page>
+
+      {/* Job Summary Page */}
+      <Page size="LETTER" style={pdfStyles.page}>
+        <ReportHeader job={job} reportTitle="Claim Package" generatedAt={now.toISOString()} />
+        <View style={pdfStyles.body}>
+          <SectionHeader title="Job Summary" />
+          <View style={{ flexDirection: "row", gap: 16 }}>
+            <View style={{ flex: 1 }}>
+              <InfoPair label="Job Number" value={job.job_number} />
+              <InfoPair label="Property Address" value={job.property_address} />
+              <InfoPair label="Insured / Owner" value={job.owner_name ?? "—"} />
+              {job.owner_phone ? <InfoPair label="Owner Phone" value={job.owner_phone} /> : null}
+              {job.owner_email ? <InfoPair label="Owner Email" value={job.owner_email} /> : null}
+              <InfoPair label="Status" value={job.status.replace(/_/g, " ").toUpperCase()} />
+              {job.loss_type ? <InfoPair label="Loss Type" value={job.loss_type.toUpperCase()} /> : null}
+              {job.loss_category ? <InfoPair label="Loss Category" value={job.loss_category.toUpperCase()} /> : null}
+              {job.cause_of_loss ? <InfoPair label="Cause of Loss" value={job.cause_of_loss} /> : null}
+              {job.date_of_loss ? <InfoPair label="Date of Loss" value={formatAlaskaDate(job.date_of_loss)} /> : null}
+              {job.date_received ? <InfoPair label="Date Received" value={formatAlaskaDate(job.date_received)} /> : null}
+            </View>
+            <View style={{ flex: 1 }}>
+              {job.insurance_carrier ? <InfoPair label="Insurance Carrier" value={job.insurance_carrier} /> : null}
+              {job.claim_number ? <InfoPair label="Claim Number" value={job.claim_number} /> : null}
+              {job.policy_number ? <InfoPair label="Policy Number" value={job.policy_number} /> : null}
+              {job.adjuster_name ? <InfoPair label="Adjuster Name" value={job.adjuster_name} /> : null}
+              {job.adjuster_phone ? <InfoPair label="Adjuster Phone" value={job.adjuster_phone} /> : null}
+              {job.adjuster_email ? <InfoPair label="Adjuster Email" value={job.adjuster_email} /> : null}
+              {job.xactimate_file_number ? <InfoPair label="Xactimate File #" value={job.xactimate_file_number} /> : null}
+              {(job.deductible_amount !== undefined && job.deductible_amount !== null) ? (
+                <InfoPair label="Deductible" value={centsToDisplay(job.deductible_amount)} />
+              ) : null}
+              {job.billing_party ? <InfoPair label="Billing Party" value={job.billing_party} /> : null}
+              {job.lead_source ? <InfoPair label="Lead Source" value={job.lead_source} /> : null}
+            </View>
+          </View>
+
+          <SectionHeader title="Financial Summary" />
+          <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
+            {[
+              { label: "Scope Subtotal", value: centsToDisplay(subtotal) },
+              { label: "Total Invoiced", value: centsToDisplay(totalInvoiced) },
+              { label: "Total Paid", value: centsToDisplay(totalPaid) },
+              { label: "Balance Due", value: centsToDisplay(totalBalance) },
+            ].map(({ label, value }) => (
+              <View key={label} style={{ flex: 1, backgroundColor: "#F8FAFC", borderRadius: 6, padding: 8, borderWidth: 0.5, borderColor: PDF_COLORS.border }}>
+                <Text style={{ fontSize: 12, fontFamily: "Helvetica-Bold", color: PDF_COLORS.navy }}>{value}</Text>
+                <Text style={{ fontSize: 7, color: PDF_COLORS.textSecondary, marginTop: 2 }}>{label}</Text>
+              </View>
+            ))}
+          </View>
+
+          {moistureReadings.length > 0 ? (
+            <>
+              <SectionHeader title="Drying Summary" />
+              <View style={{ flexDirection: "row", gap: 10, marginBottom: 12 }}>
+                <View style={{ flex: 1, backgroundColor: allDry ? "#DCFCE7" : "#FEE2E2", borderRadius: 6, padding: 8 }}>
+                  <Text style={{ fontSize: 12, fontFamily: "Helvetica-Bold", color: allDry ? "#166534" : "#991B1B" }}>
+                    {allDry ? "DRY ✓" : "NOT DRY"}
+                  </Text>
+                  <Text style={{ fontSize: 7, color: PDF_COLORS.textSecondary, marginTop: 2 }}>
+                    {moistureReadings.filter((m) => m.is_dry).length}/{moistureReadings.length} at standard
+                  </Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: "#F8FAFC", borderRadius: 6, padding: 8, borderWidth: 0.5, borderColor: PDF_COLORS.border }}>
+                  <Text style={{ fontSize: 12, fontFamily: "Helvetica-Bold", color: PDF_COLORS.navy }}>{totalEquipDays}</Text>
+                  <Text style={{ fontSize: 7, color: PDF_COLORS.textSecondary, marginTop: 2 }}>Equipment Days</Text>
+                </View>
+                <View style={{ flex: 1, backgroundColor: "#F8FAFC", borderRadius: 6, padding: 8, borderWidth: 0.5, borderColor: PDF_COLORS.border }}>
+                  <Text style={{ fontSize: 12, fontFamily: "Helvetica-Bold", color: PDF_COLORS.navy }}>{moistureReadings.length}</Text>
+                  <Text style={{ fontSize: 7, color: PDF_COLORS.textSecondary, marginTop: 2 }}>Total Readings</Text>
+                </View>
+              </View>
+            </>
+          ) : null}
+
+          {job.notes ? (
+            <>
+              <SectionHeader title="Notes" />
+              <Text style={{ fontSize: 8, color: PDF_COLORS.textPrimary, lineHeight: 1.5 }}>{job.notes}</Text>
+            </>
+          ) : null}
+        </View>
+        <PageFooter jobNumber={job.job_number} />
+      </Page>
+
+      {/* Photo Pages */}
+      {renderPhotoGrid(beforePhotos, "Before Photos")}
+      {renderPhotoGrid(afterPhotos, "After Photos")}
+      {renderPhotoGrid(moisturePhotos, "Moisture Documentation Photos")}
+      {otherPhotos.length > 0 ? renderPhotoGrid(otherPhotos, "Additional Photos") : null}
+
+      {/* Moisture & Drying Page */}
+      {moistureReadings.length > 0 ? (
+        <Page size="LETTER" style={pdfStyles.page}>
+          <ReportHeader job={job} reportTitle="Claim Package" generatedAt={now.toISOString()} />
+          <View style={pdfStyles.body}>
+            <SectionHeader title="Moisture & Drying Readings" />
+            <View style={pdfStyles.table}>
+              <View style={pdfStyles.tableHeader}>
+                {["Date", "Room", "Location", "Material", "Reading", "Standard", "Status"].map((h) => (
+                  <Text key={h} style={pdfStyles.tableHeaderCell}>{h}</Text>
+                ))}
+              </View>
+              {[...moistureReadings]
+                .sort((a, b) => a.reading_date.localeCompare(b.reading_date))
+                .map((m, i) => {
+                  const status = getMoistureStatus(m.moisture_pct, m.material_type);
+                  const standard = getDryStandard(m.material_type);
+                  return (
+                    <View key={m.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
+                      <Text style={pdfStyles.tableCell}>{formatAlaskaDate(m.reading_date)}</Text>
+                      <Text style={pdfStyles.tableCell}>{roomMap[m.room_id] ?? "—"}</Text>
+                      <Text style={pdfStyles.tableCell}>{m.location_description}</Text>
+                      <Text style={pdfStyles.tableCell}>{m.material_type}</Text>
+                      <Text style={[pdfStyles.tableCellBold, { color: status === "dry" ? PDF_COLORS.success : status === "wet" ? PDF_COLORS.danger : PDF_COLORS.warning }]}>
+                        {m.moisture_pct}%
+                      </Text>
+                      <Text style={pdfStyles.tableCell}>≤{standard.maxPct}%</Text>
+                      <Text style={status === "dry" ? pdfStyles.badgeDry : status === "wet" ? pdfStyles.badgeWet : pdfStyles.badgeMonitoring}>
+                        {status.charAt(0).toUpperCase() + status.slice(1)}
+                      </Text>
+                    </View>
+                  );
+                })}
+            </View>
+            {equipmentLogs.length > 0 ? (
+              <>
+                <SectionHeader title="Equipment Log" />
+                <View style={pdfStyles.table}>
+                  <View style={pdfStyles.tableHeader}>
+                    {["Equipment", "Type", "Room", "Placed", "Removed", "Days"].map((h) => (
+                      <Text key={h} style={pdfStyles.tableHeaderCell}>{h}</Text>
+                    ))}
+                  </View>
+                  {equipmentLogs.map((e, i) => (
+                    <View key={e.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
+                      <Text style={pdfStyles.tableCellBold}>{e.equipment_name}</Text>
+                      <Text style={pdfStyles.tableCell}>{EQUIPMENT_TYPE_LABELS[e.equipment_type]}</Text>
+                      <Text style={pdfStyles.tableCell}>{e.room_id ? (roomMap[e.room_id] ?? "—") : "—"}</Text>
+                      <Text style={pdfStyles.tableCell}>{formatAlaskaDate(e.date_placed)}</Text>
+                      <Text style={pdfStyles.tableCell}>{e.date_removed ? formatAlaskaDate(e.date_removed) : "Active"}</Text>
+                      <Text style={[pdfStyles.tableCellBold, { textAlign: "right" }]}>{e.days_on_site}</Text>
+                    </View>
+                  ))}
+                </View>
+                <View style={pdfStyles.totalRow}>
+                  <Text style={[pdfStyles.totalLabel, { flex: 5 }]}>Total Equipment Days</Text>
+                  <Text style={pdfStyles.totalValue}>{totalEquipDays}</Text>
+                </View>
+              </>
+            ) : null}
+          </View>
+          <PageFooter jobNumber={job.job_number} />
+        </Page>
+      ) : null}
+
+      {/* Scope of Work Page */}
+      {lineItems.length > 0 ? (
+        <Page size="LETTER" style={pdfStyles.page}>
+          <ReportHeader job={job} reportTitle="Claim Package" generatedAt={now.toISOString()} />
+          <View style={pdfStyles.body}>
+            <SectionHeader title="Scope of Work" />
+            {(() => {
+              const byRoom: Record<string, LineItem[]> = {};
+              lineItems.forEach((li) => {
+                const key = li.room_id ?? "__general__";
+                if (!byRoom[key]) byRoom[key] = [];
+                byRoom[key]!.push(li);
+              });
+              return Object.entries(byRoom).map(([roomId, items]) => {
+                const roomTotal = items.reduce((sum, li) => sum + li.total_cents, 0);
+                return (
+                  <View key={roomId} style={{ marginBottom: 8 }}>
+                    <Text style={{ fontSize: 9, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textSecondary, marginBottom: 4 }}>
+                      {roomId === "__general__" ? "General / Site-Wide" : (roomMap[roomId] ?? "Unknown Room")}
+                    </Text>
+                    <View style={pdfStyles.table}>
+                      <View style={pdfStyles.tableHeader}>
+                        {["Description", "Cat", "Qty", "Unit", "Price", "Total"].map((h) => (
+                          <Text key={h} style={pdfStyles.tableHeaderCell}>{h}</Text>
+                        ))}
+                      </View>
+                      {items.map((li, i) => (
+                        <View key={li.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
+                          <Text style={[pdfStyles.tableCellBold, { flex: 2 }]}>{li.description}</Text>
+                          <Text style={pdfStyles.tableCell}>{li.category}</Text>
+                          <Text style={pdfStyles.tableCell}>{li.quantity}</Text>
+                          <Text style={pdfStyles.tableCell}>{li.unit}</Text>
+                          <Text style={pdfStyles.tableCell}>{centsToDisplay(li.unit_price)}</Text>
+                          <Text style={[pdfStyles.tableCellBold, { textAlign: "right" }]}>{centsToDisplay(li.total_cents)}</Text>
+                        </View>
+                      ))}
+                    </View>
+                    <View style={{ flexDirection: "row", backgroundColor: "#F1F5F9", paddingVertical: 3, paddingHorizontal: 8 }}>
+                      <Text style={{ flex: 5, fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textSecondary, textAlign: "right" }}>Room Subtotal</Text>
+                      <Text style={{ flex: 1, fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.navy, textAlign: "right" }}>{centsToDisplay(roomTotal)}</Text>
+                    </View>
+                  </View>
+                );
+              });
+            })()}
+            <View style={pdfStyles.totalRow}>
+              <Text style={pdfStyles.totalLabel}>SCOPE SUBTOTAL</Text>
+              <Text style={pdfStyles.totalValue}>{centsToDisplay(subtotal)}</Text>
+            </View>
+          </View>
+          <PageFooter jobNumber={job.job_number} />
+        </Page>
+      ) : null}
+
+      {/* Invoice Summary Page */}
+      {invoices.length > 0 ? (
+        <Page size="LETTER" style={pdfStyles.page}>
+          <ReportHeader job={job} reportTitle="Claim Package" generatedAt={now.toISOString()} />
+          <View style={pdfStyles.body}>
+            <SectionHeader title="Invoice Summary" />
+            <View style={pdfStyles.table}>
+              <View style={pdfStyles.tableHeader}>
+                {["Invoice #", "Type", "Status", "Amount", "Paid", "Balance", "Date"].map((h) => (
+                  <Text key={h} style={pdfStyles.tableHeaderCell}>{h}</Text>
+                ))}
+              </View>
+              {invoices.map((inv, i) => {
+                const balance = inv.amount_cents - (inv.paid_cents ?? 0);
+                return (
+                  <View key={inv.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
+                    <Text style={pdfStyles.tableCellBold}>{inv.invoice_number}</Text>
+                    <Text style={pdfStyles.tableCell}>{inv.invoice_type.replace(/_/g, " ")}</Text>
+                    <Text style={pdfStyles.tableCell}>{INVOICE_STATUS_LABELS[inv.status]}</Text>
+                    <Text style={pdfStyles.tableCell}>{centsToDisplay(inv.amount_cents)}</Text>
+                    <Text style={[pdfStyles.tableCell, { color: PDF_COLORS.success }]}>{centsToDisplay(inv.paid_cents ?? 0)}</Text>
+                    <Text style={[pdfStyles.tableCellBold, { color: balance > 0 ? PDF_COLORS.warning : PDF_COLORS.success }]}>
+                      {centsToDisplay(balance)}
+                    </Text>
+                    <Text style={pdfStyles.tableCell}>
+                      {inv.submitted_date ? formatAlaskaDate(inv.submitted_date) : "—"}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+              {[
+                { label: "Total Invoiced", value: centsToDisplay(totalInvoiced) },
+                { label: "Total Paid", value: centsToDisplay(totalPaid) },
+                { label: "Balance Due", value: centsToDisplay(totalBalance) },
+              ].map(({ label, value }) => (
+                <View key={label} style={{ flex: 1, backgroundColor: "#F8FAFC", borderRadius: 6, padding: 8, borderWidth: 0.5, borderColor: PDF_COLORS.border }}>
+                  <Text style={{ fontSize: 12, fontFamily: "Helvetica-Bold", color: PDF_COLORS.navy }}>{value}</Text>
+                  <Text style={{ fontSize: 7, color: PDF_COLORS.textSecondary, marginTop: 2 }}>{label}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+          <PageFooter jobNumber={job.job_number} />
+        </Page>
+      ) : null}
+
+      {/* Communications Log Page */}
+      {recentComms.length > 0 ? (
+        <Page size="LETTER" style={pdfStyles.page}>
+          <ReportHeader job={job} reportTitle="Claim Package" generatedAt={now.toISOString()} />
+          <View style={pdfStyles.body}>
+            <SectionHeader title="Communication Log (Recent 10)" />
+            {recentComms.map((comm) => (
+              <View key={comm.id} style={{ paddingVertical: 6, borderBottomWidth: 0.5, borderBottomColor: PDF_COLORS.border, marginBottom: 2 }}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 2 }}>
+                  <Text style={{ fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textPrimary }}>
+                    {comm.comm_type.replace(/_/g, " ").toUpperCase()}
+                    {comm.contact_name ? ` — ${comm.contact_name}` : ""}
+                    {comm.contact_role ? ` (${comm.contact_role})` : ""}
+                  </Text>
+                  <Text style={{ fontSize: 7, color: PDF_COLORS.textMuted }}>
+                    {formatAlaskaDateTime(comm.created_at)}
+                  </Text>
+                </View>
+                {comm.subject ? (
+                  <Text style={{ fontSize: 8, color: PDF_COLORS.textSecondary, marginBottom: 2 }}>Re: {comm.subject}</Text>
+                ) : null}
+                <Text style={{ fontSize: 8, color: PDF_COLORS.textPrimary, lineHeight: 1.4 }}>
+                  {comm.body.length > 300 ? comm.body.slice(0, 300) + "…" : comm.body}
+                </Text>
+              </View>
+            ))}
+          </View>
+          <PageFooter jobNumber={job.job_number} />
+        </Page>
+      ) : null}
     </Document>
   );
 }

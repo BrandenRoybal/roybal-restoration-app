@@ -12,6 +12,7 @@ import JobDetailPage from "./pages/JobDetailPage";
 import JobNewPage from "./pages/JobNewPage";
 import SettingsPage from "./pages/SettingsPage";
 import HelpPage from "./pages/HelpPage";
+import ReportsPage from "./pages/ReportsPage";
 import AppLayout from "./components/layout/AppLayout";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -49,6 +50,7 @@ export default function App() {
         <Route path="jobs" element={<JobsPage />} />
         <Route path="jobs/new" element={<JobNewPage />} />
         <Route path="jobs/:id" element={<JobDetailPage />} />
+        <Route path="reports" element={<ReportsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="help" element={<HelpPage />} />
       </Route>

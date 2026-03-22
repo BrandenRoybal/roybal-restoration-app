@@ -86,14 +86,15 @@ serve(async (req: Request) => {
       } else if (rawVal !== null && typeof rawVal === "object") {
         files = Object.values(rawVal) as typeof files;
       }
-      // Match PDF first, then any image format (png, jpg, svg, etc.)
+      // Filter out null/undefined entries, then match by file type
+      const validFiles = files.filter((f) => f != null);
       const isPdf = (f: { type?: string; name?: string }) =>
         f.type === "pdf" || (f.name ?? "").toLowerCase().endsWith(".pdf");
       const isImage = (f: { type?: string; name?: string }) =>
         ["image", "png", "jpg", "jpeg", "svg"].includes((f.type ?? "").toLowerCase()) ||
         /\.(png|jpg|jpeg|svg)$/i.test(f.name ?? "");
-      const pdfFile = files.find(isPdf) ?? null;
-      const imageFile = files.find(isImage) ?? null;
+      const pdfFile = validFiles.find(isPdf) ?? null;
+      const imageFile = validFiles.find(isImage) ?? null;
       const best = pdfFile ?? imageFile ?? null;
       result = {
         fileUrl: best?.url ?? null,

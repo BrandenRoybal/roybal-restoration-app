@@ -6,18 +6,9 @@ import { useEffect, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import type { Job, JobStatus } from "@roybal/shared";
-import { JOB_STATUS_LABELS, JOB_STATUS_ORDER, formatAlaskaDate } from "@roybal/shared";
-import { Plus, Search, X, Trash2 } from "lucide-react";
+import { JOB_STATUS_LABELS, JOB_STATUS_ORDER, JOB_STATUS_COLORS, formatAlaskaDate } from "@roybal/shared";
+import { Plus, Search, X, Trash2, Flame } from "lucide-react";
 import clsx from "clsx";
-
-const STATUS_COLORS: Record<JobStatus, string> = {
-  new: "#64748B",
-  active: "#F97316",
-  drying: "#3B82F6",
-  final_inspection: "#EAB308",
-  invoicing: "#A855F7",
-  closed: "#22C55E",
-};
 
 export default function JobsPage() {
   const navigate = useNavigate();
@@ -166,19 +157,16 @@ export default function JobsPage() {
                           {job.job_number}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-slate-800 dark:text-slate-200 font-semibold max-w-xs truncate" onClick={() => navigate(`/jobs/${job.id}`)}>
-                        {job.property_address}
+                      <td className="px-4 py-3 text-slate-800 dark:text-slate-200 font-semibold max-w-xs" onClick={() => navigate(`/jobs/${job.id}`)}>
+                        <div className="flex items-center gap-2">
+                          {job.is_emergency && <span title="Emergency"><Flame size={13} className="text-red-500 flex-shrink-0" /></span>}
+                          <span className="truncate">{job.property_address}</span>
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-slate-500 dark:text-slate-400 truncate" onClick={() => navigate(`/jobs/${job.id}`)}>{job.owner_name ?? "—"}</td>
                       <td className="px-4 py-3" onClick={() => navigate(`/jobs/${job.id}`)}>
-                        <span
-                          className="px-2.5 py-1 rounded-full text-xs font-bold"
-                          style={{
-                            backgroundColor: (STATUS_COLORS[job.status] ?? "#64748B") + "22",
-                            color: STATUS_COLORS[job.status] ?? "#64748B",
-                          }}
-                        >
-                          {JOB_STATUS_LABELS[job.status]}
+                        <span className={clsx("px-2.5 py-1 rounded-full text-xs font-bold", JOB_STATUS_COLORS[job.status] ?? "bg-slate-100 text-slate-600")}>
+                          {JOB_STATUS_LABELS[job.status] ?? job.status}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-slate-500 dark:text-slate-400 uppercase text-xs" onClick={() => navigate(`/jobs/${job.id}`)}>

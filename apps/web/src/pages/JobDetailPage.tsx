@@ -5,19 +5,30 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import type { Job, Room, MoistureReading, EquipmentLog, LineItem, FloorPlan, Photo, PhotoCategory, EquipmentType } from "@roybal/shared";
+import type { Job, Room, MoistureReading, EquipmentLog, LineItem, FloorPlan, Photo, PhotoCategory, EquipmentType, Communication, CommType, CommDirection, CreateCommunicationInput, Task, TaskPriority, TaskCategory, ReconstructionItem, CreateReconstructionItemInput, ReconTrade, ReconStatus, Invoice, InvoiceType, InvoiceStatus, JobDocument, DocType } from "@roybal/shared";
 import {
   JOB_STATUS_LABELS,
   JOB_STATUS_ORDER,
+  JOB_STATUS_COLORS,
   formatAlaskaDate,
   formatAlaskaDateTime,
   centsToDisplay,
+  dollarsToCents,
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
+  COMM_TYPE_LABELS,
+  TASK_PRIORITY_LABELS,
+  TASK_PRIORITY_COLORS,
+  RECON_TRADE_LABELS,
+  RECON_STATUS_COLORS,
+  DEFAULT_RECON_TRADES,
+  INVOICE_STATUS_LABELS,
+  INVOICE_STATUS_COLORS,
+  DOC_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, ChevronDown } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, ChevronDown, MessageSquare, CheckSquare, Phone, Mail, MapPin, FileText, CheckCircle, MoreHorizontal, Flame, HardHat, Receipt, FolderOpen, AlertTriangle, ClipboardCheck, Package } from "lucide-react";
 import clsx from "clsx";
-import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
+import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport, ClaimPackageReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
 import React from "react";
 
@@ -185,12 +196,7 @@ const mpProxy = async (action: string, params: Record<string, unknown> = {}) => 
   return data.data;
 };
 
-type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report";
-
-const STATUS_COLORS: Record<string, string> = {
-  new: "#64748B", active: "#F97316", drying: "#3B82F6",
-  final_inspection: "#EAB308", invoicing: "#A855F7", closed: "#22C55E",
-};
+type Tab = "overview" | "communications" | "tasks" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report" | "reconstruction" | "invoices" | "documents" | "closeout";
 
 const MOISTURE_COLORS = { dry: "#22C55E", monitoring: "#EAB308", wet: "#EF4444" };
 
@@ -242,6 +248,74 @@ export default function JobDetailPage() {
   const [scopeForm, setScopeForm] = useState({ category: "demo", description: "", room_id: "", quantity: "", unit: "EA", unit_price: "" });
   const [savingScope, setSavingScope] = useState(false);
 
+  // Communications
+  const [communications, setCommunications] = useState<Communication[]>([]);
+  const [showCommForm, setShowCommForm] = useState(false);
+  const [commForm, setCommForm] = useState<Partial<CreateCommunicationInput>>({ comm_type: "call", direction: "inbound", is_internal: false, follow_up_needed: false });
+  const [savingComm, setSavingComm] = useState(false);
+
+  // Tasks
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [showTaskForm, setShowTaskForm] = useState(false);
+  const [taskFilter, setTaskFilter] = useState<"all" | "open" | "done">("all");
+  const [taskForm, setTaskForm] = useState<{ title: string; priority: TaskPriority; category: TaskCategory | ""; due_date: string; description: string }>({ title: "", priority: "normal", category: "", due_date: "", description: "" });
+  const [savingTask, setSavingTask] = useState(false);
+
+  // Overview additional info expanded
+  const [showAdditionalInfo, setShowAdditionalInfo] = useState(false);
+
+  // Phase 4: Closeout checklist
+  const [closeoutChecks, setCloseoutChecks] = useState<Record<string, boolean>>({});
+  const [confirmCloseJob, setConfirmCloseJob] = useState(false);
+
+  // Phase 3 state
+  const [reconItems, setReconItems] = useState<ReconstructionItem[]>([]);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [jobDocuments, setJobDocuments] = useState<JobDocument[]>([]);
+
+  // Reconstruction form
+  const [showReconForm, setShowReconForm] = useState(false);
+  const [reconForm, setReconForm] = useState<Partial<CreateReconstructionItemInput>>({
+    trade: "drywall", status: "pending"
+  });
+
+  // Invoice form
+  const [showInvoiceForm, setShowInvoiceForm] = useState(false);
+  const [invoiceForm, setInvoiceForm] = useState({
+    invoice_type: "mitigation" as InvoiceType,
+    amount_cents: 0,
+    amount_display: "",
+    status: "draft" as InvoiceStatus,
+    notes: "",
+    due_date: "",
+    xactimate_ref: "",
+  });
+
+  // Document form
+  const [showDocForm, setShowDocForm] = useState(false);
+  const [docForm, setDocForm] = useState({
+    doc_type: "work_authorization" as DocType,
+    title: "",
+    status: "pending" as "pending" | "signed" | "approved" | "rejected",
+    notes: "",
+    signed_by_name: "",
+  });
+
+
+  // Load closeout checks from localStorage
+  useEffect(() => {
+    if (!id) return;
+    try {
+      const saved = localStorage.getItem(`roybal_closeout_${id}`);
+      if (saved) setCloseoutChecks(JSON.parse(saved) as Record<string, boolean>);
+    } catch { /* ignore */ }
+  }, [id]);
+
+  // Save closeout checks to localStorage when they change
+  useEffect(() => {
+    if (!id) return;
+    localStorage.setItem(`roybal_closeout_${id}`, JSON.stringify(closeoutChecks));
+  }, [closeoutChecks, id]);
 
   useEffect(() => {
     if (!id) return;
@@ -253,7 +327,12 @@ export default function JobDetailPage() {
       supabase.from("line_items").select("*").eq("job_id", id).order("sort_order"),
       supabase.from("photos").select("*").eq("job_id", id).order("taken_at", { ascending: false }),
       supabase.from("floor_plans").select("*").eq("job_id", id).order("version", { ascending: false }),
-    ]).then(([j, r, m, e, l, p, fp]) => {
+      supabase.from("communications").select("*").eq("job_id", id).order("created_at", { ascending: false }),
+      supabase.from("tasks").select("*").eq("job_id", id).order("created_at", { ascending: false }),
+      supabase.from("reconstruction_items").select("*").eq("job_id", id).order("sort_order"),
+      supabase.from("invoices").select("*").eq("job_id", id).order("created_at", { ascending: false }),
+      supabase.from("documents").select("*").eq("job_id", id).order("created_at", { ascending: false }),
+    ]).then(([j, r, m, e, l, p, fp, comms, tks, recon, inv, docs]) => {
       if (!j.error && j.data) {
         const jobData = j.data as Job;
         setJob(jobData);
@@ -265,6 +344,11 @@ export default function JobDetailPage() {
       if (!l.error) setLineItems((l.data ?? []) as LineItem[]);
       if (!p.error) setPhotos((p.data ?? []) as Photo[]);
       if (!fp.error) setFloorPlans((fp.data ?? []) as FloorPlan[]);
+      if (!comms.error) setCommunications((comms.data ?? []) as Communication[]);
+      if (!tks.error) setTasks((tks.data ?? []) as Task[]);
+      if (!recon.error) setReconItems((recon.data ?? []) as ReconstructionItem[]);
+      if (!inv.error) setInvoices((inv.data ?? []) as Invoice[]);
+      if (!docs.error) setJobDocuments((docs.data ?? []) as JobDocument[]);
       setLoading(false);
     });
   }, [id]);
@@ -481,6 +565,113 @@ export default function JobDetailPage() {
     setLineItems((prev) => prev.filter((li) => li.id !== itemId));
   };
 
+  // ─── Reconstruction handlers ───────────────────────────────────────────────
+  const handleAddReconItem = async () => {
+    if (!job || !reconForm.trade) return;
+    const { data, error } = await supabase.from("reconstruction_items")
+      .insert({ ...reconForm, job_id: job.id, sort_order: reconItems.length })
+      .select().single();
+    if (!error && data) {
+      setReconItems(prev => [...prev, data as ReconstructionItem]);
+      setShowReconForm(false);
+      setReconForm({ trade: "drywall", status: "pending" });
+    }
+  };
+
+  const handleUpdateReconStatus = async (itemId: string, newStatus: ReconStatus) => {
+    const updates: Partial<ReconstructionItem> = { status: newStatus };
+    if (newStatus === "complete") {
+      updates.completed_at = new Date().toISOString();
+    } else {
+      updates.completed_at = null;
+      updates.completed_by = null;
+    }
+    await supabase.from("reconstruction_items").update(updates).eq("id", itemId);
+    setReconItems(prev => prev.map(i => i.id === itemId ? { ...i, ...updates } : i));
+  };
+
+  const handleDeleteReconItem = async (itemId: string) => {
+    await supabase.from("reconstruction_items").delete().eq("id", itemId);
+    setReconItems(prev => prev.filter(i => i.id !== itemId));
+  };
+
+  const handleSeedReconChecklist = async () => {
+    if (!job) return;
+    const items = DEFAULT_RECON_TRADES.map((trade, i) => ({
+      job_id: job.id, trade, status: "pending" as ReconStatus, sort_order: i
+    }));
+    const { data, error } = await supabase.from("reconstruction_items").insert(items).select();
+    if (!error && data) setReconItems(prev => [...prev, ...(data as ReconstructionItem[])]);
+  };
+
+  // ─── Invoice handlers ──────────────────────────────────────────────────────
+  const handleCreateInvoice = async () => {
+    if (!job) return;
+    const amountCents = invoiceForm.amount_display
+      ? dollarsToCents(invoiceForm.amount_display.replace(/[^0-9.]/g, ""))
+      : invoiceForm.amount_cents;
+    const { data, error } = await supabase.from("invoices")
+      .insert({
+        job_id: job.id,
+        invoice_type: invoiceForm.invoice_type,
+        status: invoiceForm.status,
+        amount_cents: amountCents,
+        paid_cents: 0,
+        due_date: invoiceForm.due_date || null,
+        notes: invoiceForm.notes || null,
+        xactimate_ref: invoiceForm.xactimate_ref || null,
+      })
+      .select().single();
+    if (!error && data) {
+      setInvoices(prev => [data as Invoice, ...prev]);
+      setShowInvoiceForm(false);
+      setInvoiceForm({ invoice_type: "mitigation", amount_cents: 0, amount_display: "", status: "draft", notes: "", due_date: "", xactimate_ref: "" });
+    }
+  };
+
+  const handleUpdateInvoiceStatus = async (invoiceId: string, newStatus: InvoiceStatus) => {
+    const updates: Record<string, unknown> = { status: newStatus };
+    if (newStatus === "submitted") updates.submitted_date = new Date().toISOString().split("T")[0];
+    if (newStatus === "paid") {
+      updates.paid_date = new Date().toISOString().split("T")[0];
+      const inv = invoices.find(i => i.id === invoiceId);
+      if (inv) updates.paid_cents = inv.amount_cents;
+    }
+    await supabase.from("invoices").update(updates).eq("id", invoiceId);
+    setInvoices(prev => prev.map(i => i.id === invoiceId ? { ...i, ...updates } as Invoice : i));
+  };
+
+  const handleDeleteInvoice = async (invoiceId: string) => {
+    await supabase.from("invoices").delete().eq("id", invoiceId);
+    setInvoices(prev => prev.filter(i => i.id !== invoiceId));
+  };
+
+  // ─── Document handlers ─────────────────────────────────────────────────────
+  const handleAddDocument = async () => {
+    if (!job || !docForm.title) return;
+    const { data, error } = await supabase.from("documents")
+      .insert({
+        job_id: job.id,
+        doc_type: docForm.doc_type,
+        title: docForm.title,
+        status: docForm.status,
+        notes: docForm.notes || null,
+        signed_by_name: docForm.signed_by_name || null,
+        signed_at: docForm.status === "signed" ? new Date().toISOString() : null,
+      })
+      .select().single();
+    if (!error && data) {
+      setJobDocuments(prev => [data as JobDocument, ...prev]);
+      setShowDocForm(false);
+      setDocForm({ doc_type: "work_authorization", title: "", status: "pending", notes: "", signed_by_name: "" });
+    }
+  };
+
+  const handleDeleteDocument = async (docId: string) => {
+    await supabase.from("documents").delete().eq("id", docId);
+    setJobDocuments(prev => prev.filter(d => d.id !== docId));
+  };
+
   // PDF generation
   const [generatingReport, setGeneratingReport] = useState<string | null>(null);
 
@@ -541,17 +732,65 @@ export default function JobDetailPage() {
     setGeneratingReport(null);
   };
 
+  const handleGenerateClaimPackage = async () => {
+    if (!job) return;
+    setGeneratingReport("claim_package");
+    try {
+      const photosWithBase64 = await Promise.all(
+        photos.map(async (p) => {
+          const rawUrl = p.url ?? getPhotoUrl(p.storage_path);
+          const base64 = await toBase64(rawUrl);
+          return { ...p, url: base64 };
+        })
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const element = React.createElement(ClaimPackageReport as any, {
+        job,
+        rooms,
+        photos: photosWithBase64,
+        moistureReadings: moisture,
+        equipmentLogs: equipment,
+        lineItems,
+        invoices,
+        communications,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const blob = await pdf(element as any).toBlob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${job.job_number}-claim-package.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Claim package PDF generation failed:", err);
+      alert("PDF generation failed: " + (err instanceof Error ? err.message : String(err)));
+    }
+    setGeneratingReport(null);
+  };
+
   const totalCents = lineItems.reduce((sum, li) => sum + li.total_cents, 0);
   const roomMap = Object.fromEntries(rooms.map((r) => [r.id, r.name]));
 
+  const openTaskCount = tasks.filter((t) => t.status === "open").length;
+
+  const reconCompleteCount = reconItems.filter(i => i.status === "complete").length;
+  const totalInvoicedCents = invoices.reduce((s, i) => s + i.amount_cents, 0);
+
   const TABS: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
+    { key: "communications", label: `Comms (${communications.length})` },
+    { key: "tasks", label: `Tasks${openTaskCount > 0 ? ` (${openTaskCount})` : ""}` },
     { key: "photos", label: `Photos (${photos.length})` },
     { key: "moisture", label: `Moisture (${moisture.length})` },
     { key: "equipment", label: `Equipment (${equipment.length})` },
     { key: "scope", label: `Scope (${centsToDisplay(totalCents)})` },
+    { key: "reconstruction", label: `Recon${reconItems.length > 0 ? ` (${reconCompleteCount}/${reconItems.length})` : ""}` },
+    { key: "invoices", label: `Invoices${invoices.length > 0 ? ` (${centsToDisplay(totalInvoicedCents)})` : ""}` },
+    { key: "documents", label: `Docs (${jobDocuments.length})` },
     { key: "floorplan", label: "Floor Plan" },
     { key: "report", label: "Reports" },
+    { key: "closeout", label: "Closeout" },
   ];
 
 
@@ -579,23 +818,33 @@ export default function JobDetailPage() {
             <div className="flex items-center gap-3 flex-wrap">
               <span className="text-xs font-mono text-slate-400 dark:text-slate-500">{job.job_number}</span>
 
-              {/* Status toggle — all 6 statuses */}
+              {/* Emergency badge */}
+              {job.is_emergency && (
+                <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-400 border border-red-200 dark:border-red-800/40">
+                  <Flame size={11} /> EMERGENCY
+                </span>
+              )}
+
+              {/* Cat 3 badge */}
+              {job.loss_category === "cat3" && (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-red-100 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded-lg text-sm">
+                  <AlertTriangle size={14} className="text-red-600 dark:text-red-400 flex-shrink-0" />
+                  <span className="text-red-700 dark:text-red-300 font-semibold">Cat 3 — Contaminated Loss</span>
+                </div>
+              )}
+
+              {/* Status toggle — all 14 statuses */}
               <div className="flex items-center gap-1 flex-wrap">
                 {JOB_STATUS_ORDER.map((s) => (
                   <button
                     key={s}
                     onClick={() => setStatus(s)}
                     className={clsx(
-                      "px-2.5 py-0.5 rounded-full text-xs font-bold transition-colors border",
+                      "px-2.5 py-0.5 rounded-full text-xs font-bold transition-all border border-transparent",
                       job.status === s
-                        ? "border-transparent"
-                        : "border-transparent opacity-30 hover:opacity-70"
+                        ? JOB_STATUS_COLORS[s]
+                        : "opacity-25 hover:opacity-60 bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
                     )}
-                    style={
-                      job.status === s
-                        ? { backgroundColor: (STATUS_COLORS[s] ?? "#64748B") + "22", color: STATUS_COLORS[s] ?? "#64748B" }
-                        : { backgroundColor: (STATUS_COLORS[s] ?? "#64748B") + "15", color: STATUS_COLORS[s] ?? "#64748B" }
-                    }
                     title={`Set to ${JOB_STATUS_LABELS[s]}`}
                   >
                     {JOB_STATUS_LABELS[s]}
@@ -748,7 +997,64 @@ export default function JobDetailPage() {
               <InfoPair label="Updated" value={formatAlaskaDateTime(job.updated_at)} />
               <InfoPair label="Job #" value={job.job_number} />
             </InfoCard>
+
+            {/* Additional Info collapsible */}
+            <div className="md:col-span-2 xl:col-span-3 bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl overflow-hidden">
+              <button
+                onClick={() => setShowAdditionalInfo((v) => !v)}
+                className="w-full flex items-center justify-between px-5 py-3 text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider hover:bg-slate-50 dark:hover:bg-[#0F172A] transition-colors"
+              >
+                Additional Information
+                <ChevronDown size={14} className={clsx("transition-transform", showAdditionalInfo && "rotate-180")} />
+              </button>
+              {showAdditionalInfo && (
+                <div className="px-5 pb-5 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-x-6 gap-y-3 border-t border-slate-200 dark:border-[#1E293B] pt-4">
+                  <InfoPair label="Emergency" value={job.is_emergency ? "YES — Emergency" : "No"} />
+                  <InfoPair label="Date Received" value={formatAlaskaDate(job.date_received)} />
+                  <InfoPair label="Cause of Loss" value={job.cause_of_loss ?? "—"} />
+                  <InfoPair label="Lead Source" value={job.lead_source ?? "—"} />
+                  <InfoPair label="Billing Party" value={job.billing_party ?? "—"} />
+                  <InfoPair label="Policy Number" value={job.policy_number ?? "—"} />
+                  <InfoPair label="Deductible" value={job.deductible_amount ? `$${(job.deductible_amount / 100).toFixed(2)}` : "—"} />
+                  <InfoPair label="Loss Location" value={job.loss_location ?? "—"} />
+                  <InfoPair label="PM Name" value={job.property_manager_name ?? "—"} />
+                  <InfoPair label="PM Phone" value={job.property_manager_phone ?? "—"} />
+                  <InfoPair label="PM Email" value={job.property_manager_email ?? "—"} />
+                  <InfoPair label="Xactimate File #" value={job.xactimate_file_number ?? "—"} />
+                </div>
+              )}
+            </div>
           </div>
+        )}
+
+        {activeTab === "communications" && (
+          <CommTab
+            jobId={job.id}
+            communications={communications}
+            setCommunications={setCommunications}
+            showCommForm={showCommForm}
+            setShowCommForm={setShowCommForm}
+            commForm={commForm}
+            setCommForm={setCommForm}
+            savingComm={savingComm}
+            setSavingComm={setSavingComm}
+          />
+        )}
+
+        {activeTab === "tasks" && (
+          <TaskTab
+            jobId={job.id}
+            tasks={tasks}
+            setTasks={setTasks}
+            showTaskForm={showTaskForm}
+            setShowTaskForm={setShowTaskForm}
+            taskForm={taskForm}
+            setTaskForm={setTaskForm}
+            taskFilter={taskFilter}
+            setTaskFilter={setTaskFilter}
+            savingTask={savingTask}
+            setSavingTask={setSavingTask}
+          />
         )}
 
         {activeTab === "moisture" && (
@@ -1119,6 +1425,453 @@ export default function JobDetailPage() {
         )}
 
 
+        {activeTab === "reconstruction" && (
+          <div className="max-w-4xl">
+            {/* Cat 3 warning banner */}
+            {job.loss_category === "cat3" && (
+              <div className="flex items-start gap-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-4 mb-4">
+                <AlertTriangle size={18} className="text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold text-red-700 dark:text-red-300 text-sm">Category 3 — Contaminated Water Loss</p>
+                  <p className="text-red-600 dark:text-red-400 text-xs mt-1">All porous materials must be removed and disposed of per IICRC S500 protocol. Document all removed materials. Do not leave contaminated materials in place.</p>
+                </div>
+              </div>
+            )}
+
+            {/* Progress bar */}
+            {reconItems.length > 0 && (
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl p-4 mb-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Progress</span>
+                  <span className="text-sm text-slate-500 dark:text-slate-400">{reconCompleteCount} of {reconItems.length} items complete</span>
+                </div>
+                <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-3">
+                  <div
+                    className="bg-green-500 h-3 rounded-full transition-all"
+                    style={{ width: `${reconItems.length > 0 ? (reconCompleteCount / reconItems.length) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Action bar */}
+            <div className="flex items-center gap-3 mb-4 flex-wrap">
+              <p className="text-slate-500 dark:text-slate-400 text-sm flex-1">{reconItems.length} item{reconItems.length !== 1 ? "s" : ""}</p>
+              {reconItems.length === 0 && (
+                <button
+                  onClick={handleSeedReconChecklist}
+                  className="flex items-center gap-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+                >
+                  <HardHat size={15} /> Seed Default Checklist
+                </button>
+              )}
+              <button
+                onClick={() => setShowReconForm(v => !v)}
+                className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+              >
+                <Plus size={16} /> Add Item
+              </button>
+            </div>
+
+            {/* Add Item form */}
+            {showReconForm && (
+              <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-4">New Reconstruction Item</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Trade *</label>
+                    <select value={reconForm.trade ?? "drywall"} onChange={e => setReconForm(f => ({ ...f, trade: e.target.value as ReconTrade }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      {(Object.entries(RECON_TRADE_LABELS) as [ReconTrade, string][]).map(([v, l]) => (
+                        <option key={v} value={v}>{l}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Room (optional)</label>
+                    <select value={reconForm.room_id ?? ""} onChange={e => {
+                        const val = e.target.value;
+                        setReconForm(f => { const { room_id: _r, ...rest } = f; return val ? { ...rest, room_id: val } : rest; });
+                      }}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      <option value="">General</option>
+                      {rooms.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Status</label>
+                    <select value={reconForm.status ?? "pending"} onChange={e => setReconForm(f => ({ ...f, status: e.target.value as ReconStatus }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      <option value="pending">Pending</option>
+                      <option value="in_progress">In Progress</option>
+                      <option value="complete">Complete</option>
+                      <option value="skipped">Skipped</option>
+                    </select>
+                  </div>
+                  <div className="col-span-2 sm:col-span-3">
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Description</label>
+                    <input type="text" placeholder="Additional details…" value={reconForm.description ?? ""}
+                      onChange={e => setReconForm(f => ({ ...f, description: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                  </div>
+                  <div className="col-span-2 sm:col-span-3">
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Notes</label>
+                    <textarea rows={2} placeholder="Notes…" value={reconForm.notes ?? ""}
+                      onChange={e => setReconForm(f => ({ ...f, notes: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] resize-none" />
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={handleAddReconItem} disabled={!reconForm.trade}
+                    className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-50 text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+                    <Plus size={14} /> Save Item
+                  </button>
+                  <button onClick={() => setShowReconForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
+                </div>
+              </div>
+            )}
+
+            {/* Items list */}
+            {reconItems.length === 0 ? (
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-12 text-center">
+                <HardHat size={32} className="text-slate-300 dark:text-slate-700 mx-auto mb-3" />
+                <p className="text-slate-500">No reconstruction items yet.</p>
+                <p className="text-slate-400 dark:text-slate-600 text-sm mt-1">Use "Seed Default Checklist" to add standard trades, or add items manually.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {reconItems.map(item => {
+                  const statusCycle: ReconStatus[] = ["pending", "in_progress", "complete", "pending"];
+                  const nextStatus = statusCycle[statusCycle.indexOf(item.status) + 1] ?? "pending";
+                  const dotColor = item.status === "complete" ? "bg-green-500" : item.status === "in_progress" ? "bg-blue-500" : item.status === "skipped" ? "bg-slate-400" : "bg-slate-300 dark:bg-slate-600";
+                  return (
+                    <div key={item.id} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-4 flex items-start gap-3 group">
+                      <button
+                        onClick={() => handleUpdateReconStatus(item.id, nextStatus)}
+                        className={clsx("w-5 h-5 rounded-full flex-shrink-0 mt-0.5 border-2 transition-colors", dotColor, item.status === "complete" ? "border-green-500" : "border-slate-300 dark:border-slate-600 hover:border-[#F97316]")}
+                        title={`Mark as ${nextStatus}`}
+                      >
+                        {item.status === "complete" && <div className="w-full h-full rounded-full flex items-center justify-center text-white text-xs">✓</div>}
+                        {item.status === "skipped" && <div className="w-full h-full rounded-full flex items-center justify-center text-white text-xs">✗</div>}
+                      </button>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{RECON_TRADE_LABELS[item.trade]}</span>
+                          <span className={clsx("px-1.5 py-0.5 rounded text-xs font-semibold", RECON_STATUS_COLORS[item.status])}>{item.status.replace("_", " ")}</span>
+                          {item.room_id && <span className="text-xs text-slate-400 dark:text-slate-500">{roomMap[item.room_id] ?? ""}</span>}
+                        </div>
+                        {item.description && <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{item.description}</p>}
+                        {item.notes && <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5 italic">{item.notes}</p>}
+                        {item.completed_at && <p className="text-xs text-green-500 mt-0.5">Completed {formatAlaskaDate(item.completed_at)}</p>}
+                      </div>
+                      <button
+                        onClick={() => handleDeleteReconItem(item.id)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10 flex-shrink-0"
+                        title="Delete item"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "invoices" && (
+          <div className="max-w-4xl">
+            {/* Summary KPI cards */}
+            {invoices.length > 0 && (() => {
+              const totalInv = invoices.reduce((s, i) => s + i.amount_cents, 0);
+              const totalPaid = invoices.reduce((s, i) => s + i.paid_cents, 0);
+              const outstanding = totalInv - totalPaid;
+              return (
+                <div className="grid grid-cols-3 gap-4 mb-6">
+                  <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl p-4 text-center">
+                    <p className="text-xs text-slate-400 dark:text-slate-500 mb-1">Total Invoiced</p>
+                    <p className="text-xl font-black text-blue-600 dark:text-blue-400">{centsToDisplay(totalInv)}</p>
+                  </div>
+                  <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl p-4 text-center">
+                    <p className="text-xs text-slate-400 dark:text-slate-500 mb-1">Total Paid</p>
+                    <p className="text-xl font-black text-green-600 dark:text-green-400">{centsToDisplay(totalPaid)}</p>
+                  </div>
+                  <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl p-4 text-center">
+                    <p className="text-xs text-slate-400 dark:text-slate-500 mb-1">Outstanding</p>
+                    <p className={clsx("text-xl font-black", outstanding > 0 ? "text-red-600 dark:text-red-400" : "text-slate-500")}>{centsToDisplay(outstanding)}</p>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Action bar */}
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-slate-500 dark:text-slate-400 text-sm">{invoices.length} invoice{invoices.length !== 1 ? "s" : ""}</p>
+              <button
+                onClick={() => setShowInvoiceForm(v => !v)}
+                className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+              >
+                <Plus size={16} /> Create Invoice
+              </button>
+            </div>
+
+            {/* Create Invoice form */}
+            {showInvoiceForm && (
+              <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-4">New Invoice</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Invoice Type</label>
+                    <select value={invoiceForm.invoice_type} onChange={e => setInvoiceForm(f => ({ ...f, invoice_type: e.target.value as InvoiceType }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      <option value="mitigation">Mitigation</option>
+                      <option value="reconstruction">Reconstruction</option>
+                      <option value="tm">T&M</option>
+                      <option value="vendor_passthrough">Vendor Passthrough</option>
+                      <option value="supplement">Supplement</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Amount ($)</label>
+                    <input type="text" placeholder="e.g. 12500.00" value={invoiceForm.amount_display}
+                      onChange={e => setInvoiceForm(f => ({ ...f, amount_display: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Status</label>
+                    <select value={invoiceForm.status} onChange={e => setInvoiceForm(f => ({ ...f, status: e.target.value as InvoiceStatus }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      {(Object.entries(INVOICE_STATUS_LABELS) as [InvoiceStatus, string][]).map(([v, l]) => (
+                        <option key={v} value={v}>{l}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Due Date</label>
+                    <input type="date" value={invoiceForm.due_date}
+                      onChange={e => setInvoiceForm(f => ({ ...f, due_date: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Xactimate Ref</label>
+                    <input type="text" placeholder="e.g. XA-12345" value={invoiceForm.xactimate_ref}
+                      onChange={e => setInvoiceForm(f => ({ ...f, xactimate_ref: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                  </div>
+                  <div className="col-span-2 sm:col-span-3">
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Notes</label>
+                    <textarea rows={2} placeholder="Notes…" value={invoiceForm.notes}
+                      onChange={e => setInvoiceForm(f => ({ ...f, notes: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] resize-none" />
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={handleCreateInvoice}
+                    className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+                    <Plus size={14} /> Create Invoice
+                  </button>
+                  <button onClick={() => setShowInvoiceForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
+                </div>
+              </div>
+            )}
+
+            {/* Invoice list */}
+            {invoices.length === 0 ? (
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-12 text-center">
+                <Receipt size={32} className="text-slate-300 dark:text-slate-700 mx-auto mb-3" />
+                <p className="text-slate-500">No invoices yet.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {invoices.map(inv => (
+                  <div key={inv.id} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-4 group">
+                    <div className="flex items-start gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                          <span className="text-sm font-bold text-slate-800 dark:text-slate-200">{inv.invoice_number}</span>
+                          <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400">{inv.invoice_type}</span>
+                          <span className={clsx("px-1.5 py-0.5 rounded text-xs font-semibold", INVOICE_STATUS_COLORS[inv.status])}>{INVOICE_STATUS_LABELS[inv.status]}</span>
+                          <span className="text-xs text-slate-400 dark:text-slate-600 ml-auto">{formatAlaskaDate(inv.created_at)}</span>
+                        </div>
+                        <div className="flex items-center gap-4 text-sm mb-2">
+                          <span className="text-slate-700 dark:text-slate-300">Invoiced: <span className="font-bold">{centsToDisplay(inv.amount_cents)}</span></span>
+                          <span className="text-green-600 dark:text-green-400">Paid: <span className="font-bold">{centsToDisplay(inv.paid_cents)}</span></span>
+                          {inv.due_date && <span className="text-xs text-slate-400 dark:text-slate-500">Due: {inv.due_date}</span>}
+                          {inv.xactimate_ref && <span className="text-xs font-mono text-slate-400 dark:text-slate-500">{inv.xactimate_ref}</span>}
+                        </div>
+                        {inv.notes && <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">{inv.notes}</p>}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {inv.status === "draft" && (
+                            <button onClick={() => handleUpdateInvoiceStatus(inv.id, "submitted")}
+                              className="text-xs font-bold px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors">
+                              Mark Submitted
+                            </button>
+                          )}
+                          {inv.status !== "paid" && inv.status !== "void" && (
+                            <button onClick={() => handleUpdateInvoiceStatus(inv.id, "paid")}
+                              className="text-xs font-bold px-2.5 py-1 rounded-lg bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 border border-green-200 dark:border-green-800 hover:bg-green-100 dark:hover:bg-green-900/50 transition-colors">
+                              Mark Paid
+                            </button>
+                          )}
+                          {inv.status !== "disputed" && inv.status !== "void" && inv.status !== "paid" && (
+                            <button onClick={() => handleUpdateInvoiceStatus(inv.id, "disputed")}
+                              className="text-xs font-bold px-2.5 py-1 rounded-lg bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors">
+                              Mark Disputed
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteInvoice(inv.id)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10 flex-shrink-0"
+                        title="Delete invoice"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "documents" && (
+          <div className="max-w-4xl">
+            {/* Document checklist */}
+            <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl p-4 mb-4">
+              <p className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3">Required Document Checklist</p>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {(["work_authorization", "direction_to_pay", "estimate", "invoice"] as DocType[]).map(dtype => {
+                  const present = jobDocuments.some(d => d.doc_type === dtype && (d.status === "signed" || d.status === "approved"));
+                  return (
+                    <div key={dtype} className="flex items-center gap-2">
+                      <span className={clsx("w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold", present ? "bg-green-100 text-green-600 dark:bg-green-900/40 dark:text-green-400" : "bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-400")}>
+                        {present ? "✓" : "✗"}
+                      </span>
+                      <span className="text-xs text-slate-600 dark:text-slate-400">{DOC_TYPE_LABELS[dtype]}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Action bar */}
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-slate-500 dark:text-slate-400 text-sm">{jobDocuments.length} document{jobDocuments.length !== 1 ? "s" : ""}</p>
+              <button
+                onClick={() => setShowDocForm(v => !v)}
+                className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+              >
+                <Plus size={16} /> Add Document
+              </button>
+            </div>
+
+            {/* Add Document form */}
+            {showDocForm && (
+              <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-4">New Document</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Document Type</label>
+                    <select value={docForm.doc_type} onChange={e => {
+                      const dt = e.target.value as DocType;
+                      setDocForm(f => ({ ...f, doc_type: dt, title: DOC_TYPE_LABELS[dt] }));
+                    }}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      {(Object.entries(DOC_TYPE_LABELS) as [DocType, string][]).map(([v, l]) => (
+                        <option key={v} value={v}>{l}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Title *</label>
+                    <input type="text" placeholder="Document title" value={docForm.title}
+                      onChange={e => setDocForm(f => ({ ...f, title: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Status</label>
+                    <select value={docForm.status} onChange={e => setDocForm(f => ({ ...f, status: e.target.value as "pending" | "signed" | "approved" | "rejected" }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      <option value="pending">Pending</option>
+                      <option value="signed">Signed</option>
+                      <option value="approved">Approved</option>
+                      <option value="rejected">Rejected</option>
+                    </select>
+                  </div>
+                  {docForm.status === "signed" && (
+                    <div>
+                      <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Signed By Name</label>
+                      <input type="text" placeholder="Full name" value={docForm.signed_by_name}
+                        onChange={e => setDocForm(f => ({ ...f, signed_by_name: e.target.value }))}
+                        className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                    </div>
+                  )}
+                  <div className={clsx(docForm.status === "signed" ? "" : "col-span-2 sm:col-span-3")}>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Notes</label>
+                    <textarea rows={2} placeholder="Notes…" value={docForm.notes}
+                      onChange={e => setDocForm(f => ({ ...f, notes: e.target.value }))}
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] resize-none" />
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={handleAddDocument} disabled={!docForm.title}
+                    className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-50 text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+                    <Plus size={14} /> Save Document
+                  </button>
+                  <button onClick={() => setShowDocForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
+                </div>
+              </div>
+            )}
+
+            {/* Document list */}
+            {jobDocuments.length === 0 ? (
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-12 text-center">
+                <FolderOpen size={32} className="text-slate-300 dark:text-slate-700 mx-auto mb-3" />
+                <p className="text-slate-500">No documents yet.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {jobDocuments.map(doc => {
+                  const statusColors: Record<string, string> = {
+                    pending: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
+                    signed: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300",
+                    approved: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+                    rejected: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+                  };
+                  return (
+                    <div key={doc.id} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-4 flex items-start gap-3 group">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                          <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400">{DOC_TYPE_LABELS[doc.doc_type]}</span>
+                          <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{doc.title}</span>
+                          {doc.status && <span className={clsx("px-1.5 py-0.5 rounded text-xs font-semibold", statusColors[doc.status] ?? "")}>{doc.status}</span>}
+                          <span className="text-xs text-slate-400 dark:text-slate-600 ml-auto">{formatAlaskaDate(doc.created_at)}</span>
+                        </div>
+                        {doc.signed_by_name && <p className="text-xs text-slate-500 dark:text-slate-400">Signed by: {doc.signed_by_name}</p>}
+                        {doc.notes && <p className="text-xs text-slate-400 dark:text-slate-500 italic mt-0.5">{doc.notes}</p>}
+                        {doc.file_url && (
+                          <a href={doc.file_url} target="_blank" rel="noreferrer" className="text-xs text-[#F97316] hover:underline flex items-center gap-1 mt-1">
+                            <ExternalLink size={11} /> View File
+                          </a>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleDeleteDocument(doc.id)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10 flex-shrink-0"
+                        title="Delete document"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
         {activeTab === "floorplan" && (
           <div className="max-w-4xl space-y-4">
             {/* Magicplan project link */}
@@ -1355,8 +2108,221 @@ export default function JobDetailPage() {
                 </div>
               ))}
             </div>
+
+            {/* Claim Package */}
+            <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+              <div className="flex items-center gap-3 mb-3">
+                <Package size={20} className="text-[#F97316]" />
+                <div>
+                  <p className="font-bold text-slate-800 dark:text-slate-200">Claim Package</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Full claim documentation bundle — cover page, job summary, photos, moisture, scope, and invoice summary</p>
+                </div>
+              </div>
+              <button
+                onClick={handleGenerateClaimPackage}
+                disabled={generatingReport !== null}
+                className="flex items-center gap-2 px-4 py-2 bg-[#F97316] text-white rounded-xl text-sm font-bold hover:bg-[#EA6C0C] disabled:opacity-50 transition-colors"
+              >
+                {generatingReport === "claim_package" ? (
+                  <><RefreshCw size={14} className="animate-spin" /> Building…</>
+                ) : (
+                  <><Package size={14} /> Build Claim Package PDF</>
+                )}
+              </button>
+            </div>
           </div>
         )}
+
+        {/* Closeout Tab */}
+        {activeTab === "closeout" && (() => {
+          const CLOSEOUT_ITEMS = [
+            { category: "Documentation", items: [
+              { key: "work_auth_signed", label: "Work authorization signed" },
+              { key: "dir_to_pay_signed", label: "Direction to pay signed" },
+              { key: "change_orders_signed", label: "All change orders signed" },
+              { key: "moisture_at_dry", label: "Final moisture readings at dry standard" },
+              { key: "equip_removed", label: "Equipment removed from site" },
+              { key: "all_photos_uploaded", label: "All photos uploaded (before/during/after)" },
+              { key: "mitigation_report", label: "Mitigation report complete" },
+              { key: "recon_scope_doc", label: "Reconstruction scope documented" },
+            ]},
+            { category: "Financial", items: [
+              { key: "final_invoice_submitted", label: "Final invoice submitted" },
+              { key: "invoice_payment_received", label: "Invoice payment received" },
+              { key: "vendor_invoices", label: "All vendor invoices accounted for" },
+              { key: "deductible_collected", label: "Deductible collected (if applicable)" },
+            ]},
+            { category: "Closeout", items: [
+              { key: "final_walkthrough", label: "Final walkthrough complete" },
+              { key: "punch_list_resolved", label: "Punch list items resolved" },
+              { key: "customer_satisfaction", label: "Customer satisfaction confirmed" },
+              { key: "job_closed_system", label: "Job closed in system" },
+            ]},
+          ];
+
+          const allItems = CLOSEOUT_ITEMS.flatMap((c) => c.items);
+          const checkedCount = allItems.filter((item) => closeoutChecks[item.key]).length;
+          const completionPct = Math.round((checkedCount / allItems.length) * 100);
+
+          // Documentation score calculation
+          const hasBeforePhotos = photos.some((p) => p.category === "before");
+          const hasAfterPhotos = photos.some((p) => p.category === "after");
+          const hasMoistureReadings = moisture.length > 0;
+          const allMoistureDry = moisture.length > 0 && moisture.every((m) => m.is_dry);
+          const allEquipRemoved = equipment.length > 0 && equipment.every((e) => e.date_removed);
+          const hasWorkAuth = jobDocuments.some((d) => d.doc_type === "work_authorization" && d.status === "signed");
+          const hasEstimate = lineItems.length > 0;
+          const hasSubmittedInvoice = invoices.some((i) => i.status !== "draft");
+          const hasComms = communications.length > 0;
+          const hasEnoughTasks = tasks.length >= 3;
+
+          const docScore = [
+            hasBeforePhotos ? 15 : 0,
+            hasAfterPhotos ? 15 : 0,
+            hasMoistureReadings ? 10 : 0,
+            allMoistureDry ? 10 : 0,
+            allEquipRemoved ? 10 : 0,
+            hasWorkAuth ? 10 : 0,
+            hasEstimate ? 10 : 0,
+            hasSubmittedInvoice ? 10 : 0,
+            hasComms ? 5 : 0,
+            hasEnoughTasks ? 5 : 0,
+          ].reduce((a, b) => a + b, 0);
+
+          const docScoreColor = docScore >= 71 ? "text-green-600 dark:text-green-400" : docScore >= 41 ? "text-yellow-600 dark:text-yellow-400" : "text-red-600 dark:text-red-400";
+          const docScoreBg = docScore >= 71 ? "bg-green-100 dark:bg-green-900/30" : docScore >= 41 ? "bg-yellow-100 dark:bg-yellow-900/30" : "bg-red-100 dark:bg-red-900/30";
+
+          const progressColor = completionPct >= 71 ? "bg-green-500" : completionPct >= 41 ? "bg-yellow-500" : "bg-red-500";
+
+          return (
+            <div className="max-w-3xl space-y-6">
+              {/* Progress bar */}
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <ClipboardCheck size={18} className="text-[#F97316]" />
+                    <span className="font-bold text-slate-800 dark:text-slate-200">Closeout Checklist</span>
+                  </div>
+                  <span className="text-sm font-bold text-slate-600 dark:text-slate-300">{checkedCount}/{allItems.length} — {completionPct}%</span>
+                </div>
+                <div className="w-full bg-slate-200 dark:bg-[#1E293B] rounded-full h-2.5 mb-1">
+                  <div className={`${progressColor} h-2.5 rounded-full transition-all`} style={{ width: `${completionPct}%` }} />
+                </div>
+              </div>
+
+              {/* Checklist sections */}
+              {CLOSEOUT_ITEMS.map((section) => (
+                <div key={section.category} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+                  <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-slate-200 dark:border-[#1E293B]">{section.category}</h3>
+                  <div className="space-y-2">
+                    {section.items.map((item) => (
+                      <label key={item.key} className="flex items-center gap-3 cursor-pointer group">
+                        <input
+                          type="checkbox"
+                          checked={!!closeoutChecks[item.key]}
+                          onChange={(e) => setCloseoutChecks((prev) => ({ ...prev, [item.key]: e.target.checked }))}
+                          className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-[#F97316] accent-[#F97316] cursor-pointer"
+                        />
+                        <span className={clsx("text-sm transition-colors", closeoutChecks[item.key] ? "line-through text-slate-400 dark:text-slate-600" : "text-slate-700 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white")}>
+                          {item.label}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              {/* Documentation Score */}
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Documentation Completeness Score</h3>
+                  <div className={`${docScoreBg} ${docScoreColor} px-3 py-1 rounded-full text-sm font-bold`}>{docScore}%</div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { label: "Before photos", val: hasBeforePhotos, pts: 15 },
+                    { label: "After photos", val: hasAfterPhotos, pts: 15 },
+                    { label: "Moisture readings", val: hasMoistureReadings, pts: 10 },
+                    { label: "All readings at dry", val: allMoistureDry, pts: 10 },
+                    { label: "Equipment removed", val: allEquipRemoved, pts: 10 },
+                    { label: "Work auth signed", val: hasWorkAuth, pts: 10 },
+                    { label: "Estimate/scope", val: hasEstimate, pts: 10 },
+                    { label: "Invoice submitted", val: hasSubmittedInvoice, pts: 10 },
+                    { label: "Communications logged", val: hasComms, pts: 5 },
+                    { label: "3+ tasks logged", val: hasEnoughTasks, pts: 5 },
+                  ].map(({ label, val, pts }) => (
+                    <div key={label} className="flex items-center justify-between py-1 border-b border-slate-100 dark:border-[#1E293B]">
+                      <span className={`text-xs ${val ? "text-slate-700 dark:text-slate-300" : "text-slate-400 dark:text-slate-600"}`}>{label}</span>
+                      <span className={`text-xs font-bold ${val ? "text-green-600 dark:text-green-400" : "text-slate-300 dark:text-slate-600"}`}>
+                        {val ? `+${pts}` : `+0/${pts}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Job Notes (Final Notes) */}
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+                <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-slate-200 dark:border-[#1E293B]">Final Notes</h3>
+                <textarea
+                  className="w-full bg-slate-50 dark:bg-[#0F172A] border border-slate-200 dark:border-[#1E293B] rounded-xl px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] resize-none"
+                  rows={4}
+                  placeholder="Add final notes for this job…"
+                  defaultValue={job.notes ?? ""}
+                  onBlur={async (e) => {
+                    const val = e.target.value;
+                    const { data } = await supabase.from("jobs").update({ notes: val || null }).eq("id", job.id).select().single();
+                    if (data) setJob(data as Job);
+                  }}
+                />
+              </div>
+
+              {/* Close Job */}
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+                <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-slate-200 dark:border-[#1E293B]">Close This Job</h3>
+                <div className="flex items-center gap-3 mb-4">
+                  <span className="text-sm text-slate-600 dark:text-slate-400">Current status:</span>
+                  <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${JOB_STATUS_COLORS[job.status]}`}>{JOB_STATUS_LABELS[job.status]}</span>
+                </div>
+                {job.status === "closed" ? (
+                  <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                    <CheckCircle size={16} />
+                    <span className="text-sm font-semibold">This job is closed.</span>
+                  </div>
+                ) : confirmCloseJob ? (
+                  <div className="space-y-3">
+                    <p className="text-sm text-slate-600 dark:text-slate-400">Mark this job as Closed? This cannot be easily undone.</p>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={async () => {
+                          await setStatus("closed");
+                          setConfirmCloseJob(false);
+                        }}
+                        className="px-4 py-2 bg-red-600 text-white rounded-xl text-sm font-bold hover:bg-red-700 transition-colors"
+                      >
+                        Yes, Close Job
+                      </button>
+                      <button
+                        onClick={() => setConfirmCloseJob(false)}
+                        className="px-4 py-2 border border-slate-200 dark:border-[#1E293B] text-slate-600 dark:text-slate-400 rounded-xl text-sm font-semibold hover:bg-slate-50 dark:hover:bg-[#1E293B] transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmCloseJob(true)}
+                    className="flex items-center gap-2 px-4 py-2 bg-slate-800 dark:bg-slate-700 text-white rounded-xl text-sm font-bold hover:bg-slate-900 dark:hover:bg-slate-600 transition-colors"
+                  >
+                    <ClipboardCheck size={15} />
+                    Close This Job
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -1376,6 +2342,419 @@ function InfoPair({ label, value }: { label: string; value: string }) {
     <div className="flex flex-col">
       <span className="text-xs text-slate-400 dark:text-slate-600">{label}</span>
       <span className="text-sm text-slate-800 dark:text-slate-200 font-medium break-words">{value}</span>
+    </div>
+  );
+}
+
+// ─── Comm type icon helper ────────────────────────────────────────────────────
+function CommIcon({ type }: { type: CommType }) {
+  const cls = "flex-shrink-0";
+  switch (type) {
+    case "call": return <Phone size={14} className={cls} />;
+    case "email": return <Mail size={14} className={cls} />;
+    case "text": return <MessageSquare size={14} className={cls} />;
+    case "site_visit": return <MapPin size={14} className={cls} />;
+    case "internal_note": return <FileText size={14} className={cls} />;
+    case "verbal_approval": return <CheckCircle size={14} className={cls} />;
+    default: return <MoreHorizontal size={14} className={cls} />;
+  }
+}
+
+// ─── Communications Tab ───────────────────────────────────────────────────────
+interface CommTabProps {
+  jobId: string;
+  communications: Communication[];
+  setCommunications: React.Dispatch<React.SetStateAction<Communication[]>>;
+  showCommForm: boolean;
+  setShowCommForm: React.Dispatch<React.SetStateAction<boolean>>;
+  commForm: Partial<CreateCommunicationInput>;
+  setCommForm: React.Dispatch<React.SetStateAction<Partial<CreateCommunicationInput>>>;
+  savingComm: boolean;
+  setSavingComm: (v: boolean) => void;
+}
+
+function CommTab({ jobId, communications, setCommunications, showCommForm, setShowCommForm, commForm, setCommForm, savingComm, setSavingComm }: CommTabProps) {
+
+  const saveComm = async () => {
+    if (!commForm.body?.trim()) return;
+    setSavingComm(true);
+    const { data } = await supabase.from("communications").insert({
+      job_id: jobId,
+      comm_type: commForm.comm_type ?? "call",
+      direction: commForm.comm_type === "internal_note" ? "internal" : (commForm.direction ?? "inbound"),
+      contact_name: commForm.contact_name || null,
+      contact_role: commForm.contact_role || null,
+      subject: commForm.subject || null,
+      body: commForm.body,
+      is_internal: commForm.is_internal ?? false,
+      follow_up_needed: commForm.follow_up_needed ?? false,
+      follow_up_date: commForm.follow_up_needed ? (commForm.follow_up_date || null) : null,
+    }).select().single();
+    if (data) {
+      setCommunications((prev) => [data as Communication, ...prev]);
+      setCommForm({ comm_type: "call", direction: "inbound", is_internal: false, follow_up_needed: false });
+      setShowCommForm(false);
+    }
+    setSavingComm(false);
+  };
+
+  const deleteComm = async (commId: string) => {
+    await supabase.from("communications").delete().eq("id", commId);
+    setCommunications((prev) => prev.filter((c) => c.id !== commId));
+  };
+
+  const directionColor: Record<string, string> = {
+    inbound: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+    outbound: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300",
+    internal: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400",
+  };
+
+  return (
+    <div className="max-w-4xl">
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-slate-500 dark:text-slate-400 text-sm">{communications.length} log{communications.length !== 1 ? "s" : ""}</p>
+        <button
+          onClick={() => setShowCommForm((v) => !v)}
+          className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+        >
+          <Plus size={16} /> Log Communication
+        </button>
+      </div>
+
+      {showCommForm && (
+        <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4 space-y-3">
+          <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300">Log Communication</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Type *</label>
+              <select value={commForm.comm_type ?? "call"}
+                onChange={(e) => setCommForm((f) => ({ ...f, comm_type: e.target.value as CommType }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                {(Object.entries(COMM_TYPE_LABELS) as [CommType, string][]).map(([v, l]) => (
+                  <option key={v} value={v}>{l}</option>
+                ))}
+              </select>
+            </div>
+            {commForm.comm_type !== "internal_note" && (
+              <div>
+                <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Direction</label>
+                <select value={commForm.direction ?? "inbound"}
+                  onChange={(e) => setCommForm((f) => ({ ...f, direction: e.target.value as CommDirection }))}
+                  className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                  <option value="inbound">Inbound</option>
+                  <option value="outbound">Outbound</option>
+                  <option value="internal">Internal</option>
+                </select>
+              </div>
+            )}
+            <div>
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Contact Name</label>
+              <input type="text" placeholder="Jane Smith" value={commForm.contact_name ?? ""}
+                onChange={(e) => setCommForm((f) => ({ ...f, contact_name: e.target.value }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Contact Role</label>
+              <input type="text" placeholder="Adjuster / PM / Owner / etc." value={commForm.contact_role ?? ""}
+                onChange={(e) => setCommForm((f) => ({ ...f, contact_role: e.target.value }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+            </div>
+            <div className="col-span-2 sm:col-span-3">
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Subject (optional)</label>
+              <input type="text" placeholder="Brief subject…" value={commForm.subject ?? ""}
+                onChange={(e) => setCommForm((f) => ({ ...f, subject: e.target.value }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+            </div>
+            <div className="col-span-2 sm:col-span-3">
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Notes / Body *</label>
+              <textarea rows={3} placeholder="What was discussed, decided, or noted…" value={commForm.body ?? ""}
+                onChange={(e) => setCommForm((f) => ({ ...f, body: e.target.value }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] resize-none" />
+            </div>
+          </div>
+          <div className="flex items-center gap-4 flex-wrap">
+            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-500 dark:text-slate-400">
+              <input type="checkbox" checked={commForm.is_internal ?? false}
+                onChange={(e) => setCommForm((f) => ({ ...f, is_internal: e.target.checked }))}
+                className="accent-[#F97316]" />
+              Internal note (not shared)
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-500 dark:text-slate-400">
+              <input type="checkbox" checked={commForm.follow_up_needed ?? false}
+                onChange={(e) => setCommForm((f) => ({ ...f, follow_up_needed: e.target.checked }))}
+                className="accent-[#F97316]" />
+              Follow-up needed
+            </label>
+            {commForm.follow_up_needed && (
+              <input type="date" value={commForm.follow_up_date ?? ""}
+                onChange={(e) => setCommForm((f) => ({ ...f, follow_up_date: e.target.value }))}
+                className="bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-8 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
+            )}
+          </div>
+          <div className="flex gap-3">
+            <button onClick={saveComm} disabled={savingComm || !commForm.body?.trim()}
+              className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-50 text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+              {savingComm ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
+              {savingComm ? "Saving…" : "Save"}
+            </button>
+            <button onClick={() => setShowCommForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {communications.length === 0 ? (
+          <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-12 text-center">
+            <MessageSquare size={32} className="text-slate-300 dark:text-slate-700 mx-auto mb-3" />
+            <p className="text-slate-500">No communications logged yet.</p>
+          </div>
+        ) : communications.map((c) => (
+          <div key={c.id} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-4 group">
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-xl bg-slate-100 dark:bg-[#1E293B] flex items-center justify-center text-slate-500 dark:text-slate-400 flex-shrink-0 mt-0.5">
+                <CommIcon type={c.comm_type} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{COMM_TYPE_LABELS[c.comm_type]}</span>
+                  {c.direction && (
+                    <span className={clsx("px-1.5 py-0.5 rounded text-xs font-semibold", directionColor[c.direction] ?? "bg-slate-100 text-slate-600")}>
+                      {c.direction}
+                    </span>
+                  )}
+                  {c.is_internal && <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400">Internal</span>}
+                  {c.follow_up_needed && <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">Follow-up {c.follow_up_date ?? ""}</span>}
+                  <span className="text-xs text-slate-400 dark:text-slate-600 ml-auto">{formatAlaskaDateTime(c.created_at)}</span>
+                </div>
+                {(c.contact_name || c.contact_role) && (
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
+                    {c.contact_name}{c.contact_role ? ` — ${c.contact_role}` : ""}
+                  </p>
+                )}
+                {c.subject && <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 mb-1">{c.subject}</p>}
+                <p className="text-sm text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{c.body}</p>
+              </div>
+              <button
+                onClick={() => deleteComm(c.id)}
+                className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10 flex-shrink-0"
+                title="Delete"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Tasks Tab ────────────────────────────────────────────────────────────────
+interface TaskTabProps {
+  jobId: string;
+  tasks: Task[];
+  setTasks: React.Dispatch<React.SetStateAction<Task[]>>;
+  showTaskForm: boolean;
+  setShowTaskForm: React.Dispatch<React.SetStateAction<boolean>>;
+  taskForm: { title: string; priority: TaskPriority; category: TaskCategory | ""; due_date: string; description: string };
+  setTaskForm: React.Dispatch<React.SetStateAction<{ title: string; priority: TaskPriority; category: TaskCategory | ""; due_date: string; description: string }>>;
+  taskFilter: "all" | "open" | "done";
+  setTaskFilter: (v: "all" | "open" | "done") => void;
+  savingTask: boolean;
+  setSavingTask: (v: boolean) => void;
+}
+
+const TASK_CATEGORIES: { value: TaskCategory; label: string }[] = [
+  { value: "photo", label: "Photo" },
+  { value: "document", label: "Document" },
+  { value: "estimate", label: "Estimate" },
+  { value: "inspection", label: "Inspection" },
+  { value: "monitoring", label: "Monitoring" },
+  { value: "invoice", label: "Invoice" },
+  { value: "communication", label: "Communication" },
+  { value: "scheduling", label: "Scheduling" },
+  { value: "other", label: "Other" },
+];
+
+function TaskTab({ jobId, tasks, setTasks, showTaskForm, setShowTaskForm, taskForm, setTaskForm, taskFilter, setTaskFilter, savingTask, setSavingTask }: TaskTabProps) {
+  const today = new Date().toISOString().split("T")[0] ?? "";
+
+  const saveTask = async () => {
+    if (!taskForm.title.trim()) return;
+    setSavingTask(true);
+    const { data } = await supabase.from("tasks").insert({
+      job_id: jobId,
+      title: taskForm.title.trim(),
+      priority: taskForm.priority,
+      category: taskForm.category || null,
+      due_date: taskForm.due_date || null,
+      description: taskForm.description || null,
+      status: "open",
+    }).select().single();
+    if (data) {
+      setTasks((prev) => [data as Task, ...prev]);
+      setTaskForm({ title: "", priority: "normal", category: "", due_date: "", description: "" });
+      setShowTaskForm(false);
+    }
+    setSavingTask(false);
+  };
+
+  const toggleTaskDone = async (task: Task) => {
+    const newStatus = task.status === "done" ? "open" : "done";
+    const { data } = await supabase.from("tasks").update({ status: newStatus }).eq("id", task.id).select().single();
+    if (data) setTasks((prev) => prev.map((t) => t.id === task.id ? data as Task : t));
+  };
+
+  const deleteTask = async (taskId: string) => {
+    await supabase.from("tasks").delete().eq("id", taskId);
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+  };
+
+  const filtered = tasks.filter((t) => {
+    if (taskFilter === "open") return t.status === "open" || t.status === "in_progress";
+    if (taskFilter === "done") return t.status === "done" || t.status === "cancelled";
+    return true;
+  });
+
+  const priorityOrder: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+  const sorted = [...filtered].sort((a, b) => (priorityOrder[a.priority] ?? 2) - (priorityOrder[b.priority] ?? 2));
+
+  const openCount = tasks.filter((t) => t.status === "open" || t.status === "in_progress").length;
+
+  return (
+    <div className="max-w-4xl">
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
+        <div className="flex gap-1">
+          {(["all", "open", "done"] as const).map((f) => (
+            <button key={f} onClick={() => setTaskFilter(f)}
+              className={clsx("px-3 h-8 rounded-xl text-xs font-bold transition-colors border",
+                taskFilter === f
+                  ? "bg-[#F97316] border-[#F97316] text-[#0F172A]"
+                  : "bg-white dark:bg-[#0A1628] border-slate-200 dark:border-[#1E293B] text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
+              )}>
+              {f === "all" ? `All (${tasks.length})` : f === "open" ? `Open (${openCount})` : "Done"}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => setShowTaskForm((v) => !v)}
+          className="ml-auto flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+        >
+          <Plus size={16} /> Add Task
+        </button>
+      </div>
+
+      {showTaskForm && (
+        <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4 space-y-3">
+          <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300">New Task</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <div className="col-span-2 sm:col-span-3">
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Title *</label>
+              <input type="text" placeholder="e.g. Take post-demo photos" value={taskForm.title}
+                onChange={(e) => setTaskForm((f) => ({ ...f, title: e.target.value }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Priority</label>
+              <select value={taskForm.priority}
+                onChange={(e) => setTaskForm((f) => ({ ...f, priority: e.target.value as TaskPriority }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                {(Object.entries(TASK_PRIORITY_LABELS) as [TaskPriority, string][]).map(([v, l]) => (
+                  <option key={v} value={v}>{l}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Category</label>
+              <select value={taskForm.category}
+                onChange={(e) => setTaskForm((f) => ({ ...f, category: e.target.value as TaskCategory | "" }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
+                <option value="">No category</option>
+                {TASK_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Due Date</label>
+              <input type="date" value={taskForm.due_date}
+                onChange={(e) => setTaskForm((f) => ({ ...f, due_date: e.target.value }))}
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
+            </div>
+            <div className="col-span-2 sm:col-span-3">
+              <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Description (optional)</label>
+              <textarea rows={2} value={taskForm.description}
+                onChange={(e) => setTaskForm((f) => ({ ...f, description: e.target.value }))}
+                placeholder="Additional details…"
+                className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] resize-none" />
+            </div>
+          </div>
+          <div className="flex gap-3">
+            <button onClick={saveTask} disabled={savingTask || !taskForm.title.trim()}
+              className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-50 text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+              {savingTask ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
+              {savingTask ? "Saving…" : "Add Task"}
+            </button>
+            <button onClick={() => setShowTaskForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {sorted.length === 0 ? (
+          <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-12 text-center">
+            <CheckSquare size={32} className="text-slate-300 dark:text-slate-700 mx-auto mb-3" />
+            <p className="text-slate-500">No tasks yet.</p>
+          </div>
+        ) : sorted.map((task) => {
+          const isDone = task.status === "done" || task.status === "cancelled";
+          const isOverdue = !isDone && task.due_date && task.due_date < today;
+          return (
+            <div key={task.id} className={clsx(
+              "bg-white dark:bg-[#0A1628] border rounded-2xl p-4 group flex items-start gap-3 transition-opacity",
+              isDone ? "opacity-50 border-slate-200 dark:border-[#1E293B]" : "border-slate-200 dark:border-[#1E293B]"
+            )}>
+              <button
+                onClick={() => toggleTaskDone(task)}
+                className={clsx(
+                  "w-5 h-5 rounded border-2 flex-shrink-0 mt-0.5 flex items-center justify-center transition-colors",
+                  isDone ? "border-[#F97316] bg-[#F97316]/20" : "border-slate-300 dark:border-slate-600 hover:border-[#F97316]"
+                )}
+              >
+                {isDone && <div className="w-2 h-2 rounded-full bg-[#F97316]" />}
+              </button>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className={clsx("text-sm font-semibold text-slate-800 dark:text-slate-200", isDone && "line-through text-slate-400 dark:text-slate-600")}>
+                    {task.title}
+                  </span>
+                  <span className={clsx("px-1.5 py-0.5 rounded text-xs font-bold", TASK_PRIORITY_COLORS[task.priority])}>
+                    {TASK_PRIORITY_LABELS[task.priority]}
+                  </span>
+                  {task.category && (
+                    <span className="px-1.5 py-0.5 rounded text-xs font-semibold bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+                      {task.category}
+                    </span>
+                  )}
+                  {task.due_date && (
+                    <span className={clsx("text-xs font-mono", isOverdue ? "text-red-500 font-bold" : "text-slate-400 dark:text-slate-600")}>
+                      {isOverdue ? "OVERDUE " : ""}{task.due_date}
+                    </span>
+                  )}
+                </div>
+                {task.description && (
+                  <p className="text-xs text-slate-500 dark:text-slate-400">{task.description}</p>
+                )}
+              </div>
+              <button
+                onClick={() => deleteTask(task.id)}
+                className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10 flex-shrink-0"
+                title="Delete task"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
