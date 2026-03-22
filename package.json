@@ -13,6 +13,10 @@
     "shared:build": "npm run build --workspace=packages/shared",
     "setup": "npm install && npm run shared:build"
   },
+  "overrides": {
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
   "devDependencies": {
     "typescript": "^5.4.5"
   }

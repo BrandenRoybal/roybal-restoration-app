@@ -1,14 +1,20 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark, .dark *));
+
+@theme {
+  --color-navy: #0A1628;
+  --color-navy-dark: #0F172A;
+  --color-navy-border: #1E293B;
+  --color-orange: #F97316;
+  --color-orange-hover: #EA6C0C;
+  --color-success: #22C55E;
+  --color-warning: #EAB308;
+  --color-danger: #EF4444;
+  --font-sans: "Inter", system-ui, sans-serif;
+}
 
 @layer base {
-  :root {
-    --color-navy: #0A1628;
-    --color-navy-dark: #0F172A;
-    --color-orange: #F97316;
-  }
-
   * {
     box-sizing: border-box;
   }

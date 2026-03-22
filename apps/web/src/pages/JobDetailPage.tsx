@@ -69,6 +69,7 @@ export default function JobDetailPage() {
   const [magicplanCreating, setMagicplanCreating] = useState(false);
   const [magicplanSyncing, setMagicplanSyncing] = useState(false);
   const [magicplanError, setMagicplanError] = useState("");
+  const [uploadingFloorPlan, setUploadingFloorPlan] = useState(false);
 
   // Photos
   const [photoCategory, setPhotoCategory] = useState<PhotoCategory>("general");
@@ -226,6 +227,34 @@ export default function JobDetailPage() {
     if (data) setJob(data as Job);
     setMagicplanEditing(false);
     setMagicplanSaving(false);
+  };
+
+  // Manual floor plan upload
+  const handleFloorPlanUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !job) return;
+    setUploadingFloorPlan(true);
+    setMagicplanError("");
+    const ext = file.name.split(".").pop();
+    const path = `${job.id}/${crypto.randomUUID()}.${ext}`;
+    const { error: upErr } = await supabase.storage.from("floor-plans").upload(path, file, { upsert: false });
+    if (upErr) {
+      setMagicplanError(`Upload failed: ${upErr.message}`);
+      setUploadingFloorPlan(false);
+      e.target.value = "";
+      return;
+    }
+    const { data: { publicUrl } } = supabase.storage.from("floor-plans").getPublicUrl(path);
+    const fileType = file.type.includes("pdf") ? "pdf" : "image";
+    const nextVersion = (floorPlans[0]?.version ?? 0) + 1;
+    const { data } = await supabase
+      .from("floor_plans")
+      .insert({ job_id: job.id, file_url: publicUrl, file_type: fileType, version: nextVersion, synced_at: new Date().toISOString() })
+      .select()
+      .single();
+    if (data) setFloorPlans((prev) => [data as FloorPlan, ...prev]);
+    setUploadingFloorPlan(false);
+    e.target.value = "";
   };
 
   // Photo upload
@@ -452,7 +481,7 @@ export default function JobDetailPage() {
         element = React.createElement(ScopeInvoiceReport, { job, lineItems, rooms });
         filename = `${job.job_number}-invoice.pdf`;
       }
-      const blob = await pdf(element).toBlob();
+      const blob = await pdf(element as any).toBlob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -1268,6 +1297,16 @@ export default function JobDetailPage() {
                   <p className="text-xs text-slate-600">Floor plans also auto-sync via webhook when exported.</p>
                 </div>
               )}
+              {/* Manual upload — always visible */}
+              <label className={clsx(
+                "flex items-center gap-1.5 text-xs font-bold border px-3 h-8 rounded-lg transition-colors cursor-pointer",
+                uploadingFloorPlan
+                  ? "bg-[#1E293B] border-[#1E293B] text-slate-500 cursor-not-allowed"
+                  : "bg-[#1E293B] border-[#1E293B] text-slate-300 hover:border-[#F97316]/40 hover:text-[#F97316]"
+              )}>
+                {uploadingFloorPlan ? <><RefreshCw size={12} className="animate-spin" /> Uploading…</> : <><Upload size={12} /> Upload File</>}
+                <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleFloorPlanUpload} disabled={uploadingFloorPlan} />
+              </label>
               {magicplanError && (
                 <p className="text-xs text-red-400 mt-2">{magicplanError}</p>
               )}

@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { useAuthStore } from "../store/auth";
-import { CheckCircle, XCircle, Loader } from "lucide-react";
+import { CircleCheck, CircleX, Loader } from "lucide-react";
 
 export default function QBCallbackPage() {
   const navigate = useNavigate();
@@ -78,7 +78,7 @@ export default function QBCallbackPage() {
         )}
         {status === "success" && (
           <>
-            <CheckCircle size={48} className="mx-auto mb-4 text-green-400" />
+            <CircleCheck size={48} className="mx-auto mb-4 text-green-400" />
             <h2 className="text-xl font-bold text-white mb-2">Connected!</h2>
             <p className="text-slate-400 text-sm">{message}</p>
             <p className="text-slate-500 text-xs mt-3">Redirecting to Settings…</p>
@@ -86,7 +86,7 @@ export default function QBCallbackPage() {
         )}
         {status === "error" && (
           <>
-            <XCircle size={48} className="mx-auto mb-4 text-red-400" />
+            <CircleX size={48} className="mx-auto mb-4 text-red-400" />
             <h2 className="text-xl font-bold text-white mb-2">Connection Failed</h2>
             <p className="text-slate-400 text-sm">{message}</p>
             <button
