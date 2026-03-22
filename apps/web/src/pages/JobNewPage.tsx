@@ -88,12 +88,12 @@ export default function JobNewPage() {
   return (
     <div className="p-6 max-w-4xl mx-auto">
       <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="text-slate-400 hover:text-slate-200 transition-colors">
+        <button onClick={() => navigate(-1)} className="text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors">
           <ChevronLeft size={22} />
         </button>
         <div>
-          <h1 className="text-2xl font-bold text-white">New Job</h1>
-          <p className="text-slate-400 text-sm">Create a new restoration job</p>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white">New Job</h1>
+          <p className="text-slate-500 dark:text-slate-400 text-sm">Create a new restoration job</p>
         </div>
       </div>
 
@@ -141,7 +141,7 @@ export default function JobNewPage() {
                 className={`px-4 py-2 rounded-xl text-sm font-bold border transition-colors ${
                   form.loss_type === t.value
                     ? "bg-[#F97316]/15 border-[#F97316] text-[#F97316]"
-                    : "bg-[#0F172A] border-[#1E293B] text-slate-400 hover:text-slate-200"
+                    : "bg-slate-50 dark:bg-[#0F172A] border-slate-200 dark:border-[#1E293B] text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
                 }`}
               >
                 {t.label}
@@ -157,7 +157,7 @@ export default function JobNewPage() {
                 className={`px-4 py-2 rounded-xl text-sm font-bold border transition-colors ${
                   form.loss_category === c.value
                     ? "bg-[#F97316]/15 border-[#F97316] text-[#F97316]"
-                    : "bg-[#0F172A] border-[#1E293B] text-slate-400 hover:text-slate-200"
+                    : "bg-slate-50 dark:bg-[#0F172A] border-slate-200 dark:border-[#1E293B] text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
                 }`}
               >
                 {c.label} — {c.desc}
@@ -199,7 +199,7 @@ export default function JobNewPage() {
             onChange={(e) => set("notes", e.target.value)}
             placeholder="Initial observations, scope notes, emergency contacts…"
             rows={4}
-            className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors resize-none"
+            className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-4 py-3 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors resize-none"
           />
         </FormSection>
 
@@ -224,15 +224,15 @@ export default function JobNewPage() {
 
 function FormSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6">
-      <h3 className="text-sm font-bold text-slate-300 mb-4 pb-3 border-b border-[#1E293B]">{title}</h3>
+    <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-6">
+      <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-4 pb-3 border-b border-slate-200 dark:border-[#1E293B]">{title}</h3>
       {children}
     </div>
   );
 }
 
 function Label({ children }: { children: React.ReactNode }) {
-  return <label className="block text-xs font-semibold text-slate-500 mb-1.5 tracking-wide">{children}</label>;
+  return <label className="block text-xs font-semibold text-slate-400 dark:text-slate-500 mb-1.5 tracking-wide">{children}</label>;
 }
 
 function Input({
@@ -255,7 +255,7 @@ function Input({
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
       required={required}
-      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
+      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
     />
   );
 }

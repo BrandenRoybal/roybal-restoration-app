@@ -28,7 +28,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0F172A] flex items-center justify-center p-4">
+    <div className="min-h-screen bg-slate-50 dark:bg-[#0F172A] flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-10">
@@ -47,17 +47,17 @@ export default function LoginPage() {
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-[#F97316] mb-4">
               <span className="text-[#0F172A] font-black text-2xl">RC</span>
             </div>
-            <h1 className="text-3xl font-black text-white tracking-wider">ROYBAL</h1>
+            <h1 className="text-3xl font-black text-slate-900 dark:text-white tracking-wider">ROYBAL</h1>
             <p className="text-[#F97316] text-xs font-bold tracking-[0.4em] mt-0.5">CONSTRUCTION LLC</p>
           </div>
           <div className="w-12 h-0.5 bg-[#F97316] mx-auto mt-3 rounded-full" />
-          <p className="text-slate-400 text-sm mt-3">Admin Dashboard</p>
+          <p className="text-slate-500 dark:text-slate-400 text-sm mt-3">Admin Dashboard</p>
         </div>
 
         {/* Form */}
         <form
           onSubmit={handleSubmit}
-          className="bg-[#0A1628] rounded-2xl border border-[#1E293B] p-8 space-y-5"
+          className="bg-white dark:bg-[#0A1628] rounded-2xl border border-slate-200 dark:border-[#1E293B] p-8 space-y-5"
         >
           {error && (
             <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3">
@@ -66,7 +66,7 @@ export default function LoginPage() {
           )}
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-2 tracking-wide">
+            <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2 tracking-wide">
               Email
             </label>
             <input
@@ -76,12 +76,12 @@ export default function LoginPage() {
               required
               autoComplete="email"
               placeholder="branden@roybalconstruction.com"
-              className="w-full bg-[#1E293B] border border-[#4A4440] rounded-xl px-4 h-12 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
+              className="w-full bg-slate-100 dark:bg-[#1E293B] border border-slate-300 dark:border-[#4A4440] rounded-xl px-4 h-12 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
             />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 mb-2 tracking-wide">
+            <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2 tracking-wide">
               Password
             </label>
             <input
@@ -91,7 +91,7 @@ export default function LoginPage() {
               required
               autoComplete="current-password"
               placeholder="••••••••"
-              className="w-full bg-[#1E293B] border border-[#4A4440] rounded-xl px-4 h-12 text-slate-100 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
+              className="w-full bg-slate-100 dark:bg-[#1E293B] border border-slate-300 dark:border-[#4A4440] rounded-xl px-4 h-12 text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
             />
           </div>
 
@@ -108,7 +108,7 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <p className="text-center text-slate-600 text-xs mt-6">
+        <p className="text-center text-slate-400 dark:text-slate-600 text-xs mt-6">
           Contact your administrator to reset access.
         </p>
       </div>

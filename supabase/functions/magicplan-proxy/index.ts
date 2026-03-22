@@ -73,18 +73,33 @@ serve(async (req: Request) => {
 
     } else if (action === "getProjectFiles") {
       const res = await mpFetch("GET", `/projects/${projectId}/plan`);
-      result = res.files ?? res.data ?? [];
+      const raw = res.files ?? res.data ?? res ?? [];
+      result = Array.isArray(raw) ? raw : Object.values(raw);
 
     } else if (action === "syncFloorPlan") {
       const res = await mpFetch("GET", `/projects/${projectId}/plan`);
-      const files: Array<{ type: string; url: string; name: string }> = res.files ?? res.data ?? [];
-      const pdfFile = files.find((f) => f.type === "pdf");
-      const imageFile = files.find((f) => f.type === "image");
+      // Flatten whatever structure Magicplan returns into a usable array
+      const rawVal = res.files ?? res.data ?? res ?? [];
+      let files: Array<{ type?: string; url?: string; name?: string }> = [];
+      if (Array.isArray(rawVal)) {
+        files = rawVal;
+      } else if (rawVal !== null && typeof rawVal === "object") {
+        files = Object.values(rawVal) as typeof files;
+      }
+      // Match PDF first, then any image format (png, jpg, svg, etc.)
+      const isPdf = (f: { type?: string; name?: string }) =>
+        f.type === "pdf" || (f.name ?? "").toLowerCase().endsWith(".pdf");
+      const isImage = (f: { type?: string; name?: string }) =>
+        ["image", "png", "jpg", "jpeg", "svg"].includes((f.type ?? "").toLowerCase()) ||
+        /\.(png|jpg|jpeg|svg)$/i.test(f.name ?? "");
+      const pdfFile = files.find(isPdf) ?? null;
+      const imageFile = files.find(isImage) ?? null;
       const best = pdfFile ?? imageFile ?? null;
       result = {
         fileUrl: best?.url ?? null,
-        fileType: best ? (pdfFile ? "pdf" : "image") : null,
+        fileType: pdfFile ? "pdf" : imageFile ? "image" : null,
         allFiles: files,
+        rawResponse: res,
       };
 
     } else {

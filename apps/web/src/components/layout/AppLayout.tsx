@@ -11,9 +11,12 @@ import {
   Menu,
   X,
   BookOpen,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { useState } from "react";
 import { useAuthStore } from "../../store/auth";
+import { useThemeStore } from "../../store/theme";
 import clsx from "clsx";
 
 const NAV_ITEMS = [
@@ -26,6 +29,7 @@ const NAV_ITEMS = [
 export default function AppLayout() {
   const navigate = useNavigate();
   const { profile, signOut } = useAuthStore();
+  const { theme, toggle } = useThemeStore();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const handleSignOut = async () => {
@@ -34,17 +38,17 @@ export default function AppLayout() {
   };
 
   return (
-    <div className="flex h-screen bg-[#0F172A] overflow-hidden">
+    <div className="flex h-screen bg-slate-100 dark:bg-[#0F172A] overflow-hidden">
       {/* Sidebar */}
       <aside
         className={clsx(
-          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 bg-[#0A1628] border-r border-[#1E293B] transition-transform duration-200",
+          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 bg-white dark:bg-[#0A1628] border-r border-slate-200 dark:border-[#1E293B] transition-transform duration-200",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
           "lg:relative lg:translate-x-0"
         )}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-4 py-5 border-b border-[#1E293B]">
+        <div className="flex items-center gap-3 px-4 py-5 border-b border-slate-200 dark:border-[#1E293B]">
           <img
             src="/logo.svg"
             alt="Roybal Construction"
@@ -61,12 +65,12 @@ export default function AppLayout() {
               <span className="text-[#0F172A] font-black text-sm">RC</span>
             </div>
             <div>
-              <p className="text-white font-bold text-sm leading-tight">Roybal</p>
+              <p className="text-slate-900 dark:text-white font-bold text-sm leading-tight">Roybal</p>
               <p className="text-[#F97316] text-xs font-semibold leading-tight tracking-widest">CONSTRUCTION</p>
             </div>
           </div>
           <button
-            className="ml-auto lg:hidden text-slate-400"
+            className="ml-auto lg:hidden text-slate-500 dark:text-slate-400"
             onClick={() => setSidebarOpen(false)}
           >
             <X size={18} />
@@ -85,7 +89,7 @@ export default function AppLayout() {
                   "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors",
                   isActive
                     ? "bg-[#F97316]/15 text-[#F97316]"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-[#1E293B]"
+                    : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1E293B]"
                 )
               }
             >
@@ -96,7 +100,7 @@ export default function AppLayout() {
         </nav>
 
         {/* Profile + Sign out */}
-        <div className="border-t border-[#1E293B] p-4">
+        <div className="border-t border-slate-200 dark:border-[#1E293B] p-4">
           <div className="flex items-center gap-3 mb-3">
             <div className="w-8 h-8 rounded-full bg-[#F97316] flex items-center justify-center flex-shrink-0">
               <span className="text-[#0F172A] font-bold text-sm">
@@ -104,15 +108,22 @@ export default function AppLayout() {
               </span>
             </div>
             <div className="min-w-0">
-              <p className="text-sm font-semibold text-slate-200 truncate">
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 truncate">
                 {profile?.full_name ?? "Loading…"}
               </p>
-              <p className="text-xs text-slate-500 capitalize">{profile?.role ?? ""}</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500 capitalize">{profile?.role ?? ""}</p>
             </div>
           </div>
           <button
+            onClick={toggle}
+            className="flex items-center gap-2 w-full text-sm text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors px-2 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-[#1E293B] mb-1"
+          >
+            {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            {theme === "dark" ? "Light Mode" : "Dark Mode"}
+          </button>
+          <button
             onClick={handleSignOut}
-            className="flex items-center gap-2 w-full text-sm text-slate-400 hover:text-red-400 transition-colors px-2 py-1.5 rounded-lg hover:bg-red-500/10"
+            className="flex items-center gap-2 w-full text-sm text-slate-500 dark:text-slate-400 hover:text-red-400 transition-colors px-2 py-1.5 rounded-lg hover:bg-red-500/10"
           >
             <LogOut size={16} />
             Sign Out
@@ -131,14 +142,14 @@ export default function AppLayout() {
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Mobile topbar */}
-        <header className="lg:hidden flex items-center gap-3 px-4 py-3 bg-[#0A1628] border-b border-[#1E293B]">
+        <header className="lg:hidden flex items-center gap-3 px-4 py-3 bg-white dark:bg-[#0A1628] border-b border-slate-200 dark:border-[#1E293B]">
           <button
             onClick={() => setSidebarOpen(true)}
-            className="text-slate-400 hover:text-slate-200"
+            className="text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
           >
             <Menu size={22} />
           </button>
-          <span className="text-white font-bold">Roybal Construction</span>
+          <span className="text-slate-900 dark:text-white font-bold">Roybal Construction</span>
         </header>
 
         <main className="flex-1 overflow-y-auto">

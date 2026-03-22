@@ -94,13 +94,13 @@ export default function SettingsPage() {
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold text-white mb-6">Settings</h1>
+      <h1 className="text-2xl font-bold text-slate-900 dark:text-white mb-6">Settings</h1>
 
       {/* Company Info */}
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6 mb-6">
+      <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-6 mb-6">
         <div className="flex items-center gap-2 mb-4">
           <Building2 size={18} className="text-[#F97316]" />
-          <h2 className="text-base font-bold text-white">Company</h2>
+          <h2 className="text-base font-bold text-slate-900 dark:text-white">Company</h2>
         </div>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <InfoPair label="Company" value="Roybal Construction, LLC" />
@@ -113,40 +113,40 @@ export default function SettingsPage() {
       {myProfile?.role === "admin" && (
         <>
           {/* Invite new user */}
-          <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6 mb-6">
+          <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-6 mb-6">
             <div className="flex items-center gap-2 mb-4">
               <UserPlus size={18} className="text-[#F97316]" />
-              <h2 className="text-base font-bold text-white">Invite User</h2>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">Invite User</h2>
             </div>
 
             <form onSubmit={handleInvite} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5 tracking-wide">Full Name</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 tracking-wide">Full Name</label>
                   <input
                     type="text"
                     value={inviteName}
                     onChange={(e) => setInviteName(e.target.value)}
                     placeholder="John Smith"
-                    className="w-full bg-[#211B17] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#F97316] transition-colors"
+                    className="w-full bg-slate-50 dark:bg-[#211B17] border border-slate-200 dark:border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-[#F97316] transition-colors"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1.5 tracking-wide">Email *</label>
+                  <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5 tracking-wide">Email *</label>
                   <input
                     type="email"
                     value={inviteEmail}
                     onChange={(e) => setInviteEmail(e.target.value)}
                     placeholder="tech@roybalconstruction.com"
                     required
-                    className="w-full bg-[#211B17] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#F97316] transition-colors"
+                    className="w-full bg-slate-50 dark:bg-[#211B17] border border-slate-200 dark:border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-[#F97316] transition-colors"
                   />
                 </div>
               </div>
 
               {/* Role selector */}
               <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-2 tracking-wide">Access Level</label>
+                <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-2 tracking-wide">Access Level</label>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   {(Object.keys(ROLE_LABELS) as Role[]).map((r) => (
                     <button
@@ -156,11 +156,11 @@ export default function SettingsPage() {
                       className={`text-left p-3 rounded-xl border transition-colors ${
                         inviteRole === r
                           ? "border-[#F97316] bg-[#F97316]/10"
-                          : "border-[#1E293B] bg-[#211B17] hover:border-[#4A4440]"
+                          : "border-slate-200 dark:border-[#1E293B] bg-slate-50 dark:bg-[#211B17] hover:border-slate-300 dark:hover:border-[#4A4440]"
                       }`}
                     >
                       <p className="text-sm font-bold" style={{ color: ROLE_COLORS[r] }}>{ROLE_LABELS[r]}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{ROLE_DESCRIPTIONS[r]}</p>
+                      <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{ROLE_DESCRIPTIONS[r]}</p>
                     </button>
                   ))}
                 </div>
@@ -193,26 +193,26 @@ export default function SettingsPage() {
           </div>
 
           {/* Existing users */}
-          <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6 mb-6">
+          <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-6 mb-6">
             <div className="flex items-center gap-2 mb-4">
               <Users size={18} className="text-[#F97316]" />
-              <h2 className="text-base font-bold text-white">Users</h2>
-              <span className="ml-auto text-xs text-slate-500">{users.length} total</span>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">Users</h2>
+              <span className="ml-auto text-xs text-slate-400 dark:text-slate-500">{users.length} total</span>
             </div>
             {loading ? (
-              <p className="text-slate-500 text-sm">Loading…</p>
+              <p className="text-slate-400 dark:text-slate-500 text-sm">Loading…</p>
             ) : users.length === 0 ? (
-              <p className="text-slate-500 text-sm">No users yet.</p>
+              <p className="text-slate-400 dark:text-slate-500 text-sm">No users yet.</p>
             ) : (
               <div className="space-y-2">
                 {users.map((u) => (
-                  <div key={u.id} className="flex items-center gap-3 bg-[#211B17] rounded-xl p-3 border border-[#1E293B]">
+                  <div key={u.id} className="flex items-center gap-3 bg-slate-50 dark:bg-[#211B17] rounded-xl p-3 border border-slate-200 dark:border-[#1E293B]">
                     <div className="w-9 h-9 rounded-full bg-[#F97316] flex items-center justify-center flex-shrink-0">
                       <span className="text-[#0F172A] font-bold text-sm">{(u.full_name[0] ?? "?").toUpperCase()}</span>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold text-slate-200">{u.full_name}</p>
-                      {u.phone && <p className="text-xs text-slate-500">{u.phone}</p>}
+                      <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">{u.full_name}</p>
+                      {u.phone && <p className="text-xs text-slate-400 dark:text-slate-500">{u.phone}</p>}
                     </div>
 
                     {/* Role — editable */}
@@ -235,7 +235,7 @@ export default function SettingsPage() {
                         ))}
                         <button
                           onClick={() => setEditingRole(null)}
-                          className="ml-1 text-slate-500 hover:text-slate-300"
+                          className="ml-1 text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                         >
                           <X size={14} />
                         </button>
@@ -262,12 +262,12 @@ export default function SettingsPage() {
       )}
 
       {/* Security */}
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6">
+      <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-6">
         <div className="flex items-center gap-2 mb-3">
           <ShieldCheck size={18} className="text-[#22C55E]" />
-          <h2 className="text-base font-bold text-white">Security</h2>
+          <h2 className="text-base font-bold text-slate-900 dark:text-white">Security</h2>
         </div>
-        <p className="text-sm text-slate-400 leading-relaxed">
+        <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
           Row Level Security is enforced on all tables. Field technicians can only view and edit
           jobs they are assigned to. Admins have full access. Service role keys are never exposed
           to the frontend.
@@ -280,8 +280,8 @@ export default function SettingsPage() {
 function InfoPair({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-xs font-semibold text-slate-500 mb-0.5">{label}</p>
-      <p className="text-sm text-slate-300 font-medium">{value}</p>
+      <p className="text-xs font-semibold text-slate-400 dark:text-slate-500 mb-0.5">{label}</p>
+      <p className="text-sm text-slate-700 dark:text-slate-300 font-medium">{value}</p>
     </div>
   );
 }

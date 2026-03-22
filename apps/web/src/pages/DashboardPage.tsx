@@ -112,8 +112,8 @@ export default function DashboardPage() {
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-white">Dashboard</h1>
-        <p className="text-slate-400 text-sm mt-1">Roybal Construction LLC — Field Operations</p>
+        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Dashboard</h1>
+        <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">Roybal Construction LLC — Field Operations</p>
       </div>
 
       {/* KPI Cards */}
@@ -121,7 +121,7 @@ export default function DashboardPage() {
         {kpis.map((kpi) => (
           <div
             key={kpi.label}
-            className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4"
+            className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-4"
           >
             <div
               className="w-9 h-9 rounded-xl flex items-center justify-center mb-3"
@@ -129,9 +129,9 @@ export default function DashboardPage() {
             >
               <kpi.icon size={18} style={{ color: kpi.color }} />
             </div>
-            <p className="text-2xl font-black text-white">{kpi.value}</p>
-            <p className="text-xs font-semibold text-slate-400 mt-0.5">{kpi.label}</p>
-            {kpi.sub && <p className="text-xs text-slate-600 mt-0.5">{kpi.sub}</p>}
+            <p className="text-2xl font-black text-slate-900 dark:text-white">{kpi.value}</p>
+            <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-0.5">{kpi.label}</p>
+            {kpi.sub && <p className="text-xs text-slate-400 dark:text-slate-600 mt-0.5">{kpi.sub}</p>}
           </div>
         ))}
       </div>
@@ -139,62 +139,68 @@ export default function DashboardPage() {
       {/* Job Pipeline */}
       <div className="mb-6 flex items-center gap-2">
         <TrendingUp size={18} className="text-[#F97316]" />
-        <h2 className="text-lg font-bold text-white">Active Pipeline</h2>
+        <h2 className="text-lg font-bold text-slate-900 dark:text-white">Active Pipeline</h2>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-        {pipeline.map(({ status, jobs: statusJobs }) => (
-          <div key={status} className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <span
-                className="w-2.5 h-2.5 rounded-full"
-                style={{ backgroundColor: STATUS_COLORS[status] }}
-              />
-              <span className="text-xs font-bold text-slate-300">
-                {JOB_STATUS_LABELS[status]}
-              </span>
-              <span
-                className="ml-auto text-xs font-bold px-2 py-0.5 rounded-full"
-                style={{
-                  backgroundColor: STATUS_COLORS[status] + "22",
-                  color: STATUS_COLORS[status],
-                }}
-              >
-                {statusJobs.length}
-              </span>
-            </div>
+      {loading ? (
+        <div className="flex h-32 items-center justify-center">
+          <div className="w-6 h-6 border-2 border-[#F97316] border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+          {pipeline.map(({ status, jobs: statusJobs }) => (
+            <div key={status} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <span
+                  className="w-2.5 h-2.5 rounded-full"
+                  style={{ backgroundColor: STATUS_COLORS[status] }}
+                />
+                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                  {JOB_STATUS_LABELS[status]}
+                </span>
+                <span
+                  className="ml-auto text-xs font-bold px-2 py-0.5 rounded-full"
+                  style={{
+                    backgroundColor: STATUS_COLORS[status] + "22",
+                    color: STATUS_COLORS[status],
+                  }}
+                >
+                  {statusJobs.length}
+                </span>
+              </div>
 
-            <div className="space-y-2">
-              {statusJobs.slice(0, 4).map((job) => (
-                <button
-                  key={job.id}
-                  onClick={() => navigate(`/jobs/${job.id}`)}
-                  className="w-full text-left bg-[#0F172A] rounded-xl p-3 border border-[#1E293B] hover:border-[#F97316]/40 transition-colors group"
-                >
-                  <p className="text-xs font-bold text-slate-300 truncate group-hover:text-white">
-                    {job.property_address}
-                  </p>
-                  <p className="text-xs text-slate-600 mt-0.5">{job.job_number}</p>
-                  {job.date_of_loss && (
-                    <p className="text-xs text-slate-600">DOL: {formatAlaskaDate(job.date_of_loss)}</p>
-                  )}
-                </button>
-              ))}
-              {statusJobs.length > 4 && (
-                <button
-                  onClick={() => navigate(`/jobs?status=${status}`)}
-                  className="flex items-center gap-1 text-xs text-[#F97316] hover:underline w-full px-1"
-                >
-                  +{statusJobs.length - 4} more <ChevronRight size={12} />
-                </button>
-              )}
-              {statusJobs.length === 0 && (
-                <p className="text-xs text-slate-700 px-1">No jobs</p>
-              )}
+              <div className="space-y-2">
+                {statusJobs.slice(0, 4).map((job) => (
+                  <button
+                    key={job.id}
+                    onClick={() => navigate(`/jobs/${job.id}`)}
+                    className="w-full text-left bg-slate-50 dark:bg-[#0F172A] rounded-xl p-3 border border-slate-200 dark:border-[#1E293B] hover:border-[#F97316]/40 transition-colors group"
+                  >
+                    <p className="text-xs font-bold text-slate-700 dark:text-slate-300 truncate group-hover:text-slate-900 dark:group-hover:text-white">
+                      {job.property_address}
+                    </p>
+                    <p className="text-xs text-slate-400 dark:text-slate-600 mt-0.5">{job.job_number}</p>
+                    {job.date_of_loss && (
+                      <p className="text-xs text-slate-400 dark:text-slate-600">DOL: {formatAlaskaDate(job.date_of_loss)}</p>
+                    )}
+                  </button>
+                ))}
+                {statusJobs.length > 4 && (
+                  <button
+                    onClick={() => navigate(`/jobs?status=${status}`)}
+                    className="flex items-center gap-1 text-xs text-[#F97316] hover:underline w-full px-1"
+                  >
+                    +{statusJobs.length - 4} more <ChevronRight size={12} />
+                  </button>
+                )}
+                {statusJobs.length === 0 && (
+                  <p className="text-xs text-slate-400 dark:text-slate-700 px-1">No jobs</p>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

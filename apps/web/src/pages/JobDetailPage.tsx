@@ -95,26 +95,26 @@ function ItemSelect({ value, onChange, storageKey, defaults, placeholder }: {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm focus:outline-none focus:border-[#F97316] hover:border-[#4A4440] transition-colors"
+        className="w-full flex items-center justify-between bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm focus:outline-none focus:border-[#F97316] hover:border-slate-400 dark:hover:border-[#4A4440] transition-colors"
       >
-        <span className={value ? "text-slate-200" : "text-slate-500"}>{value || placeholder || "Select…"}</span>
-        <ChevronDown size={14} className="text-slate-500 flex-shrink-0" />
+        <span className={value ? "text-slate-800 dark:text-slate-200" : "text-slate-400 dark:text-slate-500"}>{value || placeholder || "Select…"}</span>
+        <ChevronDown size={14} className="text-slate-400 dark:text-slate-500 flex-shrink-0" />
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full bg-[#0A1628] border border-[#1E293B] rounded-xl shadow-xl overflow-hidden">
+        <div className="absolute z-50 mt-1 w-full bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl shadow-xl overflow-hidden">
           <div className="max-h-52 overflow-y-auto">
             {items.map((item) => (
               <div
                 key={item}
-                className={`flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#F97316]/10 group ${value === item ? "bg-[#F97316]/15 text-[#F97316]" : "text-slate-200"}`}
+                className={`flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-[#F97316]/10 group ${value === item ? "bg-[#F97316]/15 text-[#F97316]" : "text-slate-800 dark:text-slate-200"}`}
                 onClick={() => { onChange(item); setOpen(false); }}
               >
                 <span className="text-sm">{item}</span>
                 <button
                   type="button"
                   onClick={(e) => deleteItem(item, e)}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded text-slate-500 hover:text-red-400"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded text-slate-400 dark:text-slate-500 hover:text-red-400"
                 >
                   <X size={12} />
                 </button>
@@ -122,7 +122,7 @@ function ItemSelect({ value, onChange, storageKey, defaults, placeholder }: {
             ))}
           </div>
 
-          <div className="border-t border-[#1E293B] p-2">
+          <div className="border-t border-slate-200 dark:border-[#1E293B] p-2">
             {adding ? (
               <div className="flex gap-1.5">
                 <input
@@ -132,10 +132,10 @@ function ItemSelect({ value, onChange, storageKey, defaults, placeholder }: {
                   onChange={(e) => setNewItem(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") addItem(); if (e.key === "Escape") { setAdding(false); setNewItem(""); } }}
                   placeholder="New item…"
-                  className="flex-1 bg-[#0F172A] border border-[#F97316]/50 rounded-lg px-2 h-7 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#F97316]"
+                  className="flex-1 bg-slate-50 dark:bg-[#0F172A] border border-[#F97316]/50 rounded-lg px-2 h-7 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-[#F97316]"
                 />
                 <button type="button" onClick={addItem} className="px-2 h-7 rounded-lg bg-[#F97316] text-[#0F172A] text-xs font-bold">Add</button>
-                <button type="button" onClick={() => { setAdding(false); setNewItem(""); }} className="px-2 h-7 rounded-lg text-slate-400 text-xs">✕</button>
+                <button type="button" onClick={() => { setAdding(false); setNewItem(""); }} className="px-2 h-7 rounded-lg text-slate-500 dark:text-slate-400 text-xs">✕</button>
               </div>
             ) : (
               <button
@@ -168,7 +168,19 @@ const mpProxy = async (action: string, params: Record<string, unknown> = {}) => 
   const { data, error } = await supabase.functions.invoke("magicplan-proxy", {
     body: { action, ...params },
   });
-  if (error) throw new Error(error.message ?? "Magicplan proxy error");
+  if (error) {
+    // Try to extract the real error body from the gateway response
+    let detail = error.message ?? "Magicplan proxy error";
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const ctx = (error as any).context;
+      if (ctx?.json) {
+        const body = await ctx.json();
+        detail = body?.error ?? body?.message ?? JSON.stringify(body);
+      }
+    } catch { /* ignore */ }
+    throw new Error(detail);
+  }
   if (!data.ok) throw new Error(data.error ?? "Magicplan proxy error");
   return data.data;
 };
@@ -558,14 +570,14 @@ export default function JobDetailPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="bg-[#0A1628] border-b border-[#1E293B] px-6 py-4">
+      <div className="bg-white dark:bg-[#0A1628] border-b border-slate-200 dark:border-[#1E293B] px-6 py-4">
         <div className="flex items-start gap-4 flex-wrap">
-          <button onClick={() => navigate("/jobs")} className="text-slate-400 hover:text-slate-200 mt-0.5">
+          <button onClick={() => navigate("/jobs")} className="text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 mt-0.5">
             <ChevronLeft size={22} />
           </button>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-xs font-mono text-slate-500">{job.job_number}</span>
+              <span className="text-xs font-mono text-slate-400 dark:text-slate-500">{job.job_number}</span>
 
               {/* Status toggle — all 6 statuses */}
               <div className="flex items-center gap-1 flex-wrap">
@@ -604,7 +616,7 @@ export default function JobDetailPage() {
                   </button>
                   <button
                     onClick={() => setConfirmDelete(false)}
-                    className="text-xs font-bold text-slate-400 hover:text-slate-200"
+                    className="text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
                   >
                     Cancel
                   </button>
@@ -612,15 +624,15 @@ export default function JobDetailPage() {
               ) : (
                 <button
                   onClick={() => setConfirmDelete(true)}
-                  className="flex items-center gap-1 text-xs text-slate-600 hover:text-red-400 transition-colors ml-2"
+                  className="flex items-center gap-1 text-xs text-slate-400 dark:text-slate-600 hover:text-red-400 transition-colors ml-2"
                   title="Delete job"
                 >
                   <Trash2 size={13} />
                 </button>
               )}
             </div>
-            <h1 className="text-xl font-bold text-white mt-1 truncate">{job.property_address}</h1>
-            <p className="text-sm text-slate-400">
+            <h1 className="text-xl font-bold text-slate-900 dark:text-white mt-1 truncate">{job.property_address}</h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
               {job.loss_type?.toUpperCase()} {job.loss_category ? `· ${job.loss_category.toUpperCase()}` : ""}
               {job.date_of_loss ? ` · DOL: ${formatAlaskaDate(job.date_of_loss)}` : ""}
             </p>
@@ -637,7 +649,7 @@ export default function JobDetailPage() {
                 "px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors",
                 activeTab === tab.key
                   ? "bg-[#F97316]/15 text-[#F97316]"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-[#1E293B]"
+                  : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1E293B]"
               )}
             >
               {tab.label}
@@ -670,37 +682,37 @@ export default function JobDetailPage() {
             <InfoCard title="Rooms">
               <div className="space-y-1 mb-3">
                 {rooms.length === 0 ? (
-                  <p className="text-slate-600 text-sm">No rooms yet — add them below.</p>
+                  <p className="text-slate-400 dark:text-slate-600 text-sm">No rooms yet — add them below.</p>
                 ) : rooms.map((r) => (
                   <div key={r.id} className="flex items-center gap-2 text-sm">
                     <span className={clsx("w-2 h-2 rounded-full flex-shrink-0", r.affected ? "bg-[#EF4444]" : "bg-[#22C55E]")} />
-                    <span className="text-slate-200 flex-1">{r.name}</span>
-                    <span className="text-slate-500 text-xs">{r.floor_level}</span>
+                    <span className="text-slate-800 dark:text-slate-200 flex-1">{r.name}</span>
+                    <span className="text-slate-400 dark:text-slate-500 text-xs">{r.floor_level}</span>
                   </div>
                 ))}
               </div>
 
               {showRoomForm ? (
-                <div className="border-t border-[#1E293B] pt-3 space-y-2">
+                <div className="border-t border-slate-200 dark:border-[#1E293B] pt-3 space-y-2">
                   <input
                     type="text"
                     placeholder="Room name (e.g. Living Room)"
                     value={roomForm.name}
                     onChange={(e) => setRoomForm((f) => ({ ...f, name: e.target.value }))}
                     autoFocus
-                    className="w-full bg-[#0F172A] border border-[#1E293B] rounded-lg px-3 h-8 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]"
+                    className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-lg px-3 h-8 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]"
                   />
                   <div className="flex gap-2">
                     <select
                       value={roomForm.floor_level}
                       onChange={(e) => setRoomForm((f) => ({ ...f, floor_level: e.target.value }))}
-                      className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 h-8 text-xs text-slate-200 focus:outline-none focus:border-[#F97316]"
+                      className="flex-1 bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-lg px-2 h-8 text-xs text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]"
                     >
                       {["Basement", "Main", "Upper", "Attic", "Crawlspace"].map((l) => (
                         <option key={l} value={l}>{l}</option>
                       ))}
                     </select>
-                    <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+                    <label className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={roomForm.affected}
@@ -719,7 +731,7 @@ export default function JobDetailPage() {
                       {savingRoom ? <RefreshCw size={11} className="animate-spin" /> : <Plus size={11} />}
                       Add
                     </button>
-                    <button onClick={() => setShowRoomForm(false)} className="text-xs text-slate-500 hover:text-slate-300">Cancel</button>
+                    <button onClick={() => setShowRoomForm(false)} className="text-xs text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">Cancel</button>
                   </div>
                 </div>
               ) : (
@@ -743,7 +755,7 @@ export default function JobDetailPage() {
           <div className="max-w-5xl">
             {/* Add reading button */}
             <div className="flex items-center justify-between mb-4">
-              <p className="text-slate-400 text-sm">{moisture.length} reading{moisture.length !== 1 ? "s" : ""}</p>
+              <p className="text-slate-500 dark:text-slate-400 text-sm">{moisture.length} reading{moisture.length !== 1 ? "s" : ""}</p>
               <button
                 onClick={() => setShowMoistureForm((v) => !v)}
                 className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
@@ -754,43 +766,43 @@ export default function JobDetailPage() {
 
             {/* Inline form */}
             {showMoistureForm && (
-              <div className="bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
-                <h3 className="text-sm font-bold text-slate-300 mb-4">New Moisture Reading</h3>
+              <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-4">New Moisture Reading</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Date</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Date</label>
                     <input type="date" value={moistureForm.reading_date} onChange={(e) => setMoistureForm((f) => ({ ...f, reading_date: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Room *</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Room *</label>
                     {rooms.length === 0 ? (
                       <button onClick={() => { setShowMoistureForm(false); setActiveTab("overview"); setShowRoomForm(true); }}
-                        className="w-full bg-[#0F172A] border border-[#F97316]/40 rounded-xl px-3 h-9 text-xs text-[#F97316] text-left hover:bg-[#F97316]/10 transition-colors">
+                        className="w-full bg-white dark:bg-[#0F172A] border border-[#F97316]/40 rounded-xl px-3 h-9 text-xs text-[#F97316] text-left hover:bg-[#F97316]/10 transition-colors">
                         + Add rooms in Overview tab first
                       </button>
                     ) : (
                       <select value={moistureForm.room_id} onChange={(e) => setMoistureForm((f) => ({ ...f, room_id: e.target.value }))}
-                        className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                        className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
                         <option value="">Select room…</option>
                         {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                       </select>
                     )}
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Moisture % *</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Moisture % *</label>
                     <input type="number" min="0" max="100" step="0.1" placeholder="e.g. 18.5" value={moistureForm.moisture_pct}
                       onChange={(e) => setMoistureForm((f) => ({ ...f, moisture_pct: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Location</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Location</label>
                     <input type="text" placeholder="e.g. NW corner, baseboard" value={moistureForm.location_description}
                       onChange={(e) => setMoistureForm((f) => ({ ...f, location_description: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Material</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Material</label>
                     <ItemSelect
                       value={moistureForm.material_type}
                       onChange={(v) => setMoistureForm((f) => ({ ...f, material_type: v }))}
@@ -806,32 +818,32 @@ export default function JobDetailPage() {
                     {savingMoisture ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
                     {savingMoisture ? "Saving…" : "Save Reading"}
                   </button>
-                  <button onClick={() => setShowMoistureForm(false)} className="text-sm text-slate-500 hover:text-slate-300 px-3">Cancel</button>
+                  <button onClick={() => setShowMoistureForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
                 </div>
               </div>
             )}
 
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+            <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#1E293B]">
+                    <tr className="border-b border-slate-200 dark:border-[#1E293B]">
                       {["Date", "Room", "Location", "Material", "Reading", "Status", ""].map((h) => (
-                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
+                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {moisture.length === 0 ? (
-                      <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No readings yet — click Add Reading above.</td></tr>
+                      <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-400 dark:text-slate-600">No readings yet — click Add Reading above.</td></tr>
                     ) : moisture.map((m) => {
                       const status = getMoistureStatus(m.moisture_pct, m.material_type);
                       return (
-                        <tr key={m.id} className="border-b border-[#1E293B]/50 group">
-                          <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(m.reading_date)}</td>
-                          <td className="px-4 py-3 text-slate-300">{roomMap[m.room_id] ?? "—"}</td>
-                          <td className="px-4 py-3 text-slate-300">{m.location_description}</td>
-                          <td className="px-4 py-3 text-slate-400">{m.material_type}</td>
+                        <tr key={m.id} className="border-b border-slate-200/50 dark:border-[#1E293B]/50 group">
+                          <td className="px-4 py-3 text-slate-500 dark:text-slate-400 text-xs">{formatAlaskaDate(m.reading_date)}</td>
+                          <td className="px-4 py-3 text-slate-700 dark:text-slate-300">{roomMap[m.room_id] ?? "—"}</td>
+                          <td className="px-4 py-3 text-slate-700 dark:text-slate-300">{m.location_description}</td>
+                          <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{m.material_type}</td>
                           <td className="px-4 py-3 font-mono font-bold" style={{ color: MOISTURE_COLORS[status] }}>{m.moisture_pct}%</td>
                           <td className="px-4 py-3">
                             <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ backgroundColor: MOISTURE_COLORS[status] + "22", color: MOISTURE_COLORS[status] }}>
@@ -841,7 +853,7 @@ export default function JobDetailPage() {
                           <td className="px-4 py-3">
                             <button
                               onClick={() => deleteMoistureReading(m.id)}
-                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10"
                               title="Delete reading"
                             >
                               <Trash2 size={14} />
@@ -861,7 +873,7 @@ export default function JobDetailPage() {
           <div className="max-w-5xl">
             {/* Add equipment button */}
             <div className="flex items-center justify-between mb-4">
-              <p className="text-slate-400 text-sm">{equipment.filter((e) => !e.date_removed).length} active · {equipment.filter((e) => e.date_removed).length} removed</p>
+              <p className="text-slate-500 dark:text-slate-400 text-sm">{equipment.filter((e) => !e.date_removed).length} active · {equipment.filter((e) => e.date_removed).length} removed</p>
               <button
                 onClick={() => setShowEquipForm((v) => !v)}
                 className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
@@ -872,11 +884,11 @@ export default function JobDetailPage() {
 
             {/* Inline form */}
             {showEquipForm && (
-              <div className="bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
-                <h3 className="text-sm font-bold text-slate-300 mb-4">Log Equipment Placement</h3>
+              <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-4">Log Equipment Placement</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Type *</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Type *</label>
                     <ItemSelect
                       value={equipForm.equipment_type ? (EQUIPMENT_TYPE_LABELS[equipForm.equipment_type] ?? equipForm.equipment_type) : ""}
                       onChange={(v) => {
@@ -890,7 +902,7 @@ export default function JobDetailPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Name *</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Name *</label>
                     <ItemSelect
                       value={equipForm.equipment_name}
                       onChange={(v) => setEquipForm((f) => ({ ...f, equipment_name: v }))}
@@ -900,23 +912,23 @@ export default function JobDetailPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Asset #</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Asset #</label>
                     <input type="text" placeholder="e.g. RC-042" value={equipForm.asset_number}
                       onChange={(e) => setEquipForm((f) => ({ ...f, asset_number: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Room</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Room</label>
                     <select value={equipForm.room_id} onChange={(e) => setEquipForm((f) => ({ ...f, room_id: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
                       <option value="">{rooms.length === 0 ? "No rooms — add in Overview" : "No room"}</option>
                       {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-500 mb-1">Date Placed</label>
+                    <label className="block text-xs text-slate-400 dark:text-slate-500 mb-1">Date Placed</label>
                     <input type="date" value={equipForm.date_placed} onChange={(e) => setEquipForm((f) => ({ ...f, date_placed: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]" />
                   </div>
                 </div>
                 <div className="flex gap-3">
@@ -925,49 +937,49 @@ export default function JobDetailPage() {
                     {savingEquip ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
                     {savingEquip ? "Saving…" : "Log Equipment"}
                   </button>
-                  <button onClick={() => setShowEquipForm(false)} className="text-sm text-slate-500 hover:text-slate-300 px-3">Cancel</button>
+                  <button onClick={() => setShowEquipForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
                 </div>
               </div>
             )}
 
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+            <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#1E293B]">
+                    <tr className="border-b border-slate-200 dark:border-[#1E293B]">
                       {["Equipment", "Asset #", "Room", "Placed", "Removed", "Days", ""].map((h) => (
-                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
+                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {equipment.length === 0 ? (
-                      <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No equipment logged — click Log Equipment above.</td></tr>
+                      <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-400 dark:text-slate-600">No equipment logged — click Log Equipment above.</td></tr>
                     ) : equipment.map((e) => (
-                      <tr key={e.id} className="border-b border-[#1E293B]/50 group">
+                      <tr key={e.id} className="border-b border-slate-200/50 dark:border-[#1E293B]/50 group">
                         <td className="px-4 py-3">
-                          <p className="text-slate-200 font-semibold">{e.equipment_name}</p>
-                          <p className="text-slate-500 text-xs">{EQUIPMENT_TYPE_LABELS[e.equipment_type]}</p>
+                          <p className="text-slate-800 dark:text-slate-200 font-semibold">{e.equipment_name}</p>
+                          <p className="text-slate-400 dark:text-slate-500 text-xs">{EQUIPMENT_TYPE_LABELS[e.equipment_type]}</p>
                         </td>
-                        <td className="px-4 py-3 text-slate-400 font-mono text-xs">{e.asset_number ?? "—"}</td>
-                        <td className="px-4 py-3 text-slate-400">{e.room_id ? (roomMap[e.room_id] ?? "—") : "—"}</td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(e.date_placed)}</td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#F97316] font-semibold">Active</span>}</td>
-                        <td className="px-4 py-3 font-bold text-slate-200">{e.days_on_site}</td>
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 font-mono text-xs">{e.asset_number ?? "—"}</td>
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{e.room_id ? (roomMap[e.room_id] ?? "—") : "—"}</td>
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 text-xs">{formatAlaskaDate(e.date_placed)}</td>
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#F97316] font-semibold">Active</span>}</td>
+                        <td className="px-4 py-3 font-bold text-slate-800 dark:text-slate-200">{e.days_on_site}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1">
                             {!e.date_removed && (
                               <button
                                 onClick={() => removeEquipment(e.id)}
                                 disabled={removingEquip === e.id}
-                                className="text-xs font-bold text-slate-500 hover:text-amber-400 border border-[#1E293B] hover:border-amber-500/30 px-2 py-1 rounded-lg transition-colors disabled:opacity-50"
+                                className="text-xs font-bold text-slate-500 dark:text-slate-500 hover:text-amber-400 border border-slate-200 dark:border-[#1E293B] hover:border-amber-500/30 px-2 py-1 rounded-lg transition-colors disabled:opacity-50"
                               >
                                 {removingEquip === e.id ? "…" : "Remove"}
                               </button>
                             )}
                             <button
                               onClick={() => deleteEquipmentLog(e.id)}
-                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10"
                               title="Delete log entry"
                             >
                               <Trash2 size={14} />
@@ -987,7 +999,7 @@ export default function JobDetailPage() {
           <div className="max-w-5xl">
             {/* Add line item button */}
             <div className="flex items-center justify-between mb-4">
-              <p className="text-slate-400 text-sm">{lineItems.length} item{lineItems.length !== 1 ? "s" : ""} · Total: <span className="text-white font-bold">{centsToDisplay(totalCents)}</span></p>
+              <p className="text-slate-500 dark:text-slate-400 text-sm">{lineItems.length} item{lineItems.length !== 1 ? "s" : ""} · Total: <span className="text-slate-900 dark:text-white font-bold">{centsToDisplay(totalCents)}</span></p>
               <button
                 onClick={() => setShowScopeForm((v) => !v)}
                 className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
@@ -998,93 +1010,93 @@ export default function JobDetailPage() {
 
             {/* Inline form */}
             {showScopeForm && (
-              <div className="bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
-                <p className="text-sm font-bold text-slate-200 mb-4">New Line Item</p>
+              <div className="bg-white dark:bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+                <p className="text-sm font-bold text-slate-800 dark:text-slate-200 mb-4">New Line Item</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
                   <div>
-                    <label className="text-xs text-slate-500 mb-1 block">Category</label>
+                    <label className="text-xs text-slate-400 dark:text-slate-500 mb-1 block">Category</label>
                     <select value={scopeForm.category} onChange={(e) => setScopeForm((f) => ({ ...f, category: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
                       {["demo","dry","equip","labor","material","disposal","other"].map((c) => (
                         <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
                       ))}
                     </select>
                   </div>
                   <div className="col-span-2 sm:col-span-2">
-                    <label className="text-xs text-slate-500 mb-1 block">Description *</label>
+                    <label className="text-xs text-slate-400 dark:text-slate-500 mb-1 block">Description *</label>
                     <input type="text" placeholder="e.g. Carpet removal and disposal" value={scopeForm.description}
                       onChange={(e) => setScopeForm((f) => ({ ...f, description: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
                   </div>
                   <div>
-                    <label className="text-xs text-slate-500 mb-1 block">Room</label>
+                    <label className="text-xs text-slate-400 dark:text-slate-500 mb-1 block">Room</label>
                     <select value={scopeForm.room_id} onChange={(e) => setScopeForm((f) => ({ ...f, room_id: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
                       <option value="">All / General</option>
                       {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label className="text-xs text-slate-500 mb-1 block">Qty *</label>
+                    <label className="text-xs text-slate-400 dark:text-slate-500 mb-1 block">Qty *</label>
                     <input type="number" min="0" step="any" placeholder="1" value={scopeForm.quantity}
                       onChange={(e) => setScopeForm((f) => ({ ...f, quantity: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
                   </div>
                   <div>
-                    <label className="text-xs text-slate-500 mb-1 block">Unit</label>
+                    <label className="text-xs text-slate-400 dark:text-slate-500 mb-1 block">Unit</label>
                     <select value={scopeForm.unit} onChange={(e) => setScopeForm((f) => ({ ...f, unit: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316]">
                       {["EA","SF","LF","HR","Day","LS","CY","SY","CF"].map((u) => <option key={u} value={u}>{u}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label className="text-xs text-slate-500 mb-1 block">Unit Price ($) *</label>
+                    <label className="text-xs text-slate-400 dark:text-slate-500 mb-1 block">Unit Price ($) *</label>
                     <input type="number" min="0" step="0.01" placeholder="0.00" value={scopeForm.unit_price}
                       onChange={(e) => setScopeForm((f) => ({ ...f, unit_price: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
                   </div>
                   {scopeForm.quantity && scopeForm.unit_price && (
                     <div className="flex items-end pb-1">
-                      <p className="text-sm text-slate-400">Line total: <span className="text-white font-bold">{centsToDisplay(Math.round(parseFloat(scopeForm.quantity || "0") * parseFloat(scopeForm.unit_price || "0") * 100))}</span></p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">Line total: <span className="text-slate-900 dark:text-white font-bold">{centsToDisplay(Math.round(parseFloat(scopeForm.quantity || "0") * parseFloat(scopeForm.unit_price || "0") * 100))}</span></p>
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-3 pt-2 border-t border-[#1E293B]">
+                <div className="flex items-center gap-3 pt-2 border-t border-slate-200 dark:border-[#1E293B]">
                   <button onClick={addLineItem} disabled={savingScope || !scopeForm.description || !scopeForm.quantity || !scopeForm.unit_price}
                     className="flex items-center gap-1.5 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm disabled:opacity-50 transition-colors">
                     {savingScope ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
                     {savingScope ? "Saving…" : "Add Item"}
                   </button>
-                  <button onClick={() => setShowScopeForm(false)} className="text-sm text-slate-500 hover:text-slate-300 px-3">Cancel</button>
+                  <button onClick={() => setShowScopeForm(false)} className="text-sm text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 px-3">Cancel</button>
                 </div>
               </div>
             )}
 
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+            <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#1E293B]">
+                    <tr className="border-b border-slate-200 dark:border-[#1E293B]">
                       {["Category", "Description", "Room", "Qty", "Unit", "Unit Price", "Total", ""].map((h) => (
-                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
+                        <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {lineItems.length === 0 ? (
-                      <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-600">No line items yet — click Add Line Item above.</td></tr>
+                      <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-400 dark:text-slate-600">No line items yet — click Add Line Item above.</td></tr>
                     ) : lineItems.map((li) => (
-                      <tr key={li.id} className="border-b border-[#1E293B]/50 group">
-                        <td className="px-4 py-3 text-xs text-slate-500 uppercase">{li.category}</td>
-                        <td className="px-4 py-3 text-slate-200">{li.description}</td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">{li.room_id ? (roomMap[li.room_id] ?? "—") : "All"}</td>
-                        <td className="px-4 py-3 text-slate-300">{li.quantity}</td>
-                        <td className="px-4 py-3 text-slate-500 text-xs">{li.unit}</td>
-                        <td className="px-4 py-3 text-slate-300 font-mono">{centsToDisplay(li.unit_price)}</td>
-                        <td className="px-4 py-3 font-bold text-slate-200 font-mono">{centsToDisplay(li.total_cents)}</td>
+                      <tr key={li.id} className="border-b border-slate-200/50 dark:border-[#1E293B]/50 group">
+                        <td className="px-4 py-3 text-xs text-slate-400 dark:text-slate-500 uppercase">{li.category}</td>
+                        <td className="px-4 py-3 text-slate-800 dark:text-slate-200">{li.description}</td>
+                        <td className="px-4 py-3 text-slate-500 dark:text-slate-400 text-xs">{li.room_id ? (roomMap[li.room_id] ?? "—") : "All"}</td>
+                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300">{li.quantity}</td>
+                        <td className="px-4 py-3 text-slate-400 dark:text-slate-500 text-xs">{li.unit}</td>
+                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300 font-mono">{centsToDisplay(li.unit_price)}</td>
+                        <td className="px-4 py-3 font-bold text-slate-800 dark:text-slate-200 font-mono">{centsToDisplay(li.total_cents)}</td>
                         <td className="px-4 py-3">
                           <button onClick={() => deleteLineItem(li.id)}
-                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                            className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10"
                             title="Delete line item">
                             <Trash2 size={14} />
                           </button>
@@ -1094,9 +1106,9 @@ export default function JobDetailPage() {
                   </tbody>
                   {lineItems.length > 0 && (
                     <tfoot>
-                      <tr className="border-t border-[#1E293B] bg-[#0F172A]">
-                        <td colSpan={7} className="px-4 py-3 text-right font-bold text-slate-300">Grand Total</td>
-                        <td className="px-4 py-3 font-black text-white font-mono text-base">{centsToDisplay(totalCents)}</td>
+                      <tr className="border-t border-slate-200 dark:border-[#1E293B] bg-slate-50 dark:bg-[#0F172A]">
+                        <td colSpan={7} className="px-4 py-3 text-right font-bold text-slate-700 dark:text-slate-300">Grand Total</td>
+                        <td className="px-4 py-3 font-black text-slate-900 dark:text-white font-mono text-base">{centsToDisplay(totalCents)}</td>
                       </tr>
                     </tfoot>
                   )}
@@ -1110,20 +1122,20 @@ export default function JobDetailPage() {
         {activeTab === "floorplan" && (
           <div className="max-w-4xl space-y-4">
             {/* Magicplan project link */}
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+            <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
               <div className="flex items-center gap-2 mb-3">
                 <Link size={16} className="text-[#F97316]" />
-                <h3 className="text-sm font-bold text-slate-300">Magicplan Project</h3>
+                <h3 className="text-sm font-bold text-slate-700 dark:text-slate-300">Magicplan Project</h3>
               </div>
 
               {job.magicplan_project_id && !magicplanEditing ? (
                 <div className="flex items-center gap-3">
-                  <code className="text-sm font-mono text-[#F97316] bg-[#1E293B] px-3 py-1.5 rounded-lg flex-1 truncate">
+                  <code className="text-sm font-mono text-[#F97316] bg-slate-100 dark:bg-[#1E293B] px-3 py-1.5 rounded-lg flex-1 truncate">
                     {job.magicplan_project_id}
                   </code>
                   <button
                     onClick={() => { setMagicplanInput(job.magicplan_project_id ?? ""); setMagicplanEditing(true); }}
-                    className="text-xs font-bold text-slate-400 hover:text-slate-200 transition-colors px-3 py-1.5 rounded-lg border border-[#1E293B] hover:border-[#4A4440]"
+                    className="text-xs font-bold text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors px-3 py-1.5 rounded-lg border border-slate-200 dark:border-[#1E293B] hover:border-slate-300 dark:hover:border-[#4A4440]"
                   >
                     Edit
                   </button>
@@ -1135,7 +1147,7 @@ export default function JobDetailPage() {
                     value={magicplanInput}
                     onChange={(e) => setMagicplanInput(e.target.value)}
                     placeholder="Enter Magicplan project ID…"
-                    className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors font-mono"
+                    className="flex-1 bg-white dark:bg-[#0F172A] border border-slate-300 dark:border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors font-mono"
                   />
                   <button
                     onClick={saveMagicplanId}
@@ -1148,7 +1160,7 @@ export default function JobDetailPage() {
                   {magicplanEditing && (
                     <button
                       onClick={() => setMagicplanEditing(false)}
-                      className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                      className="text-xs text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
                     >
                       Cancel
                     </button>
@@ -1166,7 +1178,7 @@ export default function JobDetailPage() {
                     <Plus size={12} className={magicplanCreating ? "animate-spin" : ""} />
                     {magicplanCreating ? "Creating…" : "Create in Magicplan"}
                   </button>
-                  <p className="text-xs text-slate-600">
+                  <p className="text-xs text-slate-400 dark:text-slate-600">
                     or paste a project ID above to link an existing one
                   </p>
                 </div>
@@ -1181,7 +1193,7 @@ export default function JobDetailPage() {
                     <RefreshCw size={12} className={magicplanSyncing ? "animate-spin" : ""} />
                     {magicplanSyncing ? "Syncing…" : "Sync Now"}
                   </button>
-                  <p className="text-xs text-slate-600">Floor plans also auto-sync via webhook when exported.</p>
+                  <p className="text-xs text-slate-400 dark:text-slate-600">Floor plans also auto-sync via webhook when exported.</p>
                 </div>
               )}
               {magicplanError && (
@@ -1191,9 +1203,9 @@ export default function JobDetailPage() {
 
             {/* Floor plan versions */}
             {floorPlans.length === 0 ? (
-              <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-12 text-center">
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-12 text-center">
                 <p className="text-slate-500 mb-2">No floor plans synced yet.</p>
-                <p className="text-slate-600 text-sm">
+                <p className="text-slate-400 dark:text-slate-600 text-sm">
                   {job.magicplan_project_id
                     ? "Export a floor plan from Magicplan — it will appear here automatically."
                     : "Link a Magicplan project above to get started."}
@@ -1202,9 +1214,9 @@ export default function JobDetailPage() {
             ) : (
               <div className="space-y-3">
                 {floorPlans.map((fp) => (
-                  <div key={fp.id} className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4 flex items-center gap-4">
+                  <div key={fp.id} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-4 flex items-center gap-4">
                     <div className="flex-1">
-                      <p className="text-sm font-bold text-slate-200">Version {fp.version}</p>
+                      <p className="text-sm font-bold text-slate-800 dark:text-slate-200">Version {fp.version}</p>
                       <p className="text-xs text-slate-500">Synced: {formatAlaskaDateTime(fp.synced_at)}</p>
                     </div>
                     {fp.file_url && (
@@ -1227,7 +1239,7 @@ export default function JobDetailPage() {
               <select
                 value={photoCategory}
                 onChange={(e) => setPhotoCategory(e.target.value as PhotoCategory)}
-                className="bg-[#0A1628] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316] transition-colors"
+                className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:border-[#F97316] transition-colors"
               >
                 {PHOTO_CATEGORIES.map((c) => (
                   <option key={c.value} value={c.value}>{c.label}</option>
@@ -1235,7 +1247,7 @@ export default function JobDetailPage() {
               </select>
               <label className={clsx(
                 "flex items-center gap-2 cursor-pointer font-bold px-4 h-10 rounded-xl transition-colors text-sm",
-                uploadingPhotos ? "bg-[#1E293B] text-slate-400 cursor-not-allowed" : "bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A]"
+                uploadingPhotos ? "bg-slate-100 dark:bg-[#1E293B] text-slate-400 cursor-not-allowed" : "bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A]"
               )}>
                 {uploadingPhotos ? (
                   <><RefreshCw size={16} className="animate-spin" /> Uploading…</>
@@ -1244,29 +1256,29 @@ export default function JobDetailPage() {
                 )}
                 <input type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} disabled={uploadingPhotos} />
               </label>
-              <span className="text-xs text-slate-500">Select multiple photos at once</span>
+              <span className="text-xs text-slate-400 dark:text-slate-500">Select multiple photos at once</span>
             </div>
             {photoError && <p className="text-red-400 text-sm mb-4">{photoError}</p>}
 
             {photos.length === 0 ? (
-              <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-16 text-center">
-                <Camera size={36} className="text-slate-600 mx-auto mb-3" />
+              <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-16 text-center">
+                <Camera size={36} className="text-slate-300 dark:text-slate-600 mx-auto mb-3" />
                 <p className="text-slate-500 mb-1">No photos yet.</p>
-                <p className="text-slate-600 text-sm">Choose a category above and click Upload Photos.</p>
+                <p className="text-slate-400 dark:text-slate-600 text-sm">Choose a category above and click Upload Photos.</p>
               </div>
             ) : (
               <>
                 {/* Group by category */}
                 {PHOTO_CATEGORIES.filter((c) => photos.some((p) => p.category === c.value)).map((cat) => (
                   <div key={cat.value} className="mb-6">
-                    <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">{cat.label}</h3>
+                    <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3">{cat.label}</h3>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
                       {photos.filter((p) => p.category === cat.value).map((p) => {
                         const url = p.url ?? getPhotoUrl(p.storage_path);
                         return (
                           <div
                             key={p.id}
-                            className="relative bg-[#0A1628] border border-[#1E293B] rounded-xl overflow-hidden aspect-square hover:border-[#F97316]/60 transition-colors group"
+                            className="relative bg-slate-100 dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-xl overflow-hidden aspect-square hover:border-[#F97316]/60 transition-colors group"
                           >
                             <button onClick={() => setSelectedPhoto(p)} className="w-full h-full block">
                               <img src={url} alt={p.caption ?? cat.label} className="w-full h-full object-cover" />
@@ -1316,7 +1328,7 @@ export default function JobDetailPage() {
 
         {activeTab === "report" && (
           <div className="max-w-2xl">
-            <p className="text-slate-400 text-sm mb-6">Generate and download PDF reports. Each opens a download dialog.</p>
+            <p className="text-slate-500 dark:text-slate-400 text-sm mb-6">Generate and download PDF reports. Each opens a download dialog.</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {[
                 { key: "photos" as const, title: "Photo Report", desc: `${photos.length} photo${photos.length !== 1 ? "s" : ""} organized by category`, warn: photos.length === 0 ? "No photos yet" : null },
@@ -1324,8 +1336,8 @@ export default function JobDetailPage() {
                 { key: "equipment" as const, title: "Equipment Log", desc: `${equipment.length} piece${equipment.length !== 1 ? "s" : ""} · ${equipment.filter(e => !e.date_removed).length} active`, warn: equipment.length === 0 ? "No equipment logged yet" : null },
                 { key: "scope" as const, title: "Scope of Work / Invoice", desc: `${lineItems.length} line item${lineItems.length !== 1 ? "s" : ""} · Total: ${centsToDisplay(totalCents)}`, warn: lineItems.length === 0 ? "No line items yet" : null },
               ].map((r) => (
-                <div key={r.key} className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
-                  <p className="font-bold text-slate-200 mb-1">{r.title}</p>
+                <div key={r.key} className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+                  <p className="font-bold text-slate-800 dark:text-slate-200 mb-1">{r.title}</p>
                   <p className="text-xs text-slate-500 mb-1">{r.desc}</p>
                   {r.warn && <p className="text-xs text-amber-500/80 mb-3">⚠ {r.warn} — PDF will be mostly empty</p>}
                   {!r.warn && <div className="mb-3" />}
@@ -1352,8 +1364,8 @@ export default function JobDetailPage() {
 
 function InfoCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
-      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-[#1E293B]">{title}</h3>
+    <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl p-5">
+      <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-slate-200 dark:border-[#1E293B]">{title}</h3>
       <div className="space-y-2.5">{children}</div>
     </div>
   );
@@ -1362,8 +1374,8 @@ function InfoCard({ title, children }: { title: string; children: React.ReactNod
 function InfoPair({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col">
-      <span className="text-xs text-slate-600">{label}</span>
-      <span className="text-sm text-slate-200 font-medium break-words">{value}</span>
+      <span className="text-xs text-slate-400 dark:text-slate-600">{label}</span>
+      <span className="text-sm text-slate-800 dark:text-slate-200 font-medium break-words">{value}</span>
     </div>
   );
 }
