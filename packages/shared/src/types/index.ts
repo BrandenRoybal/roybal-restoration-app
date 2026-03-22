@@ -9,30 +9,61 @@
 // ENUMS
 // ============================================================
 export type JobStatus =
-  | "new"
-  | "active"
-  | "drying"
-  | "final_inspection"
-  | "invoicing"
+  | "lead"
+  | "inspection_scheduled"
+  | "inspection_complete"
+  | "emergency_services"
+  | "mitigation_active"
+  | "monitoring"
+  | "mitigation_complete"
+  | "estimate_pending"
+  | "estimate_approved"
+  | "reconstruction_active"
+  | "punch_list"
+  | "invoice_submitted"
+  | "payment_pending"
   | "closed";
 
 export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
-  new: "New",
-  active: "Active",
-  drying: "Drying",
-  final_inspection: "Final Inspection",
-  invoicing: "Invoicing",
-  closed: "Closed",
+  lead:                   "Lead",
+  inspection_scheduled:   "Inspection Scheduled",
+  inspection_complete:    "Inspection Complete",
+  emergency_services:     "Emergency Services",
+  mitigation_active:      "Mitigation Active",
+  monitoring:             "Monitoring",
+  mitigation_complete:    "Mitigation Complete",
+  estimate_pending:       "Estimate Pending",
+  estimate_approved:      "Estimate Approved",
+  reconstruction_active:  "Reconstruction Active",
+  punch_list:             "Punch List",
+  invoice_submitted:      "Invoice Submitted",
+  payment_pending:        "Payment Pending",
+  closed:                 "Closed",
 };
 
 export const JOB_STATUS_ORDER: JobStatus[] = [
-  "new",
-  "active",
-  "drying",
-  "final_inspection",
-  "invoicing",
-  "closed",
+  "lead","inspection_scheduled","inspection_complete","emergency_services",
+  "mitigation_active","monitoring","mitigation_complete","estimate_pending",
+  "estimate_approved","reconstruction_active","punch_list","invoice_submitted",
+  "payment_pending","closed",
 ];
+
+export const JOB_STATUS_COLORS: Record<JobStatus, string> = {
+  lead:                   "bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300",
+  inspection_scheduled:   "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+  inspection_complete:    "bg-blue-200 text-blue-800 dark:bg-blue-800/40 dark:text-blue-200",
+  emergency_services:     "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+  mitigation_active:      "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300",
+  monitoring:             "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300",
+  mitigation_complete:    "bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300",
+  estimate_pending:       "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300",
+  estimate_approved:      "bg-purple-200 text-purple-800 dark:bg-purple-800/40 dark:text-purple-200",
+  reconstruction_active:  "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300",
+  punch_list:             "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  invoice_submitted:      "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  payment_pending:        "bg-lime-100 text-lime-700 dark:bg-lime-900/40 dark:text-lime-300",
+  closed:                 "bg-slate-200 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
+};
 
 export type LossType = "water" | "fire" | "mold" | "smoke" | "other";
 export type LossCategory = "cat1" | "cat2" | "cat3";
@@ -65,6 +96,77 @@ export const EQUIPMENT_TYPE_LABELS: Record<EquipmentType, string> = {
 
 export type BillingType = "tm" | "scope";
 export type UserRole = "admin" | "tech" | "viewer";
+
+// ============================================================
+// CANVAS FLOOR PLAN GEOMETRY
+// ============================================================
+
+/** 2D point in feet on the canvas coordinate system */
+export interface Point {
+  x: number;
+  y: number;
+}
+
+/** Checkbox flags for restoration work items on a room */
+export interface RoomCheckboxFlags {
+  remove_base?: boolean;
+  flood_cut?: boolean;
+  clean?: boolean;
+  disinfect?: boolean;
+  seal?: boolean;
+  dry?: boolean;
+  rebuild?: boolean;
+}
+
+/** In-app drawn floor plan (canvas-based, distinct from Magicplan file-based floor_plans) */
+export interface CanvasPlan {
+  id: string;
+  job_id: string;
+  name: string;
+  level_name: string;
+  /** Pixels per foot at zoom=1 */
+  scale: number;
+  unit_system: "imperial" | "metric";
+  /** Logical canvas size in feet */
+  canvas_width: number;
+  canvas_height: number;
+  background_image_url: string | null;
+  background_opacity: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Door, window, or opening on a room wall */
+export interface RoomOpening {
+  id: string;
+  room_id: string;
+  type: "door" | "window" | "opening";
+  /** Index of the polygon edge (0 = edge from point[0] to point[1]) */
+  wall_index: number;
+  /** Position along the wall as a 0–1 fraction */
+  position: number;
+  /** Width in feet */
+  width: number;
+  /** Height in feet */
+  height: number;
+  notes: string | null;
+  created_at: string;
+}
+
+/** Pin marker on the canvas (equipment, label, moisture point, fixture) */
+export interface RoomMarker {
+  id: string;
+  canvas_plan_id: string;
+  room_id: string | null;
+  type: "label" | "equipment" | "moisture" | "fixture";
+  /** Position in feet */
+  x: number;
+  y: number;
+  label: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
 
 // ============================================================
 // DATABASE ROW TYPES
@@ -101,6 +203,19 @@ export interface Job {
   magicplan_project_id: string | null;
   notes: string | null;
   created_by: string | null;
+  date_received?: string | null;
+  cause_of_loss?: string | null;
+  is_emergency?: boolean;
+  billing_party?: string | null;
+  property_manager_name?: string | null;
+  property_manager_phone?: string | null;
+  property_manager_email?: string | null;
+  assigned_pm_id?: string | null;
+  xactimate_file_number?: string | null;
+  deductible_amount?: number;
+  policy_number?: string | null;
+  loss_location?: string | null;
+  lead_source?: string | null;
 }
 
 export interface Room {
@@ -110,6 +225,25 @@ export interface Room {
   floor_level: string;
   affected: boolean;
   created_at: string;
+  // Canvas floor plan geometry (null when room has no drawn shape)
+  canvas_plan_id: string | null;
+  polygon_points: Point[] | null;
+  height: number;
+  floor_area: number | null;
+  perimeter: number | null;
+  wall_area: number | null;
+  ceiling_area: number | null;
+  centroid_x: number | null;
+  centroid_y: number | null;
+  color: string;
+  // Restoration metadata
+  room_notes: string | null;
+  category_of_water: "cat1" | "cat2" | "cat3" | null;
+  class_of_loss: "class1" | "class2" | "class3" | "class4" | null;
+  demo_status: "none" | "partial" | "complete";
+  drying_status: "not_started" | "in_progress" | "complete";
+  checkbox_flags: RoomCheckboxFlags;
+  updated_at: string;
 }
 
 export interface Photo {
@@ -199,7 +333,27 @@ export type CreateJobInput = Omit<
 
 export type UpdateJobInput = Partial<CreateJobInput>;
 
-export type CreateRoomInput = Omit<Room, "id" | "created_at">;
+export type CreateRoomInput = Omit<
+  Room,
+  | "id"
+  | "created_at"
+  | "updated_at"
+  | "canvas_plan_id"
+  | "polygon_points"
+  | "floor_area"
+  | "perimeter"
+  | "wall_area"
+  | "ceiling_area"
+  | "centroid_x"
+  | "centroid_y"
+  | "color"
+  | "room_notes"
+  | "category_of_water"
+  | "class_of_loss"
+  | "demo_status"
+  | "drying_status"
+  | "checkbox_flags"
+>;
 
 export type CreatePhotoInput = Omit<Photo, "id" | "created_at" | "url">;
 
@@ -323,3 +477,235 @@ export interface MagicplanFile {
   url: string;
   name: string;
 }
+
+// ============================================================
+// COMMUNICATION TYPES
+// ============================================================
+export type CommType = "call" | "email" | "text" | "site_visit" | "internal_note" | "verbal_approval" | "other";
+export type CommDirection = "inbound" | "outbound" | "internal";
+
+export const COMM_TYPE_LABELS: Record<CommType, string> = {
+  call: "Phone Call",
+  email: "Email",
+  text: "Text Message",
+  site_visit: "Site Visit",
+  internal_note: "Internal Note",
+  verbal_approval: "Verbal Approval",
+  other: "Other",
+};
+
+export const COMM_TYPE_ICONS: Record<CommType, string> = {
+  call: "phone",
+  email: "mail",
+  text: "message-square",
+  site_visit: "map-pin",
+  internal_note: "file-text",
+  verbal_approval: "check-circle",
+  other: "more-horizontal",
+};
+
+export interface Communication {
+  id: string;
+  job_id: string;
+  created_by: string | null;
+  created_at: string;
+  comm_type: CommType;
+  direction: CommDirection | null;
+  contact_name: string | null;
+  contact_role: string | null;
+  subject: string | null;
+  body: string;
+  is_internal: boolean;
+  follow_up_needed: boolean;
+  follow_up_date: string | null;
+}
+
+export interface CreateCommunicationInput {
+  job_id: string;
+  comm_type: CommType;
+  direction?: CommDirection;
+  contact_name?: string;
+  contact_role?: string;
+  subject?: string;
+  body: string;
+  is_internal?: boolean;
+  follow_up_needed?: boolean;
+  follow_up_date?: string;
+}
+
+// ============================================================
+// TASK TYPES
+// ============================================================
+export type TaskPriority = "low" | "normal" | "high" | "urgent";
+export type TaskStatus = "open" | "in_progress" | "done" | "cancelled";
+export type TaskCategory = "photo" | "document" | "estimate" | "inspection" | "monitoring" | "invoice" | "communication" | "scheduling" | "other";
+
+export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
+  low: "Low", normal: "Normal", high: "High", urgent: "Urgent",
+};
+
+export const TASK_PRIORITY_COLORS: Record<TaskPriority, string> = {
+  low: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400",
+  normal: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+  high: "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300",
+  urgent: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+};
+
+export interface Task {
+  id: string;
+  job_id: string;
+  created_by: string | null;
+  assigned_to: string | null;
+  created_at: string;
+  updated_at: string;
+  due_date: string | null;
+  title: string;
+  description: string | null;
+  priority: TaskPriority;
+  status: TaskStatus;
+  category: TaskCategory | null;
+}
+
+export interface CreateTaskInput {
+  job_id: string;
+  title: string;
+  description?: string;
+  priority?: TaskPriority;
+  due_date?: string;
+  assigned_to?: string;
+  category?: TaskCategory;
+}
+
+// ============================================================
+// DOCUMENT TYPES
+// ============================================================
+export type DocType = "work_authorization" | "direction_to_pay" | "responsibility_acknowledgment" | "change_order" | "estimate" | "invoice" | "carrier_correspondence" | "permit" | "vendor_invoice" | "closeout" | "other";
+export type DocStatus = "pending" | "signed" | "approved" | "rejected";
+
+export const DOC_TYPE_LABELS: Record<DocType, string> = {
+  work_authorization: "Work Authorization",
+  direction_to_pay: "Direction to Pay",
+  responsibility_acknowledgment: "Responsibility Acknowledgment",
+  change_order: "Change Order",
+  estimate: "Estimate",
+  invoice: "Invoice",
+  carrier_correspondence: "Carrier Correspondence",
+  permit: "Permit",
+  vendor_invoice: "Vendor Invoice",
+  closeout: "Closeout Document",
+  other: "Other",
+};
+
+export interface JobDocument {
+  id: string;
+  job_id: string;
+  uploaded_by: string | null;
+  created_at: string;
+  doc_type: DocType;
+  title: string;
+  storage_path: string | null;
+  file_url: string | null;
+  status: DocStatus | null;
+  notes: string | null;
+  signed_at: string | null;
+  signed_by_name: string | null;
+}
+
+// ============================================================
+// INVOICE TYPES
+// ============================================================
+export type InvoiceType = "mitigation" | "reconstruction" | "tm" | "vendor_passthrough" | "supplement";
+export type InvoiceStatus = "draft" | "submitted" | "partially_paid" | "paid" | "disputed" | "void";
+
+export const INVOICE_STATUS_LABELS: Record<InvoiceStatus, string> = {
+  draft: "Draft", submitted: "Submitted", partially_paid: "Partially Paid",
+  paid: "Paid", disputed: "Disputed", void: "Void",
+};
+
+export const INVOICE_STATUS_COLORS: Record<InvoiceStatus, string> = {
+  draft: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-400",
+  submitted: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+  partially_paid: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300",
+  paid: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300",
+  disputed: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+  void: "bg-slate-200 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
+};
+
+export interface Invoice {
+  id: string;
+  job_id: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  invoice_number: string;
+  invoice_type: InvoiceType;
+  status: InvoiceStatus;
+  amount_cents: number;
+  paid_cents: number;
+  due_date: string | null;
+  submitted_date: string | null;
+  paid_date: string | null;
+  notes: string | null;
+  xactimate_ref: string | null;
+}
+
+// ============================================================
+// RECONSTRUCTION TYPES
+// ============================================================
+export type ReconTrade =
+  | "drywall" | "insulation" | "paint" | "trim" | "flooring"
+  | "cabinetry" | "plumbing" | "electrical" | "hvac" | "final_clean" | "other";
+
+export type ReconStatus = "pending" | "in_progress" | "complete" | "skipped";
+
+export const RECON_TRADE_LABELS: Record<ReconTrade, string> = {
+  drywall: "Drywall",
+  insulation: "Insulation",
+  paint: "Paint",
+  trim: "Trim & Millwork",
+  flooring: "Flooring",
+  cabinetry: "Cabinetry",
+  plumbing: "Plumbing Reset",
+  electrical: "Electrical Reset",
+  hvac: "HVAC Reset",
+  final_clean: "Final Clean",
+  other: "Other",
+};
+
+export const RECON_STATUS_COLORS: Record<ReconStatus, string> = {
+  pending: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
+  in_progress: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+  complete: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300",
+  skipped: "bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500",
+};
+
+export interface ReconstructionItem {
+  id: string;
+  job_id: string;
+  room_id: string | null;
+  created_at: string;
+  updated_at: string;
+  trade: ReconTrade;
+  description: string | null;
+  status: ReconStatus;
+  notes: string | null;
+  completed_by: string | null;
+  completed_at: string | null;
+  sort_order: number;
+}
+
+export interface CreateReconstructionItemInput {
+  job_id: string;
+  room_id?: string;
+  trade: ReconTrade;
+  description?: string;
+  status?: ReconStatus;
+  notes?: string;
+  sort_order?: number;
+}
+
+// Default reconstruction checklist template (used to seed new jobs)
+export const DEFAULT_RECON_TRADES: ReconTrade[] = [
+  "insulation", "drywall", "paint", "trim", "flooring",
+  "cabinetry", "plumbing", "electrical", "hvac", "final_clean"
+];

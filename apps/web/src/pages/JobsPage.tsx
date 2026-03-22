@@ -6,18 +6,9 @@ import { useEffect, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import type { Job, JobStatus } from "@roybal/shared";
-import { JOB_STATUS_LABELS, JOB_STATUS_ORDER, formatAlaskaDate } from "@roybal/shared";
-import { Plus, Search, X, Trash2 } from "lucide-react";
+import { JOB_STATUS_LABELS, JOB_STATUS_ORDER, JOB_STATUS_COLORS, formatAlaskaDate } from "@roybal/shared";
+import { Plus, Search, X, Trash2, Flame } from "lucide-react";
 import clsx from "clsx";
-
-const STATUS_COLORS: Record<JobStatus, string> = {
-  new: "#64748B",
-  active: "#F97316",
-  drying: "#3B82F6",
-  final_inspection: "#EAB308",
-  invoicing: "#A855F7",
-  closed: "#22C55E",
-};
 
 export default function JobsPage() {
   const navigate = useNavigate();
@@ -66,8 +57,8 @@ export default function JobsPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-white">Jobs</h1>
-          <p className="text-slate-400 text-sm mt-1">{filtered.length} job{filtered.length !== 1 ? "s" : ""} shown</p>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Jobs</h1>
+          <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">{filtered.length} job{filtered.length !== 1 ? "s" : ""} shown</p>
         </div>
         <button
           onClick={() => navigate("/jobs/new")}
@@ -81,16 +72,16 @@ export default function JobsPage() {
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3 mb-5">
         <div className="relative flex-1 max-w-sm">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
           <input
             type="text"
             placeholder="Search address, job #, owner…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-[#0A1628] border border-[#1E293B] rounded-xl pl-9 pr-9 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
+            className="w-full bg-white dark:bg-[#0A1628] border border-slate-300 dark:border-[#1E293B] rounded-xl pl-9 pr-9 h-10 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
           />
           {search && (
-            <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300">
+            <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
               <X size={14} />
             </button>
           )}
@@ -104,7 +95,7 @@ export default function JobsPage() {
                 "px-3 h-9 rounded-xl text-xs font-bold transition-colors border",
                 statusFilter === s
                   ? "bg-[#F97316] border-[#F97316] text-[#0F172A]"
-                  : "bg-[#0A1628] border-[#1E293B] text-slate-400 hover:text-slate-200"
+                  : "bg-white dark:bg-[#0A1628] border-slate-200 dark:border-[#1E293B] text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
               )}
             >
               {s === "all" ? "All" : JOB_STATUS_LABELS[s]}
@@ -114,13 +105,13 @@ export default function JobsPage() {
       </div>
 
       {/* Table */}
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+      <div className="bg-white dark:bg-[#0A1628] border border-slate-200 dark:border-[#1E293B] rounded-2xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[#1E293B]">
+              <tr className="border-b border-slate-200 dark:border-[#1E293B]">
                 {["Job #", "Address", "Owner", "Status", "Loss Type", "Date of Loss", "Carrier", ""].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                     {h}
                   </th>
                 ))}
@@ -128,16 +119,16 @@ export default function JobsPage() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-600">Loading…</td></tr>
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-400 dark:text-slate-600">Loading…</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-600">No jobs found.</td></tr>
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-400 dark:text-slate-600">No jobs found.</td></tr>
               ) : (
                 filtered.map((job) => (
                   confirmDeleteId === job.id ? (
-                    <tr key={job.id} className="border-b border-[#1E293B]/50 bg-red-950/20">
+                    <tr key={job.id} className="border-b border-slate-200/50 dark:border-[#1E293B]/50 bg-red-50 dark:bg-red-950/20">
                       <td colSpan={8} className="px-4 py-3">
                         <div className="flex items-center gap-3">
-                          <p className="text-sm text-red-300 flex-1">
+                          <p className="text-sm text-red-600 dark:text-red-300 flex-1">
                             Delete <span className="font-bold">{job.job_number} — {job.property_address}</span>? This cannot be undone.
                           </p>
                           <button
@@ -149,7 +140,7 @@ export default function JobsPage() {
                           </button>
                           <button
                             onClick={() => setConfirmDeleteId(null)}
-                            className="px-3 h-8 bg-[#1E293B] text-slate-300 text-xs font-bold rounded-lg hover:bg-[#4A4440] transition-colors"
+                            className="px-3 h-8 bg-slate-100 dark:bg-[#1E293B] text-slate-700 dark:text-slate-300 text-xs font-bold rounded-lg hover:bg-slate-200 dark:hover:bg-[#4A4440] transition-colors"
                           >
                             Cancel
                           </button>
@@ -159,37 +150,34 @@ export default function JobsPage() {
                   ) : (
                     <tr
                       key={job.id}
-                      className="border-b border-[#1E293B]/50 hover:bg-[#0F172A] cursor-pointer transition-colors group"
+                      className="border-b border-slate-200/50 dark:border-[#1E293B]/50 hover:bg-slate-50 dark:hover:bg-[#0F172A] cursor-pointer transition-colors group"
                     >
                       <td className="px-4 py-3" onClick={() => navigate(`/jobs/${job.id}`)}>
-                        <span className="font-mono text-xs text-slate-400 group-hover:text-[#F97316] transition-colors">
+                        <span className="font-mono text-xs text-slate-500 dark:text-slate-400 group-hover:text-[#F97316] transition-colors">
                           {job.job_number}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-slate-200 font-semibold max-w-xs truncate" onClick={() => navigate(`/jobs/${job.id}`)}>
-                        {job.property_address}
+                      <td className="px-4 py-3 text-slate-800 dark:text-slate-200 font-semibold max-w-xs" onClick={() => navigate(`/jobs/${job.id}`)}>
+                        <div className="flex items-center gap-2">
+                          {job.is_emergency && <span title="Emergency"><Flame size={13} className="text-red-500 flex-shrink-0" /></span>}
+                          <span className="truncate">{job.property_address}</span>
+                        </div>
                       </td>
-                      <td className="px-4 py-3 text-slate-400 truncate" onClick={() => navigate(`/jobs/${job.id}`)}>{job.owner_name ?? "—"}</td>
+                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400 truncate" onClick={() => navigate(`/jobs/${job.id}`)}>{job.owner_name ?? "—"}</td>
                       <td className="px-4 py-3" onClick={() => navigate(`/jobs/${job.id}`)}>
-                        <span
-                          className="px-2.5 py-1 rounded-full text-xs font-bold"
-                          style={{
-                            backgroundColor: (STATUS_COLORS[job.status] ?? "#64748B") + "22",
-                            color: STATUS_COLORS[job.status] ?? "#64748B",
-                          }}
-                        >
-                          {JOB_STATUS_LABELS[job.status]}
+                        <span className={clsx("px-2.5 py-1 rounded-full text-xs font-bold", JOB_STATUS_COLORS[job.status] ?? "bg-slate-100 text-slate-600")}>
+                          {JOB_STATUS_LABELS[job.status] ?? job.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-slate-400 uppercase text-xs" onClick={() => navigate(`/jobs/${job.id}`)}>
+                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400 uppercase text-xs" onClick={() => navigate(`/jobs/${job.id}`)}>
                         {job.loss_type ?? "—"} {job.loss_category ? `/ ${job.loss_category}` : ""}
                       </td>
-                      <td className="px-4 py-3 text-slate-400" onClick={() => navigate(`/jobs/${job.id}`)}>{formatAlaskaDate(job.date_of_loss)}</td>
-                      <td className="px-4 py-3 text-slate-400" onClick={() => navigate(`/jobs/${job.id}`)}>{job.insurance_carrier ?? "—"}</td>
+                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400" onClick={() => navigate(`/jobs/${job.id}`)}>{formatAlaskaDate(job.date_of_loss)}</td>
+                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400" onClick={() => navigate(`/jobs/${job.id}`)}>{job.insurance_carrier ?? "—"}</td>
                       <td className="px-4 py-3">
                         <button
                           onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(job.id); }}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10"
+                          className="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 rounded-lg text-slate-400 dark:text-slate-600 hover:text-red-400 hover:bg-red-500/10"
                           title="Delete job"
                         >
                           <Trash2 size={15} />

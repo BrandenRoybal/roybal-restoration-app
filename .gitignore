@@ -14,5 +14,3 @@ ios/
 android/
 web-build/
 .vercel
-supabase/.temp/
-.claude/
