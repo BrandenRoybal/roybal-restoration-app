@@ -5,8 +5,8 @@
 import { useState } from "react";
 import {
   BookOpen, Briefcase, Camera, Droplets, Wrench, DollarSign,
-  Map, FileText, Users, ChevronDown, ChevronRight, CheckCircle2,
-  AlertCircle, Info,
+  Map, FileText, Users, ChevronDown, ChevronRight, CircleCheckBig,
+  CircleAlert, Info,
 } from "lucide-react";
 
 interface Section {
@@ -26,7 +26,7 @@ const Tip = ({ children }: { children: React.ReactNode }) => (
 
 const Note = ({ children }: { children: React.ReactNode }) => (
   <div className="flex gap-2.5 bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 my-3">
-    <AlertCircle size={15} className="text-blue-400 flex-shrink-0 mt-0.5" />
+    <CircleAlert size={15} className="text-blue-400 flex-shrink-0 mt-0.5" />
     <p className="text-sm text-slate-700 dark:text-slate-300">{children}</p>
   </div>
 );
@@ -40,7 +40,7 @@ const Step = ({ n, children }: { n: number; children: React.ReactNode }) => (
 
 const Bullet = ({ children }: { children: React.ReactNode }) => (
   <div className="flex gap-2.5 mb-1.5">
-    <CheckCircle2 size={14} className="text-[#F97316] flex-shrink-0 mt-0.5" />
+    <CircleCheckBig size={14} className="text-[#F97316] flex-shrink-0 mt-0.5" />
     <p className="text-sm text-slate-700 dark:text-slate-300">{children}</p>
   </div>
 );

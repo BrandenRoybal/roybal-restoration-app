@@ -98,6 +98,77 @@ export type BillingType = "tm" | "scope";
 export type UserRole = "admin" | "tech" | "viewer";
 
 // ============================================================
+// CANVAS FLOOR PLAN GEOMETRY
+// ============================================================
+
+/** 2D point in feet on the canvas coordinate system */
+export interface Point {
+  x: number;
+  y: number;
+}
+
+/** Checkbox flags for restoration work items on a room */
+export interface RoomCheckboxFlags {
+  remove_base?: boolean;
+  flood_cut?: boolean;
+  clean?: boolean;
+  disinfect?: boolean;
+  seal?: boolean;
+  dry?: boolean;
+  rebuild?: boolean;
+}
+
+/** In-app drawn floor plan (canvas-based, distinct from Magicplan file-based floor_plans) */
+export interface CanvasPlan {
+  id: string;
+  job_id: string;
+  name: string;
+  level_name: string;
+  /** Pixels per foot at zoom=1 */
+  scale: number;
+  unit_system: "imperial" | "metric";
+  /** Logical canvas size in feet */
+  canvas_width: number;
+  canvas_height: number;
+  background_image_url: string | null;
+  background_opacity: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Door, window, or opening on a room wall */
+export interface RoomOpening {
+  id: string;
+  room_id: string;
+  type: "door" | "window" | "opening";
+  /** Index of the polygon edge (0 = edge from point[0] to point[1]) */
+  wall_index: number;
+  /** Position along the wall as a 0–1 fraction */
+  position: number;
+  /** Width in feet */
+  width: number;
+  /** Height in feet */
+  height: number;
+  notes: string | null;
+  created_at: string;
+}
+
+/** Pin marker on the canvas (equipment, label, moisture point, fixture) */
+export interface RoomMarker {
+  id: string;
+  canvas_plan_id: string;
+  room_id: string | null;
+  type: "label" | "equipment" | "moisture" | "fixture";
+  /** Position in feet */
+  x: number;
+  y: number;
+  label: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+// ============================================================
 // DATABASE ROW TYPES
 // ============================================================
 export interface Profile {
@@ -154,6 +225,25 @@ export interface Room {
   floor_level: string;
   affected: boolean;
   created_at: string;
+  // Canvas floor plan geometry (null when room has no drawn shape)
+  canvas_plan_id: string | null;
+  polygon_points: Point[] | null;
+  height: number;
+  floor_area: number | null;
+  perimeter: number | null;
+  wall_area: number | null;
+  ceiling_area: number | null;
+  centroid_x: number | null;
+  centroid_y: number | null;
+  color: string;
+  // Restoration metadata
+  room_notes: string | null;
+  category_of_water: "cat1" | "cat2" | "cat3" | null;
+  class_of_loss: "class1" | "class2" | "class3" | "class4" | null;
+  demo_status: "none" | "partial" | "complete";
+  drying_status: "not_started" | "in_progress" | "complete";
+  checkbox_flags: RoomCheckboxFlags;
+  updated_at: string;
 }
 
 export interface Photo {
@@ -243,7 +333,27 @@ export type CreateJobInput = Omit<
 
 export type UpdateJobInput = Partial<CreateJobInput>;
 
-export type CreateRoomInput = Omit<Room, "id" | "created_at">;
+export type CreateRoomInput = Omit<
+  Room,
+  | "id"
+  | "created_at"
+  | "updated_at"
+  | "canvas_plan_id"
+  | "polygon_points"
+  | "floor_area"
+  | "perimeter"
+  | "wall_area"
+  | "ceiling_area"
+  | "centroid_x"
+  | "centroid_y"
+  | "color"
+  | "room_notes"
+  | "category_of_water"
+  | "class_of_loss"
+  | "demo_status"
+  | "drying_status"
+  | "checkbox_flags"
+>;
 
 export type CreatePhotoInput = Omit<Photo, "id" | "created_at" | "url">;
 

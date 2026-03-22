@@ -73,34 +73,40 @@ serve(async (req: Request) => {
 
     } else if (action === "getProjectFiles") {
       const res = await mpFetch("GET", `/projects/${projectId}/plan`);
-      const raw = res.files ?? res.data ?? res ?? [];
-      result = Array.isArray(raw) ? raw : Object.values(raw);
+      if (Array.isArray(res.files)) result = res.files;
+      else if (Array.isArray(res.data)) result = res.data;
+      else if (res.data && typeof res.data === "object" && Array.isArray((res.data as Record<string, unknown>).files)) result = (res.data as Record<string, unknown[]>).files;
+      else result = [];
 
     } else if (action === "syncFloorPlan") {
       const res = await mpFetch("GET", `/projects/${projectId}/plan`);
-      // Flatten whatever structure Magicplan returns into a usable array
-      const rawVal = res.files ?? res.data ?? res ?? [];
-      let files: Array<{ type?: string; url?: string; name?: string }> = [];
-      if (Array.isArray(rawVal)) {
-        files = rawVal;
-      } else if (rawVal !== null && typeof rawVal === "object") {
-        files = Object.values(rawVal) as typeof files;
+
+      // Magicplan API response can vary — handle several known shapes
+      type MpFile = { type?: string; url?: string; name?: string };
+      let files: MpFile[] = [];
+      if (Array.isArray(res.files)) {
+        files = res.files as MpFile[];
+      } else if (Array.isArray(res.data)) {
+        files = res.data as MpFile[];
+      } else if (res.data && typeof res.data === "object" && Array.isArray((res.data as Record<string, unknown>).files)) {
+        files = (res.data as Record<string, unknown[]>).files as MpFile[];
+      } else if (Array.isArray(res.plans)) {
+        files = res.plans as MpFile[];
       }
-      // Filter out null/undefined entries, then match by file type
-      const validFiles = files.filter((f) => f != null);
-      const isPdf = (f: { type?: string; name?: string }) =>
-        f.type === "pdf" || (f.name ?? "").toLowerCase().endsWith(".pdf");
-      const isImage = (f: { type?: string; name?: string }) =>
-        ["image", "png", "jpg", "jpeg", "svg"].includes((f.type ?? "").toLowerCase()) ||
-        /\.(png|jpg|jpeg|svg)$/i.test(f.name ?? "");
-      const pdfFile = validFiles.find(isPdf) ?? null;
-      const imageFile = validFiles.find(isImage) ?? null;
-      const best = pdfFile ?? imageFile ?? null;
+
+      const pdfFile = files.find((f) => f.type?.toLowerCase() === "pdf");
+      const imageFile = files.find((f) => {
+        const t = f.type?.toLowerCase() ?? "";
+        return t === "image" || t === "png" || t === "jpg" || t === "jpeg";
+      });
+      // Fall back to any file that has a URL
+      const anyFile = files.find((f) => f.url);
+      const best = pdfFile ?? imageFile ?? anyFile ?? null;
       result = {
         fileUrl: best?.url ?? null,
         fileType: pdfFile ? "pdf" : imageFile ? "image" : null,
         allFiles: files,
-        rawResponse: res,
+        _rawResponse: res,
       };
 
     } else {
