@@ -15,7 +15,8 @@ import {
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users, PenLine } from "lucide-react";
+import { useCanvasPlansForJob } from "../hooks/useFloorPlan";
 import clsx from "clsx";
 import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
@@ -52,6 +53,14 @@ const MOISTURE_COLORS = { dry: "#22C55E", monitoring: "#EAB308", wet: "#EF4444" 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+
+  // Canvas floor plans for this job
+  const { plans: canvasPlans, loading: canvasPlansLoading, createPlan, deletePlan } = useCanvasPlansForJob(id ?? "");
+  const [newPlanName, setNewPlanName] = useState("");
+  const [newPlanLevel, setNewPlanLevel] = useState("Main Floor");
+  const [showNewPlanForm, setShowNewPlanForm] = useState(false);
+  const [creatingPlan, setCreatingPlan] = useState(false);
+
   const [job, setJob] = useState<Job | null>(null);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [moisture, setMoisture] = useState<MoistureReading[]>([]);
@@ -227,6 +236,19 @@ export default function JobDetailPage() {
     if (data) setJob(data as Job);
     setMagicplanEditing(false);
     setMagicplanSaving(false);
+  };
+
+  // Create new canvas floor plan
+  const handleCreatePlan = async () => {
+    if (!newPlanName.trim()) return;
+    setCreatingPlan(true);
+    const plan = await createPlan(newPlanName.trim(), newPlanLevel);
+    setCreatingPlan(false);
+    if (plan) {
+      setShowNewPlanForm(false);
+      setNewPlanName("");
+      navigate(`/jobs/${id}/floor-plans/${plan.id}`);
+    }
   };
 
   // Manual floor plan upload
@@ -1222,6 +1244,96 @@ export default function JobDetailPage() {
 
         {activeTab === "floorplan" && (
           <div className="max-w-4xl space-y-4">
+
+            {/* ── Canvas Floor Plans ── */}
+            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <PenLine size={16} className="text-[#F97316]" />
+                  <h3 className="text-sm font-bold text-slate-300">Draw Floor Plans</h3>
+                </div>
+                <button
+                  onClick={() => setShowNewPlanForm((v) => !v)}
+                  className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316]/10 border border-[#F97316]/30 text-[#F97316] px-3 h-8 rounded-lg hover:bg-[#F97316]/20 transition-colors"
+                >
+                  <Plus size={12} /> New Plan
+                </button>
+              </div>
+
+              {/* New plan form */}
+              {showNewPlanForm && (
+                <div className="flex items-end gap-2 mb-4 flex-wrap">
+                  <div className="flex-1 min-w-32">
+                    <label className="text-xs text-slate-500 mb-1 block">Plan Name</label>
+                    <input
+                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors"
+                      placeholder="e.g. First Floor"
+                      value={newPlanName}
+                      onChange={(e) => setNewPlanName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleCreatePlan(); }}
+                      autoFocus
+                    />
+                  </div>
+                  <div className="min-w-28">
+                    <label className="text-xs text-slate-500 mb-1 block">Level</label>
+                    <select
+                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316] transition-colors"
+                      value={newPlanLevel}
+                      onChange={(e) => setNewPlanLevel(e.target.value)}
+                    >
+                      {["Basement", "Main Floor", "Second Floor", "Third Floor", "Attic"].map((l) => (
+                        <option key={l} value={l}>{l}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    onClick={handleCreatePlan}
+                    disabled={creatingPlan || !newPlanName.trim()}
+                    className="h-9 px-4 rounded-xl text-xs font-bold bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] disabled:opacity-50 transition-colors"
+                  >
+                    {creatingPlan ? "Creating…" : "Create"}
+                  </button>
+                  <button onClick={() => setShowNewPlanForm(false)} className="h-9 px-3 text-xs text-slate-500 hover:text-slate-300">
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+              {/* Canvas plan list */}
+              {canvasPlansLoading ? (
+                <p className="text-xs text-slate-500">Loading…</p>
+              ) : canvasPlans.length === 0 ? (
+                <div className="py-6 text-center">
+                  <p className="text-slate-500 text-sm mb-1">No drawn floor plans yet.</p>
+                  <p className="text-xs text-slate-600">Click "New Plan" to start drawing rooms on an interactive canvas.</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {canvasPlans.map((plan) => (
+                    <div key={plan.id} className="flex items-center gap-3 bg-[#0F172A] rounded-xl px-4 py-3">
+                      <div className="flex-1">
+                        <p className="text-sm font-bold text-slate-200">{plan.name}</p>
+                        <p className="text-xs text-slate-500">{plan.level_name} · Created {new Date(plan.created_at).toLocaleDateString()}</p>
+                      </div>
+                      <button
+                        onClick={() => navigate(`/jobs/${id}/floor-plans/${plan.id}`)}
+                        className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316]/10 border border-[#F97316]/30 text-[#F97316] px-3 h-8 rounded-lg hover:bg-[#F97316]/20 transition-colors"
+                      >
+                        <PenLine size={12} /> Open Editor
+                      </button>
+                      <button
+                        onClick={() => { if (confirm(`Delete "${plan.name}"?`)) deletePlan(plan.id); }}
+                        className="text-slate-600 hover:text-red-400 transition-colors"
+                        title="Delete plan"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Magicplan project link */}
             <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
               <div className="flex items-center gap-2 mb-3">

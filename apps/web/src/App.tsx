@@ -13,6 +13,7 @@ import JobNewPage from "./pages/JobNewPage";
 import SettingsPage from "./pages/SettingsPage";
 import HelpPage from "./pages/HelpPage";
 import QBCallbackPage from "./pages/QBCallbackPage";
+import FloorPlanEditorPage from "./pages/FloorPlanEditorPage";
 import AppLayout from "./components/layout/AppLayout";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -39,6 +40,15 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/qb-callback" element={<QBCallbackPage />} />
+      {/* Full-screen floor plan editor — outside AppLayout so it has no sidebar */}
+      <Route
+        path="/jobs/:jobId/floor-plans/:planId"
+        element={
+          <ProtectedRoute>
+            <FloorPlanEditorPage />
+          </ProtectedRoute>
+        }
+      />
       <Route
         path="/"
         element={
