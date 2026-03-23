@@ -121,6 +121,7 @@ export interface RoomOpening {
   height: number;
   notes: string | null;
   created_at: string;
+  updated_at?: string;
 }
 
 /** Pin marker on the canvas (equipment, label, moisture point, fixture) */

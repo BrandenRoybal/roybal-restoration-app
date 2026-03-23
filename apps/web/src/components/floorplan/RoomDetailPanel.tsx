@@ -1,13 +1,13 @@
 /**
  * RoomDetailPanel — right-side inspector for the selected room.
- * Shows computed stats, restoration metadata, and checkbox flags.
+ * Shows computed stats, openings (with inline edit), restoration metadata, and checkbox flags.
  */
 
 import { useState } from "react";
 import { X, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import clsx from "clsx";
 import type { Room, RoomOpening } from "@roybal/shared";
-import { formatFeet, formatSqFt, formatLinearFt } from "../../utils/geometry";
+import { formatFeet, formatSqFt, formatLinearFt, parseFeetInches } from "../../utils/geometry";
 
 interface Props {
   room: Room;
@@ -16,6 +16,7 @@ interface Props {
   onDelete: () => void;
   onClose: () => void;
   onAddOpening: (type: RoomOpening["type"]) => void;
+  onUpdateOpening: (id: string, updates: Partial<RoomOpening>) => Promise<void>;
   onDeleteOpening: (openingId: string) => void;
 }
 
@@ -34,7 +35,9 @@ const ROOM_COLORS = [
   "#1e3a2f", "#3a2a1e", "#1e2a5f", "#4a3a1e",
 ];
 
-export default function RoomDetailPanel({ room, openings, onUpdate, onDelete, onClose, onAddOpening, onDeleteOpening }: Props) {
+export default function RoomDetailPanel({
+  room, openings, onUpdate, onDelete, onClose, onAddOpening, onUpdateOpening, onDeleteOpening,
+}: Props) {
   const [showRestoration, setShowRestoration] = useState(true);
   const [name, setName] = useState(room.name);
   const [height, setHeight] = useState(String(room.height ?? 8));
@@ -137,7 +140,9 @@ export default function RoomDetailPanel({ room, openings, onUpdate, onDelete, on
         {/* Openings */}
         <div className="px-3 py-2.5 border-b border-[#2C1E00]">
           <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Openings</p>
+            <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Openings {roomOpenings.length > 0 && `(${roomOpenings.length})`}
+            </p>
             <div className="flex gap-1">
               {(["door", "window", "opening"] as const).map((t) => (
                 <button
@@ -145,23 +150,22 @@ export default function RoomDetailPanel({ room, openings, onUpdate, onDelete, on
                   onClick={() => onAddOpening(t)}
                   className="text-xs px-1.5 py-0.5 rounded bg-[#2C1E00] text-slate-400 hover:text-slate-200 capitalize"
                 >
-                  +{t}
+                  +{t[0]}
                 </button>
               ))}
             </div>
           </div>
           {roomOpenings.length === 0 ? (
-            <p className="text-xs text-slate-600">No openings added.</p>
+            <p className="text-xs text-slate-600">No openings. Use +d/+w/+o to add, or drag the toolbar icons onto a wall.</p>
           ) : (
             <div className="space-y-1">
               {roomOpenings.map((o) => (
-                <div key={o.id} className="flex items-center justify-between text-xs">
-                  <span className="capitalize text-slate-400">{o.type}</span>
-                  <span className="text-slate-500">{formatFeet(o.width)} × {formatFeet(o.height)}</span>
-                  <button onClick={() => onDeleteOpening(o.id)} className="text-slate-600 hover:text-red-400 ml-1">
-                    <X size={11} />
-                  </button>
-                </div>
+                <OpeningRow
+                  key={o.id}
+                  opening={o}
+                  onUpdate={onUpdateOpening}
+                  onDelete={onDeleteOpening}
+                />
               ))}
             </div>
           )}
@@ -222,7 +226,6 @@ export default function RoomDetailPanel({ room, openings, onUpdate, onDelete, on
                 ]}
               />
 
-              {/* Notes */}
               <div>
                 <p className="text-xs text-slate-500 mb-1">Notes</p>
                 <textarea
@@ -236,7 +239,6 @@ export default function RoomDetailPanel({ room, openings, onUpdate, onDelete, on
                 />
               </div>
 
-              {/* Checkboxes */}
               <div>
                 <p className="text-xs text-slate-500 mb-1.5">Work Items</p>
                 <div className="grid grid-cols-2 gap-x-2 gap-y-1">
@@ -288,6 +290,94 @@ export default function RoomDetailPanel({ room, openings, onUpdate, onDelete, on
     </div>
   );
 }
+
+// ── Opening row with inline dimension editing ─────────────────────────────────
+
+function OpeningRow({
+  opening, onUpdate, onDelete,
+}: {
+  opening: RoomOpening;
+  onUpdate: (id: string, updates: Partial<RoomOpening>) => Promise<void>;
+  onDelete: (id: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [width, setWidth] = useState(formatFeet(opening.width));
+  const [height, setHeight] = useState(String(opening.height));
+
+  const dot = opening.type === "door" ? "bg-orange-500"
+    : opening.type === "window" ? "bg-sky-400"
+    : "bg-violet-400";
+
+  const commitWidth = () => {
+    const parsed = parseFeetInches(width);
+    if (parsed !== null && parsed > 0.1) {
+      onUpdate(opening.id, { width: parsed });
+    } else {
+      setWidth(formatFeet(opening.width));
+    }
+  };
+
+  const commitHeight = () => {
+    const h = parseFloat(height);
+    if (!isNaN(h) && h > 0) {
+      onUpdate(opening.id, { height: h });
+    } else {
+      setHeight(String(opening.height));
+    }
+  };
+
+  return (
+    <div className="border border-[#2C1E00] rounded-md overflow-hidden">
+      {/* Row header */}
+      <div
+        className="flex items-center gap-1.5 px-2 py-1 cursor-pointer hover:bg-[#2C1E00]/30"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
+        <span className="flex-1 text-xs capitalize text-slate-400">{opening.type}</span>
+        <span className="text-xs text-slate-500 font-mono">
+          {formatFeet(opening.width)} × {formatFeet(opening.height)}
+        </span>
+        <button
+          className="text-slate-600 hover:text-red-400 ml-1 p-0.5"
+          onClick={(e) => { e.stopPropagation(); onDelete(opening.id); }}
+        >
+          <X size={11} />
+        </button>
+      </div>
+
+      {/* Expanded edit */}
+      {expanded && (
+        <div className="px-2 pb-2 grid grid-cols-2 gap-x-2 gap-y-1 border-t border-[#2C1E00]">
+          <div>
+            <p className="text-xs text-slate-600 mt-1 mb-0.5">Width</p>
+            <input
+              className="w-full text-xs bg-[#080500] border border-[#2C1E00] rounded px-1.5 py-0.5 text-slate-200 focus:border-[#C9A84C] outline-none font-mono"
+              value={width}
+              onChange={(e) => setWidth(e.target.value)}
+              onBlur={commitWidth}
+              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+              placeholder={`e.g. 3' 0"`}
+            />
+          </div>
+          <div>
+            <p className="text-xs text-slate-600 mt-1 mb-0.5">Height (ft)</p>
+            <input
+              className="w-full text-xs bg-[#080500] border border-[#2C1E00] rounded px-1.5 py-0.5 text-slate-200 focus:border-[#C9A84C] outline-none font-mono"
+              value={height}
+              onChange={(e) => setHeight(e.target.value)}
+              onBlur={commitHeight}
+              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+              placeholder="e.g. 6.8"
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Helper components ─────────────────────────────────────────────────────────
 
 function Row({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (

@@ -234,5 +234,142 @@ export function toSVGPath(points: Point[]): string {
   return parts.join(" ") + " Z";
 }
 
+// ── Dimension parsing ─────────────────────────────────────────────────────────
+
+/**
+ * Parse a user-entered dimension string to decimal feet.
+ * Accepts:
+ *   "12"       → 12.0   (feet)
+ *   "12.5"     → 12.5   (feet)
+ *   "12'"      → 12.0   (feet)
+ *   "12' 6\""  → 12.5   (12 feet 6 inches)
+ *   "12'6\""   → 12.5
+ *   "12' 6"    → 12.5   (common shorthand, apostrophe required)
+ *   "6\""      → 0.5    (inches only)
+ * Returns null if the string cannot be parsed or is negative.
+ */
+export function parseFeetInches(input: string): number | null {
+  const s = input.trim().replace(/\s+/g, " ");
+  if (!s) return null;
+
+  // Inches only: "6\"" → 0.5
+  const inchOnly = s.match(/^(\d+(?:\.\d+)?)"$/);
+  if (inchOnly) {
+    const v = parseFloat(inchOnly[1]!) / 12;
+    return v >= 0 ? v : null;
+  }
+
+  // Feet + inches (apostrophe required): "12' 6\"" or "12'6\"" or "12' 6"
+  const ftIn = s.match(/^(\d+(?:\.\d+?)?)'\s*(\d+(?:\.\d+?)?)"?$/);
+  if (ftIn) {
+    const v = parseFloat(ftIn[1]!) + parseFloat(ftIn[2]!) / 12;
+    return v >= 0 ? v : null;
+  }
+
+  // Feet only: "12'" or "12" or "12.5"
+  const ftOnly = s.match(/^(\d+(?:\.\d+?)?)'?$/);
+  if (ftOnly) {
+    const v = parseFloat(ftOnly[1]!);
+    return v >= 0 ? v : null;
+  }
+
+  return null;
+}
+
+// ── Wall geometry helpers ─────────────────────────────────────────────────────
+
+/**
+ * Set the length of wall[wallIndex] to newLength by moving its end vertex
+ * (index j = wallIndex+1) along the current wall direction.
+ * Returns null if the geometry is degenerate or newLength is invalid.
+ */
+export function setWallLength(
+  points: Point[],
+  wallIndex: number,
+  newLength: number
+): Point[] | null {
+  if (points.length < 3 || newLength < 0.1) return null;
+  const i = wallIndex;
+  const j = (i + 1) % points.length;
+  const p = points[i]!;
+  const q = points[j]!;
+  const dx = q.x - p.x;
+  const dy = q.y - p.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 0.01) return null;
+  const result = [...points];
+  result[j] = { x: p.x + (dx / len) * newLength, y: p.y + (dy / len) * newLength };
+  return result;
+}
+
+/**
+ * Move wall[wallIndex] perpendicular to itself by `delta` feet.
+ * Both vertices on the wall move equally, preserving wall direction and length.
+ */
+export function moveWallPerp(points: Point[], wallIndex: number, delta: number): Point[] {
+  if (points.length < 3) return points;
+  const i = wallIndex;
+  const j = (i + 1) % points.length;
+  const p = points[i]!;
+  const q = points[j]!;
+  const dx = q.x - p.x;
+  const dy = q.y - p.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 0.01) return points;
+  const perpX = -dy / len;
+  const perpY = dx / len;
+  const result = [...points];
+  result[i] = { x: p.x + perpX * delta, y: p.y + perpY * delta };
+  result[j] = { x: q.x + perpX * delta, y: q.y + perpY * delta };
+  return result;
+}
+
+/** Midpoint of a wall segment */
+export function wallMidpoint(p: Point, q: Point): Point {
+  return { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 };
+}
+
+/**
+ * Project a point onto line segment p→q.
+ * Returns t (clamped 0–1), closest point on the segment, and distance to it.
+ */
+export function projectPointOntoSegment(
+  point: Point,
+  p: Point,
+  q: Point
+): { t: number; closest: Point; distance: number } {
+  const dx = q.x - p.x;
+  const dy = q.y - p.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 0.0001) {
+    return { t: 0, closest: { ...p }, distance: distanceBetween(point, p) };
+  }
+  const t = Math.max(0, Math.min(1, ((point.x - p.x) * dx + (point.y - p.y) * dy) / len2));
+  const closest = { x: p.x + t * dx, y: p.y + t * dy };
+  return { t, closest, distance: distanceBetween(point, closest) };
+}
+
+/**
+ * Find the nearest wall of a polygon to a given point (all in feet).
+ * Returns { wallIndex, t } if within thresholdPx screen pixels, else null.
+ */
+export function findNearestWall(
+  points: Point[],
+  point: Point,
+  zoom: number,
+  thresholdPx = 12
+): { wallIndex: number; t: number } | null {
+  let best: { wallIndex: number; t: number; distPx: number } | null = null;
+  for (let i = 0; i < points.length; i++) {
+    const j = (i + 1) % points.length;
+    const { t, distance } = projectPointOntoSegment(point, points[i]!, points[j]!);
+    const distPx = distance * PIXELS_PER_FOOT * zoom;
+    if (distPx <= thresholdPx && (!best || distPx < best.distPx)) {
+      best = { wallIndex: i, t, distPx };
+    }
+  }
+  return best ? { wallIndex: best.wallIndex, t: best.t } : null;
+}
+
 // React type import for getMousePosition
 import type React from "react";
