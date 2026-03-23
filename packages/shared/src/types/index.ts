@@ -188,6 +188,63 @@ export interface FloorPlan {
 }
 
 // ============================================================
+// MANUAL FLOOR PLAN EDITOR TYPES
+// ============================================================
+
+export interface FPPoint {
+  x: number; // feet
+  y: number; // feet
+}
+
+export interface ManualFloorPlan {
+  id: string;
+  job_id: string;
+  name: string;
+  scale: number; // px per foot
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FPRoom {
+  id: string;
+  plan_id: string;
+  name: string;
+  points: FPPoint[]; // polygon vertices in feet
+  height: number;    // feet
+  color?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type OpeningType = 'door' | 'window' | 'opening';
+export type DoorSwing = 'left' | 'right' | 'none';
+
+export interface FPOpening {
+  id: string;
+  room_id: string;
+  plan_id: string;
+  wall_index: number;          // which polygon edge
+  type: OpeningType;
+  width: number;               // feet
+  height: number;              // feet
+  offset_from_start: number;   // feet from start vertex of wall
+  swing?: DoorSwing | null;
+  label?: string | null;
+  metadata?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Derived wall area calculations */
+export interface FPRoomCalculations {
+  floor_area: number;         // sq ft
+  perimeter: number;          // ft
+  gross_wall_area: number;    // sq ft (perimeter * height)
+  net_wall_area: number;      // sq ft (gross - opening areas)
+  wall_lengths: number[];     // ft per wall segment
+}
+
+// ============================================================
 // FORM / INPUT TYPES (used by create/update flows)
 // ============================================================
 export type CreateJobInput = Omit<

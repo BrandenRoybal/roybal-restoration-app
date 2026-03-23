@@ -16,6 +16,7 @@ import {
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
 import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users } from "lucide-react";
+import FloorPlanEditor from "../components/floorplan/FloorPlanEditor";
 import clsx from "clsx";
 import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
@@ -1221,7 +1222,7 @@ export default function JobDetailPage() {
         )}
 
         {activeTab === "floorplan" && (
-          <div className="max-w-4xl space-y-4">
+          <div className="max-w-5xl space-y-4">
             {/* Magicplan project link */}
             <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
               <div className="flex items-center gap-2 mb-3">
@@ -1312,18 +1313,10 @@ export default function JobDetailPage() {
               )}
             </div>
 
-            {/* Floor plan versions */}
-            {floorPlans.length === 0 ? (
-              <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-12 text-center">
-                <p className="text-slate-500 mb-2">No floor plans synced yet.</p>
-                <p className="text-slate-600 text-sm">
-                  {job.magicplan_project_id
-                    ? "Export a floor plan from Magicplan — it will appear here automatically."
-                    : "Link a Magicplan project above to get started."}
-                </p>
-              </div>
-            ) : (
+            {/* Synced floor plan versions */}
+            {floorPlans.length > 0 && (
               <div className="space-y-3">
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Synced Plans</h3>
                 {floorPlans.map((fp) => (
                   <div key={fp.id} className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4 flex items-center gap-4">
                     <div className="flex-1">
@@ -1340,6 +1333,14 @@ export default function JobDetailPage() {
                 ))}
               </div>
             )}
+
+            {/* Manual floor plan editor */}
+            <div>
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Manual Editor</h3>
+              <div style={{ height: 620 }}>
+                <FloorPlanEditor jobId={id!} />
+              </div>
+            </div>
           </div>
         )}
 
