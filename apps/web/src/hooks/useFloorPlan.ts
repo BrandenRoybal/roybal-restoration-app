@@ -191,6 +191,23 @@ export function useCanvasPlan(planId: string) {
     setOpenings((prev) => prev.filter((o) => o.id !== openingId));
   };
 
+  const updateOpening = async (openingId: string, updates: Partial<RoomOpening>): Promise<void> => {
+    const { data } = await supabase
+      .from("room_openings")
+      .update(updates)
+      .eq("id", openingId)
+      .select()
+      .single();
+    if (data) setOpenings((prev) => prev.map((o) => (o.id === openingId ? (data as RoomOpening) : o)));
+  };
+
+  /** Optimistic local update for opening position during drag */
+  const setOpeningPositionLocal = (openingId: string, position: number) => {
+    setOpenings((prev) =>
+      prev.map((o) => (o.id === openingId ? { ...o, position } : o))
+    );
+  };
+
   // ── Markers ──
 
   const createMarker = async (
@@ -235,7 +252,9 @@ export function useCanvasPlan(planId: string) {
     setRoomPointsLocal,
     // opening ops
     createOpening,
+    updateOpening,
     deleteOpening,
+    setOpeningPositionLocal,
     // marker ops
     createMarker,
     deleteMarker,
