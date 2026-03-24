@@ -31,12 +31,14 @@ import {
   moveWallPerp,
   projectPointOntoSegment,
   formatFeet,
+  insertVertexOnWall,
+  deleteWallVertex,
 } from "../../utils/geometry";
 import { useCanvasPlan } from "../../hooks/useFloorPlan";
 import EditorToolbar, { type EditorTool } from "./EditorToolbar";
 import RoomPolygon from "./RoomPolygon";
 import RoomDetailPanel from "./RoomDetailPanel";
-import { Loader2, AlertCircle } from "lucide-react";
+import { Loader2, AlertCircle, Plus, Minus } from "lucide-react";
 
 interface Props {
   planId: string;
@@ -224,6 +226,34 @@ export default function FloorPlanEditor({ planId, jobId }: Props) {
     setDimensionEdit(null);
     setDimEditError("");
   }, [dimensionEdit, dimEditValue, rooms, setRoomPointsLocal, updateRoom]);
+
+  // ── Wall add / delete ──
+
+  const handleAddWallVertex = useCallback(() => {
+    if (!selectedWall) return;
+    const room = rooms.find((r) => r.id === selectedWall.roomId);
+    const pts = (room?.polygon_points ?? []) as Point[];
+    const newPts = insertVertexOnWall(pts, selectedWall.wallIndex);
+    pushUndo(rooms);
+    setRoomPointsLocal(selectedWall.roomId, newPts);
+    updateRoom(selectedWall.roomId, { polygon_points: newPts });
+    // Keep new wall (the first half) selected so user can drag the new vertex right away
+    setSelectedWall({ roomId: selectedWall.roomId, wallIndex: selectedWall.wallIndex });
+  }, [selectedWall, rooms, pushUndo, setRoomPointsLocal, updateRoom]);
+
+  const handleDeleteWallVertex = useCallback(() => {
+    if (!selectedWall) return;
+    const room = rooms.find((r) => r.id === selectedWall.roomId);
+    const pts = (room?.polygon_points ?? []) as Point[];
+    const newPts = deleteWallVertex(pts, selectedWall.wallIndex);
+    if (!newPts) return; // Already at minimum 3 vertices
+    pushUndo(rooms);
+    setRoomPointsLocal(selectedWall.roomId, newPts);
+    updateRoom(selectedWall.roomId, { polygon_points: newPts });
+    // Adjust selected wall index if we deleted past the end
+    const newWallIndex = Math.min(selectedWall.wallIndex, newPts.length - 1);
+    setSelectedWall({ roomId: selectedWall.roomId, wallIndex: newWallIndex });
+  }, [selectedWall, rooms, pushUndo, setRoomPointsLocal, updateRoom]);
 
   // ── Mouse / pointer helpers ──
 
@@ -780,7 +810,7 @@ export default function FloorPlanEditor({ planId, jobId }: Props) {
 
       {/* Status bar */}
       {selectedWall && !dimensionEdit && (
-        <div className="shrink-0 flex items-center gap-2 px-3 h-7 bg-[#0C0800] border-t border-[#2C1E00] text-xs text-slate-500">
+        <div className="shrink-0 flex items-center gap-2 px-3 h-8 bg-[#0C0800] border-t border-[#2C1E00] text-xs">
           {(() => {
             const room = rooms.find((r) => r.id === selectedWall.roomId);
             const pts = (room?.polygon_points ?? []) as Point[];
@@ -790,9 +820,26 @@ export default function FloorPlanEditor({ planId, jobId }: Props) {
             const len = distanceBetween(pts[i]!, pts[j]!);
             return (
               <>
-                <span className="text-[#C9A84C] font-mono">Wall {i + 1}:</span>
-                <span>{formatFeet(len)}</span>
-                <span className="text-slate-600">· Click dimension label to enter exact length · Drag wall to move</span>
+                <span className="text-[#C9A84C] font-mono shrink-0">Wall {i + 1}:</span>
+                <span className="text-slate-300 font-mono shrink-0">{formatFeet(len)}</span>
+                <span className="text-slate-600 hidden sm:block">· Click label to edit · Drag to move</span>
+                <div className="ml-auto flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={handleAddWallVertex}
+                    title="Add vertex at midpoint (splits wall into two)"
+                    className="flex items-center gap-1 px-2 h-6 rounded bg-[#2C1E00] text-slate-300 hover:text-[#C9A84C] hover:bg-[#C9A84C]/10 border border-[#2C1E00] hover:border-[#C9A84C]/40 transition-colors text-xs"
+                  >
+                    <Plus size={11} /> Add Vertex
+                  </button>
+                  <button
+                    onClick={handleDeleteWallVertex}
+                    disabled={pts.length <= 3}
+                    title={pts.length <= 3 ? "Need 4+ vertices to delete" : "Remove end vertex (merges with next wall)"}
+                    className="flex items-center gap-1 px-2 h-6 rounded bg-[#2C1E00] text-slate-300 hover:text-red-400 hover:bg-red-500/10 border border-[#2C1E00] hover:border-red-500/40 transition-colors text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <Minus size={11} /> Del Vertex
+                  </button>
+                </div>
               </>
             );
           })()}

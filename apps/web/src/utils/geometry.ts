@@ -234,6 +234,37 @@ export function toSVGPath(points: Point[]): string {
   return parts.join(" ") + " Z";
 }
 
+// ── Wall add / delete ─────────────────────────────────────────────────────────
+
+/**
+ * Split wall[wallIndex] into two walls by inserting a new vertex at its midpoint.
+ * The new vertex can then be dragged to create a corner.
+ */
+export function insertVertexOnWall(points: Point[], wallIndex: number): Point[] {
+  if (points.length < 3) return points;
+  const i = wallIndex;
+  const j = (i + 1) % points.length;
+  const p = points[i]!;
+  const q = points[j]!;
+  const mid: Point = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 };
+  const result = [...points];
+  // Insert after i; if j === 0 (last wall wraps), splice at end is correct
+  result.splice(i + 1, 0, mid);
+  return result;
+}
+
+/**
+ * Delete the end vertex of wall[wallIndex], merging it with the next wall.
+ * Returns null if the polygon would drop below 3 vertices.
+ */
+export function deleteWallVertex(points: Point[], wallIndex: number): Point[] | null {
+  if (points.length <= 3) return null;
+  const j = (wallIndex + 1) % points.length;
+  const result = [...points];
+  result.splice(j, 1);
+  return result;
+}
+
 // ── Dimension parsing ─────────────────────────────────────────────────────────
 
 /**
