@@ -1,6 +1,8 @@
 /* Roybal Field Forms — service worker (offline-first app shell) */
-const CACHE = "roybal-field-v1";
-const ASSETS = [
+const CACHE = "roybal-field-v2";
+
+/* core shell — must all cache for the app to work offline */
+const CORE = [
   ".",
   "index.html",
   "manifest.webmanifest",
@@ -11,12 +13,27 @@ const ASSETS = [
   "js/model.js",
   "js/formkit.js",
   "js/forms.js",
-  "assets/logo.svg",
-  "assets/icon.svg",
+  "js/pdf.js",
+  "assets/favicon-16.png",
+  "assets/favicon-32.png",
+  "assets/apple-touch-icon.png",
+  "assets/mstile-150.png",
+];
+
+/* large optional assets — floor-plan PDF engine; cached best-effort */
+const OPTIONAL = [
+  "assets/vendor/pdfjs/pdf.min.mjs",
+  "assets/vendor/pdfjs/pdf.worker.min.mjs",
+  "assets/logo-full.png",
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil((async () => {
+    const c = await caches.open(CACHE);
+    await c.addAll(CORE);
+    await Promise.allSettled(OPTIONAL.map((u) => c.add(u)));
+    self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (e) => {

@@ -37,6 +37,7 @@ async function route() {
     const project = await Store.get(parts[1]);
     if (!project) return go("#/");
     if (parts[2] === "edit") return projectEdit(project);
+    if (parts[2] === "packet") return packetPage(project);
     if (parts[2] === "f" && parts[3]) return formPage(project, parts[3], parts[4]);
     return projectHome(project);
   }
@@ -113,7 +114,9 @@ function projectHome(project) {
   if (project.dryingSystem) badges.append(h("span", { class: "badge" }, project.dryingSystem + " drying"));
   if (badges.children.length) body.append(badges);
 
-  body.append(h("button", { class: "btn btn--ghost btn--sm", style: "margin-bottom:14px", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"));
+  body.append(h("div", { class: "btn-row", style: "margin-bottom:14px" },
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shareJob(project) }, "↗ Share")));
 
   const tiles = h("div", { class: "tiles" });
   FORMS.forEach((f) => {
@@ -128,6 +131,56 @@ function projectHome(project) {
       badge));
   });
   body.append(tiles);
+
+  body.append(h("button", { class: "btn btn--primary", style: "margin-top:14px", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Full job packet (PDF)"));
+}
+
+/* ============================================================
+   Full job packet — every started form, stacked for one PDF
+   ============================================================ */
+function packetPage(project) {
+  setChrome("Job packet", `#/p/${project.id}`);
+  const body = clear(view);
+  setCtx(project, null);
+
+  const included = [];
+  for (const f of FORMS) {
+    const v = project[f.key];
+    if (Array.isArray(v)) { if (v.length) v.forEach((inst) => included.push(RENDERERS[f.key](project, inst))); }
+    else if (v) { included.push(RENDERERS[f.key](project, v)); }
+  }
+
+  body.append(
+    h("h1", { class: "app-only" }, "Full job packet"),
+    h("p", { class: "subtle app-only" }, included.length
+      ? `${included.length} document(s) for ${project.customer || "this job"}. Tap “Save packet as PDF,” then share to the carrier.`
+      : "Nothing to include yet — fill out some forms first."));
+
+  included.forEach((s) => body.append(s));
+
+  if (included.length) {
+    body.append(h("div", { class: "sticky-actions app-only" },
+      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}`) }, "Back"),
+      h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Save packet as PDF")));
+  }
+}
+
+/* ---------- share a quick job summary ---------- */
+async function shareJob(project) {
+  const dryDays = [];
+  const lines = [
+    `Roybal Restoration — ${project.customer || "Job"}`,
+    project.address, project.claimNo ? "Claim #: " + project.claimNo : "",
+    project.carrier ? "Carrier: " + project.carrier : "",
+    project.waterCategory ? `Cat ${project.waterCategory}${project.waterClass ? " / Class " + project.waterClass : ""}` : "",
+    `Moisture maps: ${(project.moistureMaps || []).length} · Drying logs: ${(project.dryingLogs || []).length} · Photos: ${(project.photos || []).length}`,
+  ].filter(Boolean).concat(dryDays);
+  const textBody = lines.join("\n");
+  if (navigator.share) {
+    try { await navigator.share({ title: "Roybal Restoration — " + (project.customer || "Job"), text: textBody }); return; } catch { /* cancelled */ }
+  }
+  const to = project.adjuster && project.adjuster.includes("@") ? project.adjuster : "";
+  window.location.href = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent("Roybal Restoration — " + (project.customer || "Job"))}&body=${encodeURIComponent(textBody)}`;
 }
 
 /* ============================================================
@@ -139,6 +192,10 @@ async function formPage(project, key, instId) {
 
   // single-instance forms: open editor directly
   if (!meta.multi) {
+    if (key === "photos") {
+      if (!Array.isArray(project.photos)) { project.photos = []; await Store.put(project); }
+      return formEditor(project, meta, project.photos);
+    }
     if (!project[key]) { project[key] = FACTORY[key](); await Store.put(project); }
     return formEditor(project, meta, project[key]);
   }

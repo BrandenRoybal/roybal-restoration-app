@@ -16,8 +16,9 @@ that information flows automatically into every form. Then fill out any of the 7
 
 | Form | Notes |
 |---|---|
-| 🗺️ **Moisture Map** | Finger-draw the affected area, drop numbered markers at each reading location, log daily MC% readings. *(The daily driver.)* |
-| 💧 **Drying Log** | Equipment runtime table + daily psychrometric readings. **GPP is auto-calculated** from temp + RH, and **grain depression** computes itself. *(The other daily driver.)* |
+| 🗺️ **Moisture Map** | **Import a PDF or image floor plan** and draw right on top, drop numbered markers at each reading location, log daily MC% readings. Pick a material and the **IICRC dry goal auto-fills**; readings then flag **🟢 green (dry) / 🔴 red (wet)** automatically. *(The daily driver.)* |
+| 💧 **Drying Log** | Equipment runtime table + daily psychrometric readings. **GPP auto-calculates** from temp + RH and **grain depression** computes itself. Shows the **drying day count** and **flags any unit on site 7+ days** for the carrier. *(The other daily driver.)* |
+| 📷 **Job Photos** | Before / during / after pictures with room + caption + auto timestamp; prints as a Photo Report. |
 | ✍️ **Work Authorization** | Sign right on the screen (owner + Roybal rep) **or** snap a photo / upload a wet-signed paper copy. |
 | 📋 **Daily Construction Log** | Crew, tasks, start/finish times → hours total themselves. |
 | ✅ **Certificate of Drying** | IICRC S500 dry-standard verification table + 3-way sign-off (tech / owner / adjuster). |
@@ -25,7 +26,9 @@ that information flows automatically into every form. Then fill out any of the 7
 | 🧾 **Mitigation Invoice** | Line items, deductible, previous payments, tax → total due. |
 
 Every form has a **“Save as PDF”** button that produces a branded, letter-size document
-matching the paper packet — ready to AirDrop, email, or attach to the claim.
+matching the paper packet. The job home also has a **“Full job packet (PDF)”** button that
+stacks every completed form into one document for carrier submission, and a **Share** button
+to send a quick job summary.
 
 ---
 
@@ -76,22 +79,24 @@ runs offline.
 
 ---
 
-## Suggested next steps (ideas that would help the most)
+## Done in this version
 
-1. **Auto-fill the dry standard.** On the Moisture Map you pick a material — we can
-   auto-set the IICRC dry goal (drywall ≤1%, framing ≤19%, etc.) and flag a reading
-   red/green against it so a tech instantly sees what's still wet.
-2. **"Days drying" + 7-day equipment flag.** Surface dry-out day count and warn when a unit
-   has been on site over a week (carrier scrutiny threshold).
-3. **One-tap full report.** Bundle Work Auth + Moisture Map + Drying Log + Cert into a single
-   PDF packet per job for carrier submission.
-4. **Cloud sync (optional).** This repo already has a Supabase backend in `apps/web`. We can
+- ✅ **Floor-plan import** (PDF or image) as the Moisture Map background — draw markers on top
+- ✅ **Auto dry-standard + red/green reading flags** (pick a material → goal auto-fills)
+- ✅ **Drying day count + 7-day equipment flag**
+- ✅ **Auto GPP + grain-depression** in the Drying Log
+- ✅ **Project photos** (before/during/after) + printable Photo Report
+- ✅ **Full job packet PDF** (every form stacked) + **Share** a job summary
+- ✅ **Real Roybal branding** (icons / home-screen icon)
+
+## Suggested next steps
+
+1. **Cloud sync (optional).** This repo already has a Supabase backend in `apps/web`. We can
    add an optional "Sync to office" button so jobs/photos land in the admin dashboard and
-   QuickBooks — while the field app keeps working offline-first if anyone wants the simple
-   version.
-5. **Email/share straight to the adjuster** from the job screen.
-6. **Photo capture inside Moisture Map / Drying Log** with room + timestamp (camera hooks are
-   already wired; we can expand organization).
+   QuickBooks — while the field app keeps working offline-first.
+2. **Attach the generated PDF directly to an email/share** (today: Save as PDF, then share
+   from the OS; client-side PDF-file generation can be added with a small library).
+3. **Scale/measure on the imported floor plan** (set a known dimension → auto area for scope).
 
 ---
 

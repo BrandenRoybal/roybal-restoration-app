@@ -20,6 +20,8 @@ export const FORMS = [
     blurb: "Sketch the affected area + daily MC% readings" },
   { key: "dryingLogs",       name: "Drying Log",         icon: "💧", multi: true,  hero: true,
     blurb: "Equipment runtime + psychrometric readings" },
+  { key: "photos",           name: "Job Photos",         icon: "📷", multi: false,
+    blurb: "Before / during / after pictures" },
   { key: "workAuth",         name: "Work Authorization", icon: "✍️", multi: false,
     blurb: "Sign on device or upload signed copy" },
   { key: "constructionLogs", name: "Daily Const. Log",   icon: "📋", multi: true,
@@ -51,6 +53,8 @@ export function newProject() {
     waterCategory: "",   // 1 | 2 | 3
     waterClass: "",      // 1 | 2 | 3 | 4
     dryingSystem: "",    // Open | Closed | Hybrid
+    // project-level job photos (before/during/after, with caption + room)
+    photos: [],
     // form data
     workAuth: null,
     certDrying: null,
@@ -60,6 +64,10 @@ export function newProject() {
     changeOrders: [],
     invoices: [],
   };
+}
+
+export function newPhoto() {
+  return { id: uid(), src: "", caption: "", room: "", stage: "during", ts: new Date().toISOString() };
 }
 
 export const formByKey = (k) => FORMS.find((f) => f.key === k);
@@ -77,7 +85,10 @@ export function newMoistureMap() {
     id: uid(), createdAt: new Date().toISOString(),
     label: "", material: "", dryGoal: "", meter: "",
     ambientTemp: "", ambientRH: "", equipmentOnSite: "", technician: "",
-    sketch: "",                                  // PNG dataURL
+    sketch: "",                                  // flattened composite (bg + drawing) for print
+    floorPlan: "",                               // imported floor-plan background (PDF/image → image)
+    strokes: "",                                 // drawing layer only (PNG)
+    markerNext: 1,                               // next reading-location marker number
     photos: [],                                  // alt: photos of the area
     page: "", pageOf: "",
     // reading grid: rows are dates; locations 1..13

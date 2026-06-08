@@ -2,13 +2,14 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, sketchPad, gpp, grainDepression, money, DRY_STANDARDS } from "./core.js";
+import { h, sketchPad, gpp, grainDepression, money, toast, fmtDate, fileToDataURL, DRY_STANDARDS, goalFor, daysSince } from "./core.js";
+import { fileToFloorPlan } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
   lineItems, sheet, commit,
 } from "./formkit.js";
 import {
-  SCOPE_ITEMS, CHANGE_REASONS,
+  SCOPE_ITEMS, CHANGE_REASONS, newPhoto,
   blankReadingRow, blankPsychroRow, blankEquipRow, blankWorkRow,
   blankLineItem, blankVerifyRow,
 } from "./model.js";
@@ -36,7 +37,27 @@ function sectionTitle(t) { return h("h2", {}, t); }
    1. MOISTURE MAP
    ============================================================ */
 export function moistureMap(project, m) {
-  const pad = sketchPad(m.sketch, (data) => { m.sketch = data; commit(); });
+  const pad = sketchPad({
+    strokes: m.strokes, background: m.floorPlan, markerStart: m.markerNext || 1,
+    onChange: ({ strokes, background, composite, markerNext }) => {
+      m.strokes = strokes; m.floorPlan = background || ""; m.sketch = composite; m.markerNext = markerNext;
+      commit();
+    },
+  });
+
+  /* dry goal (numeric) for red/green flagging */
+  const goalNum = () => {
+    const g = goalFor(m.material);
+    if (g != null) return g;
+    const p = parseFloat(String(m.dryGoal || "").replace(/[^0-9.]/g, ""));
+    return isNaN(p) ? null : p;
+  };
+  function flagCell(input) {
+    const goal = goalNum(), v = parseFloat(input.value);
+    input.classList.remove("dry", "wet");
+    if (goal != null && input.value !== "" && !isNaN(v)) input.classList.add(v <= goal ? "dry" : "wet");
+  }
+  function reflagAll() { tbody.querySelectorAll("input.mc").forEach(flagCell); }
 
   /* reading grid */
   const tbody = h("tbody");
@@ -49,8 +70,9 @@ export function moistureMap(project, m) {
     tr.append(dateCell);
     for (let n = 0; n < 13; n++) {
       const c = h("td");
-      const input = h("input", { value: row.values[n] ?? "", inputmode: "decimal", style: "min-width:42px" });
-      input.addEventListener("input", () => { row.values[n] = input.value; commit(); });
+      const input = h("input", { class: "mc", value: row.values[n] ?? "", inputmode: "decimal", style: "min-width:42px" });
+      input.addEventListener("input", () => { row.values[n] = input.value; flagCell(input); commit(); });
+      flagCell(input);
       c.append(input); tr.append(c);
     }
     const noteCell = h("td");
@@ -64,6 +86,40 @@ export function moistureMap(project, m) {
   paintRows();
   const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add reading date");
   addRow.addEventListener("click", () => { m.readings.push(blankReadingRow()); paintRows(); commit(); });
+
+  /* material picker auto-fills the dry goal */
+  const dryGoalInput = inp(m, "dryGoal", { placeholder: "≤ 16%", oninput: () => reflagAll() });
+  const materialSel = sel(m, "material",
+    DRY_STANDARDS.map((d) => ({ value: d.material, label: `${d.material} (≤ ${d.goal}%)` })),
+    { placeholder: "Select material…", onchange: (v) => {
+        const g = goalFor(v);
+        if (g != null) { m.dryGoal = `≤ ${g}%`; dryGoalInput.value = m.dryGoal; }
+        reflagAll();
+      } });
+
+  /* floor-plan import (PDF or image) */
+  const fpInput = h("input", { type: "file", accept: "image/*,application/pdf", style: "display:none" });
+  fpInput.addEventListener("change", async () => {
+    const f = fpInput.files[0]; if (!f) return;
+    toast("Importing floor plan…", 6000);
+    try { const url = await fileToFloorPlan(f); pad.setBackground(url); toast("Floor plan added — draw on top"); }
+    catch { toast("Sorry — couldn't read that file"); }
+    fpInput.value = ""; renderFp();
+  });
+  const fpBox = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" });
+  function renderFp() {
+    fpBox.replaceChildren(fpInput);
+    const importBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" },
+      pad.hasBackground() ? "🔄 Replace floor plan" : "📄 Import floor plan (PDF / image)");
+    importBtn.addEventListener("click", () => fpInput.click());
+    fpBox.append(importBtn);
+    if (pad.hasBackground()) {
+      const rm = h("button", { type: "button", class: "btn btn--danger btn--sm" }, "Remove plan");
+      rm.addEventListener("click", () => { pad.setBackground(null); renderFp(); });
+      fpBox.append(rm);
+    }
+  }
+  renderFp();
 
   const headCols = ["Date"];
   for (let n = 1; n <= 13; n++) headCols.push(String(n));
@@ -79,18 +135,20 @@ export function moistureMap(project, m) {
       field("Equipment on Site", inp(m, "equipmentOnSite", { placeholder: "e.g. 2 dehu, 6 AM" })),
       field("Page (of)", h("div", { class: "grid2" }, inp(m, "page", { placeholder: "Page" }), inp(m, "pageOf", { placeholder: "of" })))),
 
-    sectionTitle("Affected Area Sketch"),
-    h("p", { class: "subtle app-only" }, "Draw the affected area, then tap “① Number” and place numbered markers at each moisture-reading location."),
+    sectionTitle("Affected Area"),
+    h("p", { class: "subtle app-only" }, "Import a floor plan (or draw freehand), then tap “① Number” and place a numbered marker at each moisture-reading location."),
     h("div", { class: "grid2" },
-      field("Material", inp(m, "material", { placeholder: "Drywall, subfloor…" })),
-      field("Dry Goal (MC%)", inp(m, "dryGoal", { placeholder: "≤ 16%" }))),
+      field("Material", materialSel),
+      field("Dry Goal (MC%)", dryGoalInput)),
     field("Meter / Setting", inp(m, "meter", { placeholder: "Pin / non-pin, scale" })),
+    fpBox,
     pad.tools, pad.el,
     h("details", { class: "app-only", style: "margin-top:10px" },
       h("summary", { class: "linklike" }, "Or attach photos of the area instead"),
       photoUploader(m.photos, "Add area photos")),
 
     sectionTitle("Moisture Reading Locations (MC% or equivalent)"),
+    h("p", { class: "flagnote app-only" }, "Cells flag ", h("span", { class: "dot g" }, "green = at/below dry goal"), " · ", h("span", { class: "dot r" }, "red = still wet"), " automatically."),
     h("div", { class: "tablewrap" },
       h("table", { class: "grid" },
         h("thead", {}, h("tr", {}, ...headCols.map((c) => h("th", {}, c)), h("th", { class: "app-only" }, ""))),
@@ -102,22 +160,59 @@ export function moistureMap(project, m) {
    2. DRYING LOG
    ============================================================ */
 export function dryingLog(project, d) {
+  /* drying-day counter: from dry-out start to today */
+  const dryStart = d.dryoutStart || project.dryStart || "";
+  const dayCount = dryStart ? (daysSince(dryStart) + 1) : null;
+  const daysBanner = h("div", { class: "daysbig app-only", style: "margin-bottom:8px" });
+  if (dayCount != null && dayCount > 0) daysBanner.append("Drying ", h("b", {}, "Day " + dayCount), " (started " + dryStart + ")");
+
+  const warnBox = h("div", { class: "warn app-only", hidden: true });
+
   /* equipment deployment table */
   const eqBody = h("tbody");
+  function refreshWarn() {
+    const flagged = d.equipment.filter((r) => r.placed && !r.removed && (daysSince(r.placed) ?? 0) >= 7);
+    if (flagged.length) {
+      warnBox.hidden = false;
+      warnBox.replaceChildren(h("strong", {}, "⚠ 7-day equipment check: "),
+        `${flagged.length} unit(s) on site 7+ days. Confirm continued need / document justification for the carrier.`);
+    } else { warnBox.hidden = true; }
+  }
   function eqRow(row, i) {
     const tr = h("tr");
+    const daysCell = h("td", { class: "calc", style: "min-width:46px" });
+    function recalcDays() {
+      // auto total hours from placed→removed (unless manually set)
+      if (row.placed && row.removed && !row._manualHrs) {
+        const ph = (new Date(row.removed) - new Date(row.placed)) / 3600000;
+        if (isFinite(ph) && ph >= 0) { row.hours = Math.round(ph); if (hoursInput) hoursInput.value = row.hours; }
+      }
+      const onsite = row.placed ? daysSince(row.placed) : null;
+      const ended = row.removed ? false : (onsite != null && onsite >= 7);
+      daysCell.textContent = onsite == null ? "" : (row.removed ? "" : onsite + "d");
+      tr.classList.toggle("flag7", !!ended);
+    }
+    let hoursInput;
     const mk = (key, w, type = "text") => {
       const c = h("td");
-      const input = h("input", { type, value: row[key] ?? "", style: `min-width:${w}` });
-      input.addEventListener("input", () => { row[key] = input.value; commit(); });
+      const input = h("input", { type, value: row[key] ?? "", style: `min-width:${w}`, step: type === "datetime-local" ? "60" : null });
+      input.addEventListener("input", () => {
+        row[key] = input.value;
+        if (key === "hours") row._manualHrs = true;
+        recalcDays(); refreshWarn(); commit();
+      });
+      if (key === "hours") hoursInput = input;
       c.append(input); return c;
     };
-    tr.append(mk("asset", "50px"), mk("type", "150px"), mk("location", "110px"),
-      mk("placed", "120px"), mk("removed", "120px"), mk("hours", "60px", "number"), mk("notes", "120px"),
-      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { d.equipment.splice(i, 1); paintEq(); commit(); } }, "✕")));
+    const assetC = mk("asset", "50px"), typeC = mk("type", "150px"), locC = mk("location", "110px");
+    const placedC = mk("placed", "150px", "datetime-local"), removedC = mk("removed", "150px", "datetime-local");
+    const hoursC = mk("hours", "56px", "number"), notesC = mk("notes", "120px");
+    tr.append(assetC, typeC, locC, placedC, removedC, daysCell, hoursC, notesC,
+      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { d.equipment.splice(i, 1); paintEq(); refreshWarn(); commit(); } }, "✕")));
+    recalcDays();
     return tr;
   }
-  function paintEq() { eqBody.replaceChildren(...d.equipment.map(eqRow)); }
+  function paintEq() { eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); }
   paintEq();
   const addEq = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add equipment");
   addEq.addEventListener("click", () => { d.equipment.push(blankEquipRow()); paintEq(); commit(); });
@@ -184,6 +279,7 @@ export function dryingLog(project, d) {
     h("th", { class: "app-only" }, ""));
 
   return sheet("DRYING LOG", "Equipment Runtime & Psychrometric Conditions — Per IICRC S500 Protocol", "Drying Log Field Template",
+    daysBanner,
     h("div", { class: "grid2" },
       field("Drying System", seg(project, "dryingSystem", ["Open", "Closed", "Hybrid"])),
       field("Dry Goal (MC%)", inp(d, "dryGoal", { placeholder: "≤ 16%" }))),
@@ -192,10 +288,11 @@ export function dryingLog(project, d) {
       field("Class", seg(project, "waterClass", ["1", "2", "3", "4"]))),
 
     sectionTitle("Equipment Deployment & Runtime"),
-    h("p", { class: "subtle app-only" }, "Log each unit placed on site — placed/removed date & time, total runtime hours."),
+    h("p", { class: "subtle app-only" }, "Log each unit placed on site — placed/removed date & time. Days-on-site and total hours calculate automatically; units past 7 days are flagged."),
+    warnBox,
     h("div", { class: "tablewrap" },
       h("table", { class: "grid" },
-        h("thead", {}, h("tr", {}, ...["Asset #", "Equipment Type / Make / Model", "Room / Location", "Placed", "Removed", "Hrs", "Notes"].map((c) => h("th", {}, c)), h("th", { class: "app-only" }, ""))),
+        h("thead", {}, h("tr", {}, ...["Asset #", "Equipment Type / Make / Model", "Room / Location", "Placed", "Removed", "Days", "Hrs", "Notes"].map((c) => h("th", {}, c)), h("th", { class: "app-only" }, ""))),
         eqBody)),
     addEq,
 
@@ -492,11 +589,53 @@ export function invoice(project, inv) {
       h("div", {}, "Methods: Check, ACH, or credit card on request")));
 }
 
+/* ============================================================
+   8. JOB PHOTOS — project-level gallery + printable Photo Report
+   ============================================================ */
+export function photosForm(project) {
+  if (!Array.isArray(project.photos)) project.photos = [];
+  const grid = h("div", { class: "photogrid" });
+
+  function card(p, i) {
+    const cap = h("input", { value: p.caption || "", placeholder: "Caption" });
+    cap.addEventListener("input", () => { p.caption = cap.value; commit(); });
+    const room = h("input", { value: p.room || "", placeholder: "Room / location" });
+    room.addEventListener("input", () => { p.room = room.value; commit(); });
+    const stage = sel(p, "stage", [
+      { value: "before", label: "Before" }, { value: "during", label: "During" }, { value: "after", label: "After" }]);
+    const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { project.photos.splice(i, 1); paint(); commit(); } }, "Delete");
+    return h("div", { class: "photocard" },
+      h("img", { src: p.src, alt: p.caption || "" }),
+      h("div", { class: "photocap print-only" }, [p.stage ? p.stage.toUpperCase() : "", p.room, p.caption].filter(Boolean).join(" · "), " ", h("span", { class: "photometa" }, fmtDate((p.ts || "").slice(0, 10)))),
+      h("div", { class: "app-only photoedit" }, room, stage, cap, del));
+  }
+  function paint() {
+    grid.replaceChildren(...project.photos.map(card));
+    if (!project.photos.length) grid.append(h("p", { class: "subtle app-only" }, "No photos yet — tap “Add photos.”"));
+  }
+
+  const input = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, style: "display:none" });
+  input.addEventListener("change", async () => {
+    for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f); project.photos.push(ph); }
+    input.value = ""; commit(); paint();
+  });
+  const addBtn = h("button", { type: "button", class: "btn btn--primary" }, "📷 Add photos");
+  addBtn.addEventListener("click", () => input.click());
+  paint();
+
+  return sheet("PHOTO REPORT", "Job Site Documentation", "Photo Report",
+    sectionTitle("Job Information"),
+    jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
+    h("div", { class: "app-only", style: "margin:10px 0" }, addBtn, input),
+    grid);
+}
+
 /* ---------- dispatch ---------- */
 export const RENDERERS = {
   moistureMaps: moistureMap,
   dryingLogs: dryingLog,
   workAuth,
+  photos: photosForm,
   constructionLogs: constructionLog,
   certDrying,
   changeOrders: changeOrder,

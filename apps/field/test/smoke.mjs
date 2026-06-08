@@ -82,6 +82,20 @@ function setInput(el, val) {
   await tick(40);
   ok(view().querySelector("canvas") !== null, "moisture map editor has sketch canvas");
   ok(view().querySelector("table.grid") !== null, "moisture map has reading grid");
+  ok(/Import floor plan/.test(text()), "moisture map offers floor-plan import (PDF/image)");
+  // material auto-fills the dry goal
+  const matSel = [...view().querySelectorAll("select")].find((s) => /Drywall/.test(s.textContent));
+  ok(!!matSel, "moisture map has a material picker");
+  matSel.value = "Drywall / Gypsum";
+  matSel.dispatchEvent(new window.Event("change", { bubbles: true }));
+  await tick();
+  ok([...view().querySelectorAll("input")].some((i) => i.value === "≤ 1%"), "selecting a material auto-fills the dry goal (≤ 1%)");
+  // readings flag green/red against the goal
+  const mc = view().querySelector("input.mc");
+  setInput(mc, "0.5"); await tick();
+  ok(mc.classList.contains("dry"), "reading at/below goal flags green (dry)");
+  setInput(mc, "8"); await tick();
+  ok(mc.classList.contains("wet"), "reading above goal flags red (wet)");
 
   // 5. Drying Log: add instance, test GPP auto-calc wiring
   await nav(`#/p/${id}/f/dryingLogs`);
@@ -97,6 +111,15 @@ function setInput(el, val) {
   setInput(inputs[4], "50"); // outRH
   await tick();
   ok(inputs[5].value === "54", "GPP auto-calculates from T/RH in the grid (got " + inputs[5].value + ")");
+  // 7-day equipment flag: place a unit 8 days ago, leave it on site
+  const eqTable = tables[0];
+  const eqRow = eqTable.querySelector("tbody tr");
+  const eqInputs = eqRow.querySelectorAll("input"); // asset,type,loc,placed,removed,hours,notes
+  const eightAgo = new Date(Date.now() - 8 * 86400000).toISOString().slice(0, 16);
+  setInput(eqInputs[3], eightAgo); // placed
+  await tick();
+  ok(eqRow.classList.contains("flag7"), "equipment on site 7+ days is flagged");
+  ok(/7-day equipment check/.test(text()), "drying log shows the 7-day equipment warning");
 
   // 6. Work Authorization (single) renders with signature pads
   await nav(`#/p/${id}/f/workAuth`);
@@ -125,6 +148,18 @@ function setInput(el, val) {
     }
     ok(view().querySelector(".sheet") !== null, `${key} editor renders a printable sheet`);
   }
+
+  // 8b. Job Photos (project-level gallery -> Photo Report sheet)
+  await nav(`#/p/${id}/f/photos`);
+  await tick(40);
+  ok(/PHOTO REPORT/.test(text()), "job photos renders a Photo Report sheet");
+  ok([...view().querySelectorAll("button")].some((b) => /Add photos/.test(b.textContent)), "photos page has an Add photos button");
+
+  // 8c. Full job packet stacks every started form into one printable doc
+  await nav(`#/p/${id}/packet`);
+  await tick(60);
+  ok(view().querySelectorAll(".sheet").length >= 4, "full packet stacks multiple sheets (got " + view().querySelectorAll(".sheet").length + ")");
+  ok([...view().querySelectorAll("button")].some((b) => /Save packet as PDF/.test(b.textContent)), "packet offers Save as PDF");
 
   // 9. data persisted across reload (fake-indexeddb keeps state in-process)
   await nav("#/");

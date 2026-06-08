@@ -116,9 +116,18 @@ table.grid td input.calc { background: #eef6ff !important; }
 .thumb img { width: 100%; height: auto; border: 1px solid #c4ccd8; border-radius: 0; }
 .thumb button { display: none; }
 
-/* sketch */
-.sketch { border: 1px solid #6b7892 !important; }
-.sketch canvas { height: 300px !important; }
+/* sketch + floor plan */
+.sketch { border: 1px solid #6b7892 !important; height: 320px; position: relative; }
+.sketch__bg { position: absolute; inset: 0; width: 100%; height: 320px; object-fit: contain; }
+.sketch canvas { height: 320px !important; position: relative; }
+
+/* job photos */
+.photogrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.photocard { border: 0.6px solid #6b7892; border-radius: 0; overflow: hidden; break-inside: avoid; }
+.photocard img { width: 100%; height: auto; max-height: 2.6in; object-fit: cover; }
+.photoedit { display: none !important; }
+.photocap { font-size: 7.5pt; padding: 2px 4px; }
+.photometa { color: #5b6b80; }
 
 .note, .divider { display: none; }
 hr.divider { display: none; }

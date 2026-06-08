@@ -206,17 +206,23 @@ export function signaturePad(initial, onChange) {
 
 /* ============================================================
    Sketch pad — freehand drawing for the Moisture Map affected-area
-   diagram, plus a "number" stamp mode that drops incrementing
-   numbered markers at the moisture-reading locations.
+   diagram, over an optional imported floor-plan background. A
+   "number" stamp mode drops incrementing markers at the moisture-
+   reading locations. Background and strokes are kept on separate
+   layers; export flattens them for printing.
    ============================================================ */
-export function sketchPad(initial, onChange) {
+export function sketchPad({ strokes = null, background = null, markerStart = 1, onChange } = {}) {
   const wrap = h("div", { class: "sketch" });
+  const bgImg = h("img", { class: "sketch__bg", alt: "" });
   const canvas = h("canvas");
-  wrap.append(canvas);
+  wrap.append(bgImg, canvas);
   const ctx = canvas.getContext("2d");
-  let pen = "#10233f", mode = "draw", nextNum = 1, drawing = false, last = null;
-  let backing = initial || null;            // last committed image (for stamps/redraw)
+  let pen = "#10233f", mode = "draw", nextNum = markerStart || 1, drawing = false, last = null;
 
+  function showBg() {
+    if (background) { bgImg.src = background; bgImg.style.display = "block"; }
+    else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; }
+  }
   function size() {
     const ratio = window.devicePixelRatio || 1;
     const w = wrap.clientWidth || 320;
@@ -224,16 +230,13 @@ export function sketchPad(initial, onChange) {
     canvas.style.height = "320px";
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.lineWidth = 2.6; ctx.lineCap = "round"; ctx.lineJoin = "round";
-    redraw();
-  }
-  function redraw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (backing) {
+    if (strokes) {
       const img = new Image();
-      img.onload = () => ctx.drawImage(img, 0, 0, wrap.clientWidth, 320);
-      img.src = backing;
+      img.onload = () => ctx.drawImage(img, 0, 0, w, 320);
+      img.src = strokes;
     }
   }
+  showBg();
   requestAnimationFrame(size);
 
   const pos = (e) => {
@@ -241,7 +244,27 @@ export function sketchPad(initial, onChange) {
     const p = e.touches ? e.touches[0] : e;
     return { x: p.clientX - r.left, y: p.clientY - r.top };
   };
-  function commitBacking() { backing = canvas.toDataURL("image/png"); onChange && onChange(backing); }
+  const strokesData = () => canvas.toDataURL("image/png");
+  function drawContain(o, img, W, H) {
+    const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+    if (!iw || !ih) return;
+    const s = Math.min(W / iw, H / ih);
+    const dw = iw * s, dh = ih * s;
+    o.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  }
+  /* flatten background + strokes into one image for print/thumbnail */
+  function composite() {
+    const W = canvas.width, H = canvas.height;
+    const out = document.createElement("canvas");
+    out.width = W; out.height = H;
+    const o = out.getContext("2d");
+    o.fillStyle = "#ffffff"; o.fillRect(0, 0, W, H);
+    if (background && bgImg.complete && bgImg.naturalWidth) drawContain(o, bgImg, W, H);
+    o.drawImage(canvas, 0, 0);
+    return out.toDataURL("image/jpeg", 0.85);
+  }
+  const emit = () => onChange && onChange({ strokes: strokesData(), background, composite: composite(), markerNext: nextNum });
+
   function stamp(p) {
     ctx.fillStyle = "#f26a21"; ctx.strokeStyle = "#fff";
     ctx.beginPath(); ctx.arc(p.x, p.y, 13, 0, Math.PI * 2); ctx.fill();
@@ -249,7 +272,7 @@ export function sketchPad(initial, onChange) {
     ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(String(nextNum++), p.x, p.y);
     ctx.lineWidth = 2.6; ctx.strokeStyle = pen;
-    commitBacking();
+    emit();
   }
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
@@ -262,7 +285,7 @@ export function sketchPad(initial, onChange) {
     ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
     last = p;
   });
-  window.addEventListener("pointerup", () => { if (drawing) { drawing = false; commitBacking(); } });
+  window.addEventListener("pointerup", () => { if (drawing) { drawing = false; emit(); } });
 
   const swatches = [];
   const swatch = (color) => {
@@ -271,7 +294,6 @@ export function sketchPad(initial, onChange) {
     swatches.push(s);
     return s;
   };
-  let toolsEl;
   function refresh() {
     swatches.forEach((s) => s.classList.toggle("active", s.dataset.color === pen && mode === "draw"));
     numBtn.classList.toggle("active", mode === "number");
@@ -280,14 +302,20 @@ export function sketchPad(initial, onChange) {
   }
   const numBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "①  Number");
   numBtn.addEventListener("click", () => { mode = mode === "number" ? "draw" : "number"; refresh(); });
-  const undoBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "↺ Clear");
-  undoBtn.addEventListener("click", () => { backing = null; nextNum = 1; ctx.clearRect(0, 0, canvas.width, canvas.height); commitBacking(); });
+  const clearBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "↺ Clear drawing");
+  clearBtn.addEventListener("click", () => { nextNum = 1; ctx.clearRect(0, 0, canvas.width, canvas.height); emit(); });
 
-  toolsEl = h("div", { class: "sketch__tools app-only" },
-    swatch("#10233f"), swatch("#f26a21"), swatch("#d23b2e"), swatch("#1f9d55"),
-    numBtn, undoBtn);
+  const toolsEl = h("div", { class: "sketch__tools app-only" },
+    swatch("#10233f"), swatch("#f26a21"), swatch("#d23b2e"), swatch("#1f9d55"), numBtn, clearBtn);
 
-  return { tools: toolsEl, el: wrap, dataURL: () => backing };
+  return {
+    tools: toolsEl, el: wrap, composite, hasBackground: () => !!background,
+    setBackground(url) {
+      background = url || null;
+      if (background) { bgImg.onload = () => emit(); bgImg.src = background; bgImg.style.display = "block"; }
+      else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; emit(); }
+    },
+  };
 }
 
 /* ============================================================
@@ -312,11 +340,30 @@ export function grainDepression(unaffectedGpp, affectedGpp) {
   return unaffectedGpp - affectedGpp;
 }
 
-/* ---------- IICRC S500 dry standards (reference helper) ---------- */
+/* ---------- IICRC S500 dry standards ---------- */
+/* goal = numeric MC% threshold a reading must be at or below to be "dry" */
 export const DRY_STANDARDS = [
-  { material: "Drywall / Gypsum", goal: "≤ 1%" },
-  { material: "Framing / Wood / Subfloor", goal: "≤ 19%" },
-  { material: "Hardwood Flooring", goal: "≤ 12%" },
-  { material: "Concrete / Slab", goal: "≤ 4%" },
-  { material: "Plaster", goal: "≤ 1.5%" },
+  { material: "Drywall / Gypsum", goal: 1 },
+  { material: "Plaster", goal: 1.5 },
+  { material: "Concrete / Slab", goal: 4 },
+  { material: "Hardwood Flooring", goal: 12 },
+  { material: "Carpet / Pad", goal: 15 },
+  { material: "Framing / Wood / Subfloor", goal: 19 },
+  { material: "OSB / Particle Board", goal: 16 },
+  { material: "Other / Generic", goal: 16 },
 ];
+export const goalFor = (material) => DRY_STANDARDS.find((d) => d.material === material)?.goal ?? null;
+
+/* ---------- date helpers ---------- */
+export function daysSince(iso) {
+  if (!iso) return null;
+  const start = new Date(iso + (iso.length === 10 ? "T00:00:00" : ""));
+  if (isNaN(start)) return null;
+  return Math.floor((Date.now() - start.getTime()) / 86400000);
+}
+export function daysBetween(aIso, bIso) {
+  if (!aIso || !bIso) return null;
+  const a = new Date(aIso), b = new Date(bIso);
+  if (isNaN(a) || isNaN(b)) return null;
+  return Math.round(Math.abs(b - a) / 86400000);
+}
