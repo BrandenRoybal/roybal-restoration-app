@@ -35,8 +35,7 @@ jobs:
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
+        # Pages is enabled in repo Settings (Source: GitHub Actions); just read config.
 
       - name: Upload field app as Pages artifact
         uses: actions/upload-pages-artifact@v3
