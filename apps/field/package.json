@@ -1,0 +1,16 @@
+{
+  "name": "@roybal/field",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Roybal Restoration — offline-first field forms PWA (no backend, no login).",
+  "type": "module",
+  "scripts": {
+    "dev": "node serve.mjs",
+    "start": "node serve.mjs",
+    "test": "node test/smoke.mjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^24.0.0"
+  }
+}

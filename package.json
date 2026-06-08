@@ -5,11 +5,14 @@
   "workspaces": [
     "apps/mobile",
     "apps/web",
+    "apps/field",
     "packages/shared"
   ],
   "scripts": {
     "mobile": "npm run start --workspace=apps/mobile",
     "web": "npm run dev --workspace=apps/web",
+    "field": "npm run dev --workspace=apps/field",
+    "field:test": "npm run test --workspace=apps/field",
     "shared:build": "npm run build --workspace=packages/shared",
     "setup": "npm install && npm run shared:build"
   },

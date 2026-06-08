@@ -4,6 +4,12 @@
 
 A full-stack, monorepo field operations app for water damage mitigation, mold remediation, and fire/smoke restoration work in Fairbanks / North Pole, Alaska.
 
+> **New: simple field app for crews.** `apps/field` is a self-contained, offline-first PWA
+> built around the Roybal form packet (Moisture Map, Drying Log, Work Authorization w/
+> on-device signature or photo upload, Construction Log, Certificate of Drying, Change Order,
+> Invoice). No login, no setup — run it with `npm run field`. See
+> [`apps/field/README.md`](apps/field/README.md).
+
 ---
 
 ## Architecture
@@ -11,6 +17,7 @@ A full-stack, monorepo field operations app for water damage mitigation, mold re
 ```
 roybal-restoration-app/
 ├── apps/
+│   ├── field/           # ⭐ Offline-first Field Forms PWA — no login, no backend
 │   ├── mobile/          # Expo (React Native) — iOS + Android field app
 │   └── web/             # React + Vite + Tailwind — Admin dashboard
 ├── packages/

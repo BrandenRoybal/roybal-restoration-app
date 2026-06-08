@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#0f1b2d" />
+  <meta name="description" content="Roybal Restoration field documentation — moisture maps, drying logs, work authorizations, and IICRC S500 forms. Works offline." />
+  <title>Roybal Field Forms</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="assets/icon.svg" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Roybal Forms" />
+  <link rel="stylesheet" href="css/app.css" />
+  <link rel="stylesheet" href="css/print.css" media="print" />
+</head>
+<body>
+  <!-- App chrome (hidden when printing) -->
+  <header class="topbar" id="topbar">
+    <button class="topbar__back" id="backBtn" aria-label="Back" hidden>&#8592;</button>
+    <div class="topbar__brand">
+      <img src="assets/logo.svg" alt="" class="topbar__logo" />
+      <div class="topbar__title">
+        <strong>Roybal Restoration</strong>
+        <span id="topbarSub">Field Forms</span>
+      </div>
+    </div>
+    <div class="topbar__status" id="netStatus" title="Connection status">●</div>
+  </header>
+
+  <main id="view" class="view"><!-- routed content --></main>
+
+  <!-- Offline / install hint -->
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
