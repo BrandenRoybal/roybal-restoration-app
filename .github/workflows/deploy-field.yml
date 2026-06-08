@@ -1,8 +1,9 @@
 name: Deploy Field App to GitHub Pages
 
-# Publishes apps/field (the offline-first Field Forms PWA) as a static site.
-# Live URL after the first successful run:
-#   https://brandenroybal.github.io/roybal-restoration-app/
+# Publishes apps/field (the offline-first Field Forms PWA) to a `gh-pages`
+# branch. Then set repo Settings -> Pages -> Source: "Deploy from a branch"
+# -> Branch: gh-pages / (root).
+# Live URL: https://brandenroybal.github.io/roybal-restoration-app/
 
 on:
   push:
@@ -15,33 +16,26 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
+  contents: write
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
-        # Pages is enabled in repo Settings (Source: GitHub Actions); just read config.
-
-      - name: Upload field app as Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: apps/field
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish apps/field to the gh-pages branch
+        run: |
+          set -e
+          cd apps/field
+          touch .nojekyll                      # serve files as-is (no Jekyll)
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b gh-pages
+          git add -A
+          git commit -q -m "Deploy field app ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
