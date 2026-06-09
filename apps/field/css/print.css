@@ -121,6 +121,19 @@ table.grid td input.calc { background: #eef6ff !important; }
 .sketch__bg { position: absolute; inset: 0; width: 100%; height: 320px; object-fit: contain; }
 .sketch canvas { height: 320px !important; position: relative; }
 
+/* contents inventory */
+table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover; border: 0.5px solid #6b7892; }
+.csub { font-size: 6.5pt; color: #5b6b80; }
+
+/* box labels — 2 per row, clean cut-out cards */
+.boxlabels { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25in; }
+.boxlabel { border: 1.5px solid #0f1b2d; border-radius: 6px; padding: 10px; break-inside: avoid; min-height: 2.6in; }
+.boxlabel__co { font-size: 9pt; font-weight: 800; color: #0f1b2d; letter-spacing: .5px; }
+.boxlabel__no { font-size: 30pt; font-weight: 800; color: #f26a21; margin: 4px 0 8px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.boxlabel__meta { width: 100%; font-size: 9pt; border-collapse: collapse; }
+.boxlabel__meta td { border-bottom: 0.5px solid #c4ccd8; padding: 3px 2px; }
+.boxlabel__meta td:first-child { color: #5b6b80; width: 38%; text-transform: uppercase; font-size: 7pt; }
+
 /* job photos */
 .photogrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .photocard { border: 0.6px solid #6b7892; border-radius: 0; overflow: hidden; break-inside: avoid; }

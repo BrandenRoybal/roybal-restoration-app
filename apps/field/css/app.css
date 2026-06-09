@@ -191,6 +191,21 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .photoedit { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .photometa { color: var(--muted); font-size: 12px; }
 
+/* ---------- Contents inventory ---------- */
+.filterbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.filterbar select { min-height: 42px; }
+.citem { display: flex; align-items: center; gap: 12px; }
+.cthumb { width: 56px; height: 56px; border-radius: 8px; object-fit: cover; border: 1px solid var(--line); flex: 0 0 auto; }
+.cthumb--ph { display: flex; align-items: center; justify-content: center; font-size: 24px; background: #f0f3f8; }
+.badge.disp-g { background: #e3f6ec; color: var(--green); }
+.badge.disp-r { background: #fbe3e0; color: var(--red); }
+.badge.disp-b { background: #e6effb; color: #1c5fb0; }
+.badge.disp-x { background: #eceff3; color: var(--muted); }
+.addable select { width: 100%; }
+.csub { font-size: 11px; color: var(--muted); }
+table.grid.contents-grid td { text-align: center; }
+table.grid.contents-grid .cthumb { width: 40px; height: 40px; }
+
 /* ---------- Sketch canvas (moisture map) ---------- */
 .sketch { border: 1px solid var(--line); border-radius: 12px; background: #fff; touch-action: none; position: relative; overflow: hidden; }
 .sketch__bg { position: absolute; inset: 0; width: 100%; height: 320px; object-fit: contain; pointer-events: none; background: #fff; }

@@ -19,6 +19,7 @@ that information flows automatically into every form. Then fill out any of the 7
 | 🗺️ **Moisture Map** | **Import a PDF or image floor plan** and draw right on top, drop numbered markers at each reading location, log daily MC% readings. Pick a material and the **IICRC dry goal auto-fills**; readings then flag **🟢 green (dry) / 🔴 red (wet)** automatically. *(The daily driver.)* |
 | 💧 **Drying Log** | Equipment runtime table + daily psychrometric readings. **GPP auto-calculates** from temp + RH and **grain depression** computes itself. Shows the **drying day count** and **flags any unit on site 7+ days** for the carrier. *(The other daily driver.)* |
 | 📷 **Job Photos** | Before / during / after pictures with room + caption + auto timestamp; prints as a Photo Report. |
+| 📦 **Contents** | Personal-property inventory + pack-out. Each item: photo(s), qty, category, **room**, **box**, **condition**, **disposition** (salvageable / non-salvageable / cleaned / disposed), replacement value, brand/model/age. Non-salvageable items roll into a **Loss List with a $ total** for the carrier; pack-out **boxes** print labels + a manifest. |
 | ✍️ **Work Authorization** | Sign right on the screen (owner + Roybal rep) **or** snap a photo / upload a wet-signed paper copy. |
 | 📋 **Daily Construction Log** | Crew, tasks, start/finish times → hours total themselves. |
 | ✅ **Certificate of Drying** | IICRC S500 dry-standard verification table + 3-way sign-off (tech / owner / adjuster). |
@@ -86,6 +87,7 @@ runs offline.
 - ✅ **Drying day count + 7-day equipment flag**
 - ✅ **Auto GPP + grain-depression** in the Drying Log
 - ✅ **Project photos** (before/during/after) + printable Photo Report
+- ✅ **Contents inventory + pack-out** (condition, disposition, rooms, boxes, loss list, box labels/manifest)
 - ✅ **Full job packet PDF** (every form stacked) + **Share** a job summary
 - ✅ **Real Roybal branding** (icons / home-screen icon)
 

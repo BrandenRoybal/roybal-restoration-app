@@ -22,6 +22,8 @@ export const FORMS = [
     blurb: "Equipment runtime + psychrometric readings" },
   { key: "photos",           name: "Job Photos",         icon: "📷", multi: false,
     blurb: "Before / during / after pictures" },
+  { key: "contents",         name: "Contents",           icon: "📦", multi: false,
+    blurb: "Personal property inventory + pack-out" },
   { key: "workAuth",         name: "Work Authorization", icon: "✍️", multi: false,
     blurb: "Sign on device or upload signed copy" },
   { key: "constructionLogs", name: "Daily Const. Log",   icon: "📋", multi: true,
@@ -55,6 +57,10 @@ export function newProject() {
     dryingSystem: "",    // Open | Closed | Hybrid
     // project-level job photos (before/during/after, with caption + room)
     photos: [],
+    // contents / personal property
+    rooms: [],          // shared room list (strings), reused across the app
+    boxes: [],          // pack-out boxes
+    contents: [],       // inventory items
     // form data
     workAuth: null,
     certDrying: null,
@@ -68,6 +74,36 @@ export function newProject() {
 
 export function newPhoto() {
   return { id: uid(), src: "", caption: "", room: "", stage: "during", ts: new Date().toISOString() };
+}
+
+/* ---------- Contents (personal property) ---------- */
+export const CONDITIONS = ["New", "Good", "Fair", "Poor", "Damaged", "Destroyed"];
+export const DISPOSITIONS = [
+  { value: "salvageable", label: "Salvageable", short: "Salv." },
+  { value: "non-salvageable", label: "Non-Salvageable (Loss)", short: "LOSS" },
+  { value: "cleaned", label: "Cleaned", short: "Cleaned" },
+  { value: "disposed", label: "Disposed", short: "Disposed" },
+];
+export const dispositionLabel = (v) => DISPOSITIONS.find((d) => d.value === v)?.label || "";
+export const dispositionShort = (v) => DISPOSITIONS.find((d) => d.value === v)?.short || "";
+export const CONTENT_CATEGORIES = [
+  "Furniture", "Electronics", "Appliance", "Clothing", "Kitchenware", "Décor",
+  "Bedding / Linens", "Tools", "Documents", "Toys", "Sporting / Outdoor", "Other",
+];
+export const BOX_DESTINATIONS = ["On-site", "Storage", "Cleaning", "Returned", "Disposed"];
+
+export function newContentsItem() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    name: "", qty: "1", category: "", room: "", boxId: "",
+    condition: "", disposition: "salvageable",
+    value: "",                       // estimated unit replacement cost
+    brand: "", model: "", age: "",   // for depreciation / loss claims
+    notes: "", photos: [],
+  };
+}
+export function newBox(n) {
+  return { id: uid(), label: "Box " + n, room: "", destination: "Storage", packedBy: "", packedDate: todayISO() };
 }
 
 export const formByKey = (k) => FORMS.find((f) => f.key === k);

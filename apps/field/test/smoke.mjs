@@ -155,6 +155,31 @@ function setInput(el, val) {
   ok(/PHOTO REPORT/.test(text()), "job photos renders a Photo Report sheet");
   ok([...view().querySelectorAll("button")].some((b) => /Add photos/.test(b.textContent)), "photos page has an Add photos button");
 
+  // 8b2. Contents inventory: add item -> condition/disposition/value -> report
+  await nav(`#/p/${id}/f/contents`);
+  ok(/Contents/.test(text()), "contents manager renders");
+  [...view().querySelectorAll("button")].find((b) => /Add item/.test(b.textContent))?.click();
+  await tick(50);
+  ok(/Item name/.test(text()), "contents item editor opens");
+  const nameI = [...view().querySelectorAll("input")].find((i) => /Samsung/.test(i.placeholder || ""));
+  setInput(nameI, "Sectional Sofa");
+  const valI = [...view().querySelectorAll("input")].find((i) => /per unit/.test(i.placeholder || ""));
+  setInput(valI, "500");
+  [...view().querySelectorAll(".seg button")].find((b) => /Non-Salvageable/.test(b.textContent))?.click();
+  await tick();
+  ok(view().querySelector(".warn") && !view().querySelector(".warn").hidden, "non-salvageable item prompts for a claim photo");
+  await nav(`#/p/${id}/f/contents/report`);
+  await tick(40);
+  ok(/Sectional Sofa/.test(text()), "item appears in the contents inventory PDF");
+  ok(/Non-Salvageable Loss Summary/.test(text()) && /\$500\.00/.test(text()), "loss summary + total compute");
+  await nav(`#/p/${id}/f/contents`);
+  ok(/Sectional Sofa/.test(text()), "item shows in the contents list");
+  // boxes
+  await nav(`#/p/${id}/f/contents/boxes`);
+  [...view().querySelectorAll("button")].find((b) => /New box/.test(b.textContent))?.click();
+  await tick(40);
+  ok([...view().querySelectorAll("input")].some((i) => i.value === "Box 1"), "a pack-out box can be created");
+
   // 8c. Full job packet stacks every started form into one printable doc
   await nav(`#/p/${id}/packet`);
   await tick(60);

@@ -9,7 +9,7 @@ import {
   lineItems, sheet, commit,
 } from "./formkit.js";
 import {
-  SCOPE_ITEMS, CHANGE_REASONS, newPhoto,
+  SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel,
   blankReadingRow, blankPsychroRow, blankEquipRow, blankWorkRow,
   blankLineItem, blankVerifyRow,
 } from "./model.js";
@@ -630,12 +630,75 @@ export function photosForm(project) {
     grid);
 }
 
+/* ============================================================
+   9. CONTENTS INVENTORY — printable report (read-only)
+   Editing happens in the dedicated Contents manager (app.js).
+   ============================================================ */
+export function contentsReport(project) {
+  const items = project.contents || [];
+  const boxes = project.boxes || [];
+  const boxLabel = (id) => boxes.find((b) => b.id === id)?.label || "";
+  const ext = (it) => (Number(it.value) || 0) * (Number(it.qty) || 1);
+
+  const invRows = items.map((it) =>
+    h("tr", {},
+      h("td", {}, it.photos && it.photos[0] ? h("img", { src: it.photos[0], class: "cthumb", alt: "" }) : ""),
+      h("td", { style: "text-align:left" }, it.name || "—", it.brand || it.model ? h("div", { class: "csub" }, [it.brand, it.model].filter(Boolean).join(" ")) : null),
+      h("td", {}, it.qty || ""),
+      h("td", {}, it.room || ""),
+      h("td", {}, boxLabel(it.boxId)),
+      h("td", {}, it.condition || ""),
+      h("td", {}, dispositionLabel(it.disposition)),
+      h("td", {}, it.value ? money(ext(it)) : "")));
+
+  const loss = items.filter((it) => it.disposition === "non-salvageable");
+  const lossTotal = loss.reduce((s, it) => s + ext(it), 0);
+  const lossRows = loss.map((it) =>
+    h("tr", {},
+      h("td", { style: "text-align:left" }, it.name || "—"),
+      h("td", {}, it.qty || ""),
+      h("td", {}, it.room || ""),
+      h("td", {}, it.age || ""),
+      h("td", {}, money(ext(it)))));
+
+  const totalItems = items.reduce((s, it) => s + (Number(it.qty) || 1), 0);
+
+  return sheet("CONTENTS INVENTORY", "Personal Property Documentation", "Contents Inventory",
+    sectionTitle("Job Information"),
+    jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
+    h("div", { class: "badgeline" },
+      h("span", { class: "badge" }, items.length + " line items"),
+      h("span", { class: "badge" }, totalItems + " pieces"),
+      h("span", { class: "badge" }, boxes.length + " boxes"),
+      loss.length ? h("span", { class: "badge cat3" }, loss.length + " non-salvageable") : null),
+
+    sectionTitle("Inventory"),
+    items.length
+      ? h("div", { class: "tablewrap" },
+          h("table", { class: "grid contents-grid" },
+            h("thead", {}, h("tr", {}, ...["Photo", "Item", "Qty", "Room", "Box", "Condition", "Disposition", "Value"].map((c) => h("th", {}, c)))),
+            h("tbody", {}, ...invRows)))
+      : h("p", { class: "subtle" }, "No items recorded."),
+
+    loss.length ? sectionTitle("Non-Salvageable Loss Summary") : null,
+    loss.length
+      ? h("div", { class: "tablewrap" },
+          h("table", { class: "grid" },
+            h("thead", {}, h("tr", {}, ...["Item", "Qty", "Room", "Age", "Replacement Value"].map((c) => h("th", {}, c)))),
+            h("tbody", {}, ...lossRows,
+              h("tr", { class: "calc" },
+                h("td", { colspan: 4, style: "text-align:right;font-weight:800" }, "Total Claimed Loss"),
+                h("td", { style: "font-weight:800" }, money(lossTotal))))))
+      : null);
+}
+
 /* ---------- dispatch ---------- */
 export const RENDERERS = {
   moistureMaps: moistureMap,
   dryingLogs: dryingLog,
   workAuth,
   photos: photosForm,
+  contents: contentsReport,
   constructionLogs: constructionLog,
   certDrying,
   changeOrders: changeOrder,

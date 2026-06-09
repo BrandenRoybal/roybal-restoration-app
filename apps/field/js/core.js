@@ -103,14 +103,24 @@ export const Store = {
 };
 
 /* ---------- debounced autosave with a visual "Saved" pulse ---------- */
-let saveTimer;
+let saveTimer, pendingProject = null, pendingPill = null;
+async function doSave() {
+  if (!pendingProject) return;
+  const p = pendingProject, pill = pendingPill;
+  pendingProject = null; pendingPill = null;
+  await Store.put(p);
+  if (pill) { pill.textContent = "✓ Saved"; pill.style.color = "var(--green)"; }
+}
 export function autosave(project, pill) {
+  pendingProject = project; pendingPill = pill;
   clearTimeout(saveTimer);
   if (pill) { pill.textContent = "Saving…"; pill.style.color = "var(--muted)"; }
-  saveTimer = setTimeout(async () => {
-    await Store.put(project);
-    if (pill) { pill.textContent = "✓ Saved"; pill.style.color = "var(--green)"; }
-  }, 350);
+  saveTimer = setTimeout(doSave, 350);
+}
+/* write any pending edit immediately (call before navigating / reloading) */
+export async function flushPending() {
+  clearTimeout(saveTimer);
+  await doSave();
 }
 
 /* ---------- toast ---------- */

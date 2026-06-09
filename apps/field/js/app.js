@@ -1,13 +1,15 @@
 /* ============================================================
    Roybal Field Forms — app shell + hash router
    ============================================================ */
-import { h, $, clear, Store, toast, fmtDate } from "./core.js";
+import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending } from "./core.js";
 import {
   FORMS, formByKey, formCount, newProject,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
   newInvoice, newWorkAuth, newCertDrying,
+  newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
+  BOX_DESTINATIONS, dispositionShort,
 } from "./model.js";
-import { setCtx } from "./formkit.js";
+import { setCtx, field, inp, ta, sel, seg, photoUploader } from "./formkit.js";
 import { RENDERERS } from "./forms.js";
 
 const view = $("#view");
@@ -29,6 +31,7 @@ window.addEventListener("hashchange", route);
 window.addEventListener("load", route);
 
 async function route() {
+  await flushPending();              // persist any in-flight edit before reloading
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   window.scrollTo(0, 0);
   // parts: [] | ['new'] | ['p', id] | ['p', id, 'edit'] | ['p', id, 'f', key] | ['p', id, 'f', key, instId]
@@ -121,8 +124,10 @@ function projectHome(project) {
   const tiles = h("div", { class: "tiles" });
   FORMS.forEach((f) => {
     const count = formCount(project, f.key);
-    const badge = f.multi
-      ? h("span", { class: "tile__count" }, count ? `${count} saved` : "None yet")
+    const isList = f.multi || Array.isArray(project[f.key]); // moisture/drying/photos/contents…
+    const noun = f.key === "contents" ? "items" : (f.key === "photos" ? "photos" : "saved");
+    const badge = isList
+      ? h("span", { class: "tile__count" }, count ? `${count} ${noun}` : "None yet")
       : h("span", { class: "tile__badge " + (count ? "done" : "todo") }, count ? "Started" : "Not started");
     tiles.append(h("a", { class: "tile" + (f.hero ? " tile--hero" : ""), href: `#/p/${project.id}/f/${f.key}` },
       h("div", { class: "tile__icon" }, f.icon),
@@ -146,8 +151,14 @@ function packetPage(project) {
   const included = [];
   for (const f of FORMS) {
     const v = project[f.key];
-    if (Array.isArray(v)) { if (v.length) v.forEach((inst) => included.push(RENDERERS[f.key](project, inst))); }
-    else if (v) { included.push(RENDERERS[f.key](project, v)); }
+    const render = RENDERERS[f.key];
+    if (!render) continue;
+    if (f.multi) {
+      (v || []).forEach((inst) => included.push(render(project, inst)));
+    } else {
+      const has = Array.isArray(v) ? v.length > 0 : !!v;   // photos/contents are arrays → one report
+      if (has) included.push(render(project, v));
+    }
   }
 
   body.append(
@@ -189,6 +200,17 @@ async function shareJob(project) {
 async function formPage(project, key, instId) {
   const meta = formByKey(key);
   if (!meta) return go(`#/p/${project.id}`);
+
+  // contents has its own manager (list + filters + boxes)
+  if (key === "contents") {
+    ensureContents(project);
+    if (!instId) return contentsManager(project);
+    if (instId === "report") return contentsReportPage(project);
+    if (instId === "boxes") return boxesManager(project);
+    const item = project.contents.find((x) => x.id === instId);
+    if (!item) return go(`#/p/${project.id}/f/contents`);
+    return contentsItemEditor(project, item);
+  }
 
   // single-instance forms: open editor directly
   if (!meta.multi) {
@@ -294,6 +316,269 @@ async function deleteInstance(project, meta, instance, back) {
   await Store.put(project);
   toast(meta.name + " deleted");
   go(back);
+}
+
+/* ============================================================
+   CONTENTS — personal property inventory + pack-out boxes
+   ============================================================ */
+function ensureContents(project) {
+  if (!Array.isArray(project.contents)) project.contents = [];
+  if (!Array.isArray(project.boxes)) project.boxes = [];
+  if (!Array.isArray(project.rooms)) project.rooms = [];
+}
+const dispClass = (d) =>
+  d === "salvageable" ? "g" : d === "non-salvageable" ? "r" : d === "disposed" ? "x" : "b";
+const boxLabelOf = (project, id) => (project.boxes.find((b) => b.id === id) || {}).label || "";
+
+/* a <select> with an extra "add new" option that prompts */
+function addableSelect(getVal, options, onPick, addLabel, onAdd) {
+  const wrap = h("span", { class: "addable" });
+  function render() {
+    const cur = getVal();
+    const s = h("select");
+    s.append(h("option", { value: "" }, "—"));
+    options().forEach((o) => s.append(h("option", { value: o.value, selected: o.value === cur }, o.label)));
+    s.append(h("option", { value: "__new__" }, addLabel));
+    s.addEventListener("change", () => {
+      if (s.value === "__new__") {
+        const added = onAdd();
+        if (added != null && added !== "") onPick(added);
+        render();
+      } else onPick(s.value);
+    });
+    wrap.replaceChildren(s);
+  }
+  render();
+  return wrap;
+}
+function roomSelect(project, item) {
+  return addableSelect(
+    () => item.room,
+    () => project.rooms.map((r) => ({ value: r, label: r })),
+    (v) => { item.room = v; Store.put(project); },
+    "➕ New room…",
+    () => {
+      const name = (prompt("Room name (e.g. Kitchen, Master Bedroom)") || "").trim();
+      if (!name) return null;
+      if (!project.rooms.includes(name)) project.rooms.push(name);
+      item.room = name; Store.put(project); return name;
+    });
+}
+function boxSelect(project, item) {
+  return addableSelect(
+    () => item.boxId,
+    () => project.boxes.map((b) => ({ value: b.id, label: b.label + (b.room ? " · " + b.room : "") })),
+    (v) => { item.boxId = v; Store.put(project); },
+    "➕ New box…",
+    () => {
+      const b = newBox(project.boxes.length + 1);
+      const label = (prompt("Box label", b.label) || "").trim();
+      if (!label) return null;
+      b.label = label; b.room = item.room || "";
+      project.boxes.push(b); item.boxId = b.id; Store.put(project); return b.id;
+    });
+}
+
+function contentsSummary(project) {
+  const items = project.contents;
+  const pieces = items.reduce((s, it) => s + (Number(it.qty) || 1), 0);
+  const loss = items.filter((it) => it.disposition === "non-salvageable");
+  const lossTotal = loss.reduce((s, it) => s + (Number(it.value) || 0) * (Number(it.qty) || 1), 0);
+  const chips = h("div", { class: "badgeline" },
+    h("span", { class: "badge" }, items.length + " items · " + pieces + " pcs"),
+    h("span", { class: "badge" }, project.boxes.length + " boxes"));
+  if (loss.length) chips.append(h("span", { class: "badge cat3" }, loss.length + " loss · " + money(lossTotal)));
+  return chips;
+}
+
+function contentsManager(project) {
+  setChrome("Contents", `#/p/${project.id}`);
+  const body = clear(view);
+  setCtx(project, null);
+
+  let q = "", fRoom = "", fBox = "", fDisp = "";
+
+  body.append(
+    h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
+      h("h1", {}, "📦 Contents"),
+      h("button", { class: "btn btn--primary btn--sm", onclick: () => addItem(project) }, "+ Add item")),
+    contentsSummary(project),
+    h("div", { class: "btn-row", style: "margin:6px 0 12px" },
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/boxes`) }, `📦 Boxes (${project.boxes.length})`),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/report`) }, "📄 Inventory PDF")));
+
+  // filters
+  const search = h("input", { type: "search", placeholder: "Search items…" });
+  search.addEventListener("input", () => { q = search.value.toLowerCase(); paint(); });
+  const roomF = h("select", {}, h("option", { value: "" }, "All rooms"),
+    ...project.rooms.map((r) => h("option", { value: r }, r)));
+  roomF.addEventListener("change", () => { fRoom = roomF.value; paint(); });
+  const boxF = h("select", {}, h("option", { value: "" }, "All boxes"),
+    ...project.boxes.map((b) => h("option", { value: b.id }, b.label)));
+  boxF.addEventListener("change", () => { fBox = boxF.value; paint(); });
+  const dispF = h("select", {}, h("option", { value: "" }, "All"),
+    ...DISPOSITIONS.map((d) => h("option", { value: d.value }, d.label)));
+  dispF.addEventListener("change", () => { fDisp = dispF.value; paint(); });
+  body.append(h("div", { class: "filterbar" }, search, h("div", { class: "grid3" }, roomF, boxF, dispF)));
+
+  const list = h("div", { class: "joblist" });
+  body.append(list);
+
+  function paint() {
+    const items = project.contents.filter((it) =>
+      (!q || (it.name + " " + it.brand + " " + it.model + " " + it.notes).toLowerCase().includes(q)) &&
+      (!fRoom || it.room === fRoom) && (!fBox || it.boxId === fBox) && (!fDisp || it.disposition === fDisp));
+    if (!items.length) {
+      list.replaceChildren(h("div", { class: "empty" }, h("div", { class: "big" }, "📦"),
+        h("p", {}, project.contents.length ? "No items match." : "No items yet."),
+        h("button", { class: "btn btn--primary", style: "max-width:240px;margin:8px auto 0", onclick: () => addItem(project) }, "+ Add item")));
+      return;
+    }
+    list.replaceChildren(...items.map((it) => h("a", { class: "card card--tap citem", href: `#/p/${project.id}/f/contents/${it.id}` },
+      it.photos[0] ? h("img", { class: "cthumb", src: it.photos[0], alt: "" }) : h("div", { class: "cthumb cthumb--ph" }, "📦"),
+      h("div", { class: "jobrow__main" },
+        h("div", { class: "jobrow__title" }, (it.qty && it.qty !== "1" ? it.qty + "× " : "") + (it.name || "Untitled item")),
+        h("div", { class: "jobrow__sub" }, [it.room, boxLabelOf(project, it.boxId), it.condition].filter(Boolean).join(" · ")),
+        h("div", { class: "badgeline", style: "margin:4px 0 0" },
+          it.disposition ? h("span", { class: "badge disp-" + dispClass(it.disposition) }, dispositionShort(it.disposition)) : null,
+          it.value ? h("span", { class: "badge" }, money((Number(it.value) || 0) * (Number(it.qty) || 1))) : null)),
+      h("div", { class: "jobrow__chev" }, "›"))));
+  }
+  paint();
+}
+
+async function addItem(project) {
+  ensureContents(project);
+  const it = newContentsItem();
+  project.contents.push(it);
+  await Store.put(project);
+  go(`#/p/${project.id}/f/contents/${it.id}`);
+}
+
+function contentsItemEditor(project, item) {
+  setChrome(item.name || "Item", `#/p/${project.id}/f/contents`);
+  const body = clear(view);
+  const pill = h("span", { class: "saved-pill" }, "✓ Saved");
+  setCtx(project, pill);
+
+  const warn = h("div", { class: "warn app-only", hidden: true });
+  function checkWarn() {
+    const need = item.disposition === "non-salvageable" && (!item.photos || !item.photos.length);
+    warn.hidden = !need;
+    if (need) warn.replaceChildren(h("strong", {}, "📷 Tip: "), "Add a photo of this non-salvageable item — carriers require photo proof for the loss claim.");
+  }
+
+  body.append(
+    h("div", { class: "app-only", style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" },
+      h("strong", { style: "font-size:18px" }, "📦 Item"), pill),
+    h("div", { class: "card" },
+      field("Photos", photoUploader(item.photos, "Add item photos")),
+      warn,
+      field("Item name", inp(item, "name", { placeholder: "e.g. 55\" Samsung TV" })),
+      h("div", { class: "grid2" },
+        field("Quantity", inp(item, "qty", { type: "number" })),
+        field("Category", sel(item, "category", CONTENT_CATEGORIES, { placeholder: "Select…" }))),
+      h("div", { class: "grid2" },
+        field("Room", roomSelect(project, item)),
+        field("Box", boxSelect(project, item))),
+      field("Condition", seg(item, "condition", CONDITIONS)),
+      field("Disposition", seg(item, "disposition", DISPOSITIONS.map((d) => ({ value: d.value, label: d.label })), { onchange: checkWarn })),
+      field("Est. replacement value (each)", inp(item, "value", { type: "number", placeholder: "$ per unit" })),
+      h("details", { class: "app-only" },
+        h("summary", { class: "linklike" }, "Brand / model / age (for depreciation)"),
+        h("div", { class: "grid3", style: "margin-top:8px" },
+          field("Brand", inp(item, "brand")),
+          field("Model", inp(item, "model")),
+          field("Age (yrs)", inp(item, "age")))),
+      field("Notes", ta(item, "notes"))));
+  checkWarn();
+
+  body.append(h("div", { class: "sticky-actions app-only" },
+    h("button", { class: "btn btn--danger", onclick: () => deleteItem(project, item) }, "Delete"),
+    h("button", { class: "btn btn--primary", onclick: () => go(`#/p/${project.id}/f/contents`) }, "Done")));
+}
+
+async function deleteItem(project, item) {
+  if (!confirm("Delete this item?")) return;
+  const i = project.contents.findIndex((x) => x.id === item.id);
+  if (i >= 0) project.contents.splice(i, 1);
+  await Store.put(project);
+  toast("Item deleted");
+  go(`#/p/${project.id}/f/contents`);
+}
+
+/* ---------- Boxes manager (+ printable labels) ---------- */
+function boxesManager(project) {
+  setChrome("Boxes", `#/p/${project.id}/f/contents`);
+  const body = clear(view);
+  const pill = h("span", { class: "saved-pill" }, "✓ Saved");
+  setCtx(project, pill);
+  const countItems = (id) => project.contents.filter((it) => it.boxId === id).length;
+
+  const listWrap = h("div", { class: "app-only" });
+  function paint() {
+    const cards = project.boxes.map((b) =>
+      h("div", { class: "card" },
+        h("div", { class: "grid2" },
+          field("Box label", inp(b, "label")),
+          field("Room", inp(b, "room"))),
+        h("div", { class: "grid2" },
+          field("Destination", sel(b, "destination", BOX_DESTINATIONS)),
+          field("Packed by", inp(b, "packedBy"))),
+        h("div", { class: "grid2" },
+          field("Packed date", inp(b, "packedDate", { type: "date" })),
+          field("Items in box", h("div", { style: "padding-top:12px;font-weight:700" }, String(countItems(b.id))))),
+        h("button", { class: "btn btn--danger btn--sm", onclick: () => delBox(b) }, "Delete box")));
+    listWrap.replaceChildren(
+      h("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px" },
+        h("h1", {}, "📦 Boxes"),
+        h("button", { class: "btn btn--primary btn--sm", onclick: addBox }, "+ New box")),
+      project.boxes.length ? h("div", {}, ...cards)
+        : h("div", { class: "empty" }, h("div", { class: "big" }, "📦"), h("p", {}, "No boxes yet."),
+            h("button", { class: "btn btn--primary", style: "max-width:200px;margin:8px auto 0", onclick: addBox }, "+ New box")));
+    labels.replaceChildren(...buildLabels());
+  }
+  function addBox() { project.boxes.push(newBox(project.boxes.length + 1)); Store.put(project); paint(); }
+  function delBox(b) {
+    if (!confirm("Delete " + b.label + "? Items stay in inventory but become unassigned.")) return;
+    project.contents.forEach((it) => { if (it.boxId === b.id) it.boxId = ""; });
+    project.boxes = project.boxes.filter((x) => x.id !== b.id);
+    Store.put(project); paint();
+  }
+  // printable labels (one card per box)
+  const labels = h("div", { class: "print-only boxlabels" });
+  function buildLabels() {
+    return project.boxes.map((b) => h("div", { class: "boxlabel" },
+      h("div", { class: "boxlabel__co" }, "ROYBAL RESTORATION"),
+      h("div", { class: "boxlabel__no" }, b.label),
+      h("table", { class: "boxlabel__meta" },
+        h("tr", {}, h("td", {}, "Customer"), h("td", {}, project.customer || "")),
+        h("tr", {}, h("td", {}, "Claim #"), h("td", {}, project.claimNo || "")),
+        h("tr", {}, h("td", {}, "Room"), h("td", {}, b.room || "")),
+        h("tr", {}, h("td", {}, "Destination"), h("td", {}, b.destination || "")),
+        h("tr", {}, h("td", {}, "Packed by"), h("td", {}, (b.packedBy || "") + (b.packedDate ? "  " + fmtDate(b.packedDate) : ""))),
+        h("tr", {}, h("td", {}, "Items"), h("td", {}, String(countItems(b.id)))))));
+  }
+
+  body.append(listWrap, labels);
+  paint();
+  if (project.boxes.length) {
+    body.append(h("div", { class: "sticky-actions app-only" },
+      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/f/contents`) }, "Done"),
+      h("button", { class: "btn btn--primary", onclick: () => window.print() }, "🏷️ Print box labels")));
+  }
+}
+
+function contentsReportPage(project) {
+  setChrome("Contents PDF", `#/p/${project.id}/f/contents`);
+  const body = clear(view);
+  setCtx(project, null);
+  body.append(
+    h("p", { class: "subtle app-only" }, "Contents inventory for the carrier. Tap “Save as PDF,” then share."),
+    RENDERERS.contents(project),
+    h("div", { class: "sticky-actions app-only" },
+      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/f/contents`) }, "Back"),
+      h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Save as PDF")));
 }
 
 /* ============================================================

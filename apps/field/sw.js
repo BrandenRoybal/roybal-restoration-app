@@ -1,5 +1,5 @@
 /* Roybal Field Forms — service worker (offline-first app shell) */
-const CACHE = "roybal-field-v2";
+const CACHE = "roybal-field-v3";
 
 /* core shell — must all cache for the app to work offline */
 const CORE = [
