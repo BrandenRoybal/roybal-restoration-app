@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v7";
+const CACHE = "roybal-field-v8";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
@@ -23,8 +23,10 @@ const OPTIONAL = [
 self.addEventListener("install", (e) => {
   e.waitUntil((async () => {
     const c = await caches.open(CACHE);
-    await c.addAll(CORE);
-    await Promise.allSettled(OPTIONAL.map((u) => c.add(u)));
+    // fetch every asset fresh from the network (bypass the HTTP cache)
+    const fresh = (u) => fetch(new Request(u, { cache: "reload" })).then((r) => r.ok && c.put(u, r.clone()));
+    await Promise.all(CORE.map((u) => fresh(u).catch(() => c.add(u).catch(() => {}))));
+    await Promise.allSettled(OPTIONAL.map((u) => fresh(u).catch(() => {})));
     self.skipWaiting();
   })());
 });
@@ -40,7 +42,7 @@ self.addEventListener("activate", (e) => {
 function swr(request) {
   return caches.open(CACHE).then((cache) =>
     cache.match(request).then((cached) => {
-      const network = fetch(request).then((res) => {
+      const network = fetch(request, { cache: "no-cache" }).then((res) => {
         if (res && res.status === 200) cache.put(request, res.clone());
         return res;
       }).catch(() => cached);

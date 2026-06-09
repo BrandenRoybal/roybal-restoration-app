@@ -89,10 +89,15 @@ async function projectList() {
   body.append(installHint());
 }
 
+const APP_VERSION = "v8";
+
 function installHint() {
-  return h("div", { class: "note", style: "margin-top:18px" },
-    h("strong", {}, "Tip: "),
-    "Add this app to your home screen (Share → “Add to Home Screen”) to launch it like a regular app and use it with no signal in the field.");
+  return h("div", {},
+    h("div", { class: "note", style: "margin-top:18px" },
+      h("strong", {}, "Tip: "),
+      "Add this app to your home screen (Share → “Add to Home Screen”) to launch it like a regular app and use it with no signal in the field."),
+    h("div", { style: "text-align:center;color:var(--muted);font-size:11px;margin-top:14px" },
+      "Roybal Field Forms · build " + APP_VERSION));
 }
 
 async function createProject() {
@@ -740,9 +745,10 @@ if ("serviceWorker" in navigator) {
     hadController = true;
   });
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").then((reg) => {
-      // check for a new version each time the app is opened
-      reg.update?.();
+    // updateViaCache:none => browser never serves a cached worker script
+    navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then((reg) => {
+      reg.update?.();                                  // check for a new version on open
+      setInterval(() => reg.update?.(), 60 * 60 * 1000); // and hourly while open
     }).catch(() => {});
   });
 }
