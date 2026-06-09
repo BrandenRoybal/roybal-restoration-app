@@ -2,7 +2,7 @@
    Run: node apps/field/test/smoke.mjs   (from repo root) */
 import { JSDOM } from "jsdom";
 import "fake-indexeddb/auto";
-import { depreciation } from "../js/model.js";
+import { depreciation, FORMS } from "../js/model.js";
 import { qrSvg } from "../js/qr.js";
 
 const SHELL = `<!DOCTYPE html><html><body>
@@ -134,16 +134,9 @@ function setInput(el, val) {
   ok(view().querySelectorAll("canvas").length >= 2, "work auth has owner + rep signature pads");
   ok(/Upload signed copy/.test(text()), "work auth offers upload-signed-copy option");
 
-  // 7. Invoice totals
-  await nav(`#/p/${id}/f/invoices`);
-  [...view().querySelectorAll("button")].find((b) => /New/.test(b.textContent))?.click();
-  await tick(40);
-  const liTable = view().querySelector("table.grid");
-  const liInputs = liTable.querySelectorAll("tbody tr input");
-  setInput(liInputs[1], "3");   // qty
-  setInput(liInputs[3], "100"); // price
-  await tick();
-  ok(/\$300\.00/.test(text()), "invoice line extends + subtotals to $300.00");
+  // Invoice removed from the field app (moved to admin)
+  ok(!FORMS.some((f) => f.key === "invoices"), "invoice form is not in the field app");
+  ok(!FORMS.some((f) => f.hero), "moisture/drying tiles are standard size (no hero)");
 
   // 8. remaining single/multi forms render without throwing
   for (const key of ["constructionLogs", "changeOrders", "certDrying"]) {

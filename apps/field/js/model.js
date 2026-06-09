@@ -13,12 +13,13 @@ export const COMPANY = {
   tagline: "General Contracting | Restoration & Mitigation | IICRC WRT Certified",
 };
 
-/* The 7 forms from the packet. `multi` forms can have many instances
-   (you fill a new Drying Log / Moisture Map page each day/area). */
+/* The forms shown in the field app. (Invoice moved to the office admin.)
+   `multi` forms can have many instances (a new Drying Log / Moisture Map
+   page per day/area). */
 export const FORMS = [
-  { key: "moistureMaps",     name: "Moisture Map",       icon: "🗺️", multi: true,  hero: true,
+  { key: "moistureMaps",     name: "Moisture Map",       icon: "🗺️", multi: true,
     blurb: "Sketch the affected area + daily MC% readings" },
-  { key: "dryingLogs",       name: "Drying Log",         icon: "💧", multi: true,  hero: true,
+  { key: "dryingLogs",       name: "Drying Log",         icon: "💧", multi: true,
     blurb: "Equipment runtime + psychrometric readings" },
   { key: "photos",           name: "Job Photos",         icon: "📷", multi: false,
     blurb: "Before / during / after pictures" },
@@ -32,8 +33,6 @@ export const FORMS = [
     blurb: "IICRC S500 dry verification + sign-off" },
   { key: "changeOrders",     name: "Change Order",       icon: "🔁", multi: true,
     blurb: "Scope / supplement changes" },
-  { key: "invoices",         name: "Invoice",            icon: "🧾", multi: true,
-    blurb: "Mitigation billing" },
 ];
 
 export function newProject() {
