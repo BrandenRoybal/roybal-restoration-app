@@ -221,10 +221,11 @@ export function lineItems(items, blankFn, opts = {}) {
 /* ---------- printable letterhead + footer ---------- */
 export function letterhead(formTitle, subtitle) {
   return h("div", { class: "print-only sheet-head" },
-    h("img", { class: "sheet-head__logo", src: "assets/emblem-mark.png", alt: "Roybal Construction" }),
-    h("div", { class: "sheet-head__co" },
-      h("div", { class: "sheet-head__name" }, "ROYBAL CONSTRUCTION, LLC"),
-      h("div", { class: "sheet-head__tag" }, COMPANY.tagline)),
+    h("div", { class: "sheet-head__brand" },
+      h("img", { class: "sheet-head__logo", src: "assets/emblem-mark.png", alt: "Roybal Construction" }),
+      h("div", { class: "sheet-head__co" },
+        h("div", { class: "sheet-head__name" }, "ROYBAL CONSTRUCTION, LLC"),
+        h("div", { class: "sheet-head__tag" }, COMPANY.tagline))),
     h("div", { class: "sheet-head__addr" },
       h("div", {}, COMPANY.address),
       h("div", {}, COMPANY.phone + " | " + COMPANY.email),

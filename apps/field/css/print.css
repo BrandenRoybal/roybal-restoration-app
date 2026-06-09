@@ -21,14 +21,14 @@ section.sheet + section.sheet { page-break-before: always; }
 
 /* ---------- letterhead ---------- */
 .sheet-head {
-  display: grid; grid-template-columns: auto 1fr auto; align-items: center; column-gap: 10px;
+  display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 12px;
   border-bottom: 2.5px solid #0f1b2d; padding-bottom: 6px; margin-bottom: 12px;
 }
+.sheet-head__brand { display: flex; align-items: center; gap: 9px; }
 .sheet-head__logo {
-  width: 0.62in; height: 0.62in; object-fit: contain; align-self: center;
+  width: 0.55in; height: 0.55in; object-fit: contain; flex: 0 0 auto;
   -webkit-print-color-adjust: exact; print-color-adjust: exact;
 }
-.sheet-head__co { align-self: center; }
 .sheet-head__name { font-size: 13pt; font-weight: 800; color: #0f1b2d; letter-spacing: .3px; }
 .sheet-head__tag { font-size: 7.5pt; color: #44556b; }
 .sheet-head__addr { font-size: 7.5pt; color: #44556b; text-align: right; line-height: 1.35; }
