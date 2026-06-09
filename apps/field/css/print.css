@@ -19,14 +19,18 @@ body { background: #fff !important; font-size: 10.5pt; color: #000; }
 .sheet { width: 100%; }
 section.sheet + section.sheet { page-break-before: always; }
 
+/* ---------- faint emblem watermark behind each report page ---------- */
+.sheet { position: relative; z-index: 0; }
+.sheet-wm {
+  position: absolute; top: 46%; left: 50%; transform: translate(-50%, -50%);
+  width: 5.5in; height: auto; opacity: 0.08; z-index: -1; pointer-events: none;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+
 /* ---------- letterhead ---------- */
 .sheet-head {
   display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px;
   border-bottom: 2.5px solid #0f1b2d; padding-bottom: 6px; margin-bottom: 12px;
-}
-.sheet-head__logo {
-  width: 0.7in; height: 0.7in; object-fit: contain; flex: 0 0 auto;
-  -webkit-print-color-adjust: exact; print-color-adjust: exact;
 }
 /* company name (left) and address (right) share a baseline so they line up */
 .sheet-head__body { flex: 1 1 auto; display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }

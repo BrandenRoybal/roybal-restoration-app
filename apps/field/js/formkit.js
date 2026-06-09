@@ -221,7 +221,6 @@ export function lineItems(items, blankFn, opts = {}) {
 /* ---------- printable letterhead + footer ---------- */
 export function letterhead(formTitle, subtitle) {
   return h("div", { class: "print-only sheet-head" },
-    h("img", { class: "sheet-head__logo", src: "assets/emblem-mark.png", alt: "Roybal Construction" }),
     h("div", { class: "sheet-head__body" },
       h("div", { class: "sheet-head__co" },
         h("div", { class: "sheet-head__name" }, "ROYBAL CONSTRUCTION, LLC"),
@@ -237,9 +236,10 @@ export function sheetFooter(label) {
   return h("div", { class: "print-only sheet-foot" }, `Roybal Construction, LLC — ${label}`);
 }
 
-/* a print "sheet" wrapper */
+/* a print "sheet" wrapper — with a faint emblem watermark behind the page */
 export function sheet(formTitle, subtitle, footLabel, ...sections) {
   return h("section", { class: "sheet" },
+    h("img", { class: "sheet-wm print-only", src: "assets/emblem-mark.png", alt: "" }),
     letterhead(formTitle, subtitle),
     ...sections,
     sheetFooter(footLabel));
