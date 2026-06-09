@@ -236,10 +236,9 @@ export function sheetFooter(label) {
   return h("div", { class: "print-only sheet-foot" }, `Roybal Construction, LLC — ${label}`);
 }
 
-/* a print "sheet" wrapper — with a faint emblem watermark behind the page */
+/* a print "sheet" wrapper */
 export function sheet(formTitle, subtitle, footLabel, ...sections) {
   return h("section", { class: "sheet" },
-    h("img", { class: "sheet-wm print-only", src: "assets/emblem-mark.png", alt: "" }),
     letterhead(formTitle, subtitle),
     ...sections,
     sheetFooter(footLabel));

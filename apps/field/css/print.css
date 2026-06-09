@@ -19,14 +19,6 @@ body { background: #fff !important; font-size: 10.5pt; color: #000; }
 .sheet { width: 100%; }
 section.sheet + section.sheet { page-break-before: always; }
 
-/* ---------- faint emblem watermark behind each report page ---------- */
-.sheet { position: relative; z-index: 0; }
-.sheet-wm {
-  position: absolute; top: 46%; left: 50%; transform: translate(-50%, -50%);
-  width: 5.5in; height: auto; opacity: 0.08; z-index: -1; pointer-events: none;
-  -webkit-print-color-adjust: exact; print-color-adjust: exact;
-}
-
 /* ---------- letterhead ---------- */
 .sheet-head {
   display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px;
@@ -34,7 +26,7 @@ section.sheet + section.sheet { page-break-before: always; }
 }
 /* company name (left) and address (right) share a baseline so they line up */
 .sheet-head__body { flex: 1 1 auto; display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
-.sheet-head__name { font-size: 17pt; font-weight: 800; color: #0f1b2d; letter-spacing: .3px; }
+.sheet-head__name { font-size: 13pt; font-weight: 800; color: #0f1b2d; letter-spacing: .3px; }
 .sheet-head__tag { font-size: 7.5pt; color: #44556b; }
 .sheet-head__addr { font-size: 7.5pt; color: #44556b; text-align: right; line-height: 1.4; white-space: nowrap; }
 .sheet-head__title { flex-basis: 100%; text-align: center; margin-top: 8px; }
