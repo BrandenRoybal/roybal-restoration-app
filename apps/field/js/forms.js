@@ -33,6 +33,59 @@ function jobInfo(project, fields) {
 
 function sectionTitle(t) { return h("h2", {}, t); }
 
+/* ---------- Moisture drying-trend line graph (pure SVG) ---------- */
+const CHART_PALETTE = ["#0f1b2d", "#f26a21", "#1f9d55", "#d23b2e", "#1c5fb0", "#8e44ad",
+  "#e0a800", "#16a085", "#c0392b", "#2c3e50", "#d35400", "#27ae60", "#7f8c8d"];
+function shortDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso + (iso.length === 10 ? "T00:00:00" : ""));
+  return isNaN(d) ? iso : (d.getMonth() + 1) + "/" + d.getDate();
+}
+function moistureChartSvg(m, goal) {
+  const rows = m.readings || [];
+  const W = 620, H = 300, padL = 40, padR = 14, padT = 14, padB = 42;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  let yMax = 0, any = false;
+  rows.forEach((r) => (r.values || []).forEach((v) => { const n = parseFloat(v); if (isFinite(n)) { any = true; if (n > yMax) yMax = n; } }));
+  if (goal && goal > yMax) yMax = goal;
+  if (!any) return '<div class="chart-empty">Enter MC% readings above to see the drying trend.</div>';
+  yMax = Math.max(5, Math.ceil((yMax * 1.1) / 5) * 5);
+  const N = rows.length;
+  const xOf = (i) => padL + (N <= 1 ? plotW / 2 : (i / (N - 1)) * plotW);
+  const yOf = (v) => padT + plotH - (v / yMax) * plotH;
+  let s = `<svg viewBox="0 0 ${W} ${H}" class="mchart" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">`;
+  const ticks = 4;
+  for (let t = 0; t <= ticks; t++) {
+    const val = (yMax * t) / ticks, y = yOf(val);
+    s += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="#e2e8f0"/>`;
+    s += `<text x="${padL - 5}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="9" fill="#5b6b80">${Math.round(val)}</text>`;
+  }
+  s += `<text x="11" y="${padT + plotH / 2}" font-size="9" fill="#5b6b80" transform="rotate(-90 13 ${padT + plotH / 2})">MC%</text>`;
+  const step = Math.max(1, Math.ceil(N / 8));
+  rows.forEach((r, i) => {
+    if (!(N <= 8 || i % step === 0 || i === N - 1)) return;
+    s += `<text x="${xOf(i).toFixed(1)}" y="${H - padB + 15}" text-anchor="middle" font-size="9" fill="#5b6b80">${shortDate(r.date) || "#" + (i + 1)}</text>`;
+  });
+  if (goal) {
+    const y = yOf(goal);
+    s += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="#1f9d55" stroke-width="1.5" stroke-dasharray="5 4"/>`;
+    s += `<text x="${W - padR}" y="${(y - 4).toFixed(1)}" text-anchor="end" font-size="9" fill="#1f9d55">Dry goal ${goal}%</text>`;
+  }
+  let legend = "";
+  for (let n = 0; n < 13; n++) {
+    const pts = [];
+    rows.forEach((r, i) => { const v = parseFloat((r.values || [])[n]); if (isFinite(v)) pts.push([xOf(i), yOf(v)]); });
+    if (!pts.length) continue;
+    const col = CHART_PALETTE[n % CHART_PALETTE.length];
+    if (pts.length > 1) s += `<path d="${pts.map((p, k) => (k ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ")}" fill="none" stroke="${col}" stroke-width="2"/>`;
+    pts.forEach((p) => (s += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6" fill="${col}"/>`));
+    legend += `<span class="mchart__leg"><i style="background:${col}"></i>${n + 1}</span>`;
+  }
+  s += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#9aa7b8"/>`;
+  s += `<line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#9aa7b8"/></svg>`;
+  return s + `<div class="mchart__legend"><span class="mchart__leglbl">Reading location:</span>${legend}</div>`;
+}
+
 /* ============================================================
    1. MOISTURE MAP
    ============================================================ */
@@ -59,19 +112,24 @@ export function moistureMap(project, m) {
   }
   function reflagAll() { tbody.querySelectorAll("input.mc").forEach(flagCell); }
 
+  /* drying-trend chart */
+  const chartBox = h("div", { class: "mchart-wrap" });
+  function redrawChart() { chartBox.innerHTML = moistureChartSvg(m, goalNum()); }
+  setTimeout(redrawChart, 0);   // initial render once mounted
+
   /* reading grid */
   const tbody = h("tbody");
   function rowEl(row, i) {
     const tr = h("tr");
     const dateCell = h("td");
     const dateInput = h("input", { type: "date", value: row.date, style: "min-width:120px" });
-    dateInput.addEventListener("input", () => { row.date = dateInput.value; commit(); });
+    dateInput.addEventListener("input", () => { row.date = dateInput.value; redrawChart(); commit(); });
     dateCell.append(dateInput);
     tr.append(dateCell);
     for (let n = 0; n < 13; n++) {
       const c = h("td");
       const input = h("input", { class: "mc", value: row.values[n] ?? "", inputmode: "decimal", style: "min-width:42px" });
-      input.addEventListener("input", () => { row.values[n] = input.value; flagCell(input); commit(); });
+      input.addEventListener("input", () => { row.values[n] = input.value; flagCell(input); redrawChart(); commit(); });
       flagCell(input);
       c.append(input); tr.append(c);
     }
@@ -79,22 +137,22 @@ export function moistureMap(project, m) {
     const noteInput = h("input", { value: row.notes ?? "", style: "min-width:120px" });
     noteInput.addEventListener("input", () => { row.notes = noteInput.value; commit(); });
     noteCell.append(noteInput); tr.append(noteCell);
-    tr.append(h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { m.readings.splice(i, 1); paintRows(); commit(); } }, "✕")));
+    tr.append(h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { m.readings.splice(i, 1); paintRows(); redrawChart(); commit(); } }, "✕")));
     return tr;
   }
   function paintRows() { tbody.replaceChildren(...m.readings.map(rowEl)); }
   paintRows();
   const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add reading date");
-  addRow.addEventListener("click", () => { m.readings.push(blankReadingRow()); paintRows(); commit(); });
+  addRow.addEventListener("click", () => { m.readings.push(blankReadingRow()); paintRows(); redrawChart(); commit(); });
 
   /* material picker auto-fills the dry goal */
-  const dryGoalInput = inp(m, "dryGoal", { placeholder: "≤ 16%", oninput: () => reflagAll() });
+  const dryGoalInput = inp(m, "dryGoal", { placeholder: "≤ 16%", oninput: () => { reflagAll(); redrawChart(); } });
   const materialSel = sel(m, "material",
     DRY_STANDARDS.map((d) => ({ value: d.material, label: `${d.material} (≤ ${d.goal}%)` })),
     { placeholder: "Select material…", onchange: (v) => {
         const g = goalFor(v);
         if (g != null) { m.dryGoal = `≤ ${g}%`; dryGoalInput.value = m.dryGoal; }
-        reflagAll();
+        reflagAll(); redrawChart();
       } });
 
   /* floor-plan import (PDF or image) */
@@ -153,7 +211,11 @@ export function moistureMap(project, m) {
       h("table", { class: "grid" },
         h("thead", {}, h("tr", {}, ...headCols.map((c) => h("th", {}, c)), h("th", { class: "app-only" }, ""))),
         tbody)),
-    addRow);
+    addRow,
+
+    sectionTitle("Drying Trend"),
+    h("p", { class: "subtle app-only" }, "MC% over time for each reading location — the line should fall toward the dry goal."),
+    chartBox);
 }
 
 /* ============================================================

@@ -98,6 +98,10 @@ function setInput(el, val) {
   ok(mc.classList.contains("dry"), "reading at/below goal flags green (dry)");
   setInput(mc, "8"); await tick();
   ok(mc.classList.contains("wet"), "reading above goal flags red (wet)");
+  // drying-trend line graph renders from the readings
+  setInput(mc, "12"); await tick(30);
+  ok(/Drying Trend/.test(text()), "moisture map shows a Drying Trend section");
+  ok(view().querySelector(".mchart-wrap svg.mchart") !== null, "drying-trend line graph renders as SVG once readings exist");
 
   // 5. Drying Log: add instance, test GPP auto-calc wiring
   await nav(`#/p/${id}/f/dryingLogs`);

@@ -16,7 +16,7 @@ that information flows automatically into every form. Then fill out any of the 7
 
 | Form | Notes |
 |---|---|
-| 🗺️ **Moisture Map** | **Import a PDF or image floor plan** and draw right on top, drop numbered markers at each reading location, log daily MC% readings. Pick a material and the **IICRC dry goal auto-fills**; readings then flag **🟢 green (dry) / 🔴 red (wet)** automatically. *(The daily driver.)* |
+| 🗺️ **Moisture Map** | **Import a PDF or image floor plan** and draw right on top, drop numbered markers at each reading location, log daily MC% readings. Pick a material and the **IICRC dry goal auto-fills**; readings flag **🟢 green (dry) / 🔴 red (wet)** automatically. A **drying-trend line graph** plots each location's MC% over time against the dry-goal line. *(The daily driver.)* |
 | 💧 **Drying Log** | Equipment runtime table + daily psychrometric readings. **GPP auto-calculates** from temp + RH and **grain depression** computes itself. Shows the **drying day count** and **flags any unit on site 7+ days** for the carrier. *(The other daily driver.)* |
 | 📷 **Job Photos** | Before / during / after pictures with room + caption + auto timestamp; prints as a Photo Report. |
 | 📦 **Contents** | Personal-property inventory + pack-out. Each item: photo(s), qty, category, **room**, **box**, **condition**, **disposition**, replacement value, brand/model/age. **Live ACV** (actual cash value after age depreciation). Non-salvageable items roll into a **Loss List** (RCV → depreciation → ACV totals) for the carrier. Pack-out **boxes** print labels with a **scannable QR code** + manifest. **Pack-back checklist** with homeowner sign-off receipt. **CSV export** of the whole inventory. |
