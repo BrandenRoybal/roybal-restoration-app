@@ -97,10 +97,32 @@ export function newContentsItem() {
     id: uid(), createdAt: new Date().toISOString(),
     name: "", qty: "1", category: "", room: "", boxId: "",
     condition: "", disposition: "salvageable",
-    value: "",                       // estimated unit replacement cost
+    value: "",                       // estimated unit replacement cost (RCV)
     brand: "", model: "", age: "",   // for depreciation / loss claims
     notes: "", photos: [],
+    returned: false, returnedDate: "", // pack-back tracking
   };
+}
+
+/* IICRC/insurance-style useful life (years) by category — drives ACV depreciation */
+export const USEFUL_LIFE = {
+  "Furniture": 15, "Electronics": 5, "Appliance": 10, "Clothing": 5,
+  "Kitchenware": 10, "Décor": 10, "Bedding / Linens": 5, "Tools": 10,
+  "Documents": 0, "Toys": 5, "Sporting / Outdoor": 8, "Other": 8,
+};
+const MAX_DEPRECIATION = 0.8;        // never depreciate below 20% salvage value
+
+/* Replacement Cost (RCV), depreciation %, and Actual Cash Value (ACV) for an item */
+export function depreciation(item) {
+  const unit = Number(item.value) || 0;
+  const qty = Number(item.qty) || 1;
+  const rcv = unit * qty;
+  const life = USEFUL_LIFE[item.category] ?? 10;
+  const age = Number(item.age);
+  let rate = 0;
+  if (rcv && life > 0 && isFinite(age) && age > 0) rate = Math.min(age / life, MAX_DEPRECIATION);
+  const acv = rcv * (1 - rate);
+  return { rcv, rate, acv, dep: rcv - acv };
 }
 export function newBox(n) {
   return { id: uid(), label: "Box " + n, room: "", destination: "Storage", packedBy: "", packedDate: todayISO() };

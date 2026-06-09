@@ -1,16 +1,17 @@
 /* ============================================================
    Roybal Field Forms — app shell + hash router
    ============================================================ */
-import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending } from "./core.js";
+import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow } from "./core.js";
 import {
   FORMS, formByKey, formCount, newProject,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
   newInvoice, newWorkAuth, newCertDrying,
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
-  BOX_DESTINATIONS, dispositionShort,
+  BOX_DESTINATIONS, dispositionShort, dispositionLabel, depreciation,
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader } from "./formkit.js";
-import { RENDERERS } from "./forms.js";
+import { RENDERERS, packBackReceipt } from "./forms.js";
+import { qrSvg } from "./qr.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -207,6 +208,7 @@ async function formPage(project, key, instId) {
     if (!instId) return contentsManager(project);
     if (instId === "report") return contentsReportPage(project);
     if (instId === "boxes") return boxesManager(project);
+    if (instId === "packback") return contentsPackBack(project);
     const item = project.contents.find((x) => x.id === instId);
     if (!item) return go(`#/p/${project.id}/f/contents`);
     return contentsItemEditor(project, item);
@@ -403,9 +405,11 @@ function contentsManager(project) {
       h("h1", {}, "📦 Contents"),
       h("button", { class: "btn btn--primary btn--sm", onclick: () => addItem(project) }, "+ Add item")),
     contentsSummary(project),
-    h("div", { class: "btn-row", style: "margin:6px 0 12px" },
+    h("div", { class: "btn-row", style: "margin:6px 0 12px;flex-wrap:wrap" },
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/boxes`) }, `📦 Boxes (${project.boxes.length})`),
-      h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/report`) }, "📄 Inventory PDF")));
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/packback`) }, "↩︎ Pack-back"),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/report`) }, "📄 Inventory PDF"),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => exportContentsCSV(project) }, "⬇ CSV")));
 
   // filters
   const search = h("input", { type: "search", placeholder: "Search items…" });
@@ -468,6 +472,17 @@ function contentsItemEditor(project, item) {
     if (need) warn.replaceChildren(h("strong", {}, "📷 Tip: "), "Add a photo of this non-salvageable item — carriers require photo proof for the loss claim.");
   }
 
+  const acvLine = h("div", { class: "acvline app-only" });
+  function updateAcv() {
+    const d = depreciation(item);
+    if (!d.rcv) { acvLine.hidden = true; return; }
+    acvLine.hidden = false;
+    acvLine.replaceChildren(
+      h("span", {}, "RCV ", h("b", {}, money(d.rcv))),
+      h("span", {}, "Depr. ", h("b", {}, Math.round(d.rate * 100) + "%")),
+      h("span", {}, "ACV ", h("b", { style: "color:var(--orange-dark)" }, money(d.acv))));
+  }
+
   body.append(
     h("div", { class: "app-only", style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" },
       h("strong", { style: "font-size:18px" }, "📦 Item"), pill),
@@ -476,22 +491,25 @@ function contentsItemEditor(project, item) {
       warn,
       field("Item name", inp(item, "name", { placeholder: "e.g. 55\" Samsung TV" })),
       h("div", { class: "grid2" },
-        field("Quantity", inp(item, "qty", { type: "number" })),
-        field("Category", sel(item, "category", CONTENT_CATEGORIES, { placeholder: "Select…" }))),
+        field("Quantity", inp(item, "qty", { type: "number", oninput: updateAcv })),
+        field("Category", sel(item, "category", CONTENT_CATEGORIES, { placeholder: "Select…", onchange: updateAcv }))),
       h("div", { class: "grid2" },
         field("Room", roomSelect(project, item)),
         field("Box", boxSelect(project, item))),
       field("Condition", seg(item, "condition", CONDITIONS)),
       field("Disposition", seg(item, "disposition", DISPOSITIONS.map((d) => ({ value: d.value, label: d.label })), { onchange: checkWarn })),
-      field("Est. replacement value (each)", inp(item, "value", { type: "number", placeholder: "$ per unit" })),
+      h("div", { class: "grid2" },
+        field("Replacement value (each)", inp(item, "value", { type: "number", placeholder: "$ per unit", oninput: updateAcv })),
+        field("Age (yrs)", inp(item, "age", { type: "number", oninput: updateAcv }))),
+      acvLine,
       h("details", { class: "app-only" },
-        h("summary", { class: "linklike" }, "Brand / model / age (for depreciation)"),
-        h("div", { class: "grid3", style: "margin-top:8px" },
+        h("summary", { class: "linklike" }, "Brand / model (for the claim)"),
+        h("div", { class: "grid2", style: "margin-top:8px" },
           field("Brand", inp(item, "brand")),
-          field("Model", inp(item, "model")),
-          field("Age (yrs)", inp(item, "age")))),
+          field("Model", inp(item, "model")))),
       field("Notes", ta(item, "notes"))));
   checkWarn();
+  updateAcv();
 
   body.append(h("div", { class: "sticky-actions app-only" },
     h("button", { class: "btn btn--danger", onclick: () => deleteItem(project, item) }, "Delete"),
@@ -548,16 +566,29 @@ function boxesManager(project) {
   // printable labels (one card per box)
   const labels = h("div", { class: "print-only boxlabels" });
   function buildLabels() {
-    return project.boxes.map((b) => h("div", { class: "boxlabel" },
-      h("div", { class: "boxlabel__co" }, "ROYBAL RESTORATION"),
-      h("div", { class: "boxlabel__no" }, b.label),
-      h("table", { class: "boxlabel__meta" },
-        h("tr", {}, h("td", {}, "Customer"), h("td", {}, project.customer || "")),
-        h("tr", {}, h("td", {}, "Claim #"), h("td", {}, project.claimNo || "")),
-        h("tr", {}, h("td", {}, "Room"), h("td", {}, b.room || "")),
-        h("tr", {}, h("td", {}, "Destination"), h("td", {}, b.destination || "")),
-        h("tr", {}, h("td", {}, "Packed by"), h("td", {}, (b.packedBy || "") + (b.packedDate ? "  " + fmtDate(b.packedDate) : ""))),
-        h("tr", {}, h("td", {}, "Items"), h("td", {}, String(countItems(b.id)))))));
+    return project.boxes.map((b) => {
+      const qr = h("div", { class: "boxlabel__qr" });
+      const payload = [
+        "ROYBAL RESTORATION", "Box: " + b.label,
+        "Job: " + (project.customer || ""), "Claim: " + (project.claimNo || ""),
+        "Room: " + (b.room || ""), "Dest: " + (b.destination || ""),
+        "Items: " + countItems(b.id),
+      ].join("\n");
+      qrSvg(payload, 3, 1).then((svg) => { qr.innerHTML = svg; }).catch(() => {});
+      return h("div", { class: "boxlabel" },
+        h("div", { class: "boxlabel__top" },
+          h("div", {},
+            h("div", { class: "boxlabel__co" }, "ROYBAL RESTORATION"),
+            h("div", { class: "boxlabel__no" }, b.label)),
+          qr),
+        h("table", { class: "boxlabel__meta" },
+          h("tr", {}, h("td", {}, "Customer"), h("td", {}, project.customer || "")),
+          h("tr", {}, h("td", {}, "Claim #"), h("td", {}, project.claimNo || "")),
+          h("tr", {}, h("td", {}, "Room"), h("td", {}, b.room || "")),
+          h("tr", {}, h("td", {}, "Destination"), h("td", {}, b.destination || "")),
+          h("tr", {}, h("td", {}, "Packed by"), h("td", {}, (b.packedBy || "") + (b.packedDate ? "  " + fmtDate(b.packedDate) : ""))),
+          h("tr", {}, h("td", {}, "Items"), h("td", {}, String(countItems(b.id))))));
+    });
   }
 
   body.append(listWrap, labels);
@@ -579,6 +610,52 @@ function contentsReportPage(project) {
     h("div", { class: "sticky-actions app-only" },
       h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/f/contents`) }, "Back"),
       h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Save as PDF")));
+}
+
+/* ---------- CSV export ---------- */
+function contentsCSV(project) {
+  const boxLabel = (id) => boxLabelOf(project, id);
+  const header = ["Item", "Qty", "Category", "Room", "Box", "Condition", "Disposition",
+    "Unit RCV", "Ext RCV", "Age (yrs)", "Depr %", "ACV", "Brand", "Model", "Returned", "Notes"];
+  const rows = (project.contents || []).map((it) => {
+    const d = depreciation(it);
+    return csvRow([
+      it.name, it.qty, it.category, it.room, boxLabel(it.boxId), it.condition, dispositionLabel(it.disposition),
+      Number(it.value) || 0, d.rcv, it.age, Math.round(d.rate * 100), d.acv.toFixed(2),
+      it.brand, it.model, it.returned ? "Yes" : "No", it.notes,
+    ]);
+  });
+  return [csvRow(header), ...rows].join("\r\n");
+}
+function exportContentsCSV(project) {
+  if (!project.contents || !project.contents.length) return toast("No items to export");
+  const safe = (project.customer || "job").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  const ok = downloadFile(`contents-${safe}.csv`, contentsCSV(project), "text/csv;charset=utf-8");
+  toast(ok ? "CSV exported" : "Export not supported here");
+}
+
+/* ---------- Pack-back checklist + receipt ---------- */
+function contentsPackBack(project) {
+  setChrome("Pack-back", `#/p/${project.id}/f/contents`);
+  const body = clear(view);
+  const pill = h("span", { class: "saved-pill" }, "✓ Saved");
+  setCtx(project, pill);
+
+  const total = project.contents.length;
+  const prog = h("div", { class: "warn app-only" });
+  const refresh = () => {
+    const r = project.contents.filter((i) => i.returned).length;
+    prog.replaceChildren(h("strong", {}, `Returned ${r} of ${total}`),
+      total ? `  ·  ${Math.round((r / total) * 100)}% complete` : "");
+  };
+
+  const receipt = packBackReceipt(project);
+  receipt.addEventListener("change", refresh);   // checkboxes live in the sheet
+  body.append(prog, receipt,
+    h("div", { class: "sticky-actions app-only" },
+      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/f/contents`) }, "Done"),
+      h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Print receipt")));
+  refresh();
 }
 
 /* ============================================================

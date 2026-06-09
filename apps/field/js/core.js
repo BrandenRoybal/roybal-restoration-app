@@ -133,6 +133,29 @@ export function toast(msg, ms = 2200) {
   toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
 
+/* ---------- trigger a client-side file download (CSV export, etc.) ---------- */
+export function downloadFile(filename, content, mime = "text/plain;charset=utf-8") {
+  try {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* ---------- CSV cell escaping ---------- */
+export function csvRow(cells) {
+  return cells.map((c) => {
+    const s = c == null ? "" : String(c);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(",");
+}
+
 /* ---------- file → compressed dataURL (for photos / uploaded docs) ---------- */
 export function fileToDataURL(file, maxDim = 1600, quality = 0.72) {
   return new Promise((resolve, reject) => {

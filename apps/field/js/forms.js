@@ -2,14 +2,14 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, sketchPad, gpp, grainDepression, money, toast, fmtDate, fileToDataURL, DRY_STANDARDS, goalFor, daysSince } from "./core.js";
+import { h, sketchPad, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, DRY_STANDARDS, goalFor, daysSince } from "./core.js";
 import { fileToFloorPlan } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
   lineItems, sheet, commit,
 } from "./formkit.js";
 import {
-  SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel,
+  SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
   blankReadingRow, blankPsychroRow, blankEquipRow, blankWorkRow,
   blankLineItem, blankVerifyRow,
 } from "./model.js";
@@ -652,14 +652,20 @@ export function contentsReport(project) {
       h("td", {}, it.value ? money(ext(it)) : "")));
 
   const loss = items.filter((it) => it.disposition === "non-salvageable");
-  const lossTotal = loss.reduce((s, it) => s + ext(it), 0);
-  const lossRows = loss.map((it) =>
-    h("tr", {},
+  const dep = (it) => depreciation(it);
+  const totRCV = loss.reduce((s, it) => s + dep(it).rcv, 0);
+  const totACV = loss.reduce((s, it) => s + dep(it).acv, 0);
+  const lossRows = loss.map((it) => {
+    const d = dep(it);
+    return h("tr", {},
       h("td", { style: "text-align:left" }, it.name || "—"),
       h("td", {}, it.qty || ""),
       h("td", {}, it.room || ""),
       h("td", {}, it.age || ""),
-      h("td", {}, money(ext(it)))));
+      h("td", {}, money(d.rcv)),
+      h("td", {}, Math.round(d.rate * 100) + "%"),
+      h("td", {}, money(d.acv)));
+  });
 
   const totalItems = items.reduce((s, it) => s + (Number(it.qty) || 1), 0);
 
@@ -681,15 +687,53 @@ export function contentsReport(project) {
       : h("p", { class: "subtle" }, "No items recorded."),
 
     loss.length ? sectionTitle("Non-Salvageable Loss Summary") : null,
+    loss.length ? h("p", { class: "subtle app-only" }, "RCV = replacement cost · ACV = actual cash value after age depreciation (IICRC useful-life basis).") : null,
     loss.length
       ? h("div", { class: "tablewrap" },
           h("table", { class: "grid" },
-            h("thead", {}, h("tr", {}, ...["Item", "Qty", "Room", "Age", "Replacement Value"].map((c) => h("th", {}, c)))),
+            h("thead", {}, h("tr", {}, ...["Item", "Qty", "Room", "Age", "RCV", "Depr.", "ACV"].map((c) => h("th", {}, c)))),
             h("tbody", {}, ...lossRows,
               h("tr", { class: "calc" },
-                h("td", { colspan: 4, style: "text-align:right;font-weight:800" }, "Total Claimed Loss"),
-                h("td", { style: "font-weight:800" }, money(lossTotal))))))
+                h("td", { colspan: 4, style: "text-align:right;font-weight:800" }, "Totals"),
+                h("td", { style: "font-weight:800" }, money(totRCV)),
+                h("td", {}, ""),
+                h("td", { style: "font-weight:800" }, money(totACV))))))
       : null);
+}
+
+/* ---------- Contents pack-back receipt (homeowner sign-off) ---------- */
+export function packBackReceipt(project) {
+  const items = project.contents || [];
+  const boxes = project.boxes || [];
+  const boxLabel = (id) => boxes.find((b) => b.id === id)?.label || "";
+  const tbody = h("tbody");
+  items.forEach((it) => {
+    const tr = h("tr");
+    const box = h("input", { type: "checkbox", checked: !!it.returned, style: "width:20px;height:20px" });
+    box.addEventListener("change", () => { it.returned = box.checked; it.returnedDate = box.checked ? todayISO() : ""; commit(); });
+    tr.append(
+      h("td", { style: "text-align:left" }, it.name || "—"),
+      h("td", {}, it.qty || ""),
+      h("td", {}, it.room || ""),
+      h("td", {}, boxLabel(it.boxId)),
+      h("td", {}, box));
+    tbody.append(tr);
+  });
+  return sheet("CONTENTS PACK-BACK RECEIPT", "Acknowledgment of Returned Personal Property", "Contents Pack-Back Receipt",
+    sectionTitle("Job Information"),
+    jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
+    sectionTitle("Returned Items"),
+    h("p", { class: "subtle app-only" }, "Check off each item as it is returned to the owner."),
+    items.length
+      ? h("div", { class: "tablewrap" },
+          h("table", { class: "grid" },
+            h("thead", {}, h("tr", {}, ...["Item", "Qty", "Room", "Box", "Returned ✓"].map((c) => h("th", {}, c)))),
+            tbody))
+      : h("p", { class: "subtle" }, "No items in inventory."),
+    h("div", { class: "certstmt" },
+      h("p", {}, "The undersigned homeowner / insured acknowledges receipt of the personal-property items checked above, returned in the condition documented at pack-back by Roybal Construction, LLC.")),
+    sectionTitle("Acknowledgment"),
+    sigBlock(project, "packbackSig", "packbackName", "packbackDate", "Homeowner / Insured"));
 }
 
 /* ---------- dispatch ---------- */

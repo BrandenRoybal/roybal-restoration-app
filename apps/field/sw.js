@@ -1,5 +1,5 @@
 /* Roybal Field Forms — service worker (offline-first app shell) */
-const CACHE = "roybal-field-v3";
+const CACHE = "roybal-field-v4";
 
 /* core shell — must all cache for the app to work offline */
 const CORE = [
@@ -14,6 +14,7 @@ const CORE = [
   "js/formkit.js",
   "js/forms.js",
   "js/pdf.js",
+  "js/qr.js",
   "assets/favicon-16.png",
   "assets/favicon-32.png",
   "assets/apple-touch-icon.png",
@@ -24,6 +25,7 @@ const CORE = [
 const OPTIONAL = [
   "assets/vendor/pdfjs/pdf.min.mjs",
   "assets/vendor/pdfjs/pdf.worker.min.mjs",
+  "assets/vendor/qrcode/qrcode.mjs",
   "assets/logo-full.png",
 ];
 

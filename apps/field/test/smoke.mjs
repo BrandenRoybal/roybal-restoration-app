@@ -2,6 +2,8 @@
    Run: node apps/field/test/smoke.mjs   (from repo root) */
 import { JSDOM } from "jsdom";
 import "fake-indexeddb/auto";
+import { depreciation } from "../js/model.js";
+import { qrSvg } from "../js/qr.js";
 
 const SHELL = `<!DOCTYPE html><html><body>
   <header id="topbar"><button id="backBtn" hidden></button>
@@ -172,13 +174,25 @@ function setInput(el, val) {
   await tick(40);
   ok(/Sectional Sofa/.test(text()), "item appears in the contents inventory PDF");
   ok(/Non-Salvageable Loss Summary/.test(text()) && /\$500\.00/.test(text()), "loss summary + total compute");
+  ok(/ACV/.test(text()), "loss summary shows ACV / depreciation columns");
   await nav(`#/p/${id}/f/contents`);
   ok(/Sectional Sofa/.test(text()), "item shows in the contents list");
-  // boxes
+  ok([...view().querySelectorAll("button")].some((b) => /CSV/.test(b.textContent)), "contents manager offers CSV export");
+  // boxes + QR labels
   await nav(`#/p/${id}/f/contents/boxes`);
   [...view().querySelectorAll("button")].find((b) => /New box/.test(b.textContent))?.click();
   await tick(40);
   ok([...view().querySelectorAll("input")].some((i) => i.value === "Box 1"), "a pack-out box can be created");
+  // pack-back
+  await nav(`#/p/${id}/f/contents/packback`);
+  await tick(40);
+  ok(/PACK-BACK RECEIPT/.test(text()), "pack-back receipt renders");
+
+  // ACV / depreciation math + QR generation (unit)
+  const d = depreciation({ value: "1000", qty: "1", category: "Electronics", age: "2" });
+  ok(Math.round(d.acv) === 600, "ACV depreciation computes (Electronics, age 2 → $600, got " + Math.round(d.acv) + ")");
+  const svg = await qrSvg("ROYBAL");
+  ok(/<svg/.test(svg), "QR code generates an SVG for box labels");
 
   // 8c. Full job packet stacks every started form into one printable doc
   await nav(`#/p/${id}/packet`);
