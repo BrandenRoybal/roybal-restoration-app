@@ -3,15 +3,18 @@
    Same-origin as the field app, so it shares the same local data
    and Supabase session. Reuses the field app's core/model/sync.
    ============================================================ */
-import { h, $, clear, Store, fmtDate, daysSince } from "../../js/core.js";
-import { FORMS } from "../../js/model.js";
-import { SYNC_ENABLED } from "../../js/config.js";
-import { isSignedIn, signIn, signOut, currentEmail } from "../../js/supa.js";
+import { h, $, clear, Store, fmtDate, daysSince, money } from "../../js/core.js";
+import { FORMS, newInvoice, SCOPE_ITEMS } from "../../js/model.js";
+import { SYNC_ENABLED, AI_ENDPOINT } from "../../js/config.js";
+import { isSignedIn, signIn, signOut, currentEmail, accessToken } from "../../js/supa.js";
 import { startSync, syncNow } from "../../js/sync.js";
+import { setCtx } from "../../js/formkit.js";
+import { RENDERERS } from "../../js/forms.js";
 
 const view = $("#view");
 const FIELD_ROOT = location.pathname.replace(/\/admin\/?.*$/, "/") || "/";
-const openJob = (id) => { location.href = FIELD_ROOT + "#/p/" + id; };
+const openFieldJob = (id) => { location.href = FIELD_ROOT + "#/p/" + id; };
+const openJob = (id) => { location.hash = "#/job/" + id; };
 
 let started = false;
 function startSyncUI() {
@@ -25,7 +28,8 @@ function onStatus(s) {
     offline: ["#ff6b6b", "Offline"], error: ["#ff6b6b", "Sync error"] };
   const [c, t] = map[s.state] || ["var(--green)", "Online"];
   dot.style.color = c; dot.title = t;
-  if (s.state === "synced" && isSignedIn()) renderDashboard();   // refresh when new data lands
+  // refresh the dashboard when fresh data lands, but don't disrupt a job/invoice screen
+  if (s.state === "synced" && isSignedIn() && (!location.hash || location.hash === "#/")) renderDashboard();
 }
 
 $("#signOutBtn").addEventListener("click", () => {
@@ -33,11 +37,19 @@ $("#signOutBtn").addEventListener("click", () => {
   signOut(); location.reload();
 });
 
-/* ---------- boot ---------- */
+/* ---------- routing ---------- */
+const authed = () => !SYNC_ENABLED || isSignedIn();
+function route() {
+  if (!authed()) return renderLogin();
+  const m = location.hash.match(/^#\/job\/([^/]+)(?:\/invoice\/([^/]+))?/);
+  if (m) return renderJob(decodeURIComponent(m[1]), m[2] && decodeURIComponent(m[2]));
+  renderDashboard();
+}
+window.addEventListener("hashchange", route);
+
 function boot() {
-  if (!SYNC_ENABLED) return renderDashboard();        // local-only fallback
-  if (isSignedIn()) { startSyncUI(); renderDashboard(); }
-  else renderLogin();
+  if (SYNC_ENABLED && isSignedIn()) startSyncUI();
+  route();
 }
 
 /* ---------- login ---------- */
@@ -51,7 +63,7 @@ function renderLogin() {
   const btn = h("button", { class: "btn btn--primary", style: "margin-top:6px" }, "Sign in");
   async function submit() {
     err.hidden = true; btn.disabled = true; btn.textContent = "Signing in…";
-    try { await signIn(email.value, pass.value); startSyncUI(); renderDashboard(); }
+    try { await signIn(email.value, pass.value); startSyncUI(); route(); }
     catch (e) { err.hidden = false; err.textContent = String(e && e.message || e); btn.disabled = false; btn.textContent = "Sign in"; }
   }
   btn.addEventListener("click", submit);
@@ -145,6 +157,154 @@ function kpi(n, label, attn) {
   return h("div", { class: "kpi" + (attn ? " attn" : "") },
     h("div", { class: "kpi__n" }, String(n)),
     h("div", { class: "kpi__l" }, label));
+}
+
+/* ============================================================
+   Job detail (office) — invoices + AI narrative/scope
+   ============================================================ */
+const savePill = () => h("span", { class: "saved-pill", style: "font-size:12px" }, "✓ Saved");
+
+async function renderJob(id, invId) {
+  const project = await Store.get(id);
+  if (!project) { location.hash = "#/"; return; }
+  if (!Array.isArray(project.invoices)) project.invoices = [];
+
+  if (invId) return renderInvoice(project, invId);
+
+  setCtx(project, null);
+  const body = clear(view);
+  body.append(
+    h("div", { class: "atoolbar" },
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => { location.hash = "#/"; } }, "← All jobs"),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => openFieldJob(id) }, "Open in field forms ↗")));
+
+  const cat = project.waterCategory ? "Cat " + project.waterCategory + (project.waterClass ? " / Class " + project.waterClass : "") : "";
+  body.append(
+    h("h1", { style: "margin:6px 0 2px" }, project.customer || "Untitled job"),
+    h("p", { class: "subtle" }, [project.address, project.claimNo ? "Claim " + project.claimNo : "", project.carrier, cat].filter(Boolean).join(" · ")));
+
+  body.append(invoiceSection(project));
+  body.append(aiSection(project));
+}
+
+function invoiceSection(project) {
+  const wrap = h("div", { class: "card" });
+  function paint() {
+    const rows = project.invoices.map((inv) => {
+      const total = (inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0);
+      return h("a", { class: "card card--tap jobrow", style: "margin:0", href: `#/job/${project.id}/invoice/${inv.id}` },
+        h("div", { class: "jobrow__main" },
+          h("div", { class: "jobrow__title" }, "Invoice " + (inv.invoiceNo || "(no #)")),
+          h("div", { class: "jobrow__sub" }, fmtDate(inv.invoiceDate) + " · " + money(total))),
+        h("div", { class: "jobrow__chev" }, "›"));
+    });
+    wrap.replaceChildren(
+      h("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" },
+        h("h2", { style: "margin:0" }, "🧾 Invoices"),
+        h("button", { class: "btn btn--primary btn--sm", onclick: addInvoice }, "+ New invoice")),
+      rows.length ? h("div", { class: "joblist" }, ...rows) : h("p", { class: "subtle" }, "No invoices yet."));
+  }
+  async function addInvoice() {
+    const inv = newInvoice(); project.invoices.push(inv); await Store.put(project);
+    location.hash = `#/job/${project.id}/invoice/${inv.id}`;
+  }
+  paint();
+  return wrap;
+}
+
+function renderInvoice(project, invId) {
+  const inv = (project.invoices || []).find((x) => x.id === invId);
+  if (!inv) { location.hash = "#/job/" + project.id; return; }
+  const pill = savePill();
+  setCtx(project, pill);
+  const body = clear(view);
+  body.append(
+    h("div", { class: "atoolbar app-only" },
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => { location.hash = "#/job/" + project.id; } }, "← Back to job"),
+      h("div", { style: "display:flex;gap:10px;align-items:center" }, pill,
+        h("button", { class: "btn btn--danger btn--sm", onclick: () => delInvoice(project, inv) }, "Delete"),
+        h("button", { class: "btn btn--primary btn--sm", onclick: () => window.print() }, "⬇ Save as PDF"))));
+  body.append(RENDERERS.invoices(project, inv));
+}
+async function delInvoice(project, inv) {
+  if (!confirm("Delete this invoice?")) return;
+  project.invoices = project.invoices.filter((x) => x.id !== inv.id);
+  await Store.put(project);
+  location.hash = "#/job/" + project.id;
+}
+
+/* ---------- AI narrative / scope ---------- */
+function jobSummaryText(p) {
+  const lines = [];
+  const add = (k, v) => { if (v) lines.push(k + ": " + v); };
+  add("Customer", p.customer); add("Property address", p.address);
+  add("Claim #", p.claimNo); add("Insurance carrier", p.carrier); add("Adjuster", p.adjuster);
+  add("Date of loss", p.dateOfLoss); add("Loss cause", p.lossCause);
+  add("Water category", p.waterCategory && ("Category " + p.waterCategory));
+  add("Class of water", p.waterClass); add("Drying system", p.dryingSystem);
+  if (p.workAuth && p.workAuth.scope) {
+    const items = SCOPE_ITEMS.filter((_, i) => p.workAuth.scope[i]);
+    if (items.length) lines.push("Authorized scope:\n - " + items.join("\n - "));
+  }
+  (p.moistureMaps || []).forEach((m, i) => {
+    const days = (m.readings || []).length;
+    lines.push(`Moisture map ${i + 1}: material ${m.material || "n/a"}, dry goal ${m.dryGoal || "n/a"}, ${days} reading day(s)` + (m.label ? ` (${m.label})` : ""));
+  });
+  (p.dryingLogs || []).forEach((d, i) => {
+    const eq = (d.equipment || []).map((e) => [e.type, e.location].filter(Boolean).join(" @ ")).filter(Boolean);
+    lines.push(`Drying log ${i + 1}: ${eq.length} unit(s) [${eq.join("; ")}], ${(d.readings || []).length} psychrometric reading(s)`);
+  });
+  if (p.certDrying && p.certDrying.affectedAreas) lines.push("Affected areas/materials: " + p.certDrying.affectedAreas);
+  if ((p.contents || []).length) {
+    const loss = p.contents.filter((c) => c.disposition === "non-salvageable").length;
+    lines.push(`Contents: ${p.contents.length} item(s), ${loss} non-salvageable`);
+  }
+  return lines.join("\n");
+}
+
+function aiSection(project) {
+  const card = h("div", { class: "card" });
+  card.append(h("h2", { style: "margin-top:0" }, "✨ AI Scope & Narrative"));
+  if (!AI_ENDPOINT) {
+    card.append(h("p", { class: "subtle" },
+      "Not set up yet. Deploy the AI function (apps/ai) to Vercel and add its URL — then these buttons generate a carrier-ready narrative and scope of work from this job's data."));
+    return card;
+  }
+  card.append(h("p", { class: "subtle" }, "Generates from this job's data (no photos). Review and edit before using — saves with the job."));
+  card.append(aiBlock(project, "narrative", "Mitigation Narrative"));
+  card.append(h("hr", { class: "divider" }));
+  card.append(aiBlock(project, "scope", "Scope of Work"));
+  return card;
+}
+function aiBlock(project, kind, label) {
+  const key = kind === "scope" ? "aiScope" : "aiNarrative";
+  const ta = h("textarea", { rows: 8, placeholder: "Generate or write the " + label.toLowerCase() + "…" });
+  ta.value = project[key] || "";
+  ta.addEventListener("input", () => { project[key] = ta.value; Store.put(project); });
+  const status = h("span", { class: "subtle", style: "font-size:12px" });
+  const gen = h("button", { class: "btn btn--ghost btn--sm" }, "✨ Generate");
+  const copy = h("button", { class: "btn btn--ghost btn--sm" }, "Copy");
+  copy.addEventListener("click", () => { navigator.clipboard && navigator.clipboard.writeText(ta.value); status.textContent = "Copied"; });
+  gen.addEventListener("click", async () => {
+    gen.disabled = true; status.textContent = "Generating… (a few seconds)";
+    try {
+      const res = await fetch(AI_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + accessToken() },
+        body: JSON.stringify({ kind, summary: jobSummaryText(project) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+      ta.value = data.text; project[key] = data.text; await Store.put(project);
+      status.textContent = "Done — review and edit.";
+    } catch (e) { status.textContent = "Error: " + (e.message || e); }
+    finally { gen.disabled = false; }
+  });
+  return h("div", {},
+    h("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:6px" },
+      h("strong", {}, label),
+      h("div", { style: "display:flex;gap:8px;align-items:center" }, status, copy, gen)),
+    ta);
 }
 
 boot();

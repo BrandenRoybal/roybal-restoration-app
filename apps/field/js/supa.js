@@ -19,6 +19,7 @@ function saveSession(s) {
 
 export function isSignedIn() { return !!(session && session.access_token); }
 export function currentEmail() { return session ? session.email : ""; }
+export function accessToken() { return session ? session.access_token : ""; }
 
 function authHeaders() {
   return {

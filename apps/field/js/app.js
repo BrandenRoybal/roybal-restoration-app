@@ -196,7 +196,7 @@ async function projectList() {
   body.append(installHint());
 }
 
-const APP_VERSION = "v16";
+const APP_VERSION = "v17";
 
 function installHint() {
   return h("div", {},

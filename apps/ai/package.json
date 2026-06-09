@@ -1,0 +1,10 @@
+{
+  "name": "@roybal/ai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Roybal Restoration — AI narrative/scope serverless function (Vercel).",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.69.0"
+  }
+}

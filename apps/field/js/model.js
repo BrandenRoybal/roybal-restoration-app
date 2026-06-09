@@ -60,6 +60,10 @@ export function newProject() {
     rooms: [],          // shared room list (strings), reused across the app
     boxes: [],          // pack-out boxes
     contents: [],       // inventory items
+    // office (admin) extras
+    invoices: [],       // mitigation invoices (created in the office admin)
+    aiNarrative: "",    // AI-generated mitigation narrative (editable)
+    aiScope: "",        // AI-generated scope of work (editable)
     // form data
     workAuth: null,
     certDrying: null,
