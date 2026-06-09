@@ -191,6 +191,12 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .photoedit { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .photometa { color: var(--muted); font-size: 12px; }
 
+/* ---------- Account / sync row ---------- */
+.acctrow { display: flex; align-items: center; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; box-shadow: var(--shadow); }
+.acctrow__main { flex: 1; min-width: 0; font-size: 13px; }
+.acctrow__main > div:first-child { font-weight: 600; color: var(--navy); }
+.acctrow__status { color: var(--muted); font-size: 12px; }
+
 /* ---------- Contents inventory ---------- */
 .filterbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
 .filterbar select { min-height: 42px; }

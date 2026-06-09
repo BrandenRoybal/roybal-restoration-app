@@ -12,6 +12,9 @@ import {
 import { setCtx, field, inp, ta, sel, seg, photoUploader } from "./formkit.js";
 import { RENDERERS, packBackReceipt } from "./forms.js";
 import { qrSvg } from "./qr.js";
+import { SYNC_ENABLED } from "./config.js";
+import { isSignedIn, signIn, signOut, currentEmail } from "./supa.js";
+import { startSync, syncNow, resetSync } from "./sync.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -29,10 +32,26 @@ function go(hash) { location.hash = hash; }
 backBtn.addEventListener("click", () => go(backTarget));
 
 window.addEventListener("hashchange", route);
-window.addEventListener("load", route);
+window.addEventListener("load", boot);
+
+/* ---------- auth gate ---------- */
+const OFFLINE_KEY = "roybal-offline";
+const isOfflineMode = () => localStorage.getItem(OFFLINE_KEY) === "1";
+const needsLogin = () => SYNC_ENABLED && !isSignedIn() && !isOfflineMode();
+let syncStarted = false;
+function startSyncUI() {
+  if (syncStarted) { syncNow(); return; }
+  syncStarted = true;
+  startSync(updateSyncStatus);
+}
+function boot() {
+  if (SYNC_ENABLED && isSignedIn()) startSyncUI();
+  route();
+}
 
 async function route() {
   await flushPending();              // persist any in-flight edit before reloading
+  if (needsLogin()) return renderLogin();
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   window.scrollTo(0, 0);
   // parts: [] | ['new'] | ['p', id] | ['p', id, 'edit'] | ['p', id, 'f', key] | ['p', id, 'f', key, instId]
@@ -55,6 +74,92 @@ function setChrome(sub, back) {
 }
 
 /* ============================================================
+   Login (shared crew account) + sync status
+   ============================================================ */
+let lastSync = null;
+function updateSyncStatus(s) {
+  lastSync = s;
+  const dot = $("#netStatus");
+  if (!dot) return;
+  const map = { syncing: ["var(--amber)", "Syncing…"], synced: ["var(--green)", "Synced"],
+    offline: ["#ff6b6b", "Offline — saved on device"], error: ["#ff6b6b", "Sync error"] };
+  const [color, title] = map[s.state] || ["var(--green)", "Online"];
+  dot.style.color = color; dot.title = title;
+  // refresh the account row if it's on screen
+  const row = $("#acctRow");
+  if (row) row.replaceWith(accountRow());
+}
+function syncLabel() {
+  if (!SYNC_ENABLED) return "";
+  if (!isSignedIn()) return "Working offline on this device";
+  const s = lastSync || {};
+  if (s.state === "syncing") return "Syncing…";
+  if (s.state === "offline") return "Offline — will sync when back online";
+  if (s.state === "error") return "Sync issue: " + (s.message || "retrying");
+  if (s.skipped) return `Synced (${s.skipped} large item(s) pending media sync)`;
+  return s.lastSync ? "All changes synced ✓" : "Synced ✓";
+}
+
+function renderLogin() {
+  setChrome("Sign in", null);
+  const body = clear(view);
+  const email = h("input", { type: "email", placeholder: "Email", autocomplete: "username", value: "" });
+  const pass = h("input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
+  const err = h("div", { class: "warn", hidden: true });
+  const btn = h("button", { class: "btn btn--primary", style: "margin-top:6px" }, "Sign in");
+
+  async function submit() {
+    err.hidden = true; btn.disabled = true; btn.textContent = "Signing in…";
+    try {
+      await signIn(email.value, pass.value);
+      localStorage.removeItem(OFFLINE_KEY);
+      startSyncUI();
+      go("#/"); route();
+    } catch (e) {
+      err.hidden = false; err.textContent = String(e && e.message || e);
+      btn.disabled = false; btn.textContent = "Sign in";
+    }
+  }
+  btn.addEventListener("click", submit);
+  pass.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+
+  body.append(
+    h("div", { style: "max-width:380px;margin:8vh auto 0;text-align:center" },
+      h("img", { src: "assets/icon-180.png", alt: "", style: "width:84px;height:84px;border-radius:18px" }),
+      h("h1", { style: "margin:14px 0 2px" }, "Roybal Field Forms"),
+      h("p", { class: "subtle" }, "Sign in with your shared crew account to sync jobs across devices."),
+      h("div", { class: "card", style: "text-align:left;margin-top:14px" },
+        err,
+        field("Email", email), field("Password", pass), btn),
+      h("button", { class: "linklike", style: "margin-top:16px", onclick: () => { localStorage.setItem(OFFLINE_KEY, "1"); go("#/"); route(); } },
+        "Work offline on this device →")));
+}
+
+function accountRow() {
+  const row = h("div", { id: "acctRow", class: "acctrow" });
+  if (!SYNC_ENABLED) return row;
+  if (isSignedIn()) {
+    row.append(
+      h("div", { class: "acctrow__main" },
+        h("div", {}, "Signed in · " + currentEmail()),
+        h("div", { class: "acctrow__status" }, syncLabel())),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => syncNow() }, "↻ Sync"),
+      h("button", { class: "linklike", onclick: doSignOut }, "Sign out"));
+  } else {
+    row.append(
+      h("div", { class: "acctrow__main" }, h("div", {}, "Working offline on this device")),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => { localStorage.removeItem(OFFLINE_KEY); route(); } }, "Sign in to sync"));
+  }
+  return row;
+}
+function doSignOut() {
+  if (!confirm("Sign out? Jobs stay saved on this device.")) return;
+  signOut(); resetSync(); syncStarted = false;
+  localStorage.removeItem(OFFLINE_KEY);
+  route();
+}
+
+/* ============================================================
    Project list (home)
    ============================================================ */
 async function projectList() {
@@ -66,6 +171,8 @@ async function projectList() {
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "Jobs"),
       h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job")));
+
+  if (SYNC_ENABLED) body.append(accountRow());
 
   if (!projects.length) {
     body.append(h("div", { class: "empty" },
@@ -89,7 +196,7 @@ async function projectList() {
   body.append(installHint());
 }
 
-const APP_VERSION = "v14";
+const APP_VERSION = "v15";
 
 function installHint() {
   return h("div", {},

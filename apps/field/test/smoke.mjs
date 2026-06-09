@@ -16,11 +16,13 @@ const { window } = dom;
 // ---- globals the app modules expect ----
 for (const k of ["document", "window", "navigator", "location", "history",
   "HTMLElement", "Node", "Event", "CustomEvent", "Image", "FileReader",
-  "getComputedStyle", "DOMParser"]) {
+  "getComputedStyle", "DOMParser", "localStorage"]) {
   if (window[k] === undefined) continue;
   try { globalThis[k] = window[k]; }
   catch { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); }
 }
+// run the app in local-only mode for tests (skip the sign-in gate)
+window.localStorage.setItem("roybal-offline", "1");
 globalThis.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0);
 globalThis.cancelAnimationFrame = (id) => clearTimeout(id);
 window.requestAnimationFrame = globalThis.requestAnimationFrame;

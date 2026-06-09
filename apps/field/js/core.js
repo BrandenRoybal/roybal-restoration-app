@@ -66,6 +66,11 @@ function db() {
 }
 function tx(mode) { return db().then((d) => d.transaction(STORE, mode).objectStore(STORE)); }
 
+/* save/delete listeners — the sync engine subscribes to push changes up */
+const _savedFns = [], _deletedFns = [];
+export function onProjectSaved(fn) { _savedFns.push(fn); }
+export function onProjectDeleted(fn) { _deletedFns.push(fn); }
+
 export const Store = {
   async all() {
     const os = await tx("readonly");
@@ -83,20 +88,22 @@ export const Store = {
       r.onerror = () => rej(r.error);
     });
   },
-  async put(project) {
-    project.updatedAt = new Date().toISOString();
+  /* opts.bump:false keeps the existing updatedAt; opts.quiet:true skips
+     listeners (used by sync when writing rows pulled from the server). */
+  async put(project, opts = {}) {
+    if (opts.bump !== false) project.updatedAt = new Date().toISOString();
     const os = await tx("readwrite");
     return new Promise((res, rej) => {
       const r = os.put(project);
-      r.onsuccess = () => res(project);
+      r.onsuccess = () => { if (!opts.quiet) _savedFns.forEach((f) => { try { f(project); } catch {} }); res(project); };
       r.onerror = () => rej(r.error);
     });
   },
-  async del(id) {
+  async del(id, opts = {}) {
     const os = await tx("readwrite");
     return new Promise((res, rej) => {
       const r = os.delete(id);
-      r.onsuccess = () => res();
+      r.onsuccess = () => { if (!opts.quiet) _deletedFns.forEach((f) => { try { f(id); } catch {} }); res(); };
       r.onerror = () => rej(r.error);
     });
   },
