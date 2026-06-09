@@ -196,7 +196,7 @@ async function projectList() {
   body.append(installHint());
 }
 
-const APP_VERSION = "v17";
+const APP_VERSION = "v18";
 
 function installHint() {
   return h("div", {},
@@ -230,9 +230,7 @@ function projectHome(project) {
   if (project.dryingSystem) badges.append(h("span", { class: "badge" }, project.dryingSystem + " drying"));
   if (badges.children.length) body.append(badges);
 
-  body.append(h("div", { class: "btn-row", style: "margin-bottom:14px" },
-    h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"),
-    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shareJob(project) }, "↗ Share")));
+  body.append(h("button", { class: "btn btn--ghost btn--sm", style: "margin-bottom:14px", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"));
 
   const tiles = h("div", { class: "tiles" });
   FORMS.forEach((f) => {
@@ -289,23 +287,6 @@ function packetPage(project) {
   }
 }
 
-/* ---------- share a quick job summary ---------- */
-async function shareJob(project) {
-  const dryDays = [];
-  const lines = [
-    `Roybal Restoration — ${project.customer || "Job"}`,
-    project.address, project.claimNo ? "Claim #: " + project.claimNo : "",
-    project.carrier ? "Carrier: " + project.carrier : "",
-    project.waterCategory ? `Cat ${project.waterCategory}${project.waterClass ? " / Class " + project.waterClass : ""}` : "",
-    `Moisture maps: ${(project.moistureMaps || []).length} · Drying logs: ${(project.dryingLogs || []).length} · Photos: ${(project.photos || []).length}`,
-  ].filter(Boolean).concat(dryDays);
-  const textBody = lines.join("\n");
-  if (navigator.share) {
-    try { await navigator.share({ title: "Roybal Restoration — " + (project.customer || "Job"), text: textBody }); return; } catch { /* cancelled */ }
-  }
-  const to = project.adjuster && project.adjuster.includes("@") ? project.adjuster : "";
-  window.location.href = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent("Roybal Restoration — " + (project.customer || "Job"))}&body=${encodeURIComponent(textBody)}`;
-}
 
 /* ============================================================
    Form page — list for multi forms, editor for single/instance
