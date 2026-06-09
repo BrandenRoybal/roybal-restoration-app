@@ -1,0 +1,45 @@
+/* Roybal Restoration — Office Admin (desktop-first; reuses app.css tokens) */
+body { background: #eef2f7; }
+
+.abar {
+  position: sticky; top: 0; z-index: 50; display: flex; align-items: center;
+  justify-content: space-between; gap: 12px; background: var(--navy); color: #fff;
+  padding: 10px 20px; box-shadow: var(--shadow);
+}
+.abar__brand { display: flex; align-items: center; gap: 12px; }
+.abar__logo { width: 38px; height: 38px; background: #fff; border-radius: 8px; padding: 4px; }
+.abar__brand strong { font-size: 16px; display: block; }
+.abar__brand span { font-size: 12px; color: #9fb3cc; }
+.abar__right { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.abar__acct { color: #cfd9e6; }
+#syncDot { color: var(--green); }
+
+.aview { max-width: 1100px; margin: 0 auto; padding: 22px 20px 80px; }
+
+/* dashboard cards */
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }
+@media (max-width: 760px) { .kpis { grid-template-columns: 1fr 1fr; } }
+.kpi { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; box-shadow: var(--shadow); }
+.kpi__n { font-size: 30px; font-weight: 800; color: var(--navy); line-height: 1; }
+.kpi__l { font-size: 13px; color: var(--muted); margin-top: 6px; }
+.kpi.attn .kpi__n { color: var(--orange-dark); }
+
+/* toolbar */
+.atoolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.atoolbar h1 { font-size: 20px; margin: 0; }
+.atoolbar input[type=search] { min-width: 260px; }
+
+/* jobs table */
+.atable-wrap { background: #fff; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }
+table.atable { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.atable th, table.atable td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+table.atable th { background: #f7f9fc; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+table.atable tr:last-child td { border-bottom: 0; }
+table.atable tbody tr { cursor: pointer; }
+table.atable tbody tr:hover { background: #f7f9fc; }
+.atable .muted { color: var(--muted); }
+.aempty { text-align: center; color: var(--muted); padding: 50px 20px; }
+
+/* login */
+.alogin { max-width: 380px; margin: 9vh auto 0; text-align: center; }
+.alogin img { width: 84px; height: 84px; border-radius: 18px; }
