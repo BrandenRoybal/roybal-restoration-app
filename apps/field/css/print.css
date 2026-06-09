@@ -25,12 +25,12 @@ section.sheet + section.sheet { page-break-before: always; }
   border-bottom: 2.5px solid #0f1b2d; padding-bottom: 6px; margin-bottom: 12px;
 }
 .sheet-head__logo {
-  width: 0.55in; height: 0.55in; object-fit: contain; flex: 0 0 auto;
+  width: 0.7in; height: 0.7in; object-fit: contain; flex: 0 0 auto;
   -webkit-print-color-adjust: exact; print-color-adjust: exact;
 }
 /* company name (left) and address (right) share a baseline so they line up */
 .sheet-head__body { flex: 1 1 auto; display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
-.sheet-head__name { font-size: 13pt; font-weight: 800; color: #0f1b2d; letter-spacing: .3px; }
+.sheet-head__name { font-size: 17pt; font-weight: 800; color: #0f1b2d; letter-spacing: .3px; }
 .sheet-head__tag { font-size: 7.5pt; color: #44556b; }
 .sheet-head__addr { font-size: 7.5pt; color: #44556b; text-align: right; line-height: 1.4; white-space: nowrap; }
 .sheet-head__title { flex-basis: 100%; text-align: center; margin-top: 8px; }
