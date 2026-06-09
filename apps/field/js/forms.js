@@ -98,12 +98,14 @@ export function moistureMap(project, m) {
     },
   });
 
-  /* dry goal (numeric) for red/green flagging */
+  /* dry goal (numeric) for the trend line + red/green flagging.
+     The Dry Goal (MC%) input is the source of truth; the material's
+     IICRC standard is only a fallback when that box is empty. */
   const goalNum = () => {
-    const g = goalFor(m.material);
-    if (g != null) return g;
     const p = parseFloat(String(m.dryGoal || "").replace(/[^0-9.]/g, ""));
-    return isNaN(p) ? null : p;
+    if (!isNaN(p)) return p;
+    const g = goalFor(m.material);
+    return g != null ? g : null;
   };
   function flagCell(input) {
     const goal = goalNum(), v = parseFloat(input.value);
