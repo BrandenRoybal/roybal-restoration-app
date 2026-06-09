@@ -3,15 +3,15 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v5";
+const CACHE = "roybal-field-v6";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
   "css/app.css", "css/print.css",
   "js/app.js", "js/core.js", "js/model.js", "js/formkit.js", "js/forms.js",
   "js/pdf.js", "js/qr.js",
-  "assets/favicon-16.png", "assets/favicon-32.png",
-  "assets/apple-touch-icon.png", "assets/mstile-150.png",
+  "assets/emblem-mark.png", "assets/icon-16.png", "assets/icon-32.png",
+  "assets/icon-180.png", "assets/icon-512.png",
 ];
 const OPTIONAL = [
   "assets/vendor/pdfjs/pdf.min.mjs",
