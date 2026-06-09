@@ -111,14 +111,14 @@ function setInput(el, val) {
   await tick(40);
   const tables = view().querySelectorAll("table.grid");
   ok(tables.length >= 2, "drying log has equipment + psychrometric tables");
-  // psychro table is the last grid; first data row inputs: [date,timeIn,timeOut,outT,outRH,outGPP,...]
+  // psychro table is the last grid; first data row inputs: [date,time,outT,outRH,outGPP,...]
   const psTable = tables[tables.length - 1];
   const row = psTable.querySelector("tbody tr");
   const inputs = row.querySelectorAll("input");
-  setInput(inputs[3], "70"); // outT
-  setInput(inputs[4], "50"); // outRH
+  setInput(inputs[2], "70"); // outT
+  setInput(inputs[3], "50"); // outRH
   await tick();
-  ok(inputs[5].value === "54", "GPP auto-calculates from T/RH in the grid (got " + inputs[5].value + ")");
+  ok(inputs[4].value === "54", "GPP auto-calculates from T/RH in the grid (got " + inputs[4].value + ")");
   // 7-day equipment flag: place a unit 8 days ago, leave it on site
   const eqTable = tables[0];
   const eqRow = eqTable.querySelector("tbody tr");

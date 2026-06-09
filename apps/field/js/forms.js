@@ -310,15 +310,15 @@ export function dryingLog(project, d) {
       if (gd != null && row.refGPP !== "" && row.affGPP !== "") { row.gd = gd; cells.gd.value = gd; }
     }
     const dateC = mk("date", "110px", "date");
-    const tiC = mk("timeIn", "85px", "time");
-    const toC = mk("timeOut", "85px", "time");
+    if (row.time == null && row.timeIn) row.time = row.timeIn;   // migrate old "Time In"
+    const timeC = mk("time", "90px", "time");
     const outT = mk("outT", "44px", "number"), outRH = mk("outRH", "44px", "number"), outG = mk("outGPP", "48px", "number");
     const refT = mk("refT", "44px", "number"), refRH = mk("refRH", "44px", "number"), refG = mk("refGPP", "48px", "number");
     const affT = mk("affT", "44px", "number"), affRH = mk("affRH", "44px", "number"), affG = mk("affGPP", "48px", "number");
     const gdC = mk("gd", "44px", "number");
     cells.outGPP.classList.add("calc"); cells.refGPP.classList.add("calc"); cells.affGPP.classList.add("calc"); cells.gd.classList.add("calc");
     recalc(); // fill GPP/GD for any pre-existing T/RH values on load
-    tr.append(dateC, tiC, toC, outT, outRH, outG, refT, refRH, refG, affT, affRH, affG, gdC,
+    tr.append(dateC, timeC, outT, outRH, outG, refT, refRH, refG, affT, affRH, affG, gdC,
       mk("dehu", "40px", "number"), mk("am", "40px", "number"), mk("scrub", "40px", "number"),
       mk("tech", "70px"), mk("notes", "130px"),
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { d.readings.splice(i, 1); paintPs(); commit(); } }, "✕")));
@@ -330,7 +330,7 @@ export function dryingLog(project, d) {
   addPs.addEventListener("click", () => { d.readings.push(blankPsychroRow()); paintPs(); commit(); });
 
   const psHeadTop = h("tr", {},
-    h("th", { colspan: 3 }, "Date / Time"),
+    h("th", { colspan: 2 }, "Date / Time"),
     h("th", { colspan: 3 }, "Outside / Ambient"),
     h("th", { colspan: 3 }, "Unaffected (Ref.)"),
     h("th", { colspan: 3 }, "Affected"),
@@ -339,7 +339,7 @@ export function dryingLog(project, d) {
     h("th", { colspan: 2 }, "Tech / Notes"),
     h("th", { class: "app-only" }, ""));
   const psHeadBot = h("tr", {},
-    ...["Date", "In", "Out", "T", "RH", "GPP", "T", "RH", "GPP", "T", "RH", "GPP", "GD", "Dehu", "AM", "Scrb", "Tech", "Notes"].map((c) => h("th", {}, c)),
+    ...["Date", "Time", "T", "RH", "GPP", "T", "RH", "GPP", "T", "RH", "GPP", "GD", "Dehu", "AM", "Scrb", "Tech", "Notes"].map((c) => h("th", {}, c)),
     h("th", { class: "app-only" }, ""));
 
   return sheet("DRYING LOG", "Equipment Runtime & Psychrometric Conditions — Per IICRC S500 Protocol", "Drying Log Field Template",

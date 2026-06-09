@@ -168,7 +168,7 @@ export function blankEquipRow() {
 }
 export function blankPsychroRow() {
   return {
-    date: todayISO(), timeIn: "", timeOut: "",
+    date: todayISO(), time: "",
     outT: "", outRH: "", outGPP: "",
     refT: "", refRH: "", refGPP: "",
     affT: "", affRH: "", affGPP: "",
