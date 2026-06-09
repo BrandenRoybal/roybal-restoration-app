@@ -221,16 +221,16 @@ export function lineItems(items, blankFn, opts = {}) {
 /* ---------- printable letterhead + footer ---------- */
 export function letterhead(formTitle, subtitle) {
   return h("div", { class: "print-only sheet-head" },
-    h("div", { class: "sheet-head__brand" },
-      h("img", { class: "sheet-head__logo", src: "assets/emblem-mark.png", alt: "Roybal Construction" }),
+    h("img", { class: "sheet-head__logo", src: "assets/emblem-mark.png", alt: "Roybal Construction" }),
+    h("div", { class: "sheet-head__body" },
       h("div", { class: "sheet-head__co" },
         h("div", { class: "sheet-head__name" }, "ROYBAL CONSTRUCTION, LLC"),
-        h("div", { class: "sheet-head__tag" }, COMPANY.tagline))),
-    h("div", { class: "sheet-head__addr" },
-      h("div", {}, COMPANY.address),
-      h("div", {}, COMPANY.phone + " | " + COMPANY.email),
-      h("div", {}, COMPANY.web)),
-    h("div", { class: "sheet-head__title", style: "grid-column:1/-1" },
+        h("div", { class: "sheet-head__tag" }, COMPANY.tagline)),
+      h("div", { class: "sheet-head__addr" },
+        h("div", {}, COMPANY.address),
+        h("div", {}, COMPANY.phone + " | " + COMPANY.email),
+        h("div", {}, COMPANY.web))),
+    h("div", { class: "sheet-head__title" },
       h("h2", {}, formTitle), subtitle ? h("div", { class: "sheet-head__sub" }, subtitle) : null));
 }
 export function sheetFooter(label) {
