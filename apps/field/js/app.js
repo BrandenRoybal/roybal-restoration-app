@@ -732,5 +732,17 @@ window.addEventListener("offline", updateNet);
 updateNet();
 
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+  // auto-reload once when an updated service worker takes control
+  let hadController = !!navigator.serviceWorker.controller;
+  let reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController && !reloading) { reloading = true; location.reload(); }
+    hadController = true;
+  });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      // check for a new version each time the app is opened
+      reg.update?.();
+    }).catch(() => {});
+  });
 }
