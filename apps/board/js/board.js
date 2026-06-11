@@ -13,20 +13,20 @@ import {
 
 /* ---------- config ---------- */
 const STAGES = [
-  { id: "lead",        label: "Leads / Bids",   color: "#9a8f78" },
-  { id: "scheduled",   label: "Scheduled",      color: "#4a7fb5" },
-  { id: "in_progress", label: "In Progress",    color: "#c9a84c" },
-  { id: "on_hold",     label: "On Hold",        color: "#d99a2b" },
+  { id: "lead",        label: "Leads / Bids",   color: "#7a8aa0" },
+  { id: "scheduled",   label: "Scheduled",      color: "#1c5fb0" },
+  { id: "in_progress", label: "In Progress",    color: "#f26a21" },
+  { id: "on_hold",     label: "On Hold",        color: "#e0a800" },
   { id: "final",       label: "Final / Punch",  color: "#8a6fb0" },
-  { id: "done",        label: "Complete",       color: "#4a9e6f" },
+  { id: "done",        label: "Complete",       color: "#1f9d55" },
 ];
 const TYPES = [
-  { id: "remodel",   label: "Remodel",          color: "#4a7fb5" },
+  { id: "remodel",   label: "Remodel",          color: "#1c5fb0" },
   { id: "new_build", label: "New Build",        color: "#8a6fb0" },
   { id: "water",     label: "Water Mitigation", color: "#2f8f8f" },
-  { id: "fire",      label: "Fire",             color: "#c0552a" },
-  { id: "mold",      label: "Mold",             color: "#4a9e6f" },
-  { id: "other",     label: "Other",            color: "#9a8f78" },
+  { id: "fire",      label: "Fire",             color: "#d4520f" },
+  { id: "mold",      label: "Mold",             color: "#1f9d55" },
+  { id: "other",     label: "Other",            color: "#7a8aa0" },
 ];
 const MATERIALS = [
   { id: "none",     label: "Not ordered" },
@@ -38,7 +38,7 @@ const PRIORITIES = [
   { id: "normal", label: "Normal" },
   { id: "high",   label: "High" },
 ];
-const CREW_COLORS = ["#c9a84c", "#4a7fb5", "#4a9e6f", "#8a6fb0", "#c0552a", "#2f8f8f", "#b5832b", "#c2487a", "#6b7a55", "#9a8f78"];
+const CREW_COLORS = ["#f26a21", "#1c5fb0", "#1f9d55", "#8a6fb0", "#d4520f", "#2f8f8f", "#4a7fb5", "#c2487a", "#5b6b80", "#7a8aa0"];
 
 /* ---------- state ---------- */
 const view = $("#view");
@@ -111,10 +111,10 @@ async function refresh() {
 function setSync(state) {
   const dot = $("#syncDot");
   const map = {
-    syncing: ["#c9a84c", "Syncing…"], synced: ["#4a9e6f", "Synced"],
-    offline: ["#d23b2e", "Offline — changes saved locally"], error: ["#d99a2b", pendingCount() + " change(s) pending"],
+    syncing: ["#e0a800", "Syncing…"], synced: ["#1f9d55", "Synced"],
+    offline: ["#ff6b6b", "Offline — changes saved locally"], error: ["#e0a800", pendingCount() + " change(s) pending"],
   };
-  const [c, t] = map[state] || ["#4a9e6f", "Online"];
+  const [c, t] = map[state] || ["#1f9d55", "Online"];
   dot.style.color = c; dot.title = t;
 }
 
@@ -297,7 +297,7 @@ function renderCard(j) {
   const ids = (j.crewIds || []).filter(crewById);
   if (ids.length) {
     meta.append(h("span", { class: "crew" },
-      ...ids.slice(0, 5).map((id) => { const c = crewById(id); return h("span", { class: "crewchip", style: `background:${c.color || "#9a8f78"}`, title: c.name }, initials(c.name)); })));
+      ...ids.slice(0, 5).map((id) => { const c = crewById(id); return h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}`, title: c.name }, initials(c.name)); })));
   }
   // dates
   if (j.startDate || j.targetDate) {
@@ -568,7 +568,7 @@ function openJobModal(existing) {
     const on = j.crewIds.includes(c.id);
     const cb = h("input", { type: "checkbox", checked: on });
     const lab = h("label", { class: on ? "on" : "" },
-      cb, h("span", { class: "crewchip", style: `background:${c.color || "#9a8f78"}` }, initials(c.name)), c.name);
+      cb, h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)), c.name);
     cb.addEventListener("change", () => {
       if (cb.checked) { if (!j.crewIds.includes(c.id)) j.crewIds.push(c.id); lab.classList.add("on"); }
       else { j.crewIds = j.crewIds.filter((x) => x !== c.id); lab.classList.remove("on"); }
@@ -650,7 +650,7 @@ function buildJobHoursSection(job) {
     const totText = est ? `${fmtH(act)} of ${fmtH(est)}  (${Math.round((act / est) * 100)}%)` : `${fmtH(act)} logged`;
 
     const rows = list.length ? list.map((e) => h("div", { class: "hrow" },
-      h("span", { class: "crewchip", style: `background:${crewById(e.crewId)?.color || "#9a8f78"}`, title: crewName(e.crewId) }, initials(crewName(e.crewId))),
+      h("span", { class: "crewchip", style: `background:${crewById(e.crewId)?.color || "#7a8aa0"}`, title: crewName(e.crewId) }, initials(crewName(e.crewId))),
       h("div", { class: "hrow__main" },
         h("div", {}, h("strong", {}, crewName(e.crewId)), " ", h("span", { class: "hrow__h" }, fmtH(e.hours))),
         h("div", { class: "hrow__meta" }, [fmtDate(e.date), e.note].filter(Boolean).join(" · ") || "—")),
@@ -722,12 +722,12 @@ function openHoursModal() {
     }).filter((r) => r.hours > 0).sort((a, b) => b.hours - a.hours);
     // entries for crew that no longer exist
     const orphanHours = scoped.filter((e) => !crewById(e.crewId)).reduce((s, e) => s + (Number(e.hours) || 0), 0);
-    if (orphanHours > 0) byCrew.push({ name: "(removed crew)", color: "#9a8f78", hours: orphanHours, jobs: 0 });
+    if (orphanHours > 0) byCrew.push({ name: "(removed crew)", color: "#7a8aa0", hours: orphanHours, jobs: 0 });
 
     const crewTable = h("table", { class: "rtable" },
       h("thead", {}, h("tr", {}, h("th", {}, "Crew"), h("th", { class: "num" }, "Hours"), h("th", { class: "num" }, "Jobs"))),
       h("tbody", {}, ...(byCrew.length ? byCrew.map((r) => h("tr", {},
-        h("td", {}, h("span", { class: "crewchip", style: `background:${r.color || "#9a8f78"}` }, initials(r.name)), " ", r.name),
+        h("td", {}, h("span", { class: "crewchip", style: `background:${r.color || "#7a8aa0"}` }, initials(r.name)), " ", r.name),
         h("td", { class: "num" }, fmtH(r.hours)),
         h("td", { class: "num" }, String(r.jobs || "")))) :
         [h("tr", {}, h("td", { colspan: 3, class: "subtle", style: "text-align:center;padding:14px" }, "No hours logged in this range."))])));
@@ -779,7 +779,7 @@ function openCrewModal() {
     if (!all.length) list.append(h("p", { class: "subtle" }, "No crew yet. Add your first crew member below."));
     for (const c of all) {
       list.append(h("div", { class: "crewrow" },
-        h("span", { class: "crewchip crewchip--lg", style: `background:${c.color || "#9a8f78"}` }, initials(c.name)),
+        h("span", { class: "crewchip crewchip--lg", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)),
         h("div", {},
           h("div", { class: "crewrow__name" }, c.name, c.active === false ? h("span", { class: "subtle" }, "  (inactive)") : null),
           h("div", { class: "crewrow__meta" }, [c.role, c.phone].filter(Boolean).join(" · ") || "—")),
