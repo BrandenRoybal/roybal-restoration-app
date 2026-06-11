@@ -49,9 +49,10 @@ let filterText = "", filterCrew = "", filterType = "";
 let modalOpen = false;
 let pollTimer = null;
 let draggingId = null;
-let currentView = "board";              // "board" | "calendar"
+let currentView = "board";              // "board" | "calendar" | "gantt"
 const _now = new Date();
 let calY = _now.getFullYear(), calM = _now.getMonth();   // calendar month being viewed
+let ganttZoom = "day";                  // "day" | "week"
 
 /* ---------- lookups ---------- */
 const stageOf = (id) => STAGES.find((s) => s.id === id) || STAGES[0];
@@ -164,6 +165,7 @@ function matchesFilter(j) {
 
 function render() {
   if (currentView === "calendar") return renderCalendarView();
+  if (currentView === "gantt") return renderGanttView();
   renderBoardView();
 }
 
@@ -195,15 +197,19 @@ function sortKey(j) {
   return p + "|" + (j.targetDate || "9999-99-99") + "|" + (j.title || "");
 }
 
-/* repaint only the inner grid (board columns or calendar) — keeps toolbar focus */
-function repaint() { if (currentView === "calendar") paintCalendar(); else paintColumns(); }
+/* repaint only the inner grid (board / calendar / gantt) — keeps toolbar focus */
+function repaint() {
+  if (currentView === "calendar") return paintCalendar();
+  if (currentView === "gantt") return paintGantt();
+  paintColumns();
+}
 
 function viewSwitch() {
   const mk = (id, label) => h("button", {
     class: "vsw__b" + (currentView === id ? " on" : ""),
     onclick: () => { if (currentView !== id) { currentView = id; render(); } },
   }, label);
-  return h("div", { class: "vsw" }, mk("board", "Board"), mk("calendar", "Calendar"));
+  return h("div", { class: "vsw" }, mk("board", "Board"), mk("calendar", "Calendar"), mk("gantt", "Gantt"));
 }
 
 function filterControls() {
@@ -424,6 +430,116 @@ function paintCalendar() {
     wrap.append(h("div", { class: "calunsched" },
       h("div", {}, h("strong", {}, `Unscheduled (${unsched.length}) `),
         h("span", { class: "subtle" }, "— add a start or target date to place these on the calendar")),
+      h("div", { class: "calunsched__row" }, ...unsched.map((j) =>
+        h("span", { class: "cal__job cal__job--chip", style: `border-left-color:${stageOf(j.stage).color}`, onclick: () => openJobModal(j) },
+          j.title || j.customer || "Job")))));
+  }
+}
+
+/* ============================================================
+   gantt timeline (one duration bar per job across a date axis)
+   ============================================================ */
+const dayDiff = (aISO, bISO) => Math.round((new Date(bISO + "T00:00:00") - new Date(aISO + "T00:00:00")) / 86400000);
+
+function renderGanttView() {
+  const body = clear(view);
+  body.append(renderGanttToolbar());
+  if (!crew.length) {
+    body.append(h("div", { class: "bempty" },
+      h("h2", {}, "Add your crew first"),
+      h("button", { class: "btn btn--primary", style: "max-width:240px;margin:0 auto", onclick: openCrewModal }, "+ Manage crew")));
+    return;
+  }
+  body.append(h("div", { class: "gwrap" }));   // filled by paintGantt
+  paintGantt();
+}
+
+function renderGanttToolbar() {
+  const zoom = h("div", { class: "vsw" },
+    h("button", { class: "vsw__b" + (ganttZoom === "day" ? " on" : ""), onclick: () => setZoom("day") }, "Day"),
+    h("button", { class: "vsw__b" + (ganttZoom === "week" ? " on" : ""), onclick: () => setZoom("week") }, "Week"));
+  return h("div", { class: "btoolbar" },
+    h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Timeline"), zoom),
+    h("div", { class: "btools" }, ...filterControls(), ...actionButtons()));
+}
+function setZoom(z) { if (ganttZoom === z) return; ganttZoom = z; renderGanttView(); }
+
+function paintGantt() {
+  const wrap = $(".gwrap", view);
+  if (!wrap) return renderGanttView();
+  clear(wrap);
+
+  const visible = jobs.filter(matchesFilter);
+  const dated = visible
+    .filter((j) => j.startDate || j.targetDate)
+    .map((j) => { const a = j.startDate || j.targetDate, b = j.targetDate || j.startDate; return { j, s: a < b ? a : b, t: b > a ? b : a }; })
+    .sort((x, y) => x.s.localeCompare(y.s) || (x.j.title || "").localeCompare(y.j.title || ""));
+  const unsched = visible.filter((j) => !j.startDate && !j.targetDate);
+
+  if (!dated.length) {
+    wrap.append(h("div", { class: "bempty" }, h("h2", {}, "Nothing scheduled"),
+      h("p", { class: "subtle" }, "Add a start or target date to a job to see it on the timeline.")));
+    return;
+  }
+
+  // date range (pad 2 days each side)
+  let minISO = dated[0].s, maxISO = dated[0].t;
+  for (const d of dated) { if (d.s < minISO) minISO = d.s; if (d.t > maxISO) maxISO = d.t; }
+  const rangeStart = addDays(new Date(minISO + "T00:00:00"), -2);
+  const startISO = toISO(rangeStart);
+  const totalDays = dayDiff(startISO, maxISO) + 5;
+  const dayW = ganttZoom === "week" ? 9 : 26;
+  const trackW = totalDays * dayW;
+  const today = todayISO();
+  const todayX = (today >= startISO && dayDiff(startISO, today) <= totalDays) ? dayDiff(startISO, today) * dayW : -1;
+
+  // ----- header: month band + week ticks -----
+  const months = h("div", { class: "gantt__months", style: `width:${trackW}px` });
+  let m = -1, segStart = 0;
+  for (let i = 0; i <= totalDays; i++) {
+    const d = addDays(rangeStart, i);
+    if (d.getMonth() !== m || i === totalDays) {
+      if (m !== -1) {
+        const seg = addDays(rangeStart, segStart);
+        months.append(h("div", { class: "gantt__month", style: `width:${(i - segStart) * dayW}px` },
+          seg.toLocaleDateString("en-US", { month: "short", year: "2-digit" })));
+      }
+      m = d.getMonth(); segStart = i;
+    }
+  }
+  const weeks = h("div", { class: "gantt__weeks", style: `width:${trackW}px` });
+  for (let i = 0; i < totalDays; i += 7) {
+    weeks.append(h("div", { class: "gantt__week", style: `width:${Math.min(7, totalDays - i) * dayW}px` },
+      fmtShort(toISO(addDays(rangeStart, i)))));
+  }
+  const header = h("div", { class: "gantt__header" },
+    h("div", { class: "gantt__corner" }, "Job"),
+    h("div", { class: "gantt__scale", style: `width:${trackW}px` }, months, weeks));
+
+  // ----- rows -----
+  const rows = dated.map(({ j, s, t }) => {
+    const left = dayDiff(startISO, s) * dayW;
+    const w = Math.max((dayDiff(s, t) + 1) * dayW - 2, 8);
+    const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
+    const hrs = est ? `  ·  ${Math.round(act * 100) / 100}/${est}h` : (act ? `  ·  ${fmtH(act)}` : "");
+    const bar = h("div", {
+      class: "gantt__bar", style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}`,
+      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}`,
+      onclick: () => openJobModal(j),
+    }, (j.title || j.customer || "Job") + hrs);
+    const track = h("div", { class: "gantt__track", style: `width:${trackW}px;--gw:${7 * dayW}px` }, bar);
+    if (todayX >= 0) track.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
+    return h("div", { class: "gantt__row" },
+      h("div", { class: "gantt__label", title: j.title || j.customer || "Job" }, j.title || j.customer || "Job"),
+      track);
+  });
+
+  wrap.append(h("div", { class: "gantt__inner", style: `width:${180 + trackW}px` }, header, ...rows));
+
+  if (unsched.length) {
+    wrap.append(h("div", { class: "calunsched" },
+      h("div", {}, h("strong", {}, `Unscheduled (${unsched.length}) `),
+        h("span", { class: "subtle" }, "— add a start or target date to place these on the timeline")),
       h("div", { class: "calunsched__row" }, ...unsched.map((j) =>
         h("span", { class: "cal__job cal__job--chip", style: `border-left-color:${stageOf(j.stage).color}`, onclick: () => openJobModal(j) },
           j.title || j.customer || "Job")))));

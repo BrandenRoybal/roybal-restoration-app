@@ -206,3 +206,21 @@ table.rtable .num.under { color: var(--green); }
   .cal__cell { min-height: 64px; }
   .cal__job { font-size: 10.5px; }
 }
+
+/* ---------- gantt timeline ---------- */
+.gwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.gantt__inner { min-width: 100%; }
+.gantt__header { display: flex; position: sticky; top: 0; z-index: 3; background: #faf7f0; border-bottom: 1px solid var(--line); }
+.gantt__corner { position: sticky; left: 0; z-index: 4; width: 180px; flex: 0 0 180px; background: #faf7f0; border-right: 1px solid var(--line); display: flex; align-items: flex-end; padding: 4px 10px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+.gantt__scale { flex: 0 0 auto; }
+.gantt__months { display: flex; height: 22px; }
+.gantt__month { border-left: 1px solid var(--line); padding: 4px 6px; box-sizing: border-box; font-size: 11px; font-weight: 800; color: var(--navy); text-transform: uppercase; letter-spacing: .4px; overflow: hidden; white-space: nowrap; }
+.gantt__weeks { display: flex; height: 18px; }
+.gantt__week { border-left: 1px solid #efe9dc; box-sizing: border-box; padding-left: 4px; font-size: 10px; color: var(--muted); overflow: hidden; white-space: nowrap; }
+.gantt__row { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
+.gantt__row:last-child { border-bottom: 0; }
+.gantt__label { position: sticky; left: 0; z-index: 2; width: 180px; flex: 0 0 180px; background: #fff; border-right: 1px solid var(--line); padding: 0 10px; display: flex; align-items: center; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gantt__track { position: relative; height: 40px; flex: 0 0 auto; background: repeating-linear-gradient(to right, transparent 0, transparent calc(var(--gw) - 1px), #efe9dc calc(var(--gw) - 1px), #efe9dc var(--gw)); }
+.gantt__bar { position: absolute; top: 8px; height: 24px; background: #fff; border: 1px solid var(--line); border-left: 5px solid var(--gold); border-radius: 6px; color: var(--ink); font-size: 11.5px; font-weight: 700; display: flex; align-items: center; padding: 0 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; box-shadow: var(--shadow); }
+.gantt__bar:hover { border-color: var(--gold); }
+.gantt__today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--gold-dark); opacity: .7; z-index: 1; }
