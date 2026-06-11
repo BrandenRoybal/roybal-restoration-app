@@ -176,3 +176,33 @@ table.rtable tr:last-child td { border-bottom: 0; }
 table.rtable .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.rtable .num.over { color: var(--red); font-weight: 700; }
 table.rtable .num.under { color: var(--green); }
+
+/* ---------- view switch + toolbar left ---------- */
+.btoolbar__left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.vsw { display: inline-flex; background: #efe9dc; border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+.vsw__b { background: none; border: 0; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--muted); padding: 6px 14px; border-radius: 7px; width: auto; min-height: auto; }
+.vsw__b.on { background: #fff; color: var(--navy); box-shadow: var(--shadow); }
+
+/* ---------- calendar ---------- */
+.calnav { display: flex; align-items: center; gap: 8px; }
+.calnav__label { font-size: 18px; color: var(--navy); min-width: 150px; text-align: center; }
+.cal__head { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 6px; }
+.cal__hd { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); text-align: center; padding: 4px 0; }
+.cal__grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.cal__cell { background: #fff; border: 1px solid var(--line); border-radius: 9px; min-height: 104px; max-height: 210px; overflow-y: auto; padding: 5px; display: flex; flex-direction: column; gap: 3px; }
+.cal__cell.out { background: #f3efe6; }
+.cal__cell.out .cal__day { color: #c4bba4; }
+.cal__cell.today { border-color: var(--gold); box-shadow: inset 0 0 0 1px var(--gold); }
+.cal__day { font-size: 12px; font-weight: 700; color: var(--muted); text-align: right; padding: 0 2px; }
+.cal__cell.today .cal__day { color: var(--gold-dark); }
+.cal__job { font-size: 11.5px; font-weight: 600; color: var(--ink); background: #f6f2e8; border-left: 3px solid var(--gold); border-radius: 5px; padding: 2px 6px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal__job:hover { background: #faf4e2; }
+.cal__job--chip { white-space: normal; }
+.calunsched { margin-top: 16px; padding: 12px 14px; background: #efe9dc; border: 1px solid var(--line); border-radius: 10px; }
+.calunsched__row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.calunsched__row .cal__job { background: #fff; }
+
+@media (max-width: 700px) {
+  .cal__cell { min-height: 64px; }
+  .cal__job { font-size: 10.5px; }
+}

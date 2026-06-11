@@ -49,6 +49,9 @@ let filterText = "", filterCrew = "", filterType = "";
 let modalOpen = false;
 let pollTimer = null;
 let draggingId = null;
+let currentView = "board";              // "board" | "calendar"
+const _now = new Date();
+let calY = _now.getFullYear(), calM = _now.getMonth();   // calendar month being viewed
 
 /* ---------- lookups ---------- */
 const stageOf = (id) => STAGES.find((s) => s.id === id) || STAGES[0];
@@ -71,7 +74,7 @@ const daysAgoISO = (n) => { const d = new Date(); d.setDate(d.getDate() - n); re
    boot / auth
    ============================================================ */
 function boot() {
-  if (!SYNC_ENABLED) { jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries(); renderBoard(); return; }
+  if (!SYNC_ENABLED) { jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries(); render(); return; }
   if (isSignedIn()) startUI();
   else renderLogin();
 }
@@ -80,7 +83,7 @@ async function startUI() {
   $("#acctEmail").textContent = currentEmail();
   $("#signOutBtn").hidden = false;
   jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries();
-  renderBoard();              // instant from cache
+  render();              // instant from cache
   await refresh();            // then from server
   startPoll();
   window.addEventListener("online", refresh);
@@ -98,7 +101,7 @@ async function refresh() {
     const r = await pull();
     jobs = r.jobs; crew = r.crew; entries = r.entries || [];
     setSync(pendingCount() ? "error" : "synced");
-    if (!modalOpen) renderBoard();
+    if (!modalOpen) render();
   } catch {
     setSync("offline");
   }
@@ -159,7 +162,12 @@ function matchesFilter(j) {
   return true;
 }
 
-function renderBoard() {
+function render() {
+  if (currentView === "calendar") return renderCalendarView();
+  renderBoardView();
+}
+
+function renderBoardView() {
   const body = clear(view);
   body.append(renderToolbar());
 
@@ -187,32 +195,48 @@ function sortKey(j) {
   return p + "|" + (j.targetDate || "9999-99-99") + "|" + (j.title || "");
 }
 
-function renderToolbar() {
-  const search = h("input", { type: "search", placeholder: "Search job, customer, address…", value: filterText });
-  search.addEventListener("input", () => { filterText = search.value.toLowerCase(); paintColumns(); });
+/* repaint only the inner grid (board columns or calendar) — keeps toolbar focus */
+function repaint() { if (currentView === "calendar") paintCalendar(); else paintColumns(); }
 
+function viewSwitch() {
+  const mk = (id, label) => h("button", {
+    class: "vsw__b" + (currentView === id ? " on" : ""),
+    onclick: () => { if (currentView !== id) { currentView = id; render(); } },
+  }, label);
+  return h("div", { class: "vsw" }, mk("board", "Board"), mk("calendar", "Calendar"));
+}
+
+function filterControls() {
+  const search = h("input", { type: "search", placeholder: "Search job, customer, address…", value: filterText });
+  search.addEventListener("input", () => { filterText = search.value.toLowerCase(); repaint(); });
   const typeSel = h("select", {}, h("option", { value: "" }, "All types"),
     ...TYPES.map((t) => h("option", { value: t.id, selected: filterType === t.id }, t.label)));
-  typeSel.addEventListener("change", () => { filterType = typeSel.value; paintColumns(); });
-
+  typeSel.addEventListener("change", () => { filterType = typeSel.value; repaint(); });
   const crewSel = h("select", {}, h("option", { value: "" }, "All crew"),
     ...activeCrew().map((c) => h("option", { value: c.id, selected: filterCrew === c.id }, c.name)));
-  crewSel.addEventListener("change", () => { filterCrew = crewSel.value; paintColumns(); });
+  crewSel.addEventListener("change", () => { filterCrew = crewSel.value; repaint(); });
+  return [search, typeSel, crewSel];
+}
 
+function actionButtons() {
+  return [
+    h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "↻ Refresh"),
+    h("button", { class: "btn btn--primary btn--sm", onclick: () => openJobModal(null) }, "+ New Job"),
+  ];
+}
+
+function renderToolbar() {
   return h("div", { class: "btoolbar" },
-    h("h1", {}, "Job Board"),
-    h("div", { class: "btools" },
-      search, typeSel, crewSel,
-      h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
-      h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
-      h("button", { class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "↻ Refresh"),
-      h("button", { class: "btn btn--primary btn--sm", onclick: () => openJobModal(null) }, "+ New Job")));
+    h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Job Board")),
+    h("div", { class: "btools" }, ...filterControls(), ...actionButtons()));
 }
 
 /* repaint only the columns (keeps toolbar inputs focused while filtering) */
 function paintColumns() {
   const old = $(".bboard", view);
-  if (!old) return renderBoard();
+  if (!old) return render();
   const visible = jobs.filter(matchesFilter);
   const fresh = h("div", { class: "bboard" });
   for (const st of STAGES) {
@@ -310,10 +334,100 @@ async function moveJob(id, stageId) {
   const j = jobs.find((x) => x.id === id);
   if (!j || (j.stage || "lead") === stageId) return;
   j.stage = stageId;
-  renderBoard();
+  render();
   setSync("syncing");
   await saveJob(j);
   setSync(pendingCount() ? "error" : "synced");
+}
+
+/* ============================================================
+   calendar view (month grid — jobs on their scheduled days)
+   ============================================================ */
+const toISO = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+function jobActiveOn(j, iso) {
+  const s = j.startDate, t = j.targetDate;
+  if (s && t) return iso >= s && iso <= t;
+  if (s) return iso === s;
+  if (t) return iso === t;
+  return false;
+}
+const monthLabel = () => new Date(calY, calM, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+function renderCalendarView() {
+  const body = clear(view);
+  body.append(renderCalToolbar());
+  if (!crew.length) {
+    body.append(h("div", { class: "bempty" },
+      h("h2", {}, "Add your crew first"),
+      h("button", { class: "btn btn--primary", style: "max-width:240px;margin:0 auto", onclick: openCrewModal }, "+ Manage crew")));
+    return;
+  }
+  body.append(h("div", { class: "calwrap" }));   // filled by paintCalendar
+  paintCalendar();
+}
+
+function renderCalToolbar() {
+  const nav = h("div", { class: "calnav" },
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftMonth(-1) }, "‹"),
+    h("strong", { class: "calnav__label" }, monthLabel()),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftMonth(1) }, "›"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: goToday }, "Today"));
+  return h("div", { class: "btoolbar" },
+    h("div", { class: "btoolbar__left" }, viewSwitch(), nav),
+    h("div", { class: "btools" }, ...filterControls(), ...actionButtons()));
+}
+
+function shiftMonth(delta) {
+  calM += delta;
+  if (calM < 0) { calM = 11; calY--; } else if (calM > 11) { calM = 0; calY++; }
+  const lbl = $(".calnav__label", view);
+  if (lbl) lbl.textContent = monthLabel();
+  paintCalendar();
+}
+function goToday() { calY = _now.getFullYear(); calM = _now.getMonth(); shiftMonth(0); }
+
+function paintCalendar() {
+  const wrap = $(".calwrap", view);
+  if (!wrap) return renderCalendarView();
+  clear(wrap);
+
+  const today = todayISO();
+  const first = new Date(calY, calM, 1);
+  const gridStart = addDays(first, -first.getDay());   // Sunday on/before the 1st
+  const visible = jobs.filter(matchesFilter);
+
+  const head = h("div", { class: "cal__head" },
+    ...["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => h("div", { class: "cal__hd" }, d)));
+
+  const grid = h("div", { class: "cal__grid" });
+  for (let i = 0; i < 42; i++) {
+    const d = addDays(gridStart, i);
+    const iso = toISO(d);
+    const inMonth = d.getMonth() === calM;
+    const cell = h("div", { class: "cal__cell" + (inMonth ? "" : " out") + (iso === today ? " today" : "") },
+      h("div", { class: "cal__day" }, String(d.getDate())));
+    for (const j of visible.filter((x) => jobActiveOn(x, iso))) {
+      const marker = j.startDate === iso ? "▶ " : j.targetDate === iso ? "⚑ " : "";
+      cell.append(h("div", {
+        class: "cal__job", style: `border-left-color:${stageOf(j.stage).color}`,
+        title: (j.title || j.customer || "Job"), onclick: () => openJobModal(j),
+      }, marker + (j.title || j.customer || "Job")));
+    }
+    grid.append(cell);
+  }
+
+  wrap.append(head, grid);
+
+  const unsched = visible.filter((j) => !j.startDate && !j.targetDate);
+  if (unsched.length) {
+    wrap.append(h("div", { class: "calunsched" },
+      h("div", {}, h("strong", {}, `Unscheduled (${unsched.length}) `),
+        h("span", { class: "subtle" }, "— add a start or target date to place these on the calendar")),
+      h("div", { class: "calunsched__row" }, ...unsched.map((j) =>
+        h("span", { class: "cal__job cal__job--chip", style: `border-left-color:${stageOf(j.stage).color}`, onclick: () => openJobModal(j) },
+          j.title || j.customer || "Job")))));
+  }
 }
 
 /* ============================================================
@@ -382,7 +496,7 @@ function openJobModal(existing) {
     saveBtn.disabled = true;
     // update local list immediately
     jobs = [...jobs.filter((x) => x.id !== j.id), j];
-    closeModal(); renderBoard();
+    closeModal(); render();
     setSync("syncing"); await saveJob(j); setSync(pendingCount() ? "error" : "synced");
     toast(isNew ? "Job created" : "Saved");
   });
@@ -393,7 +507,7 @@ function openJobModal(existing) {
     del.addEventListener("click", async () => {
       if (!confirm("Delete this job from the board?")) return;
       jobs = jobs.filter((x) => x.id !== j.id);
-      closeModal(); renderBoard();
+      closeModal(); render();
       setSync("syncing"); await deleteJob(j.id); setSync(pendingCount() ? "error" : "synced");
       toast("Job deleted");
     });
@@ -625,7 +739,7 @@ function openModal(title, bodyEl, footEl) {
 function closeModal() {
   if (overlayEl) { overlayEl.remove(); overlayEl = null; }
   document.removeEventListener("keydown", escClose);
-  if (modalOpen) { modalOpen = false; renderBoard(); }
+  if (modalOpen) { modalOpen = false; render(); }
 }
 function escClose(e) { if (e.key === "Escape") closeModal(); }
 
