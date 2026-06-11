@@ -1,9 +1,11 @@
 name: Deploy to GitHub Pages
 
-# Publishes the field app at the site root and the office admin at /admin,
-# to a `gh-pages` branch (Settings -> Pages -> Deploy from a branch -> gh-pages /root).
+# Publishes the field app at the site root, the office admin at /admin, and
+# the job board at /board, to a `gh-pages` branch
+# (Settings -> Pages -> Deploy from a branch -> gh-pages /root).
 #   Field app:   https://brandenroybal.github.io/roybal-restoration-app/
 #   Office admin: https://brandenroybal.github.io/roybal-restoration-app/admin/
+#   Job board:    https://brandenroybal.github.io/roybal-restoration-app/board/
 
 on:
   push:
@@ -13,6 +15,7 @@ on:
     paths:
       - "apps/field/**"
       - "apps/admin/**"
+      - "apps/board/**"
       - ".github/workflows/deploy-field.yml"
   workflow_dispatch:
 
@@ -26,12 +29,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Assemble site (field at /, admin at /admin)
+      - name: Assemble site (field at /, admin at /admin, board at /board)
         run: |
           set -e
-          rm -rf _site && mkdir -p _site/admin
+          rm -rf _site && mkdir -p _site/admin _site/board
           cp -r apps/field/. _site/
           cp -r apps/admin/. _site/admin/
+          cp -r apps/board/. _site/board/
           touch _site/.nojekyll
 
       - name: Publish to the gh-pages branch
@@ -43,7 +47,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -q -b gh-pages
           git add -A
-          git commit -q -m "Deploy field + admin ${GITHUB_SHA}"
+          git commit -q -m "Deploy field + admin + board ${GITHUB_SHA}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

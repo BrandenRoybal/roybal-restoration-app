@@ -1,0 +1,11 @@
+{
+  "name": "@roybal/board",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Roybal Construction — Job Board (digital whiteboard): pipeline, crew, scheduling.",
+  "type": "module",
+  "scripts": {
+    "dev": "node serve.mjs",
+    "start": "node serve.mjs"
+  }
+}

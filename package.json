@@ -6,6 +6,7 @@
     "apps/mobile",
     "apps/web",
     "apps/field",
+    "apps/board",
     "packages/shared"
   ],
   "scripts": {
@@ -13,6 +14,7 @@
     "web": "npm run dev --workspace=apps/web",
     "field": "npm run dev --workspace=apps/field",
     "field:test": "npm run test --workspace=apps/field",
+    "board": "npm run dev --workspace=apps/board",
     "shared:build": "npm run build --workspace=packages/shared",
     "setup": "npm install && npm run shared:build"
   },

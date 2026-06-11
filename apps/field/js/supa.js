@@ -100,3 +100,12 @@ export async function fetchSince(iso) {
   if (!res.ok) throw new Error("Pull failed (" + res.status + "): " + (await res.text().catch(() => "")));
   return res.json();
 }
+
+/* ---------- generic REST (shared by sibling office apps) ---------- */
+/** Authenticated REST call against any table, sharing this login session.
+    Auto-refreshes the token (and retries once on 401), exactly like the
+    field sync. Used by the Job Board app, which has its own tables but the
+    same shared crew login. Returns the raw fetch Response. */
+export async function rest(path, opts = {}) {
+  return api(path, opts);
+}

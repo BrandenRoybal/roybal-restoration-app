@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#1a1205" />
+  <title>Roybal — Job Board</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/icon-32.png" />
+  <link rel="stylesheet" href="../css/app.css" />
+  <link rel="stylesheet" href="css/board.css" />
+</head>
+<body>
+  <header class="tbar">
+    <div class="tbar__brand">
+      <img src="../assets/icon-180.png" alt="" class="tbar__logo" />
+      <div>
+        <strong>Roybal Construction</strong>
+        <span>Job Board</span>
+      </div>
+    </div>
+    <div class="tbar__right">
+      <span id="syncDot" title="">●</span>
+      <span id="acctEmail" class="tbar__acct"></span>
+      <button id="signOutBtn" class="btn btn--ghost btn--sm" hidden>Sign out</button>
+    </div>
+  </header>
+  <main id="view" class="bview"><!-- routed content --></main>
+  <script type="module" src="js/board.js"></script>
+</body>
+</html>
