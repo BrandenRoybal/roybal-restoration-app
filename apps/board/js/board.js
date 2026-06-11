@@ -171,6 +171,7 @@ function render() {
 
 function renderBoardView() {
   const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
   body.append(renderToolbar());
 
   if (!crew.length) {
@@ -229,9 +230,47 @@ function actionButtons() {
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "↻ Refresh"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: exportPDF, title: "Print / save as PDF" }, "🖨 PDF"),
     h("button", { class: "btn btn--primary btn--sm", onclick: () => openJobModal(null) }, "+ New Job"),
   ];
 }
+
+/* ---------- export / print to PDF ----------
+   Uses the browser's print → "Save as PDF". A print stylesheet hides the
+   chrome and shows a print header; the Gantt is zoom-fit to the page. */
+function exportPDF() { window.print(); }
+
+function printSub() {
+  const parts = [];
+  if (filterType) parts.push("Type: " + typeOf(filterType).label);
+  if (filterCrew) parts.push("Crew: " + crewName(filterCrew));
+  if (filterText) parts.push(`Search: “${filterText}”`);
+  parts.push("Generated " + fmtDate(todayISO()));
+  return parts.join("  ·  ");
+}
+function updatePrintHeader() {
+  const hdr = $(".printhdr", view);
+  if (!hdr) return;
+  let title = "Job Board";
+  if (currentView === "calendar") title = "Calendar — " + monthLabel();
+  else if (currentView === "gantt") title = "Timeline" + (ganttZoom !== "day" ? ` (${ganttZoom})` : "");
+  hdr.replaceChildren(h("h2", {}, "Roybal Construction — " + title), h("div", { class: "sub" }, printSub()));
+}
+window.addEventListener("beforeprint", () => {
+  updatePrintHeader();
+  if (currentView === "gantt") {
+    const inner = $(".gantt__inner", view);
+    if (inner) {
+      inner.style.minWidth = "0";          // collapse to true content width (screen stretches it to 100%)
+      const s = Math.min(1, 960 / inner.scrollWidth);
+      inner.style.zoom = s < 1 ? s : "";
+    }
+  }
+});
+window.addEventListener("afterprint", () => {
+  const inner = $(".gantt__inner", view);
+  if (inner) { inner.style.zoom = ""; inner.style.minWidth = ""; }
+});
 
 function renderToolbar() {
   return h("div", { class: "btoolbar" },
@@ -362,6 +401,7 @@ const monthLabel = () => new Date(calY, calM, 1).toLocaleDateString("en-US", { m
 
 function renderCalendarView() {
   const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
   body.append(renderCalToolbar());
   if (!crew.length) {
     body.append(h("div", { class: "bempty" },
@@ -443,6 +483,7 @@ const dayDiff = (aISO, bISO) => Math.round((new Date(bISO + "T00:00:00") - new D
 
 function renderGanttView() {
   const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
   body.append(renderGanttToolbar());
   if (!crew.length) {
     body.append(h("div", { class: "bempty" },
@@ -457,7 +498,8 @@ function renderGanttView() {
 function renderGanttToolbar() {
   const zoom = h("div", { class: "vsw" },
     h("button", { class: "vsw__b" + (ganttZoom === "day" ? " on" : ""), onclick: () => setZoom("day") }, "Day"),
-    h("button", { class: "vsw__b" + (ganttZoom === "week" ? " on" : ""), onclick: () => setZoom("week") }, "Week"));
+    h("button", { class: "vsw__b" + (ganttZoom === "week" ? " on" : ""), onclick: () => setZoom("week") }, "Week"),
+    h("button", { class: "vsw__b" + (ganttZoom === "month" ? " on" : ""), onclick: () => setZoom("month") }, "Month"));
   return h("div", { class: "btoolbar" },
     h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Timeline"), zoom),
     h("div", { class: "btools" }, ...filterControls(), ...actionButtons()));
@@ -488,33 +530,40 @@ function paintGantt() {
   const rangeStart = addDays(new Date(minISO + "T00:00:00"), -2);
   const startISO = toISO(rangeStart);
   const totalDays = dayDiff(startISO, maxISO) + 5;
-  const dayW = ganttZoom === "week" ? 9 : 26;
+  const dayW = ganttZoom === "month" ? 7 : ganttZoom === "week" ? 9 : 26;
+  const monthMode = ganttZoom === "month";
   const trackW = totalDays * dayW;
   const today = todayISO();
   const todayX = (today >= startISO && dayDiff(startISO, today) <= totalDays) ? dayDiff(startISO, today) * dayW : -1;
 
-  // ----- header: month band + week ticks -----
+  // ----- header: month band (+ week ticks unless in month mode) -----
   const months = h("div", { class: "gantt__months", style: `width:${trackW}px` });
+  const monthBounds = [];   // day-index of each internal month boundary (for month-mode gridlines)
   let m = -1, segStart = 0;
   for (let i = 0; i <= totalDays; i++) {
-    const d = addDays(rangeStart, i);
-    if (d.getMonth() !== m || i === totalDays) {
+    const mm = i === totalDays ? -999 : addDays(rangeStart, i).getMonth();
+    if (mm !== m) {
       if (m !== -1) {
         const seg = addDays(rangeStart, segStart);
         months.append(h("div", { class: "gantt__month", style: `width:${(i - segStart) * dayW}px` },
           seg.toLocaleDateString("en-US", { month: "short", year: "2-digit" })));
+        if (i < totalDays) monthBounds.push(i);
       }
-      m = d.getMonth(); segStart = i;
+      m = mm; segStart = i;
     }
   }
-  const weeks = h("div", { class: "gantt__weeks", style: `width:${trackW}px` });
-  for (let i = 0; i < totalDays; i += 7) {
-    weeks.append(h("div", { class: "gantt__week", style: `width:${Math.min(7, totalDays - i) * dayW}px` },
-      fmtShort(toISO(addDays(rangeStart, i)))));
+  const scaleChildren = [months];
+  if (!monthMode) {
+    const weeks = h("div", { class: "gantt__weeks", style: `width:${trackW}px` });
+    for (let i = 0; i < totalDays; i += 7) {
+      weeks.append(h("div", { class: "gantt__week", style: `width:${Math.min(7, totalDays - i) * dayW}px` },
+        fmtShort(toISO(addDays(rangeStart, i)))));
+    }
+    scaleChildren.push(weeks);
   }
   const header = h("div", { class: "gantt__header" },
     h("div", { class: "gantt__corner" }, "Job"),
-    h("div", { class: "gantt__scale", style: `width:${trackW}px` }, months, weeks));
+    h("div", { class: "gantt__scale", style: `width:${trackW}px` }, ...scaleChildren));
 
   // ----- rows -----
   const rows = dated.map(({ j, s, t }) => {
@@ -527,7 +576,11 @@ function paintGantt() {
       title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}`,
       onclick: () => openJobModal(j),
     }, (j.title || j.customer || "Job") + hrs);
-    const track = h("div", { class: "gantt__track", style: `width:${trackW}px;--gw:${7 * dayW}px` }, bar);
+    const track = h("div", {
+      class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""),
+      style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`),
+    }, bar);
+    if (monthMode) for (const b of monthBounds) track.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
     if (todayX >= 0) track.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
     return h("div", { class: "gantt__row" },
       h("div", { class: "gantt__label", title: j.title || j.customer || "Job" }, j.title || j.customer || "Job"),

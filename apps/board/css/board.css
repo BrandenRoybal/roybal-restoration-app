@@ -191,15 +191,15 @@ table.rtable .num.under { color: var(--green); }
 }
 
 /* ---------- gantt timeline ---------- */
-.gwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.gwrap { overflow: auto; max-height: calc(100vh - 200px); border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 .gantt__inner { min-width: 100%; }
 .gantt__header { display: flex; position: sticky; top: 0; z-index: 3; background: #f7f9fc; border-bottom: 1px solid var(--line); }
 .gantt__corner { position: sticky; left: 0; z-index: 4; width: 180px; flex: 0 0 180px; background: #f7f9fc; border-right: 1px solid var(--line); display: flex; align-items: flex-end; padding: 4px 10px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 .gantt__scale { flex: 0 0 auto; }
 .gantt__months { display: flex; height: 22px; }
-.gantt__month { border-left: 1px solid var(--line); padding: 4px 6px; box-sizing: border-box; font-size: 11px; font-weight: 800; color: var(--navy); text-transform: uppercase; letter-spacing: .4px; overflow: hidden; white-space: nowrap; }
+.gantt__month { border-left: 1px solid var(--line); padding: 4px 6px; box-sizing: border-box; min-width: 0; font-size: 11px; font-weight: 800; color: var(--navy); text-transform: uppercase; letter-spacing: .4px; overflow: hidden; white-space: nowrap; }
 .gantt__weeks { display: flex; height: 18px; }
-.gantt__week { border-left: 1px solid #e3e9f0; box-sizing: border-box; padding-left: 4px; font-size: 10px; color: var(--muted); overflow: hidden; white-space: nowrap; }
+.gantt__week { border-left: 1px solid #e3e9f0; box-sizing: border-box; min-width: 0; padding-left: 4px; font-size: 10px; color: var(--muted); overflow: hidden; white-space: nowrap; }
 .gantt__row { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
 .gantt__row:last-child { border-bottom: 0; }
 .gantt__label { position: sticky; left: 0; z-index: 2; width: 180px; flex: 0 0 180px; background: #fff; border-right: 1px solid var(--line); padding: 0 10px; display: flex; align-items: center; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -207,3 +207,39 @@ table.rtable .num.under { color: var(--green); }
 .gantt__bar { position: absolute; top: 8px; height: 24px; background: #fff; border: 1px solid var(--line); border-left: 5px solid var(--orange); border-radius: 6px; color: var(--ink); font-size: 11.5px; font-weight: 700; display: flex; align-items: center; padding: 0 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; box-shadow: var(--shadow); }
 .gantt__bar:hover { border-color: var(--orange); }
 .gantt__today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--orange-dark); opacity: .7; z-index: 1; }
+.gantt__track--plain { background: none; }
+.gantt__mline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); z-index: 0; }
+
+/* ---------- print header (screen-hidden; shown when printing) ---------- */
+.printhdr { display: none; }
+
+/* ============================================================
+   PRINT / EXPORT TO PDF
+   ============================================================ */
+@media print {
+  @page { size: landscape; margin: 10mm; }
+  html, body { background: #fff !important; }
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+
+  .tbar, .btoolbar { display: none !important; }
+  .bview { max-width: none !important; padding: 0 !important; }
+
+  .printhdr { display: block; margin: 0 0 10px; }
+  .printhdr h2 { margin: 0; font-size: 18px; color: var(--navy); }
+  .printhdr .sub { margin-top: 2px; font-size: 11px; color: var(--muted); }
+
+  /* calendar: reveal every chip, avoid splitting day cells */
+  .cal__cell { max-height: none !important; overflow: visible !important; break-inside: avoid; }
+  .cal__job { white-space: normal !important; }
+
+  /* board: expand columns so nothing is clipped */
+  .bboard { overflow: visible !important; flex-wrap: wrap; }
+  .bcol, .bcol__body { max-height: none !important; overflow: visible !important; }
+  .bcard { break-inside: avoid; }
+
+  /* gantt: print the whole chart (zoom-fit applied via JS beforeprint) */
+  .gwrap { overflow: visible !important; max-height: none !important; border: 0 !important; }
+  .gantt__inner { min-width: 0 !important; width: max-content !important; }
+  .gantt__label, .gantt__corner, .gantt__header { position: static !important; }
+  .gantt__row { break-inside: avoid; }
+}
