@@ -272,6 +272,14 @@ window.addEventListener("afterprint", () => {
   if (inner) { inner.style.zoom = ""; inner.style.minWidth = ""; }
 });
 
+/* re-fit the Gantt "Fit" zoom when the window resizes */
+let _resizeTimer = null;
+window.addEventListener("resize", () => {
+  if (currentView !== "gantt" || ganttZoom !== "fit") return;
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => { if (currentView === "gantt" && ganttZoom === "fit") paintGantt(); }, 150);
+});
+
 function renderToolbar() {
   return h("div", { class: "btoolbar" },
     h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Job Board")),
@@ -497,6 +505,7 @@ function renderGanttView() {
 
 function renderGanttToolbar() {
   const zoom = h("div", { class: "vsw" },
+    h("button", { class: "vsw__b" + (ganttZoom === "fit" ? " on" : ""), onclick: () => setZoom("fit"), title: "Fit the whole timeline on screen" }, "Fit"),
     h("button", { class: "vsw__b" + (ganttZoom === "day" ? " on" : ""), onclick: () => setZoom("day") }, "Day"),
     h("button", { class: "vsw__b" + (ganttZoom === "week" ? " on" : ""), onclick: () => setZoom("week") }, "Week"),
     h("button", { class: "vsw__b" + (ganttZoom === "month" ? " on" : ""), onclick: () => setZoom("month") }, "Month"));
@@ -530,8 +539,14 @@ function paintGantt() {
   const rangeStart = addDays(new Date(minISO + "T00:00:00"), -2);
   const startISO = toISO(rangeStart);
   const totalDays = dayDiff(startISO, maxISO) + 5;
-  const dayW = ganttZoom === "month" ? 7 : ganttZoom === "week" ? 9 : 26;
-  const monthMode = ganttZoom === "month";
+  let dayW;
+  if (ganttZoom === "fit") {
+    const avail = Math.max(320, (wrap.clientWidth || 1000) - 180 - 6);   // pane width minus the job-name column
+    dayW = Math.max(2, avail / totalDays);                               // scale so the whole range fits
+  } else {
+    dayW = ganttZoom === "month" ? 7 : ganttZoom === "week" ? 9 : 26;
+  }
+  const monthMode = ganttZoom === "month" || (ganttZoom === "fit" && dayW < 10);
   const trackW = totalDays * dayW;
   const today = todayISO();
   const todayX = (today >= startISO && dayDiff(startISO, today) <= totalDays) ? dayDiff(startISO, today) * dayW : -1;
