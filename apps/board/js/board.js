@@ -21,12 +21,13 @@ const STAGES = [
   { id: "done",        label: "Complete",       color: "#1f9d55" },
 ];
 const TYPES = [
-  { id: "remodel",   label: "Remodel",          color: "#1c5fb0" },
-  { id: "new_build", label: "New Build",        color: "#8a6fb0" },
-  { id: "water",     label: "Water Mitigation", color: "#2f8f8f" },
-  { id: "fire",      label: "Fire",             color: "#d4520f" },
-  { id: "mold",      label: "Mold",             color: "#1f9d55" },
-  { id: "other",     label: "Other",            color: "#7a8aa0" },
+  { id: "remodel",     label: "Remodel",          color: "#1c5fb0" },
+  { id: "new_build",   label: "New Build",        color: "#8a6fb0" },
+  { id: "restoration", label: "Restoration",      color: "#c2487a" },
+  { id: "water",       label: "Water Mitigation", color: "#2f8f8f" },
+  { id: "fire",        label: "Fire",             color: "#d4520f" },
+  { id: "mold",        label: "Mold",             color: "#1f9d55" },
+  { id: "other",       label: "Other",            color: "#7a8aa0" },
 ];
 const MATERIALS = [
   { id: "none",     label: "Not ordered" },
