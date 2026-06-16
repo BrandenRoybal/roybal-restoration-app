@@ -9,8 +9,8 @@ import {
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
   BOX_DESTINATIONS, dispositionShort, dispositionLabel, depreciation,
 } from "./model.js";
-import { setCtx, field, inp, ta, sel, seg, photoUploader } from "./formkit.js";
-import { RENDERERS, packBackReceipt } from "./forms.js";
+import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
+import { RENDERERS, packBackReceipt, uploadedDocSheet } from "./forms.js";
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail } from "./supa.js";
@@ -196,7 +196,7 @@ async function projectList() {
   body.append(installHint());
 }
 
-const APP_VERSION = "v19";
+const APP_VERSION = "v20";
 
 function installHint() {
   return h("div", {},
@@ -259,6 +259,9 @@ function packetPage(project) {
   const body = clear(view);
   setCtx(project, null);
 
+  // Forms where an uploaded signed PDF/scan REPLACES the generated form.
+  const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
+
   const included = [];
   for (const f of FORMS) {
     const v = project[f.key];
@@ -268,7 +271,10 @@ function packetPage(project) {
       (v || []).forEach((inst) => included.push(render(project, inst)));
     } else {
       const has = Array.isArray(v) ? v.length > 0 : !!v;   // photos/contents are arrays → one report
-      if (has) included.push(render(project, v));
+      if (!has) continue;
+      const pages = UPLOAD_REPLACES[f.key] && v.mode === "upload" ? uploadedDocPages(v) : [];
+      if (pages.length) included.push(...uploadedDocSheet(pages, UPLOAD_REPLACES[f.key]));
+      else included.push(render(project, v));
     }
   }
 

@@ -225,7 +225,8 @@ export function newWorkAuth() {
     mode: "sign",                // "sign" | "upload"
     ownerSig: "", ownerName: "", ownerDate: todayISO(),
     repSig: "", repName: "", repDate: todayISO(),
-    uploadedDoc: "",             // dataURL of a wet-signed scan/photo
+    uploadedDoc: "",             // legacy: single dataURL of a wet-signed scan/photo
+    uploadedPages: [],           // dataURL per page of an uploaded signed PDF/scan
   };
 }
 
@@ -236,6 +237,8 @@ export function newCertDrying() {
     affectedAreas: "",
     verification: [ blankVerifyRow() ],
     dehuDays: "", amDays: "", scrubDays: "", heaterDays: "",
+    mode: "sign",                // "sign" | "upload"
+    uploadedDoc: "", uploadedPages: [],   // an uploaded signed Cert of Drying PDF/scan
     sigTech: "", sigTechName: "", sigTechDate: todayISO(),
     sigOwner: "", sigOwnerName: "", sigOwnerDate: todayISO(),
     sigAdjuster: "", sigAdjusterName: "", sigAdjusterDate: "",

@@ -3,7 +3,8 @@
    Bound inputs autosave to the active project. One editable DOM
    serves both the on-screen UI and the print/PDF output.
    ============================================================ */
-import { h, autosave, fileToDataURL, signaturePad, money } from "./core.js";
+import { h, autosave, fileToDataURL, signaturePad, money, toast } from "./core.js";
+import { fileToDocPages } from "./pdf.js";
 import { COMPANY } from "./model.js";
 
 /* save context (set once per form render) */
@@ -90,20 +91,16 @@ export function sigBlock(obj, sigKey, nameKey, dateKey, title) {
       field("Date", inp(obj, dateKey, { type: "date" }))));
 }
 
-/* ---------- signature OR upload (Work Authorization) ---------- */
-export function signOrUpload(wa) {
+/* ---------- signature OR upload (Work Authorization / Cert of Drying) ----------
+   `signNodesFn` returns the fresh "sign on device" DOM for this form.
+   In upload mode, an uploaded PDF/scan is stored as page images and
+   REPLACES this form in the printed packet (see uploadedDocPages). */
+export function signOrUpload(obj, signNodesFn) {
   const body = h("div");
   function render() {
     body.replaceChildren();
-    if (wa.mode === "sign") {
-      body.append(
-        sigBlock(wa, "ownerSig", "ownerName", "ownerDate", "Property Owner — sign above"),
-        h("hr", { class: "divider" }),
-        sigBlock(wa, "repSig", "repName", "repDate", "Contractor Representative (Roybal Construction, LLC)")
-      );
-    } else {
-      body.append(uploadDoc(wa));
-    }
+    if (obj.mode === "upload") body.append(uploadDoc(obj));
+    else (signNodesFn() || []).forEach((n) => n && body.append(n));
   }
   const tabs = h("div", { class: "sig-tabs app-only" },
     tabBtn("✍️ Sign on device", () => switchTo("sign")),
@@ -112,32 +109,47 @@ export function signOrUpload(wa) {
     const b = h("button", { type: "button" }, label); b.addEventListener("click", fn); return b;
   }
   function paint() {
-    [...tabs.children].forEach((c, i) => c.classList.toggle("active", (i === 0) === (wa.mode === "sign")));
+    [...tabs.children].forEach((c, i) => c.classList.toggle("active", (i === 0) === (obj.mode !== "upload")));
   }
-  function switchTo(mode) { wa.mode = mode; paint(); render(); commit(); }
+  function switchTo(mode) { obj.mode = mode; paint(); render(); commit(); }
   paint(); render();
   return h("div", {}, tabs, body);
 }
 
-function uploadDoc(wa) {
+/* legacy single uploadedDoc → uniform page array */
+export function uploadedDocPages(obj) {
+  if (obj && obj.uploadedPages && obj.uploadedPages.length) return obj.uploadedPages;
+  if (obj && obj.uploadedDoc) return [obj.uploadedDoc];
+  return [];
+}
+
+function uploadDoc(obj) {
   const wrap = h("div", { class: "uploadbox" });
   function render() {
     wrap.replaceChildren();
-    if (wa.uploadedDoc) {
-      const isPdf = wa.uploadedDoc.startsWith("data:application/pdf");
+    const pages = uploadedDocPages(obj);
+    if (pages.length) {
       wrap.append(
-        isPdf ? h("div", {}, "📄 Signed document attached (PDF)")
-              : h("img", { src: wa.uploadedDoc, alt: "Signed work authorization", class: "sig-preview" }),
-        h("button", { type: "button", class: "btn btn--danger btn--sm app-only", style: "margin-top:10px", onclick: () => { wa.uploadedDoc = ""; commit(); render(); } }, "Remove")
-      );
+        h("div", { class: "app-only", style: "margin-bottom:8px;color:var(--green);font-weight:600" },
+          `📎 ${pages.length} page(s) attached — this replaces the form in the PDF report.`),
+        ...pages.map((src) => h("img", { src, alt: "Uploaded signed document page", class: "docpage" })),
+        h("button", { type: "button", class: "btn btn--danger btn--sm app-only", style: "margin-top:10px",
+          onclick: () => { obj.uploadedPages = []; obj.uploadedDoc = ""; commit(); render(); } }, "Remove"));
     } else {
-      const input = h("input", { type: "file", accept: "image/*,application/pdf", capture: "environment", style: "display:none" });
+      const input = h("input", { type: "file", accept: "image/*,application/pdf", style: "display:none" });
+      const status = h("div", { class: "app-only subtle", style: "margin-top:8px" });
+      const btn = h("button", { type: "button", class: "btn btn--primary" }, "📄 Choose PDF / photo");
       input.addEventListener("change", async () => {
-        if (input.files[0]) { wa.uploadedDoc = await fileToDataURL(input.files[0]); commit(); render(); }
+        const f = input.files[0]; if (!f) return;
+        btn.disabled = true; status.textContent = "Reading document…";
+        try { obj.uploadedPages = await fileToDocPages(f); obj.uploadedDoc = ""; commit(); render(); }
+        catch { btn.disabled = false; status.textContent = ""; toast("Sorry — couldn't read that file."); }
       });
-      const btn = h("button", { type: "button", class: "btn btn--primary" }, "📷 Take photo / choose file");
       btn.addEventListener("click", () => input.click());
-      wrap.append(h("div", { style: "margin-bottom:10px" }, "Upload a photo or scan of the signed paper authorization."), btn, input);
+      wrap.append(
+        h("div", { class: "app-only", style: "margin-bottom:10px" },
+          "Upload a signed PDF or a photo/scan. The uploaded document will replace this form in the PDF report."),
+        btn, input, status);
     }
   }
   render();

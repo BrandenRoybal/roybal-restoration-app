@@ -6,7 +6,7 @@ import { h, sketchPad, gpp, grainDepression, money, toast, fmtDate, todayISO, fi
 import { fileToFloorPlan } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
-  lineItems, sheet, commit,
+  lineItems, sheet, sheetFooter, commit,
 } from "./formkit.js";
 import {
   SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
@@ -413,7 +413,11 @@ export function workAuth(project, wa) {
 
     sectionTitle("Authorization & Signatures"),
     h("p", { class: "subtle" }, "By signing below, the Property Owner confirms they have read and agree to the Terms & Conditions above, and authorize Roybal Construction, LLC to commence the described scope of work."),
-    signOrUpload(wa));
+    signOrUpload(wa, () => [
+      sigBlock(wa, "ownerSig", "ownerName", "ownerDate", "Property Owner — sign above"),
+      h("hr", { class: "divider" }),
+      sigBlock(wa, "repSig", "repName", "repDate", "Contractor Representative (Roybal Construction, LLC)"),
+    ]));
 }
 function termRow(k, v) {
   return h("div", { class: "termrow" }, h("span", { class: "termrow__k" }, k + ":"), h("span", { class: "termrow__v" }, v));
@@ -542,11 +546,13 @@ export function certDrying(project, c) {
     h("div", { class: "certstmt" },
       h("p", {}, "The undersigned, an IICRC-certified water restoration technician, hereby certifies that the water damage mitigation and structural drying services described herein were performed at the above property in accordance with the IICRC S500 Standard for Professional Water Damage Restoration. Final moisture-meter readings confirm that affected materials have achieved the documented dry standard by comparison to unaffected reference materials and/or manufacturer specifications. The structure is considered dry per IICRC S500 criteria as of the Drying Completion Date stated above.")),
     sectionTitle("Signatures"),
-    sigBlock(c, "sigTech", "sigTechName", "sigTechDate", "IICRC Certified Technician — Roybal Construction, LLC"),
-    h("hr", { class: "divider" }),
-    sigBlock(c, "sigOwner", "sigOwnerName", "sigOwnerDate", "Property Owner / Insured"),
-    h("hr", { class: "divider" }),
-    sigBlock(c, "sigAdjuster", "sigAdjusterName", "sigAdjusterDate", "Adjuster / Carrier (if witness required)"));
+    signOrUpload(c, () => [
+      sigBlock(c, "sigTech", "sigTechName", "sigTechDate", "IICRC Certified Technician — Roybal Construction, LLC"),
+      h("hr", { class: "divider" }),
+      sigBlock(c, "sigOwner", "sigOwnerName", "sigOwnerDate", "Property Owner / Insured"),
+      h("hr", { class: "divider" }),
+      sigBlock(c, "sigAdjuster", "sigAdjusterName", "sigAdjusterDate", "Adjuster / Carrier (if witness required)"),
+    ]));
 }
 
 /* ============================================================
@@ -798,6 +804,16 @@ export function packBackReceipt(project) {
       h("p", {}, "The undersigned homeowner / insured acknowledges receipt of the personal-property items checked above, returned in the condition documented at pack-back by Roybal Construction, LLC.")),
     sectionTitle("Acknowledgment"),
     sigBlock(project, "packbackSig", "packbackName", "packbackDate", "Homeowner / Insured"));
+}
+
+/* Printable full-page sheets from an uploaded signed document (each PDF page
+   / scan becomes its own printed page). Used by the packet to REPLACE the
+   generated Work Authorization or Certificate of Drying when one is uploaded. */
+export function uploadedDocSheet(pages, footLabel) {
+  return pages.map((src) =>
+    h("section", { class: "sheet sheet--doc" },
+      h("img", { src, class: "docpage-full", alt: footLabel + " — uploaded copy" }),
+      sheetFooter(footLabel)));
 }
 
 /* ---------- dispatch ---------- */
