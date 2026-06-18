@@ -262,6 +262,7 @@ function actionButtons() {
   return [
     ...(conflicts.pairs.length ? [h("button", { class: "btn btn--sm confbtn", onclick: openConflicts, title: "Crew double-booked on overlapping jobs" },
       `⚠ ${conflicts.pairs.length} conflict${conflicts.pairs.length === 1 ? "" : "s"}`)] : []),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: openHelpModal, title: "How to use the Job Board" }, "❓ Help"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openScheduleSettings, title: "Work calendar & hours per day" }, "🗓 Calendar"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
@@ -1414,6 +1415,97 @@ function openCrewModal() {
 
 /* re-render the board behind a modal without closing it */
 function renderBoardSilently() { /* board re-renders on close; nothing needed live */ }
+
+/* ============================================================
+   help / how-to guide (toolbar → ❓ Help)
+   ============================================================ */
+function openHelpModal() {
+  const dot = (color) => h("span", { class: "help__dot", style: `background:${color}` });
+  const sec = (title, ...kids) => h("div", { class: "help__sec" }, h("h3", { class: "help__h" }, title), ...kids);
+  const li = (...kids) => h("li", {}, ...kids);
+  // legend row: a real rendered marker + what it means
+  const leg = (marker, desc) => h("div", { class: "help__leg" },
+    h("div", { class: "help__legm" }, marker), h("div", { class: "help__legd" }, desc));
+
+  const VIEWS = [
+    ["Board", "Your pipeline. Six columns from Leads to Complete — drag a card into another column to change its stage."],
+    ["Calendar", "A month grid. Each job fills every day between its start and due dates. Use ‹ › to change month, Today to jump back."],
+    ["Gantt", "A timeline with one bar per job. Drag a bar sideways to reschedule it. Zoom Fit / Day / Week / Month, and toggle the critical path or a saved baseline."],
+    ["Workload", "Every crew member's jobs stacked on one timeline — see who's slammed and who's free. Overlaps show in red."],
+  ];
+
+  const body = h("div", { class: "bmodal__body" },
+    h("div", { class: "help" },
+      h("p", { class: "help__lead" }, "The Job Board is your shop's digital whiteboard. Every job lives on it from first lead to final sign-off, and the whole crew sees the same board in real time."),
+
+      sec("The four views",
+        h("div", { class: "help__views" }, ...VIEWS.map(([n, d]) =>
+          h("div", { class: "help__view" }, h("strong", {}, n), h("span", {}, d))))),
+
+      sec("Adding & editing a job",
+        h("ul", { class: "help__ul" },
+          li(h("strong", {}, "+ New Job"), " (top-right) opens the editor. Fill in the name, type, address, phone, dates, crew, and notes, then ", h("strong", {}, "Create"), "."),
+          li("Click any card, calendar chip, or Gantt bar to reopen and edit it."),
+          li(h("strong", {}, "Drag a card"), " between columns to move it through the pipeline, or drag a Gantt bar to reschedule."),
+          li("Set ", h("strong", {}, "Priority"), " to High to float a job to the top of its column; ", h("strong", {}, "Materials"), " tracks whether parts are ordered or in."))),
+
+      sec("Scheduling",
+        h("p", { class: "help__p" }, "In the editor's Schedule section each job is either ", h("strong", {}, "Auto"), " or ", h("strong", {}, "Manual"), ":"),
+        h("ul", { class: "help__ul" },
+          li(h("strong", {}, "Auto"), " — the board picks the dates from the job's links and duration. Link a job to ", h("em", {}, "“start after these jobs finish”"), " (with optional lag days) and it chases its predecessors automatically."),
+          li(h("strong", {}, "Manual"), " — pin a fixed start date that won't move."),
+          li(h("strong", {}, "Duration"), " comes from estimated hours ÷ assigned crew, or you can override it in work days."),
+          li(h("strong", {}, "Phases"), " break a job into steps (demo → dry → rebuild → paint) that run in order and roll up to the job's dates."),
+          li(h("strong", {}, "Start no earlier than"), " holds a job until materials or a permit are ready (🔒)."),
+          li(h("strong", {}, "◆ Milestone"), " adds a zero-day marker — an inspection, permit, or walkthrough — that other jobs can hang off of."))),
+
+      sec("Crew & assignments",
+        h("ul", { class: "help__ul" },
+          li("Open ", h("strong", {}, "Crew"), " to add members (name, phone, role, color). Add your crew before assigning jobs."),
+          li("Assign crew inside the job editor, or per-phase. Each person shows as a colored initials circle on the card."),
+          li("Tap a card's ", h("strong", {}, "📞 phone"), " to call straight from the board."),
+          li("Mark someone ", h("em", {}, "inactive"), " to hide them from pickers without losing their logged hours."))),
+
+      sec("Logging hours & labor",
+        h("ul", { class: "help__ul" },
+          li("Open a job and use ", h("strong", {}, "Time logged"), " to record who worked, the date, and hours."),
+          li("Cards show ", h("strong", {}, "actual vs. estimated"), " hours with a progress bar that turns red when you go over."),
+          li(h("strong", {}, "⏱ Hours"), " (toolbar) is the labor report — total hours, a by-crew breakdown, and estimated-vs-actual per job, filterable to 7 / 30 days or all time."))),
+
+      sec("Pipeline stages",
+        h("div", { class: "help__stages" }, ...STAGES.map((s) =>
+          h("span", { class: "help__stage" }, dot(s.color), s.label)))),
+
+      sec("Card symbols",
+        h("div", { class: "help__legend" },
+          leg(h("span", { class: "prio prio--high", style: "margin:0" }), "High priority (a gray dot means low priority)"),
+          leg(h("span", { class: "chip" }, "📅 Due Jun 12"), "Scheduled dates — turns red when a job is past due"),
+          leg(h("span", { class: "chip" }, "⏱ 12 / 40h"), "Hours logged vs. estimate — red when over"),
+          leg(h("span", { class: "chip is-crit" }, "⚡ Critical"), "On the critical path — a slip moves your finish date"),
+          leg(h("span", { class: "chip is-warn" }, "⚠ double-booked"), "A crew member is on two overlapping jobs"),
+          leg(h("span", { class: "chip is-lock" }, "🔒 not before"), "Held until materials / permit are ready"),
+          leg(h("span", { class: "chip is-phase" }, "📋 3 phases"), "The job is broken into sequenced phases"),
+          leg(h("span", { class: "chip mat-ordered" }, "🔧 Materials ordered"), "Materials status (TBD / ordered / in)"),
+          leg(h("span", { class: "ms-diamond", style: "font-size:15px" }, "◆"), "A milestone — zero-day marker"))),
+
+      sec("Planning tools",
+        h("ul", { class: "help__ul" },
+          li(h("strong", {}, "⚡ Critical path"), " (Gantt) highlights the chain of linked jobs that drives your final completion date — protect these from slipping."),
+          li(h("strong", {}, "📸 Baseline"), " (Gantt) saves a snapshot of the plan; ghost bars and ± day chips then show how far each job has slipped from it."),
+          li(h("strong", {}, "⚠ Conflicts"), " appears in the toolbar when the same person is booked on overlapping jobs — click it to see and fix each clash."),
+          li(h("strong", {}, "🗓 Calendar"), " sets your working days, hours per day, and holidays. This drives every auto-scheduled date, so changing it re-flows the whole timeline."))),
+
+      sec("Tips",
+        h("ul", { class: "help__ul" },
+          li(h("strong", {}, "Search & filters"), " (by job, type, or crew) apply to every view at once."),
+          li(h("strong", {}, "🖨 PDF"), " prints the current view — best in Chrome with “Save as PDF.”"),
+          li(h("strong", {}, "Works offline."), " Changes save on your device and sync when you're back online — watch the dot next to your email (green = synced)."),
+          li("Everyone shares one login, so the board stays in sync across the shop. Use ", h("strong", {}, "↻ Refresh"), " to pull the latest right away."))),
+    ));
+
+  openModal("How to use the Job Board", body, h("div", { class: "bmodal__foot" },
+    h("button", { class: "btn btn--primary", onclick: closeModal }, "Got it")));
+}
 
 /* ============================================================
    modal plumbing + small helpers
