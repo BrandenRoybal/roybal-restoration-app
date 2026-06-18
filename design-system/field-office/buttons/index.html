@@ -1,0 +1,44 @@
+<!-- @dsCard group="Field & Office" name="Buttons" subtitle=".btn — primary / default / ghost / danger / sm" width="760" height="420" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field buttons</title>
+<style>
+:root{--navy:#0f1b2d;--navy-2:#16263d;--panel:#fff;--ink:#1a2433;--muted:#5b6b80;--line:#d9e0ea;--orange:#f26a21;--orange-dark:#d4520f;--red:#d23b2e;--shadow:0 2px 10px rgba(15,27,45,.08);--tap:48px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#eef2f7;color:var(--ink);margin:0;padding:24px}
+h1{font-size:20px;margin:0 0 16px}.lbl{font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:700;margin:18px 0 8px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:var(--tap);padding:0 18px;border-radius:12px;border:1px solid transparent;font-size:16px;font-weight:600;cursor:pointer;background:var(--navy-2);color:#fff}
+.btn--primary{background:var(--orange)}.btn--primary:active{background:var(--orange-dark)}
+.btn--ghost{background:#fff;color:var(--navy);border-color:var(--line)}
+.btn--danger{background:#fff;color:var(--red);border-color:#f0c9c5}
+.btn--sm{min-height:38px;padding:0 12px;font-size:14px;border-radius:9px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.block{max-width:380px}.btn-row{display:flex;gap:10px}.btn-row .btn{flex:1}
+</style>
+</head>
+<body>
+  <h1>Buttons</h1>
+  <div class="lbl">Variants</div>
+  <div class="row">
+    <button class="btn btn--primary">Save &amp; Continue</button>
+    <button class="btn">Default</button>
+    <button class="btn btn--ghost">Cancel</button>
+    <button class="btn btn--danger">Delete</button>
+  </div>
+  <div class="lbl">Small</div>
+  <div class="row">
+    <button class="btn btn--primary btn--sm">+ Add row</button>
+    <button class="btn btn--ghost btn--sm">Edit</button>
+    <button class="btn btn--danger btn--sm">Remove</button>
+  </div>
+  <div class="lbl">Full width (sticky action bar)</div>
+  <div class="block">
+    <div class="btn-row">
+      <button class="btn btn--ghost">Back</button>
+      <button class="btn btn--primary">Save</button>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!-- @dsCard group="Field & Office" name="Form controls" subtitle="Fields, grids, segmented, checkbox" width="760" height="600" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field form controls</title>
+<style>
+:root{--navy:#0f1b2d;--ink:#1a2433;--muted:#5b6b80;--line:#d9e0ea;--orange:#f26a21;--tap:48px}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#eef2f7;color:var(--ink);margin:0;padding:24px}
+h1{font-size:20px;margin:0 0 16px}
+.field{margin-bottom:12px}
+.field>label{display:block;font-size:13px;font-weight:600;color:var(--navy);margin-bottom:5px}
+.field .hint{font-weight:400;color:var(--muted)}
+input[type=text],input[type=date],select,textarea{width:100%;min-height:var(--tap);padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:16px;background:#fff;color:var(--ink);font-family:inherit}
+textarea{min-height:84px;resize:vertical}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--orange);border-color:var(--orange)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.check{display:flex;align-items:flex-start;gap:10px;padding:8px 0}
+.check input{width:22px;height:22px;flex:0 0 auto;margin-top:2px;accent-color:var(--orange)}
+.check label{font-size:14px}
+.seg{display:flex;gap:6px;flex-wrap:wrap}
+.seg button{flex:1;min-width:60px;min-height:42px;border:1px solid var(--line);background:#fff;border-radius:10px;font-weight:600;cursor:pointer}
+.seg button.active{background:var(--orange);color:#fff;border-color:var(--orange)}
+.lbl{font-size:13px;font-weight:600;color:var(--navy);margin:0 0 5px}
+</style>
+</head>
+<body>
+  <h1>Form controls</h1>
+  <div class="field">
+    <label>Property address <span class="hint">— street, city</span></label>
+    <input type="text" value="8421 Jewel Lake Rd, Anchorage">
+  </div>
+  <div class="grid2">
+    <div class="field"><label>Date of loss</label><input type="date" value="2024-03-14"></div>
+    <div class="field"><label>Loss type</label><select><option>Water</option><option>Fire</option><option>Mold</option></select></div>
+  </div>
+  <div class="field">
+    <label>Notes</label>
+    <textarea>Cat 2 water intrusion in basement; 3 air movers + 1 dehu deployed.</textarea>
+  </div>
+  <p class="lbl">Loss category (segmented)</p>
+  <div class="seg" style="margin-bottom:14px">
+    <button>Cat 1</button>
+    <button class="active">Cat 2</button>
+    <button>Cat 3</button>
+  </div>
+  <div class="check"><input type="checkbox" checked id="c1"><label for="c1">Customer present at inspection</label></div>
+  <div class="check"><input type="checkbox" id="c2"><label for="c2">Moisture map completed</label></div>
+</body>
+</html>

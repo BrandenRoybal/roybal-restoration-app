@@ -1,0 +1,56 @@
+<!-- @dsCard group="Field & Office" name="Badges & callouts" subtitle="Category, disposition, note/warn, toast" width="780" height="520" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field badges &amp; callouts</title>
+<style>
+:root{--navy:#0f1b2d;--ink:#1a2433;--muted:#5b6b80;--line:#d9e0ea;--orange:#f26a21;--orange-dark:#d4520f;--green:#1f9d55;--amber:#e0a800;--red:#d23b2e;--shadow:0 2px 10px rgba(15,27,45,.08)}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#eef2f7;color:var(--ink);margin:0;padding:24px}
+.lbl{font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:700;margin:18px 0 8px}
+.badgeline{display:flex;gap:8px;flex-wrap:wrap}
+.badge{font-size:12px;font-weight:700;padding:3px 10px;border-radius:999px;background:#eef2f7;color:var(--navy)}
+.badge.cat3{background:#fbe3e0;color:var(--red)}
+.badge.cat2{background:#fdf3e0;color:var(--amber)}
+.badge.cat1{background:#e3f6ec;color:var(--green)}
+.badge.disp-g{background:#e3f6ec;color:var(--green)}
+.badge.disp-r{background:#fbe3e0;color:var(--red)}
+.badge.disp-b{background:#e6effb;color:#1c5fb0}
+.badge.disp-x{background:#eceff3;color:var(--muted)}
+.note{background:#fff8f2;border:1px solid #f6d9c4;border-radius:10px;padding:10px 12px;font-size:13px;color:#7a4a25;margin:10px 0}
+.note strong{color:var(--orange-dark)}
+.warn{background:#fdf3e0;border:1px solid #f0d8a8;border-radius:10px;padding:8px 12px;font-size:13px;color:#7a5a1a;margin:10px 0}
+.warn strong{color:var(--amber)}
+.toastwrap{position:relative;height:60px;margin-top:8px}
+.toast{display:inline-flex;background:var(--navy);color:#fff;padding:10px 16px;border-radius:999px;font-size:14px;box-shadow:var(--shadow)}
+.saved-pill{font-size:12px;color:var(--green);display:inline-flex;align-items:center;gap:5px;margin-left:14px}
+</style>
+</head>
+<body>
+  <div class="lbl">Loss category</div>
+  <div class="badgeline">
+    <span class="badge cat1">Cat 1 — Clean</span>
+    <span class="badge cat2">Cat 2 — Gray</span>
+    <span class="badge cat3">Cat 3 — Black</span>
+  </div>
+
+  <div class="lbl">Contents disposition</div>
+  <div class="badgeline">
+    <span class="badge disp-g">Restorable</span>
+    <span class="badge disp-r">Non-salvage</span>
+    <span class="badge disp-b">In storage</span>
+    <span class="badge disp-x">Unclassified</span>
+  </div>
+
+  <div class="lbl">Callouts</div>
+  <div class="note"><strong>Note:</strong> Confirm the carrier's preferred drying standard before closing the job.</div>
+  <div class="warn"><strong>⚠ Warning:</strong> Equipment has been on site 7+ days — justify continued drying.</div>
+
+  <div class="lbl">Save feedback</div>
+  <div class="toastwrap">
+    <span class="toast">✓ Saved offline — will sync</span>
+    <span class="saved-pill">● All changes saved</span>
+  </div>
+</body>
+</html>

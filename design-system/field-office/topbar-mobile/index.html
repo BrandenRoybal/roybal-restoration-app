@@ -1,0 +1,44 @@
+<!-- @dsCard group="Field & Office" name="Mobile top bar" subtitle="Field app shell — back, brand, sync status" width="440" height="280" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field mobile top bar</title>
+<style>
+:root{--navy:#0f1b2d;--muted:#5b6b80;--line:#d9e0ea;--green:#1f9d55;--shadow:0 2px 10px rgba(15,27,45,.08)}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#eef2f7;color:#1a2433;margin:0;padding:24px}
+.phone{max-width:380px;border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow);background:#eef2f7}
+.topbar{display:flex;align-items:center;gap:10px;background:var(--navy);color:#fff;padding:12px 14px}
+.topbar__back{background:rgba(255,255,255,.12);color:#fff;border:0;width:40px;height:40px;border-radius:10px;font-size:22px;flex:0 0 auto;cursor:pointer}
+.topbar__brand{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.topbar__logo{width:34px;height:34px;background:#fff;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:800;color:var(--navy);font-size:13px}
+.topbar__title{display:flex;flex-direction:column;line-height:1.1;min-width:0}
+.topbar__title strong{font-size:15px}
+.topbar__title span{font-size:12px;color:#9fb3cc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.topbar__status{font-size:12px;color:var(--green)}
+.topbar__status.off{color:#ff6b6b}
+.body{padding:14px}
+.h{font-size:20px;margin:4px 0 2px}.sub{color:var(--muted);font-size:13px;margin:0}
+.row2{margin-top:14px;display:flex;gap:10px}.row2 .t{flex:1;background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:var(--shadow);font-size:13px;font-weight:600}
+</style>
+</head>
+<body>
+  <div class="phone">
+    <div class="topbar">
+      <button class="topbar__back">‹</button>
+      <div class="topbar__brand">
+        <div class="topbar__logo">RC</div>
+        <div class="topbar__title"><strong>8421 Jewel Lake Rd</strong><span>RC-2024-0142 · Drying Log</span></div>
+      </div>
+      <div class="topbar__status">● Synced</div>
+    </div>
+    <div class="body">
+      <h1 class="h">Drying Log</h1>
+      <p class="sub">Day 5 of 7 · 2 readings above goal</p>
+      <div class="row2"><div class="t">💧 Readings</div><div class="t">📷 Photos</div></div>
+    </div>
+  </div>
+  <p style="color:var(--muted);font-size:12px;margin-top:12px">Offline state: <code>.topbar__status.off</code> turns the dot red ("● Offline").</p>
+</body>
+</html>

@@ -1,0 +1,53 @@
+<!-- @dsCard group="Field & Office" name="Data grid" subtitle="Drying/moisture log — dry/wet flags, calc, totals" width="820" height="560" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field data grid</title>
+<style>
+:root{--navy:#0f1b2d;--ink:#1a2433;--muted:#5b6b80;--line:#d9e0ea;--orange:#f26a21;--green:#1f9d55;--red:#d23b2e;--amber:#e0a800}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#eef2f7;color:var(--ink);margin:0;padding:24px}
+h1{font-size:20px;margin:0 0 10px}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;background:#fff}
+table.grid{border-collapse:collapse;width:100%;min-width:560px;font-size:13px}
+table.grid th,table.grid td{border:1px solid var(--line);padding:6px 8px;text-align:center}
+table.grid th{background:var(--navy);color:#fff;font-size:11px;font-weight:600}
+table.grid tr:nth-child(even) td{background:#f7f9fc}
+.calc{background:#eef6ff !important;font-weight:700;color:var(--navy)}
+td.dry{background:#e3f6ec !important;color:var(--green);font-weight:700}
+td.wet{background:#fbe3e0 !important;color:var(--red);font-weight:700}
+tr.flag7 td{background:#fdf3e0 !important}
+.flagnote{font-size:12px;color:var(--muted);margin:2px 0 12px}
+.flagnote .dot{font-weight:800}.flagnote .dot.g{color:var(--green)}.flagnote .dot.r{color:var(--red)}
+.warn{background:#fdf3e0;border:1px solid #f0d8a8;border-radius:10px;padding:8px 12px;font-size:13px;color:#7a5a1a;margin-bottom:10px}
+.warn strong{color:var(--amber)}
+.totals{margin-top:12px;max-width:320px}
+.totals .trow{display:flex;justify-content:space-between;padding:6px 2px;border-bottom:1px dashed var(--line);font-size:14px}
+.totals .trow.grand{font-size:18px;font-weight:800;color:var(--navy);border-bottom:0}
+</style>
+</head>
+<body>
+  <h1>Drying / moisture log</h1>
+  <div class="warn"><strong>⚠ Day 7+</strong> — material still above dry goal. Document justification.</div>
+  <div class="tablewrap">
+    <table class="grid">
+      <thead><tr><th>Location</th><th>Material</th><th>Goal</th><th>Day 1</th><th>Day 3</th><th>Day 5</th><th>Day 7</th></tr></thead>
+      <tbody>
+        <tr><td>Basement N wall</td><td>Drywall</td><td>16%</td><td class="wet">42%</td><td class="wet">28%</td><td class="wet">19%</td><td class="dry">15%</td></tr>
+        <tr><td>Basement floor</td><td>Concrete</td><td>4%</td><td class="wet">9%</td><td class="wet">7%</td><td class="dry">4%</td><td class="dry">3%</td></tr>
+        <tr class="flag7"><td>Stair stringer</td><td>Framing</td><td>15%</td><td class="wet">38%</td><td class="wet">31%</td><td class="wet">24%</td><td class="wet">21%</td></tr>
+        <tr><td>Subfloor</td><td>OSB</td><td>12%</td><td class="wet">26%</td><td class="dry">11%</td><td class="calc">dry</td><td class="calc">dry</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="flagnote"><span class="dot g">●</span> at/below dry goal &nbsp; <span class="dot r">●</span> above goal &nbsp; · amber row = 7+ days drying</p>
+
+  <div class="totals">
+    <div class="trow"><span>Equipment (4 days)</span><span>$1,240.00</span></div>
+    <div class="trow"><span>Labor</span><span>$860.00</span></div>
+    <div class="trow"><span>Materials</span><span>$215.00</span></div>
+    <div class="trow grand"><span>Total</span><span>$2,315.00</span></div>
+  </div>
+</body>
+</html>
