@@ -124,7 +124,7 @@ async function refresh() {
 function applySchedule() {
   settings = cachedSettings();
   const res = computeSchedule(jobs, settings);   // { changed, cyclic }; mutates jobs in place
-  conflicts = findOverAllocations(jobs);         // refresh crew over-allocations
+  conflicts = findOverAllocations(jobs, settings);  // refresh crew over-allocations (phase-aware)
   critical = computeCriticalPath(jobs, settings);// refresh critical path
   return res;
 }
@@ -264,6 +264,7 @@ function actionButtons() {
     h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "↻ Refresh"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: exportPDF, title: "Print / save as PDF" }, "🖨 PDF"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => openJobModal(null, true), title: "Add a zero-day milestone" }, "◆ Milestone"),
     h("button", { class: "btn btn--primary btn--sm", onclick: () => openJobModal(null) }, "+ New Job"),
   ];
 }
@@ -420,6 +421,15 @@ function renderColumn(st, colJobs) {
 }
 
 function renderCard(j) {
+  if (j.isMilestone) {
+    const card = h("div", { class: "bcard bcard--ms", draggable: "true", onclick: () => openJobModal(j) },
+      h("div", { class: "bcard__top" }, h("span", { class: "ms-diamond" }, "◆"),
+        h("span", { class: "bcard__title" }, j.title || "Milestone")),
+      j.startDate ? h("div", { class: "bcard__sub" }, "🏁 " + fmtShort(j.startDate)) : h("div", { class: "bcard__sub subtle" }, "No date — pin a date or link it after a job"));
+    card.addEventListener("dragstart", (e) => { draggingId = j.id; e.dataTransfer.setData("text/plain", j.id); e.dataTransfer.effectAllowed = "move"; card.classList.add("dragging"); });
+    card.addEventListener("dragend", () => { draggingId = null; card.classList.remove("dragging"); });
+    return card;
+  }
   const ty = typeOf(j.type);
   const late = j.targetDate && j.targetDate < todayISO() && (j.stage || "lead") !== "done";
   const act = actualHours(j.id);
@@ -578,9 +588,9 @@ function paintCalendar() {
     const cell = h("div", { class: "cal__cell" + (inMonth ? "" : " out") + (iso === today ? " today" : "") },
       h("div", { class: "cal__day" }, String(d.getDate())));
     for (const j of visible.filter((x) => jobActiveOn(x, iso))) {
-      const marker = j.startDate === iso ? "▶ " : j.targetDate === iso ? "⚑ " : "";
+      const marker = j.isMilestone ? "◆ " : j.startDate === iso ? "▶ " : j.targetDate === iso ? "⚑ " : "";
       cell.append(h("div", {
-        class: "cal__job", style: `border-left-color:${stageOf(j.stage).color}`,
+        class: "cal__job" + (j.isMilestone ? " cal__job--ms" : ""), style: `border-left-color:${j.isMilestone ? "#5b4ba8" : stageOf(j.stage).color}`,
         title: (j.title || j.customer || "Job"), onclick: () => openJobModal(j),
       }, marker + (j.title || j.customer || "Job")));
     }
@@ -711,6 +721,18 @@ function paintGantt() {
   let vi = 0;   // running visual row index (accounts for expanded phase rows)
   for (const { j, s, t } of dated) {
     const left = dayDiff(startISO, s) * dayW;
+    if (j.isMilestone) {
+      geo.set(j.id, { ri: vi, left, w: 8 });
+      const track = h("div", { class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""), style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`) },
+        h("div", { class: "gantt__ms", style: `left:${left}px`, title: `${j.title || "Milestone"}\n${fmtShort(s)}`, onclick: () => openJobModal(j) }, "◆"),
+        h("div", { class: "gantt__ms-name", style: `left:${left + 16}px` }, j.title || "Milestone"));
+      if (monthMode) for (const b of monthBounds) track.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
+      if (todayX >= 0) track.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
+      rows.push(h("div", { class: "gantt__row gantt__row--ms" },
+        h("div", { class: "gantt__label", title: j.title || "Milestone" }, "◆ " + (j.title || "Milestone")), track));
+      vi++;
+      continue;
+    }
     const w = Math.max((dayDiff(s, t) + 1) * dayW - 2, 8);
     geo.set(j.id, { ri: vi, left, w });
     const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
@@ -827,15 +849,16 @@ function paintGantt() {
 /* ============================================================
    job modal (new / edit)
    ============================================================ */
-function openJobModal(existing) {
+function openJobModal(existing, newMilestone) {
   const isNew = !existing;
   const j = existing ? { ...existing } : {
     id: uid(), stage: "lead", type: "remodel", priority: "normal", materials: "none",
     crewIds: [], title: "", customer: "", address: "", phone: "", startDate: "", targetDate: "",
     estimatedHours: "", fieldJobId: "", notes: "",
     deps: [], durationDays: null, scheduleMode: "auto", pinnedStart: "",
-    notBefore: "", notBeforeLabel: "", subtasks: [],
+    notBefore: "", notBeforeLabel: "", subtasks: [], isMilestone: !!newMilestone,
   };
+  if (isNew && newMilestone) { j.scheduleMode = "manual"; j.pinnedStart = todayISO(); }
   j.crewIds = [...(j.crewIds || [])];
   j.deps = (j.deps || []).map((d) => ({ ...d }));
   j.subtasks = (j.subtasks || []).map((st) => ({ ...st }));
@@ -922,42 +945,72 @@ function openJobModal(existing) {
       phaseWrap.append(h("div", { class: "subtle" }, "No phases. Add phases to break the job into steps (e.g. demo → dry → rebuild → paint) that sequence and roll up to the job's dates."));
     } else {
       j.subtasks.forEach((st, i) => {
+        st.crewIds = st.crewIds || [];
         const name = h("input", { type: "text", class: "st-name", placeholder: "Phase name", value: st.name || "" });
         name.addEventListener("input", () => { st.name = name.value; });
-        const days = h("input", { type: "number", class: "st-num", min: "1", step: "1", value: st.durationDays != null ? st.durationDays : 1, title: "work days" });
-        days.addEventListener("input", () => { st.durationDays = Math.max(1, Math.round(Number(days.value) || 1)); });
+        const days = h("input", { type: "number", class: "st-num", min: "1", step: "1", placeholder: "auto", value: st.durationDays != null ? st.durationDays : "", title: "work days (leave blank to compute from hours + crew)" });
+        days.addEventListener("input", () => { st.durationDays = days.value ? Math.max(1, Math.round(Number(days.value))) : null; });
+        const hrs = h("input", { type: "number", class: "st-num", min: "0", step: "1", placeholder: "—", value: st.estimatedHours || "", title: "phase hours — sets duration with its crew when no days are given" });
+        hrs.addEventListener("input", () => { st.estimatedHours = hrs.value ? Number(hrs.value) : ""; });
         const lag = h("input", { type: "number", class: "st-num", min: "0", step: "1", value: st.lagDays || 0, title: "lag (days) before this phase — e.g. cure/dry time" });
         lag.addEventListener("input", () => { st.lagDays = Math.max(0, Math.round(Number(lag.value) || 0)); });
+        const crewStrip = h("div", { class: "st-crew" });
+        for (const c of activeCrew()) {
+          const on = st.crewIds.includes(c.id);
+          const chip = h("button", { type: "button", class: "st-crewchip" + (on ? " on" : ""), title: c.name, style: on ? `background:${c.color};border-color:${c.color};color:#fff` : "" }, initials(c.name));
+          chip.addEventListener("click", () => {
+            if (st.crewIds.includes(c.id)) { st.crewIds = st.crewIds.filter((x) => x !== c.id); chip.className = "st-crewchip"; chip.style.cssText = ""; }
+            else { st.crewIds.push(c.id); chip.className = "st-crewchip on"; chip.style.cssText = `background:${c.color};border-color:${c.color};color:#fff`; }
+          });
+          crewStrip.append(chip);
+        }
         const mv = (d) => { const t = j.subtasks[i + d]; j.subtasks[i + d] = j.subtasks[i]; j.subtasks[i] = t; renderPhases(); };
-        phaseWrap.append(h("div", { class: "st-row" },
-          h("span", { class: "st-i" }, String(i + 1)), name,
-          h("span", { class: "st-lbl" }, "days"), days,
-          h("span", { class: "st-lbl" }, "lag"), lag,
-          h("button", { class: "st-btn", type: "button", title: "Move up", disabled: i === 0, onclick: () => mv(-1) }, "↑"),
-          h("button", { class: "st-btn", type: "button", title: "Move down", disabled: i === j.subtasks.length - 1, onclick: () => mv(1) }, "↓"),
-          h("button", { class: "st-btn st-del", type: "button", title: "Remove phase", onclick: () => { j.subtasks.splice(i, 1); renderPhases(); } }, "✕")));
+        phaseWrap.append(h("div", { class: "st-block" },
+          h("div", { class: "st-row" }, h("span", { class: "st-i" }, String(i + 1)), name,
+            h("button", { class: "st-btn", type: "button", title: "Move up", disabled: i === 0, onclick: () => mv(-1) }, "↑"),
+            h("button", { class: "st-btn", type: "button", title: "Move down", disabled: i === j.subtasks.length - 1, onclick: () => mv(1) }, "↓"),
+            h("button", { class: "st-btn st-del", type: "button", title: "Remove phase", onclick: () => { j.subtasks.splice(i, 1); renderPhases(); } }, "✕")),
+          h("div", { class: "st-row2" },
+            h("span", { class: "st-lbl" }, "days"), days,
+            h("span", { class: "st-lbl" }, "hrs"), hrs,
+            h("span", { class: "st-lbl" }, "lag"), lag,
+            activeCrew().length ? crewStrip : h("span", { class: "subtle" }, "no crew"))));
       });
     }
     refreshDur();
   };
   renderPhases();
-  const addPhase = h("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { j.subtasks.push({ id: uid(), name: "", durationDays: 1, lagDays: 0 }); renderPhases(); } }, "+ Add phase");
+  const addPhase = h("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { j.subtasks.push({ id: uid(), name: "", durationDays: 1, lagDays: 0, estimatedHours: "", crewIds: [] }); renderPhases(); } }, "+ Add phase");
 
+  const durRow = h("div", { class: "grid2 hide-for-ms" },
+    field("Duration override (work days)", durInp), field("Computed duration", durOut));
+  const nbField = field("Start no earlier than (materials / permit ready)", h("div", { class: "grid2" }, nbDate, nbLabel));
+  nbField.classList.add("hide-for-ms");
+  const phasesField = field("Phases (optional)", h("div", {}, phaseWrap, h("div", { class: "row-add" }, addPhase)));
+  phasesField.classList.add("hide-for-ms");
   const scheduleSection = h("div", { class: "schedsec" },
     h("div", { class: "schedsec__h" }, "🗓 Schedule"),
     field("Scheduling mode", h("div", { class: "vsw" }, mAuto, mManual)),
     pinField,
-    field("Start after these jobs finish (+ lag days)", predWrap),
-    h("div", { class: "grid2" },
-      field("Duration override (work days)", durInp),
-      field("Computed duration", durOut)),
-    field("Start no earlier than (materials / permit ready)",
-      h("div", { class: "grid2" }, nbDate, nbLabel)),
-    field("Phases (optional)", h("div", {}, phaseWrap, h("div", { class: "row-add" }, addPhase))));
+    field("Start after these jobs / milestones finish (+ lag days)", predWrap),
+    durRow, nbField, phasesField);
   refreshDur();
 
-  const body = h("div", { class: "bmodal__body" },
-    field("Job / Customer name", inp("title", { type: "text", placeholder: "e.g. Smith Kitchen Remodel" })),
+  const msToggle = h("input", { type: "checkbox", checked: !!j.isMilestone });
+  const msRow = h("label", { class: "ms-toggle" }, msToggle,
+    h("span", {}, "◆ Milestone — a zero-day marker (inspection, permit, walkthrough)"));
+  const datesRow = h("div", { class: "grid2 hide-for-ms" },
+    field("Start date", inp("startDate", { type: "date" })),
+    field("Target / due date", inp("targetDate", { type: "date" })));
+  const hoursRow = h("div", { class: "grid2 hide-for-ms" },
+    field("Estimated hours", inp("estimatedHours", { type: "number", min: "0", step: "1", placeholder: "e.g. 40" })),
+    field("Materials", sel("materials", MATERIALS)));
+  const crewField = field("Assigned crew", crewPick);
+  crewField.classList.add("hide-for-ms");
+
+  const body = h("div", { class: "bmodal__body" + (j.isMilestone ? " is-milestone" : "") },
+    field(j.isMilestone ? "Milestone name" : "Job / Customer name", inp("title", { type: "text", placeholder: j.isMilestone ? "e.g. City framing inspection" : "e.g. Smith Kitchen Remodel" })),
+    msRow,
     field("Customer (if different)", inp("customer", { type: "text", placeholder: "Owner / contact name" })),
     h("div", { class: "grid2" },
       field("Phone", inp("phone", { type: "tel", placeholder: "(505) 555-0123" })),
@@ -966,17 +1019,12 @@ function openJobModal(existing) {
     h("div", { class: "grid2" },
       field("Stage", sel("stage", STAGES)),
       field("Priority", sel("priority", PRIORITIES))),
-    h("div", { class: "grid2" },
-      field("Start date", inp("startDate", { type: "date" })),
-      field("Target / due date", inp("targetDate", { type: "date" }))),
-    h("div", { class: "grid2" },
-      field("Estimated hours", inp("estimatedHours", { type: "number", min: "0", step: "1", placeholder: "e.g. 40" })),
-      field("Materials", sel("materials", MATERIALS))),
-    field("Assigned crew", crewPick),
+    datesRow, hoursRow, crewField,
     scheduleSection,
     field("Notes", (f.notes = h("textarea", { placeholder: "Scope, scheduling notes, gate codes…" }, j.notes || ""))),
-    isNew ? h("p", { class: "subtle", style: "margin:14px 0 0" }, "💾 Create the job, then reopen it to log time.") : buildJobHoursSection(j),
+    isNew ? h("p", { class: "subtle", style: "margin:14px 0 0" }, "💾 Create, then reopen to log time.") : (j.isMilestone ? null : buildJobHoursSection(j)),
   );
+  msToggle.addEventListener("change", () => { j.isMilestone = msToggle.checked; body.classList.toggle("is-milestone", j.isMilestone); });
 
   // keep the computed-duration readout live as hours are typed
   f.estimatedHours.addEventListener("input", () => {
@@ -1024,7 +1072,7 @@ function openJobModal(existing) {
   }
   foot.append(h("button", { class: "btn btn--ghost", onclick: closeModal }, "Cancel"), saveBtn);
 
-  openModal(isNew ? "New Job" : "Edit Job", body, foot);
+  openModal(isNew ? (j.isMilestone ? "New Milestone" : "New Job") : (j.isMilestone ? "Edit Milestone" : "Edit Job"), body, foot);
   setTimeout(() => f.title.focus(), 30);
 }
 

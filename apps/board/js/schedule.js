@@ -96,7 +96,8 @@ function participates(job) {
     || job.scheduleMode === "auto" || job.scheduleMode === "manual"
     || job.durationDays != null
     || !!job.notBefore
-    || (Array.isArray(job.subtasks) && job.subtasks.length > 0);
+    || (Array.isArray(job.subtasks) && job.subtasks.length > 0)
+    || !!job.isMilestone;
 }
 
 /* ---- main scheduler: cycle-safe topological forward pass (Kahn) ----
@@ -143,9 +144,9 @@ export function computeSchedule(jobs, settings) {
 
     if (!baseStart) { finishById.set(id, job.targetDate || null); continue; }
     const newStart = addWorkDays(baseStart, 0, s);
-    // a job with phases gets its finish from the phase chain; otherwise from its own duration
-    const subL = (job.subtasks && job.subtasks.length) ? layoutSubtasks(job.subtasks, newStart, s) : null;
-    const newFinish = subL && subL.length ? subL[subL.length - 1].finish : finishOf(newStart, dur, s);
+    // milestones are zero-duration markers; phased jobs roll up to their last phase
+    const subL = (!job.isMilestone && job.subtasks && job.subtasks.length) ? layoutSubtasks(job.subtasks, newStart, s) : null;
+    const newFinish = job.isMilestone ? newStart : (subL && subL.length ? subL[subL.length - 1].finish : finishOf(newStart, dur, s));
     finishById.set(id, newFinish);
     if (job.startDate !== newStart || job.targetDate !== newFinish) {
       job.startDate = newStart; job.targetDate = newFinish; changed.push(job);
@@ -187,22 +188,42 @@ export function computeCriticalPath(jobs, settings) {
    date ranges overlap. Returns:
      byJob: Map(jobId -> [{ crewId, otherId }])  (per-job conflicts, both sides)
      pairs: [{ crewId, aId, bId, from, to }]      (unique clashes + overlap range) */
-export function findOverAllocations(jobs) {
+export function findOverAllocations(jobs, settings) {
+  const s = settings || DEFAULT_SETTINGS;
   const byJob = new Map(), pairs = [];
-  const add = (id, crewId, otherId) => { (byJob.get(id) || byJob.set(id, []).get(id)).push({ crewId, otherId }); };
-  const byCrew = new Map();
+  const seenJob = new Set(), seenPair = new Set();
+  const add = (id, crewId, otherId) => {
+    const k = id + "|" + crewId + "|" + otherId;
+    if (seenJob.has(k)) return; seenJob.add(k);
+    (byJob.get(id) || byJob.set(id, []).get(id)).push({ crewId, otherId });
+  };
+  // crew assignments: phase-level when a job's phases carry crew, else job-level
+  const asg = [];
   for (const j of jobs) {
-    if (!j.startDate || !j.targetDate) continue;
-    for (const cid of (j.crewIds || [])) (byCrew.get(cid) || byCrew.set(cid, []).get(cid)).push(j);
+    if (j.isMilestone || !j.startDate) continue;
+    const phases = j.subtasks || [];
+    if (phases.some((st) => (st.crewIds || []).length)) {
+      for (const { sub, start, finish } of layoutSubtasks(phases, j.startDate, s))
+        for (const cid of (sub.crewIds || [])) asg.push({ crewId: cid, jobId: j.id, start, finish });
+    } else if (j.targetDate) {
+      for (const cid of (j.crewIds || [])) asg.push({ crewId: cid, jobId: j.id, start: j.startDate, finish: j.targetDate });
+    }
   }
+  const byCrew = new Map();
+  for (const a of asg) (byCrew.get(a.crewId) || byCrew.set(a.crewId, []).get(a.crewId)).push(a);
   for (const [cid, list] of byCrew) {
-    for (let a = 0; a < list.length; a++) for (let b = a + 1; b < list.length; b++) {
-      const A = list[a], B = list[b];
-      if (A.startDate <= B.targetDate && B.startDate <= A.targetDate) {
-        add(A.id, cid, B.id); add(B.id, cid, A.id);
-        pairs.push({ crewId: cid, aId: A.id, bId: B.id,
-          from: A.startDate > B.startDate ? A.startDate : B.startDate,
-          to: A.targetDate < B.targetDate ? A.targetDate : B.targetDate });
+    for (let i = 0; i < list.length; i++) for (let k = i + 1; k < list.length; k++) {
+      const A = list[i], B = list[k];
+      if (A.jobId === B.jobId) continue;                 // same job — sequential, not a clash
+      if (A.start <= B.finish && B.start <= A.finish) {
+        add(A.jobId, cid, B.jobId); add(B.jobId, cid, A.jobId);
+        const lo = A.jobId < B.jobId ? A.jobId : B.jobId, hi = A.jobId < B.jobId ? B.jobId : A.jobId;
+        const pk = cid + "|" + lo + "|" + hi;
+        if (!seenPair.has(pk)) {
+          seenPair.add(pk);
+          pairs.push({ crewId: cid, aId: A.jobId, bId: B.jobId,
+            from: A.start > B.start ? A.start : B.start, to: A.finish < B.finish ? A.finish : B.finish });
+        }
       }
     }
   }
