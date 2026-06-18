@@ -716,6 +716,7 @@ function paintGantt() {
 
   // ----- rows (collect bar geometry for dependency arrows) -----
   const geo = new Map();
+  const phaseLinks = [];   // red connectors between consecutive phases of a critical job
   const rowH = 40, barMid = 20, headerH = monthMode ? 22 : 40;
   const rows = [];
   let vi = 0;   // running visual row index (accounts for expanded phase rows)
@@ -787,24 +788,33 @@ function paintGantt() {
         title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "start no earlier than " + fmtShort(j.notBefore) }, "🔒"));
     }
     const subs = j.subtasks || [];
-    const expanded = subs.length && ganttExpanded.has(j.id);
+    const isCrit = ganttCritical && critical.has(j.id);
+    const manualExpanded = ganttExpanded.has(j.id);
+    const expanded = subs.length && (manualExpanded || isCrit);   // critical-path lens auto-expands critical jobs
     const toggle = subs.length ? h("span", { class: "gantt__toggle", title: expanded ? "Collapse phases" : "Show phases",
-      onclick: (e) => { e.stopPropagation(); if (expanded) ganttExpanded.delete(j.id); else ganttExpanded.add(j.id); paintGantt(); } }, expanded ? "▾ " : "▸ ") : null;
+      onclick: (e) => { e.stopPropagation(); if (manualExpanded) ganttExpanded.delete(j.id); else ganttExpanded.add(j.id); paintGantt(); } }, expanded ? "▾ " : "▸ ") : null;
     rows.push(h("div", { class: "gantt__row" },
       h("div", { class: "gantt__label", title: j.title || j.customer || "Job" }, toggle, (j.title || j.customer || "Job")),
       track));
     vi++;
     if (expanded) {
+      const subCls = ganttCritical ? (critical.has(j.id) ? " crit" : " dim") : "";
+      let prevPhase = null;
       for (const { sub, start, finish } of layoutSubtasks(subs, j.startDate, settings)) {
         const sLeft = dayDiff(startISO, start) * dayW;
         const sW = Math.max((dayDiff(start, finish) + 1) * dayW - 2, 6);
-        const sBar = h("div", { class: "gantt__bar gantt__bar--sub", style: `left:${sLeft}px;width:${sW}px;border-left-color:${stageOf(j.stage).color}`,
+        const phaseY = headerH + vi * rowH + barMid;
+        const sBar = h("div", { class: "gantt__bar gantt__bar--sub" + subCls, style: `left:${sLeft}px;width:${sW}px;border-left-color:${stageOf(j.stage).color}`,
           title: `${sub.name || "Phase"}\n${fmtShort(start)} – ${fmtShort(finish)}`, onclick: () => openJobModal(j) }, sub.name || "Phase");
         const sTrack = h("div", { class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""), style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`) }, sBar);
         if (monthMode) for (const b of monthBounds) sTrack.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
         if (todayX >= 0) sTrack.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
         rows.push(h("div", { class: "gantt__row gantt__row--sub" },
           h("div", { class: "gantt__label" }, "↳ " + (sub.name || "Phase")), sTrack));
+        if (isCrit) {
+          if (prevPhase) phaseLinks.push({ x1: 180 + prevPhase.right, y1: prevPhase.y, x2: 180 + sLeft, y2: phaseY });
+          prevPhase = { right: sLeft + sW, y: phaseY };
+        }
         vi++;
       }
     }
@@ -824,6 +834,10 @@ function paintGantt() {
       const cls = "gantt__dep" + (ganttCritical ? (critLink ? " crit" : " dim") : "");
       segs.push(`<path d="M${x1},${y1} H${x1 + 8} V${y2} H${x2}" class="${cls}" marker-end="url(#${critLink ? "garrowcrit" : "garrow"})"/>`);
     }
+  }
+  // red connectors flowing through a critical job's phases
+  for (const p of phaseLinks) {
+    segs.push(`<path d="M${p.x1},${p.y1} H${p.x1 + 6} V${p.y2} H${p.x2}" class="gantt__dep crit" marker-end="url(#garrowcrit)"/>`);
   }
   if (segs.length) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
