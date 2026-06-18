@@ -205,8 +205,10 @@ table.rtable .num.under { color: var(--green); }
 .gantt__row:last-child { border-bottom: 0; }
 .gantt__label { position: sticky; left: 0; z-index: 2; width: 180px; flex: 0 0 180px; background: #fff; border-right: 1px solid var(--line); padding: 0 10px; display: flex; align-items: center; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gantt__track { position: relative; height: 40px; flex: 0 0 auto; background: repeating-linear-gradient(to right, transparent 0, transparent calc(var(--gw) - 1px), #e3e9f0 calc(var(--gw) - 1px), #e3e9f0 var(--gw)); }
-.gantt__bar { position: absolute; top: 8px; height: 24px; background: #fff; border: 1px solid var(--line); border-left: 5px solid var(--orange); border-radius: 6px; color: var(--ink); font-size: 11.5px; font-weight: 700; display: flex; align-items: center; padding: 0 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: pointer; box-shadow: var(--shadow); }
+.gantt__bar { position: absolute; top: 8px; height: 24px; background: #fff; border: 1px solid var(--line); border-left: 5px solid var(--orange); border-radius: 6px; color: var(--ink); font-size: 11.5px; font-weight: 700; display: flex; align-items: center; padding: 0 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; cursor: grab; box-shadow: var(--shadow); touch-action: none; user-select: none; z-index: 2; }
 .gantt__bar:hover { border-color: var(--orange); }
+.gantt__bar.dragging { cursor: grabbing; box-shadow: var(--shadow-lg); opacity: .9; }
+.gantt__deps .gantt__dep { stroke: #9aa6b5; stroke-width: 1.5; fill: none; opacity: .75; }
 .gantt__today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--orange-dark); opacity: .7; z-index: 1; }
 .gantt__track--plain { background: none; }
 .gantt__mline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); z-index: 0; }
@@ -243,4 +245,19 @@ table.rtable .num.under { color: var(--green); }
   .gantt__inner { min-width: 0 !important; width: max-content !important; }
   .gantt__label, .gantt__corner, .gantt__header { position: static !important; }
   .gantt__row { break-inside: avoid; }
+  .gantt__deps { display: none !important; }
 }
+
+/* ---------- scheduling UI (job editor Schedule section + settings) ---------- */
+.schedsec { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 12px; }
+.schedsec__h { font-size: 13px; font-weight: 800; color: var(--navy); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .4px; }
+.schedsec__dur { display: inline-flex; align-items: center; min-height: 40px; font-weight: 700; color: var(--orange-dark); }
+.crewpick label .predname { flex: 1; }
+.crewpick label.is-off { opacity: .45; cursor: not-allowed; }
+.lagnum { width: 54px; min-width: 54px; min-height: 30px; padding: 2px 6px; text-align: center; }
+.laglbl { font-size: 11px; color: var(--muted); }
+.dowrow { display: flex; flex-wrap: wrap; gap: 6px; }
+.dowbox { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer; background: #fff; }
+.dowbox.on { border-color: var(--orange); background: var(--brand-tint, #fde7da); color: var(--orange-dark); }
+.dowbox input { display: none; }
+.holwrap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }

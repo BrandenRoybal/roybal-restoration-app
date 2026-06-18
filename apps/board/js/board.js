@@ -9,7 +9,9 @@ import {
   SYNC_ENABLED, isSignedIn, signIn, signOut, currentEmail,
   cachedJobs, cachedCrew, cachedEntries, pull, saveJob, deleteJob,
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
+  cachedSettings, saveSettings,
 } from "./data.js";
+import { computeSchedule, durationOf, wouldCreateCycle, DEFAULT_SETTINGS } from "./schedule.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -46,6 +48,7 @@ const view = $("#view");
 let jobs = [];
 let crew = [];
 let entries = [];
+let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
 let filterText = "", filterCrew = "", filterType = "";
 let modalOpen = false;
 let pollTimer = null;
@@ -76,7 +79,7 @@ const daysAgoISO = (n) => { const d = new Date(); d.setDate(d.getDate() - n); re
    boot / auth
    ============================================================ */
 function boot() {
-  if (!SYNC_ENABLED) { jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries(); render(); return; }
+  if (!SYNC_ENABLED) { jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries(); applySchedule(); render(); return; }
   if (isSignedIn()) startUI();
   else renderLogin();
 }
@@ -85,6 +88,7 @@ async function startUI() {
   $("#acctEmail").textContent = currentEmail();
   $("#signOutBtn").hidden = false;
   jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries();
+  applySchedule();
   render();              // instant from cache
   await refresh();            // then from server
   startPoll();
@@ -102,11 +106,29 @@ async function refresh() {
   try {
     const r = await pull();
     jobs = r.jobs; crew = r.crew; entries = r.entries || [];
+    applySchedule();
     setSync(pendingCount() ? "error" : "synced");
     if (!modalOpen) render();
   } catch {
     setSync("offline");
   }
+}
+
+/* ---------- scheduling engine glue ----------
+   applySchedule recomputes derived start/finish dates in memory (no writes).
+   recomputeAndPersist additionally saves every job the engine moved. */
+function applySchedule() {
+  settings = cachedSettings();
+  return computeSchedule(jobs, settings);   // { changed, cyclic }; mutates jobs in place
+}
+async function recomputeAndPersist() {
+  const { changed } = applySchedule();
+  if (changed.length) {
+    setSync("syncing");
+    for (const j of changed) await saveJob(j);
+    setSync(pendingCount() ? "error" : "synced");
+  }
+  if (!modalOpen) render(); else repaint();
 }
 
 function setSync(state) {
@@ -228,12 +250,60 @@ function filterControls() {
 
 function actionButtons() {
   return [
+    h("button", { class: "btn btn--ghost btn--sm", onclick: openScheduleSettings, title: "Work calendar & hours per day" }, "🗓 Calendar"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "↻ Refresh"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: exportPDF, title: "Print / save as PDF" }, "🖨 PDF"),
     h("button", { class: "btn btn--primary btn--sm", onclick: () => openJobModal(null) }, "+ New Job"),
   ];
+}
+
+/* ---------- work-calendar settings modal ---------- */
+function openScheduleSettings() {
+  const s = cachedSettings();
+  const DOW = [["Sun", 0], ["Mon", 1], ["Tue", 2], ["Wed", 3], ["Thu", 4], ["Fri", 5], ["Sat", 6]];
+  const dayBoxes = DOW.map(([lbl, idx]) => {
+    const cb = h("input", { type: "checkbox", checked: s.workDays.includes(idx) });
+    const el = h("label", { class: "dowbox" + (s.workDays.includes(idx) ? " on" : "") }, cb, lbl);
+    cb.addEventListener("change", () => el.classList.toggle("on", cb.checked));
+    return { idx, cb, el };
+  });
+  const hpd = h("input", { type: "number", min: "1", max: "24", step: "0.5", value: s.hoursPerDay });
+
+  let holidays = [...(s.holidays || [])].sort();
+  const holWrap = h("div", { class: "holwrap" });
+  const renderHol = () => {
+    clear(holWrap);
+    if (!holidays.length) { holWrap.append(h("span", { class: "subtle" }, "None")); return; }
+    for (const d of holidays) holWrap.append(h("span", { class: "chip" }, fmtShort(d),
+      h("button", { class: "linkx", title: "remove", onclick: () => { holidays = holidays.filter((x) => x !== d); renderHol(); } }, "×")));
+  };
+  renderHol();
+  const holDate = h("input", { type: "date" });
+  const holAdd = h("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => {
+    if (holDate.value && !holidays.includes(holDate.value)) { holidays.push(holDate.value); holidays.sort(); holDate.value = ""; renderHol(); }
+  } }, "+ Add");
+
+  const body = h("div", { class: "bmodal__body" },
+    h("p", { class: "subtle", style: "margin-top:0" }, "Drives every auto-scheduled job — durations and the dates jobs land on. Changing this re-flows the whole timeline."),
+    field("Working days", h("div", { class: "dowrow" }, ...dayBoxes.map((d) => d.el))),
+    field("Hours per work day", h("div", { class: "grid2" }, hpd, h("span", { class: "subtle", style: "align-self:center" }, "e.g. 10 in summer · 8 in winter"))),
+    field("Holidays (skipped)", h("div", {}, h("div", { class: "haddrow" }, holDate, holAdd), holWrap)));
+
+  const save = h("button", { class: "btn btn--primary" }, "Save & re-flow");
+  save.addEventListener("click", async () => {
+    const workDays = dayBoxes.filter((d) => d.cb.checked).map((d) => d.idx).sort((a, b) => a - b);
+    if (!workDays.length) { toast("Pick at least one working day"); return; }
+    const next = { workDays, hoursPerDay: Math.max(1, Number(hpd.value) || 10), holidays: holidays.slice() };
+    save.disabled = true;
+    closeModal();
+    await saveSettings(next);
+    await recomputeAndPersist();
+    toast("Schedule settings saved");
+  });
+  openModal("Schedule settings", body, h("div", { class: "bmodal__foot" },
+    h("button", { class: "btn btn--ghost", onclick: closeModal }, "Cancel"), save));
 }
 
 /* ---------- export / print to PDF ----------
@@ -581,17 +651,47 @@ function paintGantt() {
     h("div", { class: "gantt__corner" }, "Job"),
     h("div", { class: "gantt__scale", style: `width:${trackW}px` }, ...scaleChildren));
 
-  // ----- rows -----
-  const rows = dated.map(({ j, s, t }) => {
+  // ----- rows (collect bar geometry for dependency arrows) -----
+  const geo = new Map();
+  const rowH = 40, barMid = 20, headerH = monthMode ? 22 : 40;
+  const rows = dated.map(({ j, s, t }, ri) => {
     const left = dayDiff(startISO, s) * dayW;
     const w = Math.max((dayDiff(s, t) + 1) * dayW - 2, 8);
+    geo.set(j.id, { ri, left, w });
     const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
     const hrs = est ? `  ·  ${Math.round(act * 100) / 100}/${est}h` : (act ? `  ·  ${fmtH(act)}` : "");
     const bar = h("div", {
       class: "gantt__bar", style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}`,
-      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}`,
-      onclick: () => openJobModal(j),
+      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}\n(drag to reschedule)`,
+      onclick: () => { if (bar._dragged) { bar._dragged = false; return; } openJobModal(j); },
     }, (j.title || j.customer || "Job") + hrs);
+    // drag-to-reschedule: pins the job to a manual start, then cascades dependents
+    let drag = null;
+    bar.addEventListener("pointerdown", (e) => {
+      if (e.button) return;
+      drag = { x: e.clientX };
+      try { bar.setPointerCapture(e.pointerId); } catch {}
+    });
+    bar.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x;
+      if (!drag.moved && Math.abs(dx) < 4) return;
+      drag.moved = true; bar.classList.add("dragging");
+      bar.style.left = (left + dx) + "px";
+    });
+    bar.addEventListener("pointerup", async (e) => {
+      if (!drag) return;
+      const moved = drag.moved, dx = e.clientX - drag.x; drag = null;
+      bar.classList.remove("dragging");
+      try { bar.releasePointerCapture(e.pointerId); } catch {}
+      if (!moved) return;                 // a plain click → onclick opens the editor
+      bar._dragged = true;                // swallow the click event that follows
+      const daysMoved = Math.round(dx / dayW);
+      if (!daysMoved) { paintGantt(); return; }
+      j.scheduleMode = "manual";
+      j.pinnedStart = toISO(addDays(new Date(s + "T00:00:00"), daysMoved));
+      await recomputeAndPersist();
+    });
     const track = h("div", {
       class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""),
       style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`),
@@ -603,7 +703,29 @@ function paintGantt() {
       track);
   });
 
-  wrap.append(h("div", { class: "gantt__inner", style: `width:${180 + trackW}px` }, header, ...rows));
+  const inner = h("div", { class: "gantt__inner", style: `width:${180 + trackW}px;position:relative` }, header, ...rows);
+
+  // ----- dependency arrows (SVG overlay; pointer-events:none so bars stay interactive) -----
+  const segs = [];
+  for (const { j } of dated) {
+    const sg = geo.get(j.id); if (!sg) continue;
+    for (const d of (j.deps || [])) {
+      const pg = geo.get(d.predId); if (!pg) continue;
+      const x1 = 180 + pg.left + pg.w, y1 = headerH + pg.ri * rowH + barMid;
+      const x2 = 180 + sg.left, y2 = headerH + sg.ri * rowH + barMid;
+      segs.push(`<path d="M${x1},${y1} H${x1 + 8} V${y2} H${x2}" class="gantt__dep" marker-end="url(#garrow)"/>`);
+    }
+  }
+  if (segs.length) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "gantt__deps");
+    svg.setAttribute("width", 180 + trackW); svg.setAttribute("height", headerH + dated.length * rowH);
+    svg.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:1";
+    svg.innerHTML = '<defs><marker id="garrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9aa6b5"/></marker></defs>' + segs.join("");
+    inner.append(svg);
+  }
+
+  wrap.append(inner);
 
   if (unsched.length) {
     wrap.append(h("div", { class: "calunsched" },
@@ -624,12 +746,16 @@ function openJobModal(existing) {
     id: uid(), stage: "lead", type: "remodel", priority: "normal", materials: "none",
     crewIds: [], title: "", customer: "", address: "", phone: "", startDate: "", targetDate: "",
     estimatedHours: "", fieldJobId: "", notes: "",
+    deps: [], durationDays: null, scheduleMode: "auto", pinnedStart: "",
   };
   j.crewIds = [...(j.crewIds || [])];
+  j.deps = (j.deps || []).map((d) => ({ ...d }));
+  if (!j.scheduleMode) j.scheduleMode = "auto";
 
   const f = {};
   const inp = (key, attrs) => (f[key] = h("input", { value: j[key] || "", ...attrs }));
   const sel = (key, options) => (f[key] = h("select", {}, ...options.map((o) => h("option", { value: o.id, selected: (j[key] || options[0].id) === o.id }, o.label))));
+  let refreshDur = () => {};   // assigned by the Schedule section; called when crew/hours change
 
   // crew multiselect
   const crewPick = h("div", { class: "crewpick" });
@@ -641,10 +767,64 @@ function openJobModal(existing) {
     cb.addEventListener("change", () => {
       if (cb.checked) { if (!j.crewIds.includes(c.id)) j.crewIds.push(c.id); lab.classList.add("on"); }
       else { j.crewIds = j.crewIds.filter((x) => x !== c.id); lab.classList.remove("on"); }
+      refreshDur();
     });
     crewPick.append(lab);
   }
   if (!activeCrew().length) crewPick.append(h("span", { class: "subtle" }, "No crew yet — add some via the Crew button."));
+
+  // ----- schedule section (links, mode, duration) -----
+  const durOut = h("span", { class: "schedsec__dur" });
+  refreshDur = () => {
+    const d = durationOf(j, settings);
+    durOut.textContent = `${d} work day${d === 1 ? "" : "s"}` + (j.durationDays != null ? " (override)" : (Number(j.estimatedHours) > 0 ? " — from hours" : ""));
+  };
+  const durInp = h("input", { type: "number", min: "1", step: "1", placeholder: "Auto", value: j.durationDays != null ? j.durationDays : "" });
+  durInp.addEventListener("input", () => { j.durationDays = durInp.value ? Math.max(1, Math.round(Number(durInp.value))) : null; refreshDur(); });
+
+  const pinField = h("div", { class: "field", style: j.scheduleMode === "manual" ? "" : "display:none" },
+    h("label", {}, "Pinned start date"),
+    (f.pinnedStart = h("input", { type: "date", value: j.pinnedStart || j.startDate || "" })));
+  let mAuto, mManual;
+  const setMode = (m) => {
+    j.scheduleMode = m;
+    mAuto.classList.toggle("on", m === "auto");
+    mManual.classList.toggle("on", m === "manual");
+    pinField.style.display = m === "manual" ? "" : "none";
+    if (m === "manual" && !f.pinnedStart.value) f.pinnedStart.value = j.startDate || todayISO();
+  };
+  mAuto = h("button", { class: "vsw__b" + (j.scheduleMode !== "manual" ? " on" : ""), type: "button", onclick: () => setMode("auto") }, "Auto (follow links)");
+  mManual = h("button", { class: "vsw__b" + (j.scheduleMode === "manual" ? " on" : ""), type: "button", onclick: () => setMode("manual") }, "Manual (pin start)");
+
+  const predWrap = h("div", { class: "crewpick" });
+  const otherJobs = jobs.filter((x) => x.id !== j.id)
+    .sort((a, b) => (a.title || a.customer || "").localeCompare(b.title || b.customer || ""));
+  for (const o of otherJobs) {
+    const linked = j.deps.find((d) => d.predId === o.id);
+    const cyc = !linked && wouldCreateCycle(j.id, o.id, jobs);
+    const cb = h("input", { type: "checkbox", checked: !!linked, disabled: cyc });
+    const lag = h("input", { type: "number", min: "0", step: "1", class: "lagnum", value: linked ? (linked.lagDays || 0) : 0, title: "lag (calendar days)", style: linked ? "" : "display:none" });
+    const lagUnit = h("span", { class: "laglbl", style: linked ? "" : "display:none" }, "d lag");
+    const lab = h("label", { class: (linked ? "on" : "") + (cyc ? " is-off" : ""), title: cyc ? "Would create a circular link" : "" },
+      cb, h("span", { class: "predname" }, o.title || o.customer || "Job"), lag, lagUnit);
+    cb.addEventListener("change", () => {
+      if (cb.checked) { j.deps.push({ predId: o.id, type: "FS", lagDays: Math.max(0, Math.round(Number(lag.value) || 0)) }); lab.classList.add("on"); lag.style.display = ""; lagUnit.style.display = ""; }
+      else { j.deps = j.deps.filter((d) => d.predId !== o.id); lab.classList.remove("on"); lag.style.display = "none"; lagUnit.style.display = "none"; }
+    });
+    lag.addEventListener("input", () => { const d = j.deps.find((x) => x.predId === o.id); if (d) d.lagDays = Math.max(0, Math.round(Number(lag.value) || 0)); });
+    predWrap.append(lab);
+  }
+  if (!otherJobs.length) predWrap.append(h("span", { class: "subtle" }, "No other jobs to link to yet."));
+
+  const scheduleSection = h("div", { class: "schedsec" },
+    h("div", { class: "schedsec__h" }, "🗓 Schedule"),
+    field("Scheduling mode", h("div", { class: "vsw" }, mAuto, mManual)),
+    pinField,
+    field("Start after these jobs finish (+ lag days)", predWrap),
+    h("div", { class: "grid2" },
+      field("Duration override (work days)", durInp),
+      field("Computed duration", durOut)));
+  refreshDur();
 
   const body = h("div", { class: "bmodal__body" },
     field("Job / Customer name", inp("title", { type: "text", placeholder: "e.g. Smith Kitchen Remodel" })),
@@ -663,9 +843,16 @@ function openJobModal(existing) {
       field("Estimated hours", inp("estimatedHours", { type: "number", min: "0", step: "1", placeholder: "e.g. 40" })),
       field("Materials", sel("materials", MATERIALS))),
     field("Assigned crew", crewPick),
+    scheduleSection,
     field("Notes", (f.notes = h("textarea", { placeholder: "Scope, scheduling notes, gate codes…" }, j.notes || ""))),
     isNew ? h("p", { class: "subtle", style: "margin:14px 0 0" }, "💾 Create the job, then reopen it to log time.") : buildJobHoursSection(j),
   );
+
+  // keep the computed-duration readout live as hours are typed
+  f.estimatedHours.addEventListener("input", () => {
+    j.estimatedHours = f.estimatedHours.value ? Number(f.estimatedHours.value) : "";
+    refreshDur();
+  });
 
   const saveBtn = h("button", { class: "btn btn--primary" }, isNew ? "Create job" : "Save");
   saveBtn.addEventListener("click", async () => {
@@ -677,12 +864,17 @@ function openJobModal(existing) {
       startDate: f.startDate.value, targetDate: f.targetDate.value,
       estimatedHours: f.estimatedHours.value ? Number(f.estimatedHours.value) : "",
       notes: f.notes.value.trim(),
+      pinnedStart: j.scheduleMode === "manual" ? (f.pinnedStart.value || "") : (j.pinnedStart || ""),
     });
+    // j.deps / j.scheduleMode / j.durationDays are mutated live by the Schedule section
     saveBtn.disabled = true;
-    // update local list immediately
     jobs = [...jobs.filter((x) => x.id !== j.id), j];
-    closeModal(); render();
-    setSync("syncing"); await saveJob(j); setSync(pendingCount() ? "error" : "synced");
+    const { changed } = applySchedule();        // resolve j's dates + cascade dependents
+    closeModal();                                // re-renders the board with final dates
+    setSync("syncing");
+    await saveJob(j);
+    for (const o of changed) if (o.id !== j.id) await saveJob(o);
+    setSync(pendingCount() ? "error" : "synced");
     toast(isNew ? "Job created" : "Saved");
   });
 

@@ -12,6 +12,7 @@
    ============================================================ */
 import { SYNC_ENABLED } from "../../js/config.js";
 import { rest, isSignedIn, signIn, signOut, currentEmail } from "../../js/supa.js";
+import { DEFAULT_SETTINGS } from "./schedule.js";
 
 /* re-export auth so the UI imports everything board-related from here */
 export { isSignedIn, signIn, signOut, currentEmail, SYNC_ENABLED };
@@ -23,13 +24,28 @@ const J_KEY = "roybal-board-jobs";
 const C_KEY = "roybal-board-crew";
 const T_KEY = "roybal-board-time";
 const Q_KEY = "roybal-board-queue";
+const S_KEY = "roybal-board-settings";
+/* schedule settings ride in the jobs table under one reserved id so the work
+   calendar syncs across devices with no new table. It's filtered out of jobs. */
+const SETTINGS_ID = "__settings__";
 
 /* ---------- local cache ---------- */
 function readCache(k) { try { return JSON.parse(localStorage.getItem(k) || "[]"); } catch { return []; } }
+function readObj(k) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } }
 function writeCache(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
-export function cachedJobs() { return readCache(J_KEY); }
+export function cachedJobs() { return readCache(J_KEY).filter((j) => j && j.id !== SETTINGS_ID); }
 export function cachedCrew() { return readCache(C_KEY); }
 export function cachedEntries() { return readCache(T_KEY); }
+export function cachedSettings() { return { ...DEFAULT_SETTINGS, ...(readObj(S_KEY) || {}) }; }
+
+/* ---------- schedule settings (work calendar) ---------- */
+export async function saveSettings(s) {
+  writeCache(S_KEY, s);
+  const row = { id: SETTINGS_ID, data: s, deleted: false };
+  if (!SYNC_ENABLED) return s;
+  try { await upsert(JOBS_TABLE, [row]); } catch { enqueue(JOBS_TABLE, row); }
+  return s;
+}
 
 /* ---------- offline write queue ---------- */
 function queue() { return readCache(Q_KEY); }
@@ -71,7 +87,9 @@ export async function pull() {
   if (!SYNC_ENABLED) return { jobs: cachedJobs(), crew: cachedCrew(), entries: cachedEntries() };
   await flushQueue();
   const [jrows, crows, trows] = await Promise.all([getAll(JOBS_TABLE), getAll(CREW_TABLE), getAll(TIME_TABLE)]);
-  const jobs = jrows.filter((r) => !r.deleted).map((r) => r.data);
+  const srow = jrows.find((r) => r.id === SETTINGS_ID && !r.deleted);
+  if (srow && srow.data) writeCache(S_KEY, srow.data);
+  const jobs = jrows.filter((r) => !r.deleted && r.id !== SETTINGS_ID).map((r) => r.data);
   const crew = crows.filter((r) => !r.deleted).map((r) => r.data);
   const entries = trows.filter((r) => !r.deleted).map((r) => r.data);
   writeCache(J_KEY, jobs);
