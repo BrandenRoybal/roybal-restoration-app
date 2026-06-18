@@ -308,9 +308,9 @@ export default function FloorPlanEditor({ jobId }: Props) {
   const canRedo = redoStack.current.length > 0;
 
   return (
-    <div className="flex flex-col h-full rounded-2xl overflow-hidden border border-[#1E293B] bg-[#060E1A]" style={{ minHeight: 520 }}>
+    <div className="flex flex-col h-full rounded-2xl overflow-hidden border border-[#1f3354] bg-[#060E1A]" style={{ minHeight: 520 }}>
       {/* Toolbar */}
-      <div className="flex items-center gap-1 px-3 py-2 bg-[#0A1628] border-b border-[#1E293B] flex-wrap">
+      <div className="flex items-center gap-1 px-3 py-2 bg-[#0f1b2d] border-b border-[#1f3354] flex-wrap">
         {/* Mode buttons */}
         <ToolGroup>
           <ToolBtn active={mode === 'select'} onClick={() => setMode('select')} title="Select (V)">
@@ -330,7 +330,7 @@ export default function FloorPlanEditor({ jobId }: Props) {
             {(['door', 'window', 'opening'] as OpeningPlacementType[]).map((t) => (
               <button key={t}
                 onClick={() => setOpeningType(t)}
-                className={`h-7 px-2.5 text-xs font-bold rounded-lg capitalize transition-colors ${openingType === t ? 'bg-[#F97316] text-[#0F172A]' : 'text-slate-400 hover:text-slate-200 hover:bg-[#1E293B]'}`}
+                className={`h-7 px-2.5 text-xs font-bold rounded-lg capitalize transition-colors ${openingType === t ? 'bg-[#f26a21] text-[#16263d]' : 'text-slate-400 hover:text-slate-200 hover:bg-[#1f3354]'}`}
               >
                 {t}
               </button>
@@ -372,7 +372,7 @@ export default function FloorPlanEditor({ jobId }: Props) {
         <button
           onClick={saveNow}
           disabled={saving}
-          className="flex items-center gap-1.5 h-7 px-3 text-xs font-bold bg-[#F97316]/10 border border-[#F97316]/30 text-[#F97316] rounded-lg hover:bg-[#F97316]/20 disabled:opacity-50 transition-colors"
+          className="flex items-center gap-1.5 h-7 px-3 text-xs font-bold bg-[#f26a21]/10 border border-[#f26a21]/30 text-[#f26a21] rounded-lg hover:bg-[#f26a21]/20 disabled:opacity-50 transition-colors"
           title="Save (⌘S)"
         >
           <Save size={13} className={saving ? 'animate-pulse' : ''} />
@@ -386,7 +386,7 @@ export default function FloorPlanEditor({ jobId }: Props) {
       </div>
 
       {/* Mode hint */}
-      <div className="px-4 py-1.5 bg-[#0A1628] border-b border-[#1E293B] flex items-center justify-between">
+      <div className="px-4 py-1.5 bg-[#0f1b2d] border-b border-[#1f3354] flex items-center justify-between">
         <p className="text-xs text-slate-600">
           {mode === 'draw' && 'Click to place corners · Double-click or click first point to close room · Esc to cancel'}
           {mode === 'select' && 'Click to select · Drag walls/corners/rooms · Click dimension label to edit · Delete key removes selection'}
@@ -421,7 +421,7 @@ export default function FloorPlanEditor({ jobId }: Props) {
 
         {/* Inspector panel */}
         {showInspector && (
-          <div className="w-56 border-l border-[#1E293B] bg-[#0A1628] flex-shrink-0 overflow-y-auto">
+          <div className="w-56 border-l border-[#1f3354] bg-[#0f1b2d] flex-shrink-0 overflow-y-auto">
             <Inspector
               selection={selection}
               rooms={rooms}
@@ -457,7 +457,7 @@ export default function FloorPlanEditor({ jobId }: Props) {
 // ── Sub-components ───────────────────────────────────────────
 
 function ToolGroup({ children }: { children: React.ReactNode }) {
-  return <div className="flex items-center gap-0.5 bg-[#0F172A] rounded-lg p-0.5">{children}</div>;
+  return <div className="flex items-center gap-0.5 bg-[#16263d] rounded-lg p-0.5">{children}</div>;
 }
 
 function ToolBtn({ active, onClick, children, title, disabled }: {
@@ -469,7 +469,7 @@ function ToolBtn({ active, onClick, children, title, disabled }: {
       disabled={disabled}
       title={title}
       className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors disabled:opacity-30 ${
-        active ? 'bg-[#F97316] text-[#0F172A]' : 'text-slate-400 hover:text-slate-200 hover:bg-[#1E293B]'
+        active ? 'bg-[#f26a21] text-[#16263d]' : 'text-slate-400 hover:text-slate-200 hover:bg-[#1f3354]'
       }`}
     >
       {children}

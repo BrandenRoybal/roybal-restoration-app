@@ -41,18 +41,18 @@ interface Props {
   onDimensionLabelClick: (roomId: string, wallIndex: number) => void;
 }
 
-const GRID_COLOR = '#1E293B';
+const GRID_COLOR = '#1f3354';
 const ROOM_FILL = 'rgba(249,115,22,0.08)';
 const ROOM_FILL_SELECTED = 'rgba(249,115,22,0.18)';
 const WALL_COLOR = '#64748B';
-const WALL_COLOR_SELECTED = '#F97316';
+const WALL_COLOR_SELECTED = '#f26a21';
 const VERTEX_RADIUS = 6;
 const VERTEX_RADIUS_TOUCH = 14;
-const DOOR_COLOR = '#22C55E';
+const DOOR_COLOR = '#1f9d55';
 const WINDOW_COLOR = '#3B82F6';
 const OPENING_COLOR = '#A855F7';
 const DIM_LABEL_COLOR = '#94A3B8';
-const DIM_LABEL_SELECTED = '#F97316';
+const DIM_LABEL_SELECTED = '#f26a21';
 
 function isTouchDevice() {
   return 'ontouchstart' in window;
@@ -482,8 +482,8 @@ export default function EditorCanvas({
             <circle
               key={vi}
               cx={sp.x} cy={sp.y} r={isVSel ? touchR + 2 : touchR}
-              fill={isVSel ? '#F97316' : '#1E293B'}
-              stroke={isVSel ? '#F97316' : '#64748B'}
+              fill={isVSel ? '#f26a21' : '#1f3354'}
+              stroke={isVSel ? '#f26a21' : '#64748B'}
               strokeWidth={2}
               style={{ cursor: 'grab' }}
             />
@@ -570,18 +570,18 @@ export default function EditorCanvas({
       <g>
         <polyline
           points={screenPts.map((p) => `${p.x},${p.y}`).join(' ')}
-          fill="none" stroke="#F97316" strokeWidth={2} strokeDasharray="6 4"
+          fill="none" stroke="#f26a21" strokeWidth={2} strokeDasharray="6 4"
         />
         {drawPoints.map((p, i) => {
           const sp = worldToScreen(p, scale, pan);
-          return <circle key={i} cx={sp.x} cy={sp.y} r={5} fill={i === 0 ? '#F97316' : '#64748B'} />;
+          return <circle key={i} cx={sp.x} cy={sp.y} r={5} fill={i === 0 ? '#f26a21' : '#64748B'} />;
         })}
         {/* Close polygon hint */}
         {drawPoints.length >= 3 && (() => {
           const first = worldToScreen(drawPoints[0]!, scale, pan);
           return (
             <circle cx={first.x} cy={first.y} r={12}
-              fill="rgba(249,115,22,0.2)" stroke="#F97316" strokeWidth={1.5} strokeDasharray="3 2" />
+              fill="rgba(249,115,22,0.2)" stroke="#f26a21" strokeWidth={1.5} strokeDasharray="3 2" />
           );
         })()}
       </g>

@@ -44,11 +44,11 @@ const mpProxy = async (action: string, params: Record<string, unknown> = {}) => 
 type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report" | "time";
 
 const STATUS_COLORS: Record<string, string> = {
-  new: "#64748B", active: "#F97316", drying: "#3B82F6",
-  final_inspection: "#EAB308", invoicing: "#A855F7", closed: "#22C55E",
+  new: "#64748B", active: "#f26a21", drying: "#3B82F6",
+  final_inspection: "#e0a800", invoicing: "#A855F7", closed: "#1f9d55",
 };
 
-const MOISTURE_COLORS = { dry: "#22C55E", monitoring: "#EAB308", wet: "#EF4444" };
+const MOISTURE_COLORS = { dry: "#1f9d55", monitoring: "#e0a800", wet: "#d23b2e" };
 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -521,7 +521,7 @@ export default function JobDetailPage() {
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
-        <div className="w-8 h-8 border-2 border-[#F97316] border-t-transparent rounded-full animate-spin" />
+        <div className="w-8 h-8 border-2 border-[#f26a21] border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
@@ -533,7 +533,7 @@ export default function JobDetailPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="bg-[#0A1628] border-b border-[#1E293B] px-6 py-4">
+      <div className="bg-[#0f1b2d] border-b border-[#1f3354] px-6 py-4">
         <div className="flex items-start gap-4 flex-wrap">
           <button onClick={() => navigate("/jobs")} className="text-slate-400 hover:text-slate-200 mt-0.5">
             <ChevronLeft size={22} />
@@ -611,8 +611,8 @@ export default function JobDetailPage() {
               className={clsx(
                 "px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-colors",
                 activeTab === tab.key
-                  ? "bg-[#F97316]/15 text-[#F97316]"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-[#1E293B]"
+                  ? "bg-[#f26a21]/15 text-[#f26a21]"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-[#1f3354]"
               )}
             >
               {tab.label}
@@ -648,7 +648,7 @@ export default function JobDetailPage() {
                   <p className="text-slate-600 text-sm">No rooms yet — add them below.</p>
                 ) : rooms.map((r) => (
                   <div key={r.id} className="flex items-center gap-2 text-sm">
-                    <span className={clsx("w-2 h-2 rounded-full flex-shrink-0", r.affected ? "bg-[#EF4444]" : "bg-[#22C55E]")} />
+                    <span className={clsx("w-2 h-2 rounded-full flex-shrink-0", r.affected ? "bg-[#d23b2e]" : "bg-[#1f9d55]")} />
                     <span className="text-slate-200 flex-1">{r.name}</span>
                     <span className="text-slate-500 text-xs">{r.floor_level}</span>
                   </div>
@@ -656,20 +656,20 @@ export default function JobDetailPage() {
               </div>
 
               {showRoomForm ? (
-                <div className="border-t border-[#1E293B] pt-3 space-y-2">
+                <div className="border-t border-[#1f3354] pt-3 space-y-2">
                   <input
                     type="text"
                     placeholder="Room name (e.g. Living Room)"
                     value={roomForm.name}
                     onChange={(e) => setRoomForm((f) => ({ ...f, name: e.target.value }))}
                     autoFocus
-                    className="w-full bg-[#0F172A] border border-[#1E293B] rounded-lg px-3 h-8 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]"
+                    className="w-full bg-[#16263d] border border-[#1f3354] rounded-lg px-3 h-8 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#f26a21]"
                   />
                   <div className="flex gap-2">
                     <select
                       value={roomForm.floor_level}
                       onChange={(e) => setRoomForm((f) => ({ ...f, floor_level: e.target.value }))}
-                      className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 h-8 text-xs text-slate-200 focus:outline-none focus:border-[#F97316]"
+                      className="flex-1 bg-[#16263d] border border-[#1f3354] rounded-lg px-2 h-8 text-xs text-slate-200 focus:outline-none focus:border-[#f26a21]"
                     >
                       {["Basement", "Main", "Upper", "Attic", "Crawlspace"].map((l) => (
                         <option key={l} value={l}>{l}</option>
@@ -680,7 +680,7 @@ export default function JobDetailPage() {
                         type="checkbox"
                         checked={roomForm.affected}
                         onChange={(e) => setRoomForm((f) => ({ ...f, affected: e.target.checked }))}
-                        className="accent-[#F97316]"
+                        className="accent-[#f26a21]"
                       />
                       Affected
                     </label>
@@ -689,7 +689,7 @@ export default function JobDetailPage() {
                     <button
                       onClick={addRoom}
                       disabled={savingRoom || !roomForm.name.trim()}
-                      className="flex items-center gap-1 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-50 text-[#0F172A] font-bold px-3 h-7 rounded-lg text-xs transition-colors"
+                      className="flex items-center gap-1 bg-[#f26a21] hover:bg-[#d4520f] disabled:opacity-50 text-[#16263d] font-bold px-3 h-7 rounded-lg text-xs transition-colors"
                     >
                       {savingRoom ? <RefreshCw size={11} className="animate-spin" /> : <Plus size={11} />}
                       Add
@@ -700,7 +700,7 @@ export default function JobDetailPage() {
               ) : (
                 <button
                   onClick={() => setShowRoomForm(true)}
-                  className="flex items-center gap-1 text-xs text-[#F97316] hover:text-[#EA6C0C] transition-colors mt-1"
+                  className="flex items-center gap-1 text-xs text-[#f26a21] hover:text-[#d4520f] transition-colors mt-1"
                 >
                   <Plus size={12} /> Add Room
                 </button>
@@ -721,7 +721,7 @@ export default function JobDetailPage() {
               <p className="text-slate-400 text-sm">{moisture.length} reading{moisture.length !== 1 ? "s" : ""}</p>
               <button
                 onClick={() => setShowMoistureForm((v) => !v)}
-                className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+                className="flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
               >
                 <Plus size={16} /> Add Reading
               </button>
@@ -729,24 +729,24 @@ export default function JobDetailPage() {
 
             {/* Inline form */}
             {showMoistureForm && (
-              <div className="bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+              <div className="bg-[#0f1b2d] border border-[#f26a21]/30 rounded-2xl p-5 mb-4">
                 <h3 className="text-sm font-bold text-slate-300 mb-4">New Moisture Reading</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Date</label>
                     <input type="date" value={moistureForm.reading_date} onChange={(e) => setMoistureForm((f) => ({ ...f, reading_date: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Room *</label>
                     {rooms.length === 0 ? (
                       <button onClick={() => { setShowMoistureForm(false); setActiveTab("overview"); setShowRoomForm(true); }}
-                        className="w-full bg-[#0F172A] border border-[#F97316]/40 rounded-xl px-3 h-9 text-xs text-[#F97316] text-left hover:bg-[#F97316]/10 transition-colors">
+                        className="w-full bg-[#16263d] border border-[#f26a21]/40 rounded-xl px-3 h-9 text-xs text-[#f26a21] text-left hover:bg-[#f26a21]/10 transition-colors">
                         + Add rooms in Overview tab first
                       </button>
                     ) : (
                       <select value={moistureForm.room_id} onChange={(e) => setMoistureForm((f) => ({ ...f, room_id: e.target.value }))}
-                        className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                        className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]">
                         <option value="">Select room…</option>
                         {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                       </select>
@@ -756,24 +756,24 @@ export default function JobDetailPage() {
                     <label className="block text-xs text-slate-500 mb-1">Moisture % *</label>
                     <input type="number" min="0" max="100" step="0.1" placeholder="e.g. 18.5" value={moistureForm.moisture_pct}
                       onChange={(e) => setMoistureForm((f) => ({ ...f, moisture_pct: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Location</label>
                     <input type="text" placeholder="e.g. NW corner, baseboard" value={moistureForm.location_description}
                       onChange={(e) => setMoistureForm((f) => ({ ...f, location_description: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Material</label>
                     <input type="text" placeholder="e.g. Drywall, Wood" value={moistureForm.material_type}
                       onChange={(e) => setMoistureForm((f) => ({ ...f, material_type: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                 </div>
                 <div className="flex gap-3">
                   <button onClick={addMoistureReading} disabled={savingMoisture || !moistureForm.room_id || !moistureForm.moisture_pct}
-                    className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-50 text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+                    className="flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] disabled:opacity-50 text-[#16263d] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
                     {savingMoisture ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
                     {savingMoisture ? "Saving…" : "Save Reading"}
                   </button>
@@ -782,11 +782,11 @@ export default function JobDetailPage() {
               </div>
             )}
 
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+            <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#1E293B]">
+                    <tr className="border-b border-[#1f3354]">
                       {["Date", "Room", "Location", "Material", "Reading", "Status", ""].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
@@ -798,7 +798,7 @@ export default function JobDetailPage() {
                     ) : moisture.map((m) => {
                       const status = getMoistureStatus(m.moisture_pct, m.material_type);
                       return (
-                        <tr key={m.id} className="border-b border-[#1E293B]/50 group">
+                        <tr key={m.id} className="border-b border-[#1f3354]/50 group">
                           <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(m.reading_date)}</td>
                           <td className="px-4 py-3 text-slate-300">{roomMap[m.room_id] ?? "—"}</td>
                           <td className="px-4 py-3 text-slate-300">{m.location_description}</td>
@@ -835,7 +835,7 @@ export default function JobDetailPage() {
               <p className="text-slate-400 text-sm">{equipment.filter((e) => !e.date_removed).length} active · {equipment.filter((e) => e.date_removed).length} removed</p>
               <button
                 onClick={() => setShowEquipForm((v) => !v)}
-                className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+                className="flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
               >
                 <Plus size={16} /> Log Equipment
               </button>
@@ -843,13 +843,13 @@ export default function JobDetailPage() {
 
             {/* Inline form */}
             {showEquipForm && (
-              <div className="bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+              <div className="bg-[#0f1b2d] border border-[#f26a21]/30 rounded-2xl p-5 mb-4">
                 <h3 className="text-sm font-bold text-slate-300 mb-4">Log Equipment Placement</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Type *</label>
                     <select value={equipForm.equipment_type} onChange={(e) => setEquipForm((f) => ({ ...f, equipment_type: e.target.value as EquipmentType, equipment_name: EQUIPMENT_TYPE_LABELS[e.target.value as EquipmentType] }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]">
                       {Object.entries(EQUIPMENT_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                     </select>
                   </div>
@@ -857,18 +857,18 @@ export default function JobDetailPage() {
                     <label className="block text-xs text-slate-500 mb-1">Name *</label>
                     <input type="text" placeholder="e.g. Dri-Eaz LGR 2800i" value={equipForm.equipment_name}
                       onChange={(e) => setEquipForm((f) => ({ ...f, equipment_name: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Asset #</label>
                     <input type="text" placeholder="e.g. RC-042" value={equipForm.asset_number}
                       onChange={(e) => setEquipForm((f) => ({ ...f, asset_number: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Room</label>
                     <select value={equipForm.room_id} onChange={(e) => setEquipForm((f) => ({ ...f, room_id: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]">
                       <option value="">{rooms.length === 0 ? "No rooms — add in Overview" : "No room"}</option>
                       {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
@@ -876,12 +876,12 @@ export default function JobDetailPage() {
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Date Placed</label>
                     <input type="date" value={equipForm.date_placed} onChange={(e) => setEquipForm((f) => ({ ...f, date_placed: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                 </div>
                 <div className="flex gap-3">
                   <button onClick={logEquipment} disabled={savingEquip || !equipForm.equipment_name}
-                    className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-50 text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
+                    className="flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] disabled:opacity-50 text-[#16263d] font-bold px-4 h-9 rounded-xl text-sm transition-colors">
                     {savingEquip ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
                     {savingEquip ? "Saving…" : "Log Equipment"}
                   </button>
@@ -890,11 +890,11 @@ export default function JobDetailPage() {
               </div>
             )}
 
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+            <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#1E293B]">
+                    <tr className="border-b border-[#1f3354]">
                       {["Equipment", "Asset #", "Room", "Placed", "Removed", "Days", ""].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
@@ -904,7 +904,7 @@ export default function JobDetailPage() {
                     {equipment.length === 0 ? (
                       <tr><td colSpan={7} className="px-4 py-12 text-center text-slate-600">No equipment logged — click Log Equipment above.</td></tr>
                     ) : equipment.map((e) => (
-                      <tr key={e.id} className="border-b border-[#1E293B]/50 group">
+                      <tr key={e.id} className="border-b border-[#1f3354]/50 group">
                         <td className="px-4 py-3">
                           <p className="text-slate-200 font-semibold">{e.equipment_name}</p>
                           <p className="text-slate-500 text-xs">{EQUIPMENT_TYPE_LABELS[e.equipment_type]}</p>
@@ -912,7 +912,7 @@ export default function JobDetailPage() {
                         <td className="px-4 py-3 text-slate-400 font-mono text-xs">{e.asset_number ?? "—"}</td>
                         <td className="px-4 py-3 text-slate-400">{e.room_id ? (roomMap[e.room_id] ?? "—") : "—"}</td>
                         <td className="px-4 py-3 text-slate-400 text-xs">{formatAlaskaDate(e.date_placed)}</td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#F97316] font-semibold">Active</span>}</td>
+                        <td className="px-4 py-3 text-slate-400 text-xs">{e.date_removed ? formatAlaskaDate(e.date_removed) : <span className="text-[#f26a21] font-semibold">Active</span>}</td>
                         <td className="px-4 py-3 font-bold text-slate-200">{e.days_on_site}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1">
@@ -920,7 +920,7 @@ export default function JobDetailPage() {
                               <button
                                 onClick={() => removeEquipment(e.id)}
                                 disabled={removingEquip === e.id}
-                                className="text-xs font-bold text-slate-500 hover:text-amber-400 border border-[#1E293B] hover:border-amber-500/30 px-2 py-1 rounded-lg transition-colors disabled:opacity-50"
+                                className="text-xs font-bold text-slate-500 hover:text-amber-400 border border-[#1f3354] hover:border-amber-500/30 px-2 py-1 rounded-lg transition-colors disabled:opacity-50"
                               >
                                 {removingEquip === e.id ? "…" : "Remove"}
                               </button>
@@ -950,7 +950,7 @@ export default function JobDetailPage() {
               <p className="text-slate-400 text-sm">{lineItems.length} item{lineItems.length !== 1 ? "s" : ""} · Total: <span className="text-white font-bold">{centsToDisplay(totalCents)}</span></p>
               <button
                 onClick={() => setShowScopeForm((v) => !v)}
-                className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
+                className="flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] font-bold px-4 h-9 rounded-xl text-sm transition-colors"
               >
                 <Plus size={16} /> Add Line Item
               </button>
@@ -958,13 +958,13 @@ export default function JobDetailPage() {
 
             {/* Inline form */}
             {showScopeForm && (
-              <div className="bg-[#0A1628] border border-[#F97316]/30 rounded-2xl p-5 mb-4">
+              <div className="bg-[#0f1b2d] border border-[#f26a21]/30 rounded-2xl p-5 mb-4">
                 <p className="text-sm font-bold text-slate-200 mb-4">New Line Item</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
                   <div>
                     <label className="text-xs text-slate-500 mb-1 block">Category</label>
                     <select value={scopeForm.category} onChange={(e) => setScopeForm((f) => ({ ...f, category: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]">
                       {["demo","dry","equip","labor","material","disposal","other"].map((c) => (
                         <option key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</option>
                       ))}
@@ -974,12 +974,12 @@ export default function JobDetailPage() {
                     <label className="text-xs text-slate-500 mb-1 block">Description *</label>
                     <input type="text" placeholder="e.g. Carpet removal and disposal" value={scopeForm.description}
                       onChange={(e) => setScopeForm((f) => ({ ...f, description: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   <div>
                     <label className="text-xs text-slate-500 mb-1 block">Room</label>
                     <select value={scopeForm.room_id} onChange={(e) => setScopeForm((f) => ({ ...f, room_id: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]">
                       <option value="">All / General</option>
                       {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
                     </select>
@@ -988,12 +988,12 @@ export default function JobDetailPage() {
                     <label className="text-xs text-slate-500 mb-1 block">Qty *</label>
                     <input type="number" min="0" step="any" placeholder="1" value={scopeForm.quantity}
                       onChange={(e) => setScopeForm((f) => ({ ...f, quantity: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   <div>
                     <label className="text-xs text-slate-500 mb-1 block">Unit</label>
                     <select value={scopeForm.unit} onChange={(e) => setScopeForm((f) => ({ ...f, unit: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]">
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]">
                       {["EA","SF","LF","HR","Day","LS","CY","SY","CF"].map((u) => <option key={u} value={u}>{u}</option>)}
                     </select>
                   </div>
@@ -1001,7 +1001,7 @@ export default function JobDetailPage() {
                     <label className="text-xs text-slate-500 mb-1 block">Unit Price ($) *</label>
                     <input type="number" min="0" step="0.01" placeholder="0.00" value={scopeForm.unit_price}
                       onChange={(e) => setScopeForm((f) => ({ ...f, unit_price: e.target.value }))}
-                      className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]" />
+                      className="w-full bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#f26a21]" />
                   </div>
                   {scopeForm.quantity && scopeForm.unit_price && (
                     <div className="flex items-end pb-1">
@@ -1009,9 +1009,9 @@ export default function JobDetailPage() {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-3 pt-2 border-t border-[#1E293B]">
+                <div className="flex items-center gap-3 pt-2 border-t border-[#1f3354]">
                   <button onClick={addLineItem} disabled={savingScope || !scopeForm.description || !scopeForm.quantity || !scopeForm.unit_price}
-                    className="flex items-center gap-1.5 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm disabled:opacity-50 transition-colors">
+                    className="flex items-center gap-1.5 bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] font-bold px-4 h-9 rounded-xl text-sm disabled:opacity-50 transition-colors">
                     {savingScope ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
                     {savingScope ? "Saving…" : "Add Item"}
                   </button>
@@ -1020,11 +1020,11 @@ export default function JobDetailPage() {
               </div>
             )}
 
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden">
+            <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="border-b border-[#1E293B]">
+                    <tr className="border-b border-[#1f3354]">
                       {["Category", "Description", "Room", "Qty", "Unit", "Unit Price", "Total", ""].map((h) => (
                         <th key={h} className="px-4 py-3 text-left text-xs font-bold text-slate-500 uppercase tracking-wider">{h}</th>
                       ))}
@@ -1034,7 +1034,7 @@ export default function JobDetailPage() {
                     {lineItems.length === 0 ? (
                       <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-600">No line items yet — click Add Line Item above.</td></tr>
                     ) : lineItems.map((li) => (
-                      <tr key={li.id} className="border-b border-[#1E293B]/50 group">
+                      <tr key={li.id} className="border-b border-[#1f3354]/50 group">
                         <td className="px-4 py-3 text-xs text-slate-500 uppercase">{li.category}</td>
                         <td className="px-4 py-3 text-slate-200">{li.description}</td>
                         <td className="px-4 py-3 text-slate-400 text-xs">{li.room_id ? (roomMap[li.room_id] ?? "—") : "All"}</td>
@@ -1054,7 +1054,7 @@ export default function JobDetailPage() {
                   </tbody>
                   {lineItems.length > 0 && (
                     <tfoot>
-                      <tr className="border-t border-[#1E293B] bg-[#0F172A]">
+                      <tr className="border-t border-[#1f3354] bg-[#16263d]">
                         <td colSpan={7} className="px-4 py-3 text-right font-bold text-slate-300">Grand Total</td>
                         <td className="px-4 py-3 font-black text-white font-mono text-base">{centsToDisplay(totalCents)}</td>
                       </tr>
@@ -1070,14 +1070,14 @@ export default function JobDetailPage() {
           <div className="max-w-4xl space-y-4">
             {qbLoading ? (
               <div className="flex items-center justify-center py-16">
-                <div className="w-7 h-7 border-2 border-[#F97316] border-t-transparent rounded-full animate-spin" />
+                <div className="w-7 h-7 border-2 border-[#f26a21] border-t-transparent rounded-full animate-spin" />
               </div>
             ) : qbConnected === false ? (
-              <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-8 text-center">
+              <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-8 text-center">
                 <Clock size={36} className="mx-auto mb-3 text-slate-600" />
                 <h3 className="text-white font-bold mb-2">QuickBooks Time Not Connected</h3>
                 <p className="text-slate-400 text-sm mb-4">Connect your QuickBooks Time account in Settings to track employee hours by job.</p>
-                <a href="/settings" className="inline-flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-5 h-10 rounded-xl text-sm transition-colors">
+                <a href="/settings" className="inline-flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] font-bold px-5 h-10 rounded-xl text-sm transition-colors">
                   <Clock size={15} /> Go to Settings
                 </a>
               </div>
@@ -1090,9 +1090,9 @@ export default function JobDetailPage() {
                 )}
 
                 {/* Link job code */}
-                <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+                <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-5">
                   <div className="flex items-center gap-2 mb-3">
-                    <Link size={16} className="text-[#F97316]" />
+                    <Link size={16} className="text-[#f26a21]" />
                     <h3 className="text-sm font-bold text-slate-300">QB Time Job Code</h3>
                   </div>
                   <p className="text-xs text-slate-500 mb-3">Link this job to a QuickBooks Time job code so time entries roll up here.</p>
@@ -1100,7 +1100,7 @@ export default function JobDetailPage() {
                     <select
                       value={qbJobcodeInput}
                       onChange={(e) => setQbJobcodeInput(e.target.value)}
-                      className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]"
+                      className="flex-1 bg-[#16263d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21]"
                     >
                       <option value="">— No job code linked —</option>
                       {qbJobcodes.map((jc) => (
@@ -1110,7 +1110,7 @@ export default function JobDetailPage() {
                     <button
                       onClick={saveQBJobcode}
                       disabled={qbSaving}
-                      className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] px-4 h-10 rounded-xl disabled:opacity-60 transition-colors"
+                      className="flex items-center gap-1.5 text-xs font-bold bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] px-4 h-10 rounded-xl disabled:opacity-60 transition-colors"
                     >
                       {qbSaving ? <RefreshCw size={13} className="animate-spin" /> : null}
                       {qbSaving ? "Saving…" : "Save"}
@@ -1118,20 +1118,20 @@ export default function JobDetailPage() {
                     <button
                       onClick={loadQBTime}
                       disabled={qbLoading}
-                      className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white border border-[#1E293B] hover:border-[#334155] px-4 h-10 rounded-xl transition-colors"
+                      className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white border border-[#1f3354] hover:border-[#334155] px-4 h-10 rounded-xl transition-colors"
                       title="Refresh time data"
                     >
                       <RefreshCw size={13} className={qbLoading ? "animate-spin" : ""} />
                     </button>
                   </div>
                   {qbJobcodes.length === 0 && (
-                    <p className="text-xs text-slate-600 mt-2">No job codes found. <a href="/settings" className="text-[#F97316] hover:underline">Sync job codes in Settings</a>.</p>
+                    <p className="text-xs text-slate-600 mt-2">No job codes found. <a href="/settings" className="text-[#f26a21] hover:underline">Sync job codes in Settings</a>.</p>
                   )}
                 </div>
 
                 {/* Currently clocked in */}
                 {qbClockedIn.length > 0 && (
-                  <div className="bg-[#0A1628] border border-green-500/30 rounded-2xl p-5">
+                  <div className="bg-[#0f1b2d] border border-green-500/30 rounded-2xl p-5">
                     <div className="flex items-center gap-2 mb-3">
                       <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
                       <h3 className="text-sm font-bold text-green-400">Currently On Site</h3>
@@ -1160,9 +1160,9 @@ export default function JobDetailPage() {
 
                 {/* Time entries */}
                 {qbTimesheets.length > 0 ? (
-                  <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+                  <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-5">
                     <div className="flex items-center gap-2 mb-4">
-                      <Users size={16} className="text-[#F97316]" />
+                      <Users size={16} className="text-[#f26a21]" />
                       <h3 className="text-sm font-bold text-slate-300">Time Entries</h3>
                       <span className="ml-auto text-xs text-slate-500">
                         Total: <span className="text-white font-bold">
@@ -1186,8 +1186,8 @@ export default function JobDetailPage() {
                         return (
                           <div key={userId} className="mb-4 last:mb-0">
                             <div className="flex items-center gap-3 mb-2">
-                              <div className="w-8 h-8 rounded-full bg-[#F97316]/20 flex items-center justify-center">
-                                <span className="text-xs font-bold text-[#F97316]">{u ? u.first_name[0] : "?"}</span>
+                              <div className="w-8 h-8 rounded-full bg-[#f26a21]/20 flex items-center justify-center">
+                                <span className="text-xs font-bold text-[#f26a21]">{u ? u.first_name[0] : "?"}</span>
                               </div>
                               <div className="flex-1">
                                 <p className="text-sm font-semibold text-slate-200">{u ? `${u.first_name} ${u.last_name}` : `User ${userId}`}</p>
@@ -1196,7 +1196,7 @@ export default function JobDetailPage() {
                             </div>
                             <div className="ml-11 space-y-1">
                               {entries.sort((a, b) => b.date.localeCompare(a.date)).map((ts) => (
-                                <div key={ts.id} className="flex items-center gap-3 text-xs text-slate-400 py-1 border-b border-[#1E293B] last:border-0">
+                                <div key={ts.id} className="flex items-center gap-3 text-xs text-slate-400 py-1 border-b border-[#1f3354] last:border-0">
                                   <span className="text-slate-500 w-24 flex-shrink-0">{new Date(ts.date).toLocaleDateString()}</span>
                                   <span className="flex-1 text-slate-400 truncate">{ts.notes || "—"}</span>
                                   <span className="font-mono text-slate-300 flex-shrink-0">{formatDuration(ts.duration ?? 0)}</span>
@@ -1210,7 +1210,7 @@ export default function JobDetailPage() {
                   </div>
                 ) : (
                   (job as Job & { qb_jobcode_id?: string }).qb_jobcode_id && (
-                    <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-8 text-center">
+                    <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-8 text-center">
                       <Clock size={32} className="mx-auto mb-3 text-slate-600" />
                       <p className="text-slate-500 text-sm">No time entries found for this job in the last 90 days.</p>
                     </div>
@@ -1224,20 +1224,20 @@ export default function JobDetailPage() {
         {activeTab === "floorplan" && (
           <div className="max-w-5xl space-y-4">
             {/* Magicplan project link */}
-            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+            <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-5">
               <div className="flex items-center gap-2 mb-3">
-                <Link size={16} className="text-[#F97316]" />
+                <Link size={16} className="text-[#f26a21]" />
                 <h3 className="text-sm font-bold text-slate-300">Magicplan Project</h3>
               </div>
 
               {job.magicplan_project_id && !magicplanEditing ? (
                 <div className="flex items-center gap-3">
-                  <code className="text-sm font-mono text-[#F97316] bg-[#1E293B] px-3 py-1.5 rounded-lg flex-1 truncate">
+                  <code className="text-sm font-mono text-[#f26a21] bg-[#1f3354] px-3 py-1.5 rounded-lg flex-1 truncate">
                     {job.magicplan_project_id}
                   </code>
                   <button
                     onClick={() => { setMagicplanInput(job.magicplan_project_id ?? ""); setMagicplanEditing(true); }}
-                    className="text-xs font-bold text-slate-400 hover:text-slate-200 transition-colors px-3 py-1.5 rounded-lg border border-[#1E293B] hover:border-[#4A4440]"
+                    className="text-xs font-bold text-slate-400 hover:text-slate-200 transition-colors px-3 py-1.5 rounded-lg border border-[#1f3354] hover:border-[#4A4440]"
                   >
                     Edit
                   </button>
@@ -1249,12 +1249,12 @@ export default function JobDetailPage() {
                     value={magicplanInput}
                     onChange={(e) => setMagicplanInput(e.target.value)}
                     placeholder="Enter Magicplan project ID…"
-                    className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] transition-colors font-mono"
+                    className="flex-1 bg-[#16263d] border border-[#1f3354] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#f26a21] transition-colors font-mono"
                   />
                   <button
                     onClick={saveMagicplanId}
                     disabled={magicplanSaving}
-                    className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] px-3 h-10 rounded-xl disabled:opacity-60 transition-colors"
+                    className="flex items-center gap-1.5 text-xs font-bold bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] px-3 h-10 rounded-xl disabled:opacity-60 transition-colors"
                   >
                     <RefreshCw size={13} className={magicplanSaving ? "animate-spin" : ""} />
                     {magicplanSaving ? "Saving…" : "Save"}
@@ -1275,7 +1275,7 @@ export default function JobDetailPage() {
                   <button
                     onClick={createMagicplanProject}
                     disabled={magicplanCreating}
-                    className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316]/10 border border-[#F97316]/30 text-[#F97316] px-3 h-8 rounded-lg hover:bg-[#F97316]/20 disabled:opacity-60 transition-colors"
+                    className="flex items-center gap-1.5 text-xs font-bold bg-[#f26a21]/10 border border-[#f26a21]/30 text-[#f26a21] px-3 h-8 rounded-lg hover:bg-[#f26a21]/20 disabled:opacity-60 transition-colors"
                   >
                     <Plus size={12} className={magicplanCreating ? "animate-spin" : ""} />
                     {magicplanCreating ? "Creating…" : "Create in Magicplan"}
@@ -1290,7 +1290,7 @@ export default function JobDetailPage() {
                   <button
                     onClick={syncFromMagicplan}
                     disabled={magicplanSyncing}
-                    className="flex items-center gap-1.5 text-xs font-bold bg-[#F97316]/10 border border-[#F97316]/30 text-[#F97316] px-3 h-8 rounded-lg hover:bg-[#F97316]/20 disabled:opacity-60 transition-colors"
+                    className="flex items-center gap-1.5 text-xs font-bold bg-[#f26a21]/10 border border-[#f26a21]/30 text-[#f26a21] px-3 h-8 rounded-lg hover:bg-[#f26a21]/20 disabled:opacity-60 transition-colors"
                   >
                     <RefreshCw size={12} className={magicplanSyncing ? "animate-spin" : ""} />
                     {magicplanSyncing ? "Syncing…" : "Sync Now"}
@@ -1302,8 +1302,8 @@ export default function JobDetailPage() {
               <label className={clsx(
                 "flex items-center gap-1.5 text-xs font-bold border px-3 h-8 rounded-lg transition-colors cursor-pointer",
                 uploadingFloorPlan
-                  ? "bg-[#1E293B] border-[#1E293B] text-slate-500 cursor-not-allowed"
-                  : "bg-[#1E293B] border-[#1E293B] text-slate-300 hover:border-[#F97316]/40 hover:text-[#F97316]"
+                  ? "bg-[#1f3354] border-[#1f3354] text-slate-500 cursor-not-allowed"
+                  : "bg-[#1f3354] border-[#1f3354] text-slate-300 hover:border-[#f26a21]/40 hover:text-[#f26a21]"
               )}>
                 {uploadingFloorPlan ? <><RefreshCw size={12} className="animate-spin" /> Uploading…</> : <><Upload size={12} /> Upload File</>}
                 <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleFloorPlanUpload} disabled={uploadingFloorPlan} />
@@ -1318,14 +1318,14 @@ export default function JobDetailPage() {
               <div className="space-y-3">
                 <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Synced Plans</h3>
                 {floorPlans.map((fp) => (
-                  <div key={fp.id} className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4 flex items-center gap-4">
+                  <div key={fp.id} className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-4 flex items-center gap-4">
                     <div className="flex-1">
                       <p className="text-sm font-bold text-slate-200">Version {fp.version}</p>
                       <p className="text-xs text-slate-500">Synced: {formatAlaskaDateTime(fp.synced_at)}</p>
                     </div>
                     {fp.file_url && (
                       <a href={fp.file_url} target="_blank" rel="noreferrer"
-                        className="flex items-center gap-2 text-sm font-bold text-[#F97316] hover:underline">
+                        className="flex items-center gap-2 text-sm font-bold text-[#f26a21] hover:underline">
                         View <ExternalLink size={14} />
                       </a>
                     )}
@@ -1351,7 +1351,7 @@ export default function JobDetailPage() {
               <select
                 value={photoCategory}
                 onChange={(e) => setPhotoCategory(e.target.value as PhotoCategory)}
-                className="bg-[#0A1628] border border-[#1E293B] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#F97316] transition-colors"
+                className="bg-[#0f1b2d] border border-[#1f3354] rounded-xl px-3 h-10 text-sm text-slate-200 focus:outline-none focus:border-[#f26a21] transition-colors"
               >
                 {PHOTO_CATEGORIES.map((c) => (
                   <option key={c.value} value={c.value}>{c.label}</option>
@@ -1359,7 +1359,7 @@ export default function JobDetailPage() {
               </select>
               <label className={clsx(
                 "flex items-center gap-2 cursor-pointer font-bold px-4 h-10 rounded-xl transition-colors text-sm",
-                uploadingPhotos ? "bg-[#1E293B] text-slate-400 cursor-not-allowed" : "bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A]"
+                uploadingPhotos ? "bg-[#1f3354] text-slate-400 cursor-not-allowed" : "bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d]"
               )}>
                 {uploadingPhotos ? (
                   <><RefreshCw size={16} className="animate-spin" /> Uploading…</>
@@ -1373,7 +1373,7 @@ export default function JobDetailPage() {
             {photoError && <p className="text-red-400 text-sm mb-4">{photoError}</p>}
 
             {photos.length === 0 ? (
-              <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-16 text-center">
+              <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-16 text-center">
                 <Camera size={36} className="text-slate-600 mx-auto mb-3" />
                 <p className="text-slate-500 mb-1">No photos yet.</p>
                 <p className="text-slate-600 text-sm">Choose a category above and click Upload Photos.</p>
@@ -1390,7 +1390,7 @@ export default function JobDetailPage() {
                         return (
                           <div
                             key={p.id}
-                            className="relative bg-[#0A1628] border border-[#1E293B] rounded-xl overflow-hidden aspect-square hover:border-[#F97316]/60 transition-colors group"
+                            className="relative bg-[#0f1b2d] border border-[#1f3354] rounded-xl overflow-hidden aspect-square hover:border-[#f26a21]/60 transition-colors group"
                           >
                             <button onClick={() => setSelectedPhoto(p)} className="w-full h-full block">
                               <img src={url} alt={p.caption ?? cat.label} className="w-full h-full object-cover" />
@@ -1448,7 +1448,7 @@ export default function JobDetailPage() {
                 { key: "equipment" as const, title: "Equipment Log", desc: `${equipment.length} piece${equipment.length !== 1 ? "s" : ""} · ${equipment.filter(e => !e.date_removed).length} active`, warn: equipment.length === 0 ? "No equipment logged yet" : null },
                 { key: "scope" as const, title: "Scope of Work / Invoice", desc: `${lineItems.length} line item${lineItems.length !== 1 ? "s" : ""} · Total: ${centsToDisplay(totalCents)}`, warn: lineItems.length === 0 ? "No line items yet" : null },
               ].map((r) => (
-                <div key={r.key} className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
+                <div key={r.key} className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-5">
                   <p className="font-bold text-slate-200 mb-1">{r.title}</p>
                   <p className="text-xs text-slate-500 mb-1">{r.desc}</p>
                   {r.warn && <p className="text-xs text-amber-500/80 mb-3">⚠ {r.warn} — PDF will be mostly empty</p>}
@@ -1456,7 +1456,7 @@ export default function JobDetailPage() {
                   <button
                     onClick={() => generateReport(r.key)}
                     disabled={generatingReport !== null}
-                    className="w-full flex items-center justify-center gap-2 bg-[#F97316]/10 border border-[#F97316]/30 text-[#F97316] font-bold text-sm h-9 rounded-xl hover:bg-[#F97316]/20 disabled:opacity-50 transition-colors"
+                    className="w-full flex items-center justify-center gap-2 bg-[#f26a21]/10 border border-[#f26a21]/30 text-[#f26a21] font-bold text-sm h-9 rounded-xl hover:bg-[#f26a21]/20 disabled:opacity-50 transition-colors"
                   >
                     {generatingReport === r.key ? (
                       <><RefreshCw size={14} className="animate-spin" /> Generating…</>
@@ -1476,8 +1476,8 @@ export default function JobDetailPage() {
 
 function InfoCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5">
-      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-[#1E293B]">{title}</h3>
+    <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-5">
+      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 pb-2 border-b border-[#1f3354]">{title}</h3>
       <div className="space-y-2.5">{children}</div>
     </div>
   );

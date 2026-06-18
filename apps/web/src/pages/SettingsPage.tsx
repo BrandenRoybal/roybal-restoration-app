@@ -17,7 +17,7 @@ const ROLE_LABELS: Record<Role, string> = {
 };
 
 const ROLE_COLORS: Record<Role, string> = {
-  admin: "#F97316",
+  admin: "#f26a21",
   tech: "#3B82F6",
   viewer: "#64748B",
 };
@@ -156,9 +156,9 @@ export default function SettingsPage() {
       <h1 className="text-2xl font-bold text-white mb-6">Settings</h1>
 
       {/* Company Info */}
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6 mb-6">
+      <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-6 mb-6">
         <div className="flex items-center gap-2 mb-4">
-          <Building2 size={18} className="text-[#F97316]" />
+          <Building2 size={18} className="text-[#f26a21]" />
           <h2 className="text-base font-bold text-white">Company</h2>
         </div>
         <div className="grid grid-cols-2 gap-4 text-sm">
@@ -172,9 +172,9 @@ export default function SettingsPage() {
       {myProfile?.role === "admin" && (
         <>
           {/* Invite new user */}
-          <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6 mb-6">
+          <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-6 mb-6">
             <div className="flex items-center gap-2 mb-4">
-              <UserPlus size={18} className="text-[#F97316]" />
+              <UserPlus size={18} className="text-[#f26a21]" />
               <h2 className="text-base font-bold text-white">Invite User</h2>
             </div>
 
@@ -187,7 +187,7 @@ export default function SettingsPage() {
                     value={inviteName}
                     onChange={(e) => setInviteName(e.target.value)}
                     placeholder="John Smith"
-                    className="w-full bg-[#211B17] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#F97316] transition-colors"
+                    className="w-full bg-[#211B17] border border-[#1f3354] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#f26a21] transition-colors"
                   />
                 </div>
                 <div>
@@ -198,7 +198,7 @@ export default function SettingsPage() {
                     onChange={(e) => setInviteEmail(e.target.value)}
                     placeholder="tech@roybalconstruction.com"
                     required
-                    className="w-full bg-[#211B17] border border-[#1E293B] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#F97316] transition-colors"
+                    className="w-full bg-[#211B17] border border-[#1f3354] rounded-xl px-4 h-10 text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-[#f26a21] transition-colors"
                   />
                 </div>
               </div>
@@ -214,8 +214,8 @@ export default function SettingsPage() {
                       onClick={() => setInviteRole(r)}
                       className={`text-left p-3 rounded-xl border transition-colors ${
                         inviteRole === r
-                          ? "border-[#F97316] bg-[#F97316]/10"
-                          : "border-[#1E293B] bg-[#211B17] hover:border-[#4A4440]"
+                          ? "border-[#f26a21] bg-[#f26a21]/10"
+                          : "border-[#1f3354] bg-[#211B17] hover:border-[#4A4440]"
                       }`}
                     >
                       <p className="text-sm font-bold" style={{ color: ROLE_COLORS[r] }}>{ROLE_LABELS[r]}</p>
@@ -239,10 +239,10 @@ export default function SettingsPage() {
               <button
                 type="submit"
                 disabled={inviteLoading}
-                className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] disabled:opacity-60 text-[#0F172A] font-bold px-5 h-10 rounded-xl transition-colors"
+                className="flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] disabled:opacity-60 text-[#16263d] font-bold px-5 h-10 rounded-xl transition-colors"
               >
                 {inviteLoading ? (
-                  <div className="w-4 h-4 border-2 border-[#0F172A]/30 border-t-[#0F172A] rounded-full animate-spin" />
+                  <div className="w-4 h-4 border-2 border-[#16263d]/30 border-t-[#16263d] rounded-full animate-spin" />
                 ) : (
                   <UserPlus size={15} />
                 )}
@@ -252,9 +252,9 @@ export default function SettingsPage() {
           </div>
 
           {/* Existing users */}
-          <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6 mb-6">
+          <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-6 mb-6">
             <div className="flex items-center gap-2 mb-4">
-              <Users size={18} className="text-[#F97316]" />
+              <Users size={18} className="text-[#f26a21]" />
               <h2 className="text-base font-bold text-white">Users</h2>
               <span className="ml-auto text-xs text-slate-500">{users.length} total</span>
             </div>
@@ -265,9 +265,9 @@ export default function SettingsPage() {
             ) : (
               <div className="space-y-2">
                 {users.map((u) => (
-                  <div key={u.id} className="flex items-center gap-3 bg-[#211B17] rounded-xl p-3 border border-[#1E293B]">
-                    <div className="w-9 h-9 rounded-full bg-[#F97316] flex items-center justify-center flex-shrink-0">
-                      <span className="text-[#0F172A] font-bold text-sm">{(u.full_name[0] ?? "?").toUpperCase()}</span>
+                  <div key={u.id} className="flex items-center gap-3 bg-[#211B17] rounded-xl p-3 border border-[#1f3354]">
+                    <div className="w-9 h-9 rounded-full bg-[#f26a21] flex items-center justify-center flex-shrink-0">
+                      <span className="text-[#16263d] font-bold text-sm">{(u.full_name[0] ?? "?").toUpperCase()}</span>
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-slate-200">{u.full_name}</p>
@@ -321,9 +321,9 @@ export default function SettingsPage() {
       )}
 
       {/* QuickBooks Time Integration */}
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6 mb-6">
+      <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-6 mb-6">
         <div className="flex items-center gap-2 mb-4">
-          <Clock size={18} className="text-[#F97316]" />
+          <Clock size={18} className="text-[#f26a21]" />
           <h2 className="text-base font-bold text-white">QuickBooks Time</h2>
           {qbStatus?.connected && (
             <span className="ml-auto text-xs font-bold px-2.5 py-1 rounded-full bg-green-500/15 text-green-400 border border-green-500/30">
@@ -352,7 +352,7 @@ export default function SettingsPage() {
               <button
                 onClick={syncQBJobcodes}
                 disabled={qbSyncing}
-                className="flex items-center gap-2 bg-[#0F172A] border border-[#1E293B] hover:border-[#F97316] text-slate-300 hover:text-white px-4 h-9 rounded-xl text-sm font-semibold transition-colors disabled:opacity-60"
+                className="flex items-center gap-2 bg-[#16263d] border border-[#1f3354] hover:border-[#f26a21] text-slate-300 hover:text-white px-4 h-9 rounded-xl text-sm font-semibold transition-colors disabled:opacity-60"
               >
                 <RefreshCw size={14} className={qbSyncing ? "animate-spin" : ""} />
                 {qbSyncing ? "Syncing…" : "Sync Job Codes"}
@@ -361,7 +361,7 @@ export default function SettingsPage() {
                 href="https://tsheets.intuit.com"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-2 bg-[#0F172A] border border-[#1E293B] hover:border-[#334155] text-slate-400 hover:text-white px-4 h-9 rounded-xl text-sm font-semibold transition-colors"
+                className="flex items-center gap-2 bg-[#16263d] border border-[#1f3354] hover:border-[#334155] text-slate-400 hover:text-white px-4 h-9 rounded-xl text-sm font-semibold transition-colors"
               >
                 <ExternalLink size={14} /> Open QB Time
               </a>
@@ -387,7 +387,7 @@ export default function SettingsPage() {
             )}
             <button
               onClick={connectQBTime}
-              className="flex items-center gap-2 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-5 h-10 rounded-xl transition-colors text-sm"
+              className="flex items-center gap-2 bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] font-bold px-5 h-10 rounded-xl transition-colors text-sm"
             >
               <Clock size={15} />
               Connect QuickBooks Time
@@ -400,9 +400,9 @@ export default function SettingsPage() {
       </div>
 
       {/* Security */}
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-6">
+      <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-6">
         <div className="flex items-center gap-2 mb-3">
-          <ShieldCheck size={18} className="text-[#22C55E]" />
+          <ShieldCheck size={18} className="text-[#1f9d55]" />
           <h2 className="text-base font-bold text-white">Security</h2>
         </div>
         <p className="text-sm text-slate-400 leading-relaxed">

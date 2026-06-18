@@ -67,11 +67,11 @@ export default function QBCallbackPage() {
   }, [navigate, profile?.id]);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#0F172A]">
-      <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-10 max-w-md w-full text-center shadow-2xl">
+    <div className="flex min-h-screen items-center justify-center bg-[#16263d]">
+      <div className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-10 max-w-md w-full text-center shadow-2xl">
         {status === "loading" && (
           <>
-            <Loader size={48} className="mx-auto mb-4 text-[#F97316] animate-spin" />
+            <Loader size={48} className="mx-auto mb-4 text-[#f26a21] animate-spin" />
             <h2 className="text-xl font-bold text-white mb-2">Connecting…</h2>
             <p className="text-slate-400 text-sm">{message}</p>
           </>
@@ -91,7 +91,7 @@ export default function QBCallbackPage() {
             <p className="text-slate-400 text-sm">{message}</p>
             <button
               onClick={() => navigate("/settings")}
-              className="mt-5 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-6 h-10 rounded-xl transition-colors text-sm"
+              className="mt-5 bg-[#f26a21] hover:bg-[#d4520f] text-[#16263d] font-bold px-6 h-10 rounded-xl transition-colors text-sm"
             >
               Back to Settings
             </button>

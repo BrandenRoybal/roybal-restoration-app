@@ -29,7 +29,7 @@ function TextInput({ value, onChange, suffix }: { value: string; onChange: (v: s
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-lg px-3 h-8 text-sm text-slate-200 font-mono focus:outline-none focus:border-[#F97316] transition-colors"
+        className="flex-1 bg-[#16263d] border border-[#1f3354] rounded-lg px-3 h-8 text-sm text-slate-200 font-mono focus:outline-none focus:border-[#f26a21] transition-colors"
       />
       {suffix && <span className="text-xs text-slate-500">{suffix}</span>}
     </div>
@@ -50,7 +50,7 @@ function DimInput({ feet, onSave, label }: { feet: number; onSave: (v: number) =
     return (
       <button
         onClick={start}
-        className="w-full text-left bg-[#0F172A] border border-[#1E293B] hover:border-[#F97316]/50 rounded-lg px-3 h-8 text-sm text-[#F97316] font-mono transition-colors"
+        className="w-full text-left bg-[#16263d] border border-[#1f3354] hover:border-[#f26a21]/50 rounded-lg px-3 h-8 text-sm text-[#f26a21] font-mono transition-colors"
       >
         {formatFeetInches(feet)}
       </button>
@@ -65,11 +65,11 @@ function DimInput({ feet, onSave, label }: { feet: number; onSave: (v: number) =
         value={val}
         onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEditing(false); }}
-        className="flex-1 bg-[#0F172A] border border-[#F97316] rounded-lg px-3 h-8 text-sm text-slate-200 font-mono focus:outline-none"
+        className="flex-1 bg-[#16263d] border border-[#f26a21] rounded-lg px-3 h-8 text-sm text-slate-200 font-mono focus:outline-none"
         placeholder={label}
       />
-      <button onClick={commit} className="px-2 h-8 text-xs font-bold bg-[#F97316] text-[#0F172A] rounded-lg">OK</button>
-      <button onClick={() => setEditing(false)} className="px-2 h-8 text-xs text-slate-400 bg-[#1E293B] rounded-lg">✕</button>
+      <button onClick={commit} className="px-2 h-8 text-xs font-bold bg-[#f26a21] text-[#16263d] rounded-lg">OK</button>
+      <button onClick={() => setEditing(false)} className="px-2 h-8 text-xs text-slate-400 bg-[#1f3354] rounded-lg">✕</button>
     </div>
   );
 }
@@ -96,7 +96,7 @@ export default function Inspector({ selection, rooms, openings, onRoomsChange, o
     const calcs = computeRoomCalcs(room, openings);
     return (
       <div className="p-4 space-y-4 overflow-y-auto">
-        <h3 className="text-xs font-bold text-[#F97316] uppercase tracking-wider">Room</h3>
+        <h3 className="text-xs font-bold text-[#f26a21] uppercase tracking-wider">Room</h3>
         <Field label="Name">
           <TextInput
             value={room.name}
@@ -106,24 +106,24 @@ export default function Inspector({ selection, rooms, openings, onRoomsChange, o
         <Field label="Ceiling Height">
           <DimInput feet={room.height} onSave={(v) => updateRoom({ height: v })} label="height" />
         </Field>
-        <div className="border-t border-[#1E293B] pt-3 space-y-1.5">
+        <div className="border-t border-[#1f3354] pt-3 space-y-1.5">
           <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Calculations</p>
           <Stat label="Floor Area" value={formatSqFt(calcs.floor_area)} />
           <Stat label="Perimeter" value={formatFeetInches(calcs.perimeter)} />
           <Stat label="Gross Wall Area" value={formatSqFt(calcs.gross_wall_area)} />
           <Stat label="Net Wall Area" value={formatSqFt(calcs.net_wall_area)} />
         </div>
-        <div className="border-t border-[#1E293B] pt-3">
+        <div className="border-t border-[#1f3354] pt-3">
           <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Walls</p>
           <div className="space-y-1">
             {room.points.map((_, wi) => (
               <button
                 key={wi}
                 onClick={() => onWallDimensionEdit(room.id, wi)}
-                className="w-full flex items-center justify-between bg-[#0F172A] hover:bg-[#1E293B] border border-[#1E293B] rounded-lg px-3 h-8 text-xs transition-colors"
+                className="w-full flex items-center justify-between bg-[#16263d] hover:bg-[#1f3354] border border-[#1f3354] rounded-lg px-3 h-8 text-xs transition-colors"
               >
                 <span className="text-slate-400">Wall {wi + 1}</span>
-                <span className="text-[#F97316] font-mono">{formatFeetInches(wallLength(room, wi))}</span>
+                <span className="text-[#f26a21] font-mono">{formatFeetInches(wallLength(room, wi))}</span>
               </button>
             ))}
           </div>
@@ -139,11 +139,11 @@ export default function Inspector({ selection, rooms, openings, onRoomsChange, o
     const wLen = wallLength(room, wi);
     return (
       <div className="p-4 space-y-4 overflow-y-auto">
-        <h3 className="text-xs font-bold text-[#F97316] uppercase tracking-wider">Wall {wi + 1}</h3>
+        <h3 className="text-xs font-bold text-[#f26a21] uppercase tracking-wider">Wall {wi + 1}</h3>
         <Field label="Length">
           <button
             onClick={() => onWallDimensionEdit(room.id, wi)}
-            className="w-full text-left bg-[#0F172A] border border-[#F97316]/40 hover:border-[#F97316] rounded-lg px-3 h-8 text-sm text-[#F97316] font-mono transition-colors flex items-center justify-between"
+            className="w-full text-left bg-[#16263d] border border-[#f26a21]/40 hover:border-[#f26a21] rounded-lg px-3 h-8 text-sm text-[#f26a21] font-mono transition-colors flex items-center justify-between"
           >
             <span>{formatFeetInches(wLen)}</span>
             <span className="text-xs text-slate-500">tap to edit</span>
@@ -152,7 +152,7 @@ export default function Inspector({ selection, rooms, openings, onRoomsChange, o
         <Field label="Room">
           <p className="text-sm text-slate-300">{room.name}</p>
         </Field>
-        <div className="border-t border-[#1E293B] pt-3">
+        <div className="border-t border-[#1f3354] pt-3">
           <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Openings on this wall</p>
           {openings.filter((o) => o.room_id === room.id && o.wall_index === wi).length === 0
             ? <p className="text-xs text-slate-600">None — use Opening tool to add</p>
@@ -179,13 +179,13 @@ export default function Inspector({ selection, rooms, openings, onRoomsChange, o
 
     return (
       <div className="p-4 space-y-4 overflow-y-auto">
-        <h3 className="text-xs font-bold text-[#F97316] uppercase tracking-wider capitalize">{op.type}</h3>
+        <h3 className="text-xs font-bold text-[#f26a21] uppercase tracking-wider capitalize">{op.type}</h3>
         <Field label="Type">
           <div className="flex gap-1.5">
             {(['door', 'window', 'opening'] as OpeningType[]).map((t) => (
               <button key={t}
                 onClick={() => updateOp({ type: t })}
-                className={`flex-1 h-8 text-xs font-bold rounded-lg capitalize transition-colors ${op.type === t ? 'bg-[#F97316] text-[#0F172A]' : 'bg-[#1E293B] text-slate-400 hover:text-slate-200'}`}
+                className={`flex-1 h-8 text-xs font-bold rounded-lg capitalize transition-colors ${op.type === t ? 'bg-[#f26a21] text-[#16263d]' : 'bg-[#1f3354] text-slate-400 hover:text-slate-200'}`}
               >
                 {t}
               </button>
@@ -211,7 +211,7 @@ export default function Inspector({ selection, rooms, openings, onRoomsChange, o
               {(['left', 'right', 'none'] as DoorSwing[]).map((s) => (
                 <button key={s}
                   onClick={() => updateOp({ swing: s })}
-                  className={`flex-1 h-8 text-xs font-bold rounded-lg capitalize transition-colors ${op.swing === s ? 'bg-[#F97316] text-[#0F172A]' : 'bg-[#1E293B] text-slate-400 hover:text-slate-200'}`}
+                  className={`flex-1 h-8 text-xs font-bold rounded-lg capitalize transition-colors ${op.swing === s ? 'bg-[#f26a21] text-[#16263d]' : 'bg-[#1f3354] text-slate-400 hover:text-slate-200'}`}
                 >
                   {s}
                 </button>

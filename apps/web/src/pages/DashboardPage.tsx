@@ -27,11 +27,11 @@ interface KPI {
 
 const STATUS_COLORS: Record<JobStatus, string> = {
   new: "#64748B",
-  active: "#F97316",
+  active: "#f26a21",
   drying: "#3B82F6",
-  final_inspection: "#EAB308",
+  final_inspection: "#e0a800",
   invoicing: "#A855F7",
-  closed: "#22C55E",
+  closed: "#1f9d55",
 };
 
 export default function DashboardPage() {
@@ -73,7 +73,7 @@ export default function DashboardPage() {
       label: "Active Jobs",
       value: activeJobs,
       icon: Briefcase,
-      color: "#F97316",
+      color: "#f26a21",
     },
     {
       label: "In Drying",
@@ -92,14 +92,14 @@ export default function DashboardPage() {
       value: equipmentCount,
       sub: "pieces deployed",
       icon: HardDrive,
-      color: "#EAB308",
+      color: "#e0a800",
     },
     {
       label: "Open A/R (est.)",
       value: centsToDisplay(arEstimate),
       sub: "invoicing stage",
       icon: DollarSign,
-      color: "#22C55E",
+      color: "#1f9d55",
     },
   ];
 
@@ -121,7 +121,7 @@ export default function DashboardPage() {
         {kpis.map((kpi) => (
           <div
             key={kpi.label}
-            className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4"
+            className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-4"
           >
             <div
               className="w-9 h-9 rounded-xl flex items-center justify-center mb-3"
@@ -138,13 +138,13 @@ export default function DashboardPage() {
 
       {/* Job Pipeline */}
       <div className="mb-6 flex items-center gap-2">
-        <TrendingUp size={18} className="text-[#F97316]" />
+        <TrendingUp size={18} className="text-[#f26a21]" />
         <h2 className="text-lg font-bold text-white">Active Pipeline</h2>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
         {pipeline.map(({ status, jobs: statusJobs }) => (
-          <div key={status} className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4">
+          <div key={status} className="bg-[#0f1b2d] border border-[#1f3354] rounded-2xl p-4">
             <div className="flex items-center gap-2 mb-3">
               <span
                 className="w-2.5 h-2.5 rounded-full"
@@ -169,7 +169,7 @@ export default function DashboardPage() {
                 <button
                   key={job.id}
                   onClick={() => navigate(`/jobs/${job.id}`)}
-                  className="w-full text-left bg-[#0F172A] rounded-xl p-3 border border-[#1E293B] hover:border-[#F97316]/40 transition-colors group"
+                  className="w-full text-left bg-[#16263d] rounded-xl p-3 border border-[#1f3354] hover:border-[#f26a21]/40 transition-colors group"
                 >
                   <p className="text-xs font-bold text-slate-300 truncate group-hover:text-white">
                     {job.property_address}
@@ -183,7 +183,7 @@ export default function DashboardPage() {
               {statusJobs.length > 4 && (
                 <button
                   onClick={() => navigate(`/jobs?status=${status}`)}
-                  className="flex items-center gap-1 text-xs text-[#F97316] hover:underline w-full px-1"
+                  className="flex items-center gap-1 text-xs text-[#f26a21] hover:underline w-full px-1"
                 >
                   +{statusJobs.length - 4} more <ChevronRight size={12} />
                 </button>

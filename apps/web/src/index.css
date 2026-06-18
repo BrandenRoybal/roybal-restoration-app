@@ -3,14 +3,14 @@
 @custom-variant dark (&:is(.dark, .dark *));
 
 @theme {
-  --color-navy: #0A1628;
-  --color-navy-dark: #0F172A;
-  --color-navy-border: #1E293B;
-  --color-orange: #F97316;
-  --color-orange-hover: #EA6C0C;
-  --color-success: #22C55E;
-  --color-warning: #EAB308;
-  --color-danger: #EF4444;
+  --color-navy: #0f1b2d;
+  --color-navy-dark: #16263d;
+  --color-navy-border: #1f3354;
+  --color-orange: #f26a21;
+  --color-orange-hover: #d4520f;
+  --color-success: #1f9d55;
+  --color-warning: #e0a800;
+  --color-danger: #d23b2e;
   --font-sans: "Inter", system-ui, sans-serif;
 }
 
@@ -24,7 +24,7 @@
   }
 
   body {
-    background-color: #0F172A;
+    background-color: #16263d;
     color: #F1F5F9;
     font-family: "Inter", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
@@ -37,7 +37,7 @@
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    background: #1E293B;
+    background: #1f3354;
   }
   ::-webkit-scrollbar-thumb {
     background: #334155;
