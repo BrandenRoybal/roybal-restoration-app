@@ -284,6 +284,23 @@ table.rtable .num.under { color: var(--green); }
 .ganttfin { font-size: 13px; font-weight: 700; color: var(--navy); background: #eef2f7; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; white-space: nowrap; }
 .chip.is-crit { background: #c0392b; color: #fff; border-color: #c0392b; }
 
+/* ---------- workload view ---------- */
+.wl-crew { width: 100%; background: #eef1f5; border-top: 1px solid var(--line); }
+.wl-crew__lbl { position: sticky; left: 0; display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; font-weight: 700; font-size: 13px; color: var(--navy); background: #eef1f5; }
+.wl-crew--clash .wl-crew__lbl { color: var(--red); }
+.wl-count { font-weight: 600; color: var(--muted); font-size: 12px; }
+.wl-clash { color: var(--red); font-weight: 800; font-size: 12px; }
+.wl-row { min-height: 34px; }
+.wl-row .gantt__track { height: 34px; }
+.wl-over { border-color: var(--red) !important; background: #fbe3e0 !important; color: #b32c20; }
+
+/* ---------- baseline overlay ---------- */
+.btn.baseon { background: #5b6b80; color: #fff; border-color: #5b6b80; box-shadow: none; }
+.gantt__base { position: absolute; top: 33px; height: 5px; background: #b3bccb; border-radius: 3px; z-index: 0; }
+.gantt__slip { position: absolute; top: 9px; font-size: 10.5px; font-weight: 800; padding: 1px 5px; border-radius: 6px; white-space: nowrap; z-index: 2; }
+.slip-late { background: #fbe3e0; color: var(--red); }
+.slip-early { background: #e3f6ec; color: var(--green); }
+
 /* ---------- phases (sub-tasks) ---------- */
 .chip.is-phase { background: #ede9fb; color: #5b4ba8; border-color: #d6cdf3; }
 .subtasks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 6px; }

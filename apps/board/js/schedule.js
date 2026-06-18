@@ -188,6 +188,25 @@ export function computeCriticalPath(jobs, settings) {
    date ranges overlap. Returns:
      byJob: Map(jobId -> [{ crewId, otherId }])  (per-job conflicts, both sides)
      pairs: [{ crewId, aId, bId, from, to }]      (unique clashes + overlap range) */
+/* Every crew booking as { crewId, jobId, label, start, finish, phase } —
+   phase-level when a job's phases carry crew, else job-level. Shared by the
+   over-allocation check and the workload view. */
+export function crewAssignments(jobs, settings) {
+  const s = settings || DEFAULT_SETTINGS;
+  const out = [];
+  for (const j of jobs) {
+    if (j.isMilestone || !j.startDate) continue;
+    const phases = j.subtasks || [];
+    if (phases.some((st) => (st.crewIds || []).length)) {
+      for (const { sub, start, finish } of layoutSubtasks(phases, j.startDate, s))
+        for (const cid of (sub.crewIds || [])) out.push({ crewId: cid, jobId: j.id, label: sub.name || "Phase", start, finish, phase: true });
+    } else if (j.targetDate) {
+      for (const cid of (j.crewIds || [])) out.push({ crewId: cid, jobId: j.id, label: "", start: j.startDate, finish: j.targetDate, phase: false });
+    }
+  }
+  return out;
+}
+
 export function findOverAllocations(jobs, settings) {
   const s = settings || DEFAULT_SETTINGS;
   const byJob = new Map(), pairs = [];
@@ -197,18 +216,7 @@ export function findOverAllocations(jobs, settings) {
     if (seenJob.has(k)) return; seenJob.add(k);
     (byJob.get(id) || byJob.set(id, []).get(id)).push({ crewId, otherId });
   };
-  // crew assignments: phase-level when a job's phases carry crew, else job-level
-  const asg = [];
-  for (const j of jobs) {
-    if (j.isMilestone || !j.startDate) continue;
-    const phases = j.subtasks || [];
-    if (phases.some((st) => (st.crewIds || []).length)) {
-      for (const { sub, start, finish } of layoutSubtasks(phases, j.startDate, s))
-        for (const cid of (sub.crewIds || [])) asg.push({ crewId: cid, jobId: j.id, start, finish });
-    } else if (j.targetDate) {
-      for (const cid of (j.crewIds || [])) asg.push({ crewId: cid, jobId: j.id, start: j.startDate, finish: j.targetDate });
-    }
-  }
+  const asg = crewAssignments(jobs, s);
   const byCrew = new Map();
   for (const a of asg) (byCrew.get(a.crewId) || byCrew.set(a.crewId, []).get(a.crewId)).push(a);
   for (const [cid, list] of byCrew) {
