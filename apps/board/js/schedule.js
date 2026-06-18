@@ -67,6 +67,27 @@ function finishOf(startISO, dur, settings) {
   return addWorkDays(start, Math.max(1, dur) - 1, settings);
 }
 
+/* Lay out a job's phases (sub-tasks) sequentially from startISO. Each phase
+   runs for durationOf(phase) work days; phase i>0 starts after the previous
+   one finishes, plus an optional lag (calendar days). Returns
+   [{ sub, start, finish }] in order. */
+export function layoutSubtasks(subs, startISO, settings) {
+  const s = settings || DEFAULT_SETTINGS;
+  if (!subs || !subs.length || !startISO) return [];
+  const out = [];
+  let prevFinish = null;
+  for (let i = 0; i < subs.length; i++) {
+    const sub = subs[i];
+    const start = i === 0
+      ? addWorkDays(startISO, 0, s)
+      : addWorkDays(addDaysISO(prevFinish, 1 + (Number(sub.lagDays) || 0)), 0, s);
+    const finish = addWorkDays(start, durationOf(sub, s) - 1, s);
+    out.push({ sub, start, finish });
+    prevFinish = finish;
+  }
+  return out;
+}
+
 /* A job is engine-managed only once it opts in (has deps, an explicit mode,
    or a duration override). Legacy jobs with hand-typed dates stay untouched
    until the user engages scheduling on them. */
@@ -74,7 +95,8 @@ function participates(job) {
   return (Array.isArray(job.deps) && job.deps.length > 0)
     || job.scheduleMode === "auto" || job.scheduleMode === "manual"
     || job.durationDays != null
-    || !!job.notBefore;
+    || !!job.notBefore
+    || (Array.isArray(job.subtasks) && job.subtasks.length > 0);
 }
 
 /* ---- main scheduler: cycle-safe topological forward pass (Kahn) ----
@@ -121,7 +143,9 @@ export function computeSchedule(jobs, settings) {
 
     if (!baseStart) { finishById.set(id, job.targetDate || null); continue; }
     const newStart = addWorkDays(baseStart, 0, s);
-    const newFinish = finishOf(newStart, dur, s);
+    // a job with phases gets its finish from the phase chain; otherwise from its own duration
+    const subL = (job.subtasks && job.subtasks.length) ? layoutSubtasks(job.subtasks, newStart, s) : null;
+    const newFinish = subL && subL.length ? subL[subL.length - 1].finish : finishOf(newStart, dur, s);
     finishById.set(id, newFinish);
     if (job.startDate !== newStart || job.targetDate !== newFinish) {
       job.startDate = newStart; job.targetDate = newFinish; changed.push(job);

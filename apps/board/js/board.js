@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings,
 } from "./data.js";
-import { computeSchedule, durationOf, wouldCreateCycle, findOverAllocations, computeCriticalPath, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, wouldCreateCycle, findOverAllocations, computeCriticalPath, layoutSubtasks, DEFAULT_SETTINGS } from "./schedule.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -52,6 +52,7 @@ let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/serv
 let conflicts = { byJob: new Map(), pairs: [] };   // crew over-allocations (computed each schedule)
 let critical = new Set();                          // job ids on the critical path
 let ganttCritical = false;                         // Gantt "Critical path" highlight toggle
+let ganttExpanded = new Set();                     // job ids whose phases are expanded on the Gantt
 let filterText = "", filterCrew = "", filterType = "";
 let modalOpen = false;
 let pollTimer = null;
@@ -475,6 +476,9 @@ function renderCard(j) {
   // start-no-earlier-than constraint (materials / permit)
   if (j.notBefore) meta.append(h("span", { class: "chip is-lock", title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "can't start before " + fmtShort(j.notBefore) },
     "🔒 " + (j.notBeforeLabel ? j.notBeforeLabel + " " : "not before ") + fmtShort(j.notBefore)));
+  // phases (sub-tasks)
+  if ((j.subtasks || []).length) meta.append(h("span", { class: "chip is-phase", title: j.subtasks.map((st, i) => `${i + 1}. ${st.name || "Phase"} — ${st.durationDays || 1}d${st.lagDays ? ` (+${st.lagDays}d lag)` : ""}`).join("\n") },
+    "📋 " + j.subtasks.length + " phase" + (j.subtasks.length === 1 ? "" : "s")));
 
   const phone = j.phone ? h("a", { class: "bcall", href: "tel:" + j.phone.replace(/[^\d+]/g, ""), onclick: (e) => e.stopPropagation() }, "📞 " + j.phone) : null;
 
@@ -703,10 +707,12 @@ function paintGantt() {
   // ----- rows (collect bar geometry for dependency arrows) -----
   const geo = new Map();
   const rowH = 40, barMid = 20, headerH = monthMode ? 22 : 40;
-  const rows = dated.map(({ j, s, t }, ri) => {
+  const rows = [];
+  let vi = 0;   // running visual row index (accounts for expanded phase rows)
+  for (const { j, s, t } of dated) {
     const left = dayDiff(startISO, s) * dayW;
     const w = Math.max((dayDiff(s, t) + 1) * dayW - 2, 8);
-    geo.set(j.id, { ri, left, w });
+    geo.set(j.id, { ri: vi, left, w });
     const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
     const pct = est > 0 ? Math.min(100, Math.round((act / est) * 100)) : 0;
     const over = est > 0 && act > est;
@@ -758,10 +764,29 @@ function paintGantt() {
       if (nbX >= 0 && nbX <= trackW) track.append(h("div", { class: "gantt__nb", style: `left:${nbX}px`,
         title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "start no earlier than " + fmtShort(j.notBefore) }, "🔒"));
     }
-    return h("div", { class: "gantt__row" },
-      h("div", { class: "gantt__label", title: j.title || j.customer || "Job" }, j.title || j.customer || "Job"),
-      track);
-  });
+    const subs = j.subtasks || [];
+    const expanded = subs.length && ganttExpanded.has(j.id);
+    const toggle = subs.length ? h("span", { class: "gantt__toggle", title: expanded ? "Collapse phases" : "Show phases",
+      onclick: (e) => { e.stopPropagation(); if (expanded) ganttExpanded.delete(j.id); else ganttExpanded.add(j.id); paintGantt(); } }, expanded ? "▾ " : "▸ ") : null;
+    rows.push(h("div", { class: "gantt__row" },
+      h("div", { class: "gantt__label", title: j.title || j.customer || "Job" }, toggle, (j.title || j.customer || "Job")),
+      track));
+    vi++;
+    if (expanded) {
+      for (const { sub, start, finish } of layoutSubtasks(subs, j.startDate, settings)) {
+        const sLeft = dayDiff(startISO, start) * dayW;
+        const sW = Math.max((dayDiff(start, finish) + 1) * dayW - 2, 6);
+        const sBar = h("div", { class: "gantt__bar gantt__bar--sub", style: `left:${sLeft}px;width:${sW}px;border-left-color:${stageOf(j.stage).color}`,
+          title: `${sub.name || "Phase"}\n${fmtShort(start)} – ${fmtShort(finish)}`, onclick: () => openJobModal(j) }, sub.name || "Phase");
+        const sTrack = h("div", { class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""), style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`) }, sBar);
+        if (monthMode) for (const b of monthBounds) sTrack.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
+        if (todayX >= 0) sTrack.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
+        rows.push(h("div", { class: "gantt__row gantt__row--sub" },
+          h("div", { class: "gantt__label" }, "↳ " + (sub.name || "Phase")), sTrack));
+        vi++;
+      }
+    }
+  }
 
   const inner = h("div", { class: "gantt__inner", style: `width:${180 + trackW}px;position:relative` }, header, ...rows);
 
@@ -781,7 +806,7 @@ function paintGantt() {
   if (segs.length) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "gantt__deps");
-    svg.setAttribute("width", 180 + trackW); svg.setAttribute("height", headerH + dated.length * rowH);
+    svg.setAttribute("width", 180 + trackW); svg.setAttribute("height", headerH + vi * rowH);
     svg.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:1";
     svg.innerHTML = '<defs><marker id="garrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9aa6b5"/></marker><marker id="garrowcrit" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c0392b"/></marker></defs>' + segs.join("");
     inner.append(svg);
@@ -809,10 +834,11 @@ function openJobModal(existing) {
     crewIds: [], title: "", customer: "", address: "", phone: "", startDate: "", targetDate: "",
     estimatedHours: "", fieldJobId: "", notes: "",
     deps: [], durationDays: null, scheduleMode: "auto", pinnedStart: "",
-    notBefore: "", notBeforeLabel: "",
+    notBefore: "", notBeforeLabel: "", subtasks: [],
   };
   j.crewIds = [...(j.crewIds || [])];
   j.deps = (j.deps || []).map((d) => ({ ...d }));
+  j.subtasks = (j.subtasks || []).map((st) => ({ ...st }));
   if (!j.scheduleMode) j.scheduleMode = "auto";
 
   const f = {};
@@ -844,6 +870,7 @@ function openJobModal(existing) {
   // ----- schedule section (links, mode, duration) -----
   const durOut = h("span", { class: "schedsec__dur" });
   refreshDur = () => {
+    if (j.subtasks && j.subtasks.length) { durOut.textContent = `${j.subtasks.length} phase${j.subtasks.length === 1 ? "" : "s"} drive the schedule`; return; }
     const d = durationOf(j, settings);
     durOut.textContent = `${d} work day${d === 1 ? "" : "s"}` + (j.durationDays != null ? " (override)" : (Number(j.estimatedHours) > 0 ? " — from hours" : ""));
   };
@@ -887,6 +914,35 @@ function openJobModal(existing) {
   const nbDate = (f.notBefore = h("input", { type: "date", value: j.notBefore || "" }));
   const nbLabel = (f.notBeforeLabel = h("input", { type: "text", placeholder: "e.g. materials, permit", maxlength: "24", value: j.notBeforeLabel || "" }));
 
+  // ----- phases (sub-tasks) -----
+  const phaseWrap = h("div", { class: "subtasks" });
+  const renderPhases = () => {
+    clear(phaseWrap);
+    if (!j.subtasks.length) {
+      phaseWrap.append(h("div", { class: "subtle" }, "No phases. Add phases to break the job into steps (e.g. demo → dry → rebuild → paint) that sequence and roll up to the job's dates."));
+    } else {
+      j.subtasks.forEach((st, i) => {
+        const name = h("input", { type: "text", class: "st-name", placeholder: "Phase name", value: st.name || "" });
+        name.addEventListener("input", () => { st.name = name.value; });
+        const days = h("input", { type: "number", class: "st-num", min: "1", step: "1", value: st.durationDays != null ? st.durationDays : 1, title: "work days" });
+        days.addEventListener("input", () => { st.durationDays = Math.max(1, Math.round(Number(days.value) || 1)); });
+        const lag = h("input", { type: "number", class: "st-num", min: "0", step: "1", value: st.lagDays || 0, title: "lag (days) before this phase — e.g. cure/dry time" });
+        lag.addEventListener("input", () => { st.lagDays = Math.max(0, Math.round(Number(lag.value) || 0)); });
+        const mv = (d) => { const t = j.subtasks[i + d]; j.subtasks[i + d] = j.subtasks[i]; j.subtasks[i] = t; renderPhases(); };
+        phaseWrap.append(h("div", { class: "st-row" },
+          h("span", { class: "st-i" }, String(i + 1)), name,
+          h("span", { class: "st-lbl" }, "days"), days,
+          h("span", { class: "st-lbl" }, "lag"), lag,
+          h("button", { class: "st-btn", type: "button", title: "Move up", disabled: i === 0, onclick: () => mv(-1) }, "↑"),
+          h("button", { class: "st-btn", type: "button", title: "Move down", disabled: i === j.subtasks.length - 1, onclick: () => mv(1) }, "↓"),
+          h("button", { class: "st-btn st-del", type: "button", title: "Remove phase", onclick: () => { j.subtasks.splice(i, 1); renderPhases(); } }, "✕")));
+      });
+    }
+    refreshDur();
+  };
+  renderPhases();
+  const addPhase = h("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { j.subtasks.push({ id: uid(), name: "", durationDays: 1, lagDays: 0 }); renderPhases(); } }, "+ Add phase");
+
   const scheduleSection = h("div", { class: "schedsec" },
     h("div", { class: "schedsec__h" }, "🗓 Schedule"),
     field("Scheduling mode", h("div", { class: "vsw" }, mAuto, mManual)),
@@ -896,7 +952,8 @@ function openJobModal(existing) {
       field("Duration override (work days)", durInp),
       field("Computed duration", durOut)),
     field("Start no earlier than (materials / permit ready)",
-      h("div", { class: "grid2" }, nbDate, nbLabel)));
+      h("div", { class: "grid2" }, nbDate, nbLabel)),
+    field("Phases (optional)", h("div", {}, phaseWrap, h("div", { class: "row-add" }, addPhase))));
   refreshDur();
 
   const body = h("div", { class: "bmodal__body" },

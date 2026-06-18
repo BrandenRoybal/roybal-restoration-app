@@ -284,6 +284,26 @@ table.rtable .num.under { color: var(--green); }
 .ganttfin { font-size: 13px; font-weight: 700; color: var(--navy); background: #eef2f7; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; white-space: nowrap; }
 .chip.is-crit { background: #c0392b; color: #fff; border-color: #c0392b; }
 
+/* ---------- phases (sub-tasks) ---------- */
+.chip.is-phase { background: #ede9fb; color: #5b4ba8; border-color: #d6cdf3; }
+.subtasks { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.st-row { display: flex; align-items: center; gap: 6px; }
+.st-row input { min-height: 38px; }
+.st-i { width: 18px; text-align: center; font-size: 12px; font-weight: 800; color: var(--muted); flex: 0 0 auto; }
+.st-name { flex: 1 1 auto; min-width: 0; }
+.st-num { flex: 0 0 54px; width: 54px; text-align: center; padding-left: 4px; padding-right: 4px; }
+.st-lbl { font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+.st-btn { flex: 0 0 auto; width: 32px; min-height: 38px; border: 1px solid var(--line); background: #fff; border-radius: 8px; cursor: pointer; font-size: 14px; color: var(--muted); }
+.st-btn:disabled { opacity: .35; cursor: default; }
+.st-del:hover { color: var(--red); border-color: #f0c9c5; }
+
+/* gantt sub-task (phase) rows */
+.gantt__toggle { cursor: pointer; user-select: none; color: var(--muted); font-size: 11px; }
+.gantt__toggle:hover { color: var(--orange-dark); }
+.gantt__row--sub { background: #fafbfc; }
+.gantt__row--sub .gantt__label { font-size: 12px; color: var(--muted); padding-left: 18px; font-weight: 600; background: #fafbfc; }
+.gantt__bar--sub { top: 12px; height: 16px; font-size: 10.5px; font-weight: 600; opacity: .95; border-left-width: 3px; }
+
 /* ---------- "start no earlier than" constraint (materials / permit) ---------- */
 .chip.is-lock { background: #fdf3e0; color: #8a6a18; border-color: #f0d8a8; }
 .gantt__nb { position: absolute; top: 0; bottom: 0; border-left: 2px dashed #c79a2e; z-index: 1; font-size: 10px; line-height: 1.2; pointer-events: auto; cursor: help; }
