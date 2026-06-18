@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings,
 } from "./data.js";
-import { computeSchedule, durationOf, wouldCreateCycle, findOverAllocations, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, wouldCreateCycle, findOverAllocations, computeCriticalPath, DEFAULT_SETTINGS } from "./schedule.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -50,6 +50,8 @@ let crew = [];
 let entries = [];
 let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
 let conflicts = { byJob: new Map(), pairs: [] };   // crew over-allocations (computed each schedule)
+let critical = new Set();                          // job ids on the critical path
+let ganttCritical = false;                         // Gantt "Critical path" highlight toggle
 let filterText = "", filterCrew = "", filterType = "";
 let modalOpen = false;
 let pollTimer = null;
@@ -122,6 +124,7 @@ function applySchedule() {
   settings = cachedSettings();
   const res = computeSchedule(jobs, settings);   // { changed, cyclic }; mutates jobs in place
   conflicts = findOverAllocations(jobs);         // refresh crew over-allocations
+  critical = computeCriticalPath(jobs, settings);// refresh critical path
   return res;
 }
 async function recomputeAndPersist() {
@@ -444,6 +447,8 @@ function renderCard(j) {
     meta.append(h("span", { class: "chip is-warn", title: detail },
       `⚠ ${clashCrew.size === 1 ? crewName([...clashCrew][0]) + " double-booked" : clashCrew.size + " crew double-booked"}`));
   }
+  // critical path
+  if (critical.has(j.id)) meta.append(h("span", { class: "chip is-crit", title: "On the critical path — a slip here pushes your final completion date" }, "⚡ Critical"));
   // crew chips
   const ids = (j.crewIds || []).filter(crewById);
   if (ids.length) {
@@ -613,11 +618,19 @@ function renderGanttToolbar() {
     h("button", { class: "vsw__b" + (ganttZoom === "day" ? " on" : ""), onclick: () => setZoom("day") }, "Day"),
     h("button", { class: "vsw__b" + (ganttZoom === "week" ? " on" : ""), onclick: () => setZoom("week") }, "Week"),
     h("button", { class: "vsw__b" + (ganttZoom === "month" ? " on" : ""), onclick: () => setZoom("month") }, "Month"));
+  const critBtn = h("button", {
+    class: "btn btn--ghost btn--sm" + (ganttCritical ? " criton" : ""), onclick: toggleCritical,
+    title: "Highlight the chain of linked jobs that drives your final completion date",
+  }, "⚡ Critical path");
+  const fin = projectFinish();
+  const finChip = fin ? h("span", { class: "ganttfin", title: "Projected completion — latest job finish" }, "🏁 Finish " + fmtShort(fin)) : null;
   return h("div", { class: "btoolbar" },
-    h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Timeline"), zoom),
+    h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Timeline"), zoom, critBtn, finChip),
     h("div", { class: "btools" }, ...filterControls(), ...actionButtons()));
 }
 function setZoom(z) { if (ganttZoom === z) return; ganttZoom = z; renderGanttView(); }
+function toggleCritical() { ganttCritical = !ganttCritical; renderGanttView(); }
+function projectFinish() { let end = null; for (const j of jobs) if (j.targetDate && (!end || j.targetDate > end)) end = j.targetDate; return end; }
 
 function paintGantt() {
   const wrap = $(".gwrap", view);
@@ -694,8 +707,9 @@ function paintGantt() {
     const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
     const hrs = est ? `  ·  ${Math.round(act * 100) / 100}/${est}h` : (act ? `  ·  ${fmtH(act)}` : "");
     const clash = conflicts.byJob.has(j.id);
+    const critCls = ganttCritical ? (critical.has(j.id) ? " crit" : " dim") : "";
     const bar = h("div", {
-      class: "gantt__bar" + (clash ? " has-clash" : ""), style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}`,
+      class: "gantt__bar" + (clash ? " has-clash" : "") + critCls, style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}`,
       title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}${clash ? "\n⚠ crew double-booked" : ""}\n(drag to reschedule)`,
       onclick: () => { if (bar._dragged) { bar._dragged = false; return; } openJobModal(j); },
     }, (clash ? "⚠ " : "") + (j.title || j.customer || "Job") + hrs);
@@ -747,7 +761,9 @@ function paintGantt() {
       const pg = geo.get(d.predId); if (!pg) continue;
       const x1 = 180 + pg.left + pg.w, y1 = headerH + pg.ri * rowH + barMid;
       const x2 = 180 + sg.left, y2 = headerH + sg.ri * rowH + barMid;
-      segs.push(`<path d="M${x1},${y1} H${x1 + 8} V${y2} H${x2}" class="gantt__dep" marker-end="url(#garrow)"/>`);
+      const critLink = ganttCritical && critical.has(j.id) && critical.has(d.predId);
+      const cls = "gantt__dep" + (ganttCritical ? (critLink ? " crit" : " dim") : "");
+      segs.push(`<path d="M${x1},${y1} H${x1 + 8} V${y2} H${x2}" class="${cls}" marker-end="url(#${critLink ? "garrowcrit" : "garrow"})"/>`);
     }
   }
   if (segs.length) {
@@ -755,7 +771,7 @@ function paintGantt() {
     svg.setAttribute("class", "gantt__deps");
     svg.setAttribute("width", 180 + trackW); svg.setAttribute("height", headerH + dated.length * rowH);
     svg.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;overflow:visible;z-index:1";
-    svg.innerHTML = '<defs><marker id="garrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9aa6b5"/></marker></defs>' + segs.join("");
+    svg.innerHTML = '<defs><marker id="garrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9aa6b5"/></marker><marker id="garrowcrit" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c0392b"/></marker></defs>' + segs.join("");
     inner.append(svg);
   }
 

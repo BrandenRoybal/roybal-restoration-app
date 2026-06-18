@@ -127,6 +127,35 @@ export function computeSchedule(jobs, settings) {
   return { changed, cyclic };
 }
 
+/* Critical path: the chain of linked jobs that drives the latest finish.
+   Walks back from the latest-finishing job(s) along "binding" predecessors —
+   those whose finish (+ lag) actually determines a job's start. Returns a Set
+   of critical job ids; empty when there's no real chain (fewer than 2 jobs). */
+export function computeCriticalPath(jobs, settings) {
+  const s = settings || DEFAULT_SETTINGS;
+  const byId = new Map(jobs.map((j) => [j.id, j]));
+  const scheduled = jobs.filter((j) => j.startDate && j.targetDate);
+  if (scheduled.length < 2) return new Set();
+  let end = scheduled[0].targetDate;
+  for (const j of scheduled) if (j.targetDate > end) end = j.targetDate;
+  const critical = new Set();
+  const stack = scheduled.filter((j) => j.targetDate === end).map((j) => j.id);
+  while (stack.length) {
+    const id = stack.pop();
+    if (critical.has(id)) continue;
+    critical.add(id);
+    const j = byId.get(id);
+    for (const d of (j.deps || [])) {
+      const p = byId.get(d.predId);
+      if (!p || !p.targetDate) continue;
+      const driven = addWorkDays(addDaysISO(p.targetDate, 1 + (Number(d.lagDays) || 0)), 0, s);
+      if (driven === j.startDate) stack.push(p.id);   // this predecessor binds j's start
+    }
+  }
+  // a "path" needs at least one real link; a lone latest job isn't a critical path
+  return critical.size >= 2 ? critical : new Set();
+}
+
 /* Crew over-allocation: a crew member booked on two jobs whose scheduled
    date ranges overlap. Returns:
      byJob: Map(jobId -> [{ crewId, otherId }])  (per-job conflicts, both sides)

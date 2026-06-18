@@ -274,3 +274,12 @@ table.rtable .num.under { color: var(--green); }
 .confrow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
 .confrow__main { flex: 1; min-width: 0; font-size: 13px; }
 .confrow__main .linklike { font-size: 13px; }
+
+/* ---------- critical path ---------- */
+.gantt__bar.crit { border-color: #c0392b; box-shadow: 0 0 0 1.5px rgba(192, 57, 43, .45), var(--shadow); }
+.gantt__bar.dim { opacity: .4; }
+.gantt__dep.crit { stroke: #c0392b; stroke-width: 2.5; opacity: 1; }
+.gantt__dep.dim { opacity: .18; }
+.btn.criton { background: #c0392b; color: #fff; border-color: #c0392b; box-shadow: none; }
+.ganttfin { font-size: 13px; font-weight: 700; color: var(--navy); background: #eef2f7; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; white-space: nowrap; }
+.chip.is-crit { background: #c0392b; color: #fff; border-color: #c0392b; }
