@@ -11,16 +11,16 @@
 /* ---------- top bar (matches the Field app's navy topbar) ---------- */
 .tbar {
   position: sticky; top: 0; z-index: 50; display: flex; align-items: center;
-  justify-content: space-between; gap: 12px; background: var(--navy); color: #fff;
-  padding: 10px 20px; box-shadow: var(--shadow);
+  justify-content: space-between; gap: 12px; background: var(--header-grad); color: #fff;
+  padding: 11px 20px; box-shadow: 0 4px 18px rgba(14, 33, 56, .30);
 }
 .tbar__brand { display: flex; align-items: center; gap: 12px; }
-.tbar__logo { width: 38px; height: 38px; background: #fff; border-radius: 8px; padding: 4px; }
+.tbar__logo { width: 38px; height: 38px; background: #fff; border-radius: 10px; padding: 4px; box-shadow: 0 2px 6px rgba(0, 0, 0, .18); }
 .tbar__brand strong { font-size: 16px; display: block; color: #fff; letter-spacing: .2px; }
-.tbar__brand span { font-size: 12px; color: #9fb3cc; }
+.tbar__brand span { font-size: 12px; color: rgba(255, 255, 255, .8); }
 .tbar__right { display: flex; align-items: center; gap: 12px; font-size: 13px; }
-.tbar__acct { color: #cfd9e6; }
-#syncDot { color: var(--green); font-size: 12px; }
+.tbar__acct { color: rgba(255, 255, 255, .85); }
+#syncDot { color: #8fe7b0; font-size: 12px; }
 
 /* ---------- layout (full-width: uses the whole monitor, incl. ultrawide) ---------- */
 .bview { max-width: none; margin: 0; padding: 18px 24px 60px; }
@@ -35,26 +35,27 @@
 /* ---------- board (columns) ---------- */
 .bboard { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 14px; }
 .bcol {
-  flex: 1 1 0; min-width: 250px; background: #e6ecf4; border: 1px solid var(--line);
-  border-radius: 14px; display: flex; flex-direction: column; max-height: calc(100vh - 170px);
+  flex: 1 1 0; min-width: 250px; background: #eaedf2; border: 1px solid var(--line);
+  border-radius: var(--radius-lg); display: flex; flex-direction: column; max-height: calc(100vh - 170px);
 }
 .bcol__head {
   display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; background: #e6ecf4; border-radius: 14px 14px 0 0; z-index: 1;
+  position: sticky; top: 0; background: #eaedf2; border-radius: var(--radius-lg) var(--radius-lg) 0 0; z-index: 1;
 }
 .bcol__dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
 .bcol__name { font-weight: 800; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; color: var(--navy); }
 .bcol__count { margin-left: auto; font-size: 12px; font-weight: 700; color: var(--muted); background: #fff; border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; }
 .bcol__body { padding: 10px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 60px; }
-.bcol__body.drop-over { background: #fde7da; outline: 2px dashed var(--orange); outline-offset: -6px; border-radius: 10px; }
+.bcol__body.drop-over { background: var(--brand-tint); outline: 2px dashed var(--orange); outline-offset: -6px; border-radius: 10px; }
 .bcol__empty { color: var(--muted); font-size: 12px; text-align: center; padding: 16px 6px; }
 
 /* ---------- job card ---------- */
 .bcard {
   background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--orange);
-  border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow); cursor: pointer; user-select: none;
+  border-radius: var(--radius-sm); padding: 11px 13px; box-shadow: var(--shadow-sm);
+  cursor: pointer; user-select: none; transition: box-shadow .15s ease, transform .08s ease;
 }
-.bcard:hover { border-color: var(--orange); }
+.bcard:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
 .bcard.dragging { opacity: .45; }
 .bcard__top { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .bcard__title { font-weight: 700; font-size: 15px; color: var(--ink); line-height: 1.25; }
@@ -103,7 +104,7 @@
   display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px 6px 8px; border: 1px solid var(--line);
   border-radius: 999px; cursor: pointer; font-size: 13px; font-weight: 600; background: #fff;
 }
-.crewpick label.on { border-color: var(--orange); background: #fde7da; }
+.crewpick label.on { border-color: var(--orange); background: var(--brand-tint); }
 .crewpick input { display: none; }
 
 /* crew roster list */
@@ -162,7 +163,7 @@ table.rtable .num.under { color: var(--green); }
 
 /* ---------- view switch + toolbar left ---------- */
 .btoolbar__left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.vsw { display: inline-flex; background: #e6ecf4; border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+.vsw { display: inline-flex; background: #eaedf2; border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
 .vsw__b { background: none; border: 0; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--muted); padding: 6px 14px; border-radius: 7px; width: auto; min-height: auto; }
 .vsw__b.on { background: #fff; color: var(--navy); box-shadow: var(--shadow); }
 

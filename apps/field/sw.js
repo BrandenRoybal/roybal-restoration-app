@@ -3,14 +3,14 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v20";
+const CACHE = "roybal-field-v23";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
   "css/app.css", "css/print.css",
   "js/app.js", "js/core.js", "js/model.js", "js/formkit.js", "js/forms.js",
   "js/pdf.js", "js/qr.js", "js/config.js", "js/supa.js", "js/sync.js",
-  "assets/emblem-mark.png", "assets/icon-16.png", "assets/icon-32.png",
+  "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-512.png",
 ];
 const OPTIONAL = [

@@ -143,7 +143,7 @@ function renderLogin() {
   btn.addEventListener("click", submit);
   pass.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
   body.append(h("div", { class: "blogin" },
-    h("img", { src: "../assets/icon-180.png", alt: "" }),
+    h("img", { src: "../assets/emblem-mark.svg", alt: "", style: "background:#fff;padding:12px;box-sizing:border-box" }),
     h("h1", {}, "Job Board"),
     h("p", { class: "subtle" }, "Sign in with your shared crew account."),
     h("div", { class: "card", style: "text-align:left;margin-top:14px" }, err,

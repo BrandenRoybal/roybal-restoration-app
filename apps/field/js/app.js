@@ -125,7 +125,7 @@ function renderLogin() {
 
   body.append(
     h("div", { style: "max-width:380px;margin:8vh auto 0;text-align:center" },
-      h("img", { src: "assets/icon-180.png", alt: "", style: "width:84px;height:84px;border-radius:18px" }),
+      h("img", { src: "assets/emblem-mark.svg", alt: "", style: "width:84px;height:84px;border-radius:18px;background:#fff;padding:12px" }),
       h("h1", { style: "margin:14px 0 2px" }, "Roybal Field Forms"),
       h("p", { class: "subtle" }, "Sign in with your shared crew account to sync jobs across devices."),
       h("div", { class: "card", style: "text-align:left;margin-top:14px" },
