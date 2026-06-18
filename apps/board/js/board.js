@@ -472,6 +472,9 @@ function renderCard(j) {
   if (mat === "ordered") meta.append(h("span", { class: "chip mat-ordered" }, "🔧 Materials ordered"));
   else if (mat === "received") meta.append(h("span", { class: "chip mat-received" }, "🔧 Materials in"));
   else meta.append(h("span", { class: "chip mat-none" }, "🔧 Materials TBD"));
+  // start-no-earlier-than constraint (materials / permit)
+  if (j.notBefore) meta.append(h("span", { class: "chip is-lock", title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "can't start before " + fmtShort(j.notBefore) },
+    "🔒 " + (j.notBeforeLabel ? j.notBeforeLabel + " " : "not before ") + fmtShort(j.notBefore)));
 
   const phone = j.phone ? h("a", { class: "bcall", href: "tel:" + j.phone.replace(/[^\d+]/g, ""), onclick: (e) => e.stopPropagation() }, "📞 " + j.phone) : null;
 
@@ -746,6 +749,11 @@ function paintGantt() {
     }, bar);
     if (monthMode) for (const b of monthBounds) track.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
     if (todayX >= 0) track.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
+    if (j.notBefore && j.notBefore >= startISO) {
+      const nbX = dayDiff(startISO, j.notBefore) * dayW;
+      if (nbX >= 0 && nbX <= trackW) track.append(h("div", { class: "gantt__nb", style: `left:${nbX}px`,
+        title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "start no earlier than " + fmtShort(j.notBefore) }, "🔒"));
+    }
     return h("div", { class: "gantt__row" },
       h("div", { class: "gantt__label", title: j.title || j.customer || "Job" }, j.title || j.customer || "Job"),
       track);
@@ -797,6 +805,7 @@ function openJobModal(existing) {
     crewIds: [], title: "", customer: "", address: "", phone: "", startDate: "", targetDate: "",
     estimatedHours: "", fieldJobId: "", notes: "",
     deps: [], durationDays: null, scheduleMode: "auto", pinnedStart: "",
+    notBefore: "", notBeforeLabel: "",
   };
   j.crewIds = [...(j.crewIds || [])];
   j.deps = (j.deps || []).map((d) => ({ ...d }));
@@ -871,6 +880,9 @@ function openJobModal(existing) {
   }
   if (!otherJobs.length) predWrap.append(h("span", { class: "subtle" }, "No other jobs to link to yet."));
 
+  const nbDate = (f.notBefore = h("input", { type: "date", value: j.notBefore || "" }));
+  const nbLabel = (f.notBeforeLabel = h("input", { type: "text", placeholder: "e.g. materials, permit", maxlength: "24", value: j.notBeforeLabel || "" }));
+
   const scheduleSection = h("div", { class: "schedsec" },
     h("div", { class: "schedsec__h" }, "🗓 Schedule"),
     field("Scheduling mode", h("div", { class: "vsw" }, mAuto, mManual)),
@@ -878,7 +890,9 @@ function openJobModal(existing) {
     field("Start after these jobs finish (+ lag days)", predWrap),
     h("div", { class: "grid2" },
       field("Duration override (work days)", durInp),
-      field("Computed duration", durOut)));
+      field("Computed duration", durOut)),
+    field("Start no earlier than (materials / permit ready)",
+      h("div", { class: "grid2" }, nbDate, nbLabel)));
   refreshDur();
 
   const body = h("div", { class: "bmodal__body" },
@@ -920,6 +934,8 @@ function openJobModal(existing) {
       estimatedHours: f.estimatedHours.value ? Number(f.estimatedHours.value) : "",
       notes: f.notes.value.trim(),
       pinnedStart: j.scheduleMode === "manual" ? (f.pinnedStart.value || "") : (j.pinnedStart || ""),
+      notBefore: f.notBefore.value || "",
+      notBeforeLabel: f.notBefore.value ? f.notBeforeLabel.value.trim() : "",
     });
     // j.deps / j.scheduleMode / j.durationDays are mutated live by the Schedule section
     saveBtn.disabled = true;

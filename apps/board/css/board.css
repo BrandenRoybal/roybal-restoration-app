@@ -283,3 +283,7 @@ table.rtable .num.under { color: var(--green); }
 .btn.criton { background: #c0392b; color: #fff; border-color: #c0392b; box-shadow: none; }
 .ganttfin { font-size: 13px; font-weight: 700; color: var(--navy); background: #eef2f7; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; white-space: nowrap; }
 .chip.is-crit { background: #c0392b; color: #fff; border-color: #c0392b; }
+
+/* ---------- "start no earlier than" constraint (materials / permit) ---------- */
+.chip.is-lock { background: #fdf3e0; color: #8a6a18; border-color: #f0d8a8; }
+.gantt__nb { position: absolute; top: 0; bottom: 0; border-left: 2px dashed #c79a2e; z-index: 1; font-size: 10px; line-height: 1.2; pointer-events: auto; cursor: help; }

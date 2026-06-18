@@ -73,7 +73,8 @@ function finishOf(startISO, dur, settings) {
 function participates(job) {
   return (Array.isArray(job.deps) && job.deps.length > 0)
     || job.scheduleMode === "auto" || job.scheduleMode === "manual"
-    || job.durationDays != null;
+    || job.durationDays != null
+    || !!job.notBefore;
 }
 
 /* ---- main scheduler: cycle-safe topological forward pass (Kahn) ----
@@ -115,6 +116,8 @@ export function computeSchedule(jobs, settings) {
       }
       baseStart = cands.length ? cands.reduce((a, b) => (b > a ? b : a)) : (job.startDate || null);
     }
+    // "start no earlier than" constraint (materials / permit) is a hard floor
+    if (job.notBefore && (!baseStart || job.notBefore > baseStart)) baseStart = job.notBefore;
 
     if (!baseStart) { finishById.set(id, job.targetDate || null); continue; }
     const newStart = addWorkDays(baseStart, 0, s);
