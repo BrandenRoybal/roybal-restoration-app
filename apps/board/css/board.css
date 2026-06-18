@@ -261,3 +261,16 @@ table.rtable .num.under { color: var(--green); }
 .dowbox.on { border-color: var(--orange); background: var(--brand-tint, #fde7da); color: var(--orange-dark); }
 .dowbox input { display: none; }
 .holwrap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* ---------- crew over-allocation warnings ---------- */
+.chip.is-warn { background: #fbe3e0; color: var(--red); border-color: #f0c9c5; }
+.crewchip.is-clash { box-shadow: 0 0 0 2px var(--red); }
+.gantt__bar.has-clash { border-color: var(--red); }
+.confbtn { background: #fbe3e0; color: var(--red); border-color: #f0c9c5; font-weight: 800; }
+.confbtn:hover { background: #f7d2cd; }
+.crewpick label.clash { border-color: var(--red); }
+.clashflag { color: var(--red); font-weight: 800; margin-left: 2px; }
+.conflist { display: flex; flex-direction: column; gap: 8px; }
+.confrow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
+.confrow__main { flex: 1; min-width: 0; font-size: 13px; }
+.confrow__main .linklike { font-size: 13px; }

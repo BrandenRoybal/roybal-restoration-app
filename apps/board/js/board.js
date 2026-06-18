@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings,
 } from "./data.js";
-import { computeSchedule, durationOf, wouldCreateCycle, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, wouldCreateCycle, findOverAllocations, DEFAULT_SETTINGS } from "./schedule.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -49,6 +49,7 @@ let jobs = [];
 let crew = [];
 let entries = [];
 let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
+let conflicts = { byJob: new Map(), pairs: [] };   // crew over-allocations (computed each schedule)
 let filterText = "", filterCrew = "", filterType = "";
 let modalOpen = false;
 let pollTimer = null;
@@ -119,7 +120,9 @@ async function refresh() {
    recomputeAndPersist additionally saves every job the engine moved. */
 function applySchedule() {
   settings = cachedSettings();
-  return computeSchedule(jobs, settings);   // { changed, cyclic }; mutates jobs in place
+  const res = computeSchedule(jobs, settings);   // { changed, cyclic }; mutates jobs in place
+  conflicts = findOverAllocations(jobs);         // refresh crew over-allocations
+  return res;
 }
 async function recomputeAndPersist() {
   const { changed } = applySchedule();
@@ -250,6 +253,8 @@ function filterControls() {
 
 function actionButtons() {
   return [
+    ...(conflicts.pairs.length ? [h("button", { class: "btn btn--sm confbtn", onclick: openConflicts, title: "Crew double-booked on overlapping jobs" },
+      `⚠ ${conflicts.pairs.length} conflict${conflicts.pairs.length === 1 ? "" : "s"}`)] : []),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openScheduleSettings, title: "Work calendar & hours per day" }, "🗓 Calendar"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
@@ -304,6 +309,26 @@ function openScheduleSettings() {
   });
   openModal("Schedule settings", body, h("div", { class: "bmodal__foot" },
     h("button", { class: "btn btn--ghost", onclick: closeModal }, "Cancel"), save));
+}
+
+/* ---------- crew over-allocation summary ---------- */
+function openConflicts() {
+  const rows = conflicts.pairs.slice().sort((a, b) => (a.from || "").localeCompare(b.from || ""));
+  const list = rows.length ? rows.map((p) => {
+    const A = jobs.find((j) => j.id === p.aId) || {}, B = jobs.find((j) => j.id === p.bId) || {};
+    return h("div", { class: "confrow" },
+      h("span", { class: "crewchip is-clash", style: `background:${crewById(p.crewId)?.color || "#7a8aa0"}`, title: crewName(p.crewId) }, initials(crewName(p.crewId))),
+      h("div", { class: "confrow__main" },
+        h("div", {}, h("strong", {}, crewName(p.crewId)), " — overlap ", h("strong", {}, fmtShort(p.from) + " → " + fmtShort(p.to))),
+        h("div", { class: "subtle" },
+          h("button", { class: "linklike", onclick: () => { closeModal(); openJobModal(A); } }, A.title || A.customer || "Job A"),
+          "  ✕  ",
+          h("button", { class: "linklike", onclick: () => { closeModal(); openJobModal(B); } }, B.title || B.customer || "Job B"))));
+  }) : [h("div", { class: "subtle" }, "No conflicts 🎉")];
+  const body = h("div", { class: "bmodal__body" },
+    h("p", { class: "subtle", style: "margin-top:0" }, `${rows.length} crew over-allocation${rows.length === 1 ? "" : "s"} — the same person is booked on two jobs whose dates overlap. Re-crew or reschedule a job to clear it.`),
+    h("div", { class: "conflist" }, ...list));
+  openModal("Crew conflicts", body, h("div", { class: "bmodal__foot" }, h("button", { class: "btn btn--ghost", onclick: closeModal }, "Close")));
 }
 
 /* ---------- export / print to PDF ----------
@@ -411,11 +436,19 @@ function renderCard(j) {
       j.priority === "low" ? h("span", { class: "prio prio--low", title: "Low priority" }) : null);
 
   const meta = h("div", { class: "bcard__meta" });
+  // crew over-allocation warning
+  const jc = conflicts.byJob.get(j.id) || [];
+  const clashCrew = new Set(jc.map((x) => x.crewId));
+  if (jc.length) {
+    const detail = jc.map((x) => `${crewName(x.crewId)} also on “${(jobs.find((y) => y.id === x.otherId) || {}).title || "another job"}”`).join("\n");
+    meta.append(h("span", { class: "chip is-warn", title: detail },
+      `⚠ ${clashCrew.size === 1 ? crewName([...clashCrew][0]) + " double-booked" : clashCrew.size + " crew double-booked"}`));
+  }
   // crew chips
   const ids = (j.crewIds || []).filter(crewById);
   if (ids.length) {
     meta.append(h("span", { class: "crew" },
-      ...ids.slice(0, 5).map((id) => { const c = crewById(id); return h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}`, title: c.name }, initials(c.name)); })));
+      ...ids.slice(0, 5).map((id) => { const c = crewById(id); return h("span", { class: "crewchip" + (clashCrew.has(id) ? " is-clash" : ""), style: `background:${c.color || "#7a8aa0"}`, title: c.name + (clashCrew.has(id) ? " — double-booked (overlapping jobs)" : "") }, initials(c.name)); })));
   }
   // dates
   if (j.startDate || j.targetDate) {
@@ -660,11 +693,12 @@ function paintGantt() {
     geo.set(j.id, { ri, left, w });
     const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
     const hrs = est ? `  ·  ${Math.round(act * 100) / 100}/${est}h` : (act ? `  ·  ${fmtH(act)}` : "");
+    const clash = conflicts.byJob.has(j.id);
     const bar = h("div", {
-      class: "gantt__bar", style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}`,
-      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}\n(drag to reschedule)`,
+      class: "gantt__bar" + (clash ? " has-clash" : ""), style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}`,
+      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}${clash ? "\n⚠ crew double-booked" : ""}\n(drag to reschedule)`,
       onclick: () => { if (bar._dragged) { bar._dragged = false; return; } openJobModal(j); },
-    }, (j.title || j.customer || "Job") + hrs);
+    }, (clash ? "⚠ " : "") + (j.title || j.customer || "Job") + hrs);
     // drag-to-reschedule: pins the job to a manual start, then cascades dependents
     let drag = null;
     bar.addEventListener("pointerdown", (e) => {
@@ -759,11 +793,16 @@ function openJobModal(existing) {
 
   // crew multiselect
   const crewPick = h("div", { class: "crewpick" });
+  const clashHere = new Set((conflicts.byJob.get(j.id) || []).map((x) => x.crewId));
   for (const c of activeCrew()) {
     const on = j.crewIds.includes(c.id);
     const cb = h("input", { type: "checkbox", checked: on });
-    const lab = h("label", { class: on ? "on" : "" },
-      cb, h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)), c.name);
+    const clashTitle = clashHere.has(c.id)
+      ? "Double-booked: also on " + (conflicts.byJob.get(j.id) || []).filter((x) => x.crewId === c.id).map((x) => "“" + ((jobs.find((y) => y.id === x.otherId) || {}).title || "another job") + "”").join(", ")
+      : "";
+    const lab = h("label", { class: (on ? "on" : "") + (clashHere.has(c.id) ? " clash" : ""), title: clashTitle },
+      cb, h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)), c.name,
+      clashHere.has(c.id) ? h("span", { class: "clashflag", title: clashTitle }, "⚠") : null);
     cb.addEventListener("change", () => {
       if (cb.checked) { if (!j.crewIds.includes(c.id)) j.crewIds.push(c.id); lab.classList.add("on"); }
       else { j.crewIds = j.crewIds.filter((x) => x !== c.id); lab.classList.remove("on"); }

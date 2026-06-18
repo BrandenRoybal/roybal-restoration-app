@@ -127,6 +127,32 @@ export function computeSchedule(jobs, settings) {
   return { changed, cyclic };
 }
 
+/* Crew over-allocation: a crew member booked on two jobs whose scheduled
+   date ranges overlap. Returns:
+     byJob: Map(jobId -> [{ crewId, otherId }])  (per-job conflicts, both sides)
+     pairs: [{ crewId, aId, bId, from, to }]      (unique clashes + overlap range) */
+export function findOverAllocations(jobs) {
+  const byJob = new Map(), pairs = [];
+  const add = (id, crewId, otherId) => { (byJob.get(id) || byJob.set(id, []).get(id)).push({ crewId, otherId }); };
+  const byCrew = new Map();
+  for (const j of jobs) {
+    if (!j.startDate || !j.targetDate) continue;
+    for (const cid of (j.crewIds || [])) (byCrew.get(cid) || byCrew.set(cid, []).get(cid)).push(j);
+  }
+  for (const [cid, list] of byCrew) {
+    for (let a = 0; a < list.length; a++) for (let b = a + 1; b < list.length; b++) {
+      const A = list[a], B = list[b];
+      if (A.startDate <= B.targetDate && B.startDate <= A.targetDate) {
+        add(A.id, cid, B.id); add(B.id, cid, A.id);
+        pairs.push({ crewId: cid, aId: A.id, bId: B.id,
+          from: A.startDate > B.startDate ? A.startDate : B.startDate,
+          to: A.targetDate < B.targetDate ? A.targetDate : B.targetDate });
+      }
+    }
+  }
+  return { byJob, pairs };
+}
+
 /* UI guard: would making `candidatePredId` a predecessor of `jobId` create a
    cycle? True when jobId is already a (transitive) predecessor of the candidate. */
 export function wouldCreateCycle(jobId, candidatePredId, jobs) {
