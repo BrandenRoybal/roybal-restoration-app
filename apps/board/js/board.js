@@ -708,12 +708,16 @@ function paintGantt() {
     const w = Math.max((dayDiff(s, t) + 1) * dayW - 2, 8);
     geo.set(j.id, { ri, left, w });
     const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
-    const hrs = est ? `  ·  ${Math.round(act * 100) / 100}/${est}h` : (act ? `  ·  ${fmtH(act)}` : "");
+    const pct = est > 0 ? Math.min(100, Math.round((act / est) * 100)) : 0;
+    const over = est > 0 && act > est;
+    const hrs = est ? `  ·  ${Math.round(act * 100) / 100}/${est}h${pct ? ` (${pct}%)` : ""}` : (act ? `  ·  ${fmtH(act)}` : "");
+    // progress fill: tint the done portion of the bar (orange; red when over-hours)
+    const fillBg = pct > 0 ? `;background:linear-gradient(to right, ${over ? "rgba(210,59,46,.24)" : "rgba(242,106,33,.24)"} ${pct}%, #fff ${pct}%)` : "";
     const clash = conflicts.byJob.has(j.id);
     const critCls = ganttCritical ? (critical.has(j.id) ? " crit" : " dim") : "";
     const bar = h("div", {
-      class: "gantt__bar" + (clash ? " has-clash" : "") + critCls, style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}`,
-      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h` : ""}${clash ? "\n⚠ crew double-booked" : ""}\n(drag to reschedule)`,
+      class: "gantt__bar" + (clash ? " has-clash" : "") + critCls, style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}${fillBg}`,
+      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h (${pct}%${over ? " — over" : ""})` : ""}${clash ? "\n⚠ crew double-booked" : ""}\n(drag to reschedule)`,
       onclick: () => { if (bar._dragged) { bar._dragged = false; return; } openJobModal(j); },
     }, (clash ? "⚠ " : "") + (j.title || j.customer || "Job") + hrs);
     // drag-to-reschedule: pins the job to a manual start, then cascades dependents
