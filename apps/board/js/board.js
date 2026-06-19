@@ -58,7 +58,7 @@ let filterText = "", filterCrew = "", filterType = "";
 let modalOpen = false;
 let pollTimer = null;
 let draggingId = null;
-let currentView = "board";              // "board" | "calendar" | "gantt"
+let currentView = "board";              // "board" | "crew" | "calendar" | "gantt" | "workload"
 const _now = new Date();
 let calY = _now.getFullYear(), calM = _now.getMonth();   // calendar month being viewed
 let ganttZoom = "day";                  // "day" | "week"
@@ -195,6 +195,7 @@ function matchesFilter(j) {
 }
 
 function render() {
+  if (currentView === "crew") return renderCrewView();
   if (currentView === "calendar") return renderCalendarView();
   if (currentView === "gantt") return renderGanttView();
   if (currentView === "workload") return renderWorkloadView();
@@ -232,6 +233,7 @@ function sortKey(j) {
 
 /* repaint only the inner grid (board / calendar / gantt) — keeps toolbar focus */
 function repaint() {
+  if (currentView === "crew") return paintCrew();
   if (currentView === "calendar") return paintCalendar();
   if (currentView === "gantt") return paintGantt();
   if (currentView === "workload") return paintWorkload();
@@ -243,7 +245,7 @@ function viewSwitch() {
     class: "vsw__b" + (currentView === id ? " on" : ""),
     onclick: () => { if (currentView !== id) { currentView = id; render(); } },
   }, label);
-  return h("div", { class: "vsw" }, mk("board", "Board"), mk("calendar", "Calendar"), mk("gantt", "Gantt"), mk("workload", "Workload"));
+  return h("div", { class: "vsw" }, mk("board", "Board"), mk("crew", "Crew"), mk("calendar", "Calendar"), mk("gantt", "Gantt"), mk("workload", "Workload"));
 }
 
 function filterControls() {
@@ -265,7 +267,7 @@ function actionButtons() {
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHelpModal, title: "How to use the Job Board" }, "❓ Help"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openScheduleSettings, title: "Work calendar & hours per day" }, "🗓 Calendar"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
-    h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal }, "Crew"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal, title: "Add or edit crew members" }, "Roster"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "↻ Refresh"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: exportPDF, title: "Print / save as PDF" }, "🖨 PDF"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => openJobModal(null, true), title: "Add a zero-day milestone" }, "◆ Milestone"),
@@ -976,6 +978,151 @@ function paintWorkload() {
     rows.push(h("div", { class: "wlh-row" }, lbl, ...cells));
   }
   wrap.append(legend, h("div", { class: "wlh-grid", style: `width:${NAMEW + days.length * CELLW}px` }, ...rows));
+}
+
+/* ============================================================
+   crew board (magnet board — drag the guys between jobs for a day)
+   ============================================================ */
+let crewDay = todayISO();      // the day the crew board is showing
+let crewDrag = null;           // { cid, src }  — src = jobId | "avail" | "out"
+let crewTap = null;            // { cid, src }  — tap-to-move selection (mobile)
+
+const isOut = (c, day) => (c.outDays || []).includes(day);
+const crewDayLabel = () => new Date(crewDay + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+
+/* jobs running on a given day (respecting the current filters), soonest first */
+function activeJobsOn(day) {
+  return jobs.filter(matchesFilter).filter((j) => !j.isMilestone && jobActiveOn(j, day))
+    .sort((a, b) => (a.startDate || "").localeCompare(b.startDate || "") || (a.title || "").localeCompare(b.title || ""));
+}
+
+/* which crew array a job exposes on `day`: the phase active that day for
+   phase-staffed jobs, otherwise the job's own crew. `target` holds the crewIds. */
+function jobSlotOn(j, day, s) {
+  const subs = j.subtasks || [];
+  if (subs.some((st) => (st.crewIds || []).length) && j.startDate) {
+    const L = layoutSubtasks(subs, j.startDate, s);
+    let act = L.find((x) => day >= x.start && day <= x.finish);
+    if (!act) act = [...L].reverse().find((x) => x.start <= day) || L[L.length - 1];
+    if (act) return { kind: "phase", target: act.sub, label: act.sub.name || "Phase" };
+  }
+  return { kind: "job", target: j, label: typeOf(j.type).label };
+}
+const slotIds = (slot) => (slot.target.crewIds = slot.target.crewIds || []);
+
+function renderCrewView() {
+  const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
+  const nav = h("div", { class: "calnav" },
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftCrewDay(-1) }, "‹"),
+    h("strong", { class: "calnav__label" }, crewDayLabel()),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftCrewDay(1) }, "›"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftCrewDay(0, todayISO()) }, "Today"));
+  body.append(h("div", { class: "btoolbar" },
+    h("div", { class: "btoolbar__left" }, viewSwitch(), nav),
+    h("div", { class: "btools" }, ...filterControls(), ...actionButtons())));
+  if (!crew.length) {
+    body.append(h("div", { class: "bempty" }, h("h2", {}, "Add your crew first"),
+      h("button", { class: "btn btn--primary", style: "max-width:240px;margin:0 auto", onclick: openCrewModal }, "+ Manage crew")));
+    return;
+  }
+  body.append(h("div", { class: "cbwrap" }));
+  paintCrew();
+}
+
+function shiftCrewDay(delta, set) {
+  crewDay = set || toISO(addDays(new Date(crewDay + "T00:00:00"), delta));
+  const lbl = $(".calnav__label", view); if (lbl) lbl.textContent = crewDayLabel();
+  paintCrew();
+}
+
+function paintCrew() {
+  const wrap = $(".cbwrap", view);
+  if (!wrap) return renderCrewView();
+  clear(wrap);
+  const s = settings, day = crewDay;
+  const acts = activeJobsOn(day);
+  const assigned = new Set();
+  const cols = acts.map((j) => { const slot = jobSlotOn(j, day, s); slotIds(slot).forEach((id) => assigned.add(id)); return { j, slot }; });
+  const out = activeCrew().filter((c) => isOut(c, day));
+  const outSet = new Set(out.map((c) => c.id));
+  const avail = activeCrew().filter((c) => !assigned.has(c.id) && !outSet.has(c.id));
+
+  const row = h("div", { class: "cbrow" });
+  row.append(crewCol("avail", "Available", avail.map((c) => c.id), { dot: "#1f9d55", kind: "avail" }));
+  for (const { j, slot } of cols) row.append(crewCol(j.id, j.title || j.customer || "Job", slotIds(slot), { dot: stageOf(j.stage).color, sub: slot.label, kind: "job" }));
+  row.append(crewCol("out", "Out today", out.map((c) => c.id), { kind: "out" }));
+  wrap.append(row);
+
+  if (!acts.length) wrap.append(h("p", { class: "subtle", style: "padding:14px 4px" }, "No jobs scheduled for this day — use ‹ › to pick another, or assign start/target dates to your jobs."));
+  else wrap.append(h("p", { class: "subtle", style: "padding:10px 4px 0" }, "Drag a guy — or tap him, then tap a job — to reassign. Drop on “Out today” when someone doesn't show; the jobs they leave flag for cover."));
+}
+
+function crewCol(src, title, ids, opts = {}) {
+  const empty = opts.kind === "job" ? "Drop a guy here — needs crew"
+    : opts.kind === "out" ? "Nobody out" : "Everyone's on a job";
+  const bodyEl = h("div", { class: "cbcol__body" + (opts.kind === "avail" ? " is-avail" : opts.kind === "out" ? " is-outzone" : "") },
+    ...(ids.length ? ids.map((cid) => crewChip(cid, src)) : [h("div", { class: "cbcol__empty" }, empty)]));
+
+  const col = h("div", { class: "cbcol cb-" + opts.kind + (opts.kind === "job" && !ids.length ? " needs-cover" : "") },
+    h("div", { class: "cbcol__head" },
+      opts.dot ? h("span", { class: "bcol__dot", style: `background:${opts.dot}` }) : null,
+      h("div", { style: "min-width:0" },
+        h("div", { class: "cbcol__name" }, title),
+        opts.sub ? h("div", { class: "cbcol__sub" }, opts.sub) : null),
+      h("span", { class: "bcol__count" }, String(ids.length))),
+    bodyEl);
+
+  col.addEventListener("dragover", (e) => { e.preventDefault(); col.classList.add("drop-over"); });
+  col.addEventListener("dragleave", (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove("drop-over"); });
+  col.addEventListener("drop", (e) => { e.preventDefault(); col.classList.remove("drop-over"); crewDropTo(src); });
+  col.addEventListener("click", () => { if (crewTap) crewDropTo(src); });
+  return col;
+}
+
+function crewChip(cid, src) {
+  const c = crewById(cid); if (!c) return h("span");
+  const cap = Math.max(1, settings.hoursPerDay || 8);
+  const hrs = (conflicts.load.get(cid) || new Map()).get(crewDay) || 0;
+  const over = hrs > cap + 1e-6;
+  const sel = crewTap && crewTap.cid === cid && crewTap.src === src;
+  const chip = h("div", {
+    class: "cbchip" + (over ? " is-over" : "") + (src === "out" ? " is-out" : "") + (sel ? " is-sel" : ""),
+    draggable: "true", style: `--cc:${c.color || "#7a8aa0"}`,
+    title: c.name + (hrs ? ` · ${Math.round(hrs * 10) / 10}h booked` + (over ? ` (over ${cap}h shift)` : "") : "") + (src === "out" ? " · out today" : ""),
+  },
+    h("span", { class: "cbchip__ini" }, initials(c.name)),
+    hrs ? h("span", { class: "cbchip__hrs" }, Math.round(hrs) + "h") : null);
+  chip.addEventListener("dragstart", (e) => { crewDrag = { cid, src }; crewTap = null; e.dataTransfer.setData("text/plain", cid); e.dataTransfer.effectAllowed = "move"; chip.classList.add("dragging"); });
+  chip.addEventListener("dragend", () => { crewDrag = null; chip.classList.remove("dragging"); });
+  chip.addEventListener("click", (e) => { e.stopPropagation(); crewTap = sel ? null : { cid, src }; paintCrew(); });
+  return chip;
+}
+
+async function setOut(cid, val) {
+  const c = crewById(cid); if (!c) return;
+  const set = new Set(c.outDays || []);
+  val ? set.add(crewDay) : set.delete(crewDay);
+  c.outDays = [...set].sort();
+  await saveCrewMember(c);
+}
+
+async function crewDropTo(dest) {
+  const move = crewDrag || crewTap;
+  crewDrag = null; crewTap = null;
+  if (!move) return;
+  const { cid, src } = move;
+  if (src === dest) { paintCrew(); return; }
+  const touched = new Set();
+  const pull = (jid) => { const j = jobs.find((x) => x.id === jid); if (!j) return; const slot = jobSlotOn(j, crewDay, settings); const ids = slotIds(slot); if (ids.includes(cid)) { slot.target.crewIds = ids.filter((x) => x !== cid); touched.add(j); } };
+  const push = (jid) => { const j = jobs.find((x) => x.id === jid); if (!j) return; const slot = jobSlotOn(j, crewDay, settings); const ids = slotIds(slot); if (!ids.includes(cid)) { slot.target.crewIds = [...ids, cid]; touched.add(j); } };
+
+  if (src !== "avail" && src !== "out") pull(src);
+  if (dest === "out") { for (const j of activeJobsOn(crewDay)) pull(j.id); await setOut(cid, true); }
+  else { if (src === "out") await setOut(cid, false); if (dest !== "avail") push(dest); }
+
+  if (touched.size) { setSync("syncing"); for (const j of touched) await saveJob(j); setSync(pendingCount() ? "error" : "synced"); }
+  await recomputeAndPersist();   // crew change can re-flow durations/dates; repaints too
 }
 
 /* ============================================================
