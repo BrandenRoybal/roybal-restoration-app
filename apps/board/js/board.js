@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings,
 } from "./data.js";
-import { computeSchedule, durationOf, wouldCreateCycle, findOverAllocations, computeCriticalPath, layoutSubtasks, crewAssignments, workDaysBetween, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, layoutSubtasks, crewAssignments, workDaysBetween, DEFAULT_SETTINGS } from "./schedule.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -49,7 +49,7 @@ let jobs = [];
 let crew = [];
 let entries = [];
 let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
-let conflicts = { byJob: new Map(), pairs: [] };   // crew over-allocations (computed each schedule)
+let conflicts = { byJob: new Map(), overloads: [], load: new Map(), byCrew: new Map() };   // capacity over-allocations
 let critical = new Set();                          // job ids on the critical path
 let ganttCritical = false;                         // Gantt "Critical path" highlight toggle
 let ganttExpanded = new Set();                     // job ids whose phases are expanded on the Gantt
@@ -260,8 +260,8 @@ function filterControls() {
 
 function actionButtons() {
   return [
-    ...(conflicts.pairs.length ? [h("button", { class: "btn btn--sm confbtn", onclick: openConflicts, title: "Crew double-booked on overlapping jobs" },
-      `⚠ ${conflicts.pairs.length} conflict${conflicts.pairs.length === 1 ? "" : "s"}`)] : []),
+    ...(conflicts.overloads.length ? [h("button", { class: "btn btn--sm confbtn", onclick: openConflicts, title: "Crew booked past their shift on a day" },
+      `⚠ ${conflicts.overloads.length} overload${conflicts.overloads.length === 1 ? "" : "s"}`)] : []),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHelpModal, title: "How to use the Job Board" }, "❓ Help"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openScheduleSettings, title: "Work calendar & hours per day" }, "🗓 Calendar"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
@@ -326,24 +326,32 @@ function openScheduleSettings() {
     h("button", { class: "btn btn--ghost", onclick: closeModal }, "Cancel"), save));
 }
 
-/* ---------- crew over-allocation summary ---------- */
+/* ---------- crew overload summary (capacity-based) ---------- */
+function freeThatDay(day) {
+  const cap = Math.max(1, settings.hoursPerDay || 8);
+  return activeCrew().map((c) => ({ c, free: cap - ((conflicts.load.get(c.id) || new Map()).get(day) || 0) }))
+    .filter((x) => x.free >= 1).sort((a, b) => b.free - a.free);
+}
 function openConflicts() {
-  const rows = conflicts.pairs.slice().sort((a, b) => (a.from || "").localeCompare(b.from || ""));
-  const list = rows.length ? rows.map((p) => {
-    const A = jobs.find((j) => j.id === p.aId) || {}, B = jobs.find((j) => j.id === p.bId) || {};
+  const cap = Math.max(1, settings.hoursPerDay || 8);
+  const ovs = conflicts.overloads;
+  const list = ovs.length ? ovs.map((o) => {
+    const free = freeThatDay(o.day).slice(0, 4);
     return h("div", { class: "confrow" },
-      h("span", { class: "crewchip is-clash", style: `background:${crewById(p.crewId)?.color || "#7a8aa0"}`, title: crewName(p.crewId) }, initials(crewName(p.crewId))),
+      h("span", { class: "crewchip is-clash", style: `background:${crewById(o.crewId)?.color || "#7a8aa0"}`, title: crewName(o.crewId) }, initials(crewName(o.crewId))),
       h("div", { class: "confrow__main" },
-        h("div", {}, h("strong", {}, crewName(p.crewId)), " — overlap ", h("strong", {}, fmtShort(p.from) + " → " + fmtShort(p.to))),
-        h("div", { class: "subtle" },
-          h("button", { class: "linklike", onclick: () => { closeModal(); openJobModal(A); } }, A.title || A.customer || "Job A"),
-          "  ✕  ",
-          h("button", { class: "linklike", onclick: () => { closeModal(); openJobModal(B); } }, B.title || B.customer || "Job B"))));
-  }) : [h("div", { class: "subtle" }, "No conflicts 🎉")];
+        h("div", {}, h("strong", {}, crewName(o.crewId)), " — ", h("strong", {}, fmtShort(o.day)), "  ",
+          h("span", { class: "ovpct" }, `${Math.round(o.hours)}h · ${o.pct}% of shift`)),
+        h("div", { class: "subtle" }, "on ", ...o.jobIds.flatMap((id, i) => {
+          const j = jobs.find((x) => x.id === id) || {};
+          return [i ? " + " : "", h("button", { class: "linklike", onclick: () => { closeModal(); openJobModal(j); } }, j.title || j.customer || "Job")];
+        })),
+        free.length ? h("div", { class: "confree" }, "↳ free that day: " + free.map((x) => `${x.c.name} (${Math.round(x.free)}h)`).join(" · ")) : null));
+  }) : [h("div", { class: "subtle" }, "No overloads — everyone's within their shift. 🎉")];
   const body = h("div", { class: "bmodal__body" },
-    h("p", { class: "subtle", style: "margin-top:0" }, `${rows.length} crew over-allocation${rows.length === 1 ? "" : "s"} — the same person is booked on two jobs whose dates overlap. Re-crew or reschedule a job to clear it.`),
+    h("p", { class: "subtle", style: "margin-top:0" }, `${ovs.length} day${ovs.length === 1 ? "" : "s"} where a crew member is booked past their ${cap}h shift. Hand a phase to someone free that day, or reschedule it.`),
     h("div", { class: "conflist" }, ...list));
-  openModal("Crew conflicts", body, h("div", { class: "bmodal__foot" }, h("button", { class: "btn btn--ghost", onclick: closeModal }, "Close")));
+  openModal("Crew overloads", body, h("div", { class: "bmodal__foot" }, h("button", { class: "btn btn--ghost", onclick: closeModal }, "Close")));
 }
 
 /* ---------- export / print to PDF ----------
@@ -464,9 +472,9 @@ function renderCard(j) {
   const jc = conflicts.byJob.get(j.id) || [];
   const clashCrew = new Set(jc.map((x) => x.crewId));
   if (jc.length) {
-    const detail = jc.map((x) => `${crewName(x.crewId)} also on “${(jobs.find((y) => y.id === x.otherId) || {}).title || "another job"}”`).join("\n");
+    const detail = jc.map((x) => `${crewName(x.crewId)} ${Math.round(x.hours)}h on ${fmtShort(x.day)}`).join("\n");
     meta.append(h("span", { class: "chip is-warn", title: detail },
-      `⚠ ${clashCrew.size === 1 ? crewName([...clashCrew][0]) + " double-booked" : clashCrew.size + " crew double-booked"}`));
+      `⚠ ${clashCrew.size === 1 ? crewName([...clashCrew][0]) + " overloaded" : clashCrew.size + " crew overloaded"}`));
   }
   // critical path
   if (critical.has(j.id)) meta.append(h("span", { class: "chip is-crit", title: "On the critical path — a slip here pushes your final completion date" }, "⚡ Critical"));
@@ -842,12 +850,14 @@ function paintGantt() {
     if (expanded) {
       const subCls = ganttCritical ? (critical.has(j.id) ? " crit" : " dim") : "";
       let prevPhase = null;
-      for (const { sub, start, finish } of layoutSubtasks(subs, j.startDate, settings)) {
-        const sLeft = dayDiff(startISO, start) * dayW;
-        const sW = Math.max((dayDiff(start, finish) + 1) * dayW - 2, 6);
+      for (const { sub, start, finish, offFrac, durFrac } of layoutSubtasks(subs, j.startDate, settings)) {
+        // fractional sub-day positioning: a 3h tape renders as a short bar partway into its day
+        const sLeft = dayDiff(startISO, start) * dayW + (offFrac - Math.floor(offFrac)) * dayW;
+        const sW = Math.max(durFrac * dayW - 2, 5);
         const phaseY = headerH + vi * rowH + barMid;
+        const hrs = Number(sub.estimatedHours) ? `  ·  ${sub.estimatedHours}h` : "";
         const sBar = h("div", { class: "gantt__bar gantt__bar--sub" + subCls, style: `left:${sLeft}px;width:${sW}px;border-left-color:${stageOf(j.stage).color}`,
-          title: `${sub.name || "Phase"}\n${fmtShort(start)} – ${fmtShort(finish)}`, onclick: () => openJobModal(j) }, sub.name || "Phase");
+          title: `${sub.name || "Phase"}${hrs}\n${fmtShort(start)} – ${fmtShort(finish)}  (${durFrac < 1 ? Math.round(durFrac * 10) / 10 + " day" : Math.round(durFrac * 10) / 10 + " days"})`, onclick: () => openJobModal(j) }, sub.name || "Phase");
         const sTrack = h("div", { class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""), style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`) }, sBar);
         if (monthMode) for (const b of monthBounds) sTrack.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
         if (todayX >= 0) sTrack.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
@@ -924,68 +934,48 @@ function paintWorkload() {
   const wrap = $(".gwrap", view);
   if (!wrap) return renderWorkloadView();
   clear(wrap);
-  const asg = crewAssignments(jobs, settings).filter((a) => { const j = jobs.find((x) => x.id === a.jobId); return j && matchesFilter(j); });
-  if (!asg.length) {
+  const cap = Math.max(1, settings.hoursPerDay || 8);
+  const { load } = crewDayLoad(jobs.filter(matchesFilter), settings);
+  const allDays = new Set();
+  for (const [, days] of load) for (const d of days.keys()) allDays.add(d);
+  if (!allDays.size) {
     wrap.append(h("div", { class: "bempty" }, h("h2", {}, "No bookings yet"),
-      h("p", { class: "subtle" }, "Assign crew to jobs (or phases) to see their workload here.")));
+      h("p", { class: "subtle" }, "Assign crew (and hours) to jobs or phases to see each person's daily load here.")));
     return;
   }
-  let minISO = asg[0].start, maxISO = asg[0].finish;
-  for (const a of asg) { if (a.start < minISO) minISO = a.start; if (a.finish > maxISO) maxISO = a.finish; }
-  const rangeStart = addDays(new Date(minISO + "T00:00:00"), -2);
-  const startISO = toISO(rangeStart);
-  const totalDays = dayDiff(startISO, maxISO) + 5;
-  const LBL = 150;
-  const avail = Math.max(320, (wrap.clientWidth || 1000) - LBL - 6);
-  const dayW = Math.max(3, avail / totalDays);
-  const trackW = totalDays * dayW;
-  const today = todayISO();
-  const todayX = (today >= startISO && dayDiff(startISO, today) <= totalDays) ? dayDiff(startISO, today) * dayW : -1;
-
-  const months = h("div", { class: "gantt__months", style: `width:${trackW}px` });
-  let m = -1, segStart = 0;
-  for (let i = 0; i <= totalDays; i++) {
-    const mm = i === totalDays ? -999 : addDays(rangeStart, i).getMonth();
-    if (mm !== m) {
-      if (m !== -1) { const seg = addDays(rangeStart, segStart);
-        months.append(h("div", { class: "gantt__month", style: `width:${(i - segStart) * dayW}px` }, seg.toLocaleDateString("en-US", { month: "short", year: "2-digit" }))); }
-      m = mm; segStart = i;
-    }
-  }
-  const header = h("div", { class: "gantt__header" },
-    h("div", { class: "gantt__corner", style: `width:${LBL}px;flex:0 0 ${LBL}px` }, "Crew"),
-    h("div", { class: "gantt__scale", style: `width:${trackW}px` }, months));
-
-  const rows = [];
+  const days = [...allDays].sort();
+  const color = (hrs) => { const r = hrs / cap;
+    if (r <= 0.85) return ["#e3f6ec", "#1f7a45"]; if (r <= 1.001) return ["#fdf3e0", "#8a6a18"];
+    if (r <= 1.5) return ["#fbe3e0", "#b32c20"]; if (r <= 2.5) return ["#e0726a", "#fff"]; return ["#b8362b", "#fff"]; };
+  const NAMEW = 150, CELLW = 50;
+  const legend = h("div", { class: "wl-legend" },
+    ...[["fits (≤85%)", "#e3f6ec"], ["full", "#fdf3e0"], ["over shift", "#fbe3e0"], ["way over", "#b8362b"]]
+      .map(([t, bg]) => h("span", { class: "wl-leg" }, h("span", { class: "wl-swatch", style: `background:${bg}` }), t)),
+    h("span", { class: "wl-leg subtle" }, `· shift = ${cap}h/day · numbers are booked hours`));
+  const head = h("div", { class: "wlh-row" },
+    h("div", { class: "wlh-name wlh-head", style: `width:${NAMEW}px` }, "Crew"),
+    ...days.map((d) => h("div", { class: "wlh-day", style: `width:${CELLW}px` }, fmtShort(d).replace(/,.*/, ""))));
+  const rows = [head];
   for (const c of activeCrew()) {
-    const mine = asg.filter((a) => a.crewId === c.id).sort((a, b) => a.start.localeCompare(b.start));
-    if (!mine.length) continue;
-    for (const a of mine) a._over = mine.some((b) => b !== a && b.jobId !== a.jobId && a.start <= b.finish && b.start <= a.finish);
-    const lanes = [];
-    for (const a of mine) { const lane = lanes.find((L) => L[L.length - 1].finish < a.start); if (lane) lane.push(a); else lanes.push([a]); }
-    const conflicted = mine.some((a) => a._over);
-    rows.push(h("div", { class: "wl-crew" + (conflicted ? " wl-crew--clash" : "") },
-      h("div", { class: "wl-crew__lbl", style: `width:${LBL}px` },
-        h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)),
-        h("span", {}, c.name),
-        h("span", { class: "wl-count" }, `${mine.length} booking${mine.length === 1 ? "" : "s"}`),
-        conflicted ? h("span", { class: "wl-clash" }, "⚠ overlap") : null)));
-    for (const lane of lanes) {
-      const track = h("div", { class: "gantt__track", style: `width:${trackW}px;--gw:${7 * dayW}px` });
-      for (const a of lane) {
-        const job = jobs.find((x) => x.id === a.jobId) || {};
-        const left = dayDiff(startISO, a.start) * dayW;
-        const w = Math.max((dayDiff(a.start, a.finish) + 1) * dayW - 2, 8);
-        const text = (job.title || job.customer || "Job") + (a.phase ? " · " + a.label : "");
-        track.append(h("div", { class: "gantt__bar" + (a._over ? " wl-over" : ""), style: `left:${left}px;width:${w}px;border-left-color:${stageOf(job.stage).color}`,
-          title: `${text}\n${fmtShort(a.start)} – ${fmtShort(a.finish)}${a._over ? "\n⚠ overlaps another job" : ""}`, onclick: () => openJobModal(job) }, text));
-      }
-      if (todayX >= 0) track.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
-      rows.push(h("div", { class: "gantt__row wl-row" },
-        h("div", { class: "gantt__label", style: `width:${LBL}px;flex:0 0 ${LBL}px` }, ""), track));
-    }
+    const dmap = load.get(c.id);
+    if (!dmap) continue;
+    const vals = [...dmap.values()];
+    const peak = Math.max(...vals), over = vals.filter((x) => x > cap + 1e-6).length;
+    const lbl = h("div", { class: "wlh-name" + (over ? " wl-crew--clash" : ""), style: `width:${NAMEW}px` },
+      h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)),
+      h("div", { style: "min-width:0" }, h("div", { class: "wl-nm" }, c.name),
+        h("div", { class: "wl-sub" }, over ? `${over} day${over === 1 ? "" : "s"} over` : `peak ${Math.round(peak)}h`)));
+    const cells = days.map((d) => {
+      const hrs = dmap.get(d) || 0;
+      if (hrs <= 0) return h("div", { class: "wlh-cell", style: `width:${CELLW}px` });
+      const [bg, fg] = color(hrs), isOver = hrs > cap + 1e-6;
+      return h("div", { class: "wlh-cell wlh-on", style: `width:${CELLW}px;background:${bg};color:${fg}`,
+        title: `${c.name} · ${fmtShort(d)} · ${Math.round(hrs * 10) / 10}h (${Math.round((hrs / cap) * 100)}%)` + (isOver ? "\nover shift — free that day: " + (freeThatDay(d).slice(0, 3).map((x) => x.c.name).join(", ") || "nobody") : "") },
+        Math.round(hrs));
+    });
+    rows.push(h("div", { class: "wlh-row" }, lbl, ...cells));
   }
-  wrap.append(h("div", { class: "gantt__inner", style: `width:${LBL + trackW}px` }, header, ...rows));
+  wrap.append(legend, h("div", { class: "wlh-grid", style: `width:${NAMEW + days.length * CELLW}px` }, ...rows));
 }
 
 /* ============================================================
@@ -1018,7 +1008,7 @@ function openJobModal(existing, newMilestone) {
     const on = j.crewIds.includes(c.id);
     const cb = h("input", { type: "checkbox", checked: on });
     const clashTitle = clashHere.has(c.id)
-      ? "Double-booked: also on " + (conflicts.byJob.get(j.id) || []).filter((x) => x.crewId === c.id).map((x) => "“" + ((jobs.find((y) => y.id === x.otherId) || {}).title || "another job") + "”").join(", ")
+      ? "Overloaded: " + (conflicts.byJob.get(j.id) || []).filter((x) => x.crewId === c.id).map((x) => `${Math.round(x.hours)}h on ${fmtShort(x.day)}`).join(", ")
       : "";
     const lab = h("label", { class: (on ? "on" : "") + (clashHere.has(c.id) ? " clash" : ""), title: clashTitle },
       cb, h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)), c.name,

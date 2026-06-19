@@ -67,23 +67,45 @@ function finishOf(startISO, dur, settings) {
   return addWorkDays(start, Math.max(1, dur) - 1, settings);
 }
 
-/* Lay out a job's phases (sub-tasks) sequentially from startISO. Each phase
-   runs for durationOf(phase) work days; phase i>0 starts after the previous
-   one finishes, plus an optional lag (calendar days). Returns
-   [{ sub, start, finish }] in order. */
+/* Fractional phase duration in WORK DAYS (no rounding — a 3-hour tape is 0.4d,
+   not a full day). Manual durationDays override wins; else hours / (crew x hpd). */
+export function durationFracOf(sub, settings) {
+  const s = settings || DEFAULT_SETTINGS;
+  if (sub.durationDays != null && Number(sub.durationDays) > 0) return Number(sub.durationDays);
+  const est = Number(sub.estimatedHours) || 0;
+  if (est > 0) {
+    const crew = Math.max(1, (sub.crewIds || []).length);
+    const hpd = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
+    return Math.max(0.1, est / (crew * hpd));
+  }
+  return 1;
+}
+
+/* Lay out a job's phases from startISO, PACKED in fractional work-days so small
+   phases share a day instead of each eating a whole one. A phase with a lag
+   waits to the next whole day + lag. Returns, per phase:
+     { sub, start, finish }   — whole ISO days the phase touches (Gantt/Calendar)
+     { offFrac, durFrac }     — fractional work-day offset + length (sub-day bars) */
 export function layoutSubtasks(subs, startISO, settings) {
   const s = settings || DEFAULT_SETTINGS;
   if (!subs || !subs.length || !startISO) return [];
   const out = [];
-  let prevFinish = null;
+  let cursor = 0;   // fractional work-days from startISO
   for (let i = 0; i < subs.length; i++) {
     const sub = subs[i];
-    const start = i === 0
-      ? addWorkDays(startISO, 0, s)
-      : addWorkDays(addDaysISO(prevFinish, 1 + (Number(sub.lagDays) || 0)), 0, s);
-    const finish = addWorkDays(start, durationOf(sub, s) - 1, s);
-    out.push({ sub, start, finish });
-    prevFinish = finish;
+    const lag = i === 0 ? 0 : Math.max(0, Number(sub.lagDays) || 0);
+    if (lag > 0) cursor = Math.ceil(cursor - 1e-9) + lag;   // finish the prior day, then whole-day lag
+    const dur = durationFracOf(sub, s);
+    const startIdx = Math.floor(cursor + 1e-9);
+    const finishIdx = Math.max(startIdx, Math.ceil(cursor + dur - 1e-9) - 1);
+    out.push({
+      sub,
+      start: addWorkDays(startISO, startIdx, s),
+      finish: addWorkDays(startISO, finishIdx, s),
+      offFrac: cursor,
+      durFrac: dur,
+    });
+    cursor += dur;
   }
   return out;
 }
@@ -207,35 +229,77 @@ export function crewAssignments(jobs, settings) {
   return out;
 }
 
-export function findOverAllocations(jobs, settings) {
+/* Per-crew, per-day booked HOURS across all jobs/phases (fractional-aware), and
+   which jobs each crew touches each day. The basis for capacity conflicts and
+   the workload heat-map. Returns { load: Map(crewId->Map(dayISO->hours)),
+   jobsOn: Map(crewId->Map(dayISO->Set(jobId))) }. */
+export function crewDayLoad(jobs, settings) {
   const s = settings || DEFAULT_SETTINGS;
-  const byJob = new Map(), pairs = [];
-  const seenJob = new Set(), seenPair = new Set();
-  const add = (id, crewId, otherId) => {
-    const k = id + "|" + crewId + "|" + otherId;
-    if (seenJob.has(k)) return; seenJob.add(k);
-    (byJob.get(id) || byJob.set(id, []).get(id)).push({ crewId, otherId });
+  const hpd = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
+  const load = new Map(), jobsOn = new Map();
+  const bump = (cid, day, hrs, jid) => {
+    let m = load.get(cid); if (!m) load.set(cid, (m = new Map()));
+    m.set(day, (m.get(day) || 0) + hrs);
+    let jm = jobsOn.get(cid); if (!jm) jobsOn.set(cid, (jm = new Map()));
+    let set = jm.get(day); if (!set) jm.set(day, (set = new Set())); set.add(jid);
   };
-  const asg = crewAssignments(jobs, s);
-  const byCrew = new Map();
-  for (const a of asg) (byCrew.get(a.crewId) || byCrew.set(a.crewId, []).get(a.crewId)).push(a);
-  for (const [cid, list] of byCrew) {
-    for (let i = 0; i < list.length; i++) for (let k = i + 1; k < list.length; k++) {
-      const A = list[i], B = list[k];
-      if (A.jobId === B.jobId) continue;                 // same job — sequential, not a clash
-      if (A.start <= B.finish && B.start <= A.finish) {
-        add(A.jobId, cid, B.jobId); add(B.jobId, cid, A.jobId);
-        const lo = A.jobId < B.jobId ? A.jobId : B.jobId, hi = A.jobId < B.jobId ? B.jobId : A.jobId;
-        const pk = cid + "|" + lo + "|" + hi;
-        if (!seenPair.has(pk)) {
-          seenPair.add(pk);
-          pairs.push({ crewId: cid, aId: A.jobId, bId: B.jobId,
-            from: A.start > B.start ? A.start : B.start, to: A.finish < B.finish ? A.finish : B.finish });
-        }
+  const spread = (jobStart, offFrac, durFrac, crewIds, totalHours, jid) => {
+    const n = Math.max(1, (crewIds || []).length);
+    const startIdx = Math.floor(offFrac + 1e-9);
+    const endIdx = Math.max(startIdx, Math.ceil(offFrac + durFrac - 1e-9) - 1);
+    for (let k = startIdx; k <= endIdx; k++) {
+      const ov = Math.max(0, Math.min(offFrac + durFrac, k + 1) - Math.max(offFrac, k));
+      if (ov <= 0) continue;
+      const day = addWorkDays(jobStart, k, s);
+      const perCrew = (totalHours / n) * (ov / durFrac);
+      for (const cid of (crewIds || [])) bump(cid, day, perCrew, jid);
+    }
+  };
+  for (const j of jobs) {
+    if (j.isMilestone || !j.startDate) continue;
+    const phases = j.subtasks || [];
+    if (phases.some((st) => (st.crewIds || []).length)) {
+      for (const { sub, offFrac, durFrac } of layoutSubtasks(phases, j.startDate, s)) {
+        if (!(sub.crewIds || []).length) continue;
+        const hrs = Number(sub.estimatedHours) || durFrac * Math.max(1, sub.crewIds.length) * hpd;
+        spread(j.startDate, offFrac, durFrac, sub.crewIds, hrs, j.id);
       }
+    } else if (j.targetDate && (j.crewIds || []).length) {
+      const span = workDaysBetween(j.startDate, j.targetDate, s);
+      const hrs = Number(j.estimatedHours) || span * j.crewIds.length * hpd;
+      spread(j.startDate, 0, span, j.crewIds, hrs, j.id);
     }
   }
-  return { byJob, pairs };
+  return { load, jobsOn };
+}
+
+/* Capacity-based over-allocation: a crew member is only "over" on a day when
+   their booked HOURS exceed their shift — so AM-on-one-job / PM-on-another no
+   longer false-alarms. Returns:
+     byJob:     Map(jobId -> [{ crewId, day, hours }])   (jobs touching an over day)
+     overloads: [{ crewId, day, hours, pct, jobIds }]    (every over-capacity crew-day)
+     load:      Map(crewId -> Map(dayISO -> hours))      (full grid, for the heat-map)
+     byCrew:    Map(crewId -> { bookedDays, totHrs, peak, overDays }) */
+export function findOverAllocations(jobs, settings) {
+  const s = settings || DEFAULT_SETTINGS;
+  const cap = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
+  const { load, jobsOn } = crewDayLoad(jobs, s);
+  const byJob = new Map(), overloads = [], byCrew = new Map();
+  for (const [cid, days] of load) {
+    let bookedDays = 0, totHrs = 0, peak = 0, overDays = 0;
+    for (const [day, hrs] of days) {
+      bookedDays++; totHrs += hrs; if (hrs > peak) peak = hrs;
+      if (hrs > cap + 1e-6) {
+        overDays++;
+        const jids = [...((jobsOn.get(cid) || new Map()).get(day) || [])];
+        overloads.push({ crewId: cid, day, hours: hrs, pct: Math.round((hrs / cap) * 100), jobIds: jids });
+        for (const jid of jids) (byJob.get(jid) || byJob.set(jid, []).get(jid)).push({ crewId: cid, day, hours: hrs });
+      }
+    }
+    byCrew.set(cid, { bookedDays, totHrs, peak, overDays });
+  }
+  overloads.sort((a, b) => (b.hours - a.hours) || (a.day < b.day ? -1 : 1));
+  return { byJob, overloads, load, byCrew };
 }
 
 /* UI guard: would making `candidatePredId` a predecessor of `jobId` create a
