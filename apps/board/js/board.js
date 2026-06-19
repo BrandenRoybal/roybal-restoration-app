@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings,
 } from "./data.js";
-import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, layoutSubtasks, crewAssignments, workDaysBetween, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, layoutSubtasks, crewAssignments, workDaysBetween, effCrew, DEFAULT_SETTINGS } from "./schedule.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -984,6 +984,7 @@ function paintWorkload() {
    crew board (magnet board — drag the guys between jobs for a day)
    ============================================================ */
 let crewDay = todayISO();      // the day the crew board is showing
+let crewScope = "day";         // "day" = override just this day | "job" = whole-job roster
 let crewDrag = null;           // { cid, src }  — src = jobId | "avail" | "out"
 let crewTap = null;            // { cid, src }  — tap-to-move selection (mobile)
 
@@ -1010,6 +1011,30 @@ function jobSlotOn(j, day, s) {
 }
 const slotIds = (slot) => (slot.target.crewIds = slot.target.crewIds || []);
 
+/* ---- per-day crew overrides: job.dayCrew[day] = { add:[ids], remove:[ids] } ---- */
+const baseCrewOn = (j, day) => slotIds(jobSlotOn(j, day, settings)).slice();
+const effectiveCrewOn = (j, day) => effCrew(baseCrewOn(j, day), (j.dayCrew || {})[day]);
+const dayOvOf = (j, day) => j.dayCrew && j.dayCrew[day];
+const isOverridden = (j, day) => { const d = dayOvOf(j, day); return !!(d && ((d.add || []).length || (d.remove || []).length)); };
+function dayDelta(j, day) { j.dayCrew = j.dayCrew || {}; return (j.dayCrew[day] = j.dayCrew[day] || { add: [], remove: [] }); }
+function cleanDay(j, day) {
+  const m = j.dayCrew; if (!m) return;
+  const d = m[day]; if (d && !(d.add || []).length && !(d.remove || []).length) delete m[day];
+  if (!Object.keys(m).length) delete j.dayCrew;
+}
+function dayPull(j, day, cid) {           // remove cid from this job for this day only
+  const base = baseCrewOn(j, day), d = dayDelta(j, day);
+  d.add = d.add.filter((x) => x !== cid);
+  if (base.includes(cid) && !d.remove.includes(cid)) d.remove.push(cid);
+  cleanDay(j, day);
+}
+function dayPush(j, day, cid) {           // add cid to this job for this day only
+  const base = baseCrewOn(j, day), d = dayDelta(j, day);
+  d.remove = d.remove.filter((x) => x !== cid);
+  if (!base.includes(cid) && !d.add.includes(cid)) d.add.push(cid);
+  cleanDay(j, day);
+}
+
 function renderCrewView() {
   const body = clear(view);
   body.append(h("div", { class: "printhdr" }));
@@ -1018,8 +1043,13 @@ function renderCrewView() {
     h("strong", { class: "calnav__label" }, crewDayLabel()),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftCrewDay(1) }, "›"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftCrewDay(0, todayISO()) }, "Today"));
+  const scopeBtn = (id, label, tip) => h("button", { class: "vsw__b" + (crewScope === id ? " on" : ""), title: tip, onclick: () => { if (crewScope !== id) { crewScope = id; renderCrewView(); } } }, label);
+  const scope = h("div", { class: "cb-scope" }, h("span", { class: "cb-scope__l" }, "Move:"),
+    h("div", { class: "vsw" },
+      scopeBtn("day", "Just this day", "Reassign for the selected day only — the rest of the job keeps its planned crew"),
+      scopeBtn("job", "Whole job", "Reassign for the job's entire run")));
   body.append(h("div", { class: "btoolbar" },
-    h("div", { class: "btoolbar__left" }, viewSwitch(), nav),
+    h("div", { class: "btoolbar__left" }, viewSwitch(), nav, scope),
     h("div", { class: "btools" }, ...filterControls(), ...actionButtons())));
   if (!crew.length) {
     body.append(h("div", { class: "bempty" }, h("h2", {}, "Add your crew first"),
@@ -1042,20 +1072,26 @@ function paintCrew() {
   clear(wrap);
   const s = settings, day = crewDay;
   const acts = activeJobsOn(day);
-  const assigned = new Set();
-  const cols = acts.map((j) => { const slot = jobSlotOn(j, day, s); slotIds(slot).forEach((id) => assigned.add(id)); return { j, slot }; });
   const out = activeCrew().filter((c) => isOut(c, day));
   const outSet = new Set(out.map((c) => c.id));
+  const assigned = new Set();
+  const cols = acts.map((j) => {
+    const ids = effectiveCrewOn(j, day).filter((id) => !outSet.has(id));   // out guys show only on the bench
+    ids.forEach((id) => assigned.add(id));
+    return { j, ids, label: jobSlotOn(j, day, s).label };
+  });
   const avail = activeCrew().filter((c) => !assigned.has(c.id) && !outSet.has(c.id));
 
   const row = h("div", { class: "cbrow" });
   row.append(crewCol("avail", "Available", avail.map((c) => c.id), { dot: "#1f9d55", kind: "avail" }));
-  for (const { j, slot } of cols) row.append(crewCol(j.id, j.title || j.customer || "Job", slotIds(slot), { dot: stageOf(j.stage).color, sub: slot.label, kind: "job" }));
+  for (const { j, ids, label } of cols) row.append(crewCol(j.id, j.title || j.customer || "Job", ids, { dot: stageOf(j.stage).color, sub: label, kind: "job", job: j, overridden: isOverridden(j, day) }));
   row.append(crewCol("out", "Out today", out.map((c) => c.id), { kind: "out" }));
   wrap.append(row);
 
   if (!acts.length) wrap.append(h("p", { class: "subtle", style: "padding:14px 4px" }, "No jobs scheduled for this day — use ‹ › to pick another, or assign start/target dates to your jobs."));
-  else wrap.append(h("p", { class: "subtle", style: "padding:10px 4px 0" }, "Drag a guy — or tap him, then tap a job — to reassign. Drop on “Out today” when someone doesn't show; the jobs they leave flag for cover."));
+  else wrap.append(h("p", { class: "subtle", style: "padding:10px 4px 0" }, crewScope === "day"
+    ? "Moving guys for THIS day only — the rest of each job keeps its planned crew. Drop on “Out today” for a no-show; ↺ resets a day to plan. Switch to “Whole job” to change a job's whole run."
+    : "Moving guys for the job's WHOLE run. Drop on “Out today” for a no-show (always just that day). Switch to “Just this day” for single-day cover."));
 }
 
 function crewCol(src, title, ids, opts = {}) {
@@ -1064,12 +1100,13 @@ function crewCol(src, title, ids, opts = {}) {
   const bodyEl = h("div", { class: "cbcol__body" + (opts.kind === "avail" ? " is-avail" : opts.kind === "out" ? " is-outzone" : "") },
     ...(ids.length ? ids.map((cid) => crewChip(cid, src)) : [h("div", { class: "cbcol__empty" }, empty)]));
 
-  const col = h("div", { class: "cbcol cb-" + opts.kind + (opts.kind === "job" && !ids.length ? " needs-cover" : "") },
+  const col = h("div", { class: "cbcol cb-" + opts.kind + (opts.kind === "job" && !ids.length ? " needs-cover" : "") + (opts.overridden ? " cb-edited" : "") },
     h("div", { class: "cbcol__head" },
       opts.dot ? h("span", { class: "bcol__dot", style: `background:${opts.dot}` }) : null,
       h("div", { style: "min-width:0" },
-        h("div", { class: "cbcol__name" }, title),
+        h("div", { class: "cbcol__name" }, title, opts.overridden ? h("span", { class: "cb-edittag", title: "Crew changed for this day only" }, "edited") : null),
         opts.sub ? h("div", { class: "cbcol__sub" }, opts.sub) : null),
+      opts.overridden ? h("button", { class: "cb-reset", type: "button", title: "Reset this day to the planned crew", onclick: (e) => { e.stopPropagation(); resetDay(opts.job); } }, "↺") : null,
       h("span", { class: "bcol__count" }, String(ids.length))),
     bodyEl);
 
@@ -1113,16 +1150,44 @@ async function crewDropTo(dest) {
   if (!move) return;
   const { cid, src } = move;
   if (src === dest) { paintCrew(); return; }
-  const touched = new Set();
-  const pull = (jid) => { const j = jobs.find((x) => x.id === jid); if (!j) return; const slot = jobSlotOn(j, crewDay, settings); const ids = slotIds(slot); if (ids.includes(cid)) { slot.target.crewIds = ids.filter((x) => x !== cid); touched.add(j); } };
-  const push = (jid) => { const j = jobs.find((x) => x.id === jid); if (!j) return; const slot = jobSlotOn(j, crewDay, settings); const ids = slotIds(slot); if (!ids.includes(cid)) { slot.target.crewIds = [...ids, cid]; touched.add(j); } };
+  const day = crewDay, touched = new Set();
+  // pull/push respect the scope toggle: "day" edits a per-day override delta,
+  // "job" edits the job's (or active phase's) whole-run roster.
+  const pull = (jid) => {
+    const j = jobs.find((x) => x.id === jid); if (!j) return;
+    if (crewScope === "day") { if (effectiveCrewOn(j, day).includes(cid)) { dayPull(j, day, cid); touched.add(j); } }
+    else { const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot); if (ids.includes(cid)) { slot.target.crewIds = ids.filter((x) => x !== cid); touched.add(j); } }
+  };
+  const push = (jid) => {
+    const j = jobs.find((x) => x.id === jid); if (!j) return;
+    if (crewScope === "day") { if (!effectiveCrewOn(j, day).includes(cid)) { dayPush(j, day, cid); touched.add(j); } }
+    else { const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot); if (!ids.includes(cid)) { slot.target.crewIds = [...ids, cid]; touched.add(j); } }
+  };
 
   if (src !== "avail" && src !== "out") pull(src);
-  if (dest === "out") { for (const j of activeJobsOn(crewDay)) pull(j.id); await setOut(cid, true); }
-  else { if (src === "out") await setOut(cid, false); if (dest !== "avail") push(dest); }
+
+  if (dest === "out") {
+    // a no-show is always per-day: free their slots today (override) and flag absent
+    for (const j of activeJobsOn(day)) { if (effectiveCrewOn(j, day).includes(cid)) { dayPull(j, day, cid); touched.add(j); } }
+    await setOut(cid, true);
+  } else if (dest === "avail") {
+    if (src === "out") {        // back from the bench → undo today's absence everywhere
+      await setOut(cid, false);
+      for (const j of activeJobsOn(day)) { if ((dayOvOf(j, day)?.remove || []).includes(cid)) { dayPush(j, day, cid); touched.add(j); } }
+    }
+  } else {
+    if (src === "out") await setOut(cid, false);   // showed up after all → assign them
+    push(dest);
+  }
 
   if (touched.size) { setSync("syncing"); for (const j of touched) await saveJob(j); setSync(pendingCount() ? "error" : "synced"); }
   await recomputeAndPersist();   // crew change can re-flow durations/dates; repaints too
+}
+
+async function resetDay(j) {
+  if (j.dayCrew) { delete j.dayCrew[crewDay]; if (!Object.keys(j.dayCrew).length) delete j.dayCrew; }
+  setSync("syncing"); await saveJob(j); setSync(pendingCount() ? "error" : "synced");
+  await recomputeAndPersist();
 }
 
 /* ============================================================
@@ -1250,9 +1315,10 @@ function openJobModal(existing, newMilestone) {
             h("button", { class: "st-btn", type: "button", title: "Move down", disabled: i === j.subtasks.length - 1, onclick: () => mv(1) }, "↓"),
             h("button", { class: "st-btn st-del", type: "button", title: "Remove phase", onclick: () => { j.subtasks.splice(i, 1); renderPhases(); } }, "✕")),
           h("div", { class: "st-row2" },
-            h("span", { class: "st-lbl" }, "days"), days,
-            h("span", { class: "st-lbl" }, "hrs"), hrs,
-            h("span", { class: "st-lbl" }, "lag"), lag,
+            h("div", { class: "st-nums" },
+              h("label", { class: "st-field" }, h("span", {}, "Days"), days),
+              h("label", { class: "st-field" }, h("span", {}, "Hours"), hrs),
+              h("label", { class: "st-field" }, h("span", {}, "Lag (days)"), lag)),
             activeCrew().length ? crewStrip : h("span", { class: "subtle" }, "no crew"))));
       });
     }

@@ -233,6 +233,16 @@ export function crewAssignments(jobs, settings) {
    which jobs each crew touches each day. The basis for capacity conflicts and
    the workload heat-map. Returns { load: Map(crewId->Map(dayISO->hours)),
    jobsOn: Map(crewId->Map(dayISO->Set(jobId))) }. */
+/* Effective crew for a day given a base roster and an optional per-day override
+   delta `{ add:[ids], remove:[ids] }`. base − remove ∪ add (no duplicates).
+   Shared by the engine and the Crew board so both resolve overrides identically. */
+export function effCrew(base, ov) {
+  base = base || [];
+  if (!ov) return base;
+  const rem = ov.remove || [], add = ov.add || [];
+  return base.filter((c) => !rem.includes(c)).concat(add.filter((c) => !base.includes(c)));
+}
+
 export function crewDayLoad(jobs, settings) {
   const s = settings || DEFAULT_SETTINGS;
   const hpd = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
@@ -243,31 +253,37 @@ export function crewDayLoad(jobs, settings) {
     let jm = jobsOn.get(cid); if (!jm) jobsOn.set(cid, (jm = new Map()));
     let set = jm.get(day); if (!set) jm.set(day, (set = new Set())); set.add(jid);
   };
-  const spread = (jobStart, offFrac, durFrac, crewIds, totalHours, jid) => {
-    const n = Math.max(1, (crewIds || []).length);
+  // distribute totalHours across the days a phase/job touches; per-day crew can
+  // differ when a day has an override, so the hours that day re-split among them.
+  const spread = (jobStart, offFrac, durFrac, baseCrew, totalHours, jid, dayOv) => {
     const startIdx = Math.floor(offFrac + 1e-9);
     const endIdx = Math.max(startIdx, Math.ceil(offFrac + durFrac - 1e-9) - 1);
     for (let k = startIdx; k <= endIdx; k++) {
       const ov = Math.max(0, Math.min(offFrac + durFrac, k + 1) - Math.max(offFrac, k));
       if (ov <= 0) continue;
       const day = addWorkDays(jobStart, k, s);
-      const perCrew = (totalHours / n) * (ov / durFrac);
-      for (const cid of (crewIds || [])) bump(cid, day, perCrew, jid);
+      const eff = effCrew(baseCrew, dayOv && dayOv[day]);
+      if (!eff.length) continue;
+      const perCrew = (totalHours * (ov / durFrac)) / eff.length;
+      for (const cid of eff) bump(cid, day, perCrew, jid);
     }
   };
   for (const j of jobs) {
     if (j.isMilestone || !j.startDate) continue;
+    const dayOv = j.dayCrew || null;
     const phases = j.subtasks || [];
     if (phases.some((st) => (st.crewIds || []).length)) {
       for (const { sub, offFrac, durFrac } of layoutSubtasks(phases, j.startDate, s)) {
-        if (!(sub.crewIds || []).length) continue;
-        const hrs = Number(sub.estimatedHours) || durFrac * Math.max(1, sub.crewIds.length) * hpd;
-        spread(j.startDate, offFrac, durFrac, sub.crewIds, hrs, j.id);
+        const base = sub.crewIds || [];
+        if (!base.length && !dayOv) continue;   // crewless phase only matters on override days
+        const hrs = Number(sub.estimatedHours) || durFrac * Math.max(1, base.length) * hpd;
+        spread(j.startDate, offFrac, durFrac, base, hrs, j.id, dayOv);
       }
-    } else if (j.targetDate && (j.crewIds || []).length) {
+    } else if (j.targetDate && ((j.crewIds || []).length || dayOv)) {
       const span = workDaysBetween(j.startDate, j.targetDate, s);
-      const hrs = Number(j.estimatedHours) || span * j.crewIds.length * hpd;
-      spread(j.startDate, 0, span, j.crewIds, hrs, j.id);
+      const base = j.crewIds || [];
+      const hrs = Number(j.estimatedHours) || span * Math.max(1, base.length) * hpd;
+      spread(j.startDate, 0, span, base, hrs, j.id, dayOv);
     }
   }
   return { load, jobsOn };
