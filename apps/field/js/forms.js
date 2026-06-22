@@ -332,11 +332,22 @@ export function moistureMap(project, m) {
    2. DRYING LOG
    ============================================================ */
 export function dryingLog(project, d) {
-  /* drying-day counter: from dry-out start to today */
-  const dryStart = d.dryoutStart || project.dryStart || "";
-  const dayCount = dryStart ? (daysSince(dryStart) + 1) : null;
+  /* drying-day counter: start → finish once a finish date is set, else start → today */
   const daysBanner = h("div", { class: "daysbig app-only", style: "margin-bottom:8px" });
-  if (dayCount != null && dayCount > 0) daysBanner.append("Drying ", h("b", {}, "Day " + dayCount), " (started " + dryStart + ")");
+  function renderBanner() {
+    daysBanner.replaceChildren();
+    const start = d.dryoutStart || project.dryStart || "";
+    const finish = d.dryoutFinish || "";
+    if (!start) return;
+    if (finish && finish >= start) {
+      const n = (daysBetween(start, finish) ?? 0) + 1;   // inclusive of start + finish day
+      daysBanner.append("Drying complete — ", h("b", {}, n + " day" + (n === 1 ? "" : "s")), ` (${fmtDate(start)} → ${fmtDate(finish)})`);
+    } else {
+      const n = daysSince(start) + 1;
+      if (n > 0) daysBanner.append("Drying ", h("b", {}, "Day " + n), " (started " + fmtDate(start) + ")");
+    }
+  }
+  renderBanner();
 
   const warnBox = h("div", { class: "warn app-only", hidden: true });
 
@@ -527,7 +538,9 @@ export function dryingLog(project, d) {
     h("div", { class: "grid2" },
       field("Carrier / Adjuster", inp(project, "adjuster")),
       field("Tech Supervisor", inp(d, "techSupervisor"))),
-    field("Dry-out Start Date", inp(d, "dryoutStart", { type: "date" })));
+    h("div", { class: "grid2" },
+      field("Dry-out Start Date", inp(d, "dryoutStart", { type: "date", oninput: renderBanner })),
+      field("Dry-out Finish Date", inp(d, "dryoutFinish", { type: "date", oninput: renderBanner }))));
 }
 
 /* ============================================================

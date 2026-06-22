@@ -158,7 +158,7 @@ export function blankReadingRow() {
 export function newDryingLog() {
   return {
     id: uid(), createdAt: new Date().toISOString(),
-    dryoutStart: "", techSupervisor: "",
+    dryoutStart: "", dryoutFinish: "", techSupervisor: "",
     equipment: [ blankEquipRow() ],
     readings: [ blankPsychroRow() ],
   };
