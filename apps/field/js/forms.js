@@ -109,7 +109,7 @@ function cropZoom(srcUrl, aspect) {
       cv.style.width = frameW + "px"; cv.style.height = frameH + "px";
       const cx = cv.getContext("2d");
 
-      const base = Math.max(frameW / iw, frameH / ih);   // "cover" the frame
+      const base = Math.min(frameW / iw, frameH / ih);   // zoom 1 = whole image fits (100%)
       let zoom = 1, scale = base;
       let offX = (frameW - iw * scale) / 2, offY = (frameH - ih * scale) / 2;
       function clamp() {
