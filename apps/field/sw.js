@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v27";
+const CACHE = "roybal-field-v28";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",

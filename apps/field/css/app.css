@@ -221,6 +221,7 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .uploadbox { border: 2px dashed var(--line-strong); border-radius: var(--radius); padding: 18px; text-align: center; color: var(--muted); background: #fff; }
 .uploadbox img { max-width: 100%; border-radius: 8px; margin-top: 10px; }
 .docpage { display: block; max-width: 100%; border: 1px solid var(--line); border-radius: 8px; margin: 8px auto 0; }
+.docpage-full { display: block; max-width: 100%; height: auto; margin: 0 auto; border: 1px solid var(--line); }
 
 /* photo upload thumbs */
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; margin-top: 8px; }
