@@ -2,7 +2,7 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, sketchPad, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, DRY_STANDARDS, goalFor, daysSince } from "./core.js";
+import { h, sketchPad, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
 import { fileToFloorPlan } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
@@ -86,6 +86,105 @@ function moistureChartSvg(m, goal) {
   return s + `<div class="mchart__legend"><span class="mchart__leglbl">Reading location:</span>${legend}</div>`;
 }
 
+/* Crop & zoom an imported floor-plan image/PDF page. Opens a modal where you
+   pan (drag / one-finger) and zoom (slider, wheel, or two-finger pinch); on
+   Apply it renders the visible region to a new image so it fills the sketch and
+   prints clean. Resolves to a JPEG data URL, or null if cancelled. */
+function cropZoom(srcUrl, aspect) {
+  return new Promise((resolve) => {
+    if (!srcUrl) return resolve(null);
+    const img = new Image();
+    img.onerror = () => resolve(null);
+    img.onload = () => {
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      const ar = aspect && aspect > 0 ? aspect : (iw / ih || 1.5);
+      let frameW = Math.min(window.innerWidth - 32, 680);
+      let frameH = Math.round(frameW / ar);
+      const maxH = window.innerHeight - 230;
+      if (frameH > maxH) { frameH = maxH; frameW = Math.round(frameH * ar); }
+
+      const dpr = window.devicePixelRatio || 1;
+      const cv = h("canvas", { class: "cropcanvas" });
+      cv.width = Math.round(frameW * dpr); cv.height = Math.round(frameH * dpr);
+      cv.style.width = frameW + "px"; cv.style.height = frameH + "px";
+      const cx = cv.getContext("2d");
+
+      const base = Math.max(frameW / iw, frameH / ih);   // "cover" the frame
+      let zoom = 1, scale = base;
+      let offX = (frameW - iw * scale) / 2, offY = (frameH - ih * scale) / 2;
+      function clamp() {
+        const w = iw * scale, hh = ih * scale;
+        offX = w >= frameW ? Math.min(0, Math.max(frameW - w, offX)) : (frameW - w) / 2;
+        offY = hh >= frameH ? Math.min(0, Math.max(frameH - hh, offY)) : (frameH - hh) / 2;
+      }
+      function draw() {
+        cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        cx.fillStyle = "#fff"; cx.fillRect(0, 0, frameW, frameH);
+        cx.drawImage(img, offX, offY, iw * scale, ih * scale);
+      }
+      function setZoom(z, px, py) {
+        const nz = Math.max(1, Math.min(8, z)), ns = base * nz;
+        const ix = (px - offX) / scale, iy = (py - offY) / scale;
+        zoom = nz; scale = ns; offX = px - ix * ns; offY = py - iy * ns;
+        clamp(); draw(); zslider.value = String(zoom);
+      }
+
+      const pts = new Map(); let dragging = false, lx = 0, ly = 0, pinch = null;
+      cv.addEventListener("pointerdown", (e) => {
+        pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        try { cv.setPointerCapture(e.pointerId); } catch {}
+        if (pts.size === 1) { dragging = true; lx = e.clientX; ly = e.clientY; } else dragging = false;
+      });
+      cv.addEventListener("pointermove", (e) => {
+        if (!pts.has(e.pointerId)) return; e.preventDefault();
+        pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        const a = [...pts.values()];
+        if (a.length >= 2) {
+          const dist = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
+          const r = cv.getBoundingClientRect();
+          const mx = (a[0].x + a[1].x) / 2 - r.left, my = (a[0].y + a[1].y) / 2 - r.top;
+          if (!pinch) pinch = { dist, zoom };
+          else setZoom(pinch.zoom * (dist / pinch.dist), mx, my);
+        } else if (dragging) { offX += e.clientX - lx; offY += e.clientY - ly; lx = e.clientX; ly = e.clientY; clamp(); draw(); }
+      });
+      const up = (e) => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; if (!pts.size) dragging = false; };
+      cv.addEventListener("pointerup", up); cv.addEventListener("pointercancel", up);
+      cv.addEventListener("wheel", (e) => { e.preventDefault(); const r = cv.getBoundingClientRect(); setZoom(zoom * (e.deltaY < 0 ? 1.12 : 0.89), e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+
+      const zout = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "－");
+      const zin = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "＋");
+      const zslider = h("input", { type: "range", min: "1", max: "8", step: "0.05", value: "1", style: "flex:1" });
+      zout.addEventListener("click", () => setZoom(zoom / 1.25, frameW / 2, frameH / 2));
+      zin.addEventListener("click", () => setZoom(zoom * 1.25, frameW / 2, frameH / 2));
+      zslider.addEventListener("input", () => setZoom(Number(zslider.value), frameW / 2, frameH / 2));
+
+      const close = (val) => { ov.remove(); resolve(val); };
+      const cancel = h("button", { type: "button", class: "btn btn--ghost" }, "Cancel");
+      const apply = h("button", { type: "button", class: "btn btn--primary" }, "Apply");
+      cancel.addEventListener("click", () => close(null));
+      apply.addEventListener("click", () => {
+        const OUT_H = 760, k = OUT_H / frameH;
+        const out = document.createElement("canvas");
+        out.width = Math.round(frameW * k); out.height = Math.round(frameH * k);
+        const o = out.getContext("2d");
+        o.fillStyle = "#fff"; o.fillRect(0, 0, out.width, out.height);
+        o.drawImage(img, offX * k, offY * k, iw * scale * k, ih * scale * k);
+        close(out.toDataURL("image/jpeg", 0.85));
+      });
+
+      const ov = h("div", { class: "cropov" },
+        h("div", { class: "cropbox" },
+          h("div", { class: "crophdr" }, h("strong", {}, "Crop & zoom"), h("span", { class: "subtle" }, "Drag to move · scroll, pinch, or slider to zoom")),
+          h("div", { class: "cropframe", style: `width:${frameW}px;height:${frameH}px` }, cv),
+          h("div", { class: "cropzoom" }, zout, zslider, zin),
+          h("div", { class: "cropfoot" }, cancel, apply)));
+      document.body.append(ov);
+      draw();
+    };
+    img.src = srcUrl;
+  });
+}
+
 /* ============================================================
    1. MOISTURE MAP
    ============================================================ */
@@ -162,8 +261,12 @@ export function moistureMap(project, m) {
   fpInput.addEventListener("change", async () => {
     const f = fpInput.files[0]; if (!f) return;
     toast("Importing floor plan…", 6000);
-    try { const url = await fileToFloorPlan(f); pad.setBackground(url); toast("Floor plan added — draw on top"); }
-    catch { toast("Sorry — couldn't read that file"); }
+    try {
+      const url = await fileToFloorPlan(f);
+      const cropped = await cropZoom(url, (pad.el.clientWidth || 680) / 320);
+      pad.setBackground(cropped || url);
+      toast("Floor plan added — draw on top");
+    } catch { toast("Sorry — couldn't read that file"); }
     fpInput.value = ""; renderFp();
   });
   const fpBox = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" });
@@ -174,9 +277,14 @@ export function moistureMap(project, m) {
     importBtn.addEventListener("click", () => fpInput.click());
     fpBox.append(importBtn);
     if (pad.hasBackground()) {
+      const cropBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "✂️ Crop / zoom");
+      cropBtn.addEventListener("click", async () => {
+        const c = await cropZoom(m.floorPlan, (pad.el.clientWidth || 680) / 320);
+        if (c) { pad.setBackground(c); renderFp(); }
+      });
       const rm = h("button", { type: "button", class: "btn btn--danger btn--sm" }, "Remove plan");
       rm.addEventListener("click", () => { pad.setBackground(null); renderFp(); });
-      fpBox.append(rm);
+      fpBox.append(cropBtn, rm);
     }
   }
   renderFp();
@@ -242,6 +350,47 @@ export function dryingLog(project, d) {
         `${flagged.length} unit(s) on site 7+ days. Confirm continued need / document justification for the carrier.`);
     } else { warnBox.hidden = true; }
   }
+  /* increment the trailing number of an asset tag (e.g. "AM-09" → "AM-10"),
+     preserving any prefix/suffix and zero-padding; plain copy if no number. */
+  function bumpAsset(src, n) {
+    const m = String(src).match(/^(.*?)(\d+)(\D*)$/);
+    if (!m) return src;
+    return m[1] + String(Number(m[2]) + n).padStart(m[2].length, "0") + m[3];
+  }
+  /* Excel-style fill handle: drag the corner of a cell down to copy its value
+     into the rows below (asset # auto-increments). Works with mouse + touch. */
+  function attachFill(td, i, key) {
+    const handle = h("span", { class: "fillh app-only", title: "Drag down to fill the rows below" });
+    let active = false, rowsEls = [];
+    const targetOf = (y) => { let t = i; for (let k = i + 1; k < rowsEls.length; k++) { if (y >= rowsEls[k].getBoundingClientRect().top + 4) t = k; } return t; };
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      active = true; rowsEls = [...eqBody.children];
+      try { handle.setPointerCapture(e.pointerId); } catch {}
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!active) return; e.preventDefault();
+      const t = targetOf(e.clientY);
+      rowsEls.forEach((tr, idx) => tr.classList.toggle("fill-target", idx > i && idx <= t));
+    });
+    const finish = () => {
+      if (!active) return; active = false;
+      const targets = rowsEls.map((_, idx) => idx).filter((idx) => rowsEls[idx].classList.contains("fill-target"));
+      rowsEls.forEach((tr) => tr.classList.remove("fill-target"));
+      if (!targets.length) return;
+      const src = d.equipment[i][key] ?? "";
+      targets.forEach((idx, k) => {
+        d.equipment[idx][key] = key === "asset" ? bumpAsset(src, k + 1) : src;
+        if (key === "hours") d.equipment[idx]._manualHrs = true;
+      });
+      paintEq(); refreshWarn(); commit();
+      toast(`Filled ${targets.length} row${targets.length > 1 ? "s" : ""}`);
+    };
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+    td.append(handle);
+  }
+
   function eqRow(row, i) {
     const tr = h("tr");
     const daysCell = h("td", { class: "calc", style: "min-width:46px" });
@@ -251,14 +400,17 @@ export function dryingLog(project, d) {
         const ph = (new Date(row.removed) - new Date(row.placed)) / 3600000;
         if (isFinite(ph) && ph >= 0) { row.hours = Math.round(ph); if (hoursInput) hoursInput.value = row.hours; }
       }
-      const onsite = row.placed ? daysSince(row.placed) : null;
-      const ended = row.removed ? false : (onsite != null && onsite >= 7);
-      daysCell.textContent = onsite == null ? "" : (row.removed ? "" : onsite + "d");
+      // Days on site: placed→removed once removed, else days since placed.
+      let days = null;
+      if (row.placed && row.removed) days = Math.max(1, daysBetween(row.placed, row.removed) ?? 0);
+      else if (row.placed) days = daysSince(row.placed);
+      const ended = !row.removed && days != null && days >= 7;
+      daysCell.textContent = days == null ? "" : days + "d";
       tr.classList.toggle("flag7", !!ended);
     }
     let hoursInput;
     const mk = (key, w, type = "text") => {
-      const c = h("td");
+      const c = h("td", { class: "fillcell" });
       const input = h("input", { type, value: row[key] ?? "", style: `min-width:${w}`, step: type === "datetime-local" ? "60" : null });
       input.addEventListener("input", () => {
         row[key] = input.value;
@@ -266,7 +418,9 @@ export function dryingLog(project, d) {
         recalcDays(); refreshWarn(); commit();
       });
       if (key === "hours") hoursInput = input;
-      c.append(input); return c;
+      c.append(input);
+      attachFill(c, i, key);
+      return c;
     };
     const assetC = mk("asset", "50px"), typeC = mk("type", "150px"), locC = mk("location", "110px");
     const placedC = mk("placed", "150px", "datetime-local"), removedC = mk("removed", "150px", "datetime-local");
