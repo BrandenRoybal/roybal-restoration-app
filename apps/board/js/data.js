@@ -51,6 +51,13 @@ export async function saveSettings(s) {
 function queue() { return readCache(Q_KEY); }
 function setQueue(q) { writeCache(Q_KEY, q); }
 function enqueue(table, row) { const q = queue(); q.push({ table, row }); setQueue(q); }
+/* a guarded (optimistic-concurrency) job write — dedup so repeated offline edits
+   of the same job collapse to one write guarding the last-synced revision */
+function enqueueJob(id, base, data) {
+  const q = queue().filter((it) => !(it.guarded && it.id === id));
+  q.push({ guarded: true, id, base, data });
+  setQueue(q);
+}
 export function pendingCount() { return queue().length; }
 
 async function flushQueue() {
@@ -58,10 +65,57 @@ async function flushQueue() {
   if (!q.length) return;
   const remaining = [];
   for (const item of q) {
-    try { await upsert(item.table, [item.row]); }
-    catch { remaining.push(item); }
+    try {
+      if (item.guarded) {
+        const next = { ...item.data, rev: item.base + 1 };
+        const r = await guardedJobWrite(item.id, item.base, next);
+        if (r.conflict) notifyConflict(applyServer(item.id, r.server));   // dropped — don't clobber newer
+        else applyLocal(next);
+      } else {
+        await upsert(item.table, [item.row]);
+      }
+    } catch { remaining.push(item); }
   }
   setQueue(remaining);
+}
+
+/* ---------- optimistic concurrency for jobs ----------
+   Each job blob carries an integer `rev`. A save only lands if the server is
+   still on the rev the device started from; otherwise it's a conflict and we do
+   NOT overwrite — so a field device working off a stale copy can't clobber newer
+   office edits. */
+let onConflict = null;
+export function setConflictHandler(fn) { onConflict = fn; }
+function notifyConflict(serverData) { if (onConflict) { try { onConflict(serverData); } catch {} } }
+function applyLocal(data) { writeCache(J_KEY, [...cachedJobs().filter((j) => j.id !== data.id), data]); }
+function applyServer(id, serverData) {
+  const others = cachedJobs().filter((j) => j.id !== id);
+  writeCache(J_KEY, serverData ? [...others, serverData] : others);
+  return serverData;
+}
+
+async function guardedJobWrite(id, base, next) {
+  const eid = encodeURIComponent(id);
+  const guard = base > 0 ? `data->>rev=eq.${base}` : `or=(data->>rev.is.null,data->>rev.eq.0)`;
+  const res = await rest(`${JOBS_TABLE}?id=eq.${eid}&${guard}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ data: next, deleted: false }),
+  });
+  if (!res.ok) throw new Error("save " + res.status);
+  const rows = await res.json();
+  if (rows.length) return { ok: true };
+  // 0 rows: either the row doesn't exist yet (new job) or it changed (conflict)
+  const chk = await rest(`${JOBS_TABLE}?id=eq.${eid}&select=id,data`, { method: "GET" });
+  if (!chk.ok) throw new Error("check " + chk.status);
+  const existing = await chk.json();
+  if (!existing.length) {
+    const ins = await rest(JOBS_TABLE, { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify([{ id, data: next, deleted: false }]) });
+    if (ins.ok) return { ok: true };
+    if (ins.status === 409) return { conflict: true, server: existing[0]?.data || null };
+    throw new Error("insert " + ins.status);
+  }
+  return { conflict: true, server: existing[0].data };
 }
 
 /* ---------- low-level REST ---------- */
@@ -102,11 +156,20 @@ export async function pull() {
 export async function saveJob(job) {
   job.updatedAt = new Date().toISOString();
   if (!job.createdAt) job.createdAt = job.updatedAt;
-  writeCache(J_KEY, [...cachedJobs().filter((j) => j.id !== job.id), job]);
-  const row = { id: job.id, data: job, deleted: false };
-  if (!SYNC_ENABLED) return job;
-  try { await upsert(JOBS_TABLE, [row]); } catch { enqueue(JOBS_TABLE, row); }
-  return job;
+  const base = Number(job.rev) || 0;                  // rev the device started from
+  // optimistic local write keeps rev = base until the server confirms the bump
+  applyLocal({ ...job, rev: base });
+  if (!SYNC_ENABLED) { job.rev = base; return { ok: true }; }
+  const next = { ...job, rev: base + 1 };
+  try {
+    const r = await guardedJobWrite(job.id, base, next);
+    if (r.conflict) { applyServer(job.id, r.server); notifyConflict(r.server); return { conflict: true }; }
+    job.rev = base + 1; applyLocal(next);             // confirmed on the server
+    return { ok: true };
+  } catch {
+    enqueueJob(job.id, base, { ...job, rev: base });  // offline — flush later, still guarded
+    return { queued: true };
+  }
 }
 export async function deleteJob(id) {
   const job = cachedJobs().find((j) => j.id === id);
