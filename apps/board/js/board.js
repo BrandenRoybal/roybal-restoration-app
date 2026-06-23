@@ -61,6 +61,8 @@ let draggingId = null;
 let currentView = "board";              // "board" | "crew" | "calendar" | "gantt" | "workload"
 const _now = new Date();
 let calY = _now.getFullYear(), calM = _now.getMonth();   // calendar month being viewed
+let calMode = "month";                                   // "month" | "week" | "day"
+let calRef = todayISO();                                  // reference day for week / day modes
 let ganttZoom = "day";                  // "day" | "week"
 
 /* ---------- lookups ---------- */
@@ -567,57 +569,98 @@ function renderCalendarView() {
   paintCalendar();
 }
 
+const fmtMD = (iso) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+function calLabel() {
+  if (calMode === "day") return new Date(calRef + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  if (calMode === "week") { const s = weekStart(calRef); return `${fmtMD(s)} – ${fmtMD(toISO(addDays(new Date(s + "T00:00:00"), 6)))}`; }
+  return monthLabel();
+}
+const weekStart = (iso) => { const d = new Date(iso + "T00:00:00"); return toISO(addDays(d, -d.getDay())); };
+
 function renderCalToolbar() {
   const nav = h("div", { class: "calnav" },
-    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftMonth(-1) }, "‹"),
-    h("strong", { class: "calnav__label" }, monthLabel()),
-    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftMonth(1) }, "›"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftCal(-1) }, "‹"),
+    h("strong", { class: "calnav__label" }, calLabel()),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftCal(1) }, "›"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: goToday }, "Today"));
+  const modeBtn = (id, lbl) => h("button", { class: "vsw__b" + (calMode === id ? " on" : ""), onclick: () => { if (calMode !== id) { calMode = id; renderCalendarView(); } } }, lbl);
+  const modes = h("div", { class: "vsw cal-modes" }, modeBtn("day", "Day"), modeBtn("week", "Week"), modeBtn("month", "Month"));
   return h("div", { class: "btoolbar" },
-    h("div", { class: "btoolbar__left" }, viewSwitch(), nav),
+    h("div", { class: "btoolbar__left" }, viewSwitch(), nav, modes),
     h("div", { class: "btools" }, ...filterControls(), ...actionButtons()));
 }
 
-function shiftMonth(delta) {
-  calM += delta;
-  if (calM < 0) { calM = 11; calY--; } else if (calM > 11) { calM = 0; calY++; }
-  const lbl = $(".calnav__label", view);
-  if (lbl) lbl.textContent = monthLabel();
+function shiftCal(delta) {
+  if (calMode === "month") { calM += delta; if (calM < 0) { calM = 11; calY--; } else if (calM > 11) { calM = 0; calY++; } }
+  else calRef = toISO(addDays(new Date(calRef + "T00:00:00"), delta * (calMode === "week" ? 7 : 1)));
+  const lbl = $(".calnav__label", view); if (lbl) lbl.textContent = calLabel();
   paintCalendar();
 }
-function goToday() { calY = _now.getFullYear(); calM = _now.getMonth(); shiftMonth(0); }
+function goToday() { calY = _now.getFullYear(); calM = _now.getMonth(); calRef = todayISO(); const lbl = $(".calnav__label", view); if (lbl) lbl.textContent = calLabel(); paintCalendar(); }
+
+/* small colored crew avatars for a job on a given day (effective crew minus
+   anyone out), each tagged AM/PM when it's a half-day shift */
+function calCrewRow(j, iso, cap) {
+  if (j.isMilestone) return null;
+  const ids = effectiveCrewOn(j, iso).filter((id) => { const c = crewById(id); return c && !isOut(c, iso); });
+  if (!ids.length) return null;
+  const row = h("div", { class: "cal__crew" });
+  ids.slice(0, cap).forEach((id) => {
+    const c = crewById(id), sh = shiftOf(j, iso, id);
+    row.append(h("span", { class: "cala" + (sh !== "full" ? " cala--half" : ""), style: `background:${c.color || "#7a8aa0"}`, title: c.name + (sh !== "full" ? ` · ${sh.toUpperCase()} only` : "") },
+      initials(c.name), sh !== "full" ? h("span", { class: "cala__sh" }, sh === "am" ? "A" : "P") : null));
+  });
+  if (ids.length > cap) row.append(h("span", { class: "cala cala--more", title: ids.slice(cap).map((id) => crewById(id)?.name).join(", ") }, "+" + (ids.length - cap)));
+  return row;
+}
+
+function calDayCell(iso, opts = {}) {
+  const today = todayISO();
+  const d = new Date(iso + "T00:00:00");
+  const visible = jobs.filter(matchesFilter);
+  const cell = h("div", { class: "cal__cell" + (opts.out ? " out" : "") + (iso === today ? " today" : "") },
+    h("div", { class: "cal__day" }, opts.dayLabel != null ? opts.dayLabel : String(d.getDate())));
+  const cap = calMode === "month" ? 5 : 8;
+  for (const j of visible.filter((x) => jobActiveOn(x, iso))) {
+    const marker = j.isMilestone ? "◆ " : j.startDate === iso ? "▶ " : j.targetDate === iso ? "⚑ " : "";
+    cell.append(h("div", {
+      class: "cal__job" + (j.isMilestone ? " cal__job--ms" : ""), style: `border-left-color:${j.isMilestone ? "#5b4ba8" : stageOf(j.stage).color}`,
+      title: (j.title || j.customer || "Job"), onclick: () => openJobModal(j),
+    }, marker + (j.title || j.customer || "Job"), calCrewRow(j, iso, cap)));
+  }
+  return cell;
+}
 
 function paintCalendar() {
   const wrap = $(".calwrap", view);
   if (!wrap) return renderCalendarView();
   clear(wrap);
-
-  const today = todayISO();
-  const first = new Date(calY, calM, 1);
-  const gridStart = addDays(first, -first.getDay());   // Sunday on/before the 1st
   const visible = jobs.filter(matchesFilter);
+  const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-  const head = h("div", { class: "cal__head" },
-    ...["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => h("div", { class: "cal__hd" }, d)));
-
-  const grid = h("div", { class: "cal__grid" });
-  for (let i = 0; i < 42; i++) {
-    const d = addDays(gridStart, i);
-    const iso = toISO(d);
-    const inMonth = d.getMonth() === calM;
-    const cell = h("div", { class: "cal__cell" + (inMonth ? "" : " out") + (iso === today ? " today" : "") },
-      h("div", { class: "cal__day" }, String(d.getDate())));
-    for (const j of visible.filter((x) => jobActiveOn(x, iso))) {
-      const marker = j.isMilestone ? "◆ " : j.startDate === iso ? "▶ " : j.targetDate === iso ? "⚑ " : "";
-      cell.append(h("div", {
-        class: "cal__job" + (j.isMilestone ? " cal__job--ms" : ""), style: `border-left-color:${j.isMilestone ? "#5b4ba8" : stageOf(j.stage).color}`,
-        title: (j.title || j.customer || "Job"), onclick: () => openJobModal(j),
-      }, marker + (j.title || j.customer || "Job")));
+  if (calMode === "day") {
+    const iso = calRef;
+    wrap.append(h("div", { class: "cal__grid cal--day" }, calDayCell(iso, { dayLabel: "" })));
+  } else if (calMode === "week") {
+    const start = weekStart(calRef);
+    const head = h("div", { class: "cal__head cal--week" }, ...DOW.map((dn, i) => {
+      const iso = toISO(addDays(new Date(start + "T00:00:00"), i));
+      return h("div", { class: "cal__hd" }, dn + " " + new Date(iso + "T00:00:00").getDate());
+    }));
+    const grid = h("div", { class: "cal__grid cal--week" });
+    for (let i = 0; i < 7; i++) grid.append(calDayCell(toISO(addDays(new Date(start + "T00:00:00"), i)), { dayLabel: "" }));
+    wrap.append(head, grid);
+  } else {
+    const first = new Date(calY, calM, 1);
+    const gridStart = addDays(first, -first.getDay());
+    const head = h("div", { class: "cal__head" }, ...DOW.map((d) => h("div", { class: "cal__hd" }, d)));
+    const grid = h("div", { class: "cal__grid" });
+    for (let i = 0; i < 42; i++) {
+      const d = addDays(gridStart, i);
+      grid.append(calDayCell(toISO(d), { out: d.getMonth() !== calM }));
     }
-    grid.append(cell);
+    wrap.append(head, grid);
   }
-
-  wrap.append(head, grid);
 
   const unsched = visible.filter((j) => !j.startDate && !j.targetDate);
   if (unsched.length) {

@@ -186,6 +186,37 @@ table.rtable .num.under { color: var(--green); }
 .calunsched__row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .calunsched__row .cal__job { background: #fff; }
 
+/* crew avatars on calendar job chips */
+.cal__crew { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 3px; }
+.cala {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 17px; height: 17px; border-radius: 50%; color: #fff; font-size: 8px; font-weight: 800;
+  border: 1px solid #fff; box-shadow: 0 0 0 0.5px var(--line); flex: 0 0 auto;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.cala--more { background: #8a98ab; font-size: 8.5px; }
+.cala--half { box-shadow: 0 0 0 1.5px var(--orange); }
+.cala__sh {
+  position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--orange); color: #fff; font-size: 6.5px; line-height: 1; font-weight: 800;
+  display: flex; align-items: center; justify-content: center; border: 1px solid #fff;
+}
+.cal-modes { flex: 0 0 auto; }
+
+/* week mode — 7 taller columns */
+.cal__head.cal--week { grid-template-columns: repeat(7, 1fr); }
+.cal__grid.cal--week { grid-template-columns: repeat(7, 1fr); }
+.cal__grid.cal--week .cal__cell { min-height: 250px; max-height: none; }
+.cal__grid.cal--week .cala { width: 19px; height: 19px; font-size: 8.5px; }
+
+/* day mode — single wide column */
+.cal__grid.cal--day { grid-template-columns: 1fr; }
+.cal__grid.cal--day .cal__cell { min-height: 60vh; max-height: none; }
+.cal__grid.cal--day .cal__job { white-space: normal; font-size: 13px; padding: 5px 9px; }
+.cal__grid.cal--day .cal__crew { gap: 4px; }
+.cal__grid.cal--day .cala { width: 24px; height: 24px; font-size: 9.5px; }
+.cal__grid.cal--day .cala__sh { width: 12px; height: 12px; font-size: 7.5px; }
+
 @media (max-width: 700px) {
   .cal__cell { min-height: 64px; }
   .cal__job { font-size: 10.5px; }
