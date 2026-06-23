@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   isWorkDay, addWorkDays, workDaysBetween, durationOf, durationFracOf,
   layoutSubtasks, computeSchedule, effCrew, crewDayLoad, findOverAllocations,
-  wouldCreateCycle, DEFAULT_SETTINGS,
+  wouldCreateCycle, computeCriticalPath, linkComponents, DEFAULT_SETTINGS,
 } from "../js/schedule.js";
 
 const S = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 10, holidays: [] };
@@ -159,6 +159,27 @@ test("wouldCreateCycle catches a back-edge and self-link", () => {
   assert.equal(wouldCreateCycle("B", "A", [A, B]), true);   // A already depends on B
   assert.equal(wouldCreateCycle("A", "A", [A, B]), true);   // self
   assert.equal(wouldCreateCycle("A", "B", [job({ id: "A" }), job({ id: "B" })]), false);
+});
+
+group("critical path — per project");
+test("linkComponents groups linked jobs and isolates standalone ones", () => {
+  const A = job({ id: "A" }), B = job({ id: "B", deps: [{ predId: "A", type: "FS" }] }), C = job({ id: "C" });
+  const comp = linkComponents([A, B, C]);
+  assert.equal(comp.get("A"), comp.get("B"));   // linked → same project
+  assert.notEqual(comp.get("A"), comp.get("C")); // standalone → its own project
+});
+test("each independent chain lights up its own critical path", () => {
+  const A = job({ id: "A", scheduleMode: "manual", pinnedStart: "2026-06-15", durationDays: 2 });
+  const B = job({ id: "B", scheduleMode: "auto", durationDays: 2, deps: [{ predId: "A", type: "FS" }] });
+  const C = job({ id: "C", scheduleMode: "manual", pinnedStart: "2026-06-15", durationDays: 1 });
+  const D = job({ id: "D", scheduleMode: "auto", durationDays: 1, deps: [{ predId: "C", type: "FS" }] });
+  const E = job({ id: "E", scheduleMode: "manual", pinnedStart: "2026-06-15", durationDays: 1 });
+  const jobs = [A, B, C, D, E];
+  computeSchedule(jobs, S);
+  const crit = computeCriticalPath(jobs, S);
+  assert.ok(crit.has("A") && crit.has("B"));   // chain 1
+  assert.ok(crit.has("C") && crit.has("D"));   // chain 2 (earlier finish) still lights up
+  assert.ok(!crit.has("E"));                    // a lone job is no critical path
 });
 
 group("defaults");

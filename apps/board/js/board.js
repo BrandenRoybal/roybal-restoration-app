@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings, setConflictHandler,
 } from "./data.js";
-import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, layoutSubtasks, crewAssignments, workDaysBetween, effCrew, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, crewAssignments, workDaysBetween, effCrew, DEFAULT_SETTINGS } from "./schedule.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -52,6 +52,7 @@ let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/serv
 let conflicts = { byJob: new Map(), overloads: [], load: new Map(), byCrew: new Map() };   // capacity over-allocations
 let critical = new Set();                          // job ids on the critical path
 let ganttCritical = false;                         // Gantt "Critical path" highlight toggle
+let ganttFocus = null;                             // job id whose PROJECT is focused in critical mode
 let ganttExpanded = new Set();                     // job ids whose phases are expanded on the Gantt
 let ganttBaseline = false;                         // Gantt "Baseline" overlay toggle
 let filterText = "", filterCrew = "", filterType = "";
@@ -703,8 +704,11 @@ function renderGanttToolbar() {
     h("button", { class: "vsw__b" + (ganttZoom === "month" ? " on" : ""), onclick: () => setZoom("month") }, "Month"));
   const critBtn = h("button", {
     class: "btn btn--ghost btn--sm" + (ganttCritical ? " criton" : ""), onclick: toggleCritical,
-    title: "Highlight the chain of linked jobs that drives your final completion date",
+    title: "Trace one project's critical path — click it on, then click a job to focus its project",
   }, "⚡ Critical path");
+  const focusJob = ganttCritical && ganttFocus ? jobs.find((j) => j.id === ganttFocus) : null;
+  const critFocusChip = ganttCritical ? h("span", { class: "critfocus", title: "Click a job's name on the timeline to focus a different project" },
+    focusJob ? "▸ " + (focusJob.title || focusJob.customer || "Job") : "click a job to focus") : null;
   const baseBtn = h("button", {
     class: "btn btn--ghost btn--sm" + (ganttBaseline ? " baseon" : ""), onclick: toggleBaseline,
     title: "Compare against a saved snapshot of the schedule (ghost bars + slippage)",
@@ -712,11 +716,21 @@ function renderGanttToolbar() {
   const fin = projectFinish();
   const finChip = fin ? h("span", { class: "ganttfin", title: "Projected completion — latest job finish" }, "🏁 Finish " + fmtShort(fin)) : null;
   return h("div", { class: "btoolbar" },
-    h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Timeline"), zoom, critBtn, baseBtn, finChip),
+    h("div", { class: "btoolbar__left" }, viewSwitch(), h("h1", {}, "Timeline"), zoom, critBtn, critFocusChip, baseBtn, finChip),
     h("div", { class: "btools" }, ...filterControls(), ...actionButtons()));
 }
 function setZoom(z) { if (ganttZoom === z) return; ganttZoom = z; renderGanttView(); }
-function toggleCritical() { ganttCritical = !ganttCritical; renderGanttView(); }
+function toggleCritical() {
+  ganttCritical = !ganttCritical;
+  if (ganttCritical) ganttFocus = latestDatedJobId();   // default to the project finishing last
+  renderGanttView();
+}
+/* the job that finishes last (its project is the sensible default focus) */
+function latestDatedJobId() {
+  let id = null, end = null;
+  for (const j of jobs.filter(matchesFilter)) if (!j.isMilestone && j.targetDate && (!end || j.targetDate > end)) { end = j.targetDate; id = j.id; }
+  return id;
+}
 function projectFinish() { let end = null; for (const j of jobs) if (j.targetDate && (!end || j.targetDate > end)) end = j.targetDate; return end; }
 
 /* baseline = a saved snapshot of every job's start/finish, to track slippage */
@@ -745,6 +759,15 @@ function paintGantt() {
     .map((j) => { const a = j.startDate || j.targetDate, b = j.targetDate || j.startDate; return { j, s: a < b ? a : b, t: b > a ? b : a }; })
     .sort((x, y) => x.s.localeCompare(y.s) || (x.j.title || "").localeCompare(y.j.title || ""));
   const unsched = visible.filter((j) => !j.startDate && !j.targetDate);
+
+  // critical-path FOCUS: in critical mode we light up one project (a linked group)
+  // at a time so the whole board doesn't turn into a red tangle.
+  const comp = ganttCritical ? linkComponents(jobs) : null;
+  if (ganttCritical && (!ganttFocus || !comp.has(ganttFocus))) ganttFocus = latestDatedJobId();
+  const focusComp = comp && ganttFocus ? comp.get(ganttFocus) : null;
+  const focusSize = focusComp != null ? [...comp.values()].filter((c) => c === focusComp).length : 0;
+  const focused = (id) => !ganttCritical ? true : (focusComp != null && comp.get(id) === focusComp);
+  const isRed = (id) => ganttCritical && focused(id) && (critical.has(id) || focusSize === 1);
 
   if (!dated.length) {
     wrap.append(h("div", { class: "bempty" }, h("h2", {}, "Nothing scheduled"),
@@ -809,8 +832,9 @@ function paintGantt() {
     const left = dayDiff(startISO, s) * dayW;
     if (j.isMilestone) {
       geo.set(j.id, { ri: vi, left, w: 8 });
+      const msDim = ganttCritical && !focused(j.id) ? " dim" : "";
       const track = h("div", { class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""), style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`) },
-        h("div", { class: "gantt__ms", style: `left:${left}px`, title: `${j.title || "Milestone"}\n${fmtShort(s)}`, onclick: () => openJobModal(j) }, "◆"),
+        h("div", { class: "gantt__ms" + msDim, style: `left:${left}px`, title: `${j.title || "Milestone"}\n${fmtShort(s)}`, onclick: () => openJobModal(j) }, "◆"),
         h("div", { class: "gantt__ms-name", style: `left:${left + 16}px` }, j.title || "Milestone"));
       if (monthMode) for (const b of monthBounds) track.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
       if (todayX >= 0) track.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
@@ -828,7 +852,7 @@ function paintGantt() {
     // progress fill: tint the done portion of the bar (orange; red when over-hours)
     const fillBg = pct > 0 ? `;background:linear-gradient(to right, ${over ? "rgba(210,59,46,.24)" : "rgba(242,106,33,.24)"} ${pct}%, #fff ${pct}%)` : "";
     const clash = conflicts.byJob.has(j.id);
-    const critCls = ganttCritical ? (critical.has(j.id) ? " crit" : " dim") : "";
+    const critCls = ganttCritical ? (focused(j.id) ? (isRed(j.id) ? " crit" : "") : " dim") : "";
     const bar = h("div", {
       class: "gantt__bar" + (clash ? " has-clash" : "") + critCls, style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}${fillBg}`,
       title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h (${pct}%${over ? " — over" : ""})` : ""}${clash ? "\n⚠ crew double-booked" : ""}\n(drag to reschedule)`,
@@ -886,17 +910,19 @@ function paintGantt() {
       }
     }
     const subs = j.subtasks || [];
-    const isCrit = ganttCritical && critical.has(j.id);
+    const isCrit = isRed(j.id);
     const manualExpanded = ganttExpanded.has(j.id);
-    const expanded = subs.length && (manualExpanded || isCrit);   // critical-path lens auto-expands critical jobs
+    const expanded = subs.length && (manualExpanded || (ganttCritical && focused(j.id)));   // focusing a project opens its phases
     const toggle = subs.length ? h("span", { class: "gantt__toggle", title: expanded ? "Collapse phases" : "Show phases",
       onclick: (e) => { e.stopPropagation(); if (manualExpanded) ganttExpanded.delete(j.id); else ganttExpanded.add(j.id); paintGantt(); } }, expanded ? "▾ " : "▸ ") : null;
+    const labelCls = "gantt__label" + (ganttCritical ? " gantt__label--focusable" + (j.id === ganttFocus ? " is-focus" : "") : "");
     rows.push(h("div", { class: "gantt__row" },
-      h("div", { class: "gantt__label", title: j.title || j.customer || "Job" }, toggle, (j.title || j.customer || "Job")),
+      h("div", { class: labelCls, title: ganttCritical ? "Focus this project's critical path" : (j.title || j.customer || "Job"),
+        onclick: ganttCritical ? () => { ganttFocus = j.id; renderGanttView(); } : null }, toggle, (j.title || j.customer || "Job")),
       track));
     vi++;
     if (expanded) {
-      const subCls = ganttCritical ? (critical.has(j.id) ? " crit" : " dim") : "";
+      const subCls = ganttCritical ? (focused(j.id) ? (isRed(j.id) ? " crit" : "") : " dim") : "";
       let prevPhase = null;
       for (const { sub, start, finish, offFrac, durFrac } of layoutSubtasks(subs, j.startDate, settings)) {
         // fractional sub-day positioning: a 3h tape renders as a short bar partway into its day
@@ -930,7 +956,7 @@ function paintGantt() {
       const pg = geo.get(d.predId); if (!pg) continue;
       const x1 = 180 + pg.left + pg.w, y1 = headerH + pg.ri * rowH + barMid;
       const x2 = 180 + sg.left, y2 = headerH + sg.ri * rowH + barMid;
-      const critLink = ganttCritical && critical.has(j.id) && critical.has(d.predId);
+      const critLink = isRed(j.id) && isRed(d.predId);
       const cls = "gantt__dep" + (ganttCritical ? (critLink ? " crit" : " dim") : "");
       segs.push(`<path d="M${x1},${y1} H${x1 + 8} V${y2} H${x2}" class="${cls}" marker-end="url(#${critLink ? "garrowcrit" : "garrow"})"/>`);
     }

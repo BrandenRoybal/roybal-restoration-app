@@ -181,29 +181,54 @@ export function computeSchedule(jobs, settings) {
    Walks back from the latest-finishing job(s) along "binding" predecessors —
    those whose finish (+ lag) actually determines a job's start. Returns a Set
    of critical job ids; empty when there's no real chain (fewer than 2 jobs). */
+/* Group jobs into independent "projects" by their dependency links (undirected
+   connected components). Unlinked jobs are their own one-member component.
+   Returns Map(jobId -> componentRootId). */
+export function linkComponents(jobs) {
+  const parent = new Map(jobs.map((j) => [j.id, j.id]));
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+  for (const j of jobs) for (const d of (j.deps || [])) if (d && d.predId && parent.has(d.predId)) union(j.id, d.predId);
+  const comp = new Map();
+  for (const j of jobs) comp.set(j.id, find(j.id));
+  return comp;
+}
+
+/* Critical path computed PER linked project (component), not once for the whole
+   board — so each independent chain of jobs lights up its own driving path, not
+   just the one chain ending on the board's single latest date. Returns the union
+   of every project's critical jobs; a lone unlinked job has no path so isn't in it. */
 export function computeCriticalPath(jobs, settings) {
   const s = settings || DEFAULT_SETTINGS;
   const byId = new Map(jobs.map((j) => [j.id, j]));
   const scheduled = jobs.filter((j) => j.startDate && j.targetDate);
   if (scheduled.length < 2) return new Set();
-  let end = scheduled[0].targetDate;
-  for (const j of scheduled) if (j.targetDate > end) end = j.targetDate;
+  const comp = linkComponents(jobs);
+  const groups = new Map();
+  for (const j of scheduled) { const c = comp.get(j.id); (groups.get(c) || groups.set(c, []).get(c)).push(j); }
+
   const critical = new Set();
-  const stack = scheduled.filter((j) => j.targetDate === end).map((j) => j.id);
-  while (stack.length) {
-    const id = stack.pop();
-    if (critical.has(id)) continue;
-    critical.add(id);
-    const j = byId.get(id);
-    for (const d of (j.deps || [])) {
-      const p = byId.get(d.predId);
-      if (!p || !p.targetDate) continue;
-      const driven = addWorkDays(addDaysISO(p.targetDate, 1 + (Number(d.lagDays) || 0)), 0, s);
-      if (driven === j.startDate) stack.push(p.id);   // this predecessor binds j's start
+  for (const [, members] of groups) {
+    if (members.length < 2) continue;   // a single job is no critical *path*
+    let end = members[0].targetDate;
+    for (const j of members) if (j.targetDate > end) end = j.targetDate;
+    const stack = members.filter((j) => j.targetDate === end).map((j) => j.id);
+    const seen = new Set();
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const j = byId.get(id);
+      for (const d of (j.deps || [])) {
+        const p = byId.get(d.predId);
+        if (!p || !p.targetDate) continue;
+        const driven = addWorkDays(addDaysISO(p.targetDate, 1 + (Number(d.lagDays) || 0)), 0, s);
+        if (driven === j.startDate) stack.push(p.id);   // this predecessor binds j's start
+      }
     }
+    if (seen.size >= 2) for (const id of seen) critical.add(id);
   }
-  // a "path" needs at least one real link; a lone latest job isn't a critical path
-  return critical.size >= 2 ? critical : new Set();
+  return critical;
 }
 
 /* Crew over-allocation: a crew member booked on two jobs whose scheduled
