@@ -243,6 +243,11 @@ export function effCrew(base, ov) {
   return base.filter((c) => !rem.includes(c)).concat(add.filter((c) => !base.includes(c)));
 }
 
+/* Day fraction a crew member occupies on a job: a half-day (AM or PM) shift is
+   0.5, a full day is 1. Lets one person split AM on one job / PM on another
+   without reading as over-allocated. */
+export function shiftFrac(shift) { return shift === "am" || shift === "pm" ? 0.5 : 1; }
+
 export function crewDayLoad(jobs, settings) {
   const s = settings || DEFAULT_SETTINGS;
   const hpd = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
@@ -255,7 +260,7 @@ export function crewDayLoad(jobs, settings) {
   };
   // distribute totalHours across the days a phase/job touches; per-day crew can
   // differ when a day has an override, so the hours that day re-split among them.
-  const spread = (jobStart, offFrac, durFrac, baseCrew, totalHours, jid, dayOv) => {
+  const spread = (jobStart, offFrac, durFrac, baseCrew, totalHours, jid, dayOv, dayShifts) => {
     const startIdx = Math.floor(offFrac + 1e-9);
     const endIdx = Math.max(startIdx, Math.ceil(offFrac + durFrac - 1e-9) - 1);
     for (let k = startIdx; k <= endIdx; k++) {
@@ -265,7 +270,8 @@ export function crewDayLoad(jobs, settings) {
       const eff = effCrew(baseCrew, dayOv && dayOv[day]);
       if (!eff.length) continue;
       const perCrew = (totalHours * (ov / durFrac)) / eff.length;
-      for (const cid of eff) bump(cid, day, perCrew, jid);
+      const sh = dayShifts && dayShifts[day];
+      for (const cid of eff) bump(cid, day, perCrew * shiftFrac(sh && sh[cid]), jid);
     }
   };
   for (const j of jobs) {
@@ -277,13 +283,13 @@ export function crewDayLoad(jobs, settings) {
         const base = sub.crewIds || [];
         if (!base.length && !dayOv) continue;   // crewless phase only matters on override days
         const hrs = Number(sub.estimatedHours) || durFrac * Math.max(1, base.length) * hpd;
-        spread(j.startDate, offFrac, durFrac, base, hrs, j.id, dayOv);
+        spread(j.startDate, offFrac, durFrac, base, hrs, j.id, dayOv, j.dayShifts);
       }
     } else if (j.targetDate && ((j.crewIds || []).length || dayOv)) {
       const span = workDaysBetween(j.startDate, j.targetDate, s);
       const base = j.crewIds || [];
       const hrs = Number(j.estimatedHours) || span * Math.max(1, base.length) * hpd;
-      spread(j.startDate, 0, span, base, hrs, j.id, dayOv);
+      spread(j.startDate, 0, span, base, hrs, j.id, dayOv, j.dayShifts);
     }
   }
   return { load, jobsOn };

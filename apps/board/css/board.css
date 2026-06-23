@@ -407,14 +407,19 @@ table.rtable .num.under { color: var(--green); }
 .cb-job.needs-cover .cbcol__empty { color: #b32c20; }
 
 .cbchip {
-  position: relative; display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
-  width: 42px; height: 42px; border-radius: 50%; background: var(--cc, #7a8aa0); color: #fff;
-  border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); cursor: grab; user-select: none; touch-action: none;
+  position: relative; display: inline-flex; flex-direction: column; align-items: center; gap: 5px;
+  cursor: grab; user-select: none; touch-action: none;
 }
 .cbchip:active { cursor: grabbing; }
 .cbchip.dragging { opacity: .4; }
-.cbchip.is-sel { box-shadow: 0 0 0 3px var(--orange); }
-.cbchip.is-over { box-shadow: 0 0 0 3px #d23b2e; }
+.cbchip__av {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 42px; height: 42px; border-radius: 50%; background: var(--cc, #7a8aa0); color: #fff;
+  border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line);
+}
+.cbchip.is-sel .cbchip__av { box-shadow: 0 0 0 3px var(--orange); }
+.cbchip.is-over .cbchip__av { box-shadow: 0 0 0 3px #d23b2e; }
+.cbchip.is-half .cbchip__av { box-shadow: 0 0 0 2px var(--orange); }
 .cbchip.is-out { opacity: .55; filter: grayscale(.5); }
 .cbchip__ini { font-size: 13px; font-weight: 800; line-height: 1; }
 .cbchip__hrs {
@@ -422,6 +427,13 @@ table.rtable .num.under { color: var(--green); }
   background: var(--navy); color: #fff; padding: 1px 5px; border-radius: 8px; border: 1px solid #fff;
 }
 .cbchip.is-over .cbchip__hrs { background: #d23b2e; }
+.cbchip__shtoggle { display: inline-flex; gap: 3px; }
+.cbsh {
+  font-size: 9px; font-weight: 800; line-height: 1; letter-spacing: .3px; padding: 3px 6px;
+  border-radius: 6px; border: 1px solid var(--line); background: #fff; color: var(--muted);
+  cursor: pointer; width: auto; min-height: 0;
+}
+.cbsh.on { background: var(--orange); border-color: var(--orange); color: #fff; }
 @media (max-width: 560px) { .cbcol { flex-basis: 150px; } }
 
 /* crew board — per-day override controls */

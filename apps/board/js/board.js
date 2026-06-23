@@ -987,6 +987,7 @@ let crewDay = todayISO();      // the day the crew board is showing
 let crewScope = "day";         // "day" = override just this day | "job" = whole-job roster
 let crewDrag = null;           // { cid, src }  — src = jobId | "avail" | "out"
 let crewTap = null;            // { cid, src }  — tap-to-move selection (mobile)
+let _halfMap = new Map();      // cid -> { am:[jobIds], pm:[jobIds] } for the shown day
 
 const isOut = (c, day) => (c.outDays || []).includes(day);
 const crewDayLabel = () => new Date(crewDay + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -1015,7 +1016,11 @@ const slotIds = (slot) => (slot.target.crewIds = slot.target.crewIds || []);
 const baseCrewOn = (j, day) => slotIds(jobSlotOn(j, day, settings)).slice();
 const effectiveCrewOn = (j, day) => effCrew(baseCrewOn(j, day), (j.dayCrew || {})[day]);
 const dayOvOf = (j, day) => j.dayCrew && j.dayCrew[day];
-const isOverridden = (j, day) => { const d = dayOvOf(j, day); return !!(d && ((d.add || []).length || (d.remove || []).length)); };
+const isOverridden = (j, day) => {
+  const d = dayOvOf(j, day);
+  const shifted = j.dayShifts && j.dayShifts[day] && Object.keys(j.dayShifts[day]).length;
+  return !!((d && ((d.add || []).length || (d.remove || []).length)) || shifted);
+};
 function dayDelta(j, day) { j.dayCrew = j.dayCrew || {}; return (j.dayCrew[day] = j.dayCrew[day] || { add: [], remove: [] }); }
 function cleanDay(j, day) {
   const m = j.dayCrew; if (!m) return;
@@ -1033,6 +1038,36 @@ function dayPush(j, day, cid) {           // add cid to this job for this day on
   d.remove = d.remove.filter((x) => x !== cid);
   if (!base.includes(cid) && !d.add.includes(cid)) d.add.push(cid);
   cleanDay(j, day);
+}
+
+/* ---- AM/PM half-day shifts: job.dayShifts[day][cid] = "am" | "pm" (full = absent) ---- */
+const shiftOf = (j, day, cid) => (j.dayShifts && j.dayShifts[day] && j.dayShifts[day][cid]) || "full";
+const occOf = (sh) => sh === "am" ? { am: true, pm: false } : sh === "pm" ? { am: false, pm: true } : { am: true, pm: true };
+function setShift(j, day, cid, sh) {
+  if (sh === "full") { const m = j.dayShifts && j.dayShifts[day]; if (m) { delete m[cid]; if (!Object.keys(m).length) delete j.dayShifts[day]; if (!Object.keys(j.dayShifts).length) delete j.dayShifts; } return; }
+  j.dayShifts = j.dayShifts || {}; (j.dayShifts[day] = j.dayShifts[day] || {})[cid] = sh;
+}
+/* which halves cid already occupies across the day's active jobs (optionally excluding one) */
+function halfBusy(cid, day, exceptId) {
+  let am = false, pm = false;
+  for (const j of activeJobsOn(day)) {
+    if (j.id === exceptId || !effectiveCrewOn(j, day).includes(cid)) continue;
+    const o = occOf(shiftOf(j, day, cid)); am = am || o.am; pm = pm || o.pm;
+  }
+  return { am, pm };
+}
+/* cid -> { am:[jobIds], pm:[jobIds] } across the day's active jobs — for conflict flags */
+function crewHalfMap(day, outSet) {
+  const map = new Map();
+  for (const j of activeJobsOn(day)) {
+    for (const cid of effectiveCrewOn(j, day)) {
+      if (outSet && outSet.has(cid)) continue;
+      const o = occOf(shiftOf(j, day, cid));
+      let e = map.get(cid); if (!e) map.set(cid, (e = { am: [], pm: [] }));
+      if (o.am) e.am.push(j.id); if (o.pm) e.pm.push(j.id);
+    }
+  }
+  return map;
 }
 
 function renderCrewView() {
@@ -1074,6 +1109,7 @@ function paintCrew() {
   const acts = activeJobsOn(day);
   const out = activeCrew().filter((c) => isOut(c, day));
   const outSet = new Set(out.map((c) => c.id));
+  _halfMap = crewHalfMap(day, outSet);   // who's on which half — for AM/PM conflict flags
   const assigned = new Set();
   const cols = acts.map((j) => {
     const ids = effectiveCrewOn(j, day).filter((id) => !outSet.has(id));   // out guys show only on the bench
@@ -1090,15 +1126,15 @@ function paintCrew() {
 
   if (!acts.length) wrap.append(h("p", { class: "subtle", style: "padding:14px 4px" }, "No jobs scheduled for this day — use ‹ › to pick another, or assign start/target dates to your jobs."));
   else wrap.append(h("p", { class: "subtle", style: "padding:10px 4px 0" }, crewScope === "day"
-    ? "Moving guys for THIS day only — the rest of each job keeps its planned crew. Drop on “Out today” for a no-show; ↺ resets a day to plan. Switch to “Whole job” to change a job's whole run."
-    : "Moving guys for the job's WHOLE run. Drop on “Out today” for a no-show (always just that day). Switch to “Just this day” for single-day cover."));
+    ? "Moving guys for THIS day only. Tap AM / PM on a chip for a half-day shift — then the same guy can take the other half on another job. Drop on “Out today” for a no-show; ↺ resets a day to plan. Switch to “Whole job” to change a job's whole run."
+    : "Moving guys for the job's WHOLE run (full days). Drop on “Out today” for a no-show. Switch to “Just this day” for single-day cover and AM/PM shifts."));
 }
 
 function crewCol(src, title, ids, opts = {}) {
   const empty = opts.kind === "job" ? "Drop a guy here — needs crew"
     : opts.kind === "out" ? "Nobody out" : "Everyone's on a job";
   const bodyEl = h("div", { class: "cbcol__body" + (opts.kind === "avail" ? " is-avail" : opts.kind === "out" ? " is-outzone" : "") },
-    ...(ids.length ? ids.map((cid) => crewChip(cid, src)) : [h("div", { class: "cbcol__empty" }, empty)]));
+    ...(ids.length ? ids.map((cid) => crewChip(cid, src, opts.job || null)) : [h("div", { class: "cbcol__empty" }, empty)]));
 
   const col = h("div", { class: "cbcol cb-" + opts.kind + (opts.kind === "job" && !ids.length ? " needs-cover" : "") + (opts.overridden ? " cb-edited" : "") },
     h("div", { class: "cbcol__head" },
@@ -1117,22 +1153,39 @@ function crewCol(src, title, ids, opts = {}) {
   return col;
 }
 
-function crewChip(cid, src) {
+function crewChip(cid, src, job) {
   const c = crewById(cid); if (!c) return h("span");
-  const cap = Math.max(1, settings.hoursPerDay || 8);
   const hrs = (conflicts.load.get(cid) || new Map()).get(crewDay) || 0;
-  const over = hrs > cap + 1e-6;
   const sel = crewTap && crewTap.cid === cid && crewTap.src === src;
-  const chip = h("div", {
-    class: "cbchip" + (over ? " is-over" : "") + (src === "out" ? " is-out" : "") + (sel ? " is-sel" : ""),
-    draggable: "true", style: `--cc:${c.color || "#7a8aa0"}`,
-    title: c.name + (hrs ? ` · ${Math.round(hrs * 10) / 10}h booked` + (over ? ` (over ${cap}h shift)` : "") : "") + (src === "out" ? " · out today" : ""),
-  },
+  const sh = job ? shiftOf(job, crewDay, cid) : "full";
+  // double-booked in the same half (can't be two places that morning / afternoon)?
+  const hm = _halfMap.get(cid);
+  const clash = !!hm && ((hm.am.length > 1) || (hm.pm.length > 1));
+
+  const av = h("div", { class: "cbchip__av", style: `--cc:${c.color || "#7a8aa0"}` },
     h("span", { class: "cbchip__ini" }, initials(c.name)),
-    hrs ? h("span", { class: "cbchip__hrs" }, Math.round(hrs) + "h") : null);
+    (!job && hrs) ? h("span", { class: "cbchip__hrs" }, Math.round(hrs) + "h") : null);
+
+  const chip = h("div", {
+    class: "cbchip" + (clash ? " is-over" : "") + (src === "out" ? " is-out" : "") + (sel ? " is-sel" : "") + (sh !== "full" ? " is-half" : ""),
+    draggable: "true",
+    title: c.name + (hrs ? ` · ${Math.round(hrs * 10) / 10}h booked` : "") + (sh !== "full" ? ` · ${sh.toUpperCase()} only` : "")
+      + (clash ? `\n⚠ double-booked the same ${hm.am.length > 1 ? "morning" : "afternoon"}` : "") + (src === "out" ? " · out today" : ""),
+  }, av);
   chip.addEventListener("dragstart", (e) => { crewDrag = { cid, src }; crewTap = null; e.dataTransfer.setData("text/plain", cid); e.dataTransfer.effectAllowed = "move"; chip.classList.add("dragging"); });
   chip.addEventListener("dragend", () => { crewDrag = null; chip.classList.remove("dragging"); });
   chip.addEventListener("click", (e) => { e.stopPropagation(); crewTap = sel ? null : { cid, src }; paintCrew(); });
+
+  // AM/PM shift toggle (job columns only) — picking a half frees that half on other jobs
+  if (job) {
+    const segBtn = (half, lbl) => {
+      const on = sh === half;
+      const b = h("button", { type: "button", class: "cbsh" + (on ? " on" : ""), title: `${lbl} shift only — frees the other half for another job` }, lbl);
+      b.addEventListener("click", (e) => { e.stopPropagation(); applyShift(job, cid, on ? "full" : half); });
+      return b;
+    };
+    chip.append(h("div", { class: "cbchip__shtoggle" }, segBtn("am", "AM"), segBtn("pm", "PM")));
+  }
   return chip;
 }
 
@@ -1144,6 +1197,41 @@ async function setOut(cid, val) {
   await saveCrewMember(c);
 }
 
+/* Assign cid to a job for `day` (day scope). Picks the free half so one guy can
+   be AM on one job and PM on another; if both halves are taken, it's a full move
+   (pulled off the other jobs). */
+function assignDay(jid, cid, day, touched) {
+  const dj = jobs.find((x) => x.id === jid); if (!dj) return;
+  const busy = halfBusy(cid, day, jid);
+  let shift = "full", fullMove = false;
+  if (busy.am && busy.pm) { shift = "full"; fullMove = true; }
+  else if (busy.am) shift = "pm";
+  else if (busy.pm) shift = "am";
+  if (fullMove) for (const o of activeJobsOn(day)) if (o.id !== jid && effectiveCrewOn(o, day).includes(cid)) { dayPull(o, day, cid); setShift(o, day, cid, "full"); touched.add(o); }
+  if (!effectiveCrewOn(dj, day).includes(cid)) dayPush(dj, day, cid);
+  setShift(dj, day, cid, shift);
+  touched.add(dj);
+}
+
+/* Set a crew member's AM/PM/full shift on a job, freeing the same half on every
+   other job that day so they're never booked two places in one half. */
+async function applyShift(job, cid, newShift) {
+  const day = crewDay, touched = new Set(), need = occOf(newShift);
+  for (const o of activeJobsOn(day)) {
+    if (o.id === job.id || !effectiveCrewOn(o, day).includes(cid)) continue;
+    const oo = occOf(shiftOf(o, day, cid));
+    const keepAm = oo.am && !need.am, keepPm = oo.pm && !need.pm;
+    if (!keepAm && !keepPm) { dayPull(o, day, cid); setShift(o, day, cid, "full"); }
+    else setShift(o, day, cid, keepAm && keepPm ? "full" : keepAm ? "am" : "pm");
+    touched.add(o);
+  }
+  if (!effectiveCrewOn(job, day).includes(cid)) dayPush(job, day, cid);
+  setShift(job, day, cid, newShift);
+  touched.add(job);
+  setSync("syncing"); for (const j of touched) await saveJob(j); setSync(pendingCount() ? "error" : "synced");
+  await recomputeAndPersist();
+}
+
 async function crewDropTo(dest) {
   const move = crewDrag || crewTap;
   crewDrag = null; crewTap = null;
@@ -1151,33 +1239,30 @@ async function crewDropTo(dest) {
   const { cid, src } = move;
   if (src === dest) { paintCrew(); return; }
   const day = crewDay, touched = new Set();
-  // pull/push respect the scope toggle: "day" edits a per-day override delta,
-  // "job" edits the job's (or active phase's) whole-run roster.
-  const pull = (jid) => {
-    const j = jobs.find((x) => x.id === jid); if (!j) return;
-    if (crewScope === "day") { if (effectiveCrewOn(j, day).includes(cid)) { dayPull(j, day, cid); touched.add(j); } }
-    else { const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot); if (ids.includes(cid)) { slot.target.crewIds = ids.filter((x) => x !== cid); touched.add(j); } }
-  };
-  const push = (jid) => {
-    const j = jobs.find((x) => x.id === jid); if (!j) return;
-    if (crewScope === "day") { if (!effectiveCrewOn(j, day).includes(cid)) { dayPush(j, day, cid); touched.add(j); } }
-    else { const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot); if (!ids.includes(cid)) { slot.target.crewIds = [...ids, cid]; touched.add(j); } }
-  };
-
-  if (src !== "avail" && src !== "out") pull(src);
 
   if (dest === "out") {
-    // a no-show is always per-day: free their slots today (override) and flag absent
-    for (const j of activeJobsOn(day)) { if (effectiveCrewOn(j, day).includes(cid)) { dayPull(j, day, cid); touched.add(j); } }
+    // a no-show is always per-day: free every slot today (override) and flag absent
+    for (const j of activeJobsOn(day)) if (effectiveCrewOn(j, day).includes(cid)) { dayPull(j, day, cid); setShift(j, day, cid, "full"); touched.add(j); }
     await setOut(cid, true);
   } else if (dest === "avail") {
     if (src === "out") {        // back from the bench → undo today's absence everywhere
       await setOut(cid, false);
-      for (const j of activeJobsOn(day)) { if ((dayOvOf(j, day)?.remove || []).includes(cid)) { dayPush(j, day, cid); touched.add(j); } }
+      for (const j of activeJobsOn(day)) if ((dayOvOf(j, day)?.remove || []).includes(cid)) { dayPush(j, day, cid); touched.add(j); }
+    } else if (src !== "avail") {   // pull off the source job (that day or whole-run)
+      const sj = jobs.find((x) => x.id === src);
+      if (sj) {
+        if (crewScope === "day") { dayPull(sj, day, cid); setShift(sj, day, cid, "full"); }
+        else { const slot = jobSlotOn(sj, day, settings); slot.target.crewIds = slotIds(slot).filter((x) => x !== cid); }
+        touched.add(sj);
+      }
     }
-  } else {
-    if (src === "out") await setOut(cid, false);   // showed up after all → assign them
-    push(dest);
+  } else {  // dest is a job
+    if (src === "out") await setOut(cid, false);
+    if (crewScope === "day") assignDay(dest, cid, day, touched);
+    else {  // whole-run roster move (full-day; shifts are a per-day thing)
+      if (src !== "avail") { const sj = jobs.find((x) => x.id === src); if (sj) { const slot = jobSlotOn(sj, day, settings); slot.target.crewIds = slotIds(slot).filter((x) => x !== cid); touched.add(sj); } }
+      const dj = jobs.find((x) => x.id === dest); if (dj) { const slot = jobSlotOn(dj, day, settings); const ids = slotIds(slot); if (!ids.includes(cid)) slot.target.crewIds = [...ids, cid]; touched.add(dj); }
+    }
   }
 
   if (touched.size) { setSync("syncing"); for (const j of touched) await saveJob(j); setSync(pendingCount() ? "error" : "synced"); }
@@ -1186,6 +1271,7 @@ async function crewDropTo(dest) {
 
 async function resetDay(j) {
   if (j.dayCrew) { delete j.dayCrew[crewDay]; if (!Object.keys(j.dayCrew).length) delete j.dayCrew; }
+  if (j.dayShifts) { delete j.dayShifts[crewDay]; if (!Object.keys(j.dayShifts).length) delete j.dayShifts; }
   setSync("syncing"); await saveJob(j); setSync(pendingCount() ? "error" : "synced");
   await recomputeAndPersist();
 }
