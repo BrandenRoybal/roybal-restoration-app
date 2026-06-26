@@ -37,6 +37,7 @@ jobs:
           cp -r apps/admin/. _site/admin/
           cp -r apps/board/. _site/board/
           touch _site/.nojekyll
+          echo "app.roybalconstruction.com" > _site/CNAME   # GitHub Pages custom domain (force-push safe)
 
       - name: Publish to the gh-pages branch
         run: |
