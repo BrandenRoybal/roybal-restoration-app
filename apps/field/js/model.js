@@ -145,6 +145,8 @@ export function newMoistureMap() {
     floorPlan: "",                               // imported floor-plan background (PDF/image → image)
     strokes: "",                                 // drawing layer only (PNG)
     markerNext: 1,                               // next reading-location marker number
+    equipmentPlan: [],                           // placed equipment icons [{id,type,x,y,angle}] over the floor plan
+    equipmentPlanImg: "",                        // flattened equipment-plan composite for print
     photos: [],                                  // alt: photos of the area
     page: "", pageOf: "",
     // reading grid: rows are dates; locations 1..13

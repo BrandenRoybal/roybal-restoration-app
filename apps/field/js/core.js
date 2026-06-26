@@ -376,6 +376,168 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
 }
 
 /* ============================================================
+   Equipment-placement pad — drop directional equipment icons on the
+   Moisture Map's floor plan (air mover / dehumidifier / air scrubber /
+   heater), then move, rotate, and delete them. Icons are objects
+   ({type,x,y,angle}, x/y normalized 0–1) so they stay editable; the
+   canvas prints as-is in the packet.
+   ============================================================ */
+export const EQUIP_TYPES = [
+  { key: "air_mover", label: "Air mover" },
+  { key: "lgr_dehumidifier", label: "Dehumidifier" },
+  { key: "air_scrubber", label: "Air scrubber" },
+  { key: "heater", label: "Heater" },
+];
+const EQUIP_STYLE = {
+  air_mover:        { color: "#0f1b2d", label: "AM",   dir: true  },
+  lgr_dehumidifier: { color: "#1f6feb", label: "LGR",  dir: false },
+  air_scrubber:     { color: "#0f9d8f", label: "HEPA", dir: false },
+  heater:           { color: "#e0552b", label: "HT",   dir: false },
+};
+
+/* pure helpers (unit-tested) */
+export const stepAngle = (a, d) => ((((Number(a) || 0) + d) % 360) + 360) % 360;
+export const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+/* nearest placed item to a pixel point, within `radius` px, else null */
+export function nearestEquip(items, px, py, W, H, radius = 26) {
+  let best = null, bestD = radius * radius;
+  for (const it of items || []) {
+    const dx = it.x * W - px, dy = it.y * H - py, d = dx * dx + dy * dy;
+    if (d <= bestD) { bestD = d; best = it; }
+  }
+  return best;
+}
+
+function rrect(ctx, x, y, w, hh, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + hh, r);
+  ctx.arcTo(x + w, y + hh, x, y + hh, r);
+  ctx.arcTo(x, y + hh, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function drawEquip(ctx, type, cx, cy, angleDeg, s, selected) {
+  const st = EQUIP_STYLE[type] || EQUIP_STYLE.air_mover;
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (selected) {
+    ctx.strokeStyle = "#f26a21"; ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.arc(0, 0, s + 8, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+  }
+  ctx.rotate((angleDeg * Math.PI) / 180);
+  // direction arrow points "up" (the way it faces / blows) at angle 0
+  ctx.fillStyle = st.dir ? "#f26a21" : "rgba(15,27,45,0.4)";
+  ctx.beginPath(); ctx.moveTo(0, -s - 10); ctx.lineTo(-7, -s - 1); ctx.lineTo(7, -s - 1); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = st.color; rrect(ctx, -s, -s, s * 2, s * 2, 5); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = "#fff"; ctx.font = `bold ${Math.max(9, Math.round(s * 0.78))}px sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(st.label, cx, cy);
+}
+
+export function equipmentPad({ items = [], background = null, onChange } = {}) {
+  const wrap = h("div", { class: "sketch" });
+  const bgImg = h("img", { class: "sketch__bg", alt: "" });
+  const canvas = h("canvas");
+  wrap.append(bgImg, canvas);
+  const ctx = canvas.getContext("2d");
+  const ICON = 17;
+  let list = (items || []).map((it) => ({ id: it.id || uid(), type: it.type, x: clamp01(it.x), y: clamp01(it.y), angle: Number(it.angle) || 0 }));
+  let armed = null, selected = null, dragging = false, W = 320, H = 320;
+
+  function showBg() {
+    if (background) { bgImg.src = background; bgImg.style.display = "block"; }
+    else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; }
+  }
+  function size() {
+    const ratio = window.devicePixelRatio || 1;
+    W = wrap.clientWidth || 320; H = 320;
+    canvas.width = W * ratio; canvas.height = H * ratio;
+    canvas.style.height = "320px";
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    redraw();
+  }
+  function redraw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const it of list) drawEquip(ctx, it.type, it.x * W, it.y * H, it.angle, ICON, it.id === selected);
+  }
+  showBg();
+  requestAnimationFrame(size);
+
+  const pos = (e) => { const r = canvas.getBoundingClientRect(); const p = e.touches ? e.touches[0] : e; return { x: p.clientX - r.left, y: p.clientY - r.top }; };
+  function composite() {
+    const Wd = canvas.width, Hd = canvas.height;
+    const out = document.createElement("canvas"); out.width = Wd; out.height = Hd;
+    const o = out.getContext("2d");
+    o.fillStyle = "#fff"; o.fillRect(0, 0, Wd, Hd);
+    if (background && bgImg.complete && bgImg.naturalWidth) {
+      const iw = bgImg.naturalWidth, ih = bgImg.naturalHeight, sc = Math.min(Wd / iw, Hd / ih);
+      o.drawImage(bgImg, (Wd - iw * sc) / 2, (Hd - ih * sc) / 2, iw * sc, ih * sc);
+    }
+    o.drawImage(canvas, 0, 0);
+    return out.toDataURL("image/jpeg", 0.85);
+  }
+  const stripped = () => list.map(({ id, type, x, y, angle }) => ({ id, type, x, y, angle }));
+  const emit = () => onChange && onChange({ items: stripped(), composite: composite() });
+
+  canvas.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const p = pos(e);
+    if (armed) { const it = { id: uid(), type: armed, x: clamp01(p.x / W), y: clamp01(p.y / H), angle: 0 }; list.push(it); selected = it.id; redraw(); emit(); return; }
+    const hit = nearestEquip(list, p.x, p.y, W, H, ICON + 10);
+    selected = hit ? hit.id : null;
+    dragging = !!hit;
+    redraw();
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!dragging || !selected) return; e.preventDefault();
+    const p = pos(e); const it = list.find((x) => x.id === selected);
+    if (it) { it.x = clamp01(p.x / W); it.y = clamp01(p.y / H); redraw(); }
+  });
+  window.addEventListener("pointerup", () => { if (dragging) { dragging = false; emit(); } });
+
+  const selectedItem = () => list.find((x) => x.id === selected);
+  function rotate(d) { const it = selectedItem(); if (!it) return; it.angle = stepAngle(it.angle, d); redraw(); emit(); }
+  function del() { if (!selected) return; list = list.filter((x) => x.id !== selected); selected = null; redraw(); emit(); }
+  function clear() { list = []; selected = null; armed = null; redraw(); emit(); refresh(); }
+
+  const typeBtns = EQUIP_TYPES.map((t) => {
+    const b = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, t.label);
+    b.dataset.key = t.key;
+    b.addEventListener("click", () => { armed = armed === t.key ? null : t.key; selected = null; refresh(); redraw(); });
+    return b;
+  });
+  const rotL = h("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Rotate left" }, "↺");
+  const rotR = h("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Rotate right" }, "↻");
+  const delB = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "✕ Remove");
+  const clrB = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Clear all");
+  rotL.addEventListener("click", () => rotate(-45));
+  rotR.addEventListener("click", () => rotate(45));
+  delB.addEventListener("click", del);
+  clrB.addEventListener("click", clear);
+  function refresh() {
+    typeBtns.forEach((b) => {
+      const on = b.dataset.key === armed;
+      b.style.background = on ? "var(--orange,#f26a21)" : "";
+      b.style.color = on ? "#fff" : "";
+    });
+  }
+  refresh();
+  const toolsEl = h("div", { class: "sketch__tools app-only" }, ...typeBtns, rotL, rotR, delB, clrB);
+
+  return {
+    el: wrap, tools: toolsEl, composite,
+    counts: () => list.reduce((m, it) => ((m[it.type] = (m[it.type] || 0) + 1), m), {}),
+    setBackground(url) {
+      background = url || null;
+      if (background) { bgImg.onload = () => { redraw(); emit(); }; bgImg.src = background; bgImg.style.display = "block"; }
+      else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; redraw(); emit(); }
+    },
+  };
+}
+
+/* ============================================================
    Psychrometrics — grains per pound (GPP) of moisture per pound
    of dry air, from dry-bulb temp (°F) and relative humidity (%).
    Uses standard sat-vapor-pressure approximation; field-grade.

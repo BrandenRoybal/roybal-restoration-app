@@ -2,7 +2,7 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, sketchPad, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
+import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
 import { fileToFloorPlan } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
@@ -197,6 +197,22 @@ export function moistureMap(project, m) {
     },
   });
 
+  /* Equipment-placement diagram — shares the same imported floor plan as the
+     moisture sketch; air movers/dehus/scrubbers/heaters you can place + aim. */
+  const equipPad = equipmentPad({
+    items: m.equipmentPlan || [], background: m.floorPlan,
+    onChange: ({ items, composite }) => {
+      m.equipmentPlan = items; m.equipmentPlanImg = composite; renderEquipCount(); commit();
+    },
+  });
+  const equipCountEl = h("div", { class: "subtle app-only", style: "margin-top:6px;font-size:13px" });
+  function renderEquipCount() {
+    const c = equipPad.counts();
+    const parts = EQUIP_TYPES.map((t) => (c[t.key] ? `${c[t.key]} ${t.label}${c[t.key] > 1 ? "s" : ""}` : null)).filter(Boolean);
+    equipCountEl.textContent = parts.length ? "Placed: " + parts.join(" · ") : "No equipment placed yet.";
+  }
+  renderEquipCount();
+
   /* dry goal (numeric) for the trend line + red/green flagging.
      The Dry Goal (MC%) input is the source of truth; the material's
      IICRC standard is only a fallback when that box is empty. */
@@ -265,6 +281,7 @@ export function moistureMap(project, m) {
       const url = await fileToFloorPlan(f);
       const cropped = await cropZoom(url, (pad.el.clientWidth || 680) / 320);
       pad.setBackground(cropped || url);
+      equipPad.setBackground(cropped || url);
       toast("Floor plan added — draw on top");
     } catch { toast("Sorry — couldn't read that file"); }
     fpInput.value = ""; renderFp();
@@ -280,10 +297,10 @@ export function moistureMap(project, m) {
       const cropBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "✂️ Crop / zoom");
       cropBtn.addEventListener("click", async () => {
         const c = await cropZoom(m.floorPlan, (pad.el.clientWidth || 680) / 320);
-        if (c) { pad.setBackground(c); renderFp(); }
+        if (c) { pad.setBackground(c); equipPad.setBackground(c); renderFp(); }
       });
       const rm = h("button", { type: "button", class: "btn btn--danger btn--sm" }, "Remove plan");
-      rm.addEventListener("click", () => { pad.setBackground(null); renderFp(); });
+      rm.addEventListener("click", () => { pad.setBackground(null); equipPad.setBackground(null); renderFp(); });
       fpBox.append(cropBtn, rm);
     }
   }
@@ -314,6 +331,10 @@ export function moistureMap(project, m) {
     h("details", { class: "app-only", style: "margin-top:10px" },
       h("summary", { class: "linklike" }, "Or attach photos of the area instead"),
       photoUploader(m.photos, "Add area photos")),
+
+    sectionTitle("Equipment Placement"),
+    h("p", { class: "subtle app-only" }, "Tap a tool, then tap the floor plan to drop it. Tap a placed unit to move it; use ↺ ↻ to aim it (air-mover direction)."),
+    equipPad.tools, equipPad.el, equipCountEl,
 
     sectionTitle("Moisture Reading Locations (MC% or equivalent)"),
     h("p", { class: "flagnote app-only" }, "Cells flag ", h("span", { class: "dot g" }, "green = at/below dry goal"), " · ", h("span", { class: "dot r" }, "red = still wet"), " automatically."),
