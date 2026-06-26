@@ -450,7 +450,7 @@ export function equipmentPad({ items = [], background = null, onChange } = {}) {
   const canvas = h("canvas");
   wrap.append(bgImg, canvas);
   const ctx = canvas.getContext("2d");
-  const ICON = 17;
+  const ICON = 12;   // icon half-size (px); smaller = more units fit on the plan
   let list = (items || []).map((it) => ({ id: it.id || uid(), type: it.type, x: clamp01(it.x), y: clamp01(it.y), angle: Number(it.angle) || 0 }));
   let armed = null, selected = null, dragging = false, W = 320, H = 320;
 
