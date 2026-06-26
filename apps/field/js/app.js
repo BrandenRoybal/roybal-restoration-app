@@ -15,10 +15,16 @@ import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail } from "./supa.js";
 import { startSync, syncNow, resetSync } from "./sync.js";
+import { panelModel } from "./completeness.js";
+import { syncSpine } from "./spine.js";
+import { transcribeWidget } from "./voice.js";
+import { AI_FORM_KEYS } from "./ai.js";
+import { pickTech, techName } from "./tech.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
 const backBtn = $("#backBtn");
+const techChip = $("#techChip");
 
 const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
@@ -33,6 +39,7 @@ backBtn.addEventListener("click", () => go(backTarget));
 
 window.addEventListener("hashchange", route);
 window.addEventListener("load", boot);
+window.addEventListener("roybal-tech-changed", renderTechChip);  // refresh the header chip when tech is set anywhere
 
 /* ---------- auth gate ---------- */
 const OFFLINE_KEY = "roybal-offline";
@@ -51,6 +58,7 @@ function boot() {
 
 async function route() {
   await flushPending();              // persist any in-flight edit before reloading
+  renderTechChip();
   if (needsLogin()) return renderLogin();
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   window.scrollTo(0, 0);
@@ -71,6 +79,21 @@ function setChrome(sub, back) {
   topbarSub.textContent = sub;
   backTarget = back || "#/";
   backBtn.hidden = !back;
+}
+
+/* Header chip: who's capturing on this device (Step E). Tap to set/change. */
+function renderTechChip() {
+  if (!techChip) return;
+  if (needsLogin()) { techChip.hidden = true; return; }   // not on the sign-in screen
+  techChip.hidden = false;
+  const name = techName();
+  techChip.textContent = "👤 " + (name || "Set tech");
+  techChip.style.cssText =
+    "margin-left:auto;margin-right:8px;max-width:42vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+    "border-radius:999px;padding:5px 11px;font-size:13px;font-weight:600;cursor:pointer;color:#fff;" +
+    (name ? "border:1px solid rgba(255,255,255,.35);background:rgba(255,255,255,.14)"
+          : "border:1px solid transparent;background:var(--orange,#f26a21)");
+  techChip.onclick = async () => { await pickTech(); renderTechChip(); };
 }
 
 /* ============================================================
@@ -216,9 +239,37 @@ async function createProject() {
 /* ============================================================
    Project home — tiles for each form
    ============================================================ */
+/* Read-only completeness panel — pure checklist logic, no AI, no cost.
+   Reads the already-loaded project; re-renders whenever the job home does. */
+function completenessPanel(project) {
+  const m = panelModel(project);
+  const toneColor = m.tone === "blocked" ? "#b3261e" : (m.tone === "warn" ? "#8a6d00" : "#1b7a3d");
+  const wrap = h("div", {
+    class: "completeness",
+    style: "border:1px solid #e2e6ec;border-left:4px solid " + toneColor +
+           ";border-radius:12px;padding:12px 14px;margin:4px 0 16px;background:#fff",
+  });
+  wrap.append(h("div", { style: "display:flex;align-items:center;gap:8px" },
+    h("span", { style: "font-size:18px" }, m.icon),
+    h("span", { style: "font-weight:700;color:" + toneColor }, m.summary),
+    h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" }, m.progress)));
+  for (const g of m.groups) {
+    const hard = g.tone === "hard";
+    wrap.append(h("div", {
+      style: "margin-top:10px;font-weight:600;font-size:13px;color:" + (hard ? "#b3261e" : "#5b6470"),
+    }, g.title));
+    const ul = h("ul", { style: "margin:4px 0 0;padding-left:20px;font-size:14px" + (hard ? "" : ";color:#5b6470") });
+    g.items.forEach((t) => ul.append(h("li", { style: "margin:2px 0" }, t)));
+    wrap.append(ul);
+  }
+  return wrap;
+}
+
 function projectHome(project) {
   setChrome(project.customer || "Job", "#/");
   const body = clear(view);
+  // keep the unified-job spine in step with this field job (fire-and-forget, never blocks UI)
+  syncSpine(project);
 
   body.append(
     h("h1", {}, project.customer || project.address || "Untitled job"),
@@ -231,6 +282,8 @@ function projectHome(project) {
   if (badges.children.length) body.append(badges);
 
   body.append(h("button", { class: "btn btn--ghost btn--sm", style: "margin-bottom:14px", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"));
+
+  body.append(completenessPanel(project));
 
   const tiles = h("div", { class: "tiles" });
   FORMS.forEach((f) => {
@@ -391,6 +444,10 @@ function formEditor(project, meta, instance) {
     h("div", { class: "app-only", style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" },
       h("div", {}, h("strong", { style: "font-size:18px" }, meta.icon + " " + meta.name)),
       pill));
+
+  // 🎙️ Voice capture (Step D) — online-only enhancement above the typed form.
+  if (AI_FORM_KEYS.includes(meta.key))
+    body.append(transcribeWidget({ project, formKey: meta.key, instance, rerender: () => formEditor(project, meta, instance) }));
 
   const sheetEl = RENDERERS[meta.key](project, instance);
   body.append(sheetEl);
