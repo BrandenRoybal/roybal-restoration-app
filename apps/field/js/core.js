@@ -299,7 +299,8 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
     out.width = W; out.height = H;
     const o = out.getContext("2d");
     o.fillStyle = "#ffffff"; o.fillRect(0, 0, W, H);
-    if (background && bgImg.complete && bgImg.naturalWidth) drawContain(o, bgImg, W, H);
+    // fill (stretch), matching .sketch__bg object-fit:fill, so markers stay aligned
+    if (background && bgImg.complete && bgImg.naturalWidth) o.drawImage(bgImg, 0, 0, W, H);
     o.drawImage(canvas, 0, 0);
     return out.toDataURL("image/jpeg", 0.85);
   }
@@ -471,10 +472,8 @@ export function equipmentPad({ items = [], background = null, onChange } = {}) {
     const out = document.createElement("canvas"); out.width = Wd; out.height = Hd;
     const o = out.getContext("2d");
     o.fillStyle = "#fff"; o.fillRect(0, 0, Wd, Hd);
-    if (background && bgImg.complete && bgImg.naturalWidth) {
-      const iw = bgImg.naturalWidth, ih = bgImg.naturalHeight, sc = Math.min(Wd / iw, Hd / ih);
-      o.drawImage(bgImg, (Wd - iw * sc) / 2, (Hd - ih * sc) / 2, iw * sc, ih * sc);
-    }
+    // fill (stretch), matching .sketch__bg object-fit:fill, so icons stay aligned
+    if (background && bgImg.complete && bgImg.naturalWidth) o.drawImage(bgImg, 0, 0, Wd, Hd);
     o.drawImage(canvas, 0, 0);
     return out.toDataURL("image/jpeg", 0.85);
   }

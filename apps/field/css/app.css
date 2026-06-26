@@ -271,7 +271,11 @@ table.grid.contents-grid .cthumb { width: 40px; height: 40px; }
 
 /* ---------- Sketch canvas (moisture map) ---------- */
 .sketch { border: 1px solid var(--line); border-radius: var(--radius); background: #fff; touch-action: none; position: relative; overflow: hidden; }
-.sketch__bg { position: absolute; inset: 0; width: 100%; height: 320px; object-fit: contain; pointer-events: none; background: #fff; }
+/* fill (not contain): the marker/equipment layer stretches to fill the canvas,
+   so the floor plan must too, or they drift apart when the canvas aspect ratio
+   changes (e.g. landscape <-> portrait). The plan is cropped to the canvas shape
+   at import, so in same-orientation use this matches contain. */
+.sketch__bg { position: absolute; inset: 0; width: 100%; height: 320px; object-fit: fill; pointer-events: none; background: #fff; }
 .sketch canvas { display: block; width: 100%; height: 320px; border-radius: var(--radius); position: relative; z-index: 1; }
 .sketch__tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; align-items: center; }
 .sketch__tools .swatch { width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); cursor: pointer; }
