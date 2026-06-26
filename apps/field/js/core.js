@@ -305,7 +305,21 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
   }
   const emit = () => onChange && onChange({ strokes: strokesData(), background, composite: composite(), markerNext: nextNum });
 
+  /* Undo: the strokes layer is raster, so snapshot it before each stroke/stamp
+     and pop+restore on undo. Snapshots are sparse PNGs (small); cap the depth. */
+  const history = [];
+  const snapshot = () => { history.push({ url: canvas.toDataURL("image/png"), num: nextNum }); if (history.length > 30) history.shift(); };
+  function undo() {
+    const prev = history.pop();
+    if (!prev) return;                       // nothing to undo this session
+    nextNum = prev.num;
+    const img = new Image();
+    img.onload = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(img, 0, 0, wrap.clientWidth || 320, 320); emit(); };
+    img.src = prev.url;
+  }
+
   function stamp(p) {
+    snapshot();
     ctx.fillStyle = "#f26a21"; ctx.strokeStyle = "#fff";
     ctx.beginPath(); ctx.arc(p.x, p.y, 13, 0, Math.PI * 2); ctx.fill();
     ctx.lineWidth = 2; ctx.stroke();
@@ -317,6 +331,7 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     if (mode === "number") return stamp(pos(e));
+    snapshot();
     drawing = true; last = pos(e); ctx.strokeStyle = pen;
   });
   canvas.addEventListener("pointermove", (e) => {
@@ -343,10 +358,12 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
   const numBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "①  Number");
   numBtn.addEventListener("click", () => { mode = mode === "number" ? "draw" : "number"; refresh(); });
   const clearBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "↺ Clear drawing");
-  clearBtn.addEventListener("click", () => { nextNum = 1; ctx.clearRect(0, 0, canvas.width, canvas.height); emit(); });
+  clearBtn.addEventListener("click", () => { history.length = 0; nextNum = 1; ctx.clearRect(0, 0, canvas.width, canvas.height); emit(); });
+  const undoBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "↩ Undo");
+  undoBtn.addEventListener("click", undo);
 
   const toolsEl = h("div", { class: "sketch__tools app-only" },
-    swatch("#10233f"), swatch("#f26a21"), swatch("#d23b2e"), swatch("#1f9d55"), numBtn, clearBtn);
+    swatch("#10233f"), swatch("#f26a21"), swatch("#d23b2e"), swatch("#1f9d55"), numBtn, undoBtn, clearBtn);
 
   return {
     tools: toolsEl, el: wrap, composite, hasBackground: () => !!background,
