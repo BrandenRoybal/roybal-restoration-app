@@ -219,15 +219,26 @@ async function projectList() {
   body.append(installHint());
 }
 
-const APP_VERSION = "v20";
+const APP_VERSION = "v35";   // fallback only; the label below shows the LIVE service-worker cache version
 
 function installHint() {
+  const ver = h("div", { style: "text-align:center;color:var(--muted);font-size:11px;margin-top:14px" },
+    "Roybal Field Forms · build " + APP_VERSION);
+  // Show the LIVE service-worker cache version so the label always reflects the
+  // code actually running on this device (no manual bump to forget / drift stale).
+  try {
+    if (typeof caches !== "undefined" && caches.keys) {
+      caches.keys().then((keys) => {
+        const nums = keys.map((k) => (k.match(/^roybal-field-v(\d+)/) || [])[1]).filter(Boolean).map(Number);
+        if (nums.length) ver.textContent = "Roybal Field Forms · build v" + Math.max(...nums);
+      }).catch(() => {});
+    }
+  } catch (_) {}
   return h("div", {},
     h("div", { class: "note", style: "margin-top:18px" },
       h("strong", {}, "Tip: "),
       "Add this app to your home screen (Share → “Add to Home Screen”) to launch it like a regular app and use it with no signal in the field."),
-    h("div", { style: "text-align:center;color:var(--muted);font-size:11px;margin-top:14px" },
-      "Roybal Field Forms · build " + APP_VERSION));
+    ver);
 }
 
 async function createProject() {
