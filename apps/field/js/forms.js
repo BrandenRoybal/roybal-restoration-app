@@ -279,7 +279,7 @@ export function moistureMap(project, m) {
     toast("Importing floor plan…", 6000);
     try {
       const url = await fileToFloorPlan(f);
-      const cropped = await cropZoom(url, (pad.el.clientWidth || 680) / 320);
+      const cropped = await cropZoom(url);   // keep the plan's natural aspect; the canvas locks to it
       pad.setBackground(cropped || url);
       equipPad.setBackground(cropped || url);
       toast("Floor plan added — draw on top");
@@ -296,7 +296,7 @@ export function moistureMap(project, m) {
     if (pad.hasBackground()) {
       const cropBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "✂️ Crop / zoom");
       cropBtn.addEventListener("click", async () => {
-        const c = await cropZoom(m.floorPlan, (pad.el.clientWidth || 680) / 320);
+        const c = await cropZoom(m.floorPlan);   // natural aspect; the canvas locks to it
         if (c) { pad.setBackground(c); equipPad.setBackground(c); renderFp(); }
       });
       const rm = h("button", { type: "button", class: "btn btn--danger btn--sm" }, "Remove plan");

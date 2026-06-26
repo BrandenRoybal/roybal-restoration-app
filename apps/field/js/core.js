@@ -263,19 +263,26 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
     if (background) { bgImg.src = background; bgImg.style.display = "block"; }
     else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; }
   }
+  let curH = 320, curW = 320;   // current canvas display size (px); curH tracks the floor-plan aspect
   function size() {
     const ratio = window.devicePixelRatio || 1;
     const w = wrap.clientWidth || 320;
-    canvas.width = w * ratio; canvas.height = 320 * ratio;
-    canvas.style.height = "320px";
+    curW = w;
+    // Lock the canvas to the floor plan's aspect ratio: the plan then fills it
+    // UNDISTORTED and the markers stay aligned in any orientation. No plan -> 320.
+    const planAR = (background && bgImg.naturalWidth && bgImg.naturalHeight) ? bgImg.naturalWidth / bgImg.naturalHeight : 0;
+    curH = planAR ? Math.max(140, Math.round(w / planAR)) : 320;
+    canvas.width = w * ratio; canvas.height = curH * ratio;
+    canvas.style.height = curH + "px";
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.lineWidth = 2.6; ctx.lineCap = "round"; ctx.lineJoin = "round";
     if (strokes) {
       const img = new Image();
-      img.onload = () => ctx.drawImage(img, 0, 0, w, 320);
+      img.onload = () => ctx.drawImage(img, 0, 0, w, curH);
       img.src = strokes;
     }
   }
+  bgImg.addEventListener("load", size);   // re-fit the canvas when the floor plan loads/changes
   showBg();
   requestAnimationFrame(size);
 
@@ -315,7 +322,7 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
     if (!prev) return;                       // nothing to undo this session
     nextNum = prev.num;
     const img = new Image();
-    img.onload = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(img, 0, 0, wrap.clientWidth || 320, 320); emit(); };
+    img.onload = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(img, 0, 0, curW, curH); emit(); };
     img.src = prev.url;
   }
 
@@ -370,8 +377,8 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
     tools: toolsEl, el: wrap, composite, hasBackground: () => !!background,
     setBackground(url) {
       background = url || null;
-      if (background) { bgImg.onload = () => emit(); bgImg.src = background; bgImg.style.display = "block"; }
-      else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; emit(); }
+      if (background) { bgImg.onload = () => emit(); bgImg.src = background; bgImg.style.display = "block"; }  // 'load' listener also re-fits via size()
+      else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; size(); emit(); }
     },
   };
 }
@@ -453,9 +460,13 @@ export function equipmentPad({ items = [], background = null, onChange } = {}) {
   }
   function size() {
     const ratio = window.devicePixelRatio || 1;
-    W = wrap.clientWidth || 320; H = 320;
+    W = wrap.clientWidth || 320;
+    // Match the floor plan's aspect ratio (shared with the moisture sketch) so
+    // icons stay aligned + undistorted across orientations. No plan -> 320.
+    const planAR = (background && bgImg.naturalWidth && bgImg.naturalHeight) ? bgImg.naturalWidth / bgImg.naturalHeight : 0;
+    H = planAR ? Math.max(140, Math.round(W / planAR)) : 320;
     canvas.width = W * ratio; canvas.height = H * ratio;
-    canvas.style.height = "320px";
+    canvas.style.height = H + "px";
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     redraw();
   }
@@ -463,6 +474,7 @@ export function equipmentPad({ items = [], background = null, onChange } = {}) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const it of list) drawEquip(ctx, it.type, it.x * W, it.y * H, it.angle, ICON, it.id === selected);
   }
+  bgImg.addEventListener("load", size);   // re-fit when the shared floor plan loads/changes
   showBg();
   requestAnimationFrame(size);
 
@@ -530,8 +542,8 @@ export function equipmentPad({ items = [], background = null, onChange } = {}) {
     counts: () => list.reduce((m, it) => ((m[it.type] = (m[it.type] || 0) + 1), m), {}),
     setBackground(url) {
       background = url || null;
-      if (background) { bgImg.onload = () => { redraw(); emit(); }; bgImg.src = background; bgImg.style.display = "block"; }
-      else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; redraw(); emit(); }
+      if (background) { bgImg.onload = () => emit(); bgImg.src = background; bgImg.style.display = "block"; }  // 'load' listener re-fits via size()
+      else { bgImg.removeAttribute("src"); bgImg.style.display = "none"; size(); emit(); }
     },
   };
 }
