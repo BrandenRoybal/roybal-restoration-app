@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v35";
+const CACHE = "roybal-field-v36";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
@@ -11,7 +11,7 @@ const CORE = [
   "js/app.js", "js/core.js", "js/model.js", "js/formkit.js", "js/forms.js",
   "js/pdf.js", "js/qr.js", "js/config.js", "js/supa.js", "js/sync.js",
   // AI backbone (Steps A–E): completeness panel, job spine, voice capture, tech identity
-  "js/completeness.js", "js/spine.js", "js/ai.js", "js/voice.js", "js/tech.js",
+  "js/completeness.js", "js/spine.js", "js/ai.js", "js/voice.js", "js/tech.js", "js/narrative.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];

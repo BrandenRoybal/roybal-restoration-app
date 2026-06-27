@@ -11,8 +11,9 @@ import {
 import {
   SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
   blankReadingRow, blankPsychroRow, blankEquipRow, blankWorkRow,
-  blankLineItem, blankVerifyRow,
+  blankLineItem, blankVerifyRow, COMPANY,
 } from "./model.js";
+import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -1002,6 +1003,66 @@ export function uploadedDocSheet(pages, footLabel) {
     h("section", { class: "sheet sheet--doc" },
       h("img", { src, class: "docpage-full", alt: footLabel + " — uploaded copy" }),
       sheetFooter(footLabel)));
+}
+
+/* ---------- Construction narrative (packet cover) ---------- */
+/* Minimal Markdown -> DOM for the narrative subset (## headings, paragraphs,
+   - bullets, > note, **bold**). The model returns this Markdown. */
+function mdInline(text) {
+  const out = []; const re = /\*\*(.+?)\*\*/g; let i = 0, m;
+  while ((m = re.exec(text))) { if (m.index > i) out.push(text.slice(i, m.index)); out.push(h("strong", {}, m[1])); i = m.index + m[0].length; }
+  if (i < text.length) out.push(text.slice(i));
+  return out.length ? out : [text];
+}
+function mdToNodes(md) {
+  const nodes = []; let para = [], bullets = null;
+  const flushP = () => { if (para.length) { nodes.push(h("p", { style: "margin:8px 0;line-height:1.5;font-size:13px" }, ...mdInline(para.join(" ")))); para = []; } };
+  const flushB = () => { if (bullets) { nodes.push(h("ul", { style: "margin:6px 0 6px 18px;line-height:1.5;font-size:13px" }, ...bullets)); bullets = null; } };
+  for (const raw of String(md || "").split(/\r?\n/)) {
+    const line = raw.trim(); let m;
+    if (!line) { flushP(); flushB(); continue; }
+    if ((m = line.match(/^#{1,6}\s+(.*)/))) { flushP(); flushB(); nodes.push(h("h3", { style: "margin:16px 0 4px;color:var(--navy,#0f1b2d);font-size:14px;border-bottom:2px solid var(--orange,#f26a21);padding-bottom:3px" }, ...mdInline(m[1]))); }
+    else if ((m = line.match(/^>\s?(.*)/))) { flushP(); flushB(); nodes.push(h("div", { style: "margin:8px 0;padding:8px 10px;background:#f7f9fc;border-left:3px solid #cdd5df;color:#5b6470;font-style:italic;font-size:12.5px" }, ...mdInline(m[1]))); }
+    else if ((m = line.match(/^[-*]\s+(.*)/))) { flushP(); (bullets = bullets || []).push(h("li", { style: "margin:2px 0" }, ...mdInline(m[1]))); }
+    else { flushB(); para.push(line); }
+  }
+  flushP(); flushB();
+  return nodes;
+}
+
+/* The narrative cover sheet — letterhead + info table + narrative + signature
+   + license footer, in the firm's format. Prepended to the packet. */
+export function narrativeSheet(project) {
+  const facts = narrativeFacts(project);
+  const infoRows = [
+    ...narrativeInfoRows(facts),
+    ["CONTRACTOR", COMPANY.name], ["NARRATIVE DATE", project.narrativeDate || todayISO()],
+  ];
+  const cell = (k, v, i) => h("div", {
+    style: "padding:7px 10px;font-size:12.5px;" + (i >= 2 ? "border-top:1px solid #eef1f5;" : "") + (i % 2 ? "border-left:1px solid #eef1f5;" : ""),
+  }, h("span", { style: "color:var(--orange,#f26a21);font-weight:700;font-size:11px" }, k + " "), h("span", {}, String(v)));
+  const table = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;border:1px solid #e2e6ec;border-radius:8px;overflow:hidden;margin:12px 0" },
+    ...infoRows.map(([k, v], i) => cell(k, v, i)));
+  return h("section", { class: "sheet" },
+    h("div", { style: "display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid var(--navy,#0f1b2d);padding-bottom:8px" },
+      h("div", {},
+        h("div", { style: "font-weight:800;color:var(--navy,#0f1b2d);font-size:15px" }, "ROYBAL CONSTRUCTION, LLC"),
+        h("div", { style: "color:#5b6470;font-size:11px" }, COMPANY.tagline)),
+      h("div", { style: "text-align:right;color:#5b6470;font-size:10.5px;line-height:1.5" },
+        h("div", {}, COMPANY.address), h("div", {}, COMPANY.phone + " • " + COMPANY.email))),
+    h("div", { style: "text-align:center;margin:14px 0 2px" },
+      h("h2", { style: "margin:0;color:var(--navy,#0f1b2d);font-size:18px;letter-spacing:.4px" }, "CONSTRUCTION / RECONSTRUCTION NARRATIVE"),
+      h("div", { style: "color:#5b6470;font-size:12px;font-style:italic" }, "Scope Justification for Repair to Pre-Loss Condition — Per IICRC S500 & FNSB / IRC"),
+      facts.job.carrier ? h("div", { style: "color:#5b6470;font-size:11px;margin-top:2px" }, `Prepared for ${facts.job.carrier} — Submitted with Estimate, Photo Report, Moisture Map & Certificate of Drying`) : null),
+    table,
+    h("div", {}, ...mdToNodes(project.narrative || "")),
+    h("div", { style: "margin-top:18px" },
+      h("div", { style: "font-size:13px" }, "Respectfully submitted,"),
+      h("div", { style: "font-weight:700;color:var(--navy,#0f1b2d);margin-top:8px" }, COMPANY.signatory),
+      h("div", { style: "color:#5b6470;font-size:12px" }, COMPANY.signatoryTitle + " — " + COMPANY.name)),
+    h("div", { style: "margin-top:16px;border-top:1px solid #e2e6ec;padding-top:6px;text-align:center;color:#8a93a0;font-size:9.5px;line-height:1.6" },
+      h("div", {}, `${COMPANY.name} • ${COMPANY.address} • ${COMPANY.phone} • ${COMPANY.email}`),
+      h("div", {}, COMPANY.licenses.join("  •  "))));
 }
 
 /* ---------- dispatch ---------- */

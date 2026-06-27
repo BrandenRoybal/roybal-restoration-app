@@ -10,13 +10,14 @@ import {
   BOX_DESTINATIONS, dispositionShort, dispositionLabel, depreciation,
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
-import { RENDERERS, packBackReceipt, uploadedDocSheet } from "./forms.js";
+import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet } from "./forms.js";
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail } from "./supa.js";
 import { startSync, syncNow, resetSync } from "./sync.js";
-import { panelModel } from "./completeness.js";
+import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine } from "./spine.js";
+import { generateNarrative } from "./narrative.js";
 import { transcribeWidget } from "./voice.js";
 import { AI_FORM_KEYS } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -68,6 +69,7 @@ async function route() {
     const project = await Store.get(parts[1]);
     if (!project) return go("#/");
     if (parts[2] === "edit") return projectEdit(project);
+    if (parts[2] === "narrative") return narrativePage(project);
     if (parts[2] === "packet") return packetPage(project);
     if (parts[2] === "f" && parts[3]) return formPage(project, parts[3], parts[4]);
     return projectHome(project);
@@ -312,7 +314,10 @@ function projectHome(project) {
   });
   body.append(tiles);
 
-  body.append(h("button", { class: "btn btn--primary", style: "margin-top:14px", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Full job packet (PDF)"));
+  body.append(h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:14px" },
+    h("button", { class: "btn btn--primary", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Full job packet (PDF)"),
+    h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/narrative`) },
+      project.narrative ? "📝 Construction Narrative ✓" : "📝 Construction Narrative")));
 }
 
 /* ============================================================
@@ -342,6 +347,9 @@ function packetPage(project) {
     }
   }
 
+  // Construction narrative is the opening document of the packet.
+  if (project.narrative) included.unshift(narrativeSheet(project));
+
   body.append(
     h("h1", { class: "app-only" }, "Full job packet"),
     h("p", { class: "subtle app-only" }, included.length
@@ -355,6 +363,70 @@ function packetPage(project) {
       h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}`) }, "Back"),
       h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Save packet as PDF")));
   }
+}
+
+/* ============================================================
+   Construction narrative — AI-written packet cover, unlocked once
+   every billing-requirement document is complete (isBillable).
+   ============================================================ */
+function narrativePage(project) {
+  setChrome("Construction Narrative", `#/p/${project.id}`);
+  const body = clear(view);
+  const ev = evaluateProject(project);
+
+  body.append(h("h1", {}, "📝 Construction Narrative"));
+
+  if (!ev.isBillable) {
+    body.append(
+      h("div", { style: "border:1px solid #f0b463;background:#fff4e5;border-radius:12px;padding:14px;margin:8px 0" },
+        h("div", { style: "font-weight:700;color:#8a6d00" }, "Finish the required documents first"),
+        h("p", { style: "margin:6px 0;font-size:14px" }, "The construction narrative unlocks once every billing-requirement document is complete. Still missing:"),
+        h("ul", { style: "margin:6px 0 0;padding-left:20px;font-size:14px" }, ...ev.hardGaps.map((g) => h("li", { style: "margin:2px 0" }, `${g.formLabel} — ${g.label}`)))),
+      h("button", { class: "btn btn--ghost", style: "margin-top:12px", onclick: () => go(`#/p/${project.id}`) }, "Back to job"));
+    return;
+  }
+
+  const status = h("div", { class: "subtle", style: "font-size:13px;margin:8px 0;min-height:18px" });
+  const preview = h("div", { style: "margin-top:14px" });
+  const editor = h("textarea", {
+    style: "width:100%;min-height:280px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.5;padding:10px;border:1px solid #cdd5df;border-radius:10px",
+    placeholder: "Generate, then review and edit the narrative here…",
+  });
+  editor.value = project.narrative || "";
+  const renderPreview = () => preview.replaceChildren(
+    h("div", { class: "subtle", style: "font-size:12px;margin-bottom:6px" }, "Packet cover preview:"),
+    narrativeSheet(project));
+
+  const genBtn = h("button", { class: "btn btn--primary" }, project.narrative ? "↻ Regenerate" : "✨ Generate narrative");
+  genBtn.addEventListener("click", async () => {
+    if (!isSignedIn()) return toast("Sign in to generate the narrative.");
+    if (project.narrative && !confirm("Regenerate? This replaces the current narrative, including any edits.")) return;
+    genBtn.disabled = true; status.textContent = "Writing the narrative with AI (Sonnet)…";
+    try {
+      const res = await generateNarrative(project);
+      if (res.capped) { status.textContent = ""; toast("Monthly AI limit reached — write it manually or try next month."); genBtn.disabled = false; return; }
+      project.narrative = res.narrative; project.narrativeDate = new Date().toISOString().slice(0, 10); project.updatedAt = new Date().toISOString();
+      editor.value = project.narrative; await Store.put(project);
+      status.textContent = `Draft ready (~$${(res.spend?.this_call_usd ?? 0).toFixed(3)}). Review and edit below — it prints as the packet cover.`;
+      genBtn.textContent = "↻ Regenerate"; renderPreview();
+    } catch (e) { status.textContent = ""; toast("Couldn't generate — " + (e && e.message ? e.message : "try again")); }
+    genBtn.disabled = false;
+  });
+  const saveBtn = h("button", { class: "btn btn--ghost" }, "Save edits");
+  saveBtn.addEventListener("click", async () => {
+    project.narrative = editor.value; project.updatedAt = new Date().toISOString();
+    await Store.put(project); renderPreview(); toast("Narrative saved.");
+  });
+
+  body.append(
+    h("p", { class: "subtle", style: "font-size:14px" }, "All required documents are complete. Generate the construction narrative, review and edit it, then it becomes the opening page of the job packet. (The reconstruction scope + estimate are added separately.)"),
+    h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin:8px 0" }, genBtn, saveBtn,
+      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Open packet")),
+    status,
+    h("div", { style: "font-weight:600;font-size:13px;margin-top:6px" }, "Narrative (editable):"),
+    editor,
+    preview);
+  if (project.narrative) renderPreview();
 }
 
 

@@ -11,6 +11,16 @@ export const COMPANY = {
   email: "branden@roybalconstruction.com",
   web: "roybalconstruction.com",
   tagline: "General Contracting | Restoration & Mitigation | IICRC WRT Certified",
+  // Credentials — printed in the document footer + cited in the construction narrative.
+  licenses: [
+    "AK GC Lic. #199401",
+    "Bus. Lic. #2177519",
+    "Residential Endorsement #105588",
+    "IICRC WRT #70233261",
+    "EPA RRP #RI8866-26-0533",
+  ],
+  signatory: "Branden Roybal",
+  signatoryTitle: "Owner / IICRC WRT-Certified",
 };
 
 /* The forms shown in the field app. (Invoice moved to the office admin.)
@@ -60,6 +70,9 @@ export function newProject() {
     rooms: [],          // shared room list (strings), reused across the app
     boxes: [],          // pack-out boxes
     contents: [],       // inventory items
+    // AI construction narrative (packet cover) — markdown prose + date generated
+    narrative: "",
+    narrativeDate: "",
     // form data
     workAuth: null,
     certDrying: null,
