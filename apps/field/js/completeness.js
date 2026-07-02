@@ -41,7 +41,11 @@ export const REQUIREMENTS = [
   { id: "wa_sig", form: "workAuth", label: "Owner signature (signed or uploaded)", gate: "hard",
     present: (p) => !!p.workAuth && (filled(p.workAuth.ownerSig) || arr(p.workAuth.uploadedPages).length > 0 || filled(p.workAuth.uploadedDoc)) },
   { id: "wa_owner", form: "workAuth", label: "Owner name", gate: "hard",
-    present: (p) => !!p.workAuth && filled(p.workAuth.ownerName) },
+    // The form's "Owner Name" field binds to the shared job customer; the sig
+    // block's typed name lands in ownerName. Either documents the owner — as
+    // does an uploaded signed authorization (the name is in the scan).
+    present: (p) => !!p.workAuth && (filled(p.workAuth.ownerName) || filled(p.customer)
+      || arr(p.workAuth.uploadedPages).length > 0 || filled(p.workAuth.uploadedDoc)) },
   { id: "wa_date", form: "workAuth", label: "Authorization date", gate: "hard",
     present: (p) => !!p.workAuth && filled(p.workAuth.ownerDate || p.workAuth.date) },
 
