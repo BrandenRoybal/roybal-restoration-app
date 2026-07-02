@@ -136,10 +136,12 @@ table.grid td input.calc { background: #eef6ff !important; }
 .mchart__leg i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .chart-empty { display: none; }
 
-/* sketch + floor plan */
-.sketch { border: 1px solid #6b7892 !important; height: 320px; position: relative; }
-.sketch__bg { position: absolute; inset: 0; width: 100%; height: 320px; object-fit: contain; }
-.sketch canvas { height: 320px !important; position: relative; }
+/* sketch + floor plan — let the canvas keep its aspect ratio (set inline in JS)
+   so markers/equipment icons aren't stretched. NO fixed height here (that was
+   what warped them on the PDF). The bg fills the same box the canvas sizes. */
+.sketch { border: 1px solid #6b7892 !important; position: relative; }
+.sketch__bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+.sketch canvas { position: relative; }
 
 /* contents inventory */
 table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover; border: 0.5px solid #6b7892; }

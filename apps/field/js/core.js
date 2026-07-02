@@ -273,7 +273,11 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
     const planAR = (background && bgImg.naturalWidth && bgImg.naturalHeight) ? bgImg.naturalWidth / bgImg.naturalHeight : 0;
     curH = planAR ? Math.max(140, Math.round(w / planAR)) : 320;
     canvas.width = w * ratio; canvas.height = curH * ratio;
-    canvas.style.height = curH + "px";
+    // Size by aspect-ratio, not a fixed px height, so the canvas keeps the
+    // plan's proportions at ANY display width — including print (where the page
+    // width differs from the screen). A fixed height warped the markers on PDF.
+    canvas.style.aspectRatio = w + " / " + curH;
+    canvas.style.height = "auto";
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.lineWidth = 2.6; ctx.lineCap = "round"; ctx.lineJoin = "round";
     if (strokes) {
@@ -466,7 +470,10 @@ export function equipmentPad({ items = [], background = null, onChange } = {}) {
     const planAR = (background && bgImg.naturalWidth && bgImg.naturalHeight) ? bgImg.naturalWidth / bgImg.naturalHeight : 0;
     H = planAR ? Math.max(140, Math.round(W / planAR)) : 320;
     canvas.width = W * ratio; canvas.height = H * ratio;
-    canvas.style.height = H + "px";
+    // Aspect-ratio sizing (see sketchPad): keeps equipment icons undistorted at
+    // any width, so they don't stretch on the printed PDF.
+    canvas.style.aspectRatio = W + " / " + H;
+    canvas.style.height = "auto";
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     redraw();
   }
