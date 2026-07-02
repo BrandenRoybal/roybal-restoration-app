@@ -12,7 +12,7 @@ import {
   cachedSettings, saveSettings, setConflictHandler,
 } from "./data.js";
 import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, crewAssignments, workDaysBetween, effCrew, DEFAULT_SETTINGS } from "./schedule.js";
-import { pickJobcode, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
+import { pickJobcode, pickQbUser, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -86,8 +86,13 @@ const entriesForJob = (jobId) => {
     e.jobId === jobId || (jc && e.source === "qbtime" && e.qbJobcodeId === jc));
 };
 const actualHours = (jobId) => entriesForJob(jobId).reduce((s, e) => s + (Number(e.hours) || 0), 0);
+/* Which crew member an entry belongs to. Manual rows carry crewId; QB rows carry
+   qbUserId, resolved to a crew member that's been linked to that QuickBooks user. */
+const crewByQbUser = (qbUserId) => qbUserId ? crew.find((c) => c.qbUserId && String(c.qbUserId) === String(qbUserId)) : null;
+const entryCrewId = (e) => e.crewId || (e.source === "qbtime" ? (crewByQbUser(e.qbUserId)?.id || null) : null);
+const rateOf = (c) => Number(c && (c.hourlyRate ?? c.hourly_rate)) || 0;
 const crewHours = (crewId, fromISO) => entries
-  .filter((e) => e.crewId === crewId && (!fromISO || (e.date || "") >= fromISO))
+  .filter((e) => entryCrewId(e) === crewId && (!fromISO || (e.date || "") >= fromISO))
   .reduce((s, e) => s + (Number(e.hours) || 0), 0);
 const fmtH = (n) => String(Math.round((Number(n) || 0) * 100) / 100) + "h";
 const daysAgoISO = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
@@ -1568,32 +1573,39 @@ function openHoursModal() {
 
     const grandHours = scoped.reduce((s, e) => s + (Number(e.hours) || 0), 0);
 
-    // ----- by crew -----
+    // ----- by crew (QB hours attribute to the linked crew member) -----
+    const money = (n) => "$" + Math.round(n).toLocaleString();
+    const haveRates = crew.some((c) => rateOf(c) > 0);
     const byCrew = crew.map((c) => {
-      const es = scoped.filter((e) => e.crewId === c.id);
-      return { name: c.name, color: c.color, hours: es.reduce((s, e) => s + (Number(e.hours) || 0), 0), jobs: new Set(es.map((e) => e.jobId)).size };
+      const es = scoped.filter((e) => entryCrewId(e) === c.id);
+      const hours = es.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+      const rate = rateOf(c);
+      return { name: c.name, color: c.color, hours, jobs: new Set(es.map((e) => e.jobId || e.qbJobcodeId)).size, cost: rate ? hours * rate : null };
     }).filter((r) => r.hours > 0);
-    // QuickBooks-sourced hours: no crewId to map yet, so group by employee name.
+    // QuickBooks hours NOT linked to a crew member — group by employee name.
     const qbByEmp = new Map();
-    scoped.filter((e) => e.source === "qbtime").forEach((e) => {
+    scoped.filter((e) => e.source === "qbtime" && !entryCrewId(e)).forEach((e) => {
       const k = e.employee || "QuickBooks";
       const cur = qbByEmp.get(k) || { name: k + " · QB", color: "#f26a21", hours: 0, jobs: new Set() };
       cur.hours += Number(e.hours) || 0; cur.jobs.add(e.qbJobcodeId || e.jobId);
       qbByEmp.set(k, cur);
     });
-    for (const r of qbByEmp.values()) byCrew.push({ name: r.name, color: r.color, hours: r.hours, jobs: r.jobs.size });
+    for (const r of qbByEmp.values()) byCrew.push({ name: r.name, color: r.color, hours: r.hours, jobs: r.jobs.size, cost: null });
     // non-QB entries whose crew no longer exists
-    const orphanHours = scoped.filter((e) => e.source !== "qbtime" && !crewById(e.crewId)).reduce((s, e) => s + (Number(e.hours) || 0), 0);
-    if (orphanHours > 0) byCrew.push({ name: "(removed crew)", color: "#7a8aa0", hours: orphanHours, jobs: 0 });
+    const orphanHours = scoped.filter((e) => e.source !== "qbtime" && !entryCrewId(e)).reduce((s, e) => s + (Number(e.hours) || 0), 0);
+    if (orphanHours > 0) byCrew.push({ name: "(removed crew)", color: "#7a8aa0", hours: orphanHours, jobs: 0, cost: null });
     byCrew.sort((a, b) => b.hours - a.hours);
+    const laborTotal = byCrew.reduce((s, r) => s + (r.cost || 0), 0);
 
     const crewTable = h("table", { class: "rtable" },
-      h("thead", {}, h("tr", {}, h("th", {}, "Crew"), h("th", { class: "num" }, "Hours"), h("th", { class: "num" }, "Jobs"))),
+      h("thead", {}, h("tr", {}, h("th", {}, "Crew"), h("th", { class: "num" }, "Hours"), h("th", { class: "num" }, "Jobs"),
+        ...(haveRates ? [h("th", { class: "num" }, "Labor $")] : []))),
       h("tbody", {}, ...(byCrew.length ? byCrew.map((r) => h("tr", {},
         h("td", {}, h("span", { class: "crewchip", style: `background:${r.color || "#7a8aa0"}` }, initials(r.name)), " ", r.name),
         h("td", { class: "num" }, fmtH(r.hours)),
-        h("td", { class: "num" }, String(r.jobs || "")))) :
-        [h("tr", {}, h("td", { colspan: 3, class: "subtle", style: "text-align:center;padding:14px" }, "No hours logged in this range."))])));
+        h("td", { class: "num" }, String(r.jobs || "")),
+        ...(haveRates ? [h("td", { class: "num" }, r.cost != null ? money(r.cost) : "—")] : []))) :
+        [h("tr", {}, h("td", { colspan: haveRates ? 4 : 3, class: "subtle", style: "text-align:center;padding:14px" }, "No hours logged in this range."))])));
 
     // ----- by job (est vs actual) -----
     const byJob = jobs.map((j) => {
@@ -1616,6 +1628,7 @@ function openHoursModal() {
     body.append(
       h("div", { class: "hrep__top" },
         h("div", { class: "hrep__kpi" }, h("div", { class: "hrep__n" }, fmtH(grandHours)), h("div", { class: "hrep__l" }, "Total hours")),
+        ...(haveRates ? [h("div", { class: "hrep__kpi" }, h("div", { class: "hrep__n" }, money(laborTotal)), h("div", { class: "hrep__l" }, "Labor cost"))] : []),
         h("div", {}, h("label", { class: "subtle", style: "margin-right:6px" }, "Range"), sel)),
       h("h2", { style: "margin:16px 0 6px" }, "By crew"),
       h("div", { class: "rtable-wrap" }, crewTable),
@@ -1661,11 +1674,34 @@ function openCrewModal() {
     const name = h("input", { type: "text", value: m.name || "", placeholder: "Full name" });
     const phone = h("input", { type: "tel", value: m.phone || "", placeholder: "(505) 555-0123" });
     const role = h("input", { type: "text", value: m.role || "", placeholder: "Role (e.g. Lead, Tech, Carpenter)" });
+    const rate = h("input", { type: "number", min: "0", step: "1", value: m.hourlyRate || "", placeholder: "e.g. 45" });
     const active = h("input", { type: "checkbox", checked: m.active !== false });
+
+    // QuickBooks Time employee link — so this person's QB hours attribute to them.
+    let qbRow = null;
+    if (qbConfigured()) {
+      qbRow = h("div", { style: "margin:2px 0 12px" });
+      const renderQb = () => {
+        clear(qbRow);
+        const linked = !!m.qbUserId;
+        const btn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, linked ? "Change" : "Link QuickBooks employee");
+        btn.addEventListener("click", async () => { const p = await pickQbUser(m); if (p) renderQb(); });
+        qbRow.append(
+          h("div", { class: "subtle", style: "font-size:12px;margin-bottom:4px" }, "QuickBooks Time employee"),
+          h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
+            linked ? h("span", { class: "subtle" }, "🔗 ", h("strong", {}, m.qbUserName || m.qbUserId)) : h("span", { class: "subtle" }, "Not linked"),
+            btn));
+      };
+      renderQb();
+    }
+
     const save = h("button", { class: "btn btn--primary btn--sm" }, isNew ? "Add member" : "Save");
     save.addEventListener("click", async () => {
       if (!name.value.trim()) { toast("Enter a name"); name.focus(); return; }
-      Object.assign(m, { name: name.value.trim(), phone: phone.value.trim(), role: role.value.trim(), active: active.checked });
+      Object.assign(m, {
+        name: name.value.trim(), phone: phone.value.trim(), role: role.value.trim(),
+        hourlyRate: rate.value ? Number(rate.value) : "", active: active.checked,
+      });
       crew = [...crew.filter((x) => x.id !== m.id), m];
       await saveCrewMember(m);
       paint(); clear(formWrap); renderBoardSilently();
@@ -1674,7 +1710,8 @@ function openCrewModal() {
     formWrap.append(
       h("h2", { style: "margin-top:0" }, isNew ? "Add crew member" : "Edit crew member"),
       h("div", { class: "grid2" }, field("Name", name), field("Phone", phone)),
-      field("Role", role),
+      h("div", { class: "grid2" }, field("Role", role), field("Hourly rate ($)", rate)),
+      qbRow || h("span"),
       h("label", { style: "display:flex;align-items:center;gap:8px;font-size:14px;margin:6px 0 12px" }, active, "Active (show on the board)"),
       h("div", { class: "btn-row" }, save, h("button", { class: "btn btn--ghost btn--sm", onclick: () => clear(formWrap) }, "Cancel")));
     setTimeout(() => name.focus(), 30);

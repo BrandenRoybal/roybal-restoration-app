@@ -39,6 +39,12 @@ export async function listJobcodes() {
   return res.json();
 }
 
+/* ---------- QB Time employees (for the crew ↔ QB mapping) ---------- */
+export async function listUsers() {
+  const data = await proxy("getUsers");
+  return data.users || [];
+}
+
 /* ---------- the daily pull ---------- */
 /** Pull one day's QB hours for this project's linked jobcode into time_entries. */
 export function pullDay(project, date) {
@@ -141,6 +147,92 @@ export function pickJobcode(project) {
     search.addEventListener("input", paint);
 
     listJobcodes().then((rows) => {
+      if (done) return;
+      all = rows || [];
+      paint();
+    }).catch((e) => {
+      if (done) return;
+      listBox.replaceChildren(h("div", { class: "subtle", style: "padding:8px 2px;font-size:13px" }, e.message));
+    });
+  });
+}
+
+/* ============================================================
+   QB employee picker — links a crew member to a QuickBooks Time user.
+   Resolves to { id, name } (and stamps the member), or null if cancelled.
+   ============================================================ */
+let userPickerOpen = false;
+export function pickQbUser(member) {
+  if (userPickerOpen) return Promise.resolve(null);
+  userPickerOpen = true;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (val) => { if (done) return; done = true; userPickerOpen = false; overlay.remove(); resolve(val); };
+    const nameOf = (u) => `${u.first_name || ""} ${u.last_name || ""}`.trim() || ("QB user " + u.id);
+    const choose = (u) => {
+      member.qbUserId = String(u.id);
+      member.qbUserName = nameOf(u);
+      toast("Linked to " + member.qbUserName);
+      finish({ id: member.qbUserId, name: member.qbUserName });
+    };
+
+    const search = h("input", {
+      type: "text", placeholder: "Search employees…",
+      style: "width:100%;padding:9px 10px;border:1px solid #cdd5df;border-radius:8px;margin-bottom:8px",
+    });
+    const listBox = h("div", { style: "max-height:46vh;overflow:auto" },
+      h("div", { class: "subtle", style: "padding:8px 2px" }, "Loading employees…"));
+
+    const unlink = member.qbUserId
+      ? h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Unlink")
+      : null;
+    if (unlink) unlink.addEventListener("click", () => {
+      member.qbUserId = ""; member.qbUserName = "";
+      toast("Unlinked"); finish({ id: "", name: "" });
+    });
+    const cancel = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Cancel");
+    cancel.addEventListener("click", () => finish(null));
+
+    const card = h("div", {
+      style: "background:#fff;border-radius:16px;padding:18px;max-width:460px;width:92%;box-shadow:0 16px 50px rgba(0,0,0,.3)",
+    },
+      h("div", { style: "font-weight:800;font-size:18px;color:var(--navy,#0f1b2d);margin-bottom:2px" }, "Link QuickBooks employee"),
+      h("div", { class: "subtle", style: "font-size:13px;margin-bottom:10px" }, "Pick the QuickBooks Time employee this crew member is."),
+      search, listBox,
+      h("div", { style: "display:flex;justify-content:space-between;margin-top:14px" },
+        unlink || h("span"), cancel));
+
+    const overlay = h("div", {
+      style: "position:fixed;inset:0;background:rgba(15,27,45,.55);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px",
+      onclick: (e) => { if (e.target === overlay) finish(null); },
+    }, card);
+    document.body.appendChild(overlay);
+
+    let all = [];
+    const paint = () => {
+      const q = search.value.trim().toLowerCase();
+      const rows = q ? all.filter((u) => nameOf(u).toLowerCase().includes(q)) : all;
+      listBox.replaceChildren();
+      if (!rows.length) {
+        listBox.append(h("div", { class: "subtle", style: "padding:8px 2px;font-size:13px" },
+          all.length ? "No match." : "No employees found."));
+        return;
+      }
+      rows.forEach((u) => {
+        const active = String(u.id) === String(member.qbUserId);
+        const btn = h("button", {
+          type: "button",
+          style: "display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 10px;margin:3px 0;" +
+            "border:1px solid " + (active ? "var(--orange,#f26a21)" : "#e2e6ec") + ";border-radius:10px;background:#fff;cursor:pointer",
+        }, h("span", { style: "font-weight:600;color:var(--navy,#0f1b2d)" }, nameOf(u)),
+          active ? h("span", { class: "subtle", style: "margin-left:auto;font-size:12px" }, "linked") : null);
+        btn.addEventListener("click", () => choose(u));
+        listBox.append(btn);
+      });
+    };
+    search.addEventListener("input", paint);
+
+    listUsers().then((rows) => {
       if (done) return;
       all = rows || [];
       paint();
