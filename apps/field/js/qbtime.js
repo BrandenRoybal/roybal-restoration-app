@@ -29,7 +29,7 @@ async function proxy(action, payload = {}) {
 export function getStatus()   { return proxy("getStatus"); }
 export function syncJobcodes(){ return proxy("syncJobcodes"); }
 export function disconnect()  { return proxy("disconnect"); }
-export function exchangeCode(code, realmId) { return proxy("exchangeCode", { code, realmId }); }
+export function exchangeCode(code) { return proxy("exchangeCode", { code }); }
 
 /* ---------- jobcodes (read the synced cache, RLS lets the crew read) ---------- */
 export async function listJobcodes() {

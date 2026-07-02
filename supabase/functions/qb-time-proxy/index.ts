@@ -22,9 +22,12 @@ const CORS = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const QB_TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
-const QB_REVOKE_URL = "https://developer.api.intuit.com/v2/oauth2/tokens/revoke";
+// QuickBooks Time (TSheets) OAuth 2.0 — its OWN server, not QuickBooks Online's.
+// Token exchange/refresh put client_id/secret in the form body (no Basic auth,
+// no Intuit oauth.platform endpoint). No `scope`; no `realmId`.
+const QB_TOKEN_URL = "https://rest.tsheets.com/api/v1/grant";
 const QB_TIME_BASE = "https://rest.tsheets.com/api/v1";
+const QB_TIME_REALM = "tsheets"; // single-company placeholder for the token row key
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -43,10 +46,6 @@ function ok(data: unknown) {
 
 function err(message: string, status = 400) {
   return json({ ok: false, error: message }, status);
-}
-
-function basicAuth(clientId: string, clientSecret: string) {
-  return "Basic " + btoa(`${clientId}:${clientSecret}`);
 }
 
 async function qbFetch(
@@ -114,16 +113,17 @@ async function getValidToken(supabase: ReturnType<typeof createClient>): Promise
   // Token still valid
   if (expiresAt > nowPlusFive) return tokenRow.access_token;
 
-  // Refresh the token
+  // Refresh the token — TSheets wants the client creds in the form body.
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: tokenRow.refresh_token,
+    client_id: clientId,
+    client_secret: clientSecret,
   });
 
   const res = await fetch(QB_TOKEN_URL, {
     method: "POST",
     headers: {
-      Authorization: basicAuth(clientId, clientSecret),
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
     },
@@ -187,24 +187,25 @@ serve(async (req) => {
   // ── exchangeCode ──────────────────────────────────────────────────────────
   if (action === "exchangeCode") {
     const code = body.code as string;
-    const realmId = body.realmId as string;
     const userId = body.userId as string;
 
-    if (!code || !realmId) return err("Missing code or realmId");
+    if (!code) return err("Missing code");
     if (!clientId || !clientSecret || !redirectUri) {
       return err("QB_TIME_CLIENT_ID / CLIENT_SECRET / REDIRECT_URI not configured");
     }
 
+    // TSheets grant: client creds go in the form body (no Basic auth).
     const formBody = new URLSearchParams({
       grant_type: "authorization_code",
       code,
+      client_id: clientId,
+      client_secret: clientSecret,
       redirect_uri: redirectUri,
     });
 
     const tokenRes = await fetch(QB_TOKEN_URL, {
       method: "POST",
       headers: {
-        Authorization: basicAuth(clientId, clientSecret),
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
       },
@@ -226,7 +227,7 @@ serve(async (req) => {
 
     await supabase.from("qb_time_tokens").upsert(
       {
-        realm_id: realmId,
+        realm_id: QB_TIME_REALM,
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at: expiresAt,
@@ -235,7 +236,7 @@ serve(async (req) => {
       { onConflict: "realm_id" }
     );
 
-    return ok({ realmId, connected: true });
+    return ok({ connected: true });
   }
 
   // ── getStatus ─────────────────────────────────────────────────────────────
@@ -252,22 +253,9 @@ serve(async (req) => {
   }
 
   // ── disconnect ────────────────────────────────────────────────────────────
+  // TSheets has no simple token-revoke endpoint; dropping the stored token is
+  // enough to disconnect this app (the user can also revoke in QuickBooks Time).
   if (action === "disconnect") {
-    try {
-      const accessToken = await getValidToken(supabase);
-      // Revoke token with Intuit
-      await fetch(QB_REVOKE_URL, {
-        method: "POST",
-        headers: {
-          Authorization: basicAuth(clientId!, clientSecret!),
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
-        body: new URLSearchParams({ token: accessToken }).toString(),
-      }).catch(() => {}); // ignore revoke errors
-    } catch {
-      // ok even if no token
-    }
     await supabase.from("qb_time_tokens").delete().neq("id", "00000000-0000-0000-0000-000000000000");
     return ok({ disconnected: true });
   }

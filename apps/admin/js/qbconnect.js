@@ -1,15 +1,17 @@
 /* ============================================================
    Roybal Admin — QuickBooks Time connect panel
    One-time OAuth from the office. The redirect URI is this admin
-   app's own URL, so Intuit returns here with ?code&realmId and
+   app's own URL, so QuickBooks Time returns here with ?code and
    handleQbCallback() finishes the exchange. No secrets client-side.
    ============================================================ */
 import { h, toast } from "../../js/core.js";
 import { QB_TIME_CLIENT_ID } from "../../js/config.js";
 import { getStatus, syncJobcodes, disconnect, exchangeCode } from "../../js/qbtime.js";
 
-const AUTH_BASE = "https://appcenter.intuit.com/connect/oauth2";
-const SCOPE = "com.intuit.quickbooks.time";
+// QuickBooks Time uses its OWN OAuth server (the TSheets API), NOT QuickBooks
+// Online's appcenter endpoint. No `scope` param (TSheets doesn't support one),
+// and the callback returns a `code` only — no `realmId` (that's a QBO concept).
+const AUTH_BASE = "https://rest.tsheets.com/api/v1/authorize";
 
 function redirectUri() { return location.origin + location.pathname; }
 
@@ -19,32 +21,30 @@ function buildAuthUrl() {
   const p = new URLSearchParams({
     client_id: QB_TIME_CLIENT_ID,
     response_type: "code",
-    scope: SCOPE,
     redirect_uri: redirectUri(),
     state,
   });
   return `${AUTH_BASE}?${p}`;
 }
 
-/** If Intuit just redirected back here, finish the OAuth exchange.
+/** If QuickBooks Time just redirected back here, finish the OAuth exchange.
     Returns true when it handled a callback (so the caller can re-render). */
 export async function handleQbCallback() {
   const params = new URLSearchParams(location.search);
   const code = params.get("code");
-  const realmId = params.get("realmId");
   const error = params.get("error");
-  if (!code && !realmId && !error) return false;
+  if (!code && !error) return false;
 
   const state = params.get("state");
   const saved = sessionStorage.getItem("qb_oauth_state");
   history.replaceState({}, "", location.pathname); // scrub the code from the URL
 
-  if (error) { toast("QuickBooks authorization denied."); return true; }
-  if (!code || !realmId) { toast("QuickBooks redirect was missing its code."); return true; }
+  if (error) { toast("QuickBooks authorization denied: " + error); return true; }
+  if (!code) { toast("QuickBooks redirect was missing its code."); return true; }
   if (saved && state && saved !== state) { toast("QuickBooks state mismatch — connect again."); return true; }
 
   try {
-    await exchangeCode(code, realmId);
+    await exchangeCode(code);
     toast("QuickBooks Time connected.");
     try { await syncJobcodes(); } catch { /* jobcodes sync is best-effort */ }
   } catch (e) {
@@ -71,7 +71,7 @@ export function qbPanel() {
     }
 
     if (status && status.connected) {
-      box.append(h("p", { class: "subtle" }, "Company " + (status.realmId || "—") +
+      box.append(h("p", { class: "subtle" }, "Linked" +
         (status.updatedAt ? " · updated " + new Date(status.updatedAt).toLocaleDateString() : "")));
       const sync = h("button", { class: "btn btn--ghost btn--sm" }, "Sync job codes");
       sync.addEventListener("click", async () => {
