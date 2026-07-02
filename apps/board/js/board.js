@@ -1520,7 +1520,10 @@ function buildJobHoursSection(job) {
         syncBtn.addEventListener("click", async () => {
           syncBtn.disabled = true; const t = syncBtn.textContent; syncBtn.textContent = "Syncing…";
           try {
-            const r = await qbPullRange(job.qbJobcodeId, job.startDate || daysAgoISO(120), todayISO(), job.id);
+            // Worked hours are historical; a board startDate can be in the future,
+            // so look back from a past start (or 180 days) — never an inverted range.
+            const start = (job.startDate && job.startDate < todayISO()) ? job.startDate : daysAgoISO(180);
+            const r = await qbPullRange(job.qbJobcodeId, start, todayISO(), job.id);
             try { entries = (await pull()).entries; } catch { /* keep cache if offline */ }
             render();
             toast(r.pulled ? `Synced ${r.pulled} QuickBooks entr${r.pulled === 1 ? "y" : "ies"}.` : "No QuickBooks hours found for this job.");
