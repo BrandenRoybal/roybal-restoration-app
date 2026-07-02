@@ -637,20 +637,30 @@ function qbTimeBar(project, c, paint, calcTotal) {
         h("span", { class: "subtle qb-hint" }, "Imports crew hours from QuickBooks Time for " + (c.date || "this date") + ".")));
   }
 
+  // Replace the log's QB-sourced rows with `entries` (from time_entries),
+  // preserving manual rows. Returns true if anything actually changed.
+  const qbSig = (rows) => JSON.stringify(rows.filter((r) => r._qb)
+    .map((r) => [r._qbId, r.hours, r.employee, r.start, r.finish]));
+  function applyEntries(entries) {
+    const manual = c.rows.filter((row) => !row._qb);
+    const qbRows = entries.map((e) => ({
+      employee: e.employee, task: e.task, start: e.start, finish: e.finish,
+      hours: e.hours, _qb: true, _qbId: e.qbTimesheetId,
+    }));
+    const next = [...qbRows, ...manual];
+    const changed = qbSig(next) !== qbSig(c.rows);
+    c.rows = next;
+    return changed;
+  }
+
   pullBtn.addEventListener("click", async () => {
     if (!project.qbJobcodeId) { const p = await pickJobcode(project); if (!p || !project.qbJobcodeId) return; commit(); render(); }
     pullBtn.disabled = true;
     const prev = pullBtn.textContent;
     pullBtn.textContent = "Pulling…";
     try {
-      const r = await qbPullDay(project, c.date);
-      const entries = await qbEntriesFor(project, c.date);
-      const manual = c.rows.filter((row) => !row._qb);
-      const qbRows = entries.map((e) => ({
-        employee: e.employee, task: e.task, start: e.start, finish: e.finish,
-        hours: e.hours, _qb: true, _qbId: e.qbTimesheetId,
-      }));
-      c.rows = [...qbRows, ...manual];
+      const r = await qbPullDay(project, c.date);          // live refresh from QuickBooks
+      applyEntries(await qbEntriesFor(project, c.date));
       paint(); calcTotal(); commit();
       toast(r.pulled
         ? `Pulled ${r.pulled} entr${r.pulled === 1 ? "y" : "ies"} from QuickBooks.`
@@ -660,6 +670,16 @@ function qbTimeBar(project, c, paint, calcTotal) {
   });
 
   render();
+
+  // Auto-load: when a linked log opens, reflect the latest time_entries (kept
+  // fresh by the nightly cron) with no tap. Reads the cache, not a live QB call;
+  // silent if offline or not yet synced.
+  if (project.qbJobcodeId) {
+    qbEntriesFor(project, c.date)
+      .then((entries) => { if (applyEntries(entries)) { paint(); calcTotal(); commit(); } })
+      .catch(() => {});
+  }
+
   return bar;
 }
 

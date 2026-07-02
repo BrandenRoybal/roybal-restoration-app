@@ -156,6 +156,105 @@ async function getValidToken(supabase: ReturnType<typeof createClient>): Promise
 }
 
 // ---------------------------------------------------------------------------
+// Shared pull: one jobcode, one day -> time_entries (idempotent + delete-aware)
+// ---------------------------------------------------------------------------
+
+async function pullOneDay(
+  supabase: ReturnType<typeof createClient>,
+  accessToken: string,
+  jobcodeId: string,
+  date: string,
+  fieldProjectId: string | null
+): Promise<{ pulled: number; removed: number }> {
+  const qs = new URLSearchParams({
+    jobcode_ids: jobcodeId,
+    start_date: date,
+    end_date: date,
+    on_the_clock: "no",
+    per_page: "200",
+    supplemental_data: "yes",
+  });
+
+  const res = (await qbFetch(`/timesheets?${qs}`, accessToken)) as {
+    results: {
+      timesheets: Record<string, {
+        id: number; user_id: number; jobcode_id: number;
+        start: string; end: string; duration: number; date: string; notes: string;
+      }>;
+    };
+    supplemental_data: {
+      users?: Record<string, { id: number; first_name: string; last_name: string }>;
+      jobcodes?: Record<string, { id: number; name: string }>;
+    };
+  };
+
+  const timesheets = Object.values(res.results?.timesheets ?? {});
+  const users = res.supplemental_data?.users ?? {};
+  const jobcodes = res.supplemental_data?.jobcodes ?? {};
+
+  // Existing QB rows for this jobcode+date: reuse ids (update in place) and
+  // detect timesheets that were removed in QuickBooks since the last pull.
+  const { data: existing } = await supabase
+    .from("time_entries")
+    .select("id, data")
+    .eq("deleted", false)
+    .filter("data->>qbJobcodeId", "eq", jobcodeId)
+    .filter("data->>date", "eq", date);
+
+  const idByTs = new Map<string, string>();
+  for (const r of (existing ?? []) as { id: string; data: { qbTimesheetId?: string } }[]) {
+    if (r.data?.qbTimesheetId) idByTs.set(String(r.data.qbTimesheetId), r.id);
+  }
+
+  const nowIso = new Date().toISOString();
+  const seen = new Set<string>();
+  const rows = timesheets.map((ts) => {
+    seen.add(String(ts.id));
+    const u = users[String(ts.user_id)];
+    const employee = u ? `${u.first_name} ${u.last_name}`.trim() : `QB user ${ts.user_id}`;
+    const jc = jobcodes[String(ts.jobcode_id)];
+    const id = idByTs.get(String(ts.id)) ?? crypto.randomUUID();
+    return {
+      id,
+      deleted: false,
+      data: {
+        id,
+        jobId: fieldProjectId,
+        fieldProjectId,
+        qbJobcodeId: jobcodeId,
+        jobcodeName: jc?.name ?? null,
+        date,
+        employee,
+        task: ts.notes || jc?.name || "",
+        start: hhmm(ts.start),
+        finish: hhmm(ts.end),
+        hours: Number((ts.duration ? ts.duration / 3600 : 0).toFixed(2)),
+        source: "qbtime",
+        qbTimesheetId: String(ts.id),
+        qbUserId: String(ts.user_id),
+        enteredBy: "quickbooks-time",
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+    };
+  });
+
+  if (rows.length > 0) {
+    const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
+    if (error) throw new Error(`time_entries upsert failed: ${error.message}`);
+  }
+
+  // Soft-delete QB rows whose timesheet no longer exists for this day.
+  const staleIds: string[] = [];
+  for (const [ts, id] of idByTs) if (!seen.has(ts)) staleIds.push(id);
+  if (staleIds.length > 0) {
+    await supabase.from("time_entries").update({ deleted: true }).in("id", staleIds);
+  }
+
+  return { pulled: rows.length, removed: staleIds.length };
+}
+
+// ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 
@@ -397,87 +496,58 @@ serve(async (req) => {
 
     try {
       const accessToken = await getValidToken(supabase);
-      const qs = new URLSearchParams({
-        jobcode_ids: jobcodeId,
-        start_date: date,
-        end_date: date,
-        on_the_clock: "no",
-        per_page: "200",
-        supplemental_data: "yes",
-      });
-
-      const res = (await qbFetch(`/timesheets?${qs}`, accessToken)) as {
-        results: {
-          timesheets: Record<string, {
-            id: number; user_id: number; jobcode_id: number;
-            start: string; end: string; duration: number; date: string; notes: string;
-          }>;
-        };
-        supplemental_data: {
-          users?: Record<string, { id: number; first_name: string; last_name: string }>;
-          jobcodes?: Record<string, { id: number; name: string }>;
-        };
-      };
-
-      const timesheets = Object.values(res.results?.timesheets ?? {});
-      const users = res.supplemental_data?.users ?? {};
-      const jobcodes = res.supplemental_data?.jobcodes ?? {};
-
-      // Reuse existing row ids for these timesheets so a re-pull updates in place.
-      const { data: existing } = await supabase
-        .from("time_entries")
-        .select("id, data")
-        .eq("deleted", false)
-        .filter("data->>qbJobcodeId", "eq", jobcodeId)
-        .filter("data->>date", "eq", date);
-
-      const idByTs = new Map<string, string>();
-      for (const r of (existing ?? []) as { id: string; data: { qbTimesheetId?: string } }[]) {
-        if (r.data?.qbTimesheetId) idByTs.set(String(r.data.qbTimesheetId), r.id);
-      }
-
-      const nowIso = new Date().toISOString();
-      const rows = timesheets.map((ts) => {
-        const u = users[String(ts.user_id)];
-        const employee = u ? `${u.first_name} ${u.last_name}`.trim() : `QB user ${ts.user_id}`;
-        const jc = jobcodes[String(ts.jobcode_id)];
-        const start = hhmm(ts.start);
-        const finish = hhmm(ts.end);
-        const hours = ts.duration ? ts.duration / 3600 : 0;
-        const id = idByTs.get(String(ts.id)) ?? crypto.randomUUID();
-        return {
-          id,
-          deleted: false,
-          data: {
-            id,
-            jobId: fieldProjectId,
-            fieldProjectId,
-            qbJobcodeId: jobcodeId,
-            jobcodeName: jc?.name ?? null,
-            date,
-            employee,
-            task: ts.notes || jc?.name || "",
-            start,
-            finish,
-            hours: Number(hours.toFixed(2)),
-            source: "qbtime",
-            qbTimesheetId: String(ts.id),
-            qbUserId: String(ts.user_id),
-            enteredBy: "quickbooks-time",
-            createdAt: nowIso,
-            updatedAt: nowIso,
-          },
-        };
-      });
-
-      if (rows.length > 0) {
-        const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
-        if (error) return err(`time_entries upsert failed: ${error.message}`);
-      }
-
-      return ok({ pulled: rows.length, date, jobcodeId });
+      const { pulled, removed } = await pullOneDay(supabase, accessToken, jobcodeId, date, fieldProjectId);
+      return ok({ pulled, removed, date, jobcodeId });
     } catch (e) {
       return err(e instanceof Error ? e.message : "pullDay failed");
+    }
+  }
+
+  // ── pullAllLinked (nightly cron) ──────────────────────────────────────────
+  // For every field project linked to a QB jobcode, pull the given date(s) into
+  // time_entries. Gated by CRON_SECRET (for pg_cron via pg_net) OR a valid user.
+  if (action === "pullAllLinked") {
+    const cronSecret = Deno.env.get("CRON_SECRET");
+    const provided = (body.cronSecret as string) ?? req.headers.get("x-cron-secret") ?? "";
+    const isCron = !!cronSecret && provided === cronSecret;
+    if (!isCron && !(await requireUser(supabase, req))) return err("Not authorized", 401);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const dates: string[] = Array.isArray(body.dates)
+      ? (body.dates as string[])
+      : [(body.date as string) ?? today];
+
+    try {
+      const { data: projects } = await supabase
+        .from("field_projects")
+        .select("id, data")
+        .eq("deleted", false);
+
+      const linked = (projects ?? [])
+        .map((p: { id: string; data: { qbJobcodeId?: string } }) => ({ id: p.id, jobcodeId: p.data?.qbJobcodeId }))
+        .filter((p): p is { id: string; jobcodeId: string } => !!p.jobcodeId);
+
+      if (linked.length === 0) return ok({ projects: 0, totalPulled: 0, totalRemoved: 0, results: [] });
+
+      const accessToken = await getValidToken(supabase);
+      let totalPulled = 0;
+      let totalRemoved = 0;
+      const results: unknown[] = [];
+      for (const proj of linked) {
+        for (const d of dates) {
+          try {
+            const { pulled, removed } = await pullOneDay(supabase, accessToken, proj.jobcodeId, d, proj.id);
+            totalPulled += pulled;
+            totalRemoved += removed;
+            results.push({ project: proj.id, jobcodeId: proj.jobcodeId, date: d, pulled, removed });
+          } catch (e) {
+            results.push({ project: proj.id, jobcodeId: proj.jobcodeId, date: d, error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+      }
+      return ok({ projects: linked.length, totalPulled, totalRemoved, results });
+    } catch (e) {
+      return err(e instanceof Error ? e.message : "pullAllLinked failed");
     }
   }
 
