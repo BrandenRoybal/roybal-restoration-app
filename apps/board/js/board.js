@@ -12,6 +12,7 @@ import {
   cachedSettings, saveSettings, setConflictHandler,
 } from "./data.js";
 import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, crewAssignments, workDaysBetween, effCrew, DEFAULT_SETTINGS } from "./schedule.js";
+import { pickJobcode, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -74,8 +75,16 @@ const initials = (name) => (name || "?").trim().split(/\s+/).map((w) => w[0]).sl
 const activeCrew = () => crew.filter((c) => c.active !== false).sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 const crewName = (id) => crewById(id)?.name || "—";
 
-/* hours / labor */
-const entriesForJob = (jobId) => entries.filter((e) => e.jobId === jobId);
+/* hours / labor.
+   A job's entries = its manual rows (matched by jobId) PLUS any QuickBooks Time
+   rows for the QB jobcode it's linked to (matched by qbJobcodeId — the real
+   join key the QB pull writes). */
+const entriesForJob = (jobId) => {
+  const job = jobs.find((j) => j.id === jobId);
+  const jc = job && job.qbJobcodeId;
+  return entries.filter((e) =>
+    e.jobId === jobId || (jc && e.source === "qbtime" && e.qbJobcodeId === jc));
+};
 const actualHours = (jobId) => entriesForJob(jobId).reduce((s, e) => s + (Number(e.hours) || 0), 0);
 const crewHours = (crewId, fromISO) => entries
   .filter((e) => e.crewId === crewId && (!fromISO || (e.date || "") >= fromISO))
@@ -1205,6 +1214,7 @@ function openJobModal(existing, newMilestone) {
     id: uid(), stage: "lead", type: "remodel", priority: "normal", materials: "none",
     crewIds: [], title: "", customer: "", address: "", phone: "", startDate: "", targetDate: "",
     estimatedHours: "", fieldJobId: "", notes: "",
+    contractValue: "", billedToDate: "",
     deps: [], durationDays: null, scheduleMode: "auto", pinnedStart: "",
     notBefore: "", notBeforeLabel: "", subtasks: [], isMilestone: !!newMilestone,
   };
@@ -1356,6 +1366,10 @@ function openJobModal(existing, newMilestone) {
   const hoursRow = h("div", { class: "grid2 hide-for-ms" },
     field("Estimated hours", inp("estimatedHours", { type: "number", min: "0", step: "1", placeholder: "e.g. 40" })),
     field("Materials", sel("materials", MATERIALS)));
+  // Block D — dollars that drive draw/billing triggers in the daily CFO report
+  const moneyRow = h("div", { class: "grid2 hide-for-ms" },
+    field("Contract value ($)", inp("contractValue", { type: "number", min: "0", step: "0.01", placeholder: "e.g. 42000" })),
+    field("Billed to date ($)", inp("billedToDate", { type: "number", min: "0", step: "0.01", placeholder: "e.g. 15000" })));
   const crewField = field("Assigned crew", crewPick);
   crewField.classList.add("hide-for-ms");
 
@@ -1370,7 +1384,7 @@ function openJobModal(existing, newMilestone) {
     h("div", { class: "grid2" },
       field("Stage", sel("stage", STAGES)),
       field("Priority", sel("priority", PRIORITIES))),
-    datesRow, hoursRow, crewField,
+    datesRow, hoursRow, moneyRow, crewField,
     scheduleSection,
     field("Notes", (f.notes = h("textarea", { placeholder: "Scope, scheduling notes, gate codes…" }, j.notes || ""))),
     isNew ? h("p", { class: "subtle", style: "margin:14px 0 0" }, "💾 Create, then reopen to log time.") : (j.isMilestone ? null : buildJobHoursSection(j)),
@@ -1392,6 +1406,8 @@ function openJobModal(existing, newMilestone) {
       type: f.type.value, stage: f.stage.value, priority: f.priority.value, materials: f.materials.value,
       startDate: f.startDate.value, targetDate: f.targetDate.value,
       estimatedHours: f.estimatedHours.value ? Number(f.estimatedHours.value) : "",
+      contractValue: f.contractValue.value ? Number(f.contractValue.value) : "",
+      billedToDate: f.billedToDate.value ? Number(f.billedToDate.value) : "",
       notes: f.notes.value.trim(),
       pinnedStart: j.scheduleMode === "manual" ? (f.pinnedStart.value || "") : (j.pinnedStart || ""),
       notBefore: f.notBefore.value || "",
@@ -1433,6 +1449,8 @@ function openJobModal(existing, newMilestone) {
 function buildJobHoursSection(job) {
   const wrap = h("div", { class: "hsec" });
 
+  const QBTAG = "margin-left:6px;font-size:10px;font-weight:800;color:#fff;background:var(--orange,#f26a21);border-radius:5px;padding:1px 5px;vertical-align:middle";
+
   function render() {
     clear(wrap);
     const list = entriesForJob(job.id).sort((a, b) =>
@@ -1441,18 +1459,27 @@ function buildJobHoursSection(job) {
     const est = Number(job.estimatedHours) || 0;
     const totText = est ? `${fmtH(act)} of ${fmtH(est)}  (${Math.round((act / est) * 100)}%)` : `${fmtH(act)} logged`;
 
-    const rows = list.length ? list.map((e) => h("div", { class: "hrow" },
-      h("span", { class: "crewchip", style: `background:${crewById(e.crewId)?.color || "#7a8aa0"}`, title: crewName(e.crewId) }, initials(crewName(e.crewId))),
-      h("div", { class: "hrow__main" },
-        h("div", {}, h("strong", {}, crewName(e.crewId)), " ", h("span", { class: "hrow__h" }, fmtH(e.hours))),
-        h("div", { class: "hrow__meta" }, [fmtDate(e.date), e.note].filter(Boolean).join(" · ") || "—")),
-      h("button", {
-        class: "linkx", title: "Delete entry", onclick: async () => {
-          if (!confirm("Delete this time entry?")) return;
-          entries = entries.filter((x) => x.id !== e.id);
-          await deleteTimeEntry(e.id); render();
-        },
-      }, "✕"))) : [h("div", { class: "subtle", style: "padding:4px 2px" }, "No time logged yet.")];
+    const rows = list.length ? list.map((e) => {
+      const isQb = e.source === "qbtime";
+      const who = isQb ? (e.employee || "QuickBooks") : crewName(e.crewId);
+      const color = isQb ? "var(--orange,#f26a21)" : (crewById(e.crewId)?.color || "#7a8aa0");
+      return h("div", { class: "hrow" },
+        h("span", { class: "crewchip", style: `background:${color}`, title: who }, initials(who)),
+        h("div", { class: "hrow__main" },
+          h("div", {}, h("strong", {}, who),
+            isQb ? h("span", { style: QBTAG, title: "From QuickBooks Time" }, "QB") : null,
+            " ", h("span", { class: "hrow__h" }, fmtH(e.hours))),
+          h("div", { class: "hrow__meta" }, [fmtDate(e.date), e.task || e.note].filter(Boolean).join(" · ") || "—")),
+        isQb
+          ? h("span", { class: "subtle", title: "Synced from QuickBooks Time", style: "font-size:11px;padding:0 6px" }, "auto")
+          : h("button", {
+              class: "linkx", title: "Delete entry", onclick: async () => {
+                if (!confirm("Delete this time entry?")) return;
+                entries = entries.filter((x) => x.id !== e.id);
+                await deleteTimeEntry(e.id); render();
+              },
+            }, "✕"));
+    }) : [h("div", { class: "subtle", style: "padding:4px 2px" }, "No time logged yet.")];
 
     const roster = activeCrew().length ? activeCrew() : crew;
     let addRow;
@@ -1472,6 +1499,37 @@ function buildJobHoursSection(job) {
       addRow = h("div", { class: "haddrow" }, cSel, dInp, hInp, nInp, addBtn);
     } else {
       addRow = h("div", { class: "subtle" }, "Add crew (Crew button) to log time.");
+    }
+
+    // QuickBooks Time: link this board job to a jobcode + backfill its hours.
+    if (qbConfigured()) {
+      const linked = !!job.qbJobcodeId;
+      const linkBtn = h("button", { class: "btn btn--ghost btn--sm" }, linked ? "Change" : "Link QuickBooks job");
+      linkBtn.addEventListener("click", async () => {
+        const p = await pickJobcode(job);
+        if (p) { await saveJob(job); jobs = cachedJobs(); render(); }
+      });
+      const controls = [
+        linked
+          ? h("span", { class: "subtle" }, "🔗 QuickBooks: ", h("strong", {}, job.qbJobcodeName || job.qbJobcodeId))
+          : h("span", { class: "subtle" }, "Not linked to QuickBooks Time"),
+        linkBtn,
+      ];
+      if (linked) {
+        const syncBtn = h("button", { class: "btn btn--ghost btn--sm" }, "⤓ Sync hours");
+        syncBtn.addEventListener("click", async () => {
+          syncBtn.disabled = true; const t = syncBtn.textContent; syncBtn.textContent = "Syncing…";
+          try {
+            const r = await qbPullRange(job.qbJobcodeId, job.startDate || daysAgoISO(120), todayISO(), job.id);
+            try { entries = (await pull()).entries; } catch { /* keep cache if offline */ }
+            render();
+            toast(r.pulled ? `Synced ${r.pulled} QuickBooks entr${r.pulled === 1 ? "y" : "ies"}.` : "No QuickBooks hours found for this job.");
+          } catch (e) { toast(e.message || "QuickBooks sync failed"); }
+          finally { syncBtn.disabled = false; syncBtn.textContent = t; }
+        });
+        controls.push(syncBtn);
+      }
+      wrap.append(h("div", { class: "qbbar", style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px" }, ...controls));
     }
 
     wrap.append(
@@ -1511,10 +1569,20 @@ function openHoursModal() {
     const byCrew = crew.map((c) => {
       const es = scoped.filter((e) => e.crewId === c.id);
       return { name: c.name, color: c.color, hours: es.reduce((s, e) => s + (Number(e.hours) || 0), 0), jobs: new Set(es.map((e) => e.jobId)).size };
-    }).filter((r) => r.hours > 0).sort((a, b) => b.hours - a.hours);
-    // entries for crew that no longer exist
-    const orphanHours = scoped.filter((e) => !crewById(e.crewId)).reduce((s, e) => s + (Number(e.hours) || 0), 0);
+    }).filter((r) => r.hours > 0);
+    // QuickBooks-sourced hours: no crewId to map yet, so group by employee name.
+    const qbByEmp = new Map();
+    scoped.filter((e) => e.source === "qbtime").forEach((e) => {
+      const k = e.employee || "QuickBooks";
+      const cur = qbByEmp.get(k) || { name: k + " · QB", color: "#f26a21", hours: 0, jobs: new Set() };
+      cur.hours += Number(e.hours) || 0; cur.jobs.add(e.qbJobcodeId || e.jobId);
+      qbByEmp.set(k, cur);
+    });
+    for (const r of qbByEmp.values()) byCrew.push({ name: r.name, color: r.color, hours: r.hours, jobs: r.jobs.size });
+    // non-QB entries whose crew no longer exists
+    const orphanHours = scoped.filter((e) => e.source !== "qbtime" && !crewById(e.crewId)).reduce((s, e) => s + (Number(e.hours) || 0), 0);
     if (orphanHours > 0) byCrew.push({ name: "(removed crew)", color: "#7a8aa0", hours: orphanHours, jobs: 0 });
+    byCrew.sort((a, b) => b.hours - a.hours);
 
     const crewTable = h("table", { class: "rtable" },
       h("thead", {}, h("tr", {}, h("th", {}, "Crew"), h("th", { class: "num" }, "Hours"), h("th", { class: "num" }, "Jobs"))),

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   isWorkDay, addWorkDays, workDaysBetween, durationOf, durationFracOf,
   layoutSubtasks, computeSchedule, effCrew, crewDayLoad, findOverAllocations,
-  wouldCreateCycle, computeCriticalPath, linkComponents, DEFAULT_SETTINGS,
+  wouldCreateCycle, computeCriticalPath, linkComponents, computeCfoSnapshot, DEFAULT_SETTINGS,
 } from "../js/schedule.js";
 
 const S = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 10, holidays: [] };
@@ -180,6 +180,58 @@ test("each independent chain lights up its own critical path", () => {
   assert.ok(crit.has("A") && crit.has("B"));   // chain 1
   assert.ok(crit.has("C") && crit.has("D"));   // chain 2 (earlier finish) still lights up
   assert.ok(!crit.has("E"));                    // a lone job is no critical path
+});
+
+group("CFO snapshot — the daily report read");
+test("Block A: starts/ends inside the horizon, done jobs excluded", () => {
+  const today = "2026-06-15";
+  const jobs = [
+    job({ id: "S", title: "Birch Ln", stage: "scheduled", startDate: "2026-06-17", targetDate: "2026-06-19", crewIds: ["m"] }),
+    job({ id: "E", title: "Honeybee", stage: "in_progress", startDate: "2026-06-10", targetDate: "2026-06-18" }),
+    job({ id: "F", title: "Old Job", stage: "done", startDate: "2026-06-16", targetDate: "2026-06-16" }),
+    job({ id: "L", title: "Far Off", stage: "scheduled", startDate: "2026-08-01", targetDate: "2026-08-10" }),
+  ];
+  const snap = computeCfoSnapshot(jobs, [], S, today, 7);
+  assert.deepEqual(snap.startingSoon.map((x) => x.id), ["S"]);   // E started already, L too far, F done
+  assert.deepEqual(snap.endingSoon.map((x) => x.id), ["E", "S"]); // sorted by finish date: E 6/18 before S 6/19
+});
+test("Block B: idle vs booked crew + over-allocation in window", () => {
+  const today = "2026-06-15";
+  const roster = [{ id: "m", name: "Mike", active: true, hourlyRate: 45 }, { id: "z", name: "Zoe", active: true }];
+  const jobs = [
+    job({ id: "A", startDate: "2026-06-15", targetDate: "2026-06-19", crewIds: ["m"], estimatedHours: 50 }),
+    job({ id: "B", startDate: "2026-06-15", targetDate: "2026-06-19", crewIds: ["m"], estimatedHours: 50 }),
+  ];
+  const snap = computeCfoSnapshot(jobs, roster, S, today, 7);
+  assert.deepEqual(snap.crew.idle.map((c) => c.id), ["z"]);      // Zoe unbooked
+  assert.deepEqual(snap.crew.booked.map((c) => c.id), ["m"]);    // Mike booked
+  assert.ok(snap.crew.overAllocations.length > 0);               // Mike double-booked
+  assert.ok(snap.crew.laborCostWindow > 0);                      // rate present → run-rate computed
+});
+test("Block C: overdue + material-blocked near-start", () => {
+  const today = "2026-06-15";
+  const jobs = [
+    job({ id: "O", title: "Late Job", stage: "in_progress", targetDate: "2026-06-10" }),   // 3 work? -> overdue
+    job({ id: "H", title: "Paused", stage: "on_hold", targetDate: "2026-06-30" }),
+    job({ id: "M", title: "Shop", stage: "scheduled", startDate: "2026-06-17", materials: "ordered" }),
+  ];
+  const snap = computeCfoSnapshot(jobs, [], S, today, 7);
+  assert.deepEqual(snap.atRisk.overdue.map((x) => x.id), ["O"]);
+  assert.deepEqual(snap.atRisk.onHold.map((x) => x.id), ["H"]);
+  assert.deepEqual(snap.atRisk.materialBlocked.map((x) => x.id), ["M"]);
+});
+test("Block D: draw triggers carry uninvoiced dollars, sorted high→low", () => {
+  const today = "2026-06-15";
+  const jobs = [
+    job({ id: "D1", title: "Birch Ln", customer: "Smith", stage: "done", contractValue: 42000, billedToDate: 15000 }),
+    job({ id: "D2", title: "Honeybee P2", customer: "Pollen", stage: "final", contractValue: 80000, billedToDate: 80000 }), // fully billed
+    job({ id: "D3", title: "Shop", customer: "Jones", stage: "final", contractValue: 30000, billedToDate: 10000 }),
+    job({ id: "X", title: "Active", stage: "in_progress", contractValue: 10000 }), // not final/done → ignored
+  ];
+  const snap = computeCfoSnapshot(jobs, [], S, today, 7);
+  assert.deepEqual(snap.drawTriggers.map((x) => x.id), ["D1", "D3"]); // D2 final+fully-billed excluded; X not final/done
+  assert.equal(snap.drawTriggers.find((x) => x.id === "D1").uninvoiced, 27000);
+  assert.equal(snap.uninvoicedTotal, 47000); // 27k + 20k
 });
 
 group("defaults");

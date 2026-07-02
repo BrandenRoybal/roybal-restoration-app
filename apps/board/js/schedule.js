@@ -343,6 +343,100 @@ export function findOverAllocations(jobs, settings) {
   return { byJob, overloads, load, byCrew };
 }
 
+/* ============================================================
+   CFO snapshot — the one read the daily CFO report renders.
+   Pure + read-only: assumes dates are already resolved (caller runs
+   computeSchedule first) and never mutates jobs. Returns the four
+   report blocks so the report just renders, never recalculates:
+     A startingSoon / endingSoon / milestones  (next `horizonDays`)
+     B crew: booked vs idle roster + over-allocations + labor $ in window
+     C atRisk: overdue, on-hold, material-blocked near-starts, critical ids
+     D drawTriggers: final/done jobs with uninvoiced $ (contract − billed)
+   `today` is an ISO "YYYY-MM-DD"; dollars come from job.contractValue /
+   job.billedToDate; crew.hourlyRate (optional) drives the labor run-rate.
+   ============================================================ */
+export function computeCfoSnapshot(jobs, crew, settings, today, horizonDays = 7) {
+  const s = settings || DEFAULT_SETTINGS;
+  const J = Array.isArray(jobs) ? jobs : [];
+  const roster = (Array.isArray(crew) ? crew : []).filter((c) => c && c.active !== false);
+  const nameOf = (j) => j.title || j.customer || "Job";
+  const inWin = (iso) => { if (!iso) return null; const d = dayDiff(today, iso); return d >= 0 && d <= horizonDays ? d : null; };
+  const num = (v) => (v === "" || v == null || isNaN(Number(v))) ? null : Number(v);
+
+  /* Block A — starting / ending soon */
+  const startingSoon = [], endingSoon = [], milestones = [];
+  for (const j of J) {
+    if (!j) continue;
+    if (j.isMilestone) {
+      const dm = inWin(j.startDate);
+      if (dm != null) milestones.push({ id: j.id, title: nameOf(j), date: j.startDate, inDays: dm });
+      continue;
+    }
+    if (j.stage === "done") continue;
+    const ds = inWin(j.startDate);
+    if (ds != null) startingSoon.push({ id: j.id, title: nameOf(j), customer: j.customer || "", startDate: j.startDate, inDays: ds, crewCount: (j.crewIds || []).length });
+    const dt = inWin(j.targetDate);
+    if (dt != null) endingSoon.push({ id: j.id, title: nameOf(j), customer: j.customer || "", targetDate: j.targetDate, inDays: dt, crewCount: (j.crewIds || []).length });
+  }
+  startingSoon.sort((a, b) => (a.startDate < b.startDate ? -1 : 1));
+  endingSoon.sort((a, b) => (a.targetDate < b.targetDate ? -1 : 1));
+  milestones.sort((a, b) => (a.date < b.date ? -1 : 1));
+
+  /* Block B — crew allocation this window */
+  const assigns = crewAssignments(J, s);
+  const bookedIds = new Set(
+    assigns.filter((a) => dayDiff(today, a.finish) >= 0 && dayDiff(today, a.start) <= horizonDays).map((a) => a.crewId)
+  );
+  const idle = roster.filter((c) => !bookedIds.has(c.id)).map((c) => ({ id: c.id, name: c.name || "—" }));
+  const booked = roster.filter((c) => bookedIds.has(c.id)).map((c) => ({ id: c.id, name: c.name || "—" }));
+  const over = findOverAllocations(J, s);
+  const overAllocations = over.overloads
+    .filter((o) => { const d = dayDiff(today, o.day); return d >= 0 && d <= horizonDays; })
+    .map((o) => ({ ...o, crewName: (roster.find((c) => c.id === o.crewId) || {}).name || o.crewId }));
+  // labor run-rate in window: booked hours × hourly_rate, when rates exist
+  const rateById = new Map(roster.map((c) => [c.id, num(c.hourlyRate ?? c.hourly_rate)]));
+  let laborCostWindow = 0, haveRates = false;
+  for (const [cid, days] of over.load) {
+    const rate = rateById.get(cid);
+    if (rate == null) continue;
+    haveRates = true;
+    for (const [day, hrs] of days) { const d = dayDiff(today, day); if (d >= 0 && d <= horizonDays) laborCostWindow += hrs * rate; }
+  }
+
+  /* Block C — at-risk */
+  const critical = computeCriticalPath(J, s);
+  const mk = (j, extra) => ({ id: j.id, title: nameOf(j), customer: j.customer || "", stage: j.stage, targetDate: j.targetDate || null, startDate: j.startDate || null, onCriticalPath: critical.has(j.id), ...extra });
+  const overdue = J.filter((j) => j && !j.isMilestone && j.stage !== "done" && j.targetDate && dayDiff(today, j.targetDate) < 0)
+    .map((j) => mk(j, { daysLate: -dayDiff(today, j.targetDate) }))
+    .sort((a, b) => b.daysLate - a.daysLate);
+  const onHold = J.filter((j) => j && j.stage === "on_hold").map((j) => mk(j, {}));
+  const materialBlocked = J.filter((j) => j && !j.isMilestone && j.stage !== "done"
+    && j.materials && j.materials !== "received" && inWin(j.startDate) != null)
+    .map((j) => mk(j, { materials: j.materials, notBefore: j.notBefore || null }));
+
+  /* Block D — draw / billing triggers (dollars) */
+  const drawTriggers = [];
+  for (const j of J) {
+    if (!j || j.isMilestone) continue;
+    if (j.stage !== "final" && j.stage !== "done") continue;
+    const cv = num(j.contractValue), bd = num(j.billedToDate) || 0;
+    const uninvoiced = cv != null ? Math.max(0, cv - bd) : null;
+    // surface everything Complete, and any Final with money still on the table
+    if (j.stage === "done" || uninvoiced == null || uninvoiced > 0)
+      drawTriggers.push({ id: j.id, title: nameOf(j), customer: j.customer || "", stage: j.stage, fieldJobId: j.fieldJobId || null, contractValue: cv, billedToDate: bd, uninvoiced });
+  }
+  drawTriggers.sort((a, b) => (b.uninvoiced || 0) - (a.uninvoiced || 0));
+  const uninvoicedTotal = drawTriggers.reduce((t, d) => t + (d.uninvoiced || 0), 0);
+
+  return {
+    today, horizonDays,
+    startingSoon, endingSoon, milestones,
+    crew: { total: roster.length, booked, idle, overAllocations, laborCostWindow: haveRates ? Math.round(laborCostWindow) : null },
+    atRisk: { overdue, onHold, materialBlocked, criticalIds: [...critical] },
+    drawTriggers, uninvoicedTotal,
+  };
+}
+
 /* UI guard: would making `candidatePredId` a predecessor of `jobId` create a
    cycle? True when jobId is already a (transitive) predecessor of the candidate. */
 export function wouldCreateCycle(jobId, candidatePredId, jobs) {

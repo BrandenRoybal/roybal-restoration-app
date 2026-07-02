@@ -156,6 +156,55 @@ async function getValidToken(supabase: ReturnType<typeof createClient>): Promise
 }
 
 // ---------------------------------------------------------------------------
+// Shared: map QB timesheets -> time_entries rows (reusing ids for idempotency)
+// ---------------------------------------------------------------------------
+
+type QbTimesheet = {
+  id: number; user_id: number; jobcode_id: number;
+  start: string; end: string; duration: number; date: string; notes: string;
+};
+
+function qbRowsFrom(
+  timesheets: QbTimesheet[],
+  users: Record<string, { first_name: string; last_name: string }>,
+  jobcodes: Record<string, { name: string }>,
+  jobcodeId: string,
+  fieldProjectId: string | null,
+  idByTs: Map<string, string>
+) {
+  const nowIso = new Date().toISOString();
+  return timesheets.map((ts) => {
+    const u = users[String(ts.user_id)];
+    const employee = u ? `${u.first_name} ${u.last_name}`.trim() : `QB user ${ts.user_id}`;
+    const jc = jobcodes[String(ts.jobcode_id)];
+    const id = idByTs.get(String(ts.id)) ?? crypto.randomUUID();
+    return {
+      id,
+      deleted: false,
+      data: {
+        id,
+        jobId: fieldProjectId,
+        fieldProjectId,
+        qbJobcodeId: jobcodeId,
+        jobcodeName: jc?.name ?? null,
+        date: ts.date,
+        employee,
+        task: ts.notes || jc?.name || "",
+        start: hhmm(ts.start),
+        finish: hhmm(ts.end),
+        hours: Number((ts.duration ? ts.duration / 3600 : 0).toFixed(2)),
+        source: "qbtime",
+        qbTimesheetId: String(ts.id),
+        qbUserId: String(ts.user_id),
+        enteredBy: "quickbooks-time",
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      },
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Shared pull: one jobcode, one day -> time_entries (idempotent + delete-aware)
 // ---------------------------------------------------------------------------
 
@@ -206,38 +255,8 @@ async function pullOneDay(
     if (r.data?.qbTimesheetId) idByTs.set(String(r.data.qbTimesheetId), r.id);
   }
 
-  const nowIso = new Date().toISOString();
-  const seen = new Set<string>();
-  const rows = timesheets.map((ts) => {
-    seen.add(String(ts.id));
-    const u = users[String(ts.user_id)];
-    const employee = u ? `${u.first_name} ${u.last_name}`.trim() : `QB user ${ts.user_id}`;
-    const jc = jobcodes[String(ts.jobcode_id)];
-    const id = idByTs.get(String(ts.id)) ?? crypto.randomUUID();
-    return {
-      id,
-      deleted: false,
-      data: {
-        id,
-        jobId: fieldProjectId,
-        fieldProjectId,
-        qbJobcodeId: jobcodeId,
-        jobcodeName: jc?.name ?? null,
-        date,
-        employee,
-        task: ts.notes || jc?.name || "",
-        start: hhmm(ts.start),
-        finish: hhmm(ts.end),
-        hours: Number((ts.duration ? ts.duration / 3600 : 0).toFixed(2)),
-        source: "qbtime",
-        qbTimesheetId: String(ts.id),
-        qbUserId: String(ts.user_id),
-        enteredBy: "quickbooks-time",
-        createdAt: nowIso,
-        updatedAt: nowIso,
-      },
-    };
-  });
+  const seen = new Set<string>(timesheets.map((ts) => String(ts.id)));
+  const rows = qbRowsFrom(timesheets, users, jobcodes, jobcodeId, fieldProjectId, idByTs);
 
   if (rows.length > 0) {
     const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
@@ -252,6 +271,71 @@ async function pullOneDay(
   }
 
   return { pulled: rows.length, removed: staleIds.length };
+}
+
+// ---------------------------------------------------------------------------
+// Ranged backfill: one jobcode over a date range -> time_entries (paged upsert).
+// Additive (no per-day delete sweep — the nightly pullOneDay handles removals).
+// Used by the board's "Sync hours" to backfill a job's history.
+// ---------------------------------------------------------------------------
+
+async function pullRange(
+  supabase: ReturnType<typeof createClient>,
+  accessToken: string,
+  jobcodeId: string,
+  startDate: string,
+  endDate: string,
+  fieldProjectId: string | null
+): Promise<{ pulled: number; pages: number }> {
+  const all: QbTimesheet[] = [];
+  const users: Record<string, { first_name: string; last_name: string }> = {};
+  const jobcodes: Record<string, { name: string }> = {};
+  let page = 1;
+  let more = true;
+  while (more && page <= 25) {
+    const qs = new URLSearchParams({
+      jobcode_ids: jobcodeId,
+      start_date: startDate,
+      end_date: endDate,
+      on_the_clock: "no",
+      per_page: "200",
+      page: String(page),
+      supplemental_data: "yes",
+    });
+    const res = (await qbFetch(`/timesheets?${qs}`, accessToken)) as {
+      results: { timesheets: Record<string, QbTimesheet> };
+      supplemental_data: {
+        users?: Record<string, { first_name: string; last_name: string }>;
+        jobcodes?: Record<string, { name: string }>;
+      };
+    };
+    const ts = Object.values(res.results?.timesheets ?? {});
+    all.push(...ts);
+    Object.assign(users, res.supplemental_data?.users ?? {});
+    Object.assign(jobcodes, res.supplemental_data?.jobcodes ?? {});
+    more = ts.length >= 200; // a full page probably means there's another
+    page++;
+  }
+
+  const { data: existing } = await supabase
+    .from("time_entries")
+    .select("id, data")
+    .eq("deleted", false)
+    .filter("data->>qbJobcodeId", "eq", jobcodeId)
+    .filter("data->>date", "gte", startDate)
+    .filter("data->>date", "lte", endDate);
+
+  const idByTs = new Map<string, string>();
+  for (const r of (existing ?? []) as { id: string; data: { qbTimesheetId?: string } }[]) {
+    if (r.data?.qbTimesheetId) idByTs.set(String(r.data.qbTimesheetId), r.id);
+  }
+
+  const rows = qbRowsFrom(all, users, jobcodes, jobcodeId, fieldProjectId, idByTs);
+  if (rows.length > 0) {
+    const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
+    if (error) throw new Error(`time_entries upsert failed: ${error.message}`);
+  }
+  return { pulled: rows.length, pages: page - 1 };
 }
 
 // ---------------------------------------------------------------------------
@@ -503,9 +587,30 @@ serve(async (req) => {
     }
   }
 
+  // ── pullRange (board backfill) ────────────────────────────────────────────
+  // Backfill a whole date range of one jobcode's hours into time_entries.
+  if (action === "pullRange") {
+    if (!(await requireUser(supabase, req))) return err("Not authorized", 401);
+
+    const jobcodeId = body.jobcodeId as string;
+    if (!jobcodeId) return err("Missing jobcodeId");
+    const endDate = (body.endDate as string) ?? new Date().toISOString().slice(0, 10);
+    const startDate = (body.startDate as string) ?? new Date(Date.now() - 120 * 86400000).toISOString().slice(0, 10);
+    const fieldProjectId = (body.fieldProjectId as string) ?? null;
+
+    try {
+      const accessToken = await getValidToken(supabase);
+      const { pulled, pages } = await pullRange(supabase, accessToken, jobcodeId, startDate, endDate, fieldProjectId);
+      return ok({ pulled, pages, startDate, endDate, jobcodeId });
+    } catch (e) {
+      return err(e instanceof Error ? e.message : "pullRange failed");
+    }
+  }
+
   // ── pullAllLinked (nightly cron) ──────────────────────────────────────────
-  // For every field project linked to a QB jobcode, pull the given date(s) into
-  // time_entries. Gated by CRON_SECRET (for pg_cron via pg_net) OR a valid user.
+  // For every FIELD project AND BOARD job linked to a QB jobcode, pull the given
+  // date(s) into time_entries. Deduped by jobcode. Gated by CRON_SECRET (pg_cron
+  // via pg_net) OR a valid user.
   if (action === "pullAllLinked") {
     const cronSecret = Deno.env.get("CRON_SECRET");
     const provided = (body.cronSecret as string) ?? req.headers.get("x-cron-secret") ?? "";
@@ -518,34 +623,42 @@ serve(async (req) => {
       : [(body.date as string) ?? today];
 
     try {
-      const { data: projects } = await supabase
-        .from("field_projects")
-        .select("id, data")
-        .eq("deleted", false);
+      const [{ data: fps }, { data: cjs }] = await Promise.all([
+        supabase.from("field_projects").select("id, data").eq("deleted", false),
+        supabase.from("coordination_jobs").select("id, data").eq("deleted", false),
+      ]);
 
-      const linked = (projects ?? [])
-        .map((p: { id: string; data: { qbJobcodeId?: string } }) => ({ id: p.id, jobcodeId: p.data?.qbJobcodeId }))
-        .filter((p): p is { id: string; jobcodeId: string } => !!p.jobcodeId);
+      // Dedupe by jobcode across both apps; keep one representative project id.
+      const byJobcode = new Map<string, string>();
+      for (const p of (fps ?? []) as { id: string; data: { qbJobcodeId?: string } }[]) {
+        const jc = p.data?.qbJobcodeId;
+        if (jc && !byJobcode.has(jc)) byJobcode.set(jc, p.id);
+      }
+      for (const j of (cjs ?? []) as { id: string; data: { qbJobcodeId?: string } }[]) {
+        const jc = j.data?.qbJobcodeId;
+        if (jc && !byJobcode.has(jc)) byJobcode.set(jc, j.id);
+      }
 
-      if (linked.length === 0) return ok({ projects: 0, totalPulled: 0, totalRemoved: 0, results: [] });
+      const linked = [...byJobcode.entries()].map(([jobcodeId, projId]) => ({ jobcodeId, projId }));
+      if (linked.length === 0) return ok({ jobcodes: 0, totalPulled: 0, totalRemoved: 0, results: [] });
 
       const accessToken = await getValidToken(supabase);
       let totalPulled = 0;
       let totalRemoved = 0;
       const results: unknown[] = [];
-      for (const proj of linked) {
+      for (const { jobcodeId, projId } of linked) {
         for (const d of dates) {
           try {
-            const { pulled, removed } = await pullOneDay(supabase, accessToken, proj.jobcodeId, d, proj.id);
+            const { pulled, removed } = await pullOneDay(supabase, accessToken, jobcodeId, d, projId);
             totalPulled += pulled;
             totalRemoved += removed;
-            results.push({ project: proj.id, jobcodeId: proj.jobcodeId, date: d, pulled, removed });
+            results.push({ jobcodeId, date: d, pulled, removed });
           } catch (e) {
-            results.push({ project: proj.id, jobcodeId: proj.jobcodeId, date: d, error: e instanceof Error ? e.message : String(e) });
+            results.push({ jobcodeId, date: d, error: e instanceof Error ? e.message : String(e) });
           }
         }
       }
-      return ok({ projects: linked.length, totalPulled, totalRemoved, results });
+      return ok({ jobcodes: linked.length, totalPulled, totalRemoved, results });
     } catch (e) {
       return err(e instanceof Error ? e.message : "pullAllLinked failed");
     }

@@ -46,6 +46,12 @@ export function pullDay(project, date) {
   return proxy("pullDay", { jobcodeId: project.qbJobcodeId, date, fieldProjectId: project.id });
 }
 
+/** Backfill a whole date range of a jobcode's hours (used by the Job Board). */
+export function pullRange(jobcodeId, startDate, endDate, projectId) {
+  if (!jobcodeId) throw new Error("Link a QuickBooks job first");
+  return proxy("pullRange", { jobcodeId, startDate, endDate, fieldProjectId: projectId ?? null });
+}
+
 /** Read the QB-sourced time_entries for this project + day (after a pull). */
 export async function entriesFor(project, date) {
   if (!SYNC_ENABLED || !project.qbJobcodeId) return [];
