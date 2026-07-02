@@ -14,4 +14,4 @@ export const SYNC_ENABLED = !!SUPABASE_URL;
 // redirect URI it uses is the admin app's own URL (origin + path); register
 // that exact URL in the Intuit app AND set it as QB_TIME_REDIRECT_URI on the
 // Edge Function.
-export const QB_TIME_CLIENT_ID = "ABbMF4svYN9dgFFJNnU2oCW9fwQbuXUtftFAv5niNkzoCxLCSE";
+export const QB_TIME_CLIENT_ID = "3902ee19a693773d69dd4a355e1f8984";
