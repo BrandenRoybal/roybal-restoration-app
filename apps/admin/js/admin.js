@@ -8,6 +8,7 @@ import { h, $, clear, Store, fmtDate, daysSince } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
 import { isSignedIn, signIn, signOut, currentEmail } from "../../js/supa.js";
 import { startSync, syncNow } from "../../js/sync.js";
+import { qbPanel, handleQbCallback } from "./qbconnect.js";
 
 const view = $("#view");
 const FIELD_ROOT = location.pathname.replace(/\/admin\/?.*$/, "/") || "/";
@@ -36,8 +37,12 @@ $("#signOutBtn").addEventListener("click", () => {
 /* ---------- boot ---------- */
 function boot() {
   if (!SYNC_ENABLED) return renderDashboard();        // local-only fallback
-  if (isSignedIn()) { startSyncUI(); renderDashboard(); }
-  else renderLogin();
+  if (isSignedIn()) {
+    startSyncUI();
+    renderDashboard();
+    // If Intuit just redirected back with an OAuth code, finish the exchange.
+    handleQbCallback().then((did) => { if (did) renderDashboard(); });
+  } else renderLogin();
 }
 
 /* ---------- login ---------- */
@@ -101,6 +106,8 @@ async function renderDashboard() {
     kpi(active, "Active (last 7 days)"),
     kpi(drying, "Drying in progress"),
     kpi(attention, "Need attention (7-day equip.)", attention > 0)));
+
+  if (SYNC_ENABLED) body.append(qbPanel());
 
   const search = h("input", { type: "search", placeholder: "Search customer, address, claim #…", value: filterText });
   search.addEventListener("input", () => { filterText = search.value.toLowerCase(); paintTable(); });

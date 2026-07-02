@@ -101,6 +101,18 @@ export async function fetchSince(iso) {
   return res.json();
 }
 
+/** Call a Supabase Edge Function, forwarding the crew session token (so the
+    function can gate on a valid user) and auto-refreshing like the REST path.
+    Returns the raw fetch Response. */
+export async function callFunction(name, body = {}) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/functions/v1/${name}`;
+  const send = () => fetch(url, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  return res;
+}
+
 /* ---------- generic REST (shared by sibling office apps) ---------- */
 /** Authenticated REST call against any table, sharing this login session.
     Auto-refreshes the token (and retries once on 401), exactly like the

@@ -6,7 +6,7 @@
 @page { size: letter; margin: 0.5in 0.5in 0.55in; }
 
 /* hide all app chrome */
-.topbar, .sticky-actions, .toast, .app-only,
+.topbar, .sticky-actions, .toast, .app-only, .qb-tag,
 .btn, .row-add, .rowdel, .saved-pill, .sketch__tools, .sig-actions, .sig-tabs,
 details > summary { display: none !important; }
 

@@ -14,6 +14,7 @@ import {
   blankLineItem, blankVerifyRow, COMPANY,
 } from "./model.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
+import { pickJobcode, pullDay as qbPullDay, entriesFor as qbEntriesFor, qbConfigured } from "./qbtime.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -612,6 +613,56 @@ function termRow(k, v) {
   return h("div", { class: "termrow" }, h("span", { class: "termrow__k" }, k + ":"), h("span", { class: "termrow__v" }, v));
 }
 
+/* QuickBooks Time control bar for the construction log (app-only, never printed).
+   Links the job to a QB Time jobcode and pulls that day's crew hours into the
+   log's rows. QB-sourced rows are read-only; edit them in QuickBooks + re-pull. */
+function qbTimeBar(project, c, paint, calcTotal) {
+  if (!qbConfigured()) return h("span", { class: "app-only" });
+  const bar = h("div", { class: "app-only qb-bar" });
+  const pullBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "⤓ Pull hours for this date");
+
+  function render() {
+    const linked = !!project.qbJobcodeId;
+    const label = linked
+      ? h("span", { class: "qb-linked" }, "🔗 QuickBooks: ", h("strong", {}, project.qbJobcodeName || project.qbJobcodeId))
+      : h("span", { class: "subtle" }, "Not linked to a QuickBooks job");
+    const linkBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, linked ? "Change" : "Link QuickBooks job");
+    linkBtn.addEventListener("click", async () => {
+      const picked = await pickJobcode(project);
+      if (picked) { commit(); render(); }
+    });
+    bar.replaceChildren(
+      h("div", { class: "qb-bar__row" }, label, linkBtn),
+      h("div", { class: "qb-bar__row" }, pullBtn,
+        h("span", { class: "subtle qb-hint" }, "Imports crew hours from QuickBooks Time for " + (c.date || "this date") + ".")));
+  }
+
+  pullBtn.addEventListener("click", async () => {
+    if (!project.qbJobcodeId) { const p = await pickJobcode(project); if (!p || !project.qbJobcodeId) return; commit(); render(); }
+    pullBtn.disabled = true;
+    const prev = pullBtn.textContent;
+    pullBtn.textContent = "Pulling…";
+    try {
+      const r = await qbPullDay(project, c.date);
+      const entries = await qbEntriesFor(project, c.date);
+      const manual = c.rows.filter((row) => !row._qb);
+      const qbRows = entries.map((e) => ({
+        employee: e.employee, task: e.task, start: e.start, finish: e.finish,
+        hours: e.hours, _qb: true, _qbId: e.qbTimesheetId,
+      }));
+      c.rows = [...qbRows, ...manual];
+      paint(); calcTotal(); commit();
+      toast(r.pulled
+        ? `Pulled ${r.pulled} entr${r.pulled === 1 ? "y" : "ies"} from QuickBooks.`
+        : "No QuickBooks hours logged for this date.");
+    } catch (e) { toast(e.message || "QuickBooks pull failed"); }
+    finally { pullBtn.disabled = false; pullBtn.textContent = prev; }
+  });
+
+  render();
+  return bar;
+}
+
 /* ============================================================
    4. DAILY CONSTRUCTION LOG
    ============================================================ */
@@ -628,7 +679,21 @@ export function constructionLog(project, c) {
     let mins = (fh * 60 + fm) - (sh * 60 + sm); if (mins < 0) mins += 1440;
     return (mins / 60).toFixed(2);
   }
+  // QuickBooks-sourced rows are read-only — edit them in QuickBooks Time and re-pull.
+  function qbRow(r) {
+    const tr = h("tr", { class: "qb-row" });
+    const cell = (v, w) => h("td", { style: `min-width:${w}` }, h("span", { class: "qb-cell" }, v || "—"));
+    tr.append(
+      h("td", { style: "min-width:110px" },
+        h("span", { class: "qb-cell" }, r.employee || "—"),
+        h("span", { class: "qb-tag", title: "From QuickBooks Time" }, "QB")),
+      cell(r.task, "180px"), cell(r.start, "90px"), cell(r.finish, "90px"),
+      h("td", {}, h("strong", {}, r.hours != null && r.hours !== "" ? Number(r.hours).toFixed(2) : "—")),
+      h("td", { class: "app-only" }));
+    return tr;
+  }
   function row(r, i) {
+    if (r._qb) return qbRow(r);
     const tr = h("tr");
     const hoursCell = h("td");
     const hoursInput = h("input", { value: r.hours ?? "", style: "min-width:56px", inputmode: "decimal" });
@@ -645,7 +710,7 @@ export function constructionLog(project, c) {
       c2.append(input); return c2;
     };
     tr.append(mk("employee", "110px"), mk("task", "180px"), mk("start", "90px", "time"), mk("finish", "90px", "time"), hoursCell,
-      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { c.rows.splice(i, 1); paint(); calcTotal(); commit(); } }, "✕")));
+      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { c.rows.splice(c.rows.indexOf(r), 1); paint(); calcTotal(); commit(); } }, "✕")));
     return tr;
   }
   function paint() { tbody.replaceChildren(...c.rows.map(row)); }
@@ -658,6 +723,7 @@ export function constructionLog(project, c) {
       field("Customer", inp(project, "customer")),
       field("Project / Job", inp(project, "workOrderNo")),
       field("Date", inp(c, "date", { type: "date" }))),
+    qbTimeBar(project, c, paint, calcTotal),
     sectionTitle("Work Log"),
     h("div", { class: "tablewrap" },
       h("table", { class: "grid" },

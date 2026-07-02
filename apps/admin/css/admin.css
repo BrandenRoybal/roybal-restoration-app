@@ -24,6 +24,15 @@ body { background: #eef2f7; }
 .kpi__l { font-size: 13px; color: var(--muted); margin-top: 6px; }
 .kpi.attn .kpi__n { color: var(--orange-dark); }
 
+/* QuickBooks Time connect panel */
+.qb-panel { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; box-shadow: var(--shadow); margin-bottom: 22px; }
+.qb-panel__head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+.qb-panel__head strong { font-size: 15px; color: var(--navy); }
+.qb-panel__row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.qb-panel .subtle { color: var(--muted); font-size: 13px; margin: 4px 0 8px; }
+.qb-ok { color: var(--green); font-size: 13px; font-weight: 700; }
+.qb-off { color: var(--muted); font-size: 13px; font-weight: 600; }
+
 /* toolbar */
 .atoolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
 .atoolbar h1 { font-size: 20px; margin: 0; }

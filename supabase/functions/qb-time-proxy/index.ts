@@ -69,6 +69,28 @@ async function qbFetch(
   return res.json();
 }
 
+/** Local wall-clock "HH:MM" from a QB timestamp like 2020-03-08T09:00:00-08:00.
+    We intentionally read the string, not a Date, to preserve the time the crew
+    actually saw on the clock (no UTC conversion). */
+function hhmm(ts: string | undefined): string {
+  const m = /T(\d{2}:\d{2})/.exec(ts ?? "");
+  return m ? m[1] : "";
+}
+
+/** Reject anyone who isn't a signed-in user of this project. pullDay writes
+    data with the service role, so gate it on a valid caller JWT (the field/
+    admin apps forward the crew session token). */
+async function requireUser(
+  supabase: ReturnType<typeof createClient>,
+  req: Request
+): Promise<boolean> {
+  const auth = req.headers.get("Authorization") ?? "";
+  const token = auth.replace(/^Bearer\s+/i, "");
+  if (!token) return false;
+  const { data, error } = await supabase.auth.getUser(token);
+  return !error && !!data?.user;
+}
+
 // ---------------------------------------------------------------------------
 // Token management
 // ---------------------------------------------------------------------------
@@ -370,6 +392,104 @@ serve(async (req) => {
       return ok({ totals, users, jobcodes });
     } catch (e) {
       return err(e instanceof Error ? e.message : "getCurrentTotals failed");
+    }
+  }
+
+  // ── pullDay ───────────────────────────────────────────────────────────────
+  // Pull one day's timesheets for a jobcode and upsert them into time_entries,
+  // tagged to a field project. Idempotent on qbTimesheetId. Called by the field
+  // app's "Pull today's hours" button and (phase 2) the nightly cron.
+  if (action === "pullDay") {
+    if (!(await requireUser(supabase, req))) return err("Not authorized", 401);
+
+    const jobcodeId = body.jobcodeId as string;
+    const date = (body.date as string) ?? new Date().toISOString().slice(0, 10);
+    const fieldProjectId = (body.fieldProjectId as string) ?? null;
+    if (!jobcodeId) return err("Missing jobcodeId");
+
+    try {
+      const accessToken = await getValidToken(supabase);
+      const qs = new URLSearchParams({
+        jobcode_ids: jobcodeId,
+        start_date: date,
+        end_date: date,
+        on_the_clock: "no",
+        per_page: "200",
+        supplemental_data: "yes",
+      });
+
+      const res = (await qbFetch(`/timesheets?${qs}`, accessToken)) as {
+        results: {
+          timesheets: Record<string, {
+            id: number; user_id: number; jobcode_id: number;
+            start: string; end: string; duration: number; date: string; notes: string;
+          }>;
+        };
+        supplemental_data: {
+          users?: Record<string, { id: number; first_name: string; last_name: string }>;
+          jobcodes?: Record<string, { id: number; name: string }>;
+        };
+      };
+
+      const timesheets = Object.values(res.results?.timesheets ?? {});
+      const users = res.supplemental_data?.users ?? {};
+      const jobcodes = res.supplemental_data?.jobcodes ?? {};
+
+      // Reuse existing row ids for these timesheets so a re-pull updates in place.
+      const { data: existing } = await supabase
+        .from("time_entries")
+        .select("id, data")
+        .eq("deleted", false)
+        .filter("data->>qbJobcodeId", "eq", jobcodeId)
+        .filter("data->>date", "eq", date);
+
+      const idByTs = new Map<string, string>();
+      for (const r of (existing ?? []) as { id: string; data: { qbTimesheetId?: string } }[]) {
+        if (r.data?.qbTimesheetId) idByTs.set(String(r.data.qbTimesheetId), r.id);
+      }
+
+      const nowIso = new Date().toISOString();
+      const rows = timesheets.map((ts) => {
+        const u = users[String(ts.user_id)];
+        const employee = u ? `${u.first_name} ${u.last_name}`.trim() : `QB user ${ts.user_id}`;
+        const jc = jobcodes[String(ts.jobcode_id)];
+        const start = hhmm(ts.start);
+        const finish = hhmm(ts.end);
+        const hours = ts.duration ? ts.duration / 3600 : 0;
+        const id = idByTs.get(String(ts.id)) ?? crypto.randomUUID();
+        return {
+          id,
+          deleted: false,
+          data: {
+            id,
+            jobId: fieldProjectId,
+            fieldProjectId,
+            qbJobcodeId: jobcodeId,
+            jobcodeName: jc?.name ?? null,
+            date,
+            employee,
+            task: ts.notes || jc?.name || "",
+            start,
+            finish,
+            hours: Number(hours.toFixed(2)),
+            source: "qbtime",
+            qbTimesheetId: String(ts.id),
+            qbUserId: String(ts.user_id),
+            enteredBy: "quickbooks-time",
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          },
+        };
+      });
+
+      if (rows.length > 0) {
+        const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
+        if (error) return err(`time_entries upsert failed: ${error.message}`);
+      }
+
+      return ok({ pulled: rows.length, date, jobcodeId });
+    } catch (e) {
+      return err(e instanceof Error ? e.message : "pullDay failed");
     }
   }
 

@@ -202,6 +202,15 @@ td.wet input, input.wet { background: #fbe3e0 !important; color: var(--red); fon
 tr.flag7 td { background: #fdf3e0 !important; }
 .rowdel { color: var(--red); background: #fff; border: 0; font-size: 18px; cursor: pointer; width: 36px; }
 
+/* QuickBooks Time — daily construction log */
+.qb-bar { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; padding: 10px 12px; border: 1px solid var(--line, #e2e6ec); border-radius: 12px; background: #f8fafc; }
+.qb-bar__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.qb-linked strong { color: var(--navy, #0f1b2d); }
+.qb-hint { font-size: 12px; }
+.qb-tag { display: inline-block; margin-left: 6px; padding: 1px 6px; font-size: 10px; font-weight: 800; letter-spacing: .03em; color: #fff; background: var(--orange, #f26a21); border-radius: 6px; vertical-align: middle; }
+.qb-row { background: #fcfbf9; }
+.qb-cell { color: #334155; }
+
 /* line item totals */
 .totals { margin-top: 10px; }
 .totals .trow { display: flex; justify-content: space-between; padding: 6px 2px; border-bottom: 1px dashed var(--line); font-size: 14px; }
