@@ -15,3 +15,11 @@ export const SYNC_ENABLED = !!SUPABASE_URL;
 // that exact URL in the Intuit app AND set it as QB_TIME_REDIRECT_URI on the
 // Edge Function.
 export const QB_TIME_CLIENT_ID = "3902ee19a693773d69dd4a355e1f8984";
+
+// QuickBooks ONLINE OAuth client id — PUBLIC (safe to ship). Separate Intuit
+// app connection from QB Time (TSheets tokens can't call the Accounting API).
+// Fill this from an Intuit Developer app with the Accounting scope to enable
+// the admin "Connect QuickBooks Online" button; the Client Secret and tokens
+// live only in the qbo-proxy Edge Function's secrets. Register the admin
+// app's URL as the redirect URI AND set it as QBO_REDIRECT_URI on the function.
+export const QBO_CLIENT_ID = "";

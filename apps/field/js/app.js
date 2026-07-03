@@ -19,6 +19,8 @@ import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine } from "./spine.js";
 import { generateNarrative } from "./narrative.js";
 import { transcribeWidget } from "./voice.js";
+import { aiAvailable, draftAdjusterEmail } from "./officeai.js";
+import { dryingFlags } from "./dryingwatch.js";
 import { AI_FORM_KEYS } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
 
@@ -218,11 +220,17 @@ async function projectList() {
     const list = h("div", { class: "joblist" });
     projects.forEach((p) => {
       const cat = p.waterCategory ? `Cat ${p.waterCategory}` : "";
+      const flags = dryingFlags(p);   // rule-based Drying Watch — no AI, no cost
       list.append(h("a", { class: "card card--tap jobrow", href: `#/p/${p.id}` },
         h("div", { class: "jobrow__main" },
           h("div", { class: "jobrow__title" }, p.customer || p.address || "Untitled job"),
           h("div", { class: "jobrow__sub" },
-            [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "", cat, "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · "))),
+            [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "", cat, "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ")),
+          flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" },
+            ...flags.map((f) => h("span", {
+              style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
+                (f.tone === "bad" ? "background:#fdecea;color:#b3261e" : "background:#fff4e5;color:#8a6d00"),
+            }, "💧 " + f.label))) : null),
         h("div", { class: "jobrow__chev" }, "›")));
     });
     body.append(list);
@@ -431,10 +439,44 @@ function narrativePage(project) {
     await Store.put(project); renderPreview(); toast("Narrative saved.");
   });
 
+  /* Adjuster email — drafts the claim-submission email from the facts + narrative. */
+  const emailPanel = h("div", {});
+  const emailBtn = h("button", { class: "btn btn--ghost" }, "✉️ Adjuster email");
+  emailBtn.addEventListener("click", async () => {
+    if (!aiAvailable()) return;
+    emailBtn.disabled = true; status.textContent = "Drafting the adjuster email…";
+    try {
+      const draft = await draftAdjusterEmail(project);
+      status.textContent = "";
+      const subj = h("input", { value: draft.subject || "", style: "width:100%;padding:8px 10px;border:1px solid #cdd5df;border-radius:10px;font-size:13px" });
+      const bodyTa = h("textarea", { style: "width:100%;min-height:200px;font-size:13px;line-height:1.5;padding:10px;border:1px solid #cdd5df;border-radius:10px;margin-top:6px" });
+      bodyTa.value = draft.body || "";
+      const copyBtn = h("button", { class: "btn btn--sm" }, "Copy");
+      copyBtn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(`Subject: ${subj.value}\n\n${bodyTa.value}`);
+        copyBtn.textContent = "Copied!"; setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
+      });
+      const mailBtn = h("button", { class: "btn btn--sm" }, "Open in Email");
+      mailBtn.addEventListener("click", () => {
+        location.href = `mailto:?subject=${encodeURIComponent(subj.value)}&body=${encodeURIComponent(bodyTa.value)}`;
+      });
+      emailPanel.replaceChildren(
+        h("div", { style: "border:1px dashed #b9c4d4;border-radius:12px;padding:12px;margin:10px 0;background:#f7f9fc" },
+          h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "✉️ Adjuster email draft — review, then copy or open in your mail app and attach the packet PDF:"),
+          subj, bodyTa,
+          h("div", { style: "display:flex;gap:8px;margin-top:8px" }, copyBtn, mailBtn)));
+    } catch (e) {
+      status.textContent = ""; toast("Couldn't draft the email — " + (e && e.message ? e.message : "try again"));
+    }
+    emailBtn.disabled = false;
+  });
+
   body.append(
     h("p", { class: "subtle", style: "font-size:14px" }, "All required documents are complete. Generate the construction narrative, review and edit it, then it becomes the opening page of the job packet. (The reconstruction scope + estimate are added separately.)"),
     h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin:8px 0" }, genBtn, saveBtn,
-      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Open packet")),
+      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Open packet"),
+      emailBtn),
+    emailPanel,
     status,
     h("div", { style: "font-weight:600;font-size:13px;margin-top:6px" }, "Narrative (editable):"),
     editor,
