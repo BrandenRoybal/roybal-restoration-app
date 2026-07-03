@@ -104,3 +104,50 @@ runs offline.
 ---
 
 *Roybal Construction, LLC · Roybal Restoration · North Pole, Alaska · IICRC WRT Certified*
+
+
+---
+
+## AI office features (photo analysis, invoice draft/audit, adjuster email)
+
+Online-only enhancements layered over the always-available manual forms
+(same rules as voice capture -- offline they degrade to a toast and never
+block typed entry). All ride the same monthly spend cap + `ai_usage` ledger.
+
+| Feature | Where |
+|---|---|
+| AI photo captions + damage/materials/safety analysis | Photos form -- auto on new photos, `AI captions (n)` catch-up button |
+| Invoice draft from the documented job | Invoice form -- `Draft from documentation` (every line shows its basis) |
+| Supplement audit (missed billables) | Invoice form -- `Find missed items`, one-tap add, each suggestion cites its evidence |
+| Adjuster email draft | Narrative page -- `Adjuster email` (copy / open in mail app) |
+| Drying Watch flags (no AI, rule-based) | Job list -- stale readings, areas not drying down, equipment out 7+ days |
+
+Deploy (reuses the existing `LLM_API_KEY` secret):
+
+```bash
+supabase functions deploy roybal-ai-office --no-verify-jwt
+```
+
+Optional model overrides: `OFFICE_PHOTO_MODEL` (default `claude-haiku-4-5`),
+`OFFICE_DOC_MODEL` (default `claude-sonnet-4-6`). Default prices live in
+`js/pricing.js` -- adjust to your real rates.
+
+## QuickBooks Online invoice push
+
+Separate Intuit connection from QuickBooks Time (TSheets tokens can't call
+the Accounting API). One-time setup:
+
+1. In your Intuit Developer account, create (or extend) an app with the
+   **Accounting** scope; register the office admin URL as a redirect URI.
+2. Fill `QBO_CLIENT_ID` in `js/config.js`, then run migration
+   `supabase/migrations/104_qbo_tokens.sql` and deploy the proxy:
+
+   ```bash
+   supabase functions deploy qbo-proxy
+   supabase secrets set QBO_CLIENT_ID=... QBO_CLIENT_SECRET=... QBO_REDIRECT_URI=https://.../admin/
+   ```
+3. Office admin -> **Connect QuickBooks Online** (one time).
+
+Then **Push to QuickBooks** on any invoice: the customer is matched or
+created from the job header, line items carry over, and re-pushing after
+edits updates the same QBO invoice (no duplicates).
