@@ -1136,11 +1136,18 @@ export function narrativeSheet(project) {
     ...narrativeInfoRows(facts),
     ["CONTRACTOR", COMPANY.name], ["NARRATIVE DATE", project.narrativeDate || todayISO()],
   ];
-  const cell = (k, v, i) => h("div", {
-    style: "padding:7px 10px;font-size:12.5px;" + (i >= 2 ? "border-top:1px solid #eef1f5;" : "") + (i % 2 ? "border-left:1px solid #eef1f5;" : ""),
+  // LOSS TYPE / CAUSE can be a long paragraph — pull it out of the 2-column grid
+  // and render it full-width so it isn't scrunched into a narrow column.
+  const lossIdx = infoRows.findIndex(([k]) => k === "LOSS TYPE");
+  const lossRow = lossIdx >= 0 ? infoRows.splice(lossIdx, 1)[0] : null;
+  const cell = (k, v, i, full) => h("div", {
+    style: "padding:7px 10px;font-size:12.5px;" + (i >= 2 ? "border-top:1px solid #eef1f5;" : "")
+      + (!full && i % 2 ? "border-left:1px solid #eef1f5;" : "") + (full ? "grid-column:1 / -1;" : ""),
   }, h("span", { style: "color:var(--orange,#f26a21);font-weight:700;font-size:11px" }, k + " "), h("span", {}, String(v)));
+  const cells = infoRows.map(([k, v], i) => cell(k, v, i, false));
+  if (lossRow) cells.push(cell("LOSS TYPE / CAUSE", lossRow[1], infoRows.length, true));
   const table = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;border:1px solid #e2e6ec;border-radius:8px;overflow:hidden;margin:12px 0" },
-    ...infoRows.map(([k, v], i) => cell(k, v, i)));
+    ...cells);
   return h("section", { class: "sheet" },
     h("div", { style: "display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid var(--navy,#0f1b2d);padding-bottom:8px" },
       h("div", {},
