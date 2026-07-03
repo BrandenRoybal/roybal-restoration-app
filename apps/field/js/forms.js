@@ -1307,7 +1307,7 @@ export function narrativeSheet(project) {
       h("div", {},
         h("div", { style: "font-weight:800;font-size:15px" },
           h("span", { style: "color:var(--orange,#f26a21)" }, "ROYBAL"),
-          h("span", { style: "color:#0f1b2d" }, " CONSTRUCTION, LLC")),
+          h("span", { style: "color:#000" }, " CONSTRUCTION, LLC")),
         h("div", { style: "color:#5b6470;font-size:11px" }, COMPANY.tagline)),
       h("div", { style: "text-align:right;color:#5b6470;font-size:10.5px;line-height:1.5" },
         h("div", {}, COMPANY.address), h("div", {}, COMPANY.phone + " • " + COMPANY.email))),

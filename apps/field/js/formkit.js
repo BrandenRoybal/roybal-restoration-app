@@ -241,7 +241,7 @@ export function letterhead(formTitle, subtitle) {
       h("div", { class: "sheet-head__co" },
         h("div", { class: "sheet-head__name" },
           h("span", { style: "color:var(--orange,#f26a21)" }, "ROYBAL"),
-          h("span", { style: "color:#0f1b2d" }, " CONSTRUCTION, LLC")),
+          h("span", { style: "color:#000" }, " CONSTRUCTION, LLC")),
         h("div", { class: "sheet-head__tag" }, COMPANY.tagline)),
       h("div", { class: "sheet-head__addr" },
         h("div", {}, COMPANY.address),
