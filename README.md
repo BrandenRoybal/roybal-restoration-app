@@ -104,6 +104,9 @@ Run the migrations in this order in the Supabase SQL Editor:
 ```
 supabase/migrations/001_initial_schema.sql   ← Tables + RLS + triggers
 supabase/migrations/002_storage.sql          ← Storage buckets + policies
+supabase/migrations/003_qb_time.sql          ← QuickBooks Time integration
+supabase/migrations/004_manual_floor_plan.sql ← Manual floor plan editor
+supabase/migrations/005_ai_invoices.sql      ← AI photo analysis + narrative + invoices
 ```
 
 ### 2. Auth
@@ -133,6 +136,26 @@ Configure the webhook in Magicplan's developer settings to POST to:
 https://your-project.supabase.co/functions/v1/magicplan-webhook
 ```
 
+### 4. AI Assistant (photo analysis, narrative, invoices)
+
+Deploy the AI proxy Edge Function and set your Anthropic API key
+(get one at https://platform.claude.com):
+
+```bash
+supabase functions deploy ai-proxy
+supabase secrets set ANTHROPIC_API_KEY=sk-ant-your-key
+```
+
+This powers three features (all server-side — the key is never exposed to clients):
+
+1. **AI photo analysis** — auto-captions every job photo and documents visible
+   damage, affected materials, equipment, and safety concerns
+2. **AI job narrative** — writes an adjuster-ready loss narrative from all job
+   documentation (editable, saved on the job, included in invoice PDFs)
+3. **AI invoice generation** — drafts a complete Xactimate-style invoice from
+   field data: equipment days, monitoring visits, floor-plan square footage,
+   photo-documented demolition, and existing scope items
+
 ---
 
 ## Features
@@ -158,16 +181,19 @@ https://your-project.supabase.co/functions/v1/magicplan-webhook
 | **Dashboard** | KPI cards: Active Jobs, Drying, Invoicing, Equipment, Open A/R |
 | **Pipeline** | Kanban-style view by job status |
 | **Jobs** | Full list with search + filter, click-through to detail |
-| **Job Detail** | All modules: Overview, Photos, Moisture, Equipment, Scope, Floor Plans, Reports |
+| **Job Detail** | All modules: Overview, Photos, Moisture, Equipment, Scope, Invoices, Floor Plans, Reports |
+| **Invoices** | Xactimate-style invoice builder — AI-drafted or manual, price catalog, editable line items, O&P/tax, PDF export |
+| **AI Assistant** | Photo auto-captioning + damage analysis, adjuster-ready job narratives, invoice drafting |
 | **Reports** | Generate PDF reports for carrier/adjuster submission |
 | **Settings** | User management, company info, security overview |
 
-### PDF Reports (4 types)
+### PDF Reports (5 types)
 
 1. **Photo Report** — Photos by room + category with timestamps
 2. **Moisture/Drying Report** — Daily readings + dry standard comparison + sign-off block
 3. **Equipment Log** — Placement dates, locations, days on site
 4. **Scope of Work / Invoice** — Line items, markup/overhead, grand total, signature block
+5. **Invoice / Estimate** — Xactimate-style: catalog codes, room grouping, category recap, O&P + tax, optional narrative page
 
 All PDFs: dark navy + safety orange branding, job number footer, Alaska time.
 

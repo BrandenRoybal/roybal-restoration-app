@@ -66,6 +66,14 @@ export const EQUIPMENT_TYPE_LABELS: Record<EquipmentType, string> = {
 export type BillingType = "tm" | "scope";
 export type UserRole = "admin" | "tech" | "viewer";
 
+export type InvoiceStatus = "draft" | "sent" | "paid";
+
+export const INVOICE_STATUS_LABELS: Record<InvoiceStatus, string> = {
+  draft: "Draft",
+  sent: "Sent",
+  paid: "Paid",
+};
+
 // ============================================================
 // DATABASE ROW TYPES
 // ============================================================
@@ -101,6 +109,9 @@ export interface Job {
   magicplan_project_id: string | null;
   notes: string | null;
   created_by: string | null;
+  /** AI-generated (and user-editable) job narrative */
+  narrative: string | null;
+  narrative_updated_at: string | null;
 }
 
 export interface Room {
@@ -124,8 +135,25 @@ export interface Photo {
   gps_lat: number | null;
   gps_lng: number | null;
   created_at: string;
+  /** AI-generated caption (kept separate from the manual caption) */
+  ai_caption: string | null;
+  /** Full structured AI analysis of the photo */
+  ai_analysis: PhotoAnalysis | null;
+  ai_analyzed_at: string | null;
   /** Resolved public/signed URL — populated by the app, not stored in DB */
   url?: string;
+}
+
+/** Structured result of AI photo analysis (stored in photos.ai_analysis) */
+export interface PhotoAnalysis {
+  caption: string;
+  room_type: string | null;
+  damage_observed: string[];
+  materials_affected: string[];
+  equipment_visible: string[];
+  safety_concerns: string[];
+  suggested_category: PhotoCategory | null;
+  restoration_notes: string | null;
 }
 
 export interface MoistureReading {
@@ -174,6 +202,67 @@ export interface LineItem {
   sort_order: number;
   created_at: string;
   updated_at: string;
+}
+
+// ============================================================
+// INVOICES
+// ============================================================
+export interface Invoice {
+  id: string;
+  job_id: string;
+  /** Auto-generated: INV-2026-001 style */
+  invoice_number: string;
+  status: InvoiceStatus;
+  report_type: "invoice" | "estimate";
+  title: string;
+  invoice_date: string;
+  overhead_percent: number;
+  markup_percent: number;
+  tax_percent: number;
+  notes: string | null;
+  ai_generated: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type InvoiceItemSource = "ai" | "manual" | "scope";
+
+export interface InvoiceItem {
+  id: string;
+  invoice_id: string;
+  job_id: string;
+  room_name: string | null;
+  /** Xactimate-style code, e.g. WTR-EXTC */
+  code: string | null;
+  category: string;
+  description: string;
+  quantity: number;
+  unit: string;
+  /** Stored as cents: $12.50 = 1250 */
+  unit_price: number;
+  /** Computed by DB: round(quantity * unit_price) */
+  total_cents: number;
+  notes: string | null;
+  source: InvoiceItemSource;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Compute invoice totals (all values in cents) */
+export function computeInvoiceTotals(
+  items: Pick<InvoiceItem, "total_cents">[],
+  overheadPercent: number,
+  markupPercent: number,
+  taxPercent: number
+) {
+  const subtotal = items.reduce((sum, it) => sum + it.total_cents, 0);
+  const overhead = Math.round(subtotal * (overheadPercent / 100));
+  const markup = Math.round((subtotal + overhead) * (markupPercent / 100));
+  const tax = Math.round((subtotal + overhead + markup) * (taxPercent / 100));
+  const grandTotal = subtotal + overhead + markup + tax;
+  return { subtotal, overhead, markup, tax, grandTotal };
 }
 
 export interface FloorPlan {
@@ -249,7 +338,13 @@ export interface FPRoomCalculations {
 // ============================================================
 export type CreateJobInput = Omit<
   Job,
-  "id" | "created_at" | "updated_at" | "job_number" | "assigned_tech_ids"
+  | "id"
+  | "created_at"
+  | "updated_at"
+  | "job_number"
+  | "assigned_tech_ids"
+  | "narrative"
+  | "narrative_updated_at"
 > & {
   assigned_tech_ids?: string[];
 };
@@ -258,7 +353,20 @@ export type UpdateJobInput = Partial<CreateJobInput>;
 
 export type CreateRoomInput = Omit<Room, "id" | "created_at">;
 
-export type CreatePhotoInput = Omit<Photo, "id" | "created_at" | "url">;
+export type CreatePhotoInput = Omit<
+  Photo,
+  "id" | "created_at" | "url" | "ai_caption" | "ai_analysis" | "ai_analyzed_at"
+>;
+
+export type CreateInvoiceInput = Omit<
+  Invoice,
+  "id" | "invoice_number" | "created_at" | "updated_at"
+>;
+
+export type CreateInvoiceItemInput = Omit<
+  InvoiceItem,
+  "id" | "total_cents" | "created_at" | "updated_at"
+>;
 
 export type CreateMoistureReadingInput = Omit<
   MoistureReading,

@@ -6,7 +6,7 @@ import { useState } from "react";
 import {
   BookOpen, Briefcase, Camera, Droplets, Wrench, DollarSign,
   Map, FileText, Users, ChevronDown, ChevronRight, CircleCheckBig,
-  CircleAlert, Info,
+  CircleAlert, Info, Sparkles,
 } from "lucide-react";
 
 interface Section {
@@ -283,6 +283,71 @@ const SECTIONS: Section[] = [
         <p className="text-sm text-slate-400">Go to the <strong className="text-white">Reports</strong> tab → <strong className="text-white">Scope of Work / Invoice</strong> → Generate PDF. The PDF includes overhead & profit markup, totals, and a signature block.</p>
 
         <Tip>The grand total shown in the Scope tab header and in the Reports tab is the raw subtotal before markup. The PDF report adds O&P on top.</Tip>
+      </div>
+    ),
+  },
+  {
+    id: "ai",
+    icon: <Sparkles size={18} />,
+    title: "AI Assistant (Photos, Narrative & Invoices)",
+    color: "#A855F7",
+    content: (
+      <div>
+        <p className="text-sm text-slate-400 mb-4">
+          The AI assistant reads everything documented on a job — photos, moisture readings, equipment logs, rooms,
+          floor plan, and scope items — and turns it into captions, an adjuster-ready narrative, and a complete
+          Xactimate-style invoice draft. Everything the AI produces is a <strong className="text-white">draft you can edit</strong>.
+        </p>
+
+        <H3>AI photo captions & analysis</H3>
+        <Step n={1}>Open a job → <strong className="text-white">Photos</strong> tab → click <strong className="text-white">AI Captions</strong> to analyze all new photos at once (up to 25 per batch).</Step>
+        <Step n={2}>Or click any photo and use <strong className="text-white">Analyze with AI</strong> in the viewer for a single photo.</Step>
+        <Step n={3}>The AI writes a professional caption and documents visible damage, affected materials, equipment, and safety concerns. Photos with a purple sparkle badge have been analyzed.</Step>
+        <Bullet>If a technician already wrote a caption, the AI never overwrites it — the AI caption is stored alongside it.</Bullet>
+        <Bullet>You can edit any caption in the photo viewer; captions appear in the Photo Report PDF.</Bullet>
+
+        <H3>AI job narrative</H3>
+        <Step n={1}>Open a job → <strong className="text-white">Reports</strong> tab → <strong className="text-white">Generate with AI</strong> in the Job Narrative card.</Step>
+        <Step n={2}>The AI writes a chronological loss narrative (conditions found, mitigation, drying strategy, monitoring results, completion) based strictly on what's documented.</Step>
+        <Step n={3}>Edit the text as needed and click <strong className="text-white">Save</strong>. The narrative is included as a page in invoice PDFs.</Step>
+
+        <H3>AI invoice generation</H3>
+        <Step n={1}>Open a job → <strong className="text-white">Invoices</strong> tab → <strong className="text-white">Generate with AI</strong>.</Step>
+        <Step n={2}>The AI builds line items from your documentation: equipment rental days from the equipment log, monitoring visits from moisture-reading dates, square footage from the floor plan, demolition supported by photos, plus your existing scope items.</Step>
+        <Step n={3}>Review the draft in the editor — every line is editable, and lines the AI estimated show their basis in the notes field.</Step>
+
+        <Tip>The better your field documentation (photos analyzed, moisture readings daily, equipment logged with dates), the more complete and defensible the AI narrative and invoice will be. Run AI Captions on photos <strong>before</strong> generating the narrative or invoice.</Tip>
+        <Note>AI features require the ANTHROPIC_API_KEY secret to be configured on the Supabase project (Settings → Edge Functions). Generation can take one to three minutes for large jobs.</Note>
+      </div>
+    ),
+  },
+  {
+    id: "invoices",
+    icon: <DollarSign size={18} />,
+    title: "Invoices",
+    color: "#A855F7",
+    content: (
+      <div>
+        <p className="text-sm text-slate-400 mb-4">
+          The Invoices tab builds Xactimate-style invoices and estimates — grouped by room, with catalog codes,
+          category recap, overhead & profit, and a signature block. Create as many invoices per job as you need
+          (e.g. an initial estimate, then a final invoice).
+        </p>
+
+        <H3>Create an invoice</H3>
+        <Bullet><strong className="text-white">Generate with AI</strong> — drafts the full invoice from job documentation (see the AI Assistant section).</Bullet>
+        <Bullet><strong className="text-white">New Invoice</strong> — starts blank for fully manual entry.</Bullet>
+
+        <H3>Edit line items</H3>
+        <Step n={1}>Click an invoice to open the editor. Every cell is editable inline — room, code, category, description, quantity, unit, and price.</Step>
+        <Step n={2}>Use <strong className="text-white">Add from price catalog</strong> to insert common water/fire/mold mitigation items with default codes and pricing — then adjust the price per job.</Step>
+        <Step n={3}>Set <strong className="text-white">Overhead %</strong>, <strong className="text-white">Profit/Markup %</strong>, and <strong className="text-white">Tax %</strong> in the header — totals update live.</Step>
+        <Step n={4}>Click <strong className="text-white">Save Invoice</strong>, then <strong className="text-white">PDF</strong> to download.</Step>
+
+        <H3>Status tracking</H3>
+        <Bullet>Mark each invoice <strong className="text-white">Draft → Sent → Paid</strong> from the editor header, and switch between <strong className="text-white">Invoice</strong> and <strong className="text-white">Estimate</strong> layouts.</Bullet>
+
+        <Tip>Invoice numbers (INV-2026-001) are assigned automatically. The saved job narrative is appended as the last page of the invoice PDF — perfect for adjuster submissions.</Tip>
       </div>
     ),
   },

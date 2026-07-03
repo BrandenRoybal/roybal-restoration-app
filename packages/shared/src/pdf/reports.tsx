@@ -28,6 +28,8 @@ import type {
   MoistureReading,
   EquipmentLog,
   LineItem,
+  Invoice,
+  InvoiceItem,
 } from "../types/index";
 import {
   getMoistureStatus,
@@ -35,8 +37,10 @@ import {
   centsToDisplay,
   formatAlaskaDate,
   formatAlaskaDateTime,
+  computeInvoiceTotals,
   EQUIPMENT_TYPE_LABELS,
 } from "../types/index";
+import { INVOICE_CATEGORY_LABELS } from "../pricing";
 
 // ============================================================
 // 1. PHOTO REPORT
@@ -455,6 +459,199 @@ export function ScopeInvoiceReport({
 
         <PageFooter jobNumber={job.job_number} />
       </Page>
+    </Document>
+  );
+}
+
+// ============================================================
+// 5. INVOICE REPORT (Xactimate-style, from the invoices module)
+// ============================================================
+interface InvoiceReportProps {
+  job: Job;
+  invoice: Invoice;
+  items: InvoiceItem[];
+  /** Optional narrative page appended after the invoice */
+  narrative?: string | null;
+  includeSignature?: boolean;
+}
+
+export function InvoiceReport({
+  job,
+  invoice,
+  items,
+  narrative,
+  includeSignature = true,
+}: InvoiceReportProps) {
+  // Group by room name
+  const byRoom: Record<string, InvoiceItem[]> = {};
+  items.forEach((it) => {
+    const key = it.room_name?.trim() || "__general__";
+    if (!byRoom[key]) byRoom[key] = [];
+    byRoom[key]!.push(it);
+  });
+
+  const { subtotal, overhead, markup, tax, grandTotal } = computeInvoiceTotals(
+    items,
+    invoice.overhead_percent,
+    invoice.markup_percent,
+    invoice.tax_percent
+  );
+
+  const isInvoice = invoice.report_type === "invoice";
+  const title = isInvoice ? "Invoice" : "Estimate";
+
+  return (
+    <Document
+      title={`${invoice.invoice_number} — ${title}`}
+      author="Roybal Restoration"
+    >
+      <Page size="LETTER" style={pdfStyles.page}>
+        <ReportHeader
+          job={job}
+          reportTitle={`${title} ${invoice.invoice_number}`}
+          generatedAt={new Date().toISOString()}
+        />
+
+        <View style={pdfStyles.body}>
+          {/* Invoice meta + bill-to */}
+          <View style={{ flexDirection: "row", gap: 16, marginBottom: 14 }}>
+            <View style={{ flex: 1, backgroundColor: "#F8FAFC", borderRadius: 6, padding: 10, borderWidth: 0.5, borderColor: PDF_COLORS.border }}>
+              <Text style={{ fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textSecondary, marginBottom: 4 }}>BILL TO</Text>
+              <Text style={{ fontSize: 9, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textPrimary }}>{job.owner_name ?? "Property Owner"}</Text>
+              <Text style={{ fontSize: 8, color: PDF_COLORS.textSecondary }}>{job.property_address}</Text>
+              {job.owner_phone && <Text style={{ fontSize: 8, color: PDF_COLORS.textSecondary }}>{job.owner_phone}</Text>}
+              {job.owner_email && <Text style={{ fontSize: 8, color: PDF_COLORS.textSecondary }}>{job.owner_email}</Text>}
+            </View>
+            <View style={{ flex: 1, backgroundColor: "#F8FAFC", borderRadius: 6, padding: 10, borderWidth: 0.5, borderColor: PDF_COLORS.border }}>
+              <Text style={{ fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textSecondary, marginBottom: 4 }}>{title.toUpperCase()} DETAILS</Text>
+              <InfoPair label={`${title} #`} value={invoice.invoice_number} />
+              <InfoPair label="Date" value={formatAlaskaDate(invoice.invoice_date)} />
+              {job.insurance_carrier ? <InfoPair label="Carrier" value={job.insurance_carrier} /> : null}
+              {job.claim_number ? <InfoPair label="Claim #" value={job.claim_number} /> : null}
+              {job.adjuster_name ? <InfoPair label="Adjuster" value={job.adjuster_name} /> : null}
+            </View>
+          </View>
+
+          {/* Line items grouped by room, Xactimate-style */}
+          {Object.entries(byRoom).map(([roomName, roomItems]) => {
+            const roomTotal = roomItems.reduce((sum, it) => sum + it.total_cents, 0);
+            return (
+              <View key={roomName}>
+                <SectionHeader title={roomName === "__general__" ? "General / Site-Wide" : roomName} />
+                <View style={pdfStyles.table}>
+                  <View style={pdfStyles.tableHeader}>
+                    <Text style={[pdfStyles.tableHeaderCell, { flex: 0.9 }]}>Code</Text>
+                    <Text style={[pdfStyles.tableHeaderCell, { flex: 3 }]}>Description</Text>
+                    <Text style={[pdfStyles.tableHeaderCell, { flex: 0.6, textAlign: "right" }]}>Qty</Text>
+                    <Text style={[pdfStyles.tableHeaderCell, { flex: 0.6 }]}>Unit</Text>
+                    <Text style={[pdfStyles.tableHeaderCell, { flex: 1, textAlign: "right" }]}>Unit Price</Text>
+                    <Text style={[pdfStyles.tableHeaderCell, { flex: 1, textAlign: "right" }]}>Total</Text>
+                  </View>
+                  {roomItems.map((it, i) => (
+                    <View key={it.id} style={[pdfStyles.tableRow, i % 2 === 1 ? pdfStyles.tableRowAlt : {}]}>
+                      <Text style={[pdfStyles.tableCell, { flex: 0.9 }]}>{it.code ?? "—"}</Text>
+                      <View style={{ flex: 3 }}>
+                        <Text style={{ fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textPrimary }}>{it.description}</Text>
+                        {it.notes ? (
+                          <Text style={{ fontSize: 7, color: PDF_COLORS.textMuted }}>{it.notes}</Text>
+                        ) : null}
+                      </View>
+                      <Text style={[pdfStyles.tableCell, { flex: 0.6, textAlign: "right" }]}>{it.quantity}</Text>
+                      <Text style={[pdfStyles.tableCell, { flex: 0.6 }]}>{it.unit}</Text>
+                      <Text style={[pdfStyles.tableCell, { flex: 1, textAlign: "right" }]}>{centsToDisplay(it.unit_price)}</Text>
+                      <Text style={[pdfStyles.tableCellBold, { flex: 1, textAlign: "right" }]}>{centsToDisplay(it.total_cents)}</Text>
+                    </View>
+                  ))}
+                  <View style={{ flexDirection: "row", backgroundColor: "#F1F5F9", paddingVertical: 4, paddingHorizontal: 8 }}>
+                    <Text style={{ flex: 5, fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textSecondary, textAlign: "right" }}>Room Subtotal</Text>
+                    <Text style={{ flex: 1, fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.navy, textAlign: "right" }}>{centsToDisplay(roomTotal)}</Text>
+                  </View>
+                </View>
+              </View>
+            );
+          })}
+
+          {/* Category recap */}
+          <SectionHeader title="Recap by Category" />
+          {Object.keys(INVOICE_CATEGORY_LABELS).map((cat) => {
+            const catItems = items.filter((it) => it.category === cat);
+            if (catItems.length === 0) return null;
+            const catTotal = catItems.reduce((sum, it) => sum + it.total_cents, 0);
+            return (
+              <View key={cat} style={{ flexDirection: "row", paddingVertical: 3, borderBottomWidth: 0.5, borderBottomColor: PDF_COLORS.border, paddingHorizontal: 8 }}>
+                <Text style={{ flex: 1, fontSize: 8, color: PDF_COLORS.textPrimary }}>{INVOICE_CATEGORY_LABELS[cat]}</Text>
+                <Text style={{ fontSize: 8, fontFamily: "Helvetica-Bold", color: PDF_COLORS.navy }}>{centsToDisplay(catTotal)}</Text>
+              </View>
+            );
+          })}
+
+          {/* Grand totals */}
+          <View style={{ marginTop: 12 }}>
+            {[
+              { label: "Subtotal", value: subtotal },
+              { label: `Overhead (${invoice.overhead_percent}%)`, value: overhead },
+              { label: `Profit / Markup (${invoice.markup_percent}%)`, value: markup },
+              ...(invoice.tax_percent > 0 ? [{ label: `Tax (${invoice.tax_percent}%)`, value: tax }] : []),
+            ].map(({ label, value }) => (
+              <View key={label} style={{ flexDirection: "row", paddingVertical: 4, borderBottomWidth: 0.5, borderBottomColor: PDF_COLORS.border, paddingHorizontal: 8 }}>
+                <Text style={{ flex: 1, fontSize: 9, color: PDF_COLORS.textSecondary }}>{label}</Text>
+                <Text style={{ fontSize: 9, fontFamily: "Helvetica-Bold", color: PDF_COLORS.textPrimary }}>{centsToDisplay(value)}</Text>
+              </View>
+            ))}
+            <View style={pdfStyles.totalRow}>
+              <Text style={pdfStyles.totalLabel}>GRAND TOTAL</Text>
+              <Text style={pdfStyles.totalValue}>{centsToDisplay(grandTotal)}</Text>
+            </View>
+          </View>
+
+          {/* Notes / terms */}
+          <SectionHeader title="Terms & Notes" />
+          <Text style={{ fontSize: 8, color: PDF_COLORS.textSecondary, lineHeight: 1.6 }}>
+            {invoice.notes ? invoice.notes + "\n" : ""}
+            • All work performed per IICRC S500 (water damage) / S520 (mold) standards.{"\n"}
+            • Pricing subject to change if unforeseen conditions are discovered.{"\n"}
+            • Sales tax not included unless itemized above. Supplemental work will be invoiced separately.{"\n"}
+            • Payment due within 30 days of invoice date.
+          </Text>
+
+          {/* Signature block */}
+          {includeSignature && (
+            <>
+              <SectionHeader title="Authorization" />
+              <View style={pdfStyles.signatureSection}>
+                <View style={pdfStyles.signatureBlock}>
+                  <Text style={pdfStyles.signatureLabel}>Authorized Signature (Roybal Restoration)</Text>
+                  <Text style={[pdfStyles.signatureLabel, { marginTop: 28 }]}>Date</Text>
+                </View>
+                <View style={pdfStyles.signatureBlock}>
+                  <Text style={pdfStyles.signatureLabel}>Property Owner / Authorized Rep</Text>
+                  <Text style={[pdfStyles.signatureLabel, { marginTop: 28 }]}>Date</Text>
+                </View>
+              </View>
+            </>
+          )}
+        </View>
+
+        <PageFooter jobNumber={job.job_number} />
+      </Page>
+
+      {/* Optional narrative page */}
+      {narrative ? (
+        <Page size="LETTER" style={pdfStyles.page}>
+          <ReportHeader
+            job={job}
+            reportTitle="Job Narrative"
+            generatedAt={new Date().toISOString()}
+          />
+          <View style={pdfStyles.body}>
+            <SectionHeader title="Narrative of Loss & Work Performed" />
+            <Text style={{ fontSize: 9, color: PDF_COLORS.textPrimary, lineHeight: 1.7 }}>
+              {narrative}
+            </Text>
+          </View>
+          <PageFooter jobNumber={job.job_number} />
+        </Page>
+      ) : null}
     </Document>
   );
 }

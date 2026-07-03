@@ -15,8 +15,10 @@ import {
   getMoistureStatus,
   EQUIPMENT_TYPE_LABELS,
 } from "@roybal/shared";
-import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users } from "lucide-react";
+import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users, Sparkles, Check } from "lucide-react";
 import FloorPlanEditor from "../components/floorplan/FloorPlanEditor";
+import InvoicesTab from "../components/invoice/InvoicesTab";
+import { analyzePhotos, generateNarrative } from "../lib/ai";
 import clsx from "clsx";
 import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
@@ -41,7 +43,7 @@ const mpProxy = async (action: string, params: Record<string, unknown> = {}) => 
   return data.data;
 };
 
-type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "floorplan" | "report" | "time";
+type Tab = "overview" | "photos" | "moisture" | "equipment" | "scope" | "invoices" | "floorplan" | "report" | "time";
 
 const STATUS_COLORS: Record<string, string> = {
   new: "#64748B", active: "#F97316", drying: "#3B82F6",
@@ -77,6 +79,16 @@ export default function JobDetailPage() {
   const [uploadingPhotos, setUploadingPhotos] = useState(false);
   const [photoError, setPhotoError] = useState("");
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
+  const [analyzingPhotos, setAnalyzingPhotos] = useState(false);
+  const [analyzingOne, setAnalyzingOne] = useState<string | null>(null);
+  const [captionDraft, setCaptionDraft] = useState("");
+  const [savingCaption, setSavingCaption] = useState(false);
+
+  // AI narrative
+  const [narrativeDraft, setNarrativeDraft] = useState("");
+  const [generatingNarrative, setGeneratingNarrative] = useState(false);
+  const [savingNarrative, setSavingNarrative] = useState(false);
+  const [narrativeError, setNarrativeError] = useState("");
 
   // Moisture form
   const [showMoistureForm, setShowMoistureForm] = useState(false);
@@ -129,6 +141,7 @@ export default function JobDetailPage() {
         const jobData = j.data as Job;
         setJob(jobData);
         setMagicplanInput(jobData.magicplan_project_id ?? "");
+        setNarrativeDraft(jobData.narrative ?? "");
       }
       if (!r.error) setRooms((r.data ?? []) as Room[]);
       if (!m.error) setMoisture((m.data ?? []) as MoistureReading[]);
@@ -283,6 +296,95 @@ export default function JobDetailPage() {
   // Load photo URLs on mount
   const getPhotoUrl = (path: string) =>
     supabase.storage.from("job-photos").getPublicUrl(path).data.publicUrl;
+
+  // ---- AI photo analysis ----
+  const refreshPhotos = async () => {
+    if (!job) return;
+    const { data } = await supabase.from("photos").select("*").eq("job_id", job.id).order("taken_at", { ascending: false });
+    if (data) {
+      const fresh = data as Photo[];
+      setPhotos(fresh);
+      setSelectedPhoto((sel) => (sel ? fresh.find((p) => p.id === sel.id) ?? null : null));
+      return fresh;
+    }
+    return null;
+  };
+
+  const analyzeAllPhotos = async () => {
+    const pending = photos.filter((p) => !p.ai_analyzed_at).slice(0, 25).map((p) => p.id);
+    if (!pending.length) return;
+    setAnalyzingPhotos(true);
+    setPhotoError("");
+    try {
+      const { results } = await analyzePhotos(pending);
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length) setPhotoError(`${failed.length} photo(s) could not be analyzed: ${failed[0]?.error}`);
+      await refreshPhotos();
+    } catch (e) {
+      setPhotoError(e instanceof Error ? e.message : "AI analysis failed");
+    }
+    setAnalyzingPhotos(false);
+  };
+
+  const analyzeSinglePhoto = async (photo: Photo) => {
+    setAnalyzingOne(photo.id);
+    setPhotoError("");
+    try {
+      const { results } = await analyzePhotos([photo.id]);
+      if (results[0] && !results[0].ok) setPhotoError(results[0].error ?? "AI analysis failed");
+      const fresh = await refreshPhotos();
+      const updated = fresh?.find((p) => p.id === photo.id);
+      if (updated) setCaptionDraft(updated.caption ?? "");
+    } catch (e) {
+      setPhotoError(e instanceof Error ? e.message : "AI analysis failed");
+    }
+    setAnalyzingOne(null);
+  };
+
+  const savePhotoCaption = async (photo: Photo) => {
+    setSavingCaption(true);
+    const { data } = await supabase
+      .from("photos")
+      .update({ caption: captionDraft.trim() || null })
+      .eq("id", photo.id)
+      .select()
+      .single();
+    if (data) {
+      setPhotos((prev) => prev.map((p) => (p.id === photo.id ? { ...p, ...(data as Photo) } : p)));
+      setSelectedPhoto((sel) => (sel?.id === photo.id ? { ...sel, ...(data as Photo) } : sel));
+    }
+    setSavingCaption(false);
+  };
+
+  // ---- AI narrative ----
+  const runGenerateNarrative = async () => {
+    if (!job) return;
+    setGeneratingNarrative(true);
+    setNarrativeError("");
+    try {
+      const { narrative } = await generateNarrative(job.id);
+      setNarrativeDraft(narrative);
+      setJob((j) => (j ? { ...j, narrative, narrative_updated_at: new Date().toISOString() } : j));
+    } catch (e) {
+      setNarrativeError(e instanceof Error ? e.message : "Narrative generation failed");
+    }
+    setGeneratingNarrative(false);
+  };
+
+  const saveNarrative = async () => {
+    if (!job) return;
+    setSavingNarrative(true);
+    setNarrativeError("");
+    const { data, error } = await supabase
+      .from("jobs")
+      .update({ narrative: narrativeDraft.trim() || null, narrative_updated_at: new Date().toISOString() })
+      .eq("id", job.id)
+      .select()
+      .single();
+    if (error) setNarrativeError(error.message);
+    if (data) setJob(data as Job);
+    setSavingNarrative(false);
+  };
 
   // Add moisture reading
   const addMoistureReading = async () => {
@@ -505,6 +607,7 @@ export default function JobDetailPage() {
     { key: "moisture", label: `Moisture (${moisture.length})` },
     { key: "equipment", label: `Equipment (${equipment.length})` },
     { key: "scope", label: `Scope (${centsToDisplay(totalCents)})` },
+    { key: "invoices", label: "Invoices" },
     { key: "time", label: "Time" },
     { key: "floorplan", label: "Floor Plan" },
     { key: "report", label: "Reports" },
@@ -1066,6 +1169,8 @@ export default function JobDetailPage() {
           </div>
         )}
 
+        {activeTab === "invoices" && <InvoicesTab job={job} rooms={rooms} />}
+
         {activeTab === "time" && (
           <div className="max-w-4xl space-y-4">
             {qbLoading ? (
@@ -1368,8 +1473,26 @@ export default function JobDetailPage() {
                 )}
                 <input type="file" accept="image/*" multiple className="hidden" onChange={handlePhotoUpload} disabled={uploadingPhotos} />
               </label>
+              {photos.some((p) => !p.ai_analyzed_at) && (
+                <button
+                  onClick={analyzeAllPhotos}
+                  disabled={analyzingPhotos}
+                  className="flex items-center gap-2 bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 font-bold px-4 h-10 rounded-xl text-sm transition-colors disabled:opacity-60"
+                  title="Analyze photos with AI: auto-captions + damage documentation used in the narrative and invoices"
+                >
+                  {analyzingPhotos ? <RefreshCw size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                  {analyzingPhotos
+                    ? "Analyzing…"
+                    : `AI Captions (${Math.min(photos.filter((p) => !p.ai_analyzed_at).length, 25)})`}
+                </button>
+              )}
               <span className="text-xs text-slate-500">Select multiple photos at once</span>
             </div>
+            {analyzingPhotos && (
+              <p className="text-xs text-purple-300/80 mb-3">
+                AI is captioning and documenting each photo — results feed the job narrative and invoice generator…
+              </p>
+            )}
             {photoError && <p className="text-red-400 text-sm mb-4">{photoError}</p>}
 
             {photos.length === 0 ? (
@@ -1392,9 +1515,14 @@ export default function JobDetailPage() {
                             key={p.id}
                             className="relative bg-[#0A1628] border border-[#1E293B] rounded-xl overflow-hidden aspect-square hover:border-[#F97316]/60 transition-colors group"
                           >
-                            <button onClick={() => setSelectedPhoto(p)} className="w-full h-full block">
+                            <button onClick={() => { setSelectedPhoto(p); setCaptionDraft(p.caption ?? ""); }} className="w-full h-full block">
                               <img src={url} alt={p.caption ?? cat.label} className="w-full h-full object-cover" />
                             </button>
+                            {p.ai_analyzed_at && (
+                              <div className="absolute top-1.5 left-1.5 bg-purple-500/80 rounded-md p-1 pointer-events-none" title="AI analyzed">
+                                <Sparkles size={11} className="text-white" />
+                              </div>
+                            )}
                             {p.caption && (
                               <div className="absolute bottom-0 left-0 right-0 bg-black/70 px-2 py-1 pointer-events-none">
                                 <p className="text-white text-xs truncate">{p.caption}</p>
@@ -1418,7 +1546,7 @@ export default function JobDetailPage() {
 
             {/* Lightbox */}
             {selectedPhoto && (
-              <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4" onClick={() => setSelectedPhoto(null)}>
+              <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4 gap-3" onClick={() => setSelectedPhoto(null)}>
                 <button className="absolute top-4 right-4 text-white/70 hover:text-white" onClick={() => setSelectedPhoto(null)}><X size={28} /></button>
                 <button
                   className="absolute top-4 left-4 flex items-center gap-2 bg-red-600/80 hover:bg-red-600 text-white text-xs font-bold px-3 py-2 rounded-xl transition-colors"
@@ -1429,10 +1557,67 @@ export default function JobDetailPage() {
                 <img
                   src={selectedPhoto.url ?? getPhotoUrl(selectedPhoto.storage_path)}
                   alt={selectedPhoto.caption ?? ""}
-                  className="max-h-[90vh] max-w-full rounded-xl object-contain"
+                  className="max-h-[60vh] max-w-full rounded-xl object-contain"
                   onClick={(e) => e.stopPropagation()}
                 />
-                {selectedPhoto.caption && <p className="absolute bottom-6 text-white text-sm bg-black/60 px-4 py-2 rounded-full">{selectedPhoto.caption}</p>}
+                <div
+                  className="w-full max-w-2xl bg-[#0A1628] border border-[#1E293B] rounded-2xl p-4 space-y-3"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {/* Editable caption */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={captionDraft}
+                      onChange={(e) => setCaptionDraft(e.target.value)}
+                      placeholder="Add a caption… (used in photo reports)"
+                      className="flex-1 bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316]"
+                    />
+                    <button
+                      onClick={() => savePhotoCaption(selectedPhoto)}
+                      disabled={savingCaption || captionDraft === (selectedPhoto.caption ?? "")}
+                      className="flex items-center gap-1.5 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-3 h-9 rounded-xl text-xs transition-colors disabled:opacity-50"
+                    >
+                      {savingCaption ? <RefreshCw size={12} className="animate-spin" /> : <Check size={12} />} Save
+                    </button>
+                    <button
+                      onClick={() => analyzeSinglePhoto(selectedPhoto)}
+                      disabled={analyzingOne === selectedPhoto.id}
+                      className="flex items-center gap-1.5 bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 font-bold px-3 h-9 rounded-xl text-xs transition-colors disabled:opacity-60"
+                    >
+                      {analyzingOne === selectedPhoto.id ? <RefreshCw size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                      {selectedPhoto.ai_analyzed_at ? "Re-analyze" : "Analyze with AI"}
+                    </button>
+                  </div>
+
+                  {/* AI analysis details */}
+                  {selectedPhoto.ai_analysis && (
+                    <div className="space-y-2 text-xs">
+                      {selectedPhoto.ai_caption && selectedPhoto.ai_caption !== selectedPhoto.caption && (
+                        <p className="text-slate-400"><span className="text-purple-400 font-bold">AI caption:</span> {selectedPhoto.ai_caption}</p>
+                      )}
+                      {[
+                        { label: "Damage", items: selectedPhoto.ai_analysis.damage_observed },
+                        { label: "Materials", items: selectedPhoto.ai_analysis.materials_affected },
+                        { label: "Equipment", items: selectedPhoto.ai_analysis.equipment_visible },
+                        { label: "Safety", items: selectedPhoto.ai_analysis.safety_concerns },
+                      ].filter((g) => g.items?.length).map((g) => (
+                        <div key={g.label} className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-slate-500 font-bold w-16">{g.label}:</span>
+                          {g.items.map((item, i) => (
+                            <span key={i} className={clsx(
+                              "px-2 py-0.5 rounded-full",
+                              g.label === "Safety" ? "bg-red-500/15 text-red-400" : "bg-[#1E293B] text-slate-300"
+                            )}>{item}</span>
+                          ))}
+                        </div>
+                      ))}
+                      {selectedPhoto.ai_analysis.restoration_notes && (
+                        <p className="text-slate-500 italic">{selectedPhoto.ai_analysis.restoration_notes}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1440,6 +1625,49 @@ export default function JobDetailPage() {
 
         {activeTab === "report" && (
           <div className="max-w-2xl">
+            {/* AI Job Narrative */}
+            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5 mb-6">
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <Sparkles size={16} className="text-purple-400" />
+                <h3 className="text-sm font-bold text-slate-300">Job Narrative</h3>
+                {job.narrative_updated_at && (
+                  <span className="text-xs text-slate-600">Updated {formatAlaskaDateTime(job.narrative_updated_at)}</span>
+                )}
+                <div className="ml-auto flex items-center gap-2">
+                  <button
+                    onClick={runGenerateNarrative}
+                    disabled={generatingNarrative}
+                    className="flex items-center gap-1.5 bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 font-bold px-3 h-8 rounded-lg text-xs transition-colors disabled:opacity-60"
+                  >
+                    {generatingNarrative ? <RefreshCw size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                    {generatingNarrative ? "Writing…" : job.narrative ? "Regenerate" : "Generate with AI"}
+                  </button>
+                  <button
+                    onClick={saveNarrative}
+                    disabled={savingNarrative || narrativeDraft === (job.narrative ?? "")}
+                    className="flex items-center gap-1.5 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-3 h-8 rounded-lg text-xs transition-colors disabled:opacity-50"
+                  >
+                    {savingNarrative ? <RefreshCw size={12} className="animate-spin" /> : <Check size={12} />} Save
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mb-3">
+                An adjuster-ready narrative written from everything documented on this job — rooms, moisture readings,
+                equipment logs, and AI photo analysis. Edit freely; it's included as a page in invoice PDFs.
+              </p>
+              {narrativeError && <p className="text-xs text-red-400 mb-2">{narrativeError}</p>}
+              {generatingNarrative && (
+                <p className="text-xs text-purple-300/80 mb-2">Reviewing all job documentation and writing the narrative — this can take a minute…</p>
+              )}
+              <textarea
+                value={narrativeDraft}
+                onChange={(e) => setNarrativeDraft(e.target.value)}
+                placeholder="No narrative yet — click Generate with AI, or write your own."
+                rows={narrativeDraft ? 12 : 4}
+                className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] leading-relaxed"
+              />
+            </div>
+
             <p className="text-slate-400 text-sm mb-6">Generate and download PDF reports. Each opens a download dialog.</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {[
