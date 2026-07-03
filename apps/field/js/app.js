@@ -515,6 +515,8 @@ async function formPage(project, key, instId) {
   }
 
   // multi-instance: show instance list unless a specific instance is requested
+  // (older projects predate some multi forms — e.g. invoices — so default the array)
+  if (!Array.isArray(project[key])) { project[key] = []; await Store.put(project); }
   if (instId) {
     const inst = project[key].find((x) => x.id === instId);
     if (!inst) return go(`#/p/${project.id}/f/${key}`);

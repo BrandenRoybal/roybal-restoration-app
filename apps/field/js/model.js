@@ -45,6 +45,8 @@ export const FORMS = [
     blurb: "IICRC S500 dry verification + sign-off" },
   { key: "changeOrders",     name: "Change Order",       icon: "🔁", multi: true,
     blurb: "Scope / supplement changes" },
+  { key: "invoices",         name: "Mitigation Invoice", icon: "🧾", multi: true,
+    blurb: "Xactimate-style invoice — AI-drafted from the job's documentation or built by hand" },
 ];
 
 export function newProject() {
@@ -83,6 +85,7 @@ export function newProject() {
     constructionLogs: [],
     laborLog: null,
     changeOrders: [],
+    invoices: [],
   };
 }
 
