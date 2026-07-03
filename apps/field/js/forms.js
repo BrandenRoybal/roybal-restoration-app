@@ -16,6 +16,7 @@ import {
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { pickJobcode, pullDay as qbPullDay, pullRange as qbPullRange, entriesFor as qbEntriesFor, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice } from "./officeai.js";
+import { pushInvoiceToQbo } from "./qbo.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -1146,7 +1147,26 @@ export function invoice(project, inv) {
     busyBtn(auditBtn, false, "\ud83d\udd0e Find missed items");
   });
 
-  const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" }, draftBtn, auditBtn);
+  /* ---- Push to QuickBooks Online (separate office connection; see admin) ---- */
+  const qboStatusEl = h("span", { class: "subtle", style: "font-size:12px;align-self:center" },
+    inv.qboSyncedAt ? `In QuickBooks as ${inv.qboDocNumber || "invoice"} \u00b7 ${fmtDate(inv.qboSyncedAt.slice(0, 10))}` : "");
+  const qboBtn = h("button", { type: "button", class: "btn btn--sm" },
+    inv.qboInvoiceId ? "\u2b06\ufe0f Update in QuickBooks" : "\u2b06\ufe0f Push to QuickBooks");
+  qboBtn.addEventListener("click", async () => {
+    if (!(inv.items || []).some((it) => String(it.desc || "").trim())) return toast("Add line items first.");
+    busyBtn(qboBtn, true, "\u2b06\ufe0f Pushing\u2026");
+    try {
+      const r = await pushInvoiceToQbo(project, inv);
+      commit();
+      qboStatusEl.textContent = `In QuickBooks as ${r.docNumber} \u00b7 $${Number(r.total || 0).toFixed(2)}`;
+      toast((r.updated ? "Updated" : "Created") + " QuickBooks invoice " + r.docNumber + ".");
+    } catch (e) {
+      toast("QuickBooks push failed: " + (e && e.message ? e.message : e));
+    }
+    busyBtn(qboBtn, false, inv.qboInvoiceId ? "\u2b06\ufe0f Update in QuickBooks" : "\u2b06\ufe0f Push to QuickBooks");
+  });
+
+  const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" }, draftBtn, auditBtn, qboBtn, qboStatusEl);
 
   return sheet("MITIGATION INVOICE", "Water Mitigation & Restoration Services | IICRC S500 Compliant", "Mitigation Invoice",
     h("div", { class: "grid2" },
