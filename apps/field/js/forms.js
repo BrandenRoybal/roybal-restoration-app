@@ -14,7 +14,7 @@ import {
   blankLineItem, blankVerifyRow, COMPANY,
 } from "./model.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
-import { pickJobcode, pullDay as qbPullDay, entriesFor as qbEntriesFor, qbConfigured } from "./qbtime.js";
+import { pickJobcode, pullDay as qbPullDay, pullRange as qbPullRange, entriesFor as qbEntriesFor, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -772,6 +772,99 @@ export function constructionLog(project, c) {
     sigBlock(c, "signature", "completedBy", "signDate", "Signature"));
 }
 
+/* App-only bar to link a QB job + pull the whole job's hours into the Labor Log. */
+function laborSyncBar(project, l, paint) {
+  if (!qbConfigured()) return h("span", { class: "app-only" });
+  const bar = h("div", { class: "app-only qb-bar" });
+  const pullBtn = h("button", { type: "button", class: "btn btn--primary btn--sm" }, "⤓ Sync labor from QuickBooks");
+
+  function render() {
+    const linked = !!project.qbJobcodeId;
+    const label = linked
+      ? h("span", { class: "qb-linked" }, "🔗 QuickBooks: ", h("strong", {}, project.qbJobcodeName || project.qbJobcodeId))
+      : h("span", { class: "subtle" }, "Not linked to a QuickBooks job");
+    const linkBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, linked ? "Change" : "Link QuickBooks job");
+    linkBtn.addEventListener("click", async () => { const p = await pickJobcode(project); if (p) { commit(); render(); } });
+    bar.replaceChildren(
+      h("div", { class: "qb-bar__row" }, label, linkBtn),
+      h("div", { class: "qb-bar__row" }, pullBtn,
+        h("span", { class: "subtle qb-hint" }, "Pulls every hour logged to this job, up to today.")));
+  }
+
+  pullBtn.addEventListener("click", async () => {
+    if (!project.qbJobcodeId) { const p = await pickJobcode(project); if (!p || !project.qbJobcodeId) return; commit(); render(); }
+    pullBtn.disabled = true;
+    const prev = pullBtn.textContent;
+    pullBtn.textContent = "Syncing…";
+    try {
+      const start = project.dateOfLoss || new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
+      await qbPullRange(project.qbJobcodeId, start, todayISO(), project.id);   // backfill time_entries
+      const entries = await qbAllEntriesFor(project);
+      l.entries = entries.map((e) => ({ date: e.date, employee: e.employee, start: e.start, finish: e.finish, hours: e.hours, task: e.task, qbId: e.qbTimesheetId }));
+      l.syncedAt = new Date().toISOString();
+      paint(); commit();
+      toast(l.entries.length ? `Synced ${l.entries.length} labor entr${l.entries.length === 1 ? "y" : "ies"}.` : "No QuickBooks hours found for this job.");
+    } catch (e) { toast(e.message || "QuickBooks sync failed"); }
+    finally { pullBtn.disabled = false; pullBtn.textContent = prev; }
+  });
+
+  render();
+  return bar;
+}
+
+/* ============================================================
+   LABOR LOG — one-page whole-job time & labor detail from QuickBooks Time.
+   Replaces the daily construction logs in the insurance packet.
+   ============================================================ */
+export function laborLog(project, l) {
+  if (!Array.isArray(l.entries)) l.entries = [];
+  const ro = (v) => h("div", { style: "font-weight:600;padding:2px 0" }, v);
+  const tbody = h("tbody");
+  const totalEl = h("strong", {}, "0.00");
+  const summaryEl = h("div", { class: "grid3" });
+  const empEl = h("div", { class: "subtle", style: "font-size:12px;margin-top:4px;line-height:1.9" });
+
+  function paint() {
+    const entries = l.entries;
+    const total = entries.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+    totalEl.textContent = total.toFixed(2);
+    const dates = entries.map((e) => e.date).filter(Boolean).sort();
+    const range = dates.length ? fmtDate(dates[0]) + " – " + fmtDate(dates[dates.length - 1]) : "—";
+    const byEmp = {};
+    entries.forEach((e) => { const k = e.employee || "—"; byEmp[k] = (byEmp[k] || 0) + (Number(e.hours) || 0); });
+    summaryEl.replaceChildren(
+      field("Total Man-Hours", ro(total.toFixed(2))),
+      field("Date Range", ro(range)),
+      field("Crew on Job", ro(String(Object.keys(byEmp).length || "—"))));
+    empEl.replaceChildren(...Object.entries(byEmp).sort((a, b) => b[1] - a[1]).map(([n, hh]) =>
+      h("span", { style: "margin-right:16px;white-space:nowrap" }, h("strong", {}, n), " " + hh.toFixed(2) + "h")));
+    tbody.replaceChildren(...(entries.length ? entries.map((e) => h("tr", {},
+      h("td", {}, fmtDate(e.date)),
+      h("td", {}, e.employee || "—"),
+      h("td", {}, e.start || "—"),
+      h("td", {}, e.finish || "—"),
+      h("td", { style: "text-align:right" }, (Number(e.hours) || 0).toFixed(2)),
+      h("td", {}, e.task || ""))) :
+      [h("tr", {}, h("td", { colspan: 6, class: "subtle", style: "text-align:center;padding:8px" },
+        "No hours synced yet — link the QuickBooks job and tap Sync."))]));
+  }
+  paint();
+
+  return sheet("LABOR LOG", "Time & Labor Detail — per QuickBooks Time", "Labor Log",
+    jobInfo(project, ["customer", "address", "claimNo", "workOrderNo"]),
+    laborSyncBar(project, l, paint),
+    l.syncedAt ? h("p", { class: "subtle app-only", style: "font-size:12px" }, "Last synced " + fmtDate(l.syncedAt.slice(0, 10))) : null,
+    sectionTitle("Summary"),
+    summaryEl,
+    empEl,
+    sectionTitle("Labor Detail"),
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid" },
+        h("thead", {}, h("tr", {}, ...["Date", "Employee", "In", "Out", "Hrs", "Service"].map((x) => h("th", {}, x)))),
+        tbody)),
+    h("div", { class: "totals" }, h("div", { class: "trow grand" }, h("span", {}, "Total Man-Hours"), totalEl)));
+}
+
 /* ============================================================
    5. CERTIFICATE OF DRYING
    ============================================================ */
@@ -1180,6 +1273,7 @@ export const RENDERERS = {
   photos: photosForm,
   contents: contentsReport,
   constructionLogs: constructionLog,
+  laborLog,
   certDrying,
   changeOrders: changeOrder,
   invoices: invoice,

@@ -39,6 +39,21 @@ export async function listJobcodes() {
   return res.json();
 }
 
+/** All QB-sourced time_entries for this job's jobcode, across every date
+    (for the whole-job Labor Log). Sorted by date then start. */
+export async function allEntriesFor(project) {
+  if (!SYNC_ENABLED || !project.qbJobcodeId) return [];
+  const jc = encodeURIComponent(project.qbJobcodeId);
+  const res = await rest(
+    `time_entries?select=data&deleted=eq.false&data->>qbJobcodeId=eq.${jc}&data->>source=eq.qbtime`,
+    { method: "GET" }
+  );
+  if (!res.ok) throw new Error("Couldn't read QuickBooks hours (" + res.status + ")");
+  const rows = (await res.json()).map((r) => r.data);
+  rows.sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.start || "").localeCompare(b.start || ""));
+  return rows;
+}
+
 /* ---------- QB Time employees (for the crew ↔ QB mapping) ---------- */
 export async function listUsers() {
   const data = await proxy("getUsers");

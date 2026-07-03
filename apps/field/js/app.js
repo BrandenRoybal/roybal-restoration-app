@@ -5,7 +5,7 @@ import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending,
 import {
   FORMS, formByKey, formCount, newProject,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
-  newInvoice, newWorkAuth, newCertDrying,
+  newInvoice, newWorkAuth, newCertDrying, newLaborLog,
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
   BOX_DESTINATIONS, dispositionShort, dispositionLabel, depreciation,
 } from "./model.js";
@@ -39,6 +39,7 @@ const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
   invoices: newInvoice, workAuth: newWorkAuth, certDrying: newCertDrying,
+  laborLog: newLaborLog,
 };
 
 /* ---------- router ---------- */
@@ -341,13 +342,17 @@ function packetPage(project) {
 
   const included = [];
   for (const f of FORMS) {
+    // Daily construction logs are internal (crew notes/issues/materials) — the
+    // one-page Labor Log from QuickBooks Time represents the labor in the packet.
+    if (f.key === "constructionLogs") continue;
     const v = project[f.key];
     const render = RENDERERS[f.key];
     if (!render) continue;
     if (f.multi) {
       (v || []).forEach((inst) => included.push(render(project, inst)));
     } else {
-      const has = Array.isArray(v) ? v.length > 0 : !!v;   // photos/contents are arrays → one report
+      let has = Array.isArray(v) ? v.length > 0 : !!v;   // photos/contents are arrays → one report
+      if (f.key === "laborLog") has = !!(v && Array.isArray(v.entries) && v.entries.length);  // only when synced
       if (!has) continue;
       const pages = UPLOAD_REPLACES[f.key] && v.mode === "upload" ? uploadedDocPages(v) : [];
       if (pages.length) included.push(...uploadedDocSheet(pages, UPLOAD_REPLACES[f.key]));

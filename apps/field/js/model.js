@@ -38,7 +38,9 @@ export const FORMS = [
   { key: "workAuth",         name: "Work Authorization", icon: "✍️", multi: false,
     blurb: "Sign on device or upload signed copy" },
   { key: "constructionLogs", name: "Daily Const. Log",   icon: "📋", multi: true,
-    blurb: "Crew, tasks & hours" },
+    blurb: "Crew, tasks & hours (internal — not in packet)" },
+  { key: "laborLog",         name: "Labor Log",          icon: "⏱", multi: false,
+    blurb: "Every job hour from QuickBooks Time — one page for the packet" },
   { key: "certDrying",       name: "Cert. of Drying",    icon: "✅", multi: false,
     blurb: "IICRC S500 dry verification + sign-off" },
   { key: "changeOrders",     name: "Change Order",       icon: "🔁", multi: true,
@@ -79,6 +81,7 @@ export function newProject() {
     moistureMaps: [],
     dryingLogs: [],
     constructionLogs: [],
+    laborLog: null,
     changeOrders: [],
   };
 }
@@ -202,6 +205,14 @@ export function newConstructionLog() {
 }
 export function blankWorkRow() {
   return { employee: "", task: "", start: "", finish: "", hours: "" };
+}
+
+export function newLaborLog() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    syncedAt: "",       // last QuickBooks Time pull
+    entries: [],        // snapshot: [{ date, employee, start, finish, hours, task, qbId }]
+  };
 }
 
 export function newChangeOrder() {
