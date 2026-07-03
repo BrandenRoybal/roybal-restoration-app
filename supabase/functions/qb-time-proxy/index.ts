@@ -162,7 +162,17 @@ async function getValidToken(supabase: ReturnType<typeof createClient>): Promise
 type QbTimesheet = {
   id: number; user_id: number; jobcode_id: number;
   start: string; end: string; duration: number; date: string; notes: string;
+  customfields?: Record<string, string>;
 };
+
+// The QB Time "Service Item" custom field id varies per account — resolve it by
+// name from the timesheet supplemental_data (fallback: any field named ~service).
+function findServiceFieldId(defs?: Record<string, { name?: string }>): string | null {
+  if (!defs) return null;
+  for (const [id, d] of Object.entries(defs)) if (String(d?.name || "").toLowerCase() === "service item") return id;
+  for (const [id, d] of Object.entries(defs)) if (String(d?.name || "").toLowerCase().includes("service")) return id;
+  return null;
+}
 
 function qbRowsFrom(
   timesheets: QbTimesheet[],
@@ -170,7 +180,8 @@ function qbRowsFrom(
   jobcodes: Record<string, { name: string }>,
   jobcodeId: string,
   fieldProjectId: string | null,
-  idByTs: Map<string, string>
+  idByTs: Map<string, string>,
+  serviceFieldId: string | null
 ) {
   const nowIso = new Date().toISOString();
   return timesheets.map((ts) => {
@@ -178,6 +189,7 @@ function qbRowsFrom(
     const employee = u ? `${u.first_name} ${u.last_name}`.trim() : `QB user ${ts.user_id}`;
     const jc = jobcodes[String(ts.jobcode_id)];
     const id = idByTs.get(String(ts.id)) ?? crypto.randomUUID();
+    const service = serviceFieldId ? (ts.customfields?.[serviceFieldId] || "") : "";
     return {
       id,
       deleted: false,
@@ -189,7 +201,9 @@ function qbRowsFrom(
         jobcodeName: jc?.name ?? null,
         date: ts.date,
         employee,
-        task: ts.notes || jc?.name || "",
+        task: ts.notes || jc?.name || "",   // construction log "Task Performed"
+        service,                             // QB Time "Service Item" custom field
+        note: ts.notes || "",               // crew timesheet note
         start: hhmm(ts.start),
         finish: hhmm(ts.end),
         hours: Number((ts.duration ? ts.duration / 3600 : 0).toFixed(2)),
@@ -225,21 +239,18 @@ async function pullOneDay(
   });
 
   const res = (await qbFetch(`/timesheets?${qs}`, accessToken)) as {
-    results: {
-      timesheets: Record<string, {
-        id: number; user_id: number; jobcode_id: number;
-        start: string; end: string; duration: number; date: string; notes: string;
-      }>;
-    };
+    results: { timesheets: Record<string, QbTimesheet> };
     supplemental_data: {
       users?: Record<string, { id: number; first_name: string; last_name: string }>;
       jobcodes?: Record<string, { id: number; name: string }>;
+      customfields?: Record<string, { name?: string }>;
     };
   };
 
   const timesheets = Object.values(res.results?.timesheets ?? {});
   const users = res.supplemental_data?.users ?? {};
   const jobcodes = res.supplemental_data?.jobcodes ?? {};
+  const serviceFieldId = findServiceFieldId(res.supplemental_data?.customfields);
 
   // Existing QB rows for this jobcode+date: reuse ids (update in place) and
   // detect timesheets that were removed in QuickBooks since the last pull.
@@ -256,7 +267,7 @@ async function pullOneDay(
   }
 
   const seen = new Set<string>(timesheets.map((ts) => String(ts.id)));
-  const rows = qbRowsFrom(timesheets, users, jobcodes, jobcodeId, fieldProjectId, idByTs);
+  const rows = qbRowsFrom(timesheets, users, jobcodes, jobcodeId, fieldProjectId, idByTs, serviceFieldId);
 
   if (rows.length > 0) {
     const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
@@ -290,6 +301,7 @@ async function pullRange(
   const all: QbTimesheet[] = [];
   const users: Record<string, { first_name: string; last_name: string }> = {};
   const jobcodes: Record<string, { name: string }> = {};
+  const customfieldDefs: Record<string, { name?: string }> = {};
   let page = 1;
   let more = true;
   while (more && page <= 25) {
@@ -307,15 +319,18 @@ async function pullRange(
       supplemental_data: {
         users?: Record<string, { first_name: string; last_name: string }>;
         jobcodes?: Record<string, { name: string }>;
+        customfields?: Record<string, { name?: string }>;
       };
     };
     const ts = Object.values(res.results?.timesheets ?? {});
     all.push(...ts);
     Object.assign(users, res.supplemental_data?.users ?? {});
     Object.assign(jobcodes, res.supplemental_data?.jobcodes ?? {});
+    Object.assign(customfieldDefs, res.supplemental_data?.customfields ?? {});
     more = ts.length >= 200; // a full page probably means there's another
     page++;
   }
+  const serviceFieldId = findServiceFieldId(customfieldDefs);
 
   const { data: existing } = await supabase
     .from("time_entries")
@@ -330,7 +345,7 @@ async function pullRange(
     if (r.data?.qbTimesheetId) idByTs.set(String(r.data.qbTimesheetId), r.id);
   }
 
-  const rows = qbRowsFrom(all, users, jobcodes, jobcodeId, fieldProjectId, idByTs);
+  const rows = qbRowsFrom(all, users, jobcodes, jobcodeId, fieldProjectId, idByTs, serviceFieldId);
   if (rows.length > 0) {
     const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
     if (error) throw new Error(`time_entries upsert failed: ${error.message}`);
@@ -513,8 +528,9 @@ serve(async (req) => {
 
       const timesheets = Object.values(res.results?.timesheets ?? {});
       const users = res.supplemental_data?.users ?? {};
+      const customfields = (res.supplemental_data as { customfields?: unknown })?.customfields ?? {};
 
-      return ok({ timesheets, users });
+      return ok({ timesheets, users, customfields });
     } catch (e) {
       return err(e instanceof Error ? e.message : "getTimesheets failed");
     }

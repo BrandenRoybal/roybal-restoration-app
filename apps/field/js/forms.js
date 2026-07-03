@@ -800,7 +800,7 @@ function laborSyncBar(project, l, paint) {
       const start = project.dateOfLoss || new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10);
       await qbPullRange(project.qbJobcodeId, start, todayISO(), project.id);   // backfill time_entries
       const entries = await qbAllEntriesFor(project);
-      l.entries = entries.map((e) => ({ date: e.date, employee: e.employee, start: e.start, finish: e.finish, hours: e.hours, task: e.task, qbId: e.qbTimesheetId }));
+      l.entries = entries.map((e) => ({ date: e.date, employee: e.employee, start: e.start, finish: e.finish, hours: e.hours, service: e.service || "", note: e.note || "", task: e.task, qbId: e.qbTimesheetId }));
       l.syncedAt = new Date().toISOString();
       paint(); commit();
       toast(l.entries.length ? `Synced ${l.entries.length} labor entr${l.entries.length === 1 ? "y" : "ies"}.` : "No QuickBooks hours found for this job.");
@@ -844,8 +844,9 @@ export function laborLog(project, l) {
       h("td", {}, e.start || "—"),
       h("td", {}, e.finish || "—"),
       h("td", { style: "text-align:right" }, (Number(e.hours) || 0).toFixed(2)),
-      h("td", {}, e.task || ""))) :
-      [h("tr", {}, h("td", { colspan: 6, class: "subtle", style: "text-align:center;padding:8px" },
+      h("td", {}, e.service || e.task || ""),
+      h("td", {}, e.note || ""))) :
+      [h("tr", {}, h("td", { colspan: 7, class: "subtle", style: "text-align:center;padding:8px" },
         "No hours synced yet — link the QuickBooks job and tap Sync."))]));
   }
   paint();
@@ -860,7 +861,7 @@ export function laborLog(project, l) {
     sectionTitle("Labor Detail"),
     h("div", { class: "tablewrap" },
       h("table", { class: "grid" },
-        h("thead", {}, h("tr", {}, ...["Date", "Employee", "In", "Out", "Hrs", "Service"].map((x) => h("th", {}, x)))),
+        h("thead", {}, h("tr", {}, ...["Date", "Employee", "In", "Out", "Hrs", "Service", "Note"].map((x) => h("th", {}, x)))),
         tbody)),
     h("div", { class: "totals" }, h("div", { class: "trow grand" }, h("span", {}, "Total Man-Hours"), totalEl)));
 }
