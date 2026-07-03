@@ -830,13 +830,15 @@ function cleanService(s) {
    ============================================================ */
 export function laborLog(project, l) {
   if (!Array.isArray(l.entries)) l.entries = [];
+  let editing = false;
   const ro = (v) => h("div", { style: "font-weight:600;padding:2px 0" }, v);
   const tbody = h("tbody");
   const totalEl = h("strong", {}, "0.00");
   const summaryEl = h("div", { class: "grid3" });
   const empEl = h("div", { class: "subtle", style: "font-size:12px;margin-top:4px;line-height:1.9" });
 
-  function paint() {
+  // Summary + totals only (no table rebuild) — safe to call while typing in an edit cell.
+  function paintSummary() {
     const entries = l.entries;
     const total = entries.reduce((s, e) => s + (Number(e.hours) || 0), 0);
     totalEl.textContent = total.toFixed(2);
@@ -850,18 +852,62 @@ export function laborLog(project, l) {
       field("Crew on Job", ro(String(Object.keys(byEmp).length || "—"))));
     empEl.replaceChildren(...Object.entries(byEmp).sort((a, b) => b[1] - a[1]).map(([n, hh]) =>
       h("span", { style: "margin-right:16px;white-space:nowrap" }, h("strong", {}, n), " " + hh.toFixed(2) + "h")));
-    tbody.replaceChildren(...(entries.length ? entries.map((e) => h("tr", {},
-      h("td", {}, fmtDate(e.date)),
-      h("td", {}, e.employee || "—"),
-      h("td", {}, e.start || "—"),
-      h("td", {}, e.finish || "—"),
-      h("td", { style: "text-align:right" }, (Number(e.hours) || 0).toFixed(2)),
-      h("td", {}, cleanService(e.service) || e.task || ""),
-      h("td", {}, e.note || ""))) :
-      [h("tr", {}, h("td", { colspan: 7, class: "subtle", style: "text-align:center;padding:8px" },
-        "No hours synced yet — link the QuickBooks job and tap Sync."))]));
   }
+
+  const readRow = (e) => h("tr", {},
+    h("td", {}, fmtDate(e.date)),
+    h("td", {}, e.employee || "—"),
+    h("td", {}, e.start || "—"),
+    h("td", {}, e.finish || "—"),
+    h("td", { style: "text-align:right" }, (Number(e.hours) || 0).toFixed(2)),
+    h("td", {}, cleanService(e.service) || e.task || ""),
+    h("td", {}, e.note || ""));
+
+  function editRow(e, i) {
+    const cell = (key, w, type, display) => {
+      const td = h("td");
+      const input = h("input", { type: type || "text", value: display != null ? display : (e[key] ?? ""), style: "width:100%;min-width:" + w });
+      input.addEventListener("input", () => { e[key] = input.value; paintSummary(); commit(); });
+      td.append(input); return td;
+    };
+    return h("tr", {},
+      cell("date", "118px", "date"),
+      cell("employee", "104px"),
+      cell("start", "60px"),
+      cell("finish", "60px"),
+      cell("hours", "52px", "number"),
+      cell("service", "130px", "text", cleanService(e.service) || e.task || ""),
+      cell("note", "120px"),
+      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { l.entries.splice(i, 1); paintRows(); paintSummary(); commit(); } }, "✕")));
+  }
+
+  function paintRows() {
+    const entries = l.entries;
+    if (!entries.length && !editing) {
+      tbody.replaceChildren(h("tr", {}, h("td", { colspan: 7, class: "subtle", style: "text-align:center;padding:8px" },
+        "No hours synced yet — link the QuickBooks job and tap Sync.")));
+      return;
+    }
+    tbody.replaceChildren(...entries.map((e, i) => editing ? editRow(e, i) : readRow(e)));
+  }
+  const paint = () => { paintSummary(); paintRows(); };
   paint();
+
+  const editBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only" }, "✎ Edit");
+  const addBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add", style: "display:none" }, "+ Add labor row");
+  editBtn.addEventListener("click", () => {
+    editing = !editing;
+    editBtn.textContent = editing ? "✓ Done" : "✎ Edit";
+    editBtn.classList.toggle("active", editing);
+    addBtn.style.display = editing ? "" : "none";
+    paintRows();
+  });
+  addBtn.addEventListener("click", () => {
+    l.entries.push({ date: todayISO(), employee: "", start: "", finish: "", hours: 0, service: "", note: "", manual: true });
+    paintRows(); paintSummary(); commit();
+  });
+  const detailBar = h("div", { class: "app-only", style: "display:flex;gap:8px;align-items:center;margin-bottom:8px" },
+    editBtn, h("span", { class: "subtle", style: "font-size:12px" }, "Adjust a synced entry or add one by hand."));
 
   return sheet("LABOR LOG", "Time & Labor Detail — per QuickBooks Time", "Labor Log",
     jobInfo(project, ["customer", "address", "claimNo", "workOrderNo"]),
@@ -871,10 +917,12 @@ export function laborLog(project, l) {
     summaryEl,
     empEl,
     sectionTitle("Labor Detail"),
+    detailBar,
     h("div", { class: "tablewrap" },
       h("table", { class: "grid" },
-        h("thead", {}, h("tr", {}, ...["Date", "Employee", "In", "Out", "Hrs", "Service", "Note"].map((x) => h("th", {}, x)))),
+        h("thead", {}, h("tr", {}, ...["Date", "Employee", "In", "Out", "Hrs", "Service", "Note"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
         tbody)),
+    addBtn,
     h("div", { class: "totals" }, h("div", { class: "trow grand" }, h("span", {}, "Total Man-Hours"), totalEl)));
 }
 

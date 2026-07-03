@@ -255,9 +255,12 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
   const wrap = h("div", { class: "sketch" });
   const bgImg = h("img", { class: "sketch__bg", alt: "" });
   const canvas = h("canvas");
-  wrap.append(bgImg, canvas);
+  const hint = h("div", { class: "sketch__hint app-only" }, "✋ Scroll mode — tap a color to draw");
+  wrap.append(bgImg, canvas, hint);
   const ctx = canvas.getContext("2d");
-  let pen = "#10233f", mode = "draw", nextNum = markerStart || 1, drawing = false, last = null;
+  // Start in "off" (scroll) mode so a finger scrolling past the map never draws
+  // on it — the tech must tap a color (or Number) to arm a tool first.
+  let pen = "#10233f", mode = "off", nextNum = markerStart || 1, drawing = false, last = null;
 
   function showBg() {
     if (background) { bgImg.src = background; bgImg.style.display = "block"; }
@@ -341,6 +344,7 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
     emit();
   }
   canvas.addEventListener("pointerdown", (e) => {
+    if (mode === "off") return;   // scroll mode: let the page scroll, never draw
     e.preventDefault();
     if (mode === "number") return stamp(pos(e));
     snapshot();
@@ -366,16 +370,27 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
     numBtn.classList.toggle("active", mode === "number");
     numBtn.style.background = mode === "number" ? "var(--orange)" : "#fff";
     numBtn.style.color = mode === "number" ? "#fff" : "var(--navy)";
+    const off = mode === "off";
+    moveBtn.classList.toggle("active", off);
+    moveBtn.style.background = off ? "var(--orange)" : "#fff";
+    moveBtn.style.color = off ? "#fff" : "var(--navy)";
+    // Only capture touch (block page scroll) while a draw/stamp tool is armed.
+    wrap.style.touchAction = off ? "pan-y" : "none";
+    canvas.style.touchAction = off ? "pan-y" : "none";
+    hint.style.display = off ? "block" : "none";
   }
+  const moveBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm", title: "Scroll the page without drawing" }, "✋ Move");
+  moveBtn.addEventListener("click", () => { mode = "off"; refresh(); });
   const numBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "①  Number");
-  numBtn.addEventListener("click", () => { mode = mode === "number" ? "draw" : "number"; refresh(); });
+  numBtn.addEventListener("click", () => { mode = mode === "number" ? "off" : "number"; refresh(); });
   const clearBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "↺ Clear drawing");
   clearBtn.addEventListener("click", () => { history.length = 0; nextNum = 1; ctx.clearRect(0, 0, canvas.width, canvas.height); emit(); });
   const undoBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "↩ Undo");
   undoBtn.addEventListener("click", undo);
 
   const toolsEl = h("div", { class: "sketch__tools app-only" },
-    swatch("#10233f"), swatch("#f26a21"), swatch("#d23b2e"), swatch("#1f9d55"), numBtn, undoBtn, clearBtn);
+    moveBtn, swatch("#10233f"), swatch("#f26a21"), swatch("#d23b2e"), swatch("#1f9d55"), numBtn, undoBtn, clearBtn);
+  refresh();   // apply the initial "off" state (scroll enabled, hint shown, no tool active)
 
   return {
     tools: toolsEl, el: wrap, composite, hasBackground: () => !!background,

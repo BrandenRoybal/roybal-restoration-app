@@ -286,6 +286,7 @@ table.grid.contents-grid .cthumb { width: 40px; height: 40px; }
    canvas (object-fit:fill); since the canvas matches the plan's aspect that's
    distortion-free, and it keeps alignment even in the clamped extreme case. */
 .sketch__bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; background: #fff; }
+.sketch__hint { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 3; pointer-events: none; background: rgba(15,27,45,.82); color: #fff; font-size: 12px; font-weight: 600; padding: 4px 11px; border-radius: 999px; white-space: nowrap; }
 .sketch canvas { display: block; width: 100%; height: 320px; border-radius: var(--radius); position: relative; z-index: 1; }
 .sketch__tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; align-items: center; }
 .sketch__tools .swatch { width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line); cursor: pointer; }
