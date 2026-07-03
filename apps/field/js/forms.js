@@ -812,6 +812,18 @@ function laborSyncBar(project, l, paint) {
   return bar;
 }
 
+/* Tidy the QB Time "Service Item" for display: keep the most specific part and
+   drop the redundant "Labor (In-House):" / "Labor -" prefix + trailing class tag.
+   e.g. "Labor (In-House):Labor - Cabinetry / Millwork" -> "Cabinetry / Millwork". */
+function cleanService(s) {
+  if (!s) return "";
+  let out = String(s);
+  if (out.includes(":")) out = out.slice(out.lastIndexOf(":") + 1);   // most specific part
+  out = out.replace(/^\s*labor\s*[-—:]\s*/i, "");                     // drop leading "Labor - "
+  out = out.replace(/\s*[-—]\s*\([^)]*\)\s*$/, "");                   // drop trailing " - (Construction)"
+  return out.trim() || String(s);                                    // never blank
+}
+
 /* ============================================================
    LABOR LOG — one-page whole-job time & labor detail from QuickBooks Time.
    Replaces the daily construction logs in the insurance packet.
@@ -844,7 +856,7 @@ export function laborLog(project, l) {
       h("td", {}, e.start || "—"),
       h("td", {}, e.finish || "—"),
       h("td", { style: "text-align:right" }, (Number(e.hours) || 0).toFixed(2)),
-      h("td", {}, e.service || e.task || ""),
+      h("td", {}, cleanService(e.service) || e.task || ""),
       h("td", {}, e.note || ""))) :
       [h("tr", {}, h("td", { colspan: 7, class: "subtle", style: "text-align:center;padding:8px" },
         "No hours synced yet — link the QuickBooks job and tap Sync."))]));
