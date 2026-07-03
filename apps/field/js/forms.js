@@ -15,6 +15,7 @@ import {
 } from "./model.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { pickJobcode, pullDay as qbPullDay, pullRange as qbPullRange, entriesFor as qbEntriesFor, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice } from "./officeai.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -1070,7 +1071,82 @@ export function invoice(project, inv) {
     const total = subtotal - (Number(inv.deductible) || 0) - (Number(inv.previousPayments) || 0) + tax;
     totalEl.textContent = money(total);
   }
-  const items = lineItems(inv.items, blankLineItem, { onTotals: (s) => recalc(s) });
+  const lossTa = ta(inv, "lossSummary");
+  const itemsWrap = h("div", {});
+  function paintItems() {
+    itemsWrap.replaceChildren(lineItems(inv.items, blankLineItem, { onTotals: (s) => recalc(s) }));
+  }
+  paintItems();
+
+  /* ---- AI: draft the invoice from the documented job / audit for missed items.
+     Online-only enhancements (same rules as voice) — the typed invoice always works. ---- */
+  const aiPanel = h("div", { class: "app-only" });
+  const busyBtn = (btn, on, label) => { btn.disabled = on; btn.textContent = label; };
+
+  const draftBtn = h("button", { type: "button", class: "btn btn--sm" }, "\u2728 Draft from documentation");
+  draftBtn.addEventListener("click", async () => {
+    if (!aiAvailable()) return;
+    const hasItems = (inv.items || []).some((it) => String(it.desc || "").trim());
+    if (hasItems && !window.confirm("Replace the current line items with an AI draft built from the job documentation?")) return;
+    busyBtn(draftBtn, true, "\u2728 Drafting\u2026");
+    try {
+      const draft = await draftInvoice(project);
+      const lines = Array.isArray(draft.items) ? draft.items : [];
+      if (draft.lossSummary) { inv.lossSummary = draft.lossSummary; lossTa.value = inv.lossSummary; }
+      inv.items = lines.map((li) => ({
+        desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
+        unit: li.unit || "", price: li.price != null ? String(li.price) : "",
+      }));
+      if (!inv.items.length) inv.items = [blankLineItem()];
+      commit(); paintItems();
+      aiPanel.replaceChildren(
+        h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc;font-size:12px" },
+          h("strong", {}, "\u2728 Draft basis \u2014 review every line before sending:"),
+          ...lines.map((li) => h("div", { style: "margin-top:4px;color:#5a6b7f" },
+            h("strong", { style: "color:#2b3a4d" }, li.desc || ""), li.basis ? " \u2014 " + li.basis : ""))));
+      toast("Invoice draft ready \u2014 every line is editable.");
+    } catch (e) {
+      toast("AI draft failed: " + (e && e.message ? e.message : e));
+    }
+    busyBtn(draftBtn, false, "\u2728 Draft from documentation");
+  });
+
+  const auditBtn = h("button", { type: "button", class: "btn btn--sm" }, "\ud83d\udd0e Find missed items");
+  auditBtn.addEventListener("click", async () => {
+    if (!aiAvailable()) return;
+    busyBtn(auditBtn, true, "\ud83d\udd0e Auditing\u2026");
+    try {
+      const suggestions = await auditInvoice(project, inv);
+      if (!suggestions.length) {
+        aiPanel.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" },
+          "\u2728 No missed items found \u2014 everything documented appears to be billed."));
+      } else {
+        const rows = suggestions.map((sug) => {
+          const add = h("button", { type: "button", class: "btn btn--sm" }, "+ Add");
+          const row = h("div", { style: "display:flex;gap:8px;align-items:flex-start;margin-top:6px" },
+            h("div", { style: "flex:1;font-size:12px" },
+              h("strong", { style: "color:#2b3a4d" }, sug.desc || ""),
+              ` \u2014 ${sug.qty} ${sug.unit} @ $${Number(sug.price || 0).toFixed(2)}`,
+              h("div", { style: "color:#5a6b7f" }, sug.reason || "")),
+            add);
+          add.addEventListener("click", () => {
+            inv.items.push({ desc: sug.desc || "", qty: String(sug.qty ?? ""), unit: sug.unit || "", price: sug.price != null ? String(sug.price) : "" });
+            commit(); paintItems(); row.remove();
+          });
+          return row;
+        });
+        aiPanel.replaceChildren(
+          h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc" },
+            h("strong", { style: "font-size:12px" }, `\u2728 ${suggestions.length} potentially missed item${suggestions.length !== 1 ? "s" : ""} \u2014 each cites its documentation:`),
+            ...rows));
+      }
+    } catch (e) {
+      toast("AI audit failed: " + (e && e.message ? e.message : e));
+    }
+    busyBtn(auditBtn, false, "\ud83d\udd0e Find missed items");
+  });
+
+  const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" }, draftBtn, auditBtn);
 
   return sheet("MITIGATION INVOICE", "Water Mitigation & Restoration Services | IICRC S500 Compliant", "Mitigation Invoice",
     h("div", { class: "grid2" },
@@ -1082,9 +1158,11 @@ export function invoice(project, inv) {
     sectionTitle("Bill To / Insured & Claim"),
     jobInfo(project, ["customer", "address", "phone", "email"]),
     jobInfo(project, ["carrier", "claimNo", "dateOfLoss", "adjuster"]),
-    field("Loss Description / Scope Summary", ta(inv, "lossSummary")),
+    field("Loss Description / Scope Summary", lossTa),
     sectionTitle("Charges"),
-    items,
+    aiBar,
+    aiPanel,
+    itemsWrap,
     h("div", { class: "totals" },
       h("div", { class: "trow" }, h("span", {}, "Subtotal"), subEl),
       h("div", { class: "trow" }, h("span", {}, "Less: Deductible / Non-Recoverable"), inp(inv, "deductible", { type: "number", oninput: () => recalc() })),
@@ -1118,26 +1196,68 @@ export function photosForm(project) {
     return h("div", { class: "photocard" },
       h("img", { src: p.src, alt: p.caption || "" }),
       h("div", { class: "photocap print-only" }, [p.stage ? p.stage.toUpperCase() : "", p.room, p.caption].filter(Boolean).join(" · "), " ", h("span", { class: "photometa" }, fmtDate((p.ts || "").slice(0, 10)))),
-      h("div", { class: "app-only photoedit" }, room, stage, cap, del));
+      h("div", { class: "app-only photoedit" }, room, stage, cap, del),
+      p.ai ? h("div", { class: "app-only", style: "font-size:11px;color:#5a6b7f;padding:2px 4px 0" },
+        "\u2728 " + [
+          p.ai.damage && p.ai.damage.length ? "Damage: " + p.ai.damage.join("; ") : "",
+          p.ai.safety && p.ai.safety.length ? "\u26a0 " + p.ai.safety.join("; ") : "",
+        ].filter(Boolean).join(" \u00b7 ")) : null);
   }
   function paint() {
     grid.replaceChildren(...project.photos.map(card));
     if (!project.photos.length) grid.append(h("p", { class: "subtle app-only" }, "No photos yet — tap “Add photos.”"));
   }
 
+  /* AI photo analysis — captions + visible damage/materials/safety. Online-only
+     enhancement: auto-runs on newly added photos when signed in + online, and the
+     catch-up button covers anything captured offline. Never blocks manual entry. */
+  const aiBtn = h("button", { type: "button", class: "btn btn--sm", style: "margin-left:8px" }, "");
+  const pendingAi = () => project.photos.filter((p) => p.src && !p.ai);
+  let aiBusy = false;
+  function paintAiBtn() {
+    const n = pendingAi().length;
+    aiBtn.hidden = !n || aiBusy;
+    if (!aiBusy) aiBtn.textContent = `\u2728 AI captions (${n})`;
+  }
+  async function runAi(targets, { silent = false } = {}) {
+    if (aiBusy || !targets.length) return;
+    if (silent ? !aiReady() : !aiAvailable()) return;
+    aiBusy = true;
+    aiBtn.hidden = false; aiBtn.disabled = true; aiBtn.textContent = "\u2728 Analyzing\u2026";
+    try {
+      for (let i = 0; i < targets.length; i += 10) {
+        const results = await analyzePhotos(project, targets.slice(i, i + 10));
+        for (const r of results) {
+          if (!r.ok || !r.analysis) continue;
+          const ph = project.photos.find((x) => x.id === r.id);
+          if (ph) applyPhotoAnalysis(ph, r.analysis);
+        }
+        commit(); paint();
+      }
+    } catch (e) {
+      if (!silent) toast("AI photo analysis failed: " + (e && e.message ? e.message : e));
+    }
+    aiBusy = false; aiBtn.disabled = false;
+    paintAiBtn();
+  }
+  aiBtn.addEventListener("click", () => runAi(pendingAi()));
+
   const input = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, style: "display:none" });
   input.addEventListener("change", async () => {
-    for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f); project.photos.push(ph); }
-    input.value = ""; commit(); paint();
+    const added = [];
+    for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f); project.photos.push(ph); added.push(ph); }
+    input.value = ""; commit(); paint(); paintAiBtn();
+    runAi(added, { silent: true });          // fire-and-forget; typed captions still work offline
   });
   const addBtn = h("button", { type: "button", class: "btn btn--primary" }, "📷 Add photos");
   addBtn.addEventListener("click", () => input.click());
   paint();
+  paintAiBtn();
 
   return sheet("PHOTO REPORT", "Job Site Documentation", "Photo Report",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
-    h("div", { class: "app-only", style: "margin:10px 0" }, addBtn, input),
+    h("div", { class: "app-only", style: "margin:10px 0" }, addBtn, aiBtn, input),
     grid);
 }
 
