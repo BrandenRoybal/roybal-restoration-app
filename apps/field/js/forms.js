@@ -1205,27 +1205,48 @@ export function photosForm(project) {
   if (!Array.isArray(project.photos)) project.photos = [];
   const grid = h("div", { class: "photogrid" });
 
+  const refreshers = new Map();               // photo.id -> refresh that card in place
+
   function card(p, i) {
     const cap = h("input", { value: p.caption || "", placeholder: "Caption" });
-    cap.addEventListener("input", () => { p.caption = cap.value; commit(); });
+    cap.addEventListener("input", () => { p.caption = cap.value; refresh(); commit(); });
     const room = h("input", { value: p.room || "", placeholder: "Room / location" });
-    room.addEventListener("input", () => { p.room = room.value; commit(); });
+    room.addEventListener("input", () => { p.room = room.value; refresh(); commit(); });
     const stage = sel(p, "stage", [
       { value: "before", label: "Before" }, { value: "during", label: "During" }, { value: "after", label: "After" }]);
-    const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { project.photos.splice(i, 1); paint(); commit(); } }, "Delete");
+    stage.addEventListener("change", () => refresh());
+    const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); project.photos.splice(i, 1); paint(); commit(); } }, "Delete");
+    const printCap = h("div", { class: "photocap print-only" });
+    const aiLine = h("div", { class: "app-only", style: "font-size:11px;color:#5a6b7f;padding:2px 4px 0" });
+
+    /* Refresh this card in place. The inputs are never replaced, so AI
+       results landing in the background can't steal focus (or the phone
+       keyboard) mid-edit, and the caption field only syncs from the model
+       while it isn't the field being typed in. */
+    function refresh() {
+      if (document.activeElement !== cap) cap.value = p.caption || "";
+      printCap.replaceChildren(
+        [p.stage ? p.stage.toUpperCase() : "", p.room, p.caption].filter(Boolean).join(" \u00b7 "), " ",
+        h("span", { class: "photometa" }, fmtDate((p.ts || "").slice(0, 10))));
+      const bits = p.ai ? [
+        p.ai.damage && p.ai.damage.length ? "Damage: " + p.ai.damage.join("; ") : "",
+        p.ai.safety && p.ai.safety.length ? "\u26a0 " + p.ai.safety.join("; ") : "",
+      ].filter(Boolean).join(" \u00b7 ") : "";
+      aiLine.textContent = bits ? "\u2728 " + bits : "";
+      aiLine.hidden = !bits;
+    }
+    refreshers.set(p.id, refresh);
+    refresh();
     return h("div", { class: "photocard" },
       h("img", { src: p.src, alt: p.caption || "" }),
-      h("div", { class: "photocap print-only" }, [p.stage ? p.stage.toUpperCase() : "", p.room, p.caption].filter(Boolean).join(" · "), " ", h("span", { class: "photometa" }, fmtDate((p.ts || "").slice(0, 10)))),
+      printCap,
       h("div", { class: "app-only photoedit" }, room, stage, cap, del),
-      p.ai ? h("div", { class: "app-only", style: "font-size:11px;color:#5a6b7f;padding:2px 4px 0" },
-        "\u2728 " + [
-          p.ai.damage && p.ai.damage.length ? "Damage: " + p.ai.damage.join("; ") : "",
-          p.ai.safety && p.ai.safety.length ? "\u26a0 " + p.ai.safety.join("; ") : "",
-        ].filter(Boolean).join(" \u00b7 ")) : null);
+      aiLine);
   }
   function paint() {
+    refreshers.clear();
     grid.replaceChildren(...project.photos.map(card));
-    if (!project.photos.length) grid.append(h("p", { class: "subtle app-only" }, "No photos yet — tap “Add photos.”"));
+    if (!project.photos.length) grid.append(h("p", { class: "subtle app-only" }, "No photos yet \u2014 tap \u201cAdd photos.\u201d"));
   }
 
   /* AI photo analysis — captions + visible damage/materials/safety. Online-only
@@ -1250,9 +1271,12 @@ export function photosForm(project) {
         for (const r of results) {
           if (!r.ok || !r.analysis) continue;
           const ph = project.photos.find((x) => x.id === r.id);
-          if (ph) applyPhotoAnalysis(ph, r.analysis);
+          if (!ph) continue;
+          applyPhotoAnalysis(ph, r.analysis);
+          const refresh = refreshers.get(ph.id);
+          if (refresh) refresh();               // update that card in place — no grid repaint
         }
-        commit(); paint();
+        commit();
       }
     } catch (e) {
       if (!silent) toast("AI photo analysis failed: " + (e && e.message ? e.message : e));
