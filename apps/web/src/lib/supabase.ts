@@ -34,3 +34,28 @@ export async function getSignedUrl(
   if (error) return null;
   return data.signedUrl;
 }
+
+/**
+ * Resolve display URLs for photos.
+ *
+ * Canonical storage is the private `photos` bucket (signed URLs). Photos
+ * uploaded by older web builds live in the legacy `job-photos` bucket —
+ * for any path that fails to sign, fall back to that bucket's public URL.
+ */
+export async function resolvePhotoUrls<T extends { storage_path: string }>(
+  photos: T[],
+  expiresIn = 3600
+): Promise<(T & { url: string })[]> {
+  if (photos.length === 0) return [];
+  const paths = photos.map((p) => p.storage_path);
+  const { data } = await supabase.storage.from("photos").createSignedUrls(paths, expiresIn);
+  const signedByPath = new Map(
+    (data ?? []).filter((r) => !r.error && r.signedUrl).map((r) => [r.path, r.signedUrl])
+  );
+  return photos.map((p) => ({
+    ...p,
+    url:
+      signedByPath.get(p.storage_path) ??
+      supabase.storage.from("job-photos").getPublicUrl(p.storage_path).data.publicUrl,
+  }));
+}

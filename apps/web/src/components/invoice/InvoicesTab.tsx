@@ -9,8 +9,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabase";
-import { generateInvoiceDraft } from "../../lib/ai";
-import type { InvoiceDraftItem } from "../../lib/ai";
+import { generateInvoiceDraft, detectSupplements } from "../../lib/ai";
+import type { InvoiceDraftItem, SupplementSuggestion } from "../../lib/ai";
 import type { Job, Room, Invoice, InvoiceItem, InvoiceStatus, FPRoom } from "@roybal/shared";
 import {
   centsToDisplay,
@@ -24,7 +24,7 @@ import {
 import { pdf } from "@react-pdf/renderer";
 import React from "react";
 import { polygonArea, wallLength } from "../floorplan/geometry";
-import { Plus, Trash2, RefreshCw, FileDown, Sparkles, X, ChevronLeft } from "lucide-react";
+import { Plus, Trash2, RefreshCw, FileDown, Sparkles, X, ChevronLeft, Send } from "lucide-react";
 import clsx from "clsx";
 
 interface Props {
@@ -107,6 +107,10 @@ export default function InvoicesTab({ job, rooms }: Props) {
   const [downloading, setDownloading] = useState(false);
   const [catalogPick, setCatalogPick] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // Supplement detection
+  const [supplements, setSupplements] = useState<SupplementSuggestion[] | null>(null);
+  const [checkingSupplements, setCheckingSupplements] = useState(false);
 
   const loadInvoices = async () => {
     const [inv, items] = await Promise.all([
@@ -235,8 +239,8 @@ export default function InvoicesTab({ job, rooms }: Props) {
     }
   };
 
-  const saveInvoice = async () => {
-    if (!editing) return;
+  const saveInvoice = async (): Promise<boolean> => {
+    if (!editing) return false;
     setSaving(true);
     setError("");
     try {
@@ -265,8 +269,40 @@ export default function InvoicesTab({ job, rooms }: Props) {
       await loadInvoices();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save invoice");
+      setSaving(false);
+      return false;
     }
     setSaving(false);
+    return true;
+  };
+
+  // ---- QuickBooks Online push ----
+  const [pushingQbo, setPushingQbo] = useState(false);
+  const [qboMsg, setQboMsg] = useState("");
+
+  const pushToQuickBooks = async () => {
+    if (!editing) return;
+    setPushingQbo(true);
+    setQboMsg("");
+    setError("");
+    try {
+      // Persist the current edits first so QBO matches what's on screen
+      const saved = await saveInvoice();
+      if (!saved) throw new Error("Save failed — fix the error above and try again");
+      const { data, error: fnErr } = await supabase.functions.invoke("qbo-proxy", {
+        body: { action: "pushInvoice", invoiceId: editing.id },
+      });
+      if (fnErr) throw new Error(fnErr.message ?? "QuickBooks push failed");
+      if (!data?.ok) throw new Error(data?.error ?? "QuickBooks push failed");
+      const r = data.data as { docNumber: string; total: number; updated: boolean };
+      setQboMsg(`${r.updated ? "Updated" : "Created"} QuickBooks invoice ${r.docNumber} — $${r.total.toFixed(2)}`);
+      const { data: fresh } = await supabase.from("invoices").select("*").eq("id", editing.id).single();
+      if (fresh) setEditing(fresh as Invoice);
+      await loadInvoices();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "QuickBooks push failed");
+    }
+    setPushingQbo(false);
   };
 
   const deleteInvoice = async (invoiceId: string) => {
@@ -278,6 +314,47 @@ export default function InvoicesTab({ job, rooms }: Props) {
 
   const updateRow = (localId: string, patch: Partial<EditRow>) =>
     setRows((prev) => prev.map((r) => (r.localId === localId ? { ...r, ...patch } : r)));
+
+  // ---- Supplement detection ----
+  const runSupplementCheck = async () => {
+    setCheckingSupplements(true);
+    setError("");
+    try {
+      const currentItems = rows
+        .filter((r) => r.description.trim())
+        .map((r) => ({
+          room_name: r.room_name.trim() || null,
+          code: r.code.trim() || null,
+          description: r.description.trim(),
+          quantity: parseFloat(r.quantity || "0"),
+          unit: r.unit,
+        }));
+      const { suggestions } = await detectSupplements(job.id, currentItems);
+      setSupplements(suggestions);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Supplement check failed");
+    }
+    setCheckingSupplements(false);
+  };
+
+  const addSuggestion = (s: SupplementSuggestion) => {
+    setRows((prev) => [
+      ...prev,
+      {
+        localId: crypto.randomUUID(),
+        room_name: s.room_name ?? "",
+        code: s.code ?? "",
+        category: s.category,
+        description: s.description,
+        quantity: String(s.quantity),
+        unit: s.unit,
+        unit_price: (s.unit_price / 100).toFixed(2),
+        notes: s.reason,
+        source: "ai",
+      },
+    ]);
+    setSupplements((prev) => (prev ? prev.filter((x) => x !== s) : prev));
+  };
 
   const addFromCatalog = (code: string) => {
     const item = PRICE_CATALOG.find((c) => c.code === code);
@@ -391,6 +468,12 @@ export default function InvoicesTab({ job, rooms }: Props) {
               className="flex items-center gap-1.5 text-xs font-bold border border-[#1E293B] text-slate-300 hover:border-[#F97316]/40 hover:text-[#F97316] px-3 h-9 rounded-xl transition-colors disabled:opacity-50">
               {downloading ? <RefreshCw size={13} className="animate-spin" /> : <FileDown size={13} />} PDF
             </button>
+            <button onClick={pushToQuickBooks} disabled={pushingQbo || saving}
+              title="Save this invoice and create/update it in QuickBooks Online"
+              className="flex items-center gap-1.5 text-xs font-bold bg-green-500/10 border border-green-500/40 text-green-400 hover:bg-green-500/20 px-3 h-9 rounded-xl transition-colors disabled:opacity-50">
+              {pushingQbo ? <RefreshCw size={13} className="animate-spin" /> : <Send size={13} />}
+              {pushingQbo ? "Pushing…" : editing.qbo_invoice_id ? "Update in QuickBooks" : "Push to QuickBooks"}
+            </button>
             <button onClick={saveInvoice} disabled={saving}
               className="flex items-center gap-1.5 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-4 h-9 rounded-xl text-sm transition-colors disabled:opacity-50">
               {saving ? <RefreshCw size={14} className="animate-spin" /> : null}
@@ -399,6 +482,7 @@ export default function InvoicesTab({ job, rooms }: Props) {
           </div>
         </div>
         {error && <p className="text-red-400 text-sm mb-3">{error}</p>}
+        {qboMsg && <p className="text-green-400 text-sm mb-3">✓ {qboMsg}{editing.qbo_synced_at ? ` · Last synced ${formatAlaskaDate(editing.qbo_synced_at)}` : ""}</p>}
 
         {/* Header fields */}
         <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5 mb-4">
@@ -452,8 +536,52 @@ export default function InvoicesTab({ job, rooms }: Props) {
               </optgroup>
             ))}
           </select>
+          <button onClick={runSupplementCheck} disabled={checkingSupplements}
+            className="flex items-center gap-1.5 text-xs font-bold bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 px-3 h-9 rounded-xl transition-colors disabled:opacity-60"
+            title="AI compares this invoice against all job documentation and flags billable work you may have missed">
+            {checkingSupplements ? <RefreshCw size={13} className="animate-spin" /> : <Sparkles size={13} />}
+            {checkingSupplements ? "Auditing…" : "Find Missed Items"}
+          </button>
           <span className="text-xs text-slate-600">{rows.filter((r) => r.description.trim()).length} line items</span>
         </div>
+        {checkingSupplements && (
+          <p className="text-xs text-purple-300/80 mb-3">
+            AI is auditing this invoice against photos, equipment logs, and moisture readings — this can take a minute…
+          </p>
+        )}
+
+        {/* Supplement suggestions */}
+        {supplements !== null && (
+          <div className="bg-[#0A1628] border border-purple-500/30 rounded-2xl p-4 mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <Sparkles size={14} className="text-purple-400" />
+              <p className="text-xs font-bold text-purple-300">
+                {supplements.length === 0
+                  ? "No missed items found — everything documented appears to be billed."
+                  : `${supplements.length} potentially missed item${supplements.length !== 1 ? "s" : ""} found`}
+              </p>
+              <button onClick={() => setSupplements(null)} className="ml-auto text-slate-500 hover:text-slate-300" title="Dismiss">
+                <X size={14} />
+              </button>
+            </div>
+            {supplements.map((s, i) => (
+              <div key={i} className="flex items-start gap-3 py-2 border-t border-[#1E293B]/60">
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-slate-200">
+                    <span className="text-xs font-mono text-purple-400 mr-2">{s.code ?? s.category}</span>
+                    {s.description}
+                    <span className="text-slate-500 text-xs ml-2">{s.quantity} {s.unit} @ {centsToDisplay(s.unit_price)}{s.room_name ? ` · ${s.room_name}` : ""}</span>
+                  </p>
+                  <p className="text-xs text-slate-500 italic mt-0.5">{s.reason}</p>
+                </div>
+                <button onClick={() => addSuggestion(s)}
+                  className="flex items-center gap-1 text-xs font-bold bg-[#F97316]/10 border border-[#F97316]/30 text-[#F97316] px-2.5 h-7 rounded-lg hover:bg-[#F97316]/20 transition-colors flex-shrink-0">
+                  <Plus size={11} /> Add
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Items table */}
         <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl overflow-hidden mb-4">

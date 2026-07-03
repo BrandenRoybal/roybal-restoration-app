@@ -65,3 +65,36 @@ export function generateInvoiceDraft(
     roomAreas,
   });
 }
+
+/** Draft a claim-submission email to the adjuster on file. */
+export function draftAdjusterEmail(jobId: string, attachments?: string[]) {
+  return aiProxy<{ draft: { subject: string; body: string } }>("draftAdjusterEmail", {
+    jobId,
+    attachments,
+  });
+}
+
+export interface SupplementSuggestion {
+  room_name: string | null;
+  code: string | null;
+  category: string;
+  description: string;
+  quantity: number;
+  unit: string;
+  /** cents */
+  unit_price: number;
+  /** The documentation that supports this line */
+  reason: string;
+}
+
+/** Find documented-but-unbilled work missing from the current invoice items. */
+export function detectSupplements(
+  jobId: string,
+  currentItems: { room_name: string | null; code: string | null; description: string; quantity: number; unit: string }[]
+) {
+  return aiProxy<{ suggestions: SupplementSuggestion[] }>("detectSupplements", {
+    jobId,
+    currentItems,
+    catalog: PRICE_CATALOG,
+  });
+}

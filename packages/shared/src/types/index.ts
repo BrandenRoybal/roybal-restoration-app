@@ -221,6 +221,9 @@ export interface Invoice {
   tax_percent: number;
   notes: string | null;
   ai_generated: boolean;
+  /** QuickBooks Online invoice ID once pushed */
+  qbo_invoice_id: string | null;
+  qbo_synced_at: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -360,7 +363,7 @@ export type CreatePhotoInput = Omit<
 
 export type CreateInvoiceInput = Omit<
   Invoice,
-  "id" | "invoice_number" | "created_at" | "updated_at"
+  "id" | "invoice_number" | "qbo_invoice_id" | "qbo_synced_at" | "created_at" | "updated_at"
 >;
 
 export type CreateInvoiceItemInput = Omit<

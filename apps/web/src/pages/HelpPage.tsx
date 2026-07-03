@@ -300,11 +300,23 @@ const SECTIONS: Section[] = [
         </p>
 
         <H3>AI photo captions & analysis</H3>
-        <Step n={1}>Open a job → <strong className="text-white">Photos</strong> tab → click <strong className="text-white">AI Captions</strong> to analyze all new photos at once (up to 25 per batch).</Step>
+        <Bullet><strong className="text-white">Automatic:</strong> every photo uploaded (web or mobile) is captioned and analyzed in the background — no button needed.</Bullet>
+        <Step n={1}>If any photos were missed (e.g. the AI key wasn't configured yet), click <strong className="text-white">AI Captions</strong> in the Photos tab to catch up (up to 25 per batch). On mobile, tap the purple <strong className="text-white">AI</strong> button.</Step>
         <Step n={2}>Or click any photo and use <strong className="text-white">Analyze with AI</strong> in the viewer for a single photo.</Step>
         <Step n={3}>The AI writes a professional caption and documents visible damage, affected materials, equipment, and safety concerns. Photos with a purple sparkle badge have been analyzed.</Step>
         <Bullet>If a technician already wrote a caption, the AI never overwrites it — the AI caption is stored alongside it.</Bullet>
         <Bullet>You can edit any caption in the photo viewer; captions appear in the Photo Report PDF.</Bullet>
+
+        <H3>Adjuster email</H3>
+        <Step n={1}>Open a job → <strong className="text-white">Reports</strong> tab → <strong className="text-white">Draft with AI</strong> in the Adjuster Email card.</Step>
+        <Step n={2}>The AI writes a claim-submission email referencing the claim number and summarizing the loss from your saved narrative. Edit it, then <strong className="text-white">Copy</strong> or <strong className="text-white">Open in Email App</strong> and attach your PDFs.</Step>
+
+        <H3>Supplement detection (missed billables)</H3>
+        <Step n={1}>Open any invoice → <strong className="text-white">Find Missed Items</strong>.</Step>
+        <Step n={2}>The AI audits the invoice against photos, equipment logs, and moisture readings, and lists documented work that isn't billed — each with the evidence that supports it. Click <strong className="text-white">Add</strong> to accept a suggestion.</Step>
+
+        <H3>Drying Watch (dashboard)</H3>
+        <Bullet>The dashboard automatically flags active/drying jobs that need attention: no moisture reading in 24+ hours, locations not drying down, or equipment on site 7+ days. This is rule-based (instant, no AI cost) — click a flag to open the job.</Bullet>
 
         <H3>AI job narrative</H3>
         <Step n={1}>Open a job → <strong className="text-white">Reports</strong> tab → <strong className="text-white">Generate with AI</strong> in the Job Narrative card.</Step>
@@ -346,6 +358,11 @@ const SECTIONS: Section[] = [
 
         <H3>Status tracking</H3>
         <Bullet>Mark each invoice <strong className="text-white">Draft → Sent → Paid</strong> from the editor header, and switch between <strong className="text-white">Invoice</strong> and <strong className="text-white">Estimate</strong> layouts.</Bullet>
+
+        <H3>Push to QuickBooks</H3>
+        <Step n={1}>Connect QuickBooks in <strong className="text-white">Settings</strong> (one connection covers Time tracking and invoicing — reconnect once if you linked it before invoicing existed).</Step>
+        <Step n={2}>In the invoice editor, click <strong className="text-white">Push to QuickBooks</strong>. The property owner is matched or created as a QBO customer and all line items carry over with their codes and rooms.</Step>
+        <Step n={3}>Pushing again after edits <strong className="text-white">updates the same QBO invoice</strong> — no duplicates.</Step>
 
         <Tip>Invoice numbers (INV-2026-001) are assigned automatically. The saved job narrative is appended as the last page of the invoice PDF — perfect for adjuster submissions.</Tip>
       </div>

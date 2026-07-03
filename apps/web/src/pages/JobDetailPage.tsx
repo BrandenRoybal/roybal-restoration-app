@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { supabase } from "../lib/supabase";
+import { supabase, resolvePhotoUrls } from "../lib/supabase";
 import type { Job, Room, MoistureReading, EquipmentLog, LineItem, FloorPlan, Photo, PhotoCategory, EquipmentType } from "@roybal/shared";
 import {
   JOB_STATUS_LABELS,
@@ -18,7 +18,7 @@ import {
 import { ChevronLeft, ExternalLink, Trash2, Link, RefreshCw, Plus, Camera, Upload, X, FileDown, Clock, Users, Sparkles, Check } from "lucide-react";
 import FloorPlanEditor from "../components/floorplan/FloorPlanEditor";
 import InvoicesTab from "../components/invoice/InvoicesTab";
-import { analyzePhotos, generateNarrative } from "../lib/ai";
+import { analyzePhotos, generateNarrative, draftAdjusterEmail } from "../lib/ai";
 import clsx from "clsx";
 import { PhotoReport, MoistureDryingReport, EquipmentLogReport, ScopeInvoiceReport } from "@roybal/shared";
 import { pdf } from "@react-pdf/renderer";
@@ -90,6 +90,12 @@ export default function JobDetailPage() {
   const [savingNarrative, setSavingNarrative] = useState(false);
   const [narrativeError, setNarrativeError] = useState("");
 
+  // Adjuster email
+  const [emailDraft, setEmailDraft] = useState<{ subject: string; body: string } | null>(null);
+  const [draftingEmail, setDraftingEmail] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [emailCopied, setEmailCopied] = useState(false);
+
   // Moisture form
   const [showMoistureForm, setShowMoistureForm] = useState(false);
   const [moistureForm, setMoistureForm] = useState({ room_id: "", reading_date: new Date().toISOString().slice(0, 10), location_description: "", material_type: "", moisture_pct: "" });
@@ -147,7 +153,11 @@ export default function JobDetailPage() {
       if (!m.error) setMoisture((m.data ?? []) as MoistureReading[]);
       if (!e.error) setEquipment((e.data ?? []) as EquipmentLog[]);
       if (!l.error) setLineItems((l.data ?? []) as LineItem[]);
-      if (!p.error) setPhotos((p.data ?? []) as Photo[]);
+      if (!p.error) {
+        const rows = (p.data ?? []) as Photo[];
+        setPhotos(rows);
+        resolvePhotoUrls(rows).then(setPhotos);
+      }
       if (!fp.error) setFloorPlans((fp.data ?? []) as FloorPlan[]);
       setLoading(false);
     });
@@ -271,38 +281,54 @@ export default function JobDetailPage() {
     e.target.value = "";
   };
 
-  // Photo upload
+  // Photo upload — canonical bucket is `photos` (private, signed URLs)
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (!files.length || !job) return;
     setUploadingPhotos(true);
     setPhotoError("");
+    const { data: userData } = await supabase.auth.getUser();
+    const uploadedIds: string[] = [];
     for (const file of files) {
       const ext = file.name.split(".").pop();
-      const path = `${job.id}/${crypto.randomUUID()}.${ext}`;
-      const { error: upErr } = await supabase.storage.from("job-photos").upload(path, file, { upsert: false });
+      const path = `${job.id}/general/${crypto.randomUUID()}.${ext}`;
+      const { error: upErr } = await supabase.storage.from("photos").upload(path, file, { upsert: false });
       if (upErr) { setPhotoError(`Upload failed: ${upErr.message}`); continue; }
-      const { data: { publicUrl } } = supabase.storage.from("job-photos").getPublicUrl(path);
+      const { data: signed } = await supabase.storage.from("photos").createSignedUrl(path, 3600);
       const { data: photoData } = await supabase.from("photos").insert({
         job_id: job.id, storage_path: path, category: photoCategory,
+        uploaded_by: userData?.user?.id ?? null,
         taken_at: new Date().toISOString(),
       }).select().single();
-      if (photoData) setPhotos((prev) => [{ ...(photoData as Photo), url: publicUrl }, ...prev]);
+      if (photoData) {
+        uploadedIds.push((photoData as Photo).id);
+        const newPhoto: Photo = { ...(photoData as Photo), ...(signed?.signedUrl ? { url: signed.signedUrl } : {}) };
+        setPhotos((prev) => [newPhoto, ...prev]);
+      }
     }
     setUploadingPhotos(false);
     e.target.value = "";
+
+    // Auto-analyze new photos in the background (captions + damage docs)
+    if (uploadedIds.length) {
+      setAnalyzingPhotos(true);
+      analyzePhotos(uploadedIds)
+        .then(() => refreshPhotos())
+        .catch(() => { /* photos simply stay uncaptioned; the AI Captions button retries */ })
+        .finally(() => setAnalyzingPhotos(false));
+    }
   };
 
-  // Load photo URLs on mount
+  // Legacy fallback for photos uploaded by older web builds
   const getPhotoUrl = (path: string) =>
     supabase.storage.from("job-photos").getPublicUrl(path).data.publicUrl;
 
   // ---- AI photo analysis ----
   const refreshPhotos = async () => {
-    if (!job) return;
+    if (!job) return null;
     const { data } = await supabase.from("photos").select("*").eq("job_id", job.id).order("taken_at", { ascending: false });
     if (data) {
-      const fresh = data as Photo[];
+      const fresh = await resolvePhotoUrls(data as Photo[]);
       setPhotos(fresh);
       setSelectedPhoto((sel) => (sel ? fresh.find((p) => p.id === sel.id) ?? null : null));
       return fresh;
@@ -369,6 +395,27 @@ export default function JobDetailPage() {
       setNarrativeError(e instanceof Error ? e.message : "Narrative generation failed");
     }
     setGeneratingNarrative(false);
+  };
+
+  // ---- Adjuster email ----
+  const runDraftEmail = async () => {
+    if (!job) return;
+    setDraftingEmail(true);
+    setEmailError("");
+    try {
+      const { draft } = await draftAdjusterEmail(job.id);
+      setEmailDraft(draft);
+    } catch (e) {
+      setEmailError(e instanceof Error ? e.message : "Email drafting failed");
+    }
+    setDraftingEmail(false);
+  };
+
+  const copyEmail = async () => {
+    if (!emailDraft) return;
+    await navigator.clipboard.writeText(`Subject: ${emailDraft.subject}\n\n${emailDraft.body}`);
+    setEmailCopied(true);
+    setTimeout(() => setEmailCopied(false), 2000);
   };
 
   const saveNarrative = async () => {
@@ -448,7 +495,11 @@ export default function JobDetailPage() {
   };
 
   const deletePhoto = async (photo: Photo) => {
-    await supabase.storage.from("job-photos").remove([photo.storage_path]);
+    // The object may live in either bucket (legacy web uploads used job-photos)
+    await Promise.all([
+      supabase.storage.from("photos").remove([photo.storage_path]),
+      supabase.storage.from("job-photos").remove([photo.storage_path]),
+    ]);
     await supabase.from("photos").delete().eq("id", photo.id);
     setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
   };
@@ -1666,6 +1717,61 @@ export default function JobDetailPage() {
                 rows={narrativeDraft ? 12 : 4}
                 className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-[#F97316] leading-relaxed"
               />
+            </div>
+
+            {/* Adjuster email */}
+            <div className="bg-[#0A1628] border border-[#1E293B] rounded-2xl p-5 mb-6">
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <Sparkles size={16} className="text-purple-400" />
+                <h3 className="text-sm font-bold text-slate-300">Adjuster Email</h3>
+                <div className="ml-auto">
+                  <button
+                    onClick={runDraftEmail}
+                    disabled={draftingEmail}
+                    className="flex items-center gap-1.5 bg-purple-500/15 border border-purple-500/40 text-purple-300 hover:bg-purple-500/25 font-bold px-3 h-8 rounded-lg text-xs transition-colors disabled:opacity-60"
+                  >
+                    {draftingEmail ? <RefreshCw size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                    {draftingEmail ? "Drafting…" : emailDraft ? "Redraft" : "Draft with AI"}
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mb-3">
+                {job.adjuster_name || job.adjuster_email
+                  ? <>Drafts a claim-submission email to <span className="text-slate-300">{job.adjuster_name ?? job.adjuster_email}</span>{job.claim_number ? <> referencing claim <span className="text-slate-300">{job.claim_number}</span></> : null}. Review, then copy or open in your email app and attach the PDFs.</>
+                  : "Add the adjuster's info in Overview first for a fully-addressed email — otherwise a generic draft is produced."}
+              </p>
+              {emailError && <p className="text-xs text-red-400 mb-2">{emailError}</p>}
+              {emailDraft && (
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={emailDraft.subject}
+                    onChange={(e) => setEmailDraft((d) => (d ? { ...d, subject: e.target.value } : d))}
+                    className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 h-9 text-sm text-slate-200 focus:outline-none focus:border-[#F97316]"
+                  />
+                  <textarea
+                    value={emailDraft.body}
+                    onChange={(e) => setEmailDraft((d) => (d ? { ...d, body: e.target.value } : d))}
+                    rows={10}
+                    className="w-full bg-[#0F172A] border border-[#1E293B] rounded-xl px-3 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-[#F97316] leading-relaxed"
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={copyEmail}
+                      className="flex items-center gap-1.5 bg-[#F97316] hover:bg-[#EA6C0C] text-[#0F172A] font-bold px-3 h-8 rounded-lg text-xs transition-colors"
+                    >
+                      <Check size={12} /> {emailCopied ? "Copied!" : "Copy"}
+                    </button>
+                    <a
+                      href={`mailto:${job.adjuster_email ?? ""}?subject=${encodeURIComponent(emailDraft.subject)}&body=${encodeURIComponent(emailDraft.body)}`}
+                      className="flex items-center gap-1.5 border border-[#1E293B] text-slate-300 hover:border-[#F97316]/40 hover:text-[#F97316] font-bold px-3 h-8 rounded-lg text-xs transition-colors"
+                    >
+                      <ExternalLink size={12} /> Open in Email App
+                    </a>
+                    <span className="text-xs text-slate-600">Remember to attach the invoice + report PDFs.</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <p className="text-slate-400 text-sm mb-6">Generate and download PDF reports. Each opens a download dialog.</p>

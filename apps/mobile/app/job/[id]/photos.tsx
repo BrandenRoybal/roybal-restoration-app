@@ -57,6 +57,26 @@ export default function PhotosScreen() {
   const [pendingCaption, setPendingCaption] = useState("");
   const [pendingUri, setPendingUri] = useState<string | null>(null);
   const [filterCategory, setFilterCategory] = useState<PhotoCategory | "all">("all");
+  const [analyzing, setAnalyzing] = useState(false);
+
+  /** Fire AI captioning/analysis for the given photos and refresh when done */
+  const runAiAnalysis = useCallback(async (photoIds: string[]) => {
+    if (!photoIds.length) return;
+    setAnalyzing(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("ai-proxy", {
+        body: { action: "analyzePhotos", photoIds },
+      });
+      if (error || !data?.ok) throw new Error(error?.message ?? data?.error ?? "AI analysis failed");
+    } catch (err) {
+      // Photos simply stay uncaptioned; the AI Captions button retries
+      console.warn("AI analysis failed:", err);
+    } finally {
+      setAnalyzing(false);
+      fetchData();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const fetchData = useCallback(async () => {
     if (!jobId) return;
@@ -69,11 +89,13 @@ export default function PhotosScreen() {
       supabase.from("rooms").select("*").eq("job_id", jobId).order("name"),
     ]);
     if (!photosRes.error && photosRes.data) {
-      // Resolve signed URLs
+      // Resolve signed URLs (legacy web uploads live in the job-photos bucket)
       const withUrls = await Promise.all(
         (photosRes.data as Photo[]).map(async (p) => ({
           ...p,
-          url: (await getSignedUrl("photos", p.storage_path)) ?? undefined,
+          url:
+            (await getSignedUrl("photos", p.storage_path)) ??
+            supabase.storage.from("job-photos").getPublicUrl(p.storage_path).data.publicUrl,
         }))
       );
       setPhotos(withUrls);
@@ -142,7 +164,7 @@ export default function PhotosScreen() {
       const uploadedPath = await uploadFile("photos", storagePath, pendingUri, `image/${ext === "jpg" ? "jpeg" : ext}`);
       if (!uploadedPath) throw new Error("Upload failed");
 
-      const { error } = await supabase.from("photos").insert({
+      const { data: inserted, error } = await supabase.from("photos").insert({
         job_id: jobId,
         room_id: selectedRoomId,
         uploaded_by: user.id,
@@ -152,10 +174,13 @@ export default function PhotosScreen() {
         taken_at: new Date().toISOString(),
         gps_lat: gpsLat,
         gps_lng: gpsLng,
-      });
+      }).select().single();
 
       if (error) throw error;
       await fetchData();
+
+      // Auto-caption + damage analysis in the background
+      if (inserted) runAiAnalysis([(inserted as Photo).id]);
     } catch (err) {
       Alert.alert("Upload failed", String(err));
     } finally {
@@ -182,6 +207,16 @@ export default function PhotosScreen() {
             <Ionicons name="images" size={22} color={colors.orange} />
             <Text style={[styles.uploadBtnText, { color: colors.orange }]}>Gallery</Text>
           </TouchableOpacity>
+          {photos.some((p) => !p.ai_analyzed_at) && (
+            <TouchableOpacity
+              style={[styles.uploadBtn, { backgroundColor: colors.navyDark, borderColor: "#A855F7", flex: 0, paddingHorizontal: 14 }]}
+              onPress={() => runAiAnalysis(photos.filter((p) => !p.ai_analyzed_at).slice(0, 25).map((p) => p.id))}
+              disabled={analyzing || uploading}
+            >
+              <Ionicons name="sparkles" size={20} color="#A855F7" />
+              <Text style={[styles.uploadBtnText, { color: "#A855F7" }]}>AI</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Category picker */}
@@ -246,6 +281,14 @@ export default function PhotosScreen() {
         </View>
       )}
 
+      {/* AI analyzing indicator */}
+      {analyzing && (
+        <View style={[styles.uploadingBar, { backgroundColor: "#A855F711" }]}>
+          <ActivityIndicator color="#A855F7" size="small" />
+          <Text style={{ color: "#A855F7", marginLeft: 8, fontSize: 13 }}>AI is captioning photos…</Text>
+        </View>
+      )}
+
       {/* Photo grid */}
       {loading ? (
         <ActivityIndicator color={colors.orange} style={{ marginTop: 48 }} />
@@ -265,6 +308,11 @@ export default function PhotosScreen() {
                 </View>
               )}
               <View style={[styles.catDot, { backgroundColor: CATEGORY_COLORS[item.category] }]} />
+              {item.ai_analyzed_at ? (
+                <View style={styles.aiBadge}>
+                  <Ionicons name="sparkles" size={9} color="#fff" />
+                </View>
+              ) : null}
               {item.caption ? (
                 <Text style={styles.photoCaption} numberOfLines={1}>{item.caption}</Text>
               ) : null}
@@ -344,6 +392,10 @@ const styles = StyleSheet.create({
     position: "absolute", top: 5, right: 5,
     width: 8, height: 8, borderRadius: 4,
     borderWidth: 1.5, borderColor: colors.navy,
+  },
+  aiBadge: {
+    position: "absolute", top: 4, left: 4,
+    backgroundColor: "#A855F7CC", borderRadius: 4, padding: 2,
   },
   photoCaption: {
     fontSize: 9, color: colors.textMuted,

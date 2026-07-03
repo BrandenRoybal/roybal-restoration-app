@@ -107,6 +107,7 @@ supabase/migrations/002_storage.sql          ← Storage buckets + policies
 supabase/migrations/003_qb_time.sql          ← QuickBooks Time integration
 supabase/migrations/004_manual_floor_plan.sql ← Manual floor plan editor
 supabase/migrations/005_ai_invoices.sql      ← AI photo analysis + narrative + invoices
+supabase/migrations/006_photo_bucket_qbo.sql ← Photo bucket delete-policy fix + QBO invoicing columns
 ```
 
 ### 2. Auth
@@ -148,13 +149,36 @@ supabase secrets set ANTHROPIC_API_KEY=sk-ant-your-key
 
 This powers three features (all server-side — the key is never exposed to clients):
 
-1. **AI photo analysis** — auto-captions every job photo and documents visible
-   damage, affected materials, equipment, and safety concerns
+1. **AI photo analysis** — photos are auto-captioned on upload (web + mobile),
+   documenting visible damage, affected materials, equipment, and safety concerns
 2. **AI job narrative** — writes an adjuster-ready loss narrative from all job
    documentation (editable, saved on the job, included in invoice PDFs)
 3. **AI invoice generation** — drafts a complete Xactimate-style invoice from
    field data: equipment days, monitoring visits, floor-plan square footage,
    photo-documented demolition, and existing scope items
+4. **Adjuster email drafting** — one-click claim-submission email from the
+   Reports tab, addressed to the adjuster on file
+5. **Supplement detection** — audits an invoice against the job documentation
+   and flags documented-but-unbilled work
+
+The dashboard also gains a rule-based **Drying Watch** panel (no AI cost):
+flags active/drying jobs with stale readings, moisture not trending down,
+or equipment on site 7+ days.
+
+### 5. QuickBooks Online invoicing
+
+Deploy the QBO proxy (reuses the QuickBooks Time OAuth app credentials):
+
+```bash
+supabase functions deploy qbo-proxy
+```
+
+The Settings page's **Connect QuickBooks** flow now requests both the Time and
+Accounting scopes — if QuickBooks was connected before this feature existed,
+disconnect and reconnect once. Then use **Push to QuickBooks** in any invoice
+editor: the customer is matched/created from the property owner, line items
+carry over with codes and room labels, and re-pushing updates the same QBO
+invoice.
 
 ---
 

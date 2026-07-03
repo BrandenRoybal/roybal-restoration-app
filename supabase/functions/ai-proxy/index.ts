@@ -12,6 +12,9 @@
  *   generateInvoice   — Xactimate-style invoice line-item draft from all job
  *                       data + the price catalog; returned to the client for
  *                       review/editing before saving
+ *   draftAdjusterEmail — submission-ready email to the adjuster on file
+ *   detectSupplements — compares an invoice's line items against the job
+ *                       documentation and returns likely missed billables
  *
  * Required secrets (supabase secrets set):
  *   ANTHROPIC_API_KEY
@@ -410,6 +413,133 @@ async function generateInvoice(body: Record<string, unknown>) {
 }
 
 // ---------------------------------------------------------------------------
+// Action: draftAdjusterEmail
+// ---------------------------------------------------------------------------
+const EMAIL_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["subject", "body"],
+  properties: {
+    subject: { type: "string", description: "Email subject line including claim number if available" },
+    body: { type: "string", description: "Plain-text email body (no markdown), professional and concise" },
+  },
+} as const;
+
+async function draftAdjusterEmail(body: Record<string, unknown>) {
+  const jobId = body.jobId as string | undefined;
+  if (!jobId) return err("jobId is required");
+  const attachments = (body.attachments as string[] | undefined) ?? [];
+
+  const supabase = serviceClient();
+  const anthropic = anthropicClient();
+  const data = await loadJobData(supabase, jobId);
+  const j = data.job;
+  const summary = jobDataSummary(data);
+
+  const msg = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 2048,
+    output_config: { effort: "medium", format: { type: "json_schema", schema: EMAIL_SCHEMA } },
+    system:
+      "You write professional claim-submission emails on behalf of Roybal Restoration (Fairbanks, Alaska) to insurance adjusters. " +
+      "Tone: courteous, factual, brief. Plain text only — no markdown formatting.",
+    messages: [
+      {
+        role: "user",
+        content:
+          `Draft an email to the insurance adjuster submitting our documentation for this claim.\n\n` +
+          `Adjuster: ${j.adjuster_name ?? "the assigned adjuster"}\n` +
+          `Claim #: ${j.claim_number ?? "n/a"} | Carrier: ${j.insurance_carrier ?? "n/a"}\n` +
+          `Attachments that will be included: ${attachments.length ? attachments.join(", ") : "invoice PDF and supporting reports"}\n\n` +
+          `The email should: greet the adjuster by name if known, reference the claim number and property address, ` +
+          `summarize the loss and mitigation in 2-4 sentences, list the attached documentation, state the invoice total is in the attached ` +
+          `invoice, offer to answer questions, and sign off from Roybal Restoration. Keep it under 200 words.\n\n` +
+          (j.narrative ? `SAVED JOB NARRATIVE (source of truth for the summary):\n${j.narrative}\n\n` : "") +
+          `JOB DOCUMENTATION:\n${summary}`,
+      },
+    ],
+  });
+
+  if (msg.stop_reason === "refusal") return err("Email drafting was declined", 500);
+  const draft = JSON.parse(responseText(msg));
+  return ok({ draft });
+}
+
+// ---------------------------------------------------------------------------
+// Action: detectSupplements
+// ---------------------------------------------------------------------------
+const SUPPLEMENTS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["suggestions"],
+  properties: {
+    suggestions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["room_name", "code", "category", "description", "quantity", "unit", "unit_price", "reason"],
+        properties: {
+          room_name: { type: ["string", "null"] },
+          code: { type: ["string", "null"], description: "Catalog code if applicable" },
+          category: { type: "string", description: "WTR, EQU, DMO, CLN, TRT, HMR, CON, LAB, DSP, or OTH" },
+          description: { type: "string" },
+          quantity: { type: "number" },
+          unit: { type: "string" },
+          unit_price: { type: "integer", description: "Unit price in CENTS" },
+          reason: { type: "string", description: "The specific documentation that supports this line (photo, equipment log, moisture reading, etc.)" },
+        },
+      },
+    },
+  },
+} as const;
+
+async function detectSupplements(body: Record<string, unknown>) {
+  const jobId = body.jobId as string | undefined;
+  if (!jobId) return err("jobId is required");
+  const currentItems = (body.currentItems as { room_name: string | null; code: string | null; description: string; quantity: number; unit: string }[] | undefined) ?? [];
+  const catalog = (body.catalog ?? []) as { code: string; category: string; description: string; unit: string; unit_price: number }[];
+
+  const supabase = serviceClient();
+  const anthropic = anthropicClient();
+  const data = await loadJobData(supabase, jobId);
+  const summary = jobDataSummary(data);
+
+  const itemsText = currentItems.length
+    ? currentItems.map((it) => `- ${it.room_name ?? "site-wide"} | ${it.code ?? "—"} | ${it.description} | ${it.quantity} ${it.unit}`).join("\n")
+    : "(the invoice is currently empty)";
+  const catalogText = catalog
+    .map((c) => `${c.code} | ${c.category} | ${c.description} | ${c.unit} | $${(c.unit_price / 100).toFixed(2)}`)
+    .join("\n");
+
+  const msg = await anthropic.messages.create({
+    model: MODEL,
+    max_tokens: 8192,
+    output_config: { format: { type: "json_schema", schema: SUPPLEMENTS_SCHEMA } },
+    system:
+      "You are a supplement auditor for Roybal Restoration. Your job is to find DOCUMENTED work that is missing from an invoice — " +
+      "billable items clearly supported by the job's photos, equipment logs, moisture readings, or scope notes, but not present in the " +
+      "current line items. You never suggest speculative work: every suggestion must cite the specific documentation that supports it. " +
+      "If nothing is missing, return an empty suggestions array.",
+    messages: [
+      {
+        role: "user",
+        content:
+          `Audit this invoice against the job documentation and list any missed billable items.\n\n` +
+          `CURRENT INVOICE LINE ITEMS:\n${itemsText}\n\n` +
+          `PRICE CATALOG (prefer these codes/prices when a suggestion matches):\n${catalogText}\n\n` +
+          `Do not duplicate or re-price items already on the invoice. Do not suggest overhead/profit/tax lines. unit_price is in CENTS.\n\n` +
+          `JOB DOCUMENTATION:\n${summary}`,
+      },
+    ],
+  });
+
+  if (msg.stop_reason === "refusal") return err("Supplement detection was declined", 500);
+  const result = JSON.parse(responseText(msg));
+  return ok(result);
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 serve(async (req) => {
@@ -424,6 +554,10 @@ serve(async (req) => {
         return await generateNarrative(body);
       case "generateInvoice":
         return await generateInvoice(body);
+      case "draftAdjusterEmail":
+        return await draftAdjusterEmail(body);
+      case "detectSupplements":
+        return await detectSupplements(body);
       default:
         return err(`Unknown action: ${action}`);
     }

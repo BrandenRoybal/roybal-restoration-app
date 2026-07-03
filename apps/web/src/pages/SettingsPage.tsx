@@ -28,8 +28,11 @@ const ROLE_DESCRIPTIONS: Record<Role, string> = {
   viewer: "Read-only — view jobs and reports",
 };
 
-// QB Time OAuth scope and authorization URL builder
-const QB_SCOPE = "com.intuit.quickbooks.time";
+// QuickBooks OAuth scopes: Time (timesheets) + Accounting (invoice push).
+// One "Connect QuickBooks" authorization covers both APIs. If QuickBooks was
+// connected before invoicing existed, disconnect and reconnect once to grant
+// the accounting permission.
+const QB_SCOPE = "com.intuit.quickbooks.time com.intuit.quickbooks.accounting";
 const QB_AUTH_BASE = "https://appcenter.intuit.com/connect/oauth2";
 
 function buildQBAuthUrl(clientId: string, redirectUri: string) {
