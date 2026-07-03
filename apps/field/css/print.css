@@ -137,12 +137,22 @@ table.grid td input.calc { background: #eef6ff !important; }
 .mchart__leg i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .chart-empty { display: none; }
 
-/* sketch + floor plan — let the canvas keep its aspect ratio (set inline in JS)
-   so markers/equipment icons aren't stretched. NO fixed height here (that was
-   what warped them on the PDF). The bg fills the same box the canvas sizes. */
-.sketch { border: 1px solid #6b7892 !important; position: relative; }
+/* sketch + floor plan — the canvas is a replaced element; scale it to FIT a
+   bounded box (max 6.8in wide x 3.4in tall) while preserving its intrinsic
+   aspect ratio, so markers/equipment icons stay round AND the map no longer
+   balloons to a full page. The .sketch shrinks to the canvas (fit-content) and
+   the bg fills that same box, so they stay aligned. */
+.sketch {
+  border: 1px solid #6b7892 !important; position: relative;
+  width: fit-content; max-width: 100%; margin: 6px auto;
+}
 .sketch__bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
-.sketch canvas { position: relative; }
+.sketch canvas {
+  position: relative; display: block;
+  aspect-ratio: auto !important;            /* use the canvas's intrinsic aspect */
+  width: auto !important; height: auto !important;
+  max-width: 6.8in; max-height: 3.4in;
+}
 
 /* contents inventory */
 table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover; border: 0.5px solid #6b7892; }
