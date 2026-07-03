@@ -239,7 +239,7 @@ export function letterhead(formTitle, subtitle) {
   return h("div", { class: "print-only sheet-head" },
     h("div", { class: "sheet-head__body" },
       h("div", { class: "sheet-head__co" },
-        h("div", { class: "sheet-head__name" }, "ROYBAL CONSTRUCTION, LLC"),
+        h("img", { class: "sheet-head__logo", src: "assets/logo-orange.svg", alt: "Roybal Construction, LLC" }),
         h("div", { class: "sheet-head__tag" }, COMPANY.tagline)),
       h("div", { class: "sheet-head__addr" },
         h("div", {}, COMPANY.address),
