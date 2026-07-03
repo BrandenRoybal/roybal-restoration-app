@@ -71,7 +71,8 @@ input, select, textarea {
   color: #000 !important; -webkit-appearance: none; appearance: none;
   font-family: inherit;
 }
-textarea { border: 1px solid #c4ccd8 !important; min-height: 38px !important; }
+/* height comes from the JS auto-grow (fits content); never clip on print */
+textarea { border: 1px solid #c4ccd8 !important; min-height: 38px !important; height: auto; overflow: visible !important; white-space: pre-wrap; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 16px; }
 

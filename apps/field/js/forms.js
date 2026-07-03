@@ -581,6 +581,18 @@ export function workAuth(project, wa) {
     termRow("Exclusions", "This Work Order covers mitigation only. Reconstruction requires a separate written estimate and authorization. Contractor is not responsible for pre-existing damage unrelated to this loss."),
     termRow("Right to Stop", "Contractor may stop work if site conditions pose a safety risk, access is denied, or payment cannot be confirmed."));
 
+  // The Owner Name field (bound to the job customer) auto-fills the signature
+  // block's printed name — one place to type it, always in sync.
+  if (project.customer && !wa.ownerName) wa.ownerName = project.customer;
+  const ownerNameInput = inp(project, "customer");
+  const ownerSig = sigBlock(wa, "ownerSig", "ownerName", "ownerDate", "Property Owner — sign above");
+  const ownerSigName = ownerSig.querySelector('input[placeholder="Full name"]');
+  ownerNameInput.addEventListener("input", () => {
+    wa.ownerName = project.customer;
+    if (ownerSigName) ownerSigName.value = project.customer;
+    commit();
+  });
+
   return sheet("WORK AUTHORIZATION & SERVICE AGREEMENT", "Water Mitigation / Restoration Services", "Work Authorization & Service Agreement",
     h("div", { class: "grid3" },
       field("Date", inp(wa, "date", { type: "date" })),
@@ -588,7 +600,7 @@ export function workAuth(project, wa) {
       field("Claim #", inp(project, "claimNo"))),
     field("Property Address", inp(project, "address")),
     h("div", { class: "grid2" },
-      field("Owner Name", inp(project, "customer")),
+      field("Owner Name", ownerNameInput),
       field("Phone", inp(project, "phone", { type: "tel" }))),
     h("div", { class: "grid2" },
       field("Email", inp(project, "email", { type: "email" })),
@@ -604,7 +616,7 @@ export function workAuth(project, wa) {
     sectionTitle("Authorization & Signatures"),
     h("p", { class: "subtle" }, "By signing below, the Property Owner confirms they have read and agree to the Terms & Conditions above, and authorize Roybal Construction, LLC to commence the described scope of work."),
     signOrUpload(wa, () => [
-      sigBlock(wa, "ownerSig", "ownerName", "ownerDate", "Property Owner — sign above"),
+      ownerSig,
       h("hr", { class: "divider" }),
       sigBlock(wa, "repSig", "repName", "repDate", "Contractor Representative (Roybal Construction, LLC)"),
     ]));

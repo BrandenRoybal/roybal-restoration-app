@@ -34,7 +34,11 @@ export function inp(obj, key, opts = {}) {
 export function ta(obj, key, opts = {}) {
   const el = h("textarea", { placeholder: opts.placeholder || "", rows: opts.rows || 3 });
   el.value = obj[key] ?? "";
-  el.addEventListener("input", () => { obj[key] = el.value; commit(); });
+  // Auto-grow to fit the content so the FULL text prints (a fixed-row textarea
+  // clips longer text on the PDF — e.g. the Loss Cause).
+  const grow = () => { if (!el.isConnected) return; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; };
+  el.addEventListener("input", () => { obj[key] = el.value; grow(); commit(); });
+  requestAnimationFrame(grow);
   return el;
 }
 export function sel(obj, key, options, opts = {}) {

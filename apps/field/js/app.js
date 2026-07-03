@@ -27,6 +27,14 @@ const topbarSub = $("#topbarSub");
 const backBtn = $("#backBtn");
 const techChip = $("#techChip");
 
+// Before any print/Save-as-PDF, size every textarea to its content so long text
+// (e.g. the Loss Cause) prints in full instead of clipping to its visible rows.
+window.addEventListener("beforeprint", () => {
+  document.querySelectorAll("textarea").forEach((t) => {
+    t.style.height = "auto"; t.style.height = t.scrollHeight + "px";
+  });
+});
+
 const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
@@ -534,6 +542,18 @@ function formEditor(project, meta, instance) {
 
   const sheetEl = RENDERERS[meta.key](project, instance);
   body.append(sheetEl);
+
+  // If a signed copy was uploaded for the Work Auth / Cert of Drying, the printed
+  // single-form PDF shows the full-size uploaded document instead of the app form
+  // (same as the full packet). The screen still shows the form to manage the upload.
+  const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
+  if (UPLOAD_REPLACES[meta.key] && instance && instance.mode === "upload") {
+    const pages = uploadedDocPages(instance);
+    if (pages.length) {
+      sheetEl.classList.add("app-only");   // hide the generated form on print
+      uploadedDocSheet(pages, UPLOAD_REPLACES[meta.key]).forEach((s) => body.append(s));
+    }
+  }
 
   body.append(h("div", { style: "height:8px" }));
 
