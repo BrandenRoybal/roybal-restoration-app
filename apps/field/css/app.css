@@ -349,6 +349,10 @@ tr.fill-target > td { background: var(--brand-tint); box-shadow: inset 0 0 0 1px
 /* print-only content is hidden on screen (shown by print.css when printing) */
 .print-only { display: none; }
 
+/* the hidden attribute must always win — author display rules (.btn etc.)
+   otherwise override the browser default and "hidden" elements stay visible */
+[hidden] { display: none !important; }
+
 /* on-screen terms / statement blocks (Work Auth, Cert) */
 .termrow { display: grid; grid-template-columns: 120px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 13px; }
 .termrow__k { font-weight: 700; color: var(--ink); }
