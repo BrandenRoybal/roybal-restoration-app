@@ -101,11 +101,13 @@ export const REQUIREMENTS = [
   { id: "cd_sig", form: "certDrying", label: "Tech sign-off", gate: "hard",
     present: (p) => !!p.certDrying && (filled(p.certDrying.sigTech) || arr(p.certDrying.uploadedPages).length > 0) },
 
-  // ----- Daily Construction Log -----
-  { id: "cl_emp", form: "constructionLogs", label: "Crew member on each log", gate: "hard",
-    present: (p) => anyInstanceRow(p.constructionLogs, "rows", (r) => filled(r.employee)) },
-  { id: "cl_hours", form: "constructionLogs", label: "Hours logged (feeds Board + QBO)", gate: "hard",
-    present: (p) => anyInstanceRow(p.constructionLogs, "rows", (r) => filled(r.hours)) },
+  // ----- Labor Log (QuickBooks Time) -----
+  // Billing labor comes from the QuickBooks Time pull, not the Daily
+  // Construction Log (that one is internal crew notes, not in the packet).
+  { id: "ll_emp", form: "laborLog", label: "Crew member on each entry", gate: "hard",
+    present: (p) => !!p.laborLog && anyRow(p.laborLog.entries, (r) => filled(r.employee)) },
+  { id: "ll_hours", form: "laborLog", label: "Hours synced from QuickBooks Time (feeds Board + QBO)", gate: "hard",
+    present: (p) => !!p.laborLog && anyRow(p.laborLog.entries, (r) => filled(r.hours)) },
 
   // ----- Conditional: Contents moving -----
   { id: "ct_room", form: "contents", label: "Room on each contents item", gate: "hard", when: "contents",
@@ -125,7 +127,8 @@ export const REQUIREMENTS = [
 const FORM_LABELS = {
   workAuth: "Work Authorization", floorPlan: "Floor Plan", moistureMaps: "Moisture Map",
   dryingLogs: "Drying Log", photos: "Photo Log", certDrying: "Certificate of Drying",
-  constructionLogs: "Daily Construction Log", contents: "Contents", changeOrders: "Change Order",
+  constructionLogs: "Daily Construction Log", laborLog: "Labor Log",
+  contents: "Contents", changeOrders: "Change Order",
 };
 
 /* ============================================================
