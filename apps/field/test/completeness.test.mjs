@@ -24,6 +24,8 @@ function completeJob() {
     ],
     certDrying: { sigTech: "data:sig", verification: [{ material: "Drywall", goal: "1", final: "0.8" }] },
     constructionLogs: [{ rows: [{ employee: "Mike", task: "Demo", hours: "6" }] }],
+    laborLog: { syncedAt: "2026-06-22T00:00:00Z",
+      entries: [{ date: "2026-06-21", employee: "Mike", start: "8:00", finish: "14:00", hours: "6", task: "Demo" }] },
     contents: [], changeOrders: [],
   };
 }
@@ -62,5 +64,13 @@ ok("does NOT raise contents gaps (add-on inactive)", !gapIds.some((id) => id.sta
 /* Turning on the contents add-on should now demand room + disposition. */
 const c = evaluateProject({ ...completeJob(), contents: [{ name: "Sofa" /* no room/disposition */ }] });
 ok("contents add-on activates room/disposition gaps", c.hardGaps.some((g) => g.id === "ct_room"));
+
+/* Billing labor comes from the QuickBooks Time Labor Log, NOT the Daily
+   Construction Log — a job with construction logs but no synced hours blocks. */
+const d = evaluateProject({ ...completeJob(), laborLog: null });
+ok("no labor log blocks billing even with construction logs", d.isBillable === false);
+ok("flags missing QuickBooks Time hours", d.hardGaps.some((g) => g.id === "ll_hours"));
+const e = evaluateProject({ ...completeJob(), constructionLogs: [] });
+ok("construction logs no longer gate billing", e.isBillable === true);
 
 console.log(`\n${pass} checks passed.`);
