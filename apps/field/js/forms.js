@@ -3,7 +3,7 @@
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
 import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
-import { fileToFloorPlan } from "./pdf.js";
+import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
   lineItems, sheet, sheetFooter, commit,
@@ -1289,7 +1289,51 @@ export function invoice(project, inv) {
 
   const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" }, draftBtn, auditBtn, qboBtn, qboStatusEl);
 
-  return sheet("MITIGATION INVOICE", "Water Mitigation & Restoration Services | IICRC S500 Compliant", "Mitigation Invoice",
+  /* ---- supporting documents: receipts, sub invoices, dump tickets…
+     Attached PDFs/photos become full pages after the invoice when printed. ---- */
+  if (!Array.isArray(inv.attachments)) inv.attachments = [];
+  const attachSheets = h("div");
+  const attachList = h("div");
+  function paintAttachSheets() {
+    attachSheets.replaceChildren(...inv.attachments.flatMap((att) =>
+      uploadedDocSheet(att.pages || [], "Supporting Documentation" + (att.label ? " — " + att.label : ""))));
+  }
+  function paintAttachList() {
+    attachNote.hidden = !inv.attachments.length;
+    attachList.replaceChildren(...inv.attachments.map((att, i) => {
+      const label = h("input", { value: att.label || "", placeholder: "Label (e.g. Dump receipt 6/21)", style: "flex:1" });
+      label.addEventListener("input", () => { att.label = label.value; commit(); });
+      label.addEventListener("change", () => paintAttachSheets());
+      const del = h("button", { type: "button", class: "btn btn--danger btn--sm", style: "width:auto" }, "Remove");
+      del.addEventListener("click", () => {
+        if (!confirm("Remove this attachment from the invoice?")) return;
+        inv.attachments.splice(i, 1); commit(); paintAttachList(); paintAttachSheets();
+      });
+      return h("div", { style: "display:flex;gap:8px;align-items:center;margin-top:6px" },
+        h("span", {}, "📎"), label,
+        h("span", { class: "subtle", style: "font-size:12px;white-space:nowrap" }, (att.pages || []).length + " pg"),
+        del);
+    }));
+  }
+  const attachNote = h("div", { class: "print-only", style: "font-size:9pt;margin:2px 0" },
+    "Supporting documentation attached: see following page(s).");
+  const attachInput = h("input", { type: "file", accept: "image/*,application/pdf", multiple: true, style: "display:none" });
+  const attachBtn = h("button", { type: "button", class: "btn btn--sm", style: "width:auto;margin-top:8px" }, "📎 Attach PDF / photo");
+  attachInput.addEventListener("change", async () => {
+    attachBtn.disabled = true; const t = attachBtn.textContent; attachBtn.textContent = "📎 Reading…";
+    for (const f of attachInput.files) {
+      try {
+        const pages = await fileToDocPages(f);
+        inv.attachments.push({ label: (f.name || "").replace(/\.[^.]+$/, ""), pages });
+      } catch { toast("Couldn't read " + (f.name || "that file") + " — try a PDF or photo."); }
+    }
+    attachInput.value = ""; attachBtn.disabled = false; attachBtn.textContent = t;
+    commit(); paintAttachList(); paintAttachSheets();
+  });
+  attachBtn.addEventListener("click", () => attachInput.click());
+  paintAttachList(); paintAttachSheets();
+
+  const invoiceSheet = sheet("MITIGATION INVOICE", "Water Mitigation & Restoration Services | IICRC S500 Compliant", "Mitigation Invoice",
     h("div", { class: "grid2" },
       field("Invoice #", inp(inv, "invoiceNo")),
       field("Invoice Date", inp(inv, "invoiceDate", { type: "date" }))),
@@ -1318,11 +1362,18 @@ export function invoice(project, inv) {
       h("div", { class: "trow grand" }, h("span", {}, "Total Due"), totalEl)),
     recapEl,
     field("Notes / Supporting Documentation", ta(inv, "notes")),
+    h("div", { class: "app-only", style: "margin:4px 0 10px" },
+      h("div", { class: "subtle", style: "font-size:12px" },
+        "Attach receipts, subcontractor invoices or other supporting documents — each prints as its own page after the invoice."),
+      attachList, attachBtn, attachInput),
+    attachNote,
     h("div", { class: "remit print-only" },
       h("strong", {}, "Remit to: Roybal Construction, LLC"),
       h("div", {}, "2170 Chateau Court, North Pole, AK 99705"),
       h("div", {}, "Phone: 907-371-9868 · branden@roybalconstruction.com"),
       h("div", {}, "Methods: Check, ACH, or credit card on request")));
+
+  return h("div", {}, invoiceSheet, attachSheets);
 }
 
 /* ============================================================

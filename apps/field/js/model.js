@@ -240,6 +240,7 @@ export function newInvoice() {
     overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P
     deductible: "", previousPayments: "", taxRate: "",
     notes: "",
+    attachments: [],   // supporting docs: [{ label, pages: [dataURL…] }]
   };
 }
 export function blankLineItem() {
