@@ -237,6 +237,7 @@ export function newInvoice() {
     invoiceNo: "", invoiceDate: todayISO(), dueDate: "", terms: "Due on receipt",
     lossSummary: "",
     items: [ blankLineItem() ],
+    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P
     deductible: "", previousPayments: "", taxRate: "",
     notes: "",
   };

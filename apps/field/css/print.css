@@ -117,6 +117,16 @@ table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-si
 .totals { margin-top: 6px; max-width: 320px; margin-left: auto; break-inside: avoid; }
 .totals .trow { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 9pt; }
 .totals .trow input { width: 100px; text-align: right; }
+.totals .trow.rcv { font-weight: 700; border-bottom: 1px solid #0f1b2d; }
+
+/* Recap by Room */
+.invrecap { margin-top: 8px; max-width: 380px; margin-left: auto; break-inside: avoid; }
+.invrecap__title { font-weight: 700; font-size: 9.5pt; margin-bottom: 2px; }
+.invrecap__row { display: flex; gap: 8px; padding: 1px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 9pt; }
+.invrecap__row span:first-child { flex: 1; }
+.invrecap__amt { min-width: 80px; text-align: right; }
+.invrecap__pct { min-width: 55px; text-align: right; }
+.invrecap__row--total { font-weight: 700; border-bottom: 0; }
 .totals .trow.grand { font-size: 11pt; font-weight: 800; border-top: 1.5px solid #0f1b2d; border-bottom: 0; }
 
 /* ---------- terms / statements ---------- */
