@@ -224,8 +224,9 @@ async function invoiceDraft(body: Record<string, unknown>) {
       `- Group every line into its documented room/area via the room field (Xactimate style: each room carries its own scope). Job-wide lines (haul-off, service call, whole-structure disinfection) go under 'Main Level'.\n` +
       `- Descriptions are plain English exactly as Xactimate reads — never include catalog code abbreviations and never repeat the room name inside the description.\n` +
       `- Equipment rental: one line per equipment type PER ROOM where documented, phrased 'Air mover (per 24 hour period) - N units x D days', qty = N*D, unit EA.\n` +
-      `- Monitoring visits: one line, qty = the documented reading-date count.\n` +
-      `- Labor: use the documented crew hours at $125.00/HR ('Equipment setup, take down, and monitoring (hourly charge)' or task-specific labor lines).\n` +
+      `- Unit prices are FULLY LOADED, Xactimate style: labor, material and burden are baked into every unit-priced line. NEVER add hourly labor for work already covered by a unit-priced line — that double-bills the labor.\n` +
+      `- Hourly labor ($125.00/HR) ONLY for activities no unit-priced line covers — normally just 'Equipment setup, take down, and monitoring (hourly charge)', typically 1-2 HR per monitoring visit. The documented crew hours are a sanity CAP on hourly lines, not a quantity to bill wholesale.\n` +
+      `- Monitoring: bill EITHER per-visit (one line, qty = documented reading-date count) OR hourly setup/monitoring — never both.\n` +
       `- Include extraction/removal/treatment lines only where the facts support them; state the basis on every line.\n` +
       `- Match tear-out phrasing to the documented water category: on Cat 3 jobs removal lines carry the qualifier (e.g. 'Tear out wet non-salvageable carpet, cut/bag - Cat 3 water', 'Tear out wet drywall, cleanup, bag, per LF - to 2 ft - Cat 3'); Cat 1/2 jobs omit Cat-3 qualifiers.\n` +
       `- No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n\n` +
@@ -279,7 +280,7 @@ async function invoiceAudit(body: Record<string, unknown>) {
       `Audit this invoice against the documented job facts and list missed billable items.\n\n` +
       `CURRENT INVOICE LINE ITEMS:\n${itemsText}\n\n` +
       `PRICE CATALOG (prefer these codes/prices when a suggestion matches):\n${catalogText(body.catalog)}\n\n` +
-      `Do not duplicate or re-price items already on the invoice. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
+      `Do not duplicate or re-price items already on the invoice. Unit prices are FULLY LOADED (labor baked in): never suggest hourly labor for work an existing unit-priced line covers, and never suggest a unit-priced line for work already billed hourly — either is double-billing. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
       `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "audit",
     schema: AUDIT_SCHEMA as unknown as Record<string, unknown>,

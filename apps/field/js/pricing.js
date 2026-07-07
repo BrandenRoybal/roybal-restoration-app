@@ -70,7 +70,9 @@ export const PRICE_CATALOG = [
   { code: "CON-BLK", description: "Block & pad furniture in place", unit: "EA", price: 45 },
   { code: "CON-PACK", description: "Pack-out contents (per box, incl. materials)", unit: "EA", price: 35 },
   // ---- Labor / service ----
-  { code: "LAB-TECH", description: "Restoration technician labor", unit: "HR", price: 125 },
+  // NOTE: unit prices above are fully loaded (labor baked in) — hourly labor
+  // is only for tasks no unit-priced line covers, e.g. equipment setup/monitoring
+  { code: "LAB-TECH", description: "Equipment setup, take down, and monitoring (hourly charge)", unit: "HR", price: 125 },
   { code: "LAB-SUP", description: "Supervisor / project manager labor", unit: "HR", price: 125 },
   { code: "LAB-AFTH", description: "Emergency after-hours service call", unit: "EA", price: 275 },
   { code: "LAB-SVC", description: "Emergency service call - during business hours", unit: "EA", price: 222.58 },
