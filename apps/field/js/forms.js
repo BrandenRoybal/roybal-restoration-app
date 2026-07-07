@@ -1059,6 +1059,91 @@ export function changeOrder(project, co) {
 /* ============================================================
    7. MITIGATION INVOICE
    ============================================================ */
+/* Xactimate-style charges editor: line items grouped into room / section
+   blocks with continuous line numbering, a wide description column and
+   compact qty / unit / price columns — the way adjusters read estimates. */
+function invoiceCharges(inv, onTotals) {
+  const tbody = h("tbody");
+
+  function recalc() {
+    let subtotal = 0;
+    for (const it of inv.items) subtotal += (Number(it.qty) || 0) * (Number(it.price) || 0);
+    onTotals(subtotal);
+  }
+
+  // items stay one flat array; blocks are derived from each line's room,
+  // in first-appearance order (matches how Xactimate walks the sketch)
+  function sections() {
+    const order = [], by = new Map();
+    for (const it of inv.items) {
+      const key = (it.room || "").trim();
+      if (!by.has(key)) { by.set(key, []); order.push(key); }
+      by.get(key).push(it);
+    }
+    return order.map((key) => ({ key, items: by.get(key) }));
+  }
+
+  function itemRow(it, no) {
+    const tr = h("tr");
+    const cell = (key, cls, type = "text") => {
+      const input = h("input", { type, value: it[key] ?? "" });
+      input.addEventListener("input", () => { it[key] = input.value; extEl.textContent = money((Number(it.qty) || 0) * (Number(it.price) || 0)); recalc(); commit(); });
+      return h("td", { class: cls || "" }, input);
+    };
+    const extEl = h("td", { class: "ext calc" }, money((Number(it.qty) || 0) * (Number(it.price) || 0)));
+    tr.append(
+      h("td", { class: "lineno" }, String(no) + "."),
+      cell("desc", "invdesc"),
+      cell("qty", "", "number"),
+      cell("unit"),
+      cell("price", "", "number"),
+      extEl,
+      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { inv.items.splice(inv.items.indexOf(it), 1); paint(); recalc(); commit(); } }, "✕")));
+    return tr;
+  }
+
+  function paint() {
+    tbody.replaceChildren();
+    let no = 0;
+    for (const sec of sections()) {
+      const name = h("input", { value: sec.key, placeholder: "Room / section (e.g. Living Room)" });
+      // defer the repaint: 'change' fires during blur, and rebuilding the tbody
+      // while the browser is mid-blur on this input throws
+      name.addEventListener("change", () => { const v = name.value; sec.items.forEach((x) => { x.room = v; }); commit(); setTimeout(paint, 0); });
+      const addLine = h("button", { type: "button", class: "btn btn--sm app-only", style: "width:auto;min-height:32px;padding:0 10px" }, "+ line");
+      addLine.addEventListener("click", () => {
+        const at = inv.items.indexOf(sec.items[sec.items.length - 1]) + 1;
+        inv.items.splice(at, 0, { ...blankLineItem(), room: sec.key });
+        commit(); paint();
+      });
+      tbody.append(h("tr", { class: "invsec" },
+        h("td", { colspan: "7" }, h("div", { class: "invsec__row" }, name, addLine))));
+      for (const it of sec.items) tbody.append(itemRow(it, ++no));
+    }
+  }
+  paint();
+  recalc();
+
+  const addSection = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only", style: "width:auto;margin-top:6px" }, "+ Add room / section");
+  addSection.addEventListener("click", () => {
+    inv.items.push({ ...blankLineItem(), room: "New room" });
+    commit(); paint(); recalc();
+  });
+
+  return h("div", {},
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid grid--inv" },
+        h("colgroup", {},
+          h("col", { style: "width:34px" }), h("col", {}), h("col", { style: "width:64px" }),
+          h("col", { style: "width:56px" }), h("col", { style: "width:84px" }),
+          h("col", { style: "width:92px" }), h("col", { class: "app-only", style: "width:36px" })),
+        h("thead", {}, h("tr", {},
+          h("th", {}, "#"), h("th", { class: "invdesc" }, "Description"), h("th", {}, "Qty"),
+          h("th", {}, "Unit"), h("th", {}, "Unit Price"), h("th", {}, "Total"), h("th", { class: "app-only" }, ""))),
+        tbody)),
+    addSection);
+}
+
 export function invoice(project, inv) {
   const subEl = h("span", {}, money(0));
   const taxEl = h("span", {}, money(0));
@@ -1075,7 +1160,7 @@ export function invoice(project, inv) {
   const lossTa = ta(inv, "lossSummary");
   const itemsWrap = h("div", {});
   function paintItems() {
-    itemsWrap.replaceChildren(lineItems(inv.items, blankLineItem, { onTotals: (s) => recalc(s) }));
+    itemsWrap.replaceChildren(invoiceCharges(inv, (s) => recalc(s)));
   }
   paintItems();
 
@@ -1095,7 +1180,7 @@ export function invoice(project, inv) {
       const lines = Array.isArray(draft.items) ? draft.items : [];
       if (draft.lossSummary) { inv.lossSummary = draft.lossSummary; lossTa.value = inv.lossSummary; }
       inv.items = lines.map((li) => ({
-        desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
+        room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
       }));
       if (!inv.items.length) inv.items = [blankLineItem()];
@@ -1131,7 +1216,7 @@ export function invoice(project, inv) {
               h("div", { style: "color:#5a6b7f" }, sug.reason || "")),
             add);
           add.addEventListener("click", () => {
-            inv.items.push({ desc: sug.desc || "", qty: String(sug.qty ?? ""), unit: sug.unit || "", price: sug.price != null ? String(sug.price) : "" });
+            inv.items.push({ room: sug.room || "", desc: sug.desc || "", qty: String(sug.qty ?? ""), unit: sug.unit || "", price: sug.price != null ? String(sug.price) : "" });
             commit(); paintItems(); row.remove();
           });
           return row;

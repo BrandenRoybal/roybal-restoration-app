@@ -242,7 +242,7 @@ export function newInvoice() {
   };
 }
 export function blankLineItem() {
-  return { desc: "", qty: "", unit: "", price: "" };
+  return { room: "", desc: "", qty: "", unit: "", price: "" };
 }
 
 export function newWorkAuth() {

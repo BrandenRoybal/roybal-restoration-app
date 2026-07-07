@@ -188,9 +188,10 @@ const DRAFT_SCHEMA = {
       type: "array",
       items: {
         type: "object", additionalProperties: false,
-        required: ["desc", "qty", "unit", "price", "basis"],
+        required: ["room", "desc", "qty", "unit", "price", "basis"],
         properties: {
-          desc: { type: "string", description: "Line description, prefixed with the catalog code when one applies, e.g. 'WTR-EXTC — Water extraction from carpeted floor (Living Room)'" },
+          room: { type: "string", description: "Room / area this line belongs to, exactly as documented (e.g. 'Living Room', 'Bathroom'). Use 'Main Level' for job-wide lines (haul-off, service call, whole-structure treatment)." },
+          desc: { type: "string", description: "Plain-English scope description as it reads in an Xactimate estimate, e.g. 'Tear out wet drywall, cleanup, bag, per LF - up to 2 ft tall'. NO catalog code abbreviations, NO room name in the description." },
           qty: { type: "number" },
           unit: { type: "string", description: "EA, SF, LF, HR, Day or LS" },
           price: { type: "number", description: "Unit price in DOLLARS" },
@@ -220,9 +221,11 @@ async function invoiceDraft(body: Record<string, unknown>) {
       `Draft the mitigation invoice line items for this job.\n\n` +
       `PRICE CATALOG (code | description | unit | default price) — prefer these codes and prices when a line matches:\n${catalogText(body.catalog)}\n\n` +
       `RULES:\n` +
-      `- Equipment rental: one line per equipment type, qty = total unit-days from the facts.\n` +
+      `- Group every line into its documented room/area via the room field (Xactimate style: each room carries its own scope). Job-wide lines (haul-off, service call, whole-structure disinfection) go under 'Main Level'.\n` +
+      `- Descriptions are plain English exactly as Xactimate reads — never include catalog code abbreviations and never repeat the room name inside the description.\n` +
+      `- Equipment rental: one line per equipment type PER ROOM where documented, phrased 'Air mover (per 24 hour period) - N units x D days', qty = N*D, unit EA.\n` +
       `- Monitoring visits: one line, qty = the documented reading-date count.\n` +
-      `- Labor: use the documented crew hours.\n` +
+      `- Labor: use the documented crew hours at $125.00/HR ('Equipment setup, take down, and monitoring (hourly charge)' or task-specific labor lines).\n` +
       `- Include extraction/removal/treatment lines only where the facts support them; state the basis on every line.\n` +
       `- No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n\n` +
       `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
@@ -244,9 +247,10 @@ const AUDIT_SCHEMA = {
       type: "array",
       items: {
         type: "object", additionalProperties: false,
-        required: ["desc", "qty", "unit", "price", "reason"],
+        required: ["room", "desc", "qty", "unit", "price", "reason"],
         properties: {
-          desc: { type: "string" },
+          room: { type: "string", description: "Room / area the missed line belongs to ('Main Level' for job-wide)" },
+          desc: { type: "string", description: "Plain-English Xactimate-style description — no catalog code abbreviations" },
           qty: { type: "number" },
           unit: { type: "string" },
           price: { type: "number", description: "Unit price in DOLLARS" },
@@ -260,9 +264,9 @@ const AUDIT_SCHEMA = {
 async function invoiceAudit(body: Record<string, unknown>) {
   const facts = body.facts;
   if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
-  const items = Array.isArray(body.items) ? body.items as Array<{ desc: string; qty: string; unit: string; price: string }> : [];
+  const items = Array.isArray(body.items) ? body.items as Array<{ room?: string; desc: string; qty: string; unit: string; price: string }> : [];
   const itemsText = items.length
-    ? items.map((it) => `- ${it.desc} | ${it.qty} ${it.unit} @ $${it.price}`).join("\n")
+    ? items.map((it) => `- [${it.room || "Main Level"}] ${it.desc} | ${it.qty} ${it.unit} @ $${it.price}`).join("\n")
     : "(the invoice is currently empty)";
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,

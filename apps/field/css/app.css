@@ -187,6 +187,15 @@ table.grid th { background: var(--navy); color: #fff; font-size: 11px; font-weig
 table.grid td input { min-height: 40px; border: 0; border-radius: 0; text-align: center; padding: 6px 4px; font-size: 13px; background: transparent; }
 table.grid td input:focus { outline: 2px solid var(--brand); outline-offset: -2px; box-shadow: none; }
 table.grid tr:nth-child(even) td { background: #f7f8fa; }
+
+/* Invoice charges — Xactimate-style: wide left-aligned description, compact
+   numeric columns, shaded room/section header rows, continuous line numbers */
+table.grid--inv th.invdesc { text-align: left; padding-left: 8px; }
+table.grid--inv td.invdesc input { text-align: left; padding-left: 8px; }
+table.grid--inv td.lineno { font-size: 11px; color: var(--muted); background: #fff; }
+table.grid--inv tr.invsec td { background: #e8edf4; text-align: left; padding: 0; }
+table.grid--inv .invsec__row { display: flex; align-items: center; gap: 6px; padding-right: 6px; }
+table.grid--inv .invsec__row input { flex: 1; text-align: left; font-weight: 700; padding-left: 8px; background: transparent; }
 .calc { background: var(--brand-tint) !important; font-weight: 700; color: var(--brand-dark); }
 /* moisture reading flags vs dry goal */
 td.dry input, input.dry { background: #e3f6ec !important; color: var(--green); font-weight: 700; }

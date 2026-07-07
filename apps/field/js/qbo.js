@@ -36,7 +36,9 @@ export async function pushInvoiceToQbo(project, inv) {
   const items = (inv.items || [])
     .filter((it) => String(it.desc || "").trim())
     .map((it) => ({
-      desc: it.desc, qty: parseFloat(it.qty) || 0, unit: it.unit || "", price: parseFloat(it.price) || 0,
+      // QBO lines are flat, so the room/section prefixes the description
+      desc: (String(it.room || "").trim() ? it.room.trim() + " — " : "") + it.desc,
+      qty: parseFloat(it.qty) || 0, unit: it.unit || "", price: parseFloat(it.price) || 0,
     }));
   const data = await proxy("pushInvoice", {
     invoice: {

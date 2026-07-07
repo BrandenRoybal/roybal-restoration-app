@@ -104,6 +104,15 @@ table.grid td input { text-align: center; font-size: 8.5pt !important; border: 0
 table.grid td.calc { background: #eef6ff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 table.grid td input.calc { background: #eef6ff !important; }
 
+/* Invoice charges print like an Xactimate estimate: wide description,
+   left-aligned; shaded room/section rows; hidden delete column handled
+   by .app-only */
+table.grid--inv td.invdesc input { text-align: left; }
+table.grid--inv th.invdesc { text-align: left; }
+table.grid--inv td.lineno { font-size: 7.5pt; color: #5a6b7f; }
+table.grid--inv tr.invsec td { background: #e8edf4 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-size: 9pt !important; }
+
 /* ---------- totals ---------- */
 .totals { margin-top: 6px; max-width: 320px; margin-left: auto; break-inside: avoid; }
 .totals .trow { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 9pt; }
