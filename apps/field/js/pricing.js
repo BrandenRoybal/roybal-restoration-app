@@ -25,9 +25,10 @@ export const PRICE_CATALOG = [
   { code: "EQU-DHM-L", description: "LGR dehumidifier (per day)", unit: "Day", price: 125 },
   { code: "EQU-DHM-C", description: "Conventional dehumidifier (per day)", unit: "Day", price: 85 },
   { code: "EQU-AMV", description: "Air mover / axial fan (per day)", unit: "Day", price: 35 },
-  { code: "EQU-NAFA", description: "HEPA air scrubber / negative air (per day)", unit: "Day", price: 125 },
+  { code: "EQU-NAFA", description: "Negative air fan/Air scrubber (24 hr period)", unit: "Day", price: 70.75 },
   { code: "EQU-HTR", description: "Supplemental drying heater (per day)", unit: "Day", price: 75 },
   { code: "EQU-GEN", description: "Portable generator (per day)", unit: "Day", price: 150 },
+  { code: "EQP-DECON", description: "Equipment decontamination charge - per piece of equipment", unit: "EA", price: 46.35 },
   // ---- Demolition / tear-out ----
   { code: "DMO-DRY2", description: "Tear out wet drywall — 2' flood cut, bag & remove", unit: "LF", price: 3.85 },
   { code: "DMO-DRY4", description: "Tear out wet drywall — 4' flood cut, bag & remove", unit: "LF", price: 5.25 },
@@ -37,6 +38,8 @@ export const PRICE_CATALOG = [
   { code: "DMO-LAM", description: "Remove laminate/engineered flooring", unit: "SF", price: 2.15 },
   { code: "DMO-VNL", description: "Remove sheet vinyl / vinyl plank flooring", unit: "SF", price: 1.65 },
   { code: "DMO-BSB", description: "Remove baseboard / trim", unit: "LF", price: 1.15 },
+  { code: "DMO-BBH", description: "Remove Baseboard heat - steam or hot water", unit: "LF", price: 6.94 },
+  { code: "DMO-TACK", description: "Remove Tackless strip - per LF", unit: "LF", price: 1.39 },
   { code: "DMO-CAB", description: "Detach base cabinet (for drying access)", unit: "LF", price: 28.5 },
   { code: "DMO-TOE", description: "Drill/remove toe-kick for cavity drying", unit: "LF", price: 4.5 },
   // ---- Cleaning / treatments ----
@@ -45,11 +48,23 @@ export const PRICE_CATALOG = [
   { code: "CLN-DEOD", description: "Deodorization treatment (thermal fog/ozone)", unit: "SF", price: 0.45 },
   { code: "TRT-ANTI", description: "Apply EPA-registered antimicrobial to affected surfaces", unit: "SF", price: 0.45 },
   { code: "TRT-SEAL", description: "Seal/encapsulate framing or subfloor", unit: "SF", price: 1.35 },
+  { code: "TRT-FOG", description: "Disinfect building - fog / spray - per SF", unit: "SF", price: 0.91 },
   // ---- Containment / mold ----
   { code: "HMR-CONT", description: "Containment barrier — poly & tape", unit: "SF", price: 1.25 },
   { code: "HMR-ZIP", description: "Zipper door for containment", unit: "EA", price: 85 },
+  { code: "HMR-DCB", description: "Dust control barrier per square foot", unit: "SF", price: 1.87 },
+  { code: "HMR-DCBP", description: "Dust control barrier - tension post (per day)", unit: "Day", price: 3.35 },
+  { code: "PRO-FLR", description: "Floor protection - heavy paper and tape", unit: "SF", price: 0.7 },
   { code: "HMR-MOLD", description: "Mold remediation — remove affected material", unit: "SF", price: 4.85 },
   { code: "HMR-PPE", description: "PPE — full protective gear (per person per day)", unit: "EA", price: 65 },
+  // ---- Detach & reset (fixtures / appliances) ----
+  { code: "DAR-TOIL", description: "Toilet - Detach", unit: "EA", price: 133.46 },
+  { code: "DAR-SINK", description: "Sink - single basin - Detach", unit: "EA", price: 80.03 },
+  { code: "DAR-WASH", description: "Washer/Washing machine - Detach", unit: "EA", price: 75.02 },
+  { code: "DAR-DRYE", description: "Dryer - electric - Detach", unit: "EA", price: 57.84 },
+  { code: "DAR-FRIG", description: "Refrigerator - Detach", unit: "EA", price: 77.1 },
+  { code: "DAR-RANG", description: "Range - freestanding - electric - Detach", unit: "EA", price: 57.84 },
+  { code: "DAR-TSF", description: "Tub/shower faucet (finish trim) - Detach & reset", unit: "EA", price: 138.43 },
   // ---- Contents ----
   { code: "CON-MAN", description: "Contents manipulation — move & reset (per room)", unit: "EA", price: 125 },
   { code: "CON-BLK", description: "Block & pad furniture in place", unit: "EA", price: 45 },
@@ -58,7 +73,9 @@ export const PRICE_CATALOG = [
   { code: "LAB-TECH", description: "Restoration technician labor", unit: "HR", price: 125 },
   { code: "LAB-SUP", description: "Supervisor / project manager labor", unit: "HR", price: 125 },
   { code: "LAB-AFTH", description: "Emergency after-hours service call", unit: "EA", price: 275 },
+  { code: "LAB-SVC", description: "Emergency service call - during business hours", unit: "EA", price: 222.58 },
   // ---- Disposal ----
   { code: "DSP-BAG", description: "Debris bagging & haul to disposal", unit: "EA", price: 9.5 },
-  { code: "DSP-LOAD", description: "Transfer station fees & haul-off (per load)", unit: "EA", price: 225 },
+  { code: "DSP-LOAD", description: "Haul debris - per pickup truck load - including dump fees", unit: "EA", price: 253.82 },
+  { code: "DSP-TRLR", description: "Tandem axle dump trailer - per load - including dump fees", unit: "EA", price: 530.04 },
 ];

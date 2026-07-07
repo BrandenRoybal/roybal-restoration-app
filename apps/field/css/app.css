@@ -224,6 +224,17 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .totals { margin-top: 10px; }
 .totals .trow { display: flex; justify-content: space-between; padding: 6px 2px; border-bottom: 1px dashed var(--line); font-size: 14px; }
 .totals .trow.grand { font-size: 18px; font-weight: 800; color: var(--ink); border-bottom: 0; }
+.totals .trow.rcv { font-weight: 700; border-bottom: 2px solid var(--ink); }
+
+/* Recap by Room (Xactimate-style area share of the line item total) */
+.invrecap { margin-top: 14px; }
+.invrecap__title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.invrecap__row { display: flex; gap: 10px; padding: 4px 2px; border-bottom: 1px dashed var(--line); font-size: 13px; }
+.invrecap__row span:first-child { flex: 1; }
+.invrecap__amt { min-width: 100px; text-align: right; }
+.invrecap__pct { min-width: 70px; text-align: right; color: var(--muted); }
+.invrecap__row--total { font-weight: 700; border-bottom: 0; }
+.invrecap__row--total .invrecap__pct { color: var(--ink); }
 
 /* ---------- Signature pad ---------- */
 .sigblock { margin-bottom: 14px; }

@@ -227,6 +227,7 @@ async function invoiceDraft(body: Record<string, unknown>) {
       `- Monitoring visits: one line, qty = the documented reading-date count.\n` +
       `- Labor: use the documented crew hours at $125.00/HR ('Equipment setup, take down, and monitoring (hourly charge)' or task-specific labor lines).\n` +
       `- Include extraction/removal/treatment lines only where the facts support them; state the basis on every line.\n` +
+      `- Match tear-out phrasing to the documented water category: on Cat 3 jobs removal lines carry the qualifier (e.g. 'Tear out wet non-salvageable carpet, cut/bag - Cat 3 water', 'Tear out wet drywall, cleanup, bag, per LF - to 2 ft - Cat 3'); Cat 1/2 jobs omit Cat-3 qualifiers.\n` +
       `- No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n\n` +
       `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "draft_invoice",

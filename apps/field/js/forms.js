@@ -1146,16 +1146,52 @@ function invoiceCharges(inv, onTotals) {
 
 export function invoice(project, inv) {
   const subEl = h("span", {}, money(0));
+  const ohEl = h("span", {}, money(0));
+  const pfEl = h("span", {}, money(0));
+  const rcvEl = h("span", {}, money(0));
   const taxEl = h("span", {}, money(0));
   const totalEl = h("span", {}, money(0));
+  const recapEl = h("div", { class: "invrecap" });
   let subtotal = 0;
+  function paintRecap() {
+    // Xactimate's "Recap by Room": each area's share of the line item total
+    const order = [], by = new Map();
+    for (const it of inv.items || []) {
+      const ext = (Number(it.qty) || 0) * (Number(it.price) || 0);
+      if (!ext) continue;
+      const key = (it.room || "").trim() || "Main Level";
+      if (!by.has(key)) { by.set(key, 0); order.push(key); }
+      by.set(key, by.get(key) + ext);
+    }
+    const total = [...by.values()].reduce((a, b) => a + b, 0);
+    if (order.length < 2 || !total) { recapEl.replaceChildren(); recapEl.hidden = true; return; }
+    recapEl.hidden = false;
+    recapEl.replaceChildren(
+      h("div", { class: "invrecap__title" }, "Recap by Room"),
+      ...order.map((key) => h("div", { class: "invrecap__row" },
+        h("span", {}, key),
+        h("span", { class: "invrecap__amt" }, money(by.get(key))),
+        h("span", { class: "invrecap__pct" }, ((by.get(key) / total) * 100).toFixed(2) + "%"))),
+      h("div", { class: "invrecap__row invrecap__row--total" },
+        h("span", {}, "Total"),
+        h("span", { class: "invrecap__amt" }, money(total)),
+        h("span", { class: "invrecap__pct" }, "100.00%")));
+  }
   function recalc(sub) {
     if (sub != null) subtotal = sub;
     subEl.textContent = money(subtotal);
+    // Xactimate-style summary: Line Item Total + O&P = Replacement Cost Value
+    const oh = subtotal * ((Number(inv.overheadPct) || 0) / 100);
+    const pf = subtotal * ((Number(inv.profitPct) || 0) / 100);
+    ohEl.textContent = money(oh);
+    pfEl.textContent = money(pf);
+    const rcv = subtotal + oh + pf;
+    rcvEl.textContent = money(rcv);
     const tax = subtotal * ((Number(inv.taxRate) || 0) / 100);
     taxEl.textContent = money(tax);
-    const total = subtotal - (Number(inv.deductible) || 0) - (Number(inv.previousPayments) || 0) + tax;
+    const total = rcv - (Number(inv.deductible) || 0) - (Number(inv.previousPayments) || 0) + tax;
     totalEl.textContent = money(total);
+    paintRecap();
   }
   const lossTa = ta(inv, "lossSummary");
   const itemsWrap = h("div", {});
@@ -1269,12 +1305,18 @@ export function invoice(project, inv) {
     aiPanel,
     itemsWrap,
     h("div", { class: "totals" },
-      h("div", { class: "trow" }, h("span", {}, "Subtotal"), subEl),
+      h("div", { class: "trow" }, h("span", {}, "Line Item Total"), subEl),
+      h("div", { class: "trow" }, h("span", {}, "Overhead %"), inp(inv, "overheadPct", { type: "number", oninput: () => recalc() })),
+      h("div", { class: "trow" }, h("span", {}, "Overhead"), ohEl),
+      h("div", { class: "trow" }, h("span", {}, "Profit %"), inp(inv, "profitPct", { type: "number", oninput: () => recalc() })),
+      h("div", { class: "trow" }, h("span", {}, "Profit"), pfEl),
+      h("div", { class: "trow rcv" }, h("span", {}, "Replacement Cost Value"), rcvEl),
       h("div", { class: "trow" }, h("span", {}, "Less: Deductible / Non-Recoverable"), inp(inv, "deductible", { type: "number", oninput: () => recalc() })),
       h("div", { class: "trow" }, h("span", {}, "Less: Previous Payments"), inp(inv, "previousPayments", { type: "number", oninput: () => recalc() })),
       h("div", { class: "trow" }, h("span", {}, "Sales Tax %"), inp(inv, "taxRate", { type: "number", oninput: () => recalc() })),
       h("div", { class: "trow" }, h("span", {}, "Sales Tax"), taxEl),
       h("div", { class: "trow grand" }, h("span", {}, "Total Due"), totalEl)),
+    recapEl,
     field("Notes / Supporting Documentation", ta(inv, "notes")),
     h("div", { class: "remit print-only" },
       h("strong", {}, "Remit to: Roybal Construction, LLC"),
