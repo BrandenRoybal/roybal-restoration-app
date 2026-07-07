@@ -107,7 +107,7 @@ export function invoiceFacts(project) {
 }
 
 /* ---------- invoice draft + audit ---------- */
-/** Draft { lossSummary, items:[{desc,qty,unit,price,basis}] } from the documented facts. */
+/** Draft { lossSummary, items:[{room,desc,qty,unit,price,basis}] } from the documented facts. */
 export function draftInvoice(project) {
   return callOffice(project, "invoiceDraft", {
     facts: invoiceFacts(project),
@@ -115,7 +115,7 @@ export function draftInvoice(project) {
   }).then((b) => b.draft);
 }
 
-/** Audit the current items; returns suggestions [{desc,qty,unit,price,reason}]. */
+/** Audit the current items; returns suggestions [{room,desc,qty,unit,price,reason}]. */
 export function auditInvoice(project, inv) {
   return callOffice(project, "invoiceAudit", {
     facts: invoiceFacts(project),

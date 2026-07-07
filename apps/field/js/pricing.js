@@ -55,7 +55,7 @@ export const PRICE_CATALOG = [
   { code: "CON-BLK", description: "Block & pad furniture in place", unit: "EA", price: 45 },
   { code: "CON-PACK", description: "Pack-out contents (per box, incl. materials)", unit: "EA", price: 35 },
   // ---- Labor / service ----
-  { code: "LAB-TECH", description: "Restoration technician labor", unit: "HR", price: 95 },
+  { code: "LAB-TECH", description: "Restoration technician labor", unit: "HR", price: 125 },
   { code: "LAB-SUP", description: "Supervisor / project manager labor", unit: "HR", price: 125 },
   { code: "LAB-AFTH", description: "Emergency after-hours service call", unit: "EA", price: 275 },
   // ---- Disposal ----
