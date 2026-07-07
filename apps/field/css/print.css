@@ -43,8 +43,9 @@ section.sheet--doc .sheet-foot { flex: 0 0 auto; margin-top: 6px; }
 .sheet-head__title h2 { font-size: 15pt; margin: 4px 0 1px; color: #0f1b2d; letter-spacing: .5px; border: 0; }
 .sheet-head__sub { font-size: 8.5pt; color: #5b6b80; }
 /* narrative (AI cover) body — match the form font sizes on the PDF */
-.narrative-body p, .narrative-body li { font-size: 11.5pt !important; line-height: 1.5; }
-.narrative-body h3 { font-size: 13pt !important; }
+.narrative-body p, .narrative-body li, .narrative-body .nb-p, .narrative-body .nb-ul { font-size: 11.5pt !important; line-height: 1.5; }
+.narrative-body .nb-note { font-size: 10.5pt !important; }
+.narrative-body h3, .narrative-body .nb-h3 { font-size: 13pt !important; }
 
 /* ---------- footer ---------- */
 .sheet-foot {
@@ -91,16 +92,16 @@ textarea { border: 1px solid #c4ccd8 !important; min-height: 38px !important; he
 /* ---------- checkboxes (scope / reasons) ---------- */
 .check { display: flex; gap: 6px; padding: 2px 0; break-inside: avoid; }
 .check input { width: 11px !important; height: 11px !important; border: 1px solid #333 !important; }
-.check label { font-size: 10pt; }
+.check label { font-size: 10.5pt; }
 
 /* ---------- data tables ---------- */
 .tablewrap { overflow: visible !important; border: 0 !important; }
-table.grid { width: 100%; min-width: 0 !important; border-collapse: collapse; font-size: 8.5pt; }
+table.grid { width: 100%; min-width: 0 !important; border-collapse: collapse; font-size: 9.5pt; }
 table.grid th, table.grid td { border: 0.6px solid #6b7892 !important; padding: 1px 2px !important; }
-table.grid th { background: #0f1b2d !important; color: #fff !important; font-size: 7.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+table.grid th { background: #0f1b2d !important; color: #fff !important; font-size: 8pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 table.grid thead { display: table-header-group; }
 table.grid tr { break-inside: avoid; }
-table.grid td input { text-align: center; font-size: 8.5pt !important; border: 0 !important; }
+table.grid td input { text-align: center; font-size: 9.5pt !important; border: 0 !important; }
 table.grid td.calc { background: #eef6ff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 table.grid td input.calc { background: #eef6ff !important; }
 
@@ -115,25 +116,25 @@ table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-si
 
 /* ---------- totals ---------- */
 .totals { margin-top: 6px; max-width: 320px; margin-left: auto; break-inside: avoid; }
-.totals .trow { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 9pt; }
+.totals .trow { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 10pt; }
 .totals .trow input { width: 100px; text-align: right; }
 .totals .trow.rcv { font-weight: 700; border-bottom: 1px solid #0f1b2d; }
 
 /* Recap by Room */
 .invrecap { margin-top: 8px; max-width: 380px; margin-left: auto; break-inside: avoid; }
-.invrecap__title { font-weight: 700; font-size: 9.5pt; margin-bottom: 2px; }
-.invrecap__row { display: flex; gap: 8px; padding: 1px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 9pt; }
+.invrecap__title { font-weight: 700; font-size: 10.5pt; margin-bottom: 2px; }
+.invrecap__row { display: flex; gap: 8px; padding: 1px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 10pt; }
 .invrecap__row span:first-child { flex: 1; }
 .invrecap__amt { min-width: 80px; text-align: right; }
 .invrecap__pct { min-width: 55px; text-align: right; }
 .invrecap__row--total { font-weight: 700; border-bottom: 0; }
-.totals .trow.grand { font-size: 11pt; font-weight: 800; border-top: 1.5px solid #0f1b2d; border-bottom: 0; }
+.totals .trow.grand { font-size: 12pt; font-weight: 800; border-top: 1.5px solid #0f1b2d; border-bottom: 0; }
 
 /* ---------- terms / statements ---------- */
-.termrow { display: grid; grid-template-columns: 100px 1fr; gap: 8px; padding: 2px 0; font-size: 9.5pt; border: 0; break-inside: avoid; }
+.termrow { display: grid; grid-template-columns: 100px 1fr; gap: 8px; padding: 2px 0; font-size: 10.5pt; border: 0; break-inside: avoid; }
 .termrow__k { font-weight: 700; }
-.certstmt { border: 1px solid #c4ccd8; padding: 6px 8px; font-size: 9.5pt; background: #fff; }
-.remit { border: 1px solid #c4ccd8; padding: 6px 8px; font-size: 9.5pt; }
+.certstmt { border: 1px solid #c4ccd8; padding: 6px 8px; font-size: 10.5pt; background: #fff; }
+.remit { border: 1px solid #c4ccd8; padding: 6px 8px; font-size: 10.5pt; }
 
 /* ---------- signatures ---------- */
 .sigblock { break-inside: avoid; margin-bottom: 10px; }
@@ -160,7 +161,7 @@ table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-si
 .chart-empty { display: none; }
 
 /* sketch + floor plan — the canvas is a replaced element; scale it to FIT a
-   bounded box (max 6.8in wide x 3.4in tall) while preserving its intrinsic
+   bounded box (max 7.5in wide x 6.5in tall) while preserving its intrinsic
    aspect ratio, so markers/equipment icons stay round AND the map no longer
    balloons to a full page. The .sketch shrinks to the canvas (fit-content) and
    the bg fills that same box, so they stay aligned. */
@@ -173,12 +174,12 @@ table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-si
   position: relative; display: block;
   aspect-ratio: auto !important;            /* use the canvas's intrinsic aspect */
   width: auto !important; height: auto !important;
-  max-width: 7in; max-height: 5in;
+  max-width: 7.5in; max-height: 6.5in;
 }
 
 /* contents inventory */
 table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover; border: 0.5px solid #6b7892; }
-.csub { font-size: 6.5pt; color: #5b6b80; }
+.csub { font-size: 7.5pt; color: #5b6b80; }
 
 /* box labels — 2 per row, clean cut-out cards */
 .boxlabels { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25in; }
@@ -197,7 +198,7 @@ table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover;
 .photocard { border: 0.6px solid #6b7892; border-radius: 0; overflow: hidden; break-inside: avoid; }
 .photocard img { width: 100%; height: auto; max-height: 2.6in; object-fit: cover; }
 .photoedit { display: none !important; }
-.photocap { font-size: 7.5pt; padding: 2px 4px; }
+.photocap { font-size: 8.5pt; padding: 2px 4px; }
 .photometa { color: #5b6b80; }
 
 .note, .divider { display: none; }
