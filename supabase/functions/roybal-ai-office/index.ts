@@ -221,14 +221,15 @@ async function invoiceDraft(body: Record<string, unknown>) {
       `Draft the mitigation invoice line items for this job.\n\n` +
       `PRICE CATALOG (code | description | unit | default price) — prefer these codes and prices when a line matches:\n${catalogText(body.catalog)}\n\n` +
       `RULES:\n` +
-      `- Group every line into its documented room/area via the room field (Xactimate style: each room carries its own scope). Job-wide lines (haul-off, service call, whole-structure disinfection) go under 'Main Level'.\n` +
-      `- Descriptions are plain English exactly as Xactimate reads — never include catalog code abbreviations and never repeat the room name inside the description.\n` +
-      `- Equipment rental: one line per equipment type PER ROOM where documented, phrased 'Air mover (per 24 hour period) - N units x D days', qty = N*D, unit EA.\n` +
-      `- Unit prices are FULLY LOADED, Xactimate style: labor, material and burden are baked into every unit-priced line. NEVER add hourly labor for work already covered by a unit-priced line — that double-bills the labor.\n` +
-      `- Hourly labor ($125.00/HR) ONLY for activities no unit-priced line covers — normally just 'Equipment setup, take down, and monitoring (hourly charge)', typically 1-2 HR per monitoring visit. The documented crew hours are a sanity CAP on hourly lines, not a quantity to bill wholesale.\n` +
-      `- Monitoring: bill EITHER per-visit (one line, qty = documented reading-date count) OR hourly setup/monitoring — never both.\n` +
-      `- Include extraction/removal/treatment lines only where the facts support them; state the basis on every line.\n` +
-      `- Match tear-out phrasing to the documented water category: on Cat 3 jobs removal lines carry the qualifier (e.g. 'Tear out wet non-salvageable carpet, cut/bag - Cat 3 water', 'Tear out wet drywall, cleanup, bag, per LF - to 2 ft - Cat 3'); Cat 1/2 jobs omit Cat-3 qualifiers.\n` +
+      `- BILLING MODEL \u2014 time & materials in Xactimate FORMAT (not Xactimate pricing): ALL labor bills by the hour at $125.00/HR and is never baked into a unit price. EVERY documented crew hour must appear on the invoice inside an hourly line.\n` +
+      `- Divide the documented labor entries (facts.labor.entries \u2014 each has date, employee, hours and a 'work' note) into task-specific hourly lines: same task -> one line, qty = summed hours, unit HR, price 125. The work notes are the justification \u2014 phrase each line as the scope performed (e.g. 'Tear out wet drywall, bag and haul debris', 'Water extraction from carpeted floors').\n` +
+      `- RECONCILE THE HOURS: the HR quantities across all labor lines MUST sum to facts.labor.totalHours. If some hours have vague or missing notes, bill the remainder as one 'General mitigation labor' line \u2014 no logged hour goes unbilled.\n` +
+      `- Moisture mapping / monitoring visits bill hourly at $125.00/HR \u2014 never as flat per-visit fees.\n` +
+      `- Group every line into its documented room/area via the room field (Xactimate style). Use room names mentioned in work notes, moisture maps and photos; hours or job-wide lines that name no room go under 'Main Level'.\n` +
+      `- Non-labor lines: equipment rental per unit per day phrased 'Air mover (per 24 hour period) - N units x D days' (qty = N*D, unit EA); materials & consumables (product only); pass-through fees (haul/dump loads, equipment decontamination, PPE, service call). NEVER bill labor-loaded piecework unit prices \u2014 labor rides only in HR lines.\n` +
+      `- Descriptions are plain English exactly as Xactimate reads \u2014 never include catalog code abbreviations and never repeat the room name inside the description.\n` +
+      `- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit Cat-3 qualifiers.\n` +
+      `- Include scope lines only where the facts support them; state the basis on every line.\n` +
       `- No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n\n` +
       `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "draft_invoice",
@@ -280,7 +281,9 @@ async function invoiceAudit(body: Record<string, unknown>) {
       `Audit this invoice against the documented job facts and list missed billable items.\n\n` +
       `CURRENT INVOICE LINE ITEMS:\n${itemsText}\n\n` +
       `PRICE CATALOG (prefer these codes/prices when a suggestion matches):\n${catalogText(body.catalog)}\n\n` +
-      `Do not duplicate or re-price items already on the invoice. Unit prices are FULLY LOADED (labor baked in): never suggest hourly labor for work an existing unit-priced line covers, and never suggest a unit-priced line for work already billed hourly — either is double-billing. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
+      `Do not duplicate or re-price items already on the invoice. BILLING MODEL — time & materials: all labor bills hourly at $125.00/HR (never baked into unit prices).\n` +
+      `MOST IMPORTANT CHECK — hour reconciliation: compare the total HR billed across the invoice's hourly lines to facts.labor.totalHours. If logged hours are unbilled, suggest hourly line(s) at $125.00/HR that bill the gap, describing the work from the labor entries' notes and citing them as the reason. Unbilled logged hours are lost revenue.\n` +
+      `Also flag missing equipment-rental days, materials, and pass-through fees the facts support. Never suggest labor-loaded piecework: labor belongs only in HR lines. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
       `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "audit",
     schema: AUDIT_SCHEMA as unknown as Record<string, unknown>,

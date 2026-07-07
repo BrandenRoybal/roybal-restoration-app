@@ -1,83 +1,57 @@
 /* ============================================================
-   Roybal Field Forms — Xactimate-style price catalog
+   Roybal Field Forms — price catalog (T&M in Xactimate format)
    ------------------------------------------------------------
-   Default unit prices (DOLLARS) for common water/fire/mold mitigation
-   line items, loosely following Xactimate category/selector codes.
-   Starting-point pricing for Interior Alaska — every invoice line stays
-   fully editable, so adjust per job.
+   BILLING MODEL: labor is billed by the HOUR at $125/HR and is NEVER
+   baked into unit prices (we use Xactimate's room-by-room line-item
+   FORMAT, not its loaded pricing). Every logged QuickBooks Time hour
+   must land on the invoice, divided into task-specific hourly lines
+   justified by the crew's timesheet notes. Equipment rents per unit
+   per day; materials & pass-through fees bill at their own prices.
+   Every invoice line stays fully editable, so adjust per job.
 
    Used by the invoice "Draft from documentation" + "Find missed items"
-   AI actions (the catalog rides along in the request so the model bills
-   with consistent codes and prices) — and handy as a manual reference.
+   AI actions (the catalog rides along in the request) — and handy as
+   a manual reference.
    ============================================================ */
 
+export const LABOR_RATE = 125; // $/HR — Roybal Construction labor rate
+
 export const PRICE_CATALOG = [
-  // ---- Water mitigation ----
-  { code: "WTR-INSP", description: "Initial loss inspection & documentation", unit: "EA", price: 225 },
-  { code: "WTR-MAP", description: "Moisture mapping / monitoring visit", unit: "EA", price: 145 },
-  { code: "WTR-EXTC", description: "Water extraction from carpeted floor", unit: "SF", price: 1.25 },
-  { code: "WTR-EXTH", description: "Water extraction from hard surface floor", unit: "SF", price: 0.95 },
-  { code: "WTR-EXTHV", description: "Heavy water extraction (Cat 2/3)", unit: "SF", price: 1.75 },
-  { code: "WTR-PADR", description: "Remove wet carpet pad", unit: "SF", price: 0.65 },
-  { code: "WTR-CARL", description: "Lift/detach carpet for drying", unit: "SF", price: 0.55 },
-  { code: "WTR-FLR-DRY", description: "Inject-dry hardwood/subfloor system setup", unit: "EA", price: 185 },
-  // ---- Equipment rental (per unit per day) ----
-  { code: "EQU-DHM-L", description: "LGR dehumidifier (per day)", unit: "Day", price: 125 },
-  { code: "EQU-DHM-C", description: "Conventional dehumidifier (per day)", unit: "Day", price: 85 },
-  { code: "EQU-AMV", description: "Air mover / axial fan (per day)", unit: "Day", price: 35 },
-  { code: "EQU-NAFA", description: "Negative air fan/Air scrubber (24 hr period)", unit: "Day", price: 70.75 },
-  { code: "EQU-HTR", description: "Supplemental drying heater (per day)", unit: "Day", price: 75 },
-  { code: "EQU-GEN", description: "Portable generator (per day)", unit: "Day", price: 150 },
-  { code: "EQP-DECON", description: "Equipment decontamination charge - per piece of equipment", unit: "EA", price: 46.35 },
-  // ---- Demolition / tear-out ----
-  { code: "DMO-DRY2", description: "Tear out wet drywall — 2' flood cut, bag & remove", unit: "LF", price: 3.85 },
-  { code: "DMO-DRY4", description: "Tear out wet drywall — 4' flood cut, bag & remove", unit: "LF", price: 5.25 },
-  { code: "DMO-DRYC", description: "Tear out wet ceiling drywall, bag & remove", unit: "SF", price: 2.15 },
-  { code: "DMO-INS", description: "Remove wet insulation, bag & dispose", unit: "SF", price: 1.45 },
-  { code: "DMO-CAR", description: "Remove & dispose carpet and pad", unit: "SF", price: 0.95 },
-  { code: "DMO-LAM", description: "Remove laminate/engineered flooring", unit: "SF", price: 2.15 },
-  { code: "DMO-VNL", description: "Remove sheet vinyl / vinyl plank flooring", unit: "SF", price: 1.65 },
-  { code: "DMO-BSB", description: "Remove baseboard / trim", unit: "LF", price: 1.15 },
-  { code: "DMO-BBH", description: "Remove Baseboard heat - steam or hot water", unit: "LF", price: 6.94 },
-  { code: "DMO-TACK", description: "Remove Tackless strip - per LF", unit: "LF", price: 1.39 },
-  { code: "DMO-CAB", description: "Detach base cabinet (for drying access)", unit: "LF", price: 28.5 },
-  { code: "DMO-TOE", description: "Drill/remove toe-kick for cavity drying", unit: "LF", price: 4.5 },
-  // ---- Cleaning / treatments ----
-  { code: "CLN-FIN", description: "Final cleaning of affected area", unit: "SF", price: 0.55 },
-  { code: "CLN-HEPA", description: "HEPA vacuuming of affected surfaces", unit: "SF", price: 0.85 },
-  { code: "CLN-DEOD", description: "Deodorization treatment (thermal fog/ozone)", unit: "SF", price: 0.45 },
-  { code: "TRT-ANTI", description: "Apply EPA-registered antimicrobial to affected surfaces", unit: "SF", price: 0.45 },
-  { code: "TRT-SEAL", description: "Seal/encapsulate framing or subfloor", unit: "SF", price: 1.35 },
-  { code: "TRT-FOG", description: "Disinfect building - fog / spray - per SF", unit: "SF", price: 0.91 },
-  // ---- Containment / mold ----
-  { code: "HMR-CONT", description: "Containment barrier — poly & tape", unit: "SF", price: 1.25 },
-  { code: "HMR-ZIP", description: "Zipper door for containment", unit: "EA", price: 85 },
-  { code: "HMR-DCB", description: "Dust control barrier per square foot", unit: "SF", price: 1.87 },
-  { code: "HMR-DCBP", description: "Dust control barrier - tension post (per day)", unit: "Day", price: 3.35 },
-  { code: "PRO-FLR", description: "Floor protection - heavy paper and tape", unit: "SF", price: 0.7 },
-  { code: "HMR-MOLD", description: "Mold remediation — remove affected material", unit: "SF", price: 4.85 },
-  { code: "HMR-PPE", description: "PPE — full protective gear (per person per day)", unit: "EA", price: 65 },
-  // ---- Detach & reset (fixtures / appliances) ----
-  { code: "DAR-TOIL", description: "Toilet - Detach", unit: "EA", price: 133.46 },
-  { code: "DAR-SINK", description: "Sink - single basin - Detach", unit: "EA", price: 80.03 },
-  { code: "DAR-WASH", description: "Washer/Washing machine - Detach", unit: "EA", price: 75.02 },
-  { code: "DAR-DRYE", description: "Dryer - electric - Detach", unit: "EA", price: 57.84 },
-  { code: "DAR-FRIG", description: "Refrigerator - Detach", unit: "EA", price: 77.1 },
-  { code: "DAR-RANG", description: "Range - freestanding - electric - Detach", unit: "EA", price: 57.84 },
-  { code: "DAR-TSF", description: "Tub/shower faucet (finish trim) - Detach & reset", unit: "EA", price: 138.43 },
-  // ---- Contents ----
-  { code: "CON-MAN", description: "Contents manipulation — move & reset (per room)", unit: "EA", price: 125 },
-  { code: "CON-BLK", description: "Block & pad furniture in place", unit: "EA", price: 45 },
-  { code: "CON-PACK", description: "Pack-out contents (per box, incl. materials)", unit: "EA", price: 35 },
-  // ---- Labor / service ----
-  // NOTE: unit prices above are fully loaded (labor baked in) — hourly labor
-  // is only for tasks no unit-priced line covers, e.g. equipment setup/monitoring
-  { code: "LAB-TECH", description: "Equipment setup, take down, and monitoring (hourly charge)", unit: "HR", price: 125 },
-  { code: "LAB-SUP", description: "Supervisor / project manager labor", unit: "HR", price: 125 },
-  { code: "LAB-AFTH", description: "Emergency after-hours service call", unit: "EA", price: 275 },
+  // ---- Labor tasks (unit HR @ $125 — divide logged hours across these) ----
+  { code: "LAB-INSP", description: "Initial loss inspection & documentation", unit: "HR", price: 125 },
+  { code: "LAB-MAP", description: "Moisture mapping / monitoring visit", unit: "HR", price: 125 },
+  { code: "LAB-EXT", description: "Water extraction", unit: "HR", price: 125 },
+  { code: "LAB-DEMO", description: "Demolition / tear-out (drywall, flooring, trim, cabinets)", unit: "HR", price: 125 },
+  { code: "LAB-DETC", description: "Detach & reset fixtures / appliances", unit: "HR", price: 125 },
+  { code: "LAB-CLN", description: "Cleaning of affected areas", unit: "HR", price: 125 },
+  { code: "LAB-TRT", description: "Antimicrobial / disinfectant application", unit: "HR", price: 125 },
+  { code: "LAB-CONT", description: "Containment / dust barrier setup", unit: "HR", price: 125 },
+  { code: "LAB-CON", description: "Contents manipulation / pack-out", unit: "HR", price: 125 },
+  { code: "LAB-EQP", description: "Equipment setup, take down, and monitoring (hourly charge)", unit: "HR", price: 125 },
+  { code: "LAB-GEN", description: "General mitigation labor", unit: "HR", price: 125 },
+  { code: "LAB-SUP", description: "Supervisor / project manager", unit: "HR", price: 125 },
+  // ---- Service / trip fees ----
   { code: "LAB-SVC", description: "Emergency service call - during business hours", unit: "EA", price: 222.58 },
-  // ---- Disposal ----
-  { code: "DSP-BAG", description: "Debris bagging & haul to disposal", unit: "EA", price: 9.5 },
+  { code: "LAB-AFTH", description: "Emergency after-hours service call", unit: "EA", price: 275 },
+  // ---- Equipment rental (per unit per day — no labor in these) ----
+  { code: "EQU-DHM-L", description: "LGR dehumidifier (per 24 hour period)", unit: "Day", price: 125 },
+  { code: "EQU-DHM-C", description: "Conventional dehumidifier (per 24 hour period)", unit: "Day", price: 85 },
+  { code: "EQU-AMV", description: "Air mover (per 24 hour period)", unit: "Day", price: 35 },
+  { code: "EQU-NAFA", description: "Negative air fan/Air scrubber (24 hr period)", unit: "Day", price: 70.75 },
+  { code: "EQU-HTR", description: "Supplemental drying heater (per 24 hour period)", unit: "Day", price: 75 },
+  { code: "EQU-GEN", description: "Portable generator (per 24 hour period)", unit: "Day", price: 150 },
+  { code: "EQU-INJ", description: "Inject-dry floor drying system (per 24 hour period)", unit: "Day", price: 185 },
+  { code: "EQP-DECON", description: "Equipment decontamination charge - per piece of equipment", unit: "EA", price: 46.35 },
+  // ---- Materials & consumables (product only — install labor is hourly) ----
+  { code: "MAT-CONT", description: "Containment barrier materials - poly & tape", unit: "SF", price: 0.45 },
+  { code: "MAT-DCBP", description: "Dust control barrier - tension post (per day)", unit: "Day", price: 3.35 },
+  { code: "MAT-ZIP", description: "Zipper door for containment", unit: "EA", price: 85 },
+  { code: "MAT-FLRP", description: "Floor protection materials - heavy paper and tape", unit: "SF", price: 0.35 },
+  { code: "MAT-ANTI", description: "EPA-registered antimicrobial (product, per SF treated)", unit: "SF", price: 0.2 },
+  { code: "MAT-BAG", description: "Debris bags & disposal consumables", unit: "EA", price: 9.5 },
+  { code: "MAT-PPE", description: "PPE - full protective gear (per person per day)", unit: "EA", price: 65 },
+  { code: "MAT-PACK", description: "Pack-out boxes & packing materials (per box)", unit: "EA", price: 12 },
+  // ---- Disposal / haul-off (pass-through fees incl. drive time) ----
   { code: "DSP-LOAD", description: "Haul debris - per pickup truck load - including dump fees", unit: "EA", price: 253.82 },
   { code: "DSP-TRLR", description: "Tandem axle dump trailer - per load - including dump fees", unit: "EA", price: 530.04 },
 ];

@@ -85,7 +85,18 @@ export function applyPhotoAnalysis(photo, analysis) {
 function laborSummary(project) {
   const entries = Array.isArray(project.laborLog?.entries) ? project.laborLog.entries : [];
   const hours = entries.reduce((a, e) => a + (parseFloat(e.hours) || 0), 0);
-  return entries.length ? { source: "QuickBooks Time", entries: entries.length, totalHours: Math.round(hours * 10) / 10 } : null;
+  if (!entries.length) return null;
+  return {
+    source: "QuickBooks Time",
+    totalHours: Math.round(hours * 100) / 100,
+    // per-entry detail so hours can be divided into task-specific billable
+    // lines — the crew's timesheet notes are the justification for each line
+    entries: entries.slice(0, 150).map((e) => ({
+      date: e.date || "", employee: e.employee || "",
+      hours: parseFloat(e.hours) || 0,
+      work: e.note || e.task || e.service || "",
+    })),
+  };
 }
 function photoAiSummary(project) {
   const out = [];
