@@ -264,6 +264,13 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .photocard { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #fff; box-shadow: var(--shadow); }
 .photocard img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; }
 .photoedit { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+/* editable AI findings under each photo — reads like a label, edits like a field */
+.photocard .ainote {
+  width: 100%; min-height: 0; resize: none; display: block;
+  border: 1px dashed transparent; border-radius: 8px; background: transparent;
+  font-size: 12px; line-height: 1.45; color: #5a6b7f; padding: 4px 8px 6px; margin: 0;
+}
+.photocard .ainote:focus { border-color: var(--brand); background: #fff; color: var(--ink); outline: none; box-shadow: none; }
 .photometa { color: var(--muted); font-size: 12px; }
 
 /* ---------- Account / sync row ---------- */

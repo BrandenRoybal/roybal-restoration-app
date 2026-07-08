@@ -104,7 +104,10 @@ function photoAiSummary(project) {
     if (!p.ai) continue;
     out.push({
       room: p.room || "", stage: p.stage || "", caption: p.caption || p.ai.caption || "",
-      damage: p.ai.damage || [], materials: p.ai.materials || [],
+      // the tech's edited note overrides the raw analysis — deleted findings stay deleted
+      ...(p.aiNote != null
+        ? { findings: p.aiNote }
+        : { damage: p.ai.damage || [], materials: p.ai.materials || [] }),
     });
   }
   return out.slice(0, 40);

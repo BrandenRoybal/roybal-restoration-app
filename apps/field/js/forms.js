@@ -1395,12 +1395,16 @@ export function photosForm(project) {
     stage.addEventListener("change", () => refresh());
     const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); project.photos.splice(i, 1); paint(); commit(); } }, "Delete");
     const printCap = h("div", { class: "photocap print-only" });
-    const aiLine = h("div", { class: "app-only", style: "font-size:11px;color:#5a6b7f;padding:2px 4px 0" });
+    /* The AI findings under the photo are EDITABLE — reword or delete
+       anything the analysis got wrong (stored as p.aiNote; an emptied note
+       stays empty). Edits also flow into the AI narrative/invoice facts. */
+    const aiLine = h("textarea", { class: "app-only ainote", rows: "2" });
+    aiLine.addEventListener("input", () => { p.aiNote = aiLine.value; commit(); });
 
     /* Refresh this card in place. The inputs are never replaced, so AI
        results landing in the background can't steal focus (or the phone
-       keyboard) mid-edit, and the caption field only syncs from the model
-       while it isn't the field being typed in. */
+       keyboard) mid-edit, and fields only sync from the model while they
+       aren't the field being typed in. */
     function refresh() {
       if (document.activeElement !== cap) cap.value = p.caption || "";
       printCap.replaceChildren(
@@ -1410,8 +1414,9 @@ export function photosForm(project) {
         p.ai.damage && p.ai.damage.length ? "Damage: " + p.ai.damage.join("; ") : "",
         p.ai.safety && p.ai.safety.length ? "\u26a0 " + p.ai.safety.join("; ") : "",
       ].filter(Boolean).join(" \u00b7 ") : "";
-      aiLine.textContent = bits ? "\u2728 " + bits : "";
-      aiLine.hidden = !bits;
+      const shown = p.aiNote != null ? p.aiNote : (bits ? "\u2728 " + bits : "");
+      if (document.activeElement !== aiLine) aiLine.value = shown;
+      aiLine.hidden = !p.ai && p.aiNote == null;
     }
     refreshers.set(p.id, refresh);
     refresh();
