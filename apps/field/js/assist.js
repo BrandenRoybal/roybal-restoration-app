@@ -21,6 +21,41 @@ let project = null;
 let pendingImages = [];       // photos attached to the next message
 let recorder = null, stream = null, chunks = [];
 
+/* ---------- voice agent (spoken replies + hands-free loop) ---------- */
+const SPEAK_KEY = "roybal-assist-speak";
+let speakerOn = localStorage.getItem(SPEAK_KEY) !== "0";   // default: talk back
+let handsFree = false;                                     // 🎧 continuous conversation
+let audioEl = null, audioUnlocked = false;
+
+/* iOS only lets audio start from a user gesture — unlock one reusable
+   element on the first tap, then later replies can play through it. */
+function unlockAudio() {
+  if (audioUnlocked) return;
+  audioEl = audioEl || new Audio();
+  audioEl.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+  audioEl.play().then(() => { audioEl.pause(); audioUnlocked = true; }).catch(() => {});
+}
+function stopSpeaking() {
+  if (audioEl) { try { audioEl.pause(); } catch (_) {} }
+  if ("speechSynthesis" in window) try { speechSynthesis.cancel(); } catch (_) {}
+}
+function speak(b64Mp3, fallbackText, onDone) {
+  const done = () => { if (onDone) onDone(); };
+  if (b64Mp3 && audioEl) {
+    audioEl.onended = done;
+    audioEl.src = "data:audio/mp3;base64," + b64Mp3;
+    audioEl.play().catch(() => { speakFallback(fallbackText, done); });
+    return;
+  }
+  speakFallback(fallbackText, done);
+}
+function speakFallback(text, done) {
+  if (!("speechSynthesis" in window) || !text) return done();
+  const u = new SpeechSynthesisUtterance(text.replace(/[*_#`>]/g, ""));
+  u.rate = 1.04; u.onend = done; u.onerror = done;
+  try { speechSynthesis.speak(u); } catch (_) { done(); }
+}
+
 function blobToBase64(blob) {
   return new Promise((res, rej) => {
     const r = new FileReader();
@@ -82,16 +117,27 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
     // so prior turns exclude the message we just painted for a text ask
     const prior = (audio ? list : list.slice(0, -1)).slice(-12)
       .map((m) => ({ role: m.role, text: m.text || "" }));
+    const wantSpeech = speakerOn && (!!audio || handsFree);
     const b = await fieldAssist(project, {
       messages: prior,
       text: audio ? "" : text,
       images,
       audio, audioMime,
+      speak: wantSpeech,
       context: narrativeFacts(project),
     });
     if (audio && b.transcript) list.push({ role: "user", text: b.transcript, images });
-    list.push({ role: "assistant", text: b.reply || "…I didn't get an answer back. Try again?" });
+    const reply = b.reply || "…I didn't get an answer back. Try again?";
+    list.push({ role: "assistant", text: reply });
     paintMessages();
+    if (wantSpeech) {
+      ui.speaking.hidden = false;
+      speak(b.replyAudio, reply, () => {
+        ui.speaking.hidden = true;
+        // 🎧 hands-free: the mic re-arms once the answer finishes, like a call
+        if (handsFree && !ui.drawer.hidden) toggleMic();
+      });
+    }
   } catch (e) {
     toast((e && e.message) || "Couldn't reach the assistant — try again.");
     paintMessages();
@@ -101,6 +147,8 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
 
 /* ---------- voice ---------- */
 async function toggleMic() {
+  unlockAudio();
+  stopSpeaking();
   if (recorder) {  // stop → send
     try { recorder.stop(); } catch (_) {}
     return;
@@ -156,20 +204,49 @@ function buildUi() {
   });
 
   const close = h("button", { type: "button", class: "assist__close" }, "✕");
+  const spk = h("button", { type: "button", class: "assist__mini" + (speakerOn ? " on" : "") }, speakerOn ? "🔊" : "🔇");
+  spk.title = "Spoken replies on/off";
+  spk.addEventListener("click", () => {
+    speakerOn = !speakerOn;
+    localStorage.setItem(SPEAK_KEY, speakerOn ? "1" : "0");
+    spk.textContent = speakerOn ? "🔊" : "🔇";
+    spk.classList.toggle("on", speakerOn);
+    if (!speakerOn) { stopSpeaking(); if (handsFree) hf.click(); }
+  });
+  const hf = h("button", { type: "button", class: "assist__mini" }, "🎧");
+  hf.title = "Hands-free conversation — it talks back and re-opens the mic";
+  hf.addEventListener("click", () => {
+    handsFree = !handsFree;
+    hf.classList.toggle("on", handsFree);
+    if (handsFree) {
+      unlockAudio();
+      if (!speakerOn) spk.click();
+      toast("Hands-free on — talk, listen, talk again. Tap 🎧 to stop.");
+      if (!recorder) toggleMic();
+    } else { stopSpeaking(); if (recorder) try { recorder.stop(); } catch (_) {} }
+  });
+  const speaking = h("div", { class: "assist__speaking", hidden: true }, "🔊 speaking — tap 🎙️ to jump in");
   const drawer = h("div", { class: "assist app-only", hidden: true },
     h("div", { class: "assist__head" },
       h("div", {},
         h("strong", {}, "💬 Ask the office"),
         h("div", { class: "assist__sub" }, "Job-aware AI colleague · cites IICRC standards · verify anything safety-critical")),
-      close),
-    msgs, thinking, attach,
+      h("div", { class: "assist__headbtns" }, hf, spk, close)),
+    msgs, thinking, speaking, attach,
     h("div", { class: "assist__row" }, cam, mic, input, send),
     file);
-  close.addEventListener("click", () => { drawer.hidden = true; });
+  close.addEventListener("click", () => {
+    drawer.hidden = true;
+    stopSpeaking();
+    if (handsFree) { handsFree = false; hf.classList.remove("on"); }
+    if (recorder) try { recorder.stop(); } catch (_) {}
+  });
   fab.addEventListener("click", () => { drawer.hidden = !drawer.hidden; if (!drawer.hidden) { paintMessages(); setTimeout(() => input.focus(), 50); } });
 
+  fab.addEventListener("click", unlockAudio);
+  send.addEventListener("click", unlockAudio);
   document.body.append(fab, drawer);
-  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam };
+  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam, speaking };
 }
 
 /** Called by the router: show the assistant on job pages, hide elsewhere. */

@@ -39,6 +39,7 @@ const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-sonnet-4-6";
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const STT_API_KEY = Deno.env.get("STT_API_KEY") ?? "";        // Deepgram (shared with roybal-ai-ingest)
 const STT_MODEL = Deno.env.get("STT_MODEL") ?? "nova-3";
+const TTS_MODEL = Deno.env.get("TTS_MODEL") ?? "aura-2-thalia-en";  // Deepgram Aura voice
 
 // $/1M tokens (override via env if pricing shifts) — same table as roybal-ai-ingest.
 const LLM_PRICES: Record<string, { in: number; out: number }> = {
@@ -132,6 +133,23 @@ async function sttTranscribe(audio: Uint8Array, mime: string): Promise<string> {
   if (!res.ok) throw new Error(`stt_failed (${res.status}): ${await res.text().catch(() => "")}`);
   const data = await res.json();
   return String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "").trim();
+}
+
+/* Deepgram Aura TTS — returns base64 MP3 of the spoken reply (same API key).
+   Cost is ~$0.03 per 1k characters — pennies per answer; not separately metered. */
+async function ttsSpeak(text: string): Promise<string> {
+  if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
+  const clean = text.replace(/[*_#`>]/g, "").replace(/\s+/g, " ").trim().slice(0, 1800);
+  const res = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(TTS_MODEL)}&encoding=mp3`, {
+    method: "POST",
+    headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: clean }),
+  });
+  if (!res.ok) throw new Error(`tts_failed (${res.status}): ${await res.text().catch(() => "")}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
 }
 
 function b64ToBytes(src: string): Uint8Array {
@@ -526,7 +544,10 @@ async function fieldAssist(body: Record<string, unknown>) {
 
   const context = body.context ? `\n\nJOB CONTEXT (current job):\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
   const { text, usage } = await chatText({ model: DOC_MODEL, system: ASSIST_SYSTEM + context, messages: msgs, maxTokens: 1024 });
-  return { result: { reply: text, transcript }, usage, model: DOC_MODEL, summary: { turns: history.length + 1, images: images.length, voice: !!transcript } };
+  // voice agent: speak the reply back (best-effort — a TTS hiccup never eats the answer)
+  let replyAudio: string | null = null;
+  if (body.speak && text) { try { replyAudio = await ttsSpeak(text); } catch (_) { replyAudio = null; } }
+  return { result: { reply: text, transcript, replyAudio }, usage, model: DOC_MODEL, summary: { turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio } };
 }
 
 /* ============================================================

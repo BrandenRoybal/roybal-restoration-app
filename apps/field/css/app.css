@@ -401,6 +401,10 @@ tr.fill-target > td { background: var(--brand-tint); box-shadow: inset 0 0 0 1px
 .assist__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 12px 14px 8px; border-bottom: 1px solid var(--line); }
 .assist__sub { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
 .assist__close { border: 0; background: #eef1f5; color: var(--ink-2); width: 32px; height: 32px; border-radius: 50%; font-size: 14px; cursor: pointer; flex: 0 0 auto; }
+.assist__headbtns { display: flex; gap: 8px; align-items: center; flex: 0 0 auto; }
+.assist__mini { border: 1px solid var(--line-strong); background: #fff; width: 32px; height: 32px; border-radius: 50%; font-size: 15px; cursor: pointer; padding: 0; }
+.assist__mini.on { background: var(--brand-tint-2); border-color: var(--brand); }
+.assist__speaking { color: var(--muted); font-size: 12px; padding: 0 14px 4px; }
 .assist__msgs { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .amsg { max-width: 86%; }
 .amsg--user { align-self: flex-end; }
