@@ -160,6 +160,8 @@ table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-si
 .mchart__leg i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .chart-empty { display: none; }
 
+.maptitle { font-weight: 800; font-size: 11.5pt; margin: 4px 0 2px; }
+
 /* sketch + floor plan — the canvas is a replaced element; scale it to FIT a
    bounded box (max 7.5in wide x 6.5in tall) while preserving its intrinsic
    aspect ratio, so markers/equipment icons stay round AND the map no longer
