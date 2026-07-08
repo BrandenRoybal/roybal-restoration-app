@@ -329,12 +329,131 @@ async function adjusterEmail(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: contentsVision — personal-property inventory from photos
+   mode "item": identify ONE item in detail (claim fields + est. RCV)
+   mode "scan": list EVERY distinct item visible (bulk room capture)
+   ============================================================ */
+const CONTENTS_ITEM_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["name", "brand", "model", "category", "condition", "estimatedValue", "notes", "confidence"],
+  properties: {
+    name: { type: "string", description: "Short inventory name, e.g. '55\" Samsung TV' or 'Leather reclining sofa'" },
+    brand: { type: "string", description: "Brand if identifiable from the photo, else empty" },
+    model: { type: "string", description: "Model number if legible, else empty" },
+    category: { type: "string", description: "Best fit from the provided category list, verbatim" },
+    condition: { type: "string", description: "Best fit from the provided condition list based on what is visible" },
+    estimatedValue: { type: "number", description: "Typical replacement cost NEW (RCV) in US dollars for a comparable item — a starting point the office verifies" },
+    notes: { type: "string", description: "Visible damage or claim-relevant details, one sentence, else empty" },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+  },
+} as const;
+
+const CONTENTS_SCAN_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["name", "category", "qty", "condition", "estimatedValue", "confidence"],
+        properties: {
+          name: { type: "string", description: "Short inventory name for one distinct item" },
+          category: { type: "string", description: "Best fit from the provided category list, verbatim" },
+          qty: { type: "number", description: "Count of this identical item visible" },
+          condition: { type: "string", description: "Best fit from the provided condition list" },
+          estimatedValue: { type: "number", description: "Typical replacement cost NEW (RCV) per unit, US dollars" },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+      },
+    },
+  },
+} as const;
+
+async function contentsVision(body: Record<string, unknown>) {
+  const mode = body.mode === "scan" ? "scan" : "item";
+  const image = dataUrlToImage(String(body.image || ""));
+  if (!image) throw new Error("Provide `image` as a JPEG/PNG data URL.");
+  const cats = Array.isArray(body.categories) ? (body.categories as string[]).join(", ") : "";
+  const conds = Array.isArray(body.conditions) ? (body.conditions as string[]).join(", ") : "";
+  const text = mode === "item"
+    ? `Identify the single main personal-property item in this photo for an insurance contents inventory.\n` +
+      `CATEGORIES (pick one verbatim): ${cats}\nCONDITIONS (pick one verbatim): ${conds}\n` +
+      `estimatedValue = typical replacement cost NEW for a comparable item, US retail. Be conservative and round sensibly. ` +
+      `If brand/model aren't visible, leave them empty — never guess specifics.`
+    : `List EVERY distinct personal-property item visible in this photo for an insurance contents inventory (bulk room capture). ` +
+      `One entry per distinct item; identical items get one entry with qty. Skip fixtures and building materials (cabinets, flooring, trim) — personal property only.\n` +
+      `CATEGORIES (pick one verbatim): ${cats}\nCONDITIONS (pick one verbatim): ${conds}\n` +
+      `estimatedValue = typical replacement cost NEW per unit, US retail, conservative.`;
+  const { input, usage } = await forcedTool({
+    model: PHOTO_MODEL,
+    system:
+      "You are a contents-inventory specialist at Roybal Construction, LLC (water/fire restoration, Fairbanks Alaska) cataloging a customer's " +
+      "personal property for an insurance claim. Only describe what is actually visible. Call `contents` with the structured result.",
+    content: [
+      { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } },
+      { type: "text", text },
+    ],
+    toolName: "contents",
+    schema: (mode === "item" ? CONTENTS_ITEM_SCHEMA : CONTENTS_SCAN_SCHEMA) as unknown as Record<string, unknown>,
+    maxTokens: 2048,
+  });
+  return {
+    result: mode === "item" ? { item: input } : { items: (input as { items?: unknown[] }).items ?? [] },
+    usage, model: PHOTO_MODEL,
+    summary: { mode, items: mode === "item" ? 1 : ((input as { items?: unknown[] }).items ?? []).length },
+  };
+}
+
+/* ============================================================
+   Action: contentsJustify — one-line total-loss justifications
+   ============================================================ */
+const JUSTIFY_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["justifications"],
+  properties: {
+    justifications: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["id", "text"],
+        properties: {
+          id: { type: "string", description: "The item id, verbatim" },
+          text: { type: "string", description: "ONE sentence, adjuster-facing, e.g. 'Porous upholstered furniture saturated by Category 3 water; per IICRC S500 it cannot be restored to a sanitary condition.'" },
+        },
+      },
+    },
+  },
+} as const;
+
+async function contentsJustify(body: Record<string, unknown>) {
+  const items = Array.isArray(body.items) ? body.items as Array<Record<string, unknown>> : [];
+  if (!items.length) throw new Error("Provide `items` to justify.");
+  const ctx = (body.context ?? {}) as Record<string, unknown>;
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You write total-loss justifications for a restoration contractor's contents loss schedule. One factual, professional sentence " +
+      "per item explaining why it is non-salvageable — cite the water category, the material's porosity, and IICRC S500 where they apply. " +
+      "Never exaggerate and never invent damage that isn't supported by the item's condition/notes. Call `justify` with one entry per item id.",
+    content:
+      `LOSS CONTEXT: water category ${ctx.waterCategory || "?"}, cause: ${ctx.lossCause || "?"}, date of loss: ${ctx.dateOfLoss || "?"}.\n\n` +
+      `NON-SALVAGEABLE ITEMS:\n\`\`\`json\n${JSON.stringify(items, null, 2)}\n\`\`\``,
+    toolName: "justify",
+    schema: JUSTIFY_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 3000,
+  });
+  const out = (input as { justifications?: unknown[] }).justifications ?? [];
+  return { result: { justifications: out }, usage, model: DOC_MODEL, summary: { items: items.length, written: out.length } };
+}
+
+/* ============================================================
    Handler — same self-protection invariants as roybal-ai-ingest:
    anon key only (RLS always applies), the caller's JWT on every DB op,
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify,
 };
 
 serve(async (req: Request) => {

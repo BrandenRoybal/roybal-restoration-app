@@ -7,7 +7,7 @@ import {
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
   newInvoice, newWorkAuth, newCertDrying, newLaborLog,
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
-  BOX_DESTINATIONS, dispositionShort, dispositionLabel, depreciation,
+  BOX_DESTINATIONS, POROUS_CATEGORIES, dispositionShort, dispositionLabel, depreciation,
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet } from "./forms.js";
@@ -19,7 +19,7 @@ import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine } from "./spine.js";
 import { generateNarrative } from "./narrative.js";
 import { transcribeWidget } from "./voice.js";
-import { aiAvailable, draftAdjusterEmail } from "./officeai.js";
+import { aiAvailable, aiReady, draftAdjusterEmail, analyzeContentsItem, scanContentsPhoto, justifyContents } from "./officeai.js";
 import { dryingFlags } from "./dryingwatch.js";
 import { AI_FORM_KEYS } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -708,18 +708,28 @@ function roomSelect(project, item) {
       item.room = name; Store.put(project); return name;
     });
 }
-function boxSelect(project, item) {
+function boxSelect(project, item, onChange) {
   return addableSelect(
-    () => item.boxId,
-    () => project.boxes.map((b) => ({ value: b.id, label: b.label + (b.room ? " · " + b.room : "") })),
-    (v) => { item.boxId = v; Store.put(project); },
+    () => (item.noBox ? "__loose__" : item.boxId),
+    () => [
+      { value: "__loose__", label: "🛋 Large item — no box" },
+      ...project.boxes.map((b) => ({ value: b.id, label: b.label + (b.room ? " · " + b.room : "") })),
+    ],
+    (v) => {
+      if (v === "__loose__") { item.noBox = true; item.boxId = ""; if (!item.destination) item.destination = "Storage"; }
+      else { item.noBox = false; item.boxId = v; }
+      Store.put(project);
+      if (onChange) onChange();
+    },
     "➕ New box…",
     () => {
       const b = newBox(project.boxes.length + 1);
       const label = (prompt("Box label", b.label) || "").trim();
       if (!label) return null;
       b.label = label; b.room = item.room || "";
-      project.boxes.push(b); item.boxId = b.id; Store.put(project); return b.id;
+      project.boxes.push(b); item.boxId = b.id; item.noBox = false; Store.put(project);
+      if (onChange) onChange();
+      return b.id;
     });
 }
 
@@ -735,6 +745,16 @@ function contentsSummary(project) {
   return chips;
 }
 
+/* Cat 3 + porous contents still marked salvageable — S500 review flag */
+function s500ContentsWarning(project) {
+  if (String(project.waterCategory) !== "3") return h("span");
+  const risky = project.contents.filter((it) => POROUS_CATEGORIES.includes(it.category) && it.disposition !== "non-salvageable");
+  if (!risky.length) return h("span");
+  return h("div", { class: "warn app-only", style: "margin:6px 0" },
+    h("strong", {}, "⚠ Cat 3 review: "),
+    `${risky.length} porous item(s) (${[...new Set(risky.map((i) => i.category))].join(", ")}) not marked non-salvageable — IICRC S500 says porous materials in Category 3 losses usually can't be restored.`);
+}
+
 function contentsManager(project) {
   setChrome("Contents", `#/p/${project.id}`);
   const body = clear(view);
@@ -742,16 +762,93 @@ function contentsManager(project) {
 
   let q = "", fRoom = "", fBox = "", fDisp = "";
 
+  /* ✨ Bulk capture: photograph a room/shelf, the AI lists every item it
+     sees, the tech checks off what to add. Photos are not attached to the
+     created items — take close-ups on the ones that matter for the claim. */
+  const scanInput = h("input", { type: "file", accept: "image/*", capture: "environment", style: "display:none" });
+  const scanBtn = h("button", { class: "btn btn--ghost btn--sm" }, "✨ Scan room photo");
+  const scanPanel = h("div", {});
+  scanBtn.addEventListener("click", () => { if (aiAvailable()) scanInput.click(); });
+  scanInput.addEventListener("change", async () => {
+    const f = scanInput.files[0]; scanInput.value = "";
+    if (!f) return;
+    scanBtn.disabled = true; scanBtn.textContent = "✨ Scanning…";
+    try {
+      const img = await fileToDataURL(f);
+      const found = await scanContentsPhoto(project, img, CONTENT_CATEGORIES, CONDITIONS);
+      if (!found.length) { scanPanel.replaceChildren(h("p", { class: "subtle" }, "✨ No personal-property items recognized in that photo.")); }
+      else {
+        const roomIn = h("input", { placeholder: "Room for these items (e.g. Living Room)", style: "margin:6px 0" });
+        const rows = found.map((it) => {
+          const cb = h("input", { type: "checkbox", checked: true, style: "width:22px;height:22px;min-height:0;flex:0 0 auto" });
+          return { it, cb, row: h("label", { style: "display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px;cursor:pointer" },
+            cb, h("span", { style: "flex:1" }, h("strong", {}, it.name), ` — ${it.category || "?"} · qty ${it.qty || 1}` +
+              (it.estimatedValue > 0 ? ` · est. ${money(it.estimatedValue)}` : ""))) };
+        });
+        const addBtn = h("button", { class: "btn btn--primary btn--sm", style: "margin-top:8px" }, "+ Add checked items");
+        addBtn.addEventListener("click", async () => {
+          const picked = rows.filter((r) => r.cb.checked);
+          if (!picked.length) return toast("Nothing checked.");
+          for (const { it } of picked) {
+            const n = newContentsItem();
+            n.name = it.name || ""; n.qty = String(it.qty || 1);
+            if (CONTENT_CATEGORIES.includes(it.category)) n.category = it.category;
+            if (CONDITIONS.includes(it.condition)) n.condition = it.condition;
+            if (it.estimatedValue > 0) n.value = String(Math.round(it.estimatedValue));
+            n.room = roomIn.value.trim();
+            project.contents.push(n);
+            if (n.room && !project.rooms.includes(n.room)) project.rooms.push(n.room);
+          }
+          await Store.put(project);
+          toast(`Added ${picked.length} item(s) — open each to add photos & details.`);
+          contentsManager(project);
+        });
+        scanPanel.replaceChildren(h("div", { class: "card", style: "border-style:dashed" },
+          h("strong", { style: "font-size:13px" }, `✨ ${found.length} item(s) recognized — uncheck any that don't belong, set the room, then add:`),
+          roomIn, ...rows.map((r) => r.row), addBtn));
+      }
+    } catch (e) {
+      toast("Scan failed — " + (e && e.message ? e.message : "try again"));
+    }
+    scanBtn.disabled = false; scanBtn.textContent = "✨ Scan room photo";
+  });
+
+  /* ✨ One-line total-loss justifications for the loss schedule (editable per item). */
+  const justifyBtn = h("button", { class: "btn btn--ghost btn--sm" }, "✨ Justify losses");
+  justifyBtn.addEventListener("click", async () => {
+    const need = project.contents.filter((it) => it.disposition === "non-salvageable" && !String(it.lossJust || "").trim());
+    if (!need.length) return toast("Every total-loss item already has a justification.");
+    if (!aiAvailable()) return;
+    justifyBtn.disabled = true; justifyBtn.textContent = "✨ Writing…";
+    try {
+      const out = await justifyContents(project, need);
+      let n = 0;
+      for (const j of out) {
+        const it = project.contents.find((x) => x.id === j.id);
+        if (it && j.text) { it.lossJust = j.text; n++; }
+      }
+      await Store.put(project);
+      toast(`Wrote ${n} justification(s) — they print on the loss schedule and stay editable per item.`);
+    } catch (e) {
+      toast("Couldn't write justifications — " + (e && e.message ? e.message : "try again"));
+    }
+    justifyBtn.disabled = false; justifyBtn.textContent = "✨ Justify losses";
+  });
+
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "📦 Contents"),
       h("button", { class: "btn btn--primary btn--sm", onclick: () => addItem(project) }, "+ Add item")),
     contentsSummary(project),
+    s500ContentsWarning(project),
     h("div", { class: "btn-row", style: "margin:6px 0 12px;flex-wrap:wrap" },
+      scanBtn,
+      justifyBtn,
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/boxes`) }, `📦 Boxes (${project.boxes.length})`),
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/packback`) }, "↩︎ Pack-back"),
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/report`) }, "📄 Inventory PDF"),
-      h("button", { class: "btn btn--ghost btn--sm", onclick: () => exportContentsCSV(project) }, "⬇ CSV")));
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => exportContentsCSV(project) }, "⬇ CSV")),
+    scanInput, scanPanel);
 
   // filters
   const search = h("input", { type: "search", placeholder: "Search items…" });
@@ -760,6 +857,7 @@ function contentsManager(project) {
     ...project.rooms.map((r) => h("option", { value: r }, r)));
   roomF.addEventListener("change", () => { fRoom = roomF.value; paint(); });
   const boxF = h("select", {}, h("option", { value: "" }, "All boxes"),
+    h("option", { value: "__loose__" }, "🛋 Loose / large items"),
     ...project.boxes.map((b) => h("option", { value: b.id }, b.label)));
   boxF.addEventListener("change", () => { fBox = boxF.value; paint(); });
   const dispF = h("select", {}, h("option", { value: "" }, "All"),
@@ -773,7 +871,7 @@ function contentsManager(project) {
   function paint() {
     const items = project.contents.filter((it) =>
       (!q || (it.name + " " + it.brand + " " + it.model + " " + it.notes).toLowerCase().includes(q)) &&
-      (!fRoom || it.room === fRoom) && (!fBox || it.boxId === fBox) && (!fDisp || it.disposition === fDisp));
+      (!fRoom || it.room === fRoom) && (!fBox || (fBox === "__loose__" ? it.noBox : it.boxId === fBox)) && (!fDisp || it.disposition === fDisp));
     if (!items.length) {
       list.replaceChildren(h("div", { class: "empty" }, h("div", { class: "big" }, "📦"),
         h("p", {}, project.contents.length ? "No items match." : "No items yet."),
@@ -809,10 +907,19 @@ function contentsItemEditor(project, item) {
 
   const warn = h("div", { class: "warn app-only", hidden: true });
   function checkWarn() {
-    const need = item.disposition === "non-salvageable" && (!item.photos || !item.photos.length);
-    warn.hidden = !need;
-    if (need) warn.replaceChildren(h("strong", {}, "📷 Tip: "), "Add a photo of this non-salvageable item — carriers require photo proof for the loss claim.");
+    const msgs = [];
+    if (item.disposition === "non-salvageable" && (!item.photos || !item.photos.length))
+      msgs.push([h("strong", {}, "📷 Tip: "), "Add a photo of this non-salvageable item — carriers require photo proof for the loss claim."]);
+    // S500: porous materials in Cat 3 losses generally can't be restored to sanitary condition
+    if (String(project.waterCategory) === "3" && POROUS_CATEGORIES.includes(item.category) && item.disposition !== "non-salvageable")
+      msgs.push([h("strong", {}, "⚠ Cat 3: "), `${item.category} is porous — IICRC S500 says porous materials in Category 3 losses usually can't be restored. Review the disposition.`]);
+    warn.hidden = !msgs.length;
+    warn.replaceChildren(...msgs.flatMap((m, i) => (i ? [h("div", { style: "margin-top:6px" }, ...m)] : [h("div", {}, ...m)])));
   }
+
+  // large/loose items track their own destination (boxes carry it for boxed items)
+  const destField = field("Where did it go? (no box)", sel(item, "destination", BOX_DESTINATIONS));
+  destField.hidden = !item.noBox;
 
   const acvLine = h("div", { class: "acvline app-only" });
   function updateAcv() {
@@ -825,11 +932,44 @@ function contentsItemEditor(project, item) {
       h("span", {}, "ACV ", h("b", { style: "color:var(--orange-dark)" }, money(d.acv))));
   }
 
+  /* ✨ Identify from photo — vision fills the claim fields from the item's
+     photo (blank fields only; everything stays editable). Runs automatically
+     when a photo lands on a blank item; the button covers the rest. */
+  const idBtn = h("button", { type: "button", class: "btn btn--sm", style: "width:auto" }, "✨ Identify from photo");
+  const idLine = h("div", { class: "subtle", style: "font-size:12px;margin-top:6px" });
+  async function runIdentify({ silent = false } = {}) {
+    if (!item.photos || !item.photos.length) { if (!silent) toast("Add a photo of the item first."); return; }
+    if (silent ? !aiReady() : !aiAvailable()) return;
+    idBtn.disabled = true; idBtn.textContent = "✨ Identifying…";
+    try {
+      const r = await analyzeContentsItem(project, item.photos[item.photos.length - 1], CONTENT_CATEGORIES, CONDITIONS);
+      const filled = [];
+      const fill = (key, v) => { if (v != null && String(v).trim() && !String(item[key] || "").trim()) { item[key] = String(v); filled.push(key); } };
+      fill("name", r.name); fill("brand", r.brand); fill("model", r.model);
+      if (CONTENT_CATEGORIES.includes(r.category)) fill("category", r.category);
+      if (CONDITIONS.includes(r.condition)) fill("condition", r.condition);
+      if (r.estimatedValue > 0) fill("value", Math.round(r.estimatedValue));
+      if (r.notes) fill("notes", r.notes);
+      await Store.put(project);
+      idLine.textContent = "✨ " + (r.name || "Identified") +
+        (r.estimatedValue > 0 ? ` · est. replacement ${money(r.estimatedValue)} (starting point — verify)` : "") +
+        (filled.length ? "" : " — fields already filled, nothing overwritten");
+      if (filled.length) { contentsItemEditor(project, item); toast("Filled: " + filled.join(", ") + " — review every field."); }
+    } catch (e) {
+      if (!silent) toast("Couldn't identify — " + (e && e.message ? e.message : "try again"));
+    }
+    idBtn.disabled = false; idBtn.textContent = "✨ Identify from photo";
+  }
+  idBtn.addEventListener("click", () => runIdentify());
+
   body.append(
     h("div", { class: "app-only", style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" },
       h("strong", { style: "font-size:18px" }, "📦 Item"), pill),
     h("div", { class: "card" },
-      field("Photos", photoUploader(item.photos, "Add item photos")),
+      field("Photos", photoUploader(item.photos, "Add item photos", {
+        onAdd: () => { if (!String(item.name || "").trim()) runIdentify({ silent: true }); },
+      })),
+      h("div", { class: "app-only", style: "margin:-4px 0 12px" }, idBtn, idLine),
       warn,
       field("Item name", inp(item, "name", { placeholder: "e.g. 55\" Samsung TV" })),
       h("div", { class: "grid2" },
@@ -837,7 +977,8 @@ function contentsItemEditor(project, item) {
         field("Category", sel(item, "category", CONTENT_CATEGORIES, { placeholder: "Select…", onchange: updateAcv }))),
       h("div", { class: "grid2" },
         field("Room", roomSelect(project, item)),
-        field("Box", boxSelect(project, item))),
+        field("Box", boxSelect(project, item, () => { destField.hidden = !item.noBox; }))),
+      destField,
       field("Condition", seg(item, "condition", CONDITIONS)),
       field("Disposition", seg(item, "disposition", DISPOSITIONS.map((d) => ({ value: d.value, label: d.label })), { onchange: checkWarn })),
       h("div", { class: "grid2" },
@@ -888,7 +1029,8 @@ function boxesManager(project) {
         h("div", { class: "grid2" },
           field("Packed date", inp(b, "packedDate", { type: "date" })),
           field("Items in box", h("div", { style: "padding-top:12px;font-weight:700" }, String(countItems(b.id))))),
-        h("button", { class: "btn btn--danger btn--sm", onclick: () => delBox(b) }, "Delete box")));
+        field("Contents (typed or from an AI snapshot — prints on the box label)", ta(b, "aiContents")),
+        h("div", { class: "app-only", style: "display:flex;gap:8px" }, boxSnapBtn(b), h("button", { class: "btn btn--danger btn--sm", style: "width:auto", onclick: () => delBox(b) }, "Delete box"))));
     listWrap.replaceChildren(
       h("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px" },
         h("h1", {}, "📦 Boxes"),
@@ -898,6 +1040,30 @@ function boxesManager(project) {
             h("button", { class: "btn btn--primary", style: "max-width:200px;margin:8px auto 0", onclick: addBox }, "+ New box")));
     labels.replaceChildren(...buildLabels());
   }
+  /* 📷✨ photograph the open box before sealing — the AI lists what it sees */
+  function boxSnapBtn(b) {
+    const input = h("input", { type: "file", accept: "image/*", capture: "environment", style: "display:none" });
+    const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "📷✨ Snap contents");
+    btn.addEventListener("click", () => { if (aiAvailable()) input.click(); });
+    input.addEventListener("change", async () => {
+      const f = input.files[0]; input.value = "";
+      if (!f) return;
+      btn.disabled = true; btn.textContent = "✨ Reading…";
+      try {
+        const img = await fileToDataURL(f);
+        const found = await scanContentsPhoto(project, img, CONTENT_CATEGORIES, CONDITIONS);
+        const line = found.map((it) => ((Number(it.qty) || 1) > 1 ? it.qty + "× " : "") + it.name).join("; ");
+        b.aiContents = [b.aiContents, line].filter((x) => String(x || "").trim()).join("; ");
+        await Store.put(project); paint();
+        toast(found.length ? `Listed ${found.length} item(s) in ${b.label}.` : "No items recognized in that photo.");
+      } catch (e) {
+        toast("Couldn't read the box photo — " + (e && e.message ? e.message : "try again"));
+      }
+      btn.disabled = false; btn.textContent = "📷✨ Snap contents";
+    });
+    return h("span", {}, btn, input);
+  }
+
   function addBox() { project.boxes.push(newBox(project.boxes.length + 1)); Store.put(project); paint(); }
   function delBox(b) {
     if (!confirm("Delete " + b.label + "? Items stay in inventory but become unassigned.")) return;
@@ -929,7 +1095,8 @@ function boxesManager(project) {
           h("tr", {}, h("td", {}, "Room"), h("td", {}, b.room || "")),
           h("tr", {}, h("td", {}, "Destination"), h("td", {}, b.destination || "")),
           h("tr", {}, h("td", {}, "Packed by"), h("td", {}, (b.packedBy || "") + (b.packedDate ? "  " + fmtDate(b.packedDate) : ""))),
-          h("tr", {}, h("td", {}, "Items"), h("td", {}, String(countItems(b.id))))));
+          h("tr", {}, h("td", {}, "Items"), h("td", {}, String(countItems(b.id)))),
+          b.aiContents ? h("tr", {}, h("td", {}, "Contents"), h("td", {}, b.aiContents)) : null));
     });
   }
 

@@ -161,7 +161,7 @@ function uploadDoc(obj) {
 }
 
 /* ---------- photo uploader (array of dataURLs) ---------- */
-export function photoUploader(arr, label = "Add photos") {
+export function photoUploader(arr, label = "Add photos", opts = {}) {
   const wrap = h("div");
   const thumbs = h("div", { class: "thumbs" });
   function paint() {
@@ -176,6 +176,7 @@ export function photoUploader(arr, label = "Add photos") {
   input.addEventListener("change", async () => {
     for (const f of input.files) arr.push(await fileToDataURL(f));
     input.value = ""; commit(); paint();
+    if (opts.onAdd) opts.onAdd();
   });
   const btn = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only" }, "📷 " + label);
   btn.addEventListener("click", () => input.click());

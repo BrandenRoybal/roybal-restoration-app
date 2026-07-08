@@ -146,3 +146,32 @@ export function draftAdjusterEmail(project) {
     narrative: project.narrative || "",
   }).then((b) => b.draft);
 }
+
+/* ---------- contents vision (personal property inventory) ---------- */
+/** Identify ONE item from its photo → {name,brand,model,category,condition,estimatedValue,notes,confidence}. */
+export function analyzeContentsItem(project, imageDataUrl, categories, conditions) {
+  return callOffice(project, "contentsVision", {
+    mode: "item", image: imageDataUrl, categories, conditions,
+  }).then((b) => b.item);
+}
+
+/** Bulk room capture: list every item in a photo → [{name,category,qty,condition,estimatedValue,confidence}]. */
+export function scanContentsPhoto(project, imageDataUrl, categories, conditions) {
+  return callOffice(project, "contentsVision", {
+    mode: "scan", image: imageDataUrl, categories, conditions,
+  }).then((b) => b.items ?? []);
+}
+
+/** One-line total-loss justifications for the loss schedule; returns [{id, text}]. */
+export function justifyContents(project, items) {
+  return callOffice(project, "contentsJustify", {
+    context: {
+      waterCategory: project.waterCategory || "", lossCause: project.lossCause || "",
+      dateOfLoss: project.dateOfLoss || "",
+    },
+    items: items.map((it) => ({
+      id: it.id, name: it.name || "", category: it.category || "", condition: it.condition || "",
+      age: it.age || "", room: it.room || "", notes: it.notes || "",
+    })),
+  }).then((b) => b.justifications ?? []);
+}

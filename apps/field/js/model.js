@@ -109,13 +109,18 @@ export const CONTENT_CATEGORIES = [
 ];
 export const BOX_DESTINATIONS = ["On-site", "Storage", "Cleaning", "Returned", "Disposed"];
 
+/* Porous categories — IICRC S500: generally non-restorable in Cat 3 losses */
+export const POROUS_CATEGORIES = ["Clothing", "Bedding / Linens", "Documents", "Toys"];
+
 export function newContentsItem() {
   return {
     id: uid(), createdAt: new Date().toISOString(),
     name: "", qty: "1", category: "", room: "", boxId: "",
+    noBox: false, destination: "",   // large/loose items ship unboxed with their own destination
     condition: "", disposition: "salvageable",
     value: "",                       // estimated unit replacement cost (RCV)
     brand: "", model: "", age: "",   // for depreciation / loss claims
+    lossJust: "",                    // one-line total-loss justification (AI-drafted, editable)
     notes: "", photos: [],
     returned: false, returnedDate: "", // pack-back tracking
   };
@@ -142,7 +147,8 @@ export function depreciation(item) {
   return { rcv, rate, acv, dep: rcv - acv };
 }
 export function newBox(n) {
-  return { id: uid(), label: "Box " + n, room: "", destination: "Storage", packedBy: "", packedDate: todayISO() };
+  return { id: uid(), label: "Box " + n, room: "", destination: "Storage", packedBy: "", packedDate: todayISO(),
+    aiContents: "" };   // AI-listed contents from a box snapshot (editable text)
 }
 
 export const formByKey = (k) => FORMS.find((f) => f.key === k);
