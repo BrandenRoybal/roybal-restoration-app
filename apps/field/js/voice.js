@@ -118,10 +118,15 @@ export function transcribeWidget({ project, formKey, instance, rerender }) {
     }
     try {
       chunks = [];
-      recorder = new MediaRecorder(stream);
+      // iPhones record audio/mp4 (not webm); chunked delivery (250ms) keeps
+      // iOS Safari from returning an empty blob on stop
+      const preferred = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"];
+      const picked = (typeof MediaRecorder.isTypeSupported === "function"
+        ? preferred.find((t) => MediaRecorder.isTypeSupported(t)) : "") || "";
+      recorder = picked ? new MediaRecorder(stream, { mimeType: picked }) : new MediaRecorder(stream);
       recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       recorder.onstop = upload;
-      recorder.start();
+      recorder.start(250);
     } catch (e) {
       // setup failed after the mic opened — release it rather than leak the track
       teardown(); recorder = null; busy = false;

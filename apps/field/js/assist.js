@@ -157,21 +157,34 @@ async function toggleMic() {
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined")
     return toast("This device can't record audio — type your question.");
   try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-  catch { return toast("Microphone blocked — allow mic access or type your question."); }
+  catch (err) {
+    const name = (err && err.name) || "";
+    return toast(name === "NotAllowedError"
+      ? "Microphone blocked — on iPhone: Settings → Safari → Microphone → Allow, then reopen the app."
+      : "Couldn't open the microphone (" + (name || "unknown") + ") — type your question instead.");
+  }
   chunks = [];
-  recorder = new MediaRecorder(stream);
+  // iPhones record audio/mp4 (not webm) — pick whatever this device supports
+  const preferred = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"];
+  const picked = (typeof MediaRecorder.isTypeSupported === "function"
+    ? preferred.find((t) => MediaRecorder.isTypeSupported(t)) : "") || "";
+  try { recorder = picked ? new MediaRecorder(stream, { mimeType: picked }) : new MediaRecorder(stream); }
+  catch { recorder = new MediaRecorder(stream); }
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
   recorder.onstop = async () => {
     stream?.getTracks().forEach((t) => t.stop());
     stream = null;
-    const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-    const mime = recorder.mimeType || "audio/webm";
+    const mime = recorder.mimeType || picked || "audio/mp4";
     recorder = null;
     ui.mic.classList.remove("rec"); ui.mic.textContent = "🎙️";
-    if (!blob.size) return toast("Didn't catch any audio — try again.");
+    const blob = new Blob(chunks, { type: mime });
+    if (!blob.size) return toast("Didn't catch any audio — check the mic permission and try again.");
+    if (blob.size < 2000) return toast("That was too quick — hold the mic open a beat longer.");
     ask({ audio: await blobToBase64(blob), audioMime: mime });
   };
-  recorder.start();
+  // timeslice: iOS Safari can return an empty blob when data is only requested
+  // at stop — chunked delivery every 250ms makes recordings reliable
+  recorder.start(250);
   ui.mic.classList.add("rec"); ui.mic.textContent = "⏹";
 }
 

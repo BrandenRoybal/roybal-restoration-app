@@ -128,8 +128,9 @@ async function chatText(opts: {
 /* Deepgram pre-recorded STT (same account as voice capture). */
 async function sttTranscribe(audio: Uint8Array, mime: string): Promise<string> {
   if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
+  const ct = String(mime || "audio/webm").split(";")[0].trim();   // iOS sends audio/mp4;codecs=… — params confuse STT
   const url = `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(STT_MODEL)}&smart_format=true&punctuate=true`;
-  const res = await fetch(url, { method: "POST", headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": mime || "audio/webm" }, body: audio as unknown as BodyInit });
+  const res = await fetch(url, { method: "POST", headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": ct }, body: audio as unknown as BodyInit });
   if (!res.ok) throw new Error(`stt_failed (${res.status}): ${await res.text().catch(() => "")}`);
   const data = await res.json();
   return String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "").trim();
