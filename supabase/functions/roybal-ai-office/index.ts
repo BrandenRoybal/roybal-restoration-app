@@ -406,12 +406,54 @@ async function contentsVision(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: contentsJustify — one-line total-loss justifications
+   ============================================================ */
+const JUSTIFY_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["justifications"],
+  properties: {
+    justifications: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["id", "text"],
+        properties: {
+          id: { type: "string", description: "The item id, verbatim" },
+          text: { type: "string", description: "ONE sentence, adjuster-facing, e.g. 'Porous upholstered furniture saturated by Category 3 water; per IICRC S500 it cannot be restored to a sanitary condition.'" },
+        },
+      },
+    },
+  },
+} as const;
+
+async function contentsJustify(body: Record<string, unknown>) {
+  const items = Array.isArray(body.items) ? body.items as Array<Record<string, unknown>> : [];
+  if (!items.length) throw new Error("Provide `items` to justify.");
+  const ctx = (body.context ?? {}) as Record<string, unknown>;
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You write total-loss justifications for a restoration contractor's contents loss schedule. One factual, professional sentence " +
+      "per item explaining why it is non-salvageable — cite the water category, the material's porosity, and IICRC S500 where they apply. " +
+      "Never exaggerate and never invent damage that isn't supported by the item's condition/notes. Call `justify` with one entry per item id.",
+    content:
+      `LOSS CONTEXT: water category ${ctx.waterCategory || "?"}, cause: ${ctx.lossCause || "?"}, date of loss: ${ctx.dateOfLoss || "?"}.\n\n` +
+      `NON-SALVAGEABLE ITEMS:\n\`\`\`json\n${JSON.stringify(items, null, 2)}\n\`\`\``,
+    toolName: "justify",
+    schema: JUSTIFY_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 3000,
+  });
+  const out = (input as { justifications?: unknown[] }).justifications ?? [];
+  return { result: { justifications: out }, usage, model: DOC_MODEL, summary: { items: items.length, written: out.length } };
+}
+
+/* ============================================================
    Handler — same self-protection invariants as roybal-ai-ingest:
    anon key only (RLS always applies), the caller's JWT on every DB op,
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify,
 };
 
 serve(async (req: Request) => {

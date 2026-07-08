@@ -1495,7 +1495,7 @@ export function photosForm(project) {
 export function contentsReport(project) {
   const items = project.contents || [];
   const boxes = project.boxes || [];
-  const boxLabel = (id) => boxes.find((b) => b.id === id)?.label || "";
+  const boxLabel = (it) => it.noBox ? ("Loose" + (it.destination ? " — " + it.destination : "")) : (boxes.find((b) => b.id === it.boxId)?.label || "");
   const ext = (it) => (Number(it.value) || 0) * (Number(it.qty) || 1);
 
   const invRows = items.map((it) =>
@@ -1504,7 +1504,7 @@ export function contentsReport(project) {
       h("td", { style: "text-align:left" }, it.name || "—", it.brand || it.model ? h("div", { class: "csub" }, [it.brand, it.model].filter(Boolean).join(" ")) : null),
       h("td", {}, it.qty || ""),
       h("td", {}, it.room || ""),
-      h("td", {}, boxLabel(it.boxId)),
+      h("td", {}, boxLabel(it)),
       h("td", {}, it.condition || ""),
       h("td", {}, dispositionLabel(it.disposition)),
       h("td", {}, it.value ? money(ext(it)) : "")));
@@ -1516,7 +1516,8 @@ export function contentsReport(project) {
   const lossRows = loss.map((it) => {
     const d = dep(it);
     return h("tr", {},
-      h("td", { style: "text-align:left" }, it.name || "—"),
+      h("td", { style: "text-align:left" }, it.name || "—",
+        it.lossJust ? h("div", { class: "csub" }, it.lossJust) : null),
       h("td", {}, it.qty || ""),
       h("td", {}, it.room || ""),
       h("td", {}, it.age || ""),
@@ -1563,7 +1564,7 @@ export function contentsReport(project) {
 export function packBackReceipt(project) {
   const items = project.contents || [];
   const boxes = project.boxes || [];
-  const boxLabel = (id) => boxes.find((b) => b.id === id)?.label || "";
+  const boxLabel = (it) => it.noBox ? ("Loose" + (it.destination ? " — " + it.destination : "")) : (boxes.find((b) => b.id === it.boxId)?.label || "");
   const tbody = h("tbody");
   items.forEach((it) => {
     const tr = h("tr");
@@ -1573,7 +1574,7 @@ export function packBackReceipt(project) {
       h("td", { style: "text-align:left" }, it.name || "—"),
       h("td", {}, it.qty || ""),
       h("td", {}, it.room || ""),
-      h("td", {}, boxLabel(it.boxId)),
+      h("td", {}, boxLabel(it)),
       h("td", {}, box));
     tbody.append(tr);
   });

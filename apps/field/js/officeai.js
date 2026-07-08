@@ -161,3 +161,17 @@ export function scanContentsPhoto(project, imageDataUrl, categories, conditions)
     mode: "scan", image: imageDataUrl, categories, conditions,
   }).then((b) => b.items ?? []);
 }
+
+/** One-line total-loss justifications for the loss schedule; returns [{id, text}]. */
+export function justifyContents(project, items) {
+  return callOffice(project, "contentsJustify", {
+    context: {
+      waterCategory: project.waterCategory || "", lossCause: project.lossCause || "",
+      dateOfLoss: project.dateOfLoss || "",
+    },
+    items: items.map((it) => ({
+      id: it.id, name: it.name || "", category: it.category || "", condition: it.condition || "",
+      age: it.age || "", room: it.room || "", notes: it.notes || "",
+    })),
+  }).then((b) => b.justifications ?? []);
+}
