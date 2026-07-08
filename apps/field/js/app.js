@@ -53,6 +53,40 @@ window.addEventListener("hashchange", route);
 window.addEventListener("load", boot);
 window.addEventListener("roybal-tech-changed", renderTechChip);  // refresh the header chip when tech is set anywhere
 
+/* ---------- ?diag — on-screen input diagnostic (no DevTools needed) ----------
+   Open https://app.roybalconstruction.com/?diag and a readout box appears.
+   Shows, live: what a click lands on (full element stack), whether the input
+   under the click is disabled/unclickable, where focus went, and where
+   keystrokes are delivered. For chasing device-specific input problems. */
+if (location.search.includes("diag")) {
+  const dbox = document.createElement("div");
+  dbox.style.cssText = "position:fixed;top:70px;left:8px;z-index:999999;background:rgba(0,0,0,.92);color:#0f0;font:12px/1.5 monospace;padding:10px;border-radius:8px;max-width:470px;pointer-events:none;white-space:pre-wrap;word-break:break-all";
+  document.body.append(dbox);
+  const desc = (el) => !el ? "none"
+    : el.tagName + (el.className ? "." + String(el.className).trim().split(/\s+/).join(".") : "")
+      + (el.placeholder ? "[" + el.placeholder + "]" : "");
+  const L = { click: "—", stack: "—", input: "—", focus: "—", key: "—", typed: "—" };
+  const paint = () => { dbox.textContent =
+    "CLICK  " + L.click + "\nSTACK  " + L.stack + "\nINPUT  " + L.input +
+    "\nFOCUS  " + L.focus + "\nKEY    " + L.key + "\nTYPED  " + L.typed; };
+  document.addEventListener("pointerdown", (e) => {
+    L.click = desc(e.target);
+    const els = document.elementsFromPoint(e.clientX, e.clientY);
+    L.stack = els.slice(0, 4).map(desc).join("  |  ");
+    const inp = els.find((n) => n.tagName === "INPUT" || n.tagName === "TEXTAREA");
+    L.input = inp
+      ? `disabled=${inp.disabled} readonly=${inp.readOnly} pointer-events=${getComputedStyle(inp).pointerEvents} h=${Math.round(inp.getBoundingClientRect().height)}px`
+      : "(no input under this click)";
+    paint();
+  }, true);
+  document.addEventListener("focusin", (e) => { L.focus = desc(e.target); paint(); });
+  document.addEventListener("keydown", (e) => { L.key = e.key + " -> " + desc(document.activeElement); paint(); }, true);
+  document.addEventListener("input", (e) => {
+    const t = e.target; L.typed = desc(t) + " = " + JSON.stringify(String((t && t.value) || "").slice(-24)); paint();
+  }, true);
+  paint();
+}
+
 /* ---------- auth gate ---------- */
 const OFFLINE_KEY = "roybal-offline";
 const isOfflineMode = () => localStorage.getItem(OFFLINE_KEY) === "1";
@@ -1040,11 +1074,26 @@ window.addEventListener("offline", updateNet);
 updateNet();
 
 if ("serviceWorker" in navigator) {
-  // auto-reload once when an updated service worker takes control
+  // Reload once when an updated service worker takes control — but NEVER
+  // out from under someone typing (deploys were yanking open desktop tabs
+  // mid-edit). If a text field is focused, defer the reload until the user
+  // navigates or leaves the tab.
   let hadController = !!navigator.serviceWorker.controller;
   let reloading = false;
+  const typing = () => {
+    const a = document.activeElement;
+    return a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable);
+  };
+  const doReload = () => { if (!reloading) { reloading = true; location.reload(); } };
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (hadController && !reloading) { reloading = true; location.reload(); }
+    if (hadController && !reloading) {
+      if (!typing()) doReload();
+      else {
+        const safe = () => { if (!typing()) doReload(); };
+        window.addEventListener("hashchange", safe, { once: true });
+        document.addEventListener("visibilitychange", () => { if (document.hidden) doReload(); }, { once: true });
+      }
+    }
     hadController = true;
   });
   window.addEventListener("load", () => {
