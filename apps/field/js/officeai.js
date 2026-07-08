@@ -146,3 +146,18 @@ export function draftAdjusterEmail(project) {
     narrative: project.narrative || "",
   }).then((b) => b.draft);
 }
+
+/* ---------- contents vision (personal property inventory) ---------- */
+/** Identify ONE item from its photo → {name,brand,model,category,condition,estimatedValue,notes,confidence}. */
+export function analyzeContentsItem(project, imageDataUrl, categories, conditions) {
+  return callOffice(project, "contentsVision", {
+    mode: "item", image: imageDataUrl, categories, conditions,
+  }).then((b) => b.item);
+}
+
+/** Bulk room capture: list every item in a photo → [{name,category,qty,condition,estimatedValue,confidence}]. */
+export function scanContentsPhoto(project, imageDataUrl, categories, conditions) {
+  return callOffice(project, "contentsVision", {
+    mode: "scan", image: imageDataUrl, categories, conditions,
+  }).then((b) => b.items ?? []);
+}

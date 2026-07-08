@@ -19,7 +19,7 @@ import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine } from "./spine.js";
 import { generateNarrative } from "./narrative.js";
 import { transcribeWidget } from "./voice.js";
-import { aiAvailable, draftAdjusterEmail } from "./officeai.js";
+import { aiAvailable, draftAdjusterEmail, analyzeContentsItem, scanContentsPhoto } from "./officeai.js";
 import { dryingFlags } from "./dryingwatch.js";
 import { AI_FORM_KEYS } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -742,16 +742,69 @@ function contentsManager(project) {
 
   let q = "", fRoom = "", fBox = "", fDisp = "";
 
+  /* ✨ Bulk capture: photograph a room/shelf, the AI lists every item it
+     sees, the tech checks off what to add. Photos are not attached to the
+     created items — take close-ups on the ones that matter for the claim. */
+  const scanInput = h("input", { type: "file", accept: "image/*", capture: "environment", style: "display:none" });
+  const scanBtn = h("button", { class: "btn btn--ghost btn--sm" }, "✨ Scan room photo");
+  const scanPanel = h("div", {});
+  scanBtn.addEventListener("click", () => { if (aiAvailable()) scanInput.click(); });
+  scanInput.addEventListener("change", async () => {
+    const f = scanInput.files[0]; scanInput.value = "";
+    if (!f) return;
+    scanBtn.disabled = true; scanBtn.textContent = "✨ Scanning…";
+    try {
+      const img = await fileToDataURL(f);
+      const found = await scanContentsPhoto(project, img, CONTENT_CATEGORIES, CONDITIONS);
+      if (!found.length) { scanPanel.replaceChildren(h("p", { class: "subtle" }, "✨ No personal-property items recognized in that photo.")); }
+      else {
+        const roomIn = h("input", { placeholder: "Room for these items (e.g. Living Room)", style: "margin:6px 0" });
+        const rows = found.map((it) => {
+          const cb = h("input", { type: "checkbox", checked: true, style: "width:22px;height:22px;min-height:0;flex:0 0 auto" });
+          return { it, cb, row: h("label", { style: "display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px;cursor:pointer" },
+            cb, h("span", { style: "flex:1" }, h("strong", {}, it.name), ` — ${it.category || "?"} · qty ${it.qty || 1}` +
+              (it.estimatedValue > 0 ? ` · est. ${money(it.estimatedValue)}` : ""))) };
+        });
+        const addBtn = h("button", { class: "btn btn--primary btn--sm", style: "margin-top:8px" }, "+ Add checked items");
+        addBtn.addEventListener("click", async () => {
+          const picked = rows.filter((r) => r.cb.checked);
+          if (!picked.length) return toast("Nothing checked.");
+          for (const { it } of picked) {
+            const n = newContentsItem();
+            n.name = it.name || ""; n.qty = String(it.qty || 1);
+            if (CONTENT_CATEGORIES.includes(it.category)) n.category = it.category;
+            if (CONDITIONS.includes(it.condition)) n.condition = it.condition;
+            if (it.estimatedValue > 0) n.value = String(Math.round(it.estimatedValue));
+            n.room = roomIn.value.trim();
+            project.contents.push(n);
+            if (n.room && !project.rooms.includes(n.room)) project.rooms.push(n.room);
+          }
+          await Store.put(project);
+          toast(`Added ${picked.length} item(s) — open each to add photos & details.`);
+          contentsManager(project);
+        });
+        scanPanel.replaceChildren(h("div", { class: "card", style: "border-style:dashed" },
+          h("strong", { style: "font-size:13px" }, `✨ ${found.length} item(s) recognized — uncheck any that don't belong, set the room, then add:`),
+          roomIn, ...rows.map((r) => r.row), addBtn));
+      }
+    } catch (e) {
+      toast("Scan failed — " + (e && e.message ? e.message : "try again"));
+    }
+    scanBtn.disabled = false; scanBtn.textContent = "✨ Scan room photo";
+  });
+
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "📦 Contents"),
       h("button", { class: "btn btn--primary btn--sm", onclick: () => addItem(project) }, "+ Add item")),
     contentsSummary(project),
     h("div", { class: "btn-row", style: "margin:6px 0 12px;flex-wrap:wrap" },
+      scanBtn,
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/boxes`) }, `📦 Boxes (${project.boxes.length})`),
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/packback`) }, "↩︎ Pack-back"),
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => go(`#/p/${project.id}/f/contents/report`) }, "📄 Inventory PDF"),
-      h("button", { class: "btn btn--ghost btn--sm", onclick: () => exportContentsCSV(project) }, "⬇ CSV")));
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => exportContentsCSV(project) }, "⬇ CSV")),
+    scanInput, scanPanel);
 
   // filters
   const search = h("input", { type: "search", placeholder: "Search items…" });
@@ -825,11 +878,40 @@ function contentsItemEditor(project, item) {
       h("span", {}, "ACV ", h("b", { style: "color:var(--orange-dark)" }, money(d.acv))));
   }
 
+  /* ✨ Identify from photo — vision fills the claim fields from the item's
+     photo (blank fields only; everything stays editable). Online-only. */
+  const idBtn = h("button", { type: "button", class: "btn btn--sm", style: "width:auto" }, "✨ Identify from photo");
+  const idLine = h("div", { class: "subtle", style: "font-size:12px;margin-top:6px" });
+  idBtn.addEventListener("click", async () => {
+    if (!item.photos || !item.photos.length) return toast("Add a photo of the item first.");
+    if (!aiAvailable()) return;
+    idBtn.disabled = true; idBtn.textContent = "✨ Identifying…";
+    try {
+      const r = await analyzeContentsItem(project, item.photos[item.photos.length - 1], CONTENT_CATEGORIES, CONDITIONS);
+      const filled = [];
+      const fill = (key, v) => { if (v != null && String(v).trim() && !String(item[key] || "").trim()) { item[key] = String(v); filled.push(key); } };
+      fill("name", r.name); fill("brand", r.brand); fill("model", r.model);
+      if (CONTENT_CATEGORIES.includes(r.category)) fill("category", r.category);
+      if (CONDITIONS.includes(r.condition)) fill("condition", r.condition);
+      if (r.estimatedValue > 0) fill("value", Math.round(r.estimatedValue));
+      if (r.notes) fill("notes", r.notes);
+      await Store.put(project);
+      idLine.textContent = "✨ " + (r.name || "Identified") +
+        (r.estimatedValue > 0 ? ` · est. replacement ${money(r.estimatedValue)} (starting point — verify)` : "") +
+        (filled.length ? "" : " — fields already filled, nothing overwritten");
+      if (filled.length) { contentsItemEditor(project, item); toast("Filled: " + filled.join(", ") + " — review every field."); }
+    } catch (e) {
+      toast("Couldn't identify — " + (e && e.message ? e.message : "try again"));
+    }
+    idBtn.disabled = false; idBtn.textContent = "✨ Identify from photo";
+  });
+
   body.append(
     h("div", { class: "app-only", style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" },
       h("strong", { style: "font-size:18px" }, "📦 Item"), pill),
     h("div", { class: "card" },
       field("Photos", photoUploader(item.photos, "Add item photos")),
+      h("div", { class: "app-only", style: "margin:-4px 0 12px" }, idBtn, idLine),
       warn,
       field("Item name", inp(item, "name", { placeholder: "e.g. 55\" Samsung TV" })),
       h("div", { class: "grid2" },
