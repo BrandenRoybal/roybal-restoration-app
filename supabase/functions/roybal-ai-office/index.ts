@@ -37,6 +37,8 @@ const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                        //
 const PHOTO_MODEL = Deno.env.get("OFFICE_PHOTO_MODEL") ?? "claude-haiku-4-5";
 const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-sonnet-4-6";
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
+const STT_API_KEY = Deno.env.get("STT_API_KEY") ?? "";        // Deepgram (shared with roybal-ai-ingest)
+const STT_MODEL = Deno.env.get("STT_MODEL") ?? "nova-3";
 
 // $/1M tokens (override via env if pricing shifts) — same table as roybal-ai-ingest.
 const LLM_PRICES: Record<string, { in: number; out: number }> = {
@@ -102,6 +104,42 @@ async function forcedTool(opts: {
   if (!block) throw new Error("extraction_failed: model returned no structured result");
   const usage = data.usage ?? {};
   return { input: block.input ?? {}, usage: { inTok: Number(usage.input_tokens) || 0, outTok: Number(usage.output_tokens) || 0 } };
+}
+
+/* Plain conversational call — no forced tool; returns the assistant's text. */
+async function chatText(opts: {
+  model: string; system: string; messages: unknown[]; maxTokens?: number;
+}): Promise<{ text: string; usage: Usage }> {
+  if (!LLM_API_KEY) throw new Error("llm_key_missing: set the LLM_API_KEY function secret (Anthropic)");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "x-api-key": LLM_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({ model: opts.model, max_tokens: opts.maxTokens ?? 1024, system: opts.system, messages: opts.messages }),
+  });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`llm_failed (${res.status}): ${raw}`);
+  const data = JSON.parse(raw);
+  const text = (data.content ?? []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("\n").trim();
+  const usage = data.usage ?? {};
+  return { text, usage: { inTok: Number(usage.input_tokens) || 0, outTok: Number(usage.output_tokens) || 0 } };
+}
+
+/* Deepgram pre-recorded STT (same account as voice capture). */
+async function sttTranscribe(audio: Uint8Array, mime: string): Promise<string> {
+  if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
+  const url = `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(STT_MODEL)}&smart_format=true&punctuate=true`;
+  const res = await fetch(url, { method: "POST", headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": mime || "audio/webm" }, body: audio as unknown as BodyInit });
+  if (!res.ok) throw new Error(`stt_failed (${res.status}): ${await res.text().catch(() => "")}`);
+  const data = await res.json();
+  return String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "").trim();
+}
+
+function b64ToBytes(src: string): Uint8Array {
+  const b64 = String(src || "").replace(/^data:[^;]+;base64,/, "");
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 /* Split a data: URL into { mediaType, data } for the Anthropic image block. */
@@ -448,12 +486,56 @@ async function contentsJustify(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: fieldAssist — conversational, job-aware field Q&A
+   Voice (Deepgram STT) + photos (vision) + short colleague answers.
+   ============================================================ */
+const ASSIST_SYSTEM =
+  "You are the senior IICRC WRT-certified lead at Roybal Construction, LLC (water/fire restoration, Fairbanks Alaska), " +
+  "taking a quick call from one of your techs in the field mid-job. Answer like a sharp, friendly colleague on the phone:\n" +
+  "- Lead with what to DO. Two to four short sentences for a typical question — actionable and direct.\n" +
+  "- Cite the standard when it backs the call (IICRC S500 water, S520 mold, S700/S740 fire) in plain terms, e.g. 'S500 puts that at Cat 3 — it touched sewage'.\n" +
+  "- Safety gates first: possible Cat 3, energized electrical, structural concerns, pre-1980s materials (asbestos/lead), or mold beyond ~10 sq ft mean STOP and say exactly what to check or who to call before proceeding.\n" +
+  "- Use the JOB CONTEXT so the answer fits THIS job (category, class, cause, materials, equipment, readings). Never invent readings or facts.\n" +
+  "- If you need one piece of information to answer safely, ask ONE pointed question back instead of guessing.\n" +
+  "- Go deeper only when the tech asks (why / explain / walk me through it).\n" +
+  "Tone: warm, plain language, zero fluff — a knowledgeable colleague, never a manual. No headings, no bullet lists unless listing steps the tech must do in order.";
+
+async function fieldAssist(body: Record<string, unknown>) {
+  const history = Array.isArray(body.messages) ? (body.messages as Array<{ role: string; text: string }>).slice(-12) : [];
+  const images = Array.isArray(body.images) ? (body.images as string[]).slice(0, 4) : [];
+  let userText = String(body.text ?? "").trim();
+  let transcript: string | null = null;
+
+  if (body.audio) {
+    transcript = await sttTranscribe(b64ToBytes(String(body.audio)), String(body.audioMime || "audio/webm"));
+    if (!transcript) throw new Error("Didn't catch that — try again closer to the mic.");
+    userText = transcript;
+  }
+  if (!userText && !images.length) throw new Error("Ask a question (text or voice), or attach a photo.");
+
+  const msgs: unknown[] = history
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && String(m.text || "").trim())
+    .map((m) => ({ role: m.role, content: String(m.text) }));
+  const finalContent: unknown[] = [];
+  for (const src of images) {
+    const img = dataUrlToImage(src);
+    if (img) finalContent.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+  }
+  finalContent.push({ type: "text", text: userText || "Here's the situation in the photo — what should I do?" });
+  msgs.push({ role: "user", content: finalContent });
+
+  const context = body.context ? `\n\nJOB CONTEXT (current job):\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
+  const { text, usage } = await chatText({ model: DOC_MODEL, system: ASSIST_SYSTEM + context, messages: msgs, maxTokens: 1024 });
+  return { result: { reply: text, transcript }, usage, model: DOC_MODEL, summary: { turns: history.length + 1, images: images.length, voice: !!transcript } };
+}
+
+/* ============================================================
    Handler — same self-protection invariants as roybal-ai-ingest:
    anon key only (RLS always applies), the caller's JWT on every DB op,
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist,
 };
 
 serve(async (req: Request) => {

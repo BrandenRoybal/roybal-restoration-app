@@ -21,6 +21,7 @@ import { generateNarrative } from "./narrative.js";
 import { transcribeWidget } from "./voice.js";
 import { aiAvailable, aiReady, draftAdjusterEmail, analyzeContentsItem, scanContentsPhoto, justifyContents } from "./officeai.js";
 import { dryingFlags } from "./dryingwatch.js";
+import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
 
@@ -113,12 +114,14 @@ async function route() {
   if (parts[0] === "p" && parts[1]) {
     const project = await Store.get(parts[1]);
     if (!project) return go("#/");
+    mountAssist(project);   // 💬 job-aware assistant floats over every job page
     if (parts[2] === "edit") return projectEdit(project);
     if (parts[2] === "narrative") return narrativePage(project);
     if (parts[2] === "packet") return packetPage(project);
     if (parts[2] === "f" && parts[3]) return formPage(project, parts[3], parts[4]);
     return projectHome(project);
   }
+  mountAssist(null);
   return projectList();
 }
 

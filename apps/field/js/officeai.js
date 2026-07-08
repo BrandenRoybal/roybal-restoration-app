@@ -175,3 +175,8 @@ export function justifyContents(project, items) {
     })),
   }).then((b) => b.justifications ?? []);
 }
+
+/** Conversational field assistant — returns { reply, transcript? }. */
+export function fieldAssist(project, payload) {
+  return callOffice(project, "fieldAssist", payload);
+}
