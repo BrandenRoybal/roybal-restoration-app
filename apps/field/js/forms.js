@@ -192,6 +192,48 @@ function cropZoom(srcUrl, aspect) {
 /* ============================================================
    1. MOISTURE MAP
    ============================================================ */
+/* Meter presets — saved once per device, picked from a dropdown after that. */
+const METERS_KEY = "roybal-meters";
+function meterPresets() { try { return JSON.parse(localStorage.getItem(METERS_KEY)) || []; } catch { return []; } }
+function meterSelect(m) {
+  const wrap = h("span", { class: "addable" });
+  function render() {
+    const s = h("select");
+    const cur = m.meter || "";
+    const opts = meterPresets();
+    s.append(h("option", { value: "" }, "—"));
+    if (cur && !opts.includes(cur)) s.append(h("option", { value: cur, selected: true }, cur));
+    opts.forEach((o) => s.append(h("option", { value: o, selected: o === cur }, o)));
+    s.append(h("option", { value: "__new__" }, "➕ New meter / setting…"));
+    s.addEventListener("change", () => {
+      if (s.value === "__new__") {
+        const v = (prompt("Meter & setting (e.g. Protimeter Surveymaster — pin, WME scale)") || "").trim();
+        if (v) {
+          const list = meterPresets();
+          if (!list.includes(v)) { list.push(v); try { localStorage.setItem(METERS_KEY, JSON.stringify(list)); } catch (_) {} }
+          m.meter = v; commit();
+        }
+        render();
+      } else { m.meter = s.value; commit(); }
+    });
+    wrap.replaceChildren(s);
+  }
+  render();
+  return wrap;
+}
+
+/* Most recent drying-log psychrometric reading — the room's ambient conditions. */
+function latestPsychReading(project) {
+  let best = null;
+  for (const d of project.dryingLogs || []) {
+    for (const r of d.readings || []) {
+      if (!(String(r.affT || "").trim() || String(r.affRH || "").trim())) continue;
+      if (!best || String(r.date || "") >= String(best.date || "")) best = r;
+    }
+  }
+  return best;
+}
+
 export function moistureMap(project, m) {
   const pad = sketchPad({
     strokes: m.strokes, background: m.floorPlan, markerStart: m.markerNext || 1,
@@ -314,12 +356,42 @@ export function moistureMap(project, m) {
   for (let n = 1; n <= 13; n++) headCols.push(String(n));
   headCols.push("Notes");
 
+  /* Room / Area name — titles both maps so multi-room jobs stay readable */
+  const areaTitle = h("div", { class: "maptitle" });
+  const eqTitle = h("div", { class: "maptitle" });
+  function paintTitles() {
+    const name = String(m.label || "").trim();
+    areaTitle.textContent = name;
+    areaTitle.hidden = !name;
+    eqTitle.textContent = name ? name + " — Equipment" : "";
+    eqTitle.hidden = !name;
+  }
+  const roomInp = inp(m, "label", { placeholder: "e.g. Living Room", oninput: paintTitles });
+  paintTitles();
+
+  /* Ambient temp/RH — auto-pulled from the latest drying-log psychrometric
+     reading (that IS the room's ambient), still fully editable. */
+  const ambInp = inp(m, "ambientTemp", { placeholder: "e.g. 72°F / 45%" });
+  const ambBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only", style: "width:auto;flex:0 0 auto" }, "↻");
+  function pullAmbient({ silent = false } = {}) {
+    const r = latestPsychReading(project);
+    if (!r) { if (!silent) toast("No drying-log readings yet — enter today's psychrometrics in a Drying Log first."); return; }
+    m.ambientTemp = [r.affT && r.affT + "°F", r.affRH && r.affRH + "%"].filter(Boolean).join(" / ") +
+      (r.date ? " (" + r.date + ")" : "");
+    ambInp.value = m.ambientTemp;
+    commit();
+    if (!silent) toast("Pulled from the drying log.");
+  }
+  ambBtn.title = "Pull from the latest drying-log reading";
+  ambBtn.addEventListener("click", () => pullAmbient());
+  if (!String(m.ambientTemp || "").trim()) pullAmbient({ silent: true });
+
   return sheet("MOISTURE MAP", "Water Mitigation Field Documentation — Per IICRC S500 Protocol", "Moisture Map Field Template",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
     h("div", { class: "grid2" },
       field("Technician", inp(m, "technician")),
-      field("Ambient Temp / RH", inp(m, "ambientTemp", { placeholder: "e.g. 72°F / 45%" }))),
+      field("Ambient Temp / RH", h("div", { style: "display:flex;gap:6px" }, ambInp, ambBtn))),
     h("div", { class: "grid2" },
       field("Equipment on Site", inp(m, "equipmentOnSite", { placeholder: "e.g. 2 dehu, 6 AM" })),
       field("Page (of)", h("div", { class: "grid2" }, inp(m, "page", { placeholder: "Page" }), inp(m, "pageOf", { placeholder: "of" })))),
@@ -327,18 +399,20 @@ export function moistureMap(project, m) {
     sectionTitle("Affected Area"),
     h("p", { class: "subtle app-only" }, "Import a floor plan (or draw freehand), then tap “① Number” and place a numbered marker at each moisture-reading location."),
     h("div", { class: "grid2" },
+      field("Room / Area (titles this map)", roomInp),
+      field("Meter / Setting", meterSelect(m))),
+    h("div", { class: "grid2" },
       field("Material", materialSel),
       field("Dry Goal (MC%)", dryGoalInput)),
-    field("Meter / Setting", inp(m, "meter", { placeholder: "Pin / non-pin, scale" })),
     fpBox,
-    pad.tools, pad.el,
+    pad.tools, areaTitle, pad.el,
     h("details", { class: "app-only", style: "margin-top:10px" },
       h("summary", { class: "linklike" }, "Or attach photos of the area instead"),
       photoUploader(m.photos, "Add area photos")),
 
     sectionTitle("Equipment Placement"),
     h("p", { class: "subtle app-only" }, "Tap a tool, then tap the floor plan to drop it. Tap a placed unit to move it; use ↺ ↻ to aim it (air-mover direction)."),
-    equipPad.tools, equipPad.el, equipCountEl,
+    equipPad.tools, eqTitle, equipPad.el, equipCountEl,
 
     sectionTitle("Moisture Reading Locations (MC% or equivalent)"),
     h("p", { class: "flagnote app-only" }, "Cells flag ", h("span", { class: "dot g" }, "green = at/below dry goal"), " · ", h("span", { class: "dot r" }, "red = still wet"), " automatically."),

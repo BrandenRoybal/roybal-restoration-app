@@ -336,9 +336,9 @@ export function sketchPad({ strokes = null, background = null, markerStart = 1, 
   function stamp(p) {
     snapshot();
     ctx.fillStyle = "#f26a21"; ctx.strokeStyle = "#fff";
-    ctx.beginPath(); ctx.arc(p.x, p.y, 13, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 17, 0, Math.PI * 2); ctx.fill();
     ctx.lineWidth = 2; ctx.stroke();
-    ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "#fff"; ctx.font = "bold 18px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.fillText(String(nextNum++), p.x, p.y);
     ctx.lineWidth = 2.6; ctx.strokeStyle = pen;
     emit();
@@ -469,7 +469,7 @@ export function equipmentPad({ items = [], background = null, onChange } = {}) {
   const canvas = h("canvas");
   wrap.append(bgImg, canvas);
   const ctx = canvas.getContext("2d");
-  const ICON = 12;   // icon half-size (px); smaller = more units fit on the plan
+  const ICON = 16;   // icon half-size (px) — sized to stay legible on the enlarged printed map
   let list = (items || []).map((it) => ({ id: it.id || uid(), type: it.type, x: clamp01(it.x), y: clamp01(it.y), angle: Number(it.angle) || 0 }));
   let armed = null, selected = null, dragging = false, W = 320, H = 320;
 
