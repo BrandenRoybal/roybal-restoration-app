@@ -7,6 +7,7 @@ import assert from "node:assert";
 import {
   candidateChips, confidenceTone, LOW_CONFIDENCE,
   estimateCost, sumUsd, isOverCap, applyChips,
+  rebuildChips, applyRebuildChips,
 } from "../js/ai.js";
 
 /* stub blank-row / photo factories (voice.js supplies the real model.js ones) */
@@ -163,5 +164,145 @@ ok("unchecked chip is not applied", skipInstance.rows[0].employee === "Sam" && !
 ok("applied count reflects only confirmed chips", skipOut.applied === 1);
 
 function has2(v) { return v !== undefined && v !== null && String(v).trim() !== ""; }
+
+/* ============================================================
+   Construction voice-capture chips (Phase 4)
+   ============================================================ */
+{
+  const punch = candidateChips("punchList", { rows: [
+    { area: "Master Bath", item: "Door casing scratched", trade: "Paint", priority: "normal", confidence: 0.9 },
+    { area: "Kitchen", item: "Cabinet handle missing", trade: "Cabinets / Counters", confidence: 0.8 },
+  ] });
+  ok("punch rows -> chips per stated field", punch.length === 7);
+  const inst = { rows: [{ area: "", item: "", trade: "", priority: "normal", status: "open", photos: [] }] };
+  const mkC = { row: () => ({ area: "", item: "", trade: "", priority: "normal", status: "open", photos: [] }) };
+  applyChips("punchList", inst, {}, punch, mkC);
+  ok("two punch rows written (blank reused + one appended)",
+    inst.rows.length === 2 && inst.rows[0].item === "Door casing scratched" && inst.rows[1].area === "Kitchen");
+  ok("punch row keeps its defaults", inst.rows[0].status === "open" && Array.isArray(inst.rows[0].photos));
+
+  const subs = candidateChips("subSchedule", { rows: [
+    { trade: "Drywall", company: "AK Interiors", schedStart: "2026-07-20", status: "scheduled", confidence: 0.85 },
+  ] });
+  const subInst = { rows: [{ trade: "", company: "", status: "scheduled" }] };
+  applyChips("subSchedule", subInst, {}, subs, { row: () => ({ trade: "", company: "", status: "scheduled" }) });
+  ok("sub schedule row written", subInst.rows.length === 1 && subInst.rows[0].company === "AK Interiors" &&
+    subInst.rows[0].schedStart === "2026-07-20");
+
+  const insp = candidateChips("inspections", {
+    type: "Framing", scheduled: "2026-07-22", result: "fail", corrections: "Add hurricane clips at ridge", confidence: 0.9,
+  });
+  ok("inspection chips are instance-level", insp.every((c) => c.target.group === null));
+  const inspInst = { type: "", result: "", corrections: "" };
+  applyChips("inspections", inspInst, {}, insp, {});
+  ok("inspection fields written", inspInst.type === "Framing" && inspInst.result === "fail" &&
+    /hurricane clips/.test(inspInst.corrections));
+
+  const sels = candidateChips("selections", { rows: [
+    { area: "Kitchen", item: "Faucet", spec: "Moen brushed nickel", allowance: 250, confidence: 0.6 },
+  ] });
+  ok("low-confidence selection chips are amber", sels.every((c) => c.tone === "amber"));
+  const selInst = { rows: [{ area: "", item: "", spec: "", status: "pending" }] };
+  applyChips("selections", selInst, {}, sels, { row: () => ({ area: "", item: "", spec: "", status: "pending" }) });
+  ok("selection row written with allowance", selInst.rows[0].item === "Faucet" && String(selInst.rows[0].allowance) === "250");
+
+  const co = candidateChips("changeOrders", {
+    description: "Found rot in the subfloor behind the tub",
+    daysAdded: 2,
+    items: [{ desc: "Sister two floor joists + new underlayment", qty: 1, unit: "LS", price: 1800, confidence: 0.7 }],
+    confidence: 0.85,
+  });
+  const coInst = { description: "", daysAdded: "", items: [{ room: "", desc: "", qty: "", unit: "", price: "" }] };
+  applyChips("changeOrders", coInst, {}, co, { row: () => ({ room: "", desc: "", qty: "", unit: "", price: "" }) });
+  ok("change order description + days written", /rot in the subfloor/.test(coInst.description) && String(coInst.daysAdded) === "2");
+  ok("change order line item written into items[]",
+    coInst.items.length === 1 && /Sister two floor joists/.test(coInst.items[0].desc) && String(coInst.items[0].price) === "1800");
+}
+
+/* ============================================================
+   Rebuild draft chips (Phase 3: restoration → construction)
+   ============================================================ */
+const DRAFT = {
+  scopeAreas: [
+    { area: "Utility", items: [
+      { trade: "Drywall", desc: "Hang, tape and finish lower 2 ft of walls", qty: 64, unit: "SF", confidence: 0.9 },
+      { trade: "Paint", desc: "Prime and paint patched walls", qty: 0, unit: "SF", confidence: 0.5 },
+    ] },
+    { area: "Kitchen", items: [
+      { trade: "Flooring", desc: "Replace vinyl flooring", qty: 120, unit: "SF", confidence: 0.85 },
+    ] },
+  ],
+  tradeSequence: [
+    { trade: "Drywall", note: "after rough-in check" },
+    { trade: "Paint", note: "" },
+    { trade: "Flooring", note: "last — dust done" },
+  ],
+  selections: [{ area: "Kitchen", item: "Vinyl flooring", spec: "match existing", confidence: 0.6 }],
+  questions: ["Confirm subfloor condition under the vinyl"],
+};
+
+const rchips = rebuildChips(DRAFT);
+ok("one chip per scope line + trade + selection", rchips.length === 3 + 3 + 1);
+ok("scope chip labels area + trade", rchips[0].label === "Utility — Drywall");
+ok("scope chip value shows qty/unit", /64 SF/.test(rchips[0].value));
+ok("low-confidence scope chip is amber", rchips.find((c) => /Prime and paint/.test(String(c.target.meta.desc))).tone === "amber");
+ok("selection chip carries spec in meta", rchips[6].target.meta.spec === "match existing");
+ok("empty draft -> no chips", rebuildChips(null).length === 0 && rebuildChips({}).length === 0);
+
+/* apply into a bare construction project via factories */
+const rmk = {
+  scope: () => ({ areas: [{ name: "", items: [{ trade: "", desc: "", qty: "", unit: "", notes: "" }] }], allowances: [], referencePlans: [] }),
+  scopeArea: () => ({ name: "", items: [] }),
+  scopeItem: () => ({ trade: "", desc: "", qty: "", unit: "", notes: "" }),
+  subSchedule: () => ({ rows: [{ trade: "", company: "", status: "scheduled", notes: "" }] }),
+  subRow: () => ({ trade: "", company: "", status: "scheduled", notes: "" }),
+  selections: () => ({ rows: [{ area: "", item: "", spec: "", status: "pending" }] }),
+  selectionRow: () => ({ area: "", item: "", spec: "", status: "pending" }),
+};
+const conProj = {};
+const rout = applyRebuildChips(conProj, rchips, rmk);
+ok("all confirmed chips applied", rout.applied === 7);
+ok("scope created with two areas", conProj.scopeOfWork.areas.length === 2);
+ok("factory blank area reused (no empty leftover)", conProj.scopeOfWork.areas[0].name === "Utility");
+ok("scope items land under their area", conProj.scopeOfWork.areas[0].items.length === 2 &&
+  conProj.scopeOfWork.areas[0].items[0].desc === "Hang, tape and finish lower 2 ft of walls");
+ok("qty stored as string for the form inputs", conProj.scopeOfWork.areas[0].items[0].qty === "64");
+ok("trade sequence fills the sub schedule in order", conProj.subSchedule.rows.map((r) => r.trade).join() === "Drywall,Paint,Flooring");
+ok("trade note lands in row notes", conProj.subSchedule.rows[0].notes === "after rough-in check");
+ok("selection lands pending with spec", conProj.selections.rows[0].item === "Vinyl flooring" &&
+  conProj.selections.rows[0].status === "pending" && conProj.selections.rows[0].spec === "match existing");
+
+/* unchecked chips are skipped; existing scope area is reused, not duplicated */
+const conProj2 = { scopeOfWork: { areas: [{ name: "Utility", items: [] }], allowances: [] } };
+const rchips2 = rebuildChips(DRAFT);
+rchips2.forEach((c) => { if (c.target.group !== "scopeItems") c.confirmed = false; });
+const rout2 = applyRebuildChips(conProj2, rchips2, rmk);
+ok("only scope chips applied when others unchecked", rout2.applied === 3);
+ok("existing area matched case-insensitively (no duplicate)",
+  conProj2.scopeOfWork.areas.filter((a) => a.name.toLowerCase() === "utility").length === 1);
+ok("subSchedule untouched when its chips are unchecked", conProj2.subSchedule === undefined);
+
+/* the schema's qty-0-means-unknown sentinel never reaches the form */
+const paintChip = rchips.find((c) => /Prime and paint/.test(String(c.target.meta.desc)));
+ok("qty 0 chip shows no quantity", !/\(0/.test(String(paintChip.value)));
+ok("qty 0 lands blank in the scope item",
+  conProj.scopeOfWork.areas[0].items[1].qty === "" && conProj.scopeOfWork.areas[0].items[1].unit === "");
+
+/* off-list trades coerce to "Other" and keep the model's wording in notes */
+const oddDraft = {
+  scopeAreas: [{ area: "Garage", items: [{ trade: "Concrete Polishing", desc: "Polish slab", qty: 200, unit: "SF", confidence: 0.9 }] }],
+  tradeSequence: [{ trade: "Concrete Polishing", note: "last" }],
+  selections: [], questions: [],
+};
+const oddProj = {};
+applyRebuildChips(oddProj, rebuildChips(oddDraft), { ...rmk, trades: ["Demo", "Drywall", "Other"] });
+ok("off-list scope trade coerced to Other", oddProj.scopeOfWork.areas[0].items[0].trade === "Other");
+ok("original trade wording kept in scope notes", oddProj.scopeOfWork.areas[0].items[0].notes === "Concrete Polishing");
+ok("off-list sub trade coerced with note", oddProj.subSchedule.rows[0].trade === "Other" &&
+  /Concrete Polishing/.test(oddProj.subSchedule.rows[0].notes) && /last/.test(oddProj.subSchedule.rows[0].notes));
+/* without a trades list, values pass through untouched */
+const passProj = {};
+applyRebuildChips(passProj, rebuildChips(oddDraft), rmk);
+ok("no trades list -> trade passes through", passProj.scopeOfWork.areas[0].items[0].trade === "Concrete Polishing");
 
 console.log(`\n${pass} checks passed.`);

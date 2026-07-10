@@ -530,6 +530,11 @@ function renderCard(j) {
   // phases (sub-tasks)
   if ((j.subtasks || []).length) meta.append(h("span", { class: "chip is-phase", title: j.subtasks.map((st, i) => `${i + 1}. ${st.name || "Phase"} — ${st.durationDays || 1}d${st.lagDays ? ` (+${st.lagDays}d lag)` : ""}`).join("\n") },
     "📋 " + j.subtasks.length + " phase" + (j.subtasks.length === 1 ? "" : "s")));
+  // field-app link — amber when the field sent a phase plan awaiting review
+  if (j.fieldJobId) meta.append(h("span", {
+    class: "chip" + (j.fieldPlanProposal ? " is-warn" : ""),
+    title: j.fieldPlanProposal ? "The field app sent an updated phase plan — open the job to review it" : "Linked to a field app job",
+  }, j.fieldPlanProposal ? "⚠ field update" : "📱 field-linked"));
 
   const phone = j.phone ? h("a", { class: "bcall", href: "tel:" + j.phone.replace(/[^\d+]/g, ""), onclick: (e) => e.stopPropagation() }, "📞 " + j.phone) : null;
 
@@ -1330,6 +1335,14 @@ function openJobModal(existing, newMilestone) {
           crewStrip.append(chip);
         }
         const mv = (d) => { const t = j.subtasks[i + d]; j.subtasks[i + d] = j.subtasks[i]; j.subtasks[i] = t; renderPhases(); };
+        // hours the field crew has logged against this phase (pushed by the field app)
+        const fieldAct = j.fieldActuals && st.name && j.fieldActuals[st.name] != null ? Number(j.fieldActuals[st.name]) : null;
+        const est = Number(st.estimatedHours) || 0;
+        const fieldChip = fieldAct != null ? h("span", {
+          class: "subtle",
+          style: "font-size:11px;font-weight:700;" + (est && fieldAct >= est * 1.1 ? "color:#d23b2e" : (est && fieldAct >= est * 0.8 ? "color:#a07800" : "")),
+          title: "Hours logged in the field app's daily construction logs",
+        }, `📱 ${fieldAct}h logged`) : null;
         phaseWrap.append(h("div", { class: "st-block" },
           h("div", { class: "st-row" }, h("span", { class: "st-i" }, String(i + 1)), name,
             h("button", { class: "st-btn", type: "button", title: "Move up", disabled: i === 0, onclick: () => mv(-1) }, "↑"),
@@ -1339,7 +1352,8 @@ function openJobModal(existing, newMilestone) {
             h("div", { class: "st-nums" },
               h("label", { class: "st-field" }, h("span", {}, "Days"), days),
               h("label", { class: "st-field" }, h("span", {}, "Hours"), hrs),
-              h("label", { class: "st-field" }, h("span", {}, "Lag (days)"), lag)),
+              h("label", { class: "st-field" }, h("span", {}, "Lag (days)"), lag),
+              fieldChip),
             activeCrew().length ? crewStrip : h("span", { class: "subtle" }, "no crew"))));
       });
     }
@@ -1347,6 +1361,37 @@ function openJobModal(existing, newMilestone) {
   };
   renderPhases();
   const addPhase = h("button", { class: "btn btn--ghost btn--sm", type: "button", onclick: () => { j.subtasks.push({ id: uid(), name: "", durationDays: 1, lagDays: 0, estimatedHours: "", crewIds: [] }); renderPhases(); } }, "+ Add phase");
+
+  // ----- field plan proposal (pushed by the field app; import or dismiss) -----
+  let fieldPlanSection = null;
+  if (j.fieldPlanProposal && !j.isMilestone) {
+    const fp = j.fieldPlanProposal;
+    const picks = (fp.phases || []).filter((p) => p && p.name).map((p) => ({ p, cb: h("input", { type: "checkbox", checked: true }) }));
+    const list = h("div", {}, ...picks.map(({ p, cb }) =>
+      h("label", { style: "display:flex;align-items:center;gap:8px;padding:4px 6px;font-size:13px;cursor:pointer" },
+        cb, h("span", {}, `${p.name} — ${p.estimatedHours || "?"}h${p.lagDays ? ` (+${p.lagDays}d lag)` : ""}`))));
+    const importBtn = h("button", { class: "btn btn--primary btn--sm", type: "button" }, "⤓ Import checked phases");
+    importBtn.addEventListener("click", () => {
+      const chosen = picks.filter((x) => x.cb.checked).map((x) => x.p);
+      if (!chosen.length) { toast("Nothing checked."); return; }
+      j.subtasks = [...j.subtasks, ...chosen.map((p) => ({
+        id: uid(), name: p.name, durationDays: null,
+        estimatedHours: Number(p.estimatedHours) || "", lagDays: Math.max(0, Math.round(Number(p.lagDays) || 0)), crewIds: [],
+      }))];
+      if (fp.notBefore && !f.notBefore.value) { f.notBefore.value = fp.notBefore; f.notBeforeLabel.value = fp.notBeforeLabel || ""; }
+      delete j.fieldPlanProposal;
+      fieldPlanSection.remove();
+      renderPhases();
+      toast("Imported — assign crew per phase, then Save.");
+    });
+    const dropBtn = h("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Dismiss");
+    dropBtn.addEventListener("click", () => { delete j.fieldPlanProposal; fieldPlanSection.remove(); toast("Proposal dismissed — Save to keep."); });
+    fieldPlanSection = h("div", { class: "schedsec", style: "border-color:#e0a800" },
+      h("div", { class: "schedsec__h" }, "📱 Phase plan from the field" + (fp.at ? " — " + fmtShort(fp.at.slice(0, 10)) : "")),
+      fp.assumptions && fp.assumptions.length ? h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Assumes: " + fp.assumptions.join(" · ")) : null,
+      list,
+      h("div", { class: "row-add", style: "display:flex;gap:8px" }, importBtn, dropBtn));
+  }
 
   const durRow = h("div", { class: "grid2 hide-for-ms" },
     field("Duration override (work days)", durInp), field("Computed duration", durOut));
@@ -1390,6 +1435,7 @@ function openJobModal(existing, newMilestone) {
       field("Stage", sel("stage", STAGES)),
       field("Priority", sel("priority", PRIORITIES))),
     datesRow, hoursRow, moneyRow, crewField,
+    fieldPlanSection,
     scheduleSection,
     field("Notes", (f.notes = h("textarea", { placeholder: "Scope, scheduling notes, gate codes…" }, j.notes || ""))),
     isNew ? h("p", { class: "subtle", style: "margin:14px 0 0" }, "💾 Create, then reopen to log time.") : (j.isMilestone ? null : buildJobHoursSection(j)),

@@ -33,6 +33,87 @@ to send a quick job summary.
 
 ---
 
+## Construction / Remodel mode
+
+The home screen has a **💧 Restoration | 🔨 Construction** toggle. Construction jobs
+(remodels, new builds, post-mitigation rebuilds) share the same offline engine, job header,
+and shared forms (photos, contents, work auth, daily log, labor log, change orders,
+invoices) but swap the water forms for a construction set:
+
+| Form | Notes |
+|---|---|
+| 📐 **Scope of Work** | Per-room/area line items tagged by trade, plus an allowances table. |
+| 🗒️ **Pre-Construction** | Ready-to-build checklist (contract, deposit, permits, selections, utilities) + permit log. Gates the completeness panel. |
+| 🎨 **Selections** | Owner finish/fixture choices vs. allowances with live over/under; lead-time + needed-by dates drive an ordering-deadline flag on the job list. |
+| 👷 **Sub Schedule** | Trade sequence with scheduled/actual dates, status, and COI tracking. |
+| 🏛️ **Inspection Log** | One record per inspection: result, corrections, reinspection date. A failed inspection with no reinspection flags the job. |
+| 🔧 **Punch List** | Walkthrough items with per-item photos and an owner sign-off. |
+| 💰 **Draw Schedule** | Payment milestones — % auto-computes the amount from the contract, and **“→ Invoice”** pre-fills an invoice for the draw. |
+| 🏁 **Cert. of Completion** | Final checklist, workmanship warranty, contractor + owner signatures (sign on device or upload). |
+
+Construction jobs get their own completeness matrix (contract → permits → inspections →
+punch list → certificate of completion) and their own job-list watch flags
+(`js/buildwatch.js`): failed inspections, sub no-shows, trades behind schedule, and
+selections that need ordering.
+
+### Restoration → reconstruction conversion
+
+Once a water job's drying is certified, its job home shows **🔨 Start reconstruction**
+(earlier, behind a confirm). It creates a **new, linked construction job** — a copy, never
+a mutation: customer/claim header, photos (re-tagged as the rebuild's "before" record) and
+moisture-map floor plans (as Scope of Work reference plans) carry over, and both jobs link
+to each other with a tappable chip. The mitigation job and its carrier packet stay untouched.
+
+On the new job, **✨ Draft rebuild plan** sends the mitigation documentation (`js/convert.js`
+→ `rebuildFacts`) to the `rebuildDraft` action of `roybal-ai-office`, which drafts the Scope
+of Work per room, the trade sequence, and the owner-selection list. The draft lands as
+tap-to-confirm chips (amber = double-check) — nothing writes until you apply, and if AI is
+offline or the monthly cap is hit, the conversion still works with empty forms.
+
+### AI in the construction workflow
+
+- **🎙️ Voice capture** now also rides on the Punch List, Sub Schedule, Inspection Log,
+  Selections, and Change Orders ("master bath — door casing scratched, painter" → punch
+  rows to confirm; "found rot behind the tub, sister the joists, roughly $1,800" → a
+  drafted change order). Same review-chips flow, same monthly cap.
+- **💬 The assistant** knows construction jobs: scope, sub schedule, inspection results,
+  selection status, and draws — ask "what's blocking drywall?" or "are we over allowance?".
+- **📝 Progress Update** (construction job home) — an AI-drafted weekly owner/adjuster/lender
+  status summary built from the daily logs, inspections, schedule, selections, and draw
+  status. Editable Markdown, printed on letterhead.
+- **Schedule cross-check flags** (`js/buildwatch.js`, no AI): a trade working on site that
+  isn't on the sub schedule, or a scheduled trade with no daily-log entry for 2+ days,
+  flags the job card.
+
+Deploy the updated functions:
+
+```bash
+supabase functions deploy roybal-ai-ingest --no-verify-jwt
+supabase functions deploy roybal-ai-office --no-verify-jwt
+```
+
+### Job Board integration (`js/boardpush.js`)
+
+The field **proposes** a plan; the Board **schedules** it — the field owns scope, phase-hour
+proposals and actuals; the Board owns dates, crew, dependencies and stage.
+
+- **📅 Estimate timeline** (construction job home) — AI breaks the Scope of Work into build
+  phases in the Board's exact shape (name, crew hours, lag days for cure/inspection/delivery
+  waits), calibrated by the company's own estimate-vs-actual history once it exists. Review
+  and edit the phases (amber = inferred), then **Send to Job Board**: it creates or updates
+  the linked `coordination_jobs` row with the same optimistic-concurrency rev guard the Board
+  uses. If the coordinator already built phases, the plan lands as a **proposal** — the Board
+  shows an amber "⚠ field update" chip and an **Import checked phases** panel in the job
+  editor, never a silent overwrite.
+- **🗓 On the Job Board** card — the coordinator's live schedule (stage, dates, phases)
+  read-only on the field job home; the Sub Schedule form can **prefill from board phases**.
+- **Actuals rollup** — daily-log hours match phase names and land on the board job as
+  `fieldActuals`: the Board's phase editor shows "📱 Nh logged" per phase, and the field job
+  card flags ⏱ amber at 80% / red at 110% of a phase estimate, plus a "change order since
+  the timeline" reminder.
+
+---
+
 ## Run it locally
 
 From the repo root:

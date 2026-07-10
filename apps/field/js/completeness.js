@@ -15,7 +15,11 @@
          'soft' = warn only (good practice, not a blocker)
    when: null = always required
          'cat3' | 'contents' | 'cleaning' = conditional add-on
+
+   Construction jobs check against CONSTRUCTION_REQUIREMENTS instead
+   (contract → permits → inspections → punch list → cert of completion).
    ============================================================ */
+import { jobType, PRECON_CONTRACT, PRECON_PERMITS } from "./model.js";
 
 /* ---------- small helpers ---------- */
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -124,11 +128,61 @@ export const REQUIREMENTS = [
     present: (p) => filled(p.cat3Justification) || anyRow(p.changeOrders, (co) => /flood cut|containment|hepa|antimicrob/i.test(co.description || "")) },
 ];
 
+/* ---------- construction / remodel matrix ----------
+   The closeout gate for construction jobs: isBillable here means
+   "ready to invoice the final draw / close the job". */
+export const CONSTRUCTION_REQUIREMENTS = [
+  // ----- Pre-construction gates -----
+  { id: "pc_contract", form: "preConChecklist", label: "Contract signed (pre-con checklist)", gate: "hard",
+    present: (p) => !!p.preConChecklist && !!p.preConChecklist.items[PRECON_CONTRACT] },
+  { id: "pc_permits", form: "preConChecklist", label: "Permits pulled (or checked off as not required)", gate: "hard",
+    present: (p) => !!p.preConChecklist && (!!p.preConChecklist.items[PRECON_PERMITS]
+      || anyRow(p.preConChecklist.permits, (r) => filled(r.number))) },
+
+  // ----- Scope of Work -----
+  { id: "sc_items", form: "scopeOfWork", label: "At least one scoped line item", gate: "hard",
+    present: (p) => !!p.scopeOfWork && arr(p.scopeOfWork.areas).some((a) => anyRow(a.items, (it) => filled(it.desc))) },
+
+  // ----- Photos -----
+  { id: "cph_before", form: "photos", label: "Pre-construction photos", gate: "soft",
+    present: (p) => anyRow(p.photos, (ph) => ph.stage === "before") },
+  { id: "cph_after", form: "photos", label: "Completion photos", gate: "soft",
+    present: (p) => anyRow(p.photos, (ph) => ph.stage === "after") },
+
+  // ----- Inspections -----
+  { id: "in_fail", form: "inspections", label: "No failed inspection without a reinspection scheduled", gate: "hard",
+    present: (p) => !arr(p.inspections).some((i) => i.result === "fail" && !filled(i.reinspection)) },
+  { id: "in_final", form: "inspections", label: "Final inspection passed (if required)", gate: "soft",
+    present: (p) => arr(p.inspections).some((i) => /final/i.test(i.type || "") && i.result === "pass") },
+
+  // ----- Selections -----
+  { id: "se_decided", form: "selections", label: "No pending owner selections", gate: "soft",
+    present: (p) => !p.selections || !anyRow(p.selections.rows, (r) => r.status === "pending") },
+
+  // ----- Punch list -----
+  { id: "pu_clear", form: "punchList", label: "Punch list cleared (all items done / verified)", gate: "hard",
+    present: (p) => !!p.punchList && arr(p.punchList.rows).length > 0
+      && arr(p.punchList.rows).every((r) => r.status === "done" || r.status === "verified") },
+
+  // ----- Certificate of Completion -----
+  { id: "cc_sig", form: "certCompletion", label: "Contractor sign-off (signed or uploaded)", gate: "hard",
+    present: (p) => !!p.certCompletion && (filled(p.certCompletion.sigContractor) || arr(p.certCompletion.uploadedPages).length > 0) },
+  { id: "cc_owner", form: "certCompletion", label: "Owner acceptance signature", gate: "soft",
+    present: (p) => !!p.certCompletion && (filled(p.certCompletion.sigOwner) || arr(p.certCompletion.uploadedPages).length > 0) },
+
+  // ----- Draws -----
+  { id: "dr_paid", form: "drawSchedule", label: "Every invoiced draw marked paid", gate: "soft",
+    present: (p) => !p.drawSchedule || !anyRow(p.drawSchedule.rows, (r) => filled(r.invoicedDate) && !filled(r.paidDate)) },
+];
+
 const FORM_LABELS = {
   workAuth: "Work Authorization", floorPlan: "Floor Plan", moistureMaps: "Moisture Map",
   dryingLogs: "Drying Log", photos: "Photo Log", certDrying: "Certificate of Drying",
   constructionLogs: "Daily Construction Log", laborLog: "Labor Log",
   contents: "Contents", changeOrders: "Change Order",
+  scopeOfWork: "Scope of Work", preConChecklist: "Pre-Construction Checklist",
+  selections: "Selections", subSchedule: "Sub Schedule", inspections: "Inspection Log",
+  punchList: "Punch List", drawSchedule: "Draw Schedule", certCompletion: "Certificate of Completion",
 };
 
 /* ============================================================
@@ -146,7 +200,9 @@ export function evaluateProject(project, conditionOverride = {}) {
   const p = project || {};
   const conditions = activeConditions(p, conditionOverride);
 
-  const applicable = REQUIREMENTS.filter((req) => !req.when || conditions[req.when]);
+  // construction jobs use their own gate matrix (no cat3/contents add-ons)
+  const matrix = jobType(p) === "construction" ? CONSTRUCTION_REQUIREMENTS : REQUIREMENTS;
+  const applicable = matrix.filter((req) => !req.when || conditions[req.when]);
 
   const hardGaps = [], softGaps = [];
   let presentCount = 0;
