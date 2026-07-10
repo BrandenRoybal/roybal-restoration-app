@@ -12,8 +12,13 @@
    Online-only, same spend cap + ai_usage ledger as all AI.
    ============================================================ */
 import { h, toast, fileToDataURL } from "./core.js";
-import { narrativeFacts } from "./narrative.js";
+import { narrativeFacts, constructionFacts } from "./narrative.js";
+import { jobType } from "./model.js";
 import { aiAvailable, fieldAssist } from "./officeai.js";
+
+/* Construction jobs get the construction digest (scope, schedule, inspections,
+   selections, draws); water jobs keep the mitigation digest. */
+const assistFacts = (p) => (jobType(p) === "construction" ? constructionFacts(p) : narrativeFacts(p));
 
 const sessions = new Map();   // projectId -> [{ role, text, images? }]
 let ui = null;                // singleton { fab, drawer, msgs, input, ... }
@@ -85,7 +90,9 @@ function paintMessages() {
   ui.msgs.replaceChildren(
     list.length ? h("span") : h("div", { class: "amsg amsg--ai" },
       h("div", { class: "amsg__text" },
-        "Hey — what's the question? I can see this job's readings, category, and equipment. " +
+        (project && jobType(project) === "construction"
+          ? "Hey — what's the question? I can see this job's scope, sub schedule, inspections, selections, and draws. "
+          : "Hey — what's the question? I can see this job's readings, category, and equipment. ") +
         "Talk to me with the mic, type, or send a photo of what you're looking at.")),
     ...list.map(bubble));
   ui.msgs.scrollTop = ui.msgs.scrollHeight;
@@ -124,7 +131,7 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
       images,
       audio, audioMime,
       speak: wantSpeech,
-      context: narrativeFacts(project),
+      context: assistFacts(project),
     });
     if (audio && b.transcript) list.push({ role: "user", text: b.transcript, images });
     const reply = b.reply || "…I didn't get an answer back. Try again?";

@@ -17,6 +17,13 @@
  *                   and returns documented-but-unbilled suggestions.
  *   adjusterEmail — claim-submission email (subject + body) from the digest
  *                   + the saved narrative.
+ *   rebuildDraft  — reconstruction plan (scope per room, trade sequence,
+ *                   owner selections, open questions) drafted from a
+ *                   restoration job's fact pack when it converts to a
+ *                   construction job.
+ *   progressNarrative — weekly construction progress update (Markdown)
+ *                   for the owner / adjuster / lender, from the
+ *                   constructionFacts digest.
  *
  * Deploy:  supabase functions deploy roybal-ai-office --no-verify-jwt
  *   (--no-verify-jwt required — browser CORS preflight carries no token; the
@@ -386,6 +393,201 @@ async function adjusterEmail(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: progressNarrative — construction progress update
+   (Phase 4: weekly owner / carrier / lender status summary)
+   ============================================================ */
+const PROGRESS_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["narrative"],
+  properties: {
+    narrative: { type: "string", description: "The progress update in Markdown (## headings, - bullets, **bold**)" },
+  },
+} as const;
+
+async function progressNarrative(body: Record<string, unknown>) {
+  const facts = body.facts;
+  if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You write construction progress updates for Roybal Construction, LLC (North Pole / Fairbanks, Alaska) addressed to the " +
+      "property owner and, when applicable, the insurance adjuster or construction lender. Factual, confident, plain language — " +
+      "never promise dates the schedule doesn't support. Use ONLY the documented facts. Call `progress_update` with the Markdown.",
+    content:
+      `Write this week's progress update for the job below. Today is ${new Date().toISOString().slice(0, 10)}.\n\n` +
+      `STRUCTURE (Markdown, ## headings; skip a section when there's nothing to say):\n` +
+      `## Work Completed — from recentWork (DATED log entries; "this week" = the last 7 days). Older history is context only — never re-report it as new\n` +
+      `## Inspections — results, corrections, what's scheduled\n` +
+      `## Schedule — trades on deck vs the sub schedule; call out anything behind\n` +
+      `## Decisions Needed — pending owner selections, with why timing matters\n` +
+      `## Budget & Draws — draw/invoice status; change orders that moved the number\n` +
+      `## Up Next — the coming week, from the schedule\n\n` +
+      `Under 350 words. No greeting or signature — the letterhead and sign-off are added by the document.\n\n` +
+      `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
+    toolName: "progress_update",
+    schema: PROGRESS_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 2048,
+  });
+  const md = String((input as { narrative?: string }).narrative ?? "");
+  return { result: { draft: { narrative: md } }, usage, model: DOC_MODEL, summary: { chars: md.length } };
+}
+
+/* ============================================================
+   Action: timelineDraft — phase plan for the Job Board's Gantt
+   (Phase 5: field proposes, the Board schedules)
+   ============================================================ */
+const TIMELINE_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["phases", "notBefore", "notBeforeLabel", "assumptions"],
+  properties: {
+    phases: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["name", "estimatedHours", "lagDays", "confidence"],
+        properties: {
+          name: { type: "string", description: "Short phase name as it reads on a Gantt bar, e.g. 'Demo & prep', 'Drywall', 'Insulation + inspection'" },
+          estimatedHours: { type: "number", description: "Total crew hours for the phase (assume a 2-person crew unless the scope implies otherwise)" },
+          lagDays: { type: "number", description: "Calendar days of WAIT before this phase starts — mud/concrete cure, inspection scheduling, material delivery. 0 when none." },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+      },
+    },
+    notBefore: { type: "string", pattern: "^(\\d{4}-\\d{2}-\\d{2})?$", description: "YYYY-MM-DD date the job can't start before (permit, long-lead selection), else empty string" },
+    notBeforeLabel: { type: "string", description: "One word for the constraint, e.g. 'permit' or 'materials'; empty when notBefore is empty" },
+    assumptions: { type: "array", items: { type: "string" }, description: "Assumptions the estimate rests on, e.g. '2-man crew', 'cabinets are 3-week lead'" },
+  },
+} as const;
+
+async function timelineDraft(body: Record<string, unknown>) {
+  const facts = body.facts;
+  if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  const history = Array.isArray(body.history) ? body.history : [];
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You are a senior construction scheduler at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) breaking a job into " +
+      "sequenced phases for a Gantt schedule. Derive hours from the documented Scope of Work quantities; insert lag days for " +
+      "real-world waits (mud/concrete cure, inspection scheduling, material lead times from the selections). Never invent scope. " +
+      "Call `timeline` with the phase plan.",
+    content:
+      `Draft the phase plan for this job's Gantt schedule. Today is ${new Date().toISOString().slice(0, 10)}.\n\n` +
+      `RULES:\n` +
+      `- Phases in build order; one phase per stretch of related work (demo → rough-in → insulation → drywall → paint → flooring → trim → punch), skipping anything the scope doesn't include.\n` +
+      `- estimatedHours from the scope quantities; keep phases between ~8 and ~80 hours — split or merge to fit.\n` +
+      `- lagDays for waits BEFORE a phase (cure, inspection wait, delivery). Pending selections with lead times → notBefore or lag on the affected phase.\n` +
+      `- Set confidence below 0.7 on any phase whose hours are inferred rather than derived from quantities.\n` +
+      (history.length ? `- CALIBRATION — this company's history of estimate vs actual hours by phase (ratio >1 = they run over). Weight your hours accordingly:\n${JSON.stringify(history)}\n` : "") +
+      `\nDOCUMENTED JOB FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
+    toolName: "timeline",
+    schema: TIMELINE_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 3072,
+  });
+  const d = input as { phases?: unknown[] };
+  return { result: { draft: input }, usage, model: DOC_MODEL, summary: { phases: d.phases?.length ?? 0, calibrated: history.length > 0 } };
+}
+
+/* ============================================================
+   Action: rebuildDraft — reconstruction plan from a restoration job
+   (Phase 3: mitigation job converts to a rebuild construction job)
+   ============================================================ */
+// Mirrors TRADES in apps/field/js/model.js — the form's trade <select> only
+// renders these values, so the schema enforces the list rather than trusting prose.
+const REBUILD_TRADES = [
+  "Demo", "Framing", "Electrical", "Plumbing", "HVAC", "Insulation",
+  "Drywall", "Paint", "Flooring", "Trim / Doors", "Cabinets / Counters", "Roofing", "Other",
+];
+const REBUILD_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["scopeAreas", "tradeSequence", "selections", "questions"],
+  properties: {
+    scopeAreas: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["area", "items"],
+        properties: {
+          area: { type: "string", description: "Room / area name exactly as documented (e.g. 'Living Room')" },
+          items: {
+            type: "array",
+            items: {
+              type: "object", additionalProperties: false,
+              required: ["trade", "desc", "qty", "unit", "confidence"],
+              properties: {
+                trade: { type: "string", enum: REBUILD_TRADES },
+                desc: { type: "string", description: "Plain-English rebuild scope line, e.g. 'Hang, tape and finish drywall, lower 4 ft of walls'" },
+                qty: { type: "number", description: "Quantity; 0 when unknown" },
+                unit: { type: "string", description: "SF, LF, EA, HR or LS" },
+                confidence: { type: "number", minimum: 0, maximum: 1, description: "Below 0.7 when inferred rather than documented" },
+              },
+            },
+          },
+        },
+      },
+    },
+    tradeSequence: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["trade", "note"],
+        properties: {
+          trade: { type: "string", enum: REBUILD_TRADES, description: "In build order" },
+          note: { type: "string", description: "One-line reason / dependency (e.g. 'after insulation inspection')" },
+        },
+      },
+    },
+    selections: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["area", "item", "spec", "confidence"],
+        properties: {
+          area: { type: "string" },
+          item: { type: "string", description: "What the owner must choose, e.g. 'Carpet + pad'" },
+          spec: { type: "string", description: "Known spec/match detail, else empty" },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+      },
+    },
+    questions: {
+      type: "array",
+      items: { type: "string", description: "Open question for the estimator — something the documentation doesn't answer" },
+    },
+  },
+} as const;
+
+async function rebuildDraft(body: Record<string, unknown>) {
+  const facts = body.facts;
+  if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You are a senior reconstruction estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska). A water-mitigation " +
+      "job is converting to a rebuild: draft the reconstruction plan FROM THE DOCUMENTED MITIGATION FACTS ONLY — the rebuild " +
+      "restores exactly what the mitigation removed (flood cuts, flooring, insulation, contents losses). Never invent scope the " +
+      "documentation doesn't support; put anything uncertain in `questions` instead. Call `rebuild_plan` with the draft.",
+    content:
+      `Draft the reconstruction plan for this converted mitigation job.\n\n` +
+      `RULES:\n` +
+      `- Scope lines restore documented demo: drywall cut heights, removed flooring/insulation/trim, antimicrobial-treated areas needing repaint.\n` +
+      `- Group lines by the documented room/area names. Use the trade list verbatim.\n` +
+      `- qty/unit only when the documentation supports a number (e.g. cut height × wall length); otherwise qty 0 and a confidence below 0.7.\n` +
+      `- tradeSequence: the build order for THIS scope only (demo-complete → rough-in → insulation → drywall → paint → flooring → trim → punch), skipping trades with no scope.\n` +
+      `- selections: every owner choice the rebuild needs (flooring, paint colors, trim profile, fixtures) based on what was removed.\n` +
+      `- questions: what the estimator must confirm on site (hidden damage, matching, code upgrades).\n\n` +
+      `DOCUMENTED MITIGATION FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
+    toolName: "rebuild_plan",
+    schema: REBUILD_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 4096,
+  });
+  const d = input as { scopeAreas?: unknown[]; selections?: unknown[]; questions?: unknown[] };
+  return {
+    result: { draft: input }, usage, model: DOC_MODEL,
+    summary: { areas: d.scopeAreas?.length ?? 0, selections: d.selections?.length ?? 0, questions: d.questions?.length ?? 0 },
+  };
+}
+
+/* ============================================================
    Action: contentsVision — personal-property inventory from photos
    mode "item": identify ONE item in detail (claim fields + est. RCV)
    mode "scan": list EVERY distinct item visible (bulk room capture)
@@ -557,7 +759,7 @@ async function fieldAssist(body: Record<string, unknown>) {
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft,
 };
 
 serve(async (req: Request) => {

@@ -3,26 +3,33 @@
    ============================================================ */
 import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow } from "./core.js";
 import {
-  FORMS, formByKey, formCount, newProject,
+  formByKey, formCount, newProject, formsFor, jobType,
+  CONSTRUCTION_TYPES, constructionTypeLabel,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
   newInvoice, newWorkAuth, newCertDrying, newLaborLog,
+  newScopeOfWork, newPreConChecklist, newSelections, newSubSchedule,
+  newInspection, newPunchList, newDrawSchedule, newCertCompletion,
+  blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
   BOX_DESTINATIONS, POROUS_CATEGORIES, dispositionShort, dispositionLabel, depreciation,
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
-import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet } from "./forms.js";
+import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail } from "./supa.js";
 import { startSync, syncNow, resetSync } from "./sync.js";
 import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine } from "./spine.js";
-import { generateNarrative } from "./narrative.js";
+import { generateNarrative, constructionFacts } from "./narrative.js";
 import { transcribeWidget } from "./voice.js";
-import { aiAvailable, aiReady, draftAdjusterEmail, analyzeContentsItem, scanContentsPhoto, justifyContents } from "./officeai.js";
-import { dryingFlags } from "./dryingwatch.js";
+import { aiAvailable, aiReady, draftAdjusterEmail, analyzeContentsItem, scanContentsPhoto, justifyContents, draftRebuild, draftProgress, draftTimeline } from "./officeai.js";
+import { dryingFlags, isCertified } from "./dryingwatch.js";
+import { buildFlags } from "./buildwatch.js";
+import { convertToConstruction, rebuildFacts } from "./convert.js";
+import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
-import { AI_FORM_KEYS } from "./ai.js";
+import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
 
 const view = $("#view");
@@ -43,6 +50,10 @@ const FACTORY = {
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
   invoices: newInvoice, workAuth: newWorkAuth, certDrying: newCertDrying,
   laborLog: newLaborLog,
+  scopeOfWork: newScopeOfWork, preConChecklist: newPreConChecklist,
+  selections: newSelections, subSchedule: newSubSchedule,
+  inspections: newInspection, punchList: newPunchList,
+  drawSchedule: newDrawSchedule, certCompletion: newCertCompletion,
 };
 
 /* ---------- router ---------- */
@@ -117,6 +128,7 @@ async function route() {
     mountAssist(project);   // 💬 job-aware assistant floats over every job page
     if (parts[2] === "edit") return projectEdit(project);
     if (parts[2] === "narrative") return narrativePage(project);
+    if (parts[2] === "progress") return progressPage(project);
     if (parts[2] === "packet") return packetPage(project);
     if (parts[2] === "f" && parts[3]) return formPage(project, parts[3], parts[4]);
     return projectHome(project);
@@ -235,39 +247,74 @@ function doSignOut() {
 /* ============================================================
    Project list (home)
    ============================================================ */
+/* Home-screen mode — which job kind the list shows and "+ New Job" creates. */
+const MODE_KEY = "roybal-mode";
+const activeMode = () => (localStorage.getItem(MODE_KEY) === "construction" ? "construction" : "restoration");
+const setMode = (m) => localStorage.setItem(MODE_KEY, m);
+
+/* Small job-kind chip for job cards — keeps mixed contexts unambiguous. */
+function modeChip(p) {
+  const isConst = jobType(p) === "construction";
+  return h("span", {
+    style: "font-size:10px;font-weight:700;letter-spacing:.4px;padding:2px 7px;border-radius:999px;margin-left:8px;vertical-align:2px;" +
+      (isConst ? "background:#fdeadd;color:#c2571b" : "background:#e7eef7;color:#1e4a72"),
+  }, isConst ? "🔨 CONSTRUCTION" : "💧 RESTORATION");
+}
+
 async function projectList() {
   setChrome("Field Forms", null);
   const projects = await Store.all();
   const body = clear(view);
+  const mode = activeMode();
+  const byMode = { restoration: [], construction: [] };
+  projects.forEach((p) => byMode[jobType(p)].push(p));
+  const shown = byMode[mode];
 
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "Jobs"),
       h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job")));
 
+  const modeSeg = h("div", { class: "seg", style: "margin:0 0 10px" });
+  [["restoration", `💧 Restoration (${byMode.restoration.length})`],
+   ["construction", `🔨 Construction (${byMode.construction.length})`]].forEach(([m, label]) => {
+    const b = h("button", { type: "button", class: m === mode ? "active" : "" }, label);
+    b.addEventListener("click", () => { if (m !== mode) { setMode(m); projectList(); } });
+    modeSeg.append(b);
+  });
+  body.append(modeSeg);
+
   if (SYNC_ENABLED) body.append(accountRow());
 
-  if (!projects.length) {
+  if (!shown.length) {
     body.append(h("div", { class: "empty" },
-      h("div", { class: "big" }, "🧰"),
-      h("p", {}, "No jobs yet."),
-      h("p", { class: "subtle" }, "Tap “+ New Job” to start a water restoration project. Everything works offline and saves to this device."),
+      h("div", { class: "big" }, mode === "construction" ? "🔨" : "🧰"),
+      h("p", {}, mode === "construction" ? "No construction jobs yet." : "No restoration jobs yet."),
+      h("p", { class: "subtle" }, mode === "construction"
+        ? "Tap “+ New Job” to start a remodel, new build, or reconstruction. Everything works offline and saves to this device."
+        : "Tap “+ New Job” to start a water restoration project. Everything works offline and saves to this device."),
       h("button", { class: "btn btn--primary", style: "max-width:260px;margin:10px auto 0", onclick: () => go("#/new") }, "+ New Job")));
   } else {
     const list = h("div", { class: "joblist" });
-    projects.forEach((p) => {
+    shown.forEach((p) => {
+      const isConst = jobType(p) === "construction";
       const cat = p.waterCategory ? `Cat ${p.waterCategory}` : "";
-      const flags = dryingFlags(p);   // rule-based Drying Watch — no AI, no cost
+      const flags = isConst ? buildFlags(p) : dryingFlags(p);   // rule-based watch flags — no AI, no cost
+      const sub = isConst
+        ? [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "",
+           constructionTypeLabel(p.constructionType),
+           p.targetCompletion ? "Target " + fmtDate(p.targetCompletion) : "",
+           "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ")
+        : [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "", cat, "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ");
       list.append(h("a", { class: "card card--tap jobrow", href: `#/p/${p.id}` },
         h("div", { class: "jobrow__main" },
-          h("div", { class: "jobrow__title" }, p.customer || p.address || "Untitled job"),
-          h("div", { class: "jobrow__sub" },
-            [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "", cat, "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ")),
+          h("div", { class: "jobrow__title" }, p.customer || p.address || "Untitled job", modeChip(p)),
+          h("div", { class: "jobrow__sub" }, sub),
           flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" },
             ...flags.map((f) => h("span", {
               style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
                 (f.tone === "bad" ? "background:#fdecea;color:#b3261e" : "background:#fff4e5;color:#8a6d00"),
-            }, "💧 " + f.label))) : null),
+            }, (f.icon || "💧") + " " + f.label))) : null),
         h("div", { class: "jobrow__chev" }, "›")));
     });
     body.append(list);
@@ -299,6 +346,7 @@ function installHint() {
 
 async function createProject() {
   const p = newProject();
+  p.jobType = activeMode();   // the home-screen toggle decides what "+ New Job" starts
   await Store.put(p);
   go(`#/p/${p.id}/edit`);
 }
@@ -332,6 +380,275 @@ function completenessPanel(project) {
   return wrap;
 }
 
+/* ============================================================
+   Restoration → construction conversion (Phase 3)
+   ============================================================ */
+async function startReconstruction(project, btn) {
+  if (project.linkedConstructionId) return go(`#/p/${project.linkedConstructionId}`);   // already converted
+  if (!isCertified(project) &&
+      !confirm("Drying isn't certified yet — start the reconstruction job anyway?")) return;
+  if (btn) btn.disabled = true;        // the puts below take a beat on photo-heavy jobs — no double-fire
+  const con = convertToConstruction(project);
+  project.linkedConstructionId = con.id;
+  project.updatedAt = new Date().toISOString();
+  await Store.put(con);
+  await Store.put(project);
+  setMode("construction");             // the new job lives on the construction tab
+  toast("Reconstruction job created — same claim, construction forms.");
+  go(`#/p/${con.id}`);
+}
+
+function startReconCard(project) {
+  const btn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "🔨 Start reconstruction");
+  btn.addEventListener("click", () => startReconstruction(project, btn));
+  return h("div", { class: "card", style: "border-style:dashed" },
+    h("div", { style: "font-weight:700" }, "🔨 Reconstruction"),
+    h("p", { class: "subtle", style: "margin:6px 0 10px;font-size:14px" },
+      isCertified(project)
+        ? "Drying is certified — spin up the rebuild as a linked construction job. Header, photos and floor plans carry over; this mitigation job stays untouched."
+        : "Creates a linked construction job for the rebuild (header, photos and floor plans carry over). Drying isn't certified yet — you'll be asked to confirm."),
+    btn);
+}
+
+/* AI rebuild setup — drafts scope / trades / selections from the linked
+   mitigation job, reviewed as chips before anything writes. AI failure or
+   the spend cap never blocks: the forms work empty. */
+function rebuildPanel(project) {
+  const wrap = h("div", { class: "card", style: "border-style:dashed" });
+  const status = h("div", { class: "subtle", style: "font-size:13px" });
+
+  async function generate(btn) {
+    if (!aiAvailable()) return;
+    const rest = await Store.get(project.linkedRestorationId);
+    if (!rest) { toast("The linked mitigation job isn't on this device — sync first."); return; }
+    btn.disabled = true;
+    status.textContent = "Drafting the rebuild plan from the mitigation documentation…";
+    try {
+      const draft = await draftRebuild(project, rebuildFacts(rest));
+      // the call can take a while — write onto a FRESH copy (the tech may have
+      // kept editing) and only repaint if they're still on this job home
+      const fresh = (await Store.get(project.id)) || project;
+      fresh.rebuildDraft = { draft, chips: rebuildChips(draft), createdAt: new Date().toISOString(), status: "draft" };
+      fresh.updatedAt = new Date().toISOString();
+      await Store.put(fresh);
+      if (location.hash === `#/p/${project.id}`) projectHome(fresh);
+      else toast("Rebuild plan drafted — review it on the job home.");
+    } catch (e) {
+      status.textContent = "";
+      toast("Couldn't draft the rebuild plan — " + (e && e.message ? e.message : "try again") + ". The forms work fine without it.");
+      btn.disabled = false;
+    }
+  }
+
+  const rd = project.rebuildDraft;
+  if (!rd || rd.status === "dismissed") {
+    const btn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "✨ Draft rebuild plan");
+    btn.addEventListener("click", () => generate(btn));
+    wrap.append(
+      h("div", { style: "font-weight:700" }, "✨ AI rebuild setup"),
+      h("p", { class: "subtle", style: "margin:6px 0 10px;font-size:14px" },
+        "Draft the Scope of Work, trade sequence and owner selections from the mitigation job's documentation. Everything lands as chips you review before it writes."),
+      btn, status);
+    return wrap;
+  }
+  if (rd.status === "applied") return null;   // done — the forms hold the data now
+
+  const chips = Array.isArray(rd.chips) ? rd.chips : [];
+  wrap.append(
+    h("div", { style: "font-weight:700" }, "✨ Rebuild plan draft — tap to confirm"),
+    h("p", { class: "subtle", style: "margin:4px 0 6px;font-size:13px" },
+      "Amber = double-check. Uncheck anything wrong, then apply — values land in the forms and stay editable."));
+  const GROUPS = [["scopeItems", "📐 Scope of Work"], ["subRows", "👷 Trade sequence"], ["selectionRows", "🎨 Owner selections"]];
+  for (const [group, title] of GROUPS) {
+    const list = chips.filter((c) => c.target && c.target.group === group);
+    if (!list.length) continue;
+    wrap.append(h("div", { style: "font-weight:600;font-size:13px;margin-top:8px;color:var(--navy,#16395a)" }, title));
+    for (const c of list) {
+      if (c.confirmed !== false) c.confirmed = true;
+      const box = h("input", { type: "checkbox", checked: c.confirmed });
+      box.addEventListener("change", () => { c.confirmed = box.checked; Store.put(project); });
+      const amber = c.tone === "amber";
+      wrap.append(h("label", {
+        style: "display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;margin:4px 0;background:" +
+          (amber ? "#fff4e5" : "#eef6ee") + ";border:1px solid " + (amber ? "#f0b463" : "#bfe0bf"),
+      },
+        box,
+        h("span", { style: "min-width:110px;font-size:13px;font-weight:600;color:var(--navy,#0f1b2d)" }, (amber ? "⚠️ " : "") + c.label),
+        h("span", { style: "flex:1;font-size:13px" }, String(c.value ?? ""))));
+    }
+  }
+  if (rd.draft && Array.isArray(rd.draft.questions) && rd.draft.questions.length) {
+    wrap.append(h("div", { class: "note", style: "margin-top:8px" },
+      h("strong", {}, "For the estimator: "), rd.draft.questions.join(" · ")));
+  }
+
+  const applyBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "Apply checked items");
+  applyBtn.addEventListener("click", async () => {
+    const out = applyRebuildChips(project, chips, {
+      scope: newScopeOfWork, scopeArea: blankScopeArea, scopeItem: blankScopeItem,
+      subSchedule: newSubSchedule, subRow: blankSubRow,
+      selections: newSelections, selectionRow: blankSelectionRow,
+      trades: TRADES,
+    });
+    rd.status = "applied";
+    project.updatedAt = new Date().toISOString();
+    await Store.put(project);
+    toast(out.applied ? `Applied ${out.applied} item(s) — review the Scope of Work, Sub Schedule and Selections.` : "Nothing checked.");
+    projectHome(project);
+  });
+  const redoBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "↻ Redraft");
+  redoBtn.addEventListener("click", () => generate(redoBtn));
+  const dismissBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "Dismiss");
+  dismissBtn.addEventListener("click", async () => { rd.status = "dismissed"; await Store.put(project); projectHome(project); });
+  wrap.append(h("div", { style: "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap" }, applyBtn, redoBtn, dismissBtn), status);
+  return wrap;
+}
+
+/* ============================================================
+   📅 Board timeline (Phase 5) — the field PROPOSES a phase plan,
+   the Job Board SCHEDULES it. AI estimates hours + lag from the
+   Scope of Work; the plan is edited here, then pushed rev-safely
+   to coordination_jobs (never clobbering the coordinator's dates,
+   crew, links or stage).
+   ============================================================ */
+function timelinePanel(project) {
+  const wrap = h("div", { class: "card", style: "border-style:dashed" });
+  const status = h("div", { class: "subtle", style: "font-size:13px" });
+
+  async function estimate(btn) {
+    if (!aiAvailable()) return;
+    btn.disabled = true;
+    status.textContent = "Estimating phases from the Scope of Work…";
+    try {
+      const history = await fetchHistoryDigest();   // est-vs-actual calibration, empty until history exists
+      const draft = await draftTimeline(project, constructionFacts(project), history);
+      const fresh = (await Store.get(project.id)) || project;
+      fresh.boardPlan = {
+        phases: planPhases(draft),
+        notBefore: isoDateOnly(draft.notBefore),   // never trust model prose as a date
+        notBeforeLabel: isoDateOnly(draft.notBefore) ? (draft.notBeforeLabel || "") : "",
+        assumptions: Array.isArray(draft.assumptions) ? draft.assumptions : [],
+        generatedAt: new Date().toISOString(),
+        status: "draft",
+      };
+      fresh.updatedAt = new Date().toISOString();
+      await Store.put(fresh);
+      if (location.hash === `#/p/${project.id}`) projectHome(fresh);
+      else toast("Timeline drafted — review it on the job home.");
+      return;
+    } catch (e) {
+      status.textContent = "";
+      toast("Couldn't estimate — " + (e && e.message ? e.message : "try again") + ". You can still build phases on the board by hand.");
+      btn.disabled = false;
+    }
+  }
+
+  const bp = project.boardPlan;
+  if (!bp || bp.status === "dismissed") {
+    const btn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "📅 Estimate timeline");
+    btn.addEventListener("click", () => estimate(btn));
+    wrap.append(
+      h("div", { style: "font-weight:700" }, "📅 Board timeline"),
+      h("p", { class: "subtle", style: "margin:6px 0 10px;font-size:14px" },
+        "Estimate the build phases (hours + wait days) from the Scope of Work, review them, then send them to the Job Board's calendar and Gantt. The board keeps control of dates and crew."),
+      btn, status);
+    return wrap;
+  }
+
+  const pushed = bp.status === "pushed";
+  wrap.append(
+    h("div", { style: "font-weight:700" }, pushed ? "📅 Board timeline — sent " + fmtDate((bp.pushedAt || "").slice(0, 10)) : "📅 Board timeline — review before sending"),
+    h("p", { class: "subtle", style: "margin:4px 0 6px;font-size:13px" },
+      pushed ? "The board schedules the dates and crew. Edit here and re-send if the plan changes."
+        : "Amber = the estimate is inferred — double-check the hours. Edit anything, then send."));
+
+  // editable phase rows — name / hours / lag, mirroring the board's phase editor
+  const rows = h("div");
+  const paintRows = () => {
+    rows.replaceChildren(...bp.phases.map((p, i) => {
+      const amber = Number(p.confidence) < 0.7;
+      const name = h("input", { value: p.name || "", placeholder: "Phase name", style: "flex:2;min-width:110px" });
+      name.addEventListener("input", () => { p.name = name.value; Store.put(project); });
+      const hrs = h("input", { type: "number", value: p.estimatedHours ?? "", placeholder: "hrs", style: "width:70px", title: "crew hours" });
+      hrs.addEventListener("input", () => { p.estimatedHours = hrs.value ? Number(hrs.value) : ""; Store.put(project); });
+      const lag = h("input", { type: "number", value: p.lagDays || 0, style: "width:60px", title: "wait days before this phase (cure, inspection, delivery)" });
+      lag.addEventListener("input", () => { p.lagDays = Math.max(0, Math.round(Number(lag.value) || 0)); Store.put(project); });
+      const del = h("button", { type: "button", class: "rowdel", onclick: () => { bp.phases.splice(i, 1); Store.put(project); paintRows(); } }, "✕");
+      return h("div", {
+        style: "display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:8px;margin:4px 0;background:" +
+          (amber ? "#fff4e5" : "#f3f6fa") + ";border:1px solid " + (amber ? "#f0b463" : "#e2e6ec"),
+      },
+        h("span", { style: "min-width:16px;font-weight:700;font-size:12px;color:var(--muted)" }, String(i + 1)),
+        name, hrs, h("span", { class: "subtle", style: "font-size:11px" }, "h"), lag,
+        h("span", { class: "subtle", style: "font-size:11px" }, "d lag"), del);
+    }));
+  };
+  paintRows();
+  const addPhase = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "+ Add phase");
+  addPhase.addEventListener("click", () => { bp.phases.push({ name: "", estimatedHours: "", lagDays: 0 }); Store.put(project); paintRows(); });
+  wrap.append(rows, addPhase);
+
+  if (bp.notBefore) wrap.append(h("div", { class: "subtle", style: "font-size:13px;margin-top:6px" },
+    "🔒 Can't start before " + fmtDate(bp.notBefore) + (bp.notBeforeLabel ? ` (${bp.notBeforeLabel})` : "")));
+  if (bp.assumptions && bp.assumptions.length) wrap.append(h("div", { class: "note", style: "margin-top:6px" },
+    h("strong", {}, "Assumes: "), bp.assumptions.join(" · ")));
+
+  const sendBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, pushed ? "📅 Send again" : "📅 Send to Job Board");
+  sendBtn.addEventListener("click", async () => {
+    sendBtn.disabled = true;
+    status.textContent = "Sending to the board…";
+    try {
+      const out = await pushPlanToBoard(project);
+      bp.status = "pushed";
+      bp.pushedAt = new Date().toISOString();
+      project.updatedAt = new Date().toISOString();
+      await Store.put(project);
+      toast(out.mode === "created" ? "Board job created with the phase plan."
+        : out.mode === "proposal" ? "Sent — the board already has phases, so this landed as a proposal to review there."
+        : "Phases sent to the board.");
+      projectHome(project);
+    } catch (e) {
+      status.textContent = "";
+      toast((e && e.message) || "Couldn't reach the board — try again online.");
+      sendBtn.disabled = false;
+    }
+  });
+  const reBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "↻ Re-estimate");
+  reBtn.addEventListener("click", () => estimate(reBtn));
+  const dismissBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "Dismiss");
+  dismissBtn.addEventListener("click", async () => { bp.status = "dismissed"; await Store.put(project); projectHome(project); });
+  wrap.append(h("div", { style: "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap" }, sendBtn, reBtn, dismissBtn), status);
+  return wrap;
+}
+
+/* Read-only "on the board" card — what the coordinator has scheduled.
+   Renders async when a linked board job is found; hidden otherwise. */
+const BOARD_STAGES = { lead: "Leads / Bids", scheduled: "Scheduled", in_progress: "In Progress", on_hold: "On Hold", final: "Final / Punch", done: "Complete" };
+function boardCard(project) {
+  const wrap = h("div", { class: "card", hidden: true });
+  (async () => {
+    try {
+      const row = await findBoardRow(project);
+      if (!row || !row.data) return;
+      const d = row.data;
+      const when = d.startDate && d.targetDate ? `${fmtDate(d.startDate)} → ${fmtDate(d.targetDate)}`
+        : d.startDate ? "starts " + fmtDate(d.startDate) : "not scheduled yet";
+      wrap.hidden = false;
+      wrap.append(
+        h("div", { style: "font-weight:700" }, "🗓 On the Job Board"),
+        h("div", { class: "subtle", style: "font-size:13px;margin-top:4px" },
+          [BOARD_STAGES[d.stage] || d.stage, when,
+           d.notBefore ? "🔒 not before " + fmtDate(d.notBefore) : ""].filter(Boolean).join(" · ")),
+        (d.subtasks || []).length ? h("div", { style: "margin-top:6px;font-size:13px" },
+          ...d.subtasks.map((st, i) => h("div", {},
+            `${i + 1}. ${st.name || "Phase"}${st.estimatedHours ? " — " + st.estimatedHours + "h" : ""}${st.lagDays ? ` (+${st.lagDays}d lag)` : ""}`))) : null,
+        d.fieldPlanProposal ? h("div", { class: "note", style: "margin-top:6px" },
+          "⚠ Your phase proposal is waiting for review on the board.") : null);
+    } catch (_) { /* offline / signed out — the card just stays hidden */ }
+  })();
+  return wrap;
+}
+
 function projectHome(project) {
   setChrome(project.customer || "Job", "#/");
   const body = clear(view);
@@ -343,17 +660,44 @@ function projectHome(project) {
     h("p", { class: "subtle" }, [project.address, project.claimNo ? "Claim " + project.claimNo : ""].filter(Boolean).join(" · ") || "Tap Edit to add job details"));
 
   const badges = h("div", { class: "badgeline" });
-  if (project.waterCategory) badges.append(h("span", { class: "badge cat" + project.waterCategory }, "Category " + project.waterCategory));
-  if (project.waterClass) badges.append(h("span", { class: "badge" }, "Class " + project.waterClass));
-  if (project.dryingSystem) badges.append(h("span", { class: "badge" }, project.dryingSystem + " drying"));
+  if (jobType(project) === "construction") {
+    badges.append(h("span", { class: "badge", style: "background:#fdeadd;color:#c2571b" },
+      "🔨 " + (constructionTypeLabel(project.constructionType) || "Construction")));
+    if (project.targetCompletion) badges.append(h("span", { class: "badge" }, "Target " + fmtDate(project.targetCompletion)));
+  } else {
+    if (project.waterCategory) badges.append(h("span", { class: "badge cat" + project.waterCategory }, "Category " + project.waterCategory));
+    if (project.waterClass) badges.append(h("span", { class: "badge" }, "Class " + project.waterClass));
+    if (project.dryingSystem) badges.append(h("span", { class: "badge" }, project.dryingSystem + " drying"));
+  }
+  // conversion cross-links — each side of a converted job links to the other
+  if (project.linkedRestorationId)
+    badges.append(h("a", { class: "badge", href: `#/p/${project.linkedRestorationId}`, style: "text-decoration:none" }, "💧 Mitigation job →"));
+  if (project.linkedConstructionId)
+    badges.append(h("a", { class: "badge", href: `#/p/${project.linkedConstructionId}`, style: "text-decoration:none" }, "🔨 Reconstruction job →"));
   if (badges.children.length) body.append(badges);
 
   body.append(h("button", { class: "btn btn--ghost btn--sm", style: "margin-bottom:14px", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"));
 
-  body.append(completenessPanel(project));
+  body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
+
+  // Phase 5: keep the board's field-actuals rollup fresh (fire-and-forget)
+  if (jobType(project) === "construction") pushActuals(project);
+
+  // Phase 3: conversion entry point + AI rebuild setup
+  if (jobType(project) === "restoration" && !project.linkedConstructionId) body.append(startReconCard(project));
+  if (jobType(project) === "construction" && project.linkedRestorationId) {
+    const panel = rebuildPanel(project);
+    if (panel) body.append(panel);
+  }
+
+  // Phase 5: propose a phase plan to the Job Board + show what it scheduled
+  if (jobType(project) === "construction") {
+    body.append(timelinePanel(project));
+    body.append(boardCard(project));
+  }
 
   const tiles = h("div", { class: "tiles" });
-  FORMS.forEach((f) => {
+  formsFor(project).forEach((f) => {
     const count = formCount(project, f.key);
     const isList = f.multi || Array.isArray(project[f.key]); // moisture/drying/photos/contents…
     const noun = f.key === "contents" ? "items" : (f.key === "photos" ? "photos" : "saved");
@@ -368,10 +712,16 @@ function projectHome(project) {
   });
   body.append(tiles);
 
-  body.append(h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:14px" },
-    h("button", { class: "btn btn--primary", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Full job packet (PDF)"),
+  const actionRow = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:14px" },
+    h("button", { class: "btn btn--primary", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Full job packet (PDF)"));
+  // the narrative unlocks off the water-mitigation completeness rules — restoration only for now
+  if (jobType(project) === "restoration") actionRow.append(
     h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/narrative`) },
-      project.narrative ? "📝 Construction Narrative ✓" : "📝 Construction Narrative")));
+      project.narrative ? "📝 Construction Narrative ✓" : "📝 Construction Narrative"));
+  else actionRow.append(
+    h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/progress`) },
+      project.progressNarrative ? "📝 Progress Update ✓" : "📝 Progress Update"));
+  body.append(actionRow);
 }
 
 /* ============================================================
@@ -386,7 +736,7 @@ function packetPage(project) {
   const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
 
   const included = [];
-  for (const f of FORMS) {
+  for (const f of formsFor(project)) {
     // Daily construction logs are internal (crew notes/issues/materials) — the
     // one-page Labor Log from QuickBooks Time represents the labor in the packet.
     if (f.key === "constructionLogs") continue;
@@ -421,6 +771,86 @@ function packetPage(project) {
       h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}`) }, "Back"),
       h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Save packet as PDF")));
   }
+}
+
+/* ============================================================
+   Progress update (construction jobs) — weekly owner / carrier /
+   lender status summary. AI-drafted from the construction digest,
+   edited by the office, printed on letterhead. No completeness gate.
+   ============================================================ */
+function progressPage(project) {
+  setChrome("Progress Update", `#/p/${project.id}`);
+  const body = clear(view);
+  if (jobType(project) !== "construction") return go(`#/p/${project.id}`);
+
+  const status = h("div", { class: "subtle app-only", style: "font-size:13px;margin:8px 0;min-height:18px" });
+  const preview = h("div", { style: "margin-top:14px" });
+  const editor = h("textarea", {
+    class: "app-only",
+    style: "width:100%;min-height:260px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.5;padding:10px;border:1px solid #cdd5df;border-radius:10px",
+    placeholder: "Generate, then review and edit the update here…",
+  });
+  editor.value = project.progressNarrative || "";
+  const renderPreview = () => preview.replaceChildren(progressSheet(project));
+
+  const genBtn = h("button", { class: "btn btn--primary" }, project.progressNarrative ? "↻ Regenerate" : "✨ Generate update");
+  genBtn.addEventListener("click", async () => {
+    if (!aiAvailable()) return;
+    if (project.progressNarrative && !confirm("Regenerate? This replaces the current update, including any edits.")) return;
+    genBtn.disabled = true; status.textContent = "Writing this week's update from the job documentation…";
+    try {
+      const draft = await draftProgress(project, constructionFacts(project));
+      // the call can take a while — write onto a FRESH blob (the tech may have
+      // kept editing elsewhere) and only repaint if they're still on this page
+      const fresh = (await Store.get(project.id)) || project;
+      fresh.progressNarrative = draft.narrative || "";
+      fresh.progressNarrativeDate = new Date().toISOString().slice(0, 10);
+      fresh.updatedAt = new Date().toISOString();
+      await Store.put(fresh);
+      if (location.hash === `#/p/${project.id}/progress`) progressPage(fresh);
+      else toast("Progress update drafted — it's saved on the job.");
+      return;
+    } catch (e) {
+      status.textContent = "";
+      toast("Couldn't generate — " + (e && e.message ? e.message : "try again"));
+    }
+    genBtn.disabled = false;
+  });
+  const saveBtn = h("button", { class: "btn btn--ghost" }, "Save edits");
+  saveBtn.addEventListener("click", async () => {
+    project.progressNarrative = editor.value;
+    project.progressNarrativeDate = project.progressNarrativeDate || new Date().toISOString().slice(0, 10);
+    project.updatedAt = new Date().toISOString();
+    await Store.put(project); renderPreview(); toast("Progress update saved.");
+  });
+  const copyBtn = h("button", { class: "btn btn--ghost" }, "Copy text");
+  copyBtn.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(editor.value);
+    copyBtn.textContent = "Copied!"; setTimeout(() => (copyBtn.textContent = "Copy text"), 1500);
+  });
+
+  body.append(
+    h("h1", { class: "app-only" }, "📝 Progress Update"),
+    h("p", { class: "subtle app-only", style: "font-size:14px" },
+      "A weekly status summary for the owner" + (project.carrier ? ", adjuster" : "") + (project.lender ? ", lender" : "") +
+      " — drafted from the daily logs, inspections, schedule, selections and draws. Review and edit before sending."),
+    h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:8px 0" },
+      genBtn, saveBtn, copyBtn,
+      // the printed sheet renders the SAVED narrative — persist the editor first
+      h("button", { class: "btn btn--primary", onclick: async () => {
+        project.progressNarrative = editor.value;
+        project.progressNarrativeDate = project.progressNarrativeDate || new Date().toISOString().slice(0, 10);
+        project.updatedAt = new Date().toISOString();
+        await Store.put(project); renderPreview();
+        window.print();
+      } }, "⬇ Save as PDF")),
+    status,
+    h("div", { class: "app-only", style: "font-weight:600;font-size:13px;margin-top:6px" }, "Update (editable Markdown):"),
+    editor,
+    preview,
+    h("div", { class: "sticky-actions app-only" },
+      h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}`) }, "Done")));
+  renderPreview();
 }
 
 /* ============================================================
@@ -597,6 +1027,8 @@ function instanceTitle(key, inst) {
     case "constructionLogs": return "Construction log — " + fmtDate(inst.date);
     case "changeOrders": return "Change Order " + (inst.coNo || "") + " — " + fmtDate(inst.coDate);
     case "invoices": return "Invoice " + (inst.invoiceNo || "") + " — " + fmtDate(inst.invoiceDate);
+    case "inspections": return (inst.type || "Inspection") + " — " +
+      (inst.result ? inst.result : (inst.scheduled ? "sched " + fmtDate(inst.scheduled) : "scheduled"));
     default: return "Entry";
   }
 }
@@ -1184,19 +1616,6 @@ function projectEdit(project) {
     el.addEventListener("input", () => { project[key] = el.value; Store.put(project); });
     return h("div", { class: "field" }, h("label", {}, label), el);
   };
-
-  body.append(
-    h("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px" },
-      h("h1", {}, "Job details"), pill),
-    h("p", { class: "subtle" }, "Enter this once — it flows into every form."),
-    h("div", { class: "card" },
-      h("div", { class: "grid2" }, f("Customer / Owner", "customer"), f("Phone", "phone", { type: "tel" })),
-      f("Property Address", "address"),
-      h("div", { class: "grid2" }, f("Email", "email", { type: "email" }), f("Work Order #", "workOrderNo")),
-      h("div", { class: "grid2" }, f("Claim #", "claimNo"), f("Date of Loss", "dateOfLoss", { type: "date" })),
-      h("div", { class: "grid2" }, f("Insurance Carrier", "carrier"), f("Adjuster", "adjuster")),
-      f("Loss Cause", "lossCause")));
-
   const cat = (key, vals) => {
     const wrap = h("div", { class: "seg" });
     vals.forEach((v) => {
@@ -1211,15 +1630,58 @@ function projectEdit(project) {
     });
     return wrap;
   };
+
+  // Job kind — decides which form set the job home shows. Switching never
+  // deletes anything; the other kind's forms are hidden, data stays put.
+  const typeSeg = h("div", { class: "seg" });
+  [["restoration", "💧 Restoration"], ["construction", "🔨 Construction"]].forEach(([v, label]) => {
+    const b = h("button", { type: "button", class: jobType(project) === v ? "active" : "" }, label);
+    b.addEventListener("click", () => {
+      if (jobType(project) === v) return;
+      project.jobType = v;
+      Store.put(project);
+      projectEdit(project);   // re-render to swap the classification card
+    });
+    typeSeg.append(b);
+  });
+
   body.append(
+    h("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:8px" },
+      h("h1", {}, "Job details"), pill),
+    h("p", { class: "subtle" }, "Enter this once — it flows into every form."),
     h("div", { class: "card" },
-      h("h2", { style: "margin-top:0" }, "Loss classification"),
-      h("div", { class: "field" }, h("label", {}, "Water Category (IICRC S500)"),
-        cat("waterCategory", [{ value: "1", label: "Cat 1 — Clean" }, { value: "2", label: "Cat 2 — Gray" }, { value: "3", label: "Cat 3 — Black" }])),
-      h("div", { class: "field" }, h("label", {}, "Class of Water"),
-        cat("waterClass", [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }, { value: "4", label: "4" }])),
-      h("div", { class: "field" }, h("label", {}, "Drying System"),
-        cat("dryingSystem", [{ value: "Open", label: "Open" }, { value: "Closed", label: "Closed" }, { value: "Hybrid", label: "Hybrid" }]))));
+      h("div", { class: "field" }, h("label", {}, "Job type"), typeSeg)),
+    h("div", { class: "card" },
+      h("div", { class: "grid2" }, f("Customer / Owner", "customer"), f("Phone", "phone", { type: "tel" })),
+      f("Property Address", "address"),
+      h("div", { class: "grid2" }, f("Email", "email", { type: "email" }), f("Work Order #", "workOrderNo")),
+      h("div", { class: "grid2" }, f("Claim #", "claimNo"), f("Date of Loss", "dateOfLoss", { type: "date" })),
+      h("div", { class: "grid2" }, f("Insurance Carrier", "carrier"), f("Adjuster", "adjuster")),
+      f("Loss Cause", "lossCause")));
+
+  if (jobType(project) === "construction") {
+    body.append(
+      h("div", { class: "card" },
+        h("h2", { style: "margin-top:0" }, "Construction details"),
+        h("div", { class: "field" }, h("label", {}, "Project type"), cat("constructionType", CONSTRUCTION_TYPES)),
+        h("div", { class: "grid2" },
+          f("Contract amount", "contractAmount", { type: "number", placeholder: "$" }),
+          f("Lender (optional — draw schedule)", "lender")),
+        h("div", { class: "grid2" },
+          f("Start date", "startDate", { type: "date" }),
+          f("Target completion", "targetCompletion", { type: "date" })),
+        f("Permit numbers", "permitNumbers", { placeholder: "e.g. B26-1042, E26-0311" })));
+  } else {
+    body.append(
+      h("div", { class: "card" },
+        h("h2", { style: "margin-top:0" }, "Loss classification"),
+        h("div", { class: "field" }, h("label", {}, "Water Category (IICRC S500)"),
+          cat("waterCategory", [{ value: "1", label: "Cat 1 — Clean" }, { value: "2", label: "Cat 2 — Gray" }, { value: "3", label: "Cat 3 — Black" }])),
+        h("div", { class: "field" }, h("label", {}, "Class of Water"),
+          cat("waterClass", [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }, { value: "4", label: "4" }])),
+        h("div", { class: "field" }, h("label", {}, "Drying System"),
+          cat("dryingSystem", [{ value: "Open", label: "Open" }, { value: "Closed", label: "Closed" }, { value: "Hybrid", label: "Hybrid" }]))));
+  }
 
   body.append(
     h("button", { class: "btn btn--primary", style: "margin-top:6px", onclick: () => go(`#/p/${project.id}`) }, "Done — go to forms"),

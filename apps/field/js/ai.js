@@ -19,8 +19,12 @@
       without a network and reused client-side for display.
    ============================================================ */
 
-/* The four forms that get a 🎙️ Transcribe button (handoff Step D). */
-export const AI_FORM_KEYS = ["moistureMaps", "dryingLogs", "photos", "constructionLogs"];
+/* The forms that get a 🎙️ Transcribe button (handoff Step D + Phase 4
+   construction forms — a tech walking a unit dictates rows hands-free). */
+export const AI_FORM_KEYS = [
+  "moistureMaps", "dryingLogs", "photos", "constructionLogs",
+  "punchList", "subSchedule", "inspections", "selections", "changeOrders",
+];
 
 /* Below this, a chip renders amber so the tech double-checks the value. */
 export const LOW_CONFIDENCE = 0.7;
@@ -57,6 +61,11 @@ export function candidateChips(formKey, candidates) {
     case "moistureMaps":    return moistureMapChips(c);
     case "photos":          return photoChips(c);
     case "constructionLogs":return constructionLogChips(c);
+    case "punchList":       return punchListChips(c);
+    case "subSchedule":     return subScheduleChips(c);
+    case "inspections":     return inspectionChips(c);
+    case "selections":      return selectionsChips(c);
+    case "changeOrders":    return changeOrderChips(c);
     default:                return [];
   }
 }
@@ -116,6 +125,75 @@ function photoChips(c) {
   return chips;
 }
 
+/* Punch List: rows[] (area/item/trade/priority). */
+function punchListChips(c) {
+  const chips = [];
+  arr(c.rows).forEach((r, i) => {
+    const at = has(r.area) ? r.area : `Item ${i + 1}`;
+    if (has(r.area))     chips.push(chip("punchList", "Area",              r.area,     r.confidence, { group: "rows", field: "area", meta: { index: i } }));
+    if (has(r.item))     chips.push(chip("punchList", `${at} — item`,      r.item,     r.confidence, { group: "rows", field: "item", meta: { index: i } }));
+    if (has(r.trade))    chips.push(chip("punchList", `${at} — trade`,     r.trade,    r.confidence, { group: "rows", field: "trade", meta: { index: i } }));
+    if (has(r.priority)) chips.push(chip("punchList", `${at} — priority`,  r.priority, r.confidence, { group: "rows", field: "priority", meta: { index: i } }));
+  });
+  return chips;
+}
+
+/* Sub Schedule: rows[] (trade/company/schedStart/schedEnd/status). */
+function subScheduleChips(c) {
+  const chips = [];
+  arr(c.rows).forEach((r, i) => {
+    const who = has(r.trade) ? r.trade : `Trade ${i + 1}`;
+    if (has(r.trade))      chips.push(chip("subSchedule", "Trade",               r.trade,      r.confidence, { group: "rows", field: "trade", meta: { index: i } }));
+    if (has(r.company))    chips.push(chip("subSchedule", `${who} — company`,    r.company,    r.confidence, { group: "rows", field: "company", meta: { index: i } }));
+    if (has(r.schedStart)) chips.push(chip("subSchedule", `${who} — start`,      r.schedStart, r.confidence, { group: "rows", field: "schedStart", meta: { index: i } }));
+    if (has(r.schedEnd))   chips.push(chip("subSchedule", `${who} — end`,        r.schedEnd,   r.confidence, { group: "rows", field: "schedEnd", meta: { index: i } }));
+    if (has(r.status))     chips.push(chip("subSchedule", `${who} — status`,     r.status,     r.confidence, { group: "rows", field: "status", meta: { index: i } }));
+  });
+  return chips;
+}
+
+/* Inspection record: instance-level fields. */
+function inspectionChips(c) {
+  const chips = [];
+  const f = (key, label, v) => { if (has(v)) chips.push(chip("inspections", label, v, c.confidence, { group: null, field: key })); };
+  f("type", "Inspection type", c.type);
+  f("scheduled", "Scheduled date", c.scheduled);
+  f("inspector", "Inspector", c.inspector);
+  f("result", "Result", c.result);
+  f("corrections", "Corrections", c.corrections);
+  f("reinspection", "Reinspection date", c.reinspection);
+  return chips;
+}
+
+/* Selections: rows[] (area/item/spec/allowance). */
+function selectionsChips(c) {
+  const chips = [];
+  arr(c.rows).forEach((r, i) => {
+    const at = has(r.item) ? r.item : `Selection ${i + 1}`;
+    if (has(r.area))      chips.push(chip("selections", "Area",              r.area,      r.confidence, { group: "rows", field: "area", meta: { index: i } }));
+    if (has(r.item))      chips.push(chip("selections", "Selection item",    r.item,      r.confidence, { group: "rows", field: "item", meta: { index: i } }));
+    if (has(r.spec))      chips.push(chip("selections", `${at} — spec`,      r.spec,      r.confidence, { group: "rows", field: "spec", meta: { index: i } }));
+    if (has(r.allowance)) chips.push(chip("selections", `${at} — allowance`, r.allowance, r.confidence, { group: "rows", field: "allowance", meta: { index: i } }));
+  });
+  return chips;
+}
+
+/* Change Order: description + schedule days + priced line items.
+   ("found rot behind the tub, sister the joists, roughly $1,800") */
+function changeOrderChips(c) {
+  const chips = [];
+  if (has(c.description)) chips.push(chip("changeOrders", "Description", c.description, c.confidence, { group: null, field: "description" }));
+  if (has(c.daysAdded))   chips.push(chip("changeOrders", "Days added",  c.daysAdded,   c.confidence, { group: null, field: "daysAdded" }));
+  arr(c.items).forEach((it, i) => {
+    const at = has(it.desc) ? String(it.desc).slice(0, 24) : `Line ${i + 1}`;
+    if (has(it.desc))  chips.push(chip("changeOrders", "Line item",        it.desc,  it.confidence, { group: "items", field: "desc", meta: { index: i } }));
+    if (has(it.qty))   chips.push(chip("changeOrders", `${at} — qty`,      it.qty,   it.confidence, { group: "items", field: "qty", meta: { index: i } }));
+    if (has(it.unit))  chips.push(chip("changeOrders", `${at} — unit`,     it.unit,  it.confidence, { group: "items", field: "unit", meta: { index: i } }));
+    if (has(it.price)) chips.push(chip("changeOrders", `${at} — price`,    it.price, it.confidence, { group: "items", field: "price", meta: { index: i } }));
+  });
+  return chips;
+}
+
 /* Daily Construction Log: rows[] (employee/task/start/finish/hours) + notes. */
 function constructionLogChips(c) {
   const chips = [];
@@ -129,6 +207,108 @@ function constructionLogChips(c) {
   });
   if (has(c.notes)) chips.push(chip("constructionLogs", "Notes", c.notes, c.confidence, { group: null, field: "notes" }));
   return chips;
+}
+
+/* ============================================================
+   Rebuild draft chips (Phase 3: restoration → construction).
+   The roybal-ai-office `rebuildDraft` action returns
+     { scopeAreas:[{area, items:[{trade,desc,qty,unit,confidence}]}],
+       tradeSequence:[{trade, note}], selections:[{area,item,spec,confidence}],
+       questions:[...] }
+   rebuildChips() flattens that into confirm-chips; applyRebuildChips()
+   writes the confirmed ones into scopeOfWork / subSchedule / selections.
+   Factories arrive via `mk` (same pattern as applyChips) so this module
+   stays free of model.js and Node-testable.
+   ============================================================ */
+export function rebuildChips(draft) {
+  const d = draft || {};
+  const chips = [];
+  for (const a of arr(d.scopeAreas)) {
+    const area = String(a.area || "").trim() || "General";
+    for (const it of arr(a.items)) {
+      if (!has(it.desc)) continue;
+      // the schema uses qty 0 as "unknown" — never let the sentinel reach the form
+      const qty = Number(it.qty) > 0 ? it.qty : "";
+      const qtyStr = qty === "" ? "" : [qty, it.unit].filter(has).join(" ");
+      chips.push(chip("rebuild",
+        `${area}${has(it.trade) ? " — " + it.trade : ""}`,
+        String(it.desc) + (qtyStr ? ` (${qtyStr})` : ""),
+        it.confidence,
+        { group: "scopeItems", field: "desc",
+          meta: { area, trade: it.trade || "", desc: String(it.desc), qty, unit: qty === "" ? "" : (it.unit || "") } }));
+    }
+  }
+  arr(d.tradeSequence).forEach((t, i) => {
+    if (!has(t.trade)) return;
+    chips.push(chip("rebuild", `Trade ${i + 1}`, t.trade, t.confidence,
+      { group: "subRows", field: "trade", meta: { trade: String(t.trade), notes: t.note || "" } }));
+  });
+  for (const s of arr(d.selections)) {
+    if (!has(s.item)) continue;
+    chips.push(chip("rebuild", `Selection${has(s.area) ? " — " + s.area : ""}`, s.item, s.confidence,
+      { group: "selectionRows", field: "item", meta: { area: s.area || "", item: String(s.item), spec: s.spec || "" } }));
+  }
+  return chips;
+}
+
+/* Reuse a trailing factory-blank row, else append a fresh one. */
+function takeRow(list, isBlank, fresh) {
+  const last = list[list.length - 1];
+  if (last && isBlank(last)) return last;
+  list.push(fresh);
+  return fresh;
+}
+
+export function applyRebuildChips(project, chips, mk = {}) {
+  const list = arr(chips).filter((c) => c && c.confirmed !== false && c.target);
+  let applied = 0;
+  // an off-list trade would render blank in the form's trade <select> —
+  // coerce to "Other" and keep the model's wording in the row notes
+  const normTrade = (t) => (!has(t) || !Array.isArray(mk.trades) || mk.trades.includes(t)) ? (t || "") : "Other";
+  const tradeNote = (t) => (normTrade(t) === "Other" && has(t) && t !== "Other") ? t : "";
+  for (const c of list) {
+    const t = c.target, m = t.meta || {};
+    if (t.group === "scopeItems") {
+      if (!project.scopeOfWork && mk.scope) project.scopeOfWork = mk.scope();
+      const scope = project.scopeOfWork;
+      if (!scope) continue;
+      if (!Array.isArray(scope.areas)) scope.areas = [];
+      let area = scope.areas.find((a) => String(a.name || "").trim().toLowerCase() === m.area.toLowerCase());
+      if (!area) {
+        area = takeRow(scope.areas, (a) => !has(a.name) && !arr(a.items).some((it) => has(it.desc)),
+          mk.scopeArea ? mk.scopeArea() : { name: "", items: [] });
+        area.name = m.area;
+      }
+      if (!Array.isArray(area.items)) area.items = [];
+      const row = takeRow(area.items, (it) => !has(it.desc) && !has(it.trade),
+        mk.scopeItem ? mk.scopeItem() : {});
+      row.trade = normTrade(m.trade); row.desc = m.desc; row.qty = String(m.qty ?? ""); row.unit = m.unit;
+      const tn = tradeNote(m.trade);
+      if (tn) row.notes = tn;
+      applied++;
+    } else if (t.group === "subRows") {
+      if (!project.subSchedule && mk.subSchedule) project.subSchedule = mk.subSchedule();
+      const ss = project.subSchedule;
+      if (!ss) continue;
+      if (!Array.isArray(ss.rows)) ss.rows = [];
+      const row = takeRow(ss.rows, (r) => !has(r.trade) && !has(r.company), mk.subRow ? mk.subRow() : {});
+      row.trade = normTrade(m.trade);
+      const note = [tradeNote(m.trade), has(m.notes) ? m.notes : ""].filter(Boolean).join(" — ");
+      if (note) row.notes = note;
+      applied++;
+    } else if (t.group === "selectionRows") {
+      if (!project.selections && mk.selections) project.selections = mk.selections();
+      const sl = project.selections;
+      if (!sl) continue;
+      if (!Array.isArray(sl.rows)) sl.rows = [];
+      const row = takeRow(sl.rows, (r) => !has(r.item) && !has(r.area), mk.selectionRow ? mk.selectionRow() : {});
+      row.area = m.area; row.item = m.item;
+      if (has(m.spec)) row.spec = m.spec;
+      row.status = "pending";
+      applied++;
+    }
+  }
+  return { applied };
 }
 
 /* ============================================================
@@ -187,6 +367,10 @@ const ROW_KEYFIELDS = {
   "dryingLogs:readings": ["affT", "affRH", "outT", "outRH", "refT", "refRH"],
   "dryingLogs:equipment": ["type", "location", "placed", "removed"],
   "constructionLogs:rows": ["employee", "task", "start", "finish", "hours"],
+  "punchList:rows": ["area", "item", "trade"],
+  "subSchedule:rows": ["trade", "company"],
+  "selections:rows": ["area", "item", "spec"],
+  "changeOrders:items": ["desc", "qty", "price"],
   // moistureMaps:readings is special — emptiness is decided by the values[] grid.
 };
 

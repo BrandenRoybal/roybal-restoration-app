@@ -6,14 +6,19 @@ import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, t
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
-  lineItems, sheet, sheetFooter, commit,
+  lineItems, sheet, sheetFooter, letterhead, commit,
 } from "./formkit.js";
 import {
   SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
   blankReadingRow, blankPsychroRow, blankEquipRow, blankWorkRow,
   blankLineItem, blankVerifyRow, COMPANY,
+  TRADES, SELECTION_STATUSES, SUB_STATUSES, PUNCH_STATUSES, PUNCH_PRIORITIES,
+  INSPECTION_TYPES, INSPECTION_RESULTS, PRECON_ITEMS, COMPLETION_ITEMS,
+  blankScopeArea, blankScopeItem, blankAllowanceRow, blankPermitRow,
+  blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
 } from "./model.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
+import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullDay as qbPullDay, pullRange as qbPullRange, entriesFor as qbEntriesFor, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
@@ -1750,7 +1755,450 @@ export function narrativeSheet(project) {
       h("div", {}, COMPANY.licenses.join("  •  "))));
 }
 
+/* Progress update sheet (construction jobs) — letterhead + info + markdown body. */
+export function progressSheet(project) {
+  const infoRows = [
+    ["OWNER", project.customer], ["PROPERTY", project.address],
+    ["PROJECT TYPE", project.constructionType === "new_construction" ? "New Construction"
+      : project.constructionType === "reconstruction" ? "Reconstruction" : "Remodel"],
+    ["PROJECT / JOB ID", project.workOrderNo],
+    project.carrier ? ["CARRIER / CLAIM", [project.carrier, project.claimNo].filter(Boolean).join(" — ")] : null,
+    project.lender ? ["LENDER", project.lender] : null,
+    ["TARGET COMPLETION", project.targetCompletion ? fmtDate(project.targetCompletion) : ""],
+    ["UPDATE DATE", project.progressNarrativeDate || todayISO()],
+  ].filter((r) => r && r[1] && String(r[1]).trim());
+  const cell = (k, v, i) => h("div", {
+    style: "padding:7px 10px;font-size:14px;" + (i >= 2 ? "border-top:1px solid #eef1f5;" : "") + (i % 2 ? "border-left:1px solid #eef1f5;" : ""),
+  }, h("span", { style: "color:var(--orange,#f26a21);font-weight:700;font-size:12px" }, k + " "), h("span", {}, String(v)));
+  return h("section", { class: "sheet" },
+    letterhead("CONSTRUCTION PROGRESS UPDATE", "Owner / Carrier / Lender Status Summary"),
+    h("div", { style: "display:grid;grid-template-columns:1fr 1fr;border:1px solid #e2e6ec;border-radius:8px;overflow:hidden;margin:12px 0" },
+      ...infoRows.map(([k, v], i) => cell(k, v, i))),
+    h("div", { class: "narrative-body" }, ...mdToNodes(project.progressNarrative || "")),
+    h("div", { style: "margin-top:18px" },
+      h("div", { style: "font-size:13px" }, "Respectfully submitted,"),
+      h("div", { style: "font-weight:700;color:var(--navy,#0f1b2d);margin-top:8px" }, COMPANY.signatory),
+      h("div", { style: "color:#5b6470;font-size:12px" }, COMPANY.signatoryTitle + " — " + COMPANY.name)),
+    sheetFooter("Construction Progress Update"));
+}
+
 /* ---------- dispatch ---------- */
+/* ============================================================
+   CONSTRUCTION / REMODEL FORMS (jobType "construction")
+   ============================================================ */
+
+/* small cell builder shared by the construction tables */
+function boundCell(r, key, w, type = "text", oninput) {
+  const td = h("td");
+  const input = h("input", { type, value: r[key] ?? "", style: w ? `min-width:${w}` : "" });
+  input.addEventListener("input", () => { r[key] = input.value; oninput && oninput(input.value); commit(); });
+  td.append(input);
+  return td;
+}
+function delCell(arr, r, repaint) {
+  return h("td", { class: "app-only" },
+    h("button", { type: "button", class: "rowdel", onclick: () => { arr.splice(arr.indexOf(r), 1); repaint(); commit(); } }, "✕"));
+}
+
+/* ---------- 8a. SCOPE OF WORK ---------- */
+export function scopeOfWork(project, s) {
+  const areasWrap = h("div");
+  function areaBlock(area) {
+    const tbody = h("tbody");
+    function row(it) {
+      const tr = h("tr");
+      const tradeTd = h("td");
+      tradeTd.append(sel(it, "trade", TRADES, { placeholder: "Trade…" }));
+      tr.append(tradeTd,
+        boundCell(it, "desc", "220px"),
+        boundCell(it, "qty", "56px"),
+        boundCell(it, "unit", "56px"),
+        boundCell(it, "notes", "140px"),
+        delCell(area.items, it, paintRows));
+      return tr;
+    }
+    function paintRows() { tbody.replaceChildren(...area.items.map(row)); }
+    paintRows();
+    const addItem = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add line item");
+    addItem.addEventListener("click", () => { area.items.push(blankScopeItem()); paintRows(); commit(); });
+    const delArea = h("button", { type: "button", class: "btn btn--danger btn--sm app-only", style: "width:auto" }, "Delete area");
+    delArea.addEventListener("click", () => {
+      if (!confirm("Delete this area and its line items?")) return;
+      s.areas.splice(s.areas.indexOf(area), 1); paintAreas(); commit();
+    });
+    return h("div", { class: "scopearea", style: "margin:10px 0 16px" },
+      h("div", { class: "grid2" },
+        field("Room / Area", inp(area, "name", { placeholder: "e.g. Kitchen, Master Bath" })),
+        h("div", { class: "field app-only", style: "align-self:end" }, delArea)),
+      h("div", { class: "tablewrap" },
+        h("table", { class: "grid" },
+          h("thead", {}, h("tr", {}, ...["Trade", "Description", "Qty", "Unit", "Notes"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+          tbody)),
+      addItem);
+  }
+  function paintAreas() { areasWrap.replaceChildren(...s.areas.map(areaBlock)); }
+  paintAreas();
+  const addArea = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only" }, "+ Add room / area");
+  addArea.addEventListener("click", () => { s.areas.push(blankScopeArea()); paintAreas(); commit(); });
+
+  const abody = h("tbody");
+  const allowTotal = h("strong", {}, money(0));
+  function calcAllow() {
+    allowTotal.textContent = money(s.allowances.reduce((t, a) => t + (Number(a.amount) || 0), 0));
+  }
+  function arow(a) {
+    const tr = h("tr");
+    tr.append(boundCell(a, "item", "180px"), boundCell(a, "amount", "90px", "number", calcAllow),
+      boundCell(a, "notes", "160px"), delCell(s.allowances, a, paintAllow));
+    return tr;
+  }
+  function paintAllow() { abody.replaceChildren(...s.allowances.map(arow)); calcAllow(); }
+  paintAllow();
+  const addAllow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add allowance");
+  addAllow.addEventListener("click", () => { s.allowances.push(blankAllowanceRow()); paintAllow(); commit(); });
+
+  return sheet("SCOPE OF WORK", "Construction / Remodel Work Description", "Scope of Work",
+    h("div", { class: "grid3" },
+      field("Date", inp(s, "date", { type: "date" })),
+      field("Work Order #", inp(project, "workOrderNo")),
+      field("Contract Amount", inp(project, "contractAmount", { type: "number", placeholder: "$" }))),
+    jobInfo(project, ["customer", "address", "phone", "email"]),
+    field("Project Summary", ta(s, "summary", { rows: 3 })),
+    s.referencePlans && s.referencePlans.length ? h("div", {},
+      sectionTitle("Reference Plans"),
+      ...s.referencePlans.map((src) => h("img", { src, alt: "Reference plan", class: "docpage" }))) : null,
+    sectionTitle("Work by Room / Area"),
+    areasWrap, addArea,
+    sectionTitle("Allowances"),
+    h("p", { class: "subtle app-only" }, "Owner-selected items carried in the contract at an allowance amount — actuals land on the Selections sheet."),
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid" },
+        h("thead", {}, h("tr", {}, ...["Allowance Item", "Amount", "Notes"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+        abody)),
+    addAllow,
+    h("div", { class: "totals" }, h("div", { class: "trow grand" }, h("span", {}, "Total Allowances"), allowTotal)),
+    sectionTitle("Exclusions / Clarifications"),
+    field("Exclusions", ta(s, "exclusions", { rows: 2 })));
+}
+
+/* ---------- 8b. PRE-CONSTRUCTION CHECKLIST ---------- */
+export function preConChecklist(project, c) {
+  const list = h("div");
+  PRECON_ITEMS.forEach((txt, i) => list.append(check(c.items, i, `${i + 1}. ${txt}`)));
+
+  const pbody = h("tbody");
+  function prow(r) {
+    const tr = h("tr");
+    tr.append(boundCell(r, "type", "130px"), boundCell(r, "number", "110px"),
+      boundCell(r, "pulled", "120px", "date"), boundCell(r, "notes", "150px"),
+      delCell(c.permits, r, paintPermits));
+    return tr;
+  }
+  function paintPermits() { pbody.replaceChildren(...c.permits.map(prow)); }
+  paintPermits();
+  const addPermit = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add permit");
+  addPermit.addEventListener("click", () => { c.permits.push(blankPermitRow()); paintPermits(); commit(); });
+
+  return sheet("PRE-CONSTRUCTION CHECKLIST", "Ready-to-Build Verification", "Pre-Construction Checklist",
+    jobInfo(project, ["customer", "address", "workOrderNo", "phone"]),
+    sectionTitle("Checklist"),
+    list,
+    sectionTitle("Permits"),
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid" },
+        h("thead", {}, h("tr", {}, ...["Permit Type", "Number", "Pulled", "Notes"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+        pbody)),
+    addPermit,
+    field("Notes", ta(c, "notes")));
+}
+
+/* ---------- 8c. SELECTIONS SHEET ---------- */
+export function selectionsSheet(project, sl) {
+  const tbody = h("tbody");
+  const allowEl = h("span", {}, money(0));
+  const actualEl = h("span", {}, money(0));
+  const netEl = h("span", {}, money(0));
+  function calc() {
+    const allow = sl.rows.reduce((t, r) => t + (Number(r.allowance) || 0), 0);
+    const act = sl.rows.reduce((t, r) => t + (Number(r.actual) || 0), 0);
+    allowEl.textContent = money(allow);
+    actualEl.textContent = money(act);
+    const net = act - allow;
+    netEl.textContent = (net > 0 ? "+" : "") + money(net);
+    netEl.style.color = net > 0 ? "var(--red,#d23b2e)" : "var(--green,#1f9d55)";
+    sl.rows.forEach((r, i) => {
+      const cell = tbody.children[i]?.querySelector(".ext");
+      if (!cell) return;
+      const d = (Number(r.actual) || 0) - (Number(r.allowance) || 0);
+      cell.textContent = r.actual === "" ? "—" : (d > 0 ? "+" : "") + money(d);
+      cell.style.color = d > 0 ? "var(--red,#d23b2e)" : "";
+    });
+  }
+  function row(r) {
+    const tr = h("tr");
+    const statusTd = h("td");
+    statusTd.append(sel(r, "status", SELECTION_STATUSES));
+    tr.append(
+      boundCell(r, "area", "90px"),
+      boundCell(r, "item", "130px"),
+      boundCell(r, "spec", "150px"),
+      boundCell(r, "allowance", "80px", "number", calc),
+      boundCell(r, "actual", "80px", "number", calc),
+      h("td", { class: "ext calc" }, "—"),
+      statusTd,
+      boundCell(r, "leadWeeks", "50px", "number"),
+      boundCell(r, "neededBy", "120px", "date"),
+      boundCell(r, "decidedDate", "120px", "date"),
+      boundCell(r, "ownerInit", "44px"),
+      delCell(sl.rows, r, paint));
+    return tr;
+  }
+  function paint() { tbody.replaceChildren(...sl.rows.map(row)); calc(); }
+  paint();
+  const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add selection");
+  addRow.addEventListener("click", () => { sl.rows.push(blankSelectionRow()); paint(); commit(); });
+
+  return sheet("SELECTIONS SHEET", "Owner Finish & Fixture Choices vs. Contract Allowances", "Selections Sheet",
+    jobInfo(project, ["customer", "address", "workOrderNo", "phone"]),
+    h("p", { class: "subtle app-only" }, "Lead wks + Needed-by drive the ordering-deadline watch on the job list."),
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid" },
+        h("thead", {}, h("tr", {}, ...["Area", "Item", "Spec / Model / Color", "Allow $", "Actual $", "+/−", "Status", "Lead wks", "Needed by", "Decided", "Init"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+        tbody)),
+    addRow,
+    h("div", { class: "totals" },
+      h("div", { class: "trow" }, h("span", {}, "Total Allowances"), allowEl),
+      h("div", { class: "trow" }, h("span", {}, "Total Actual"), actualEl),
+      h("div", { class: "trow grand" }, h("span", {}, "Net Over / (Under)"), netEl)),
+    field("Notes", ta(sl, "notes")));
+}
+
+/* ---------- 8d. SUBCONTRACTOR SCHEDULE ---------- */
+export function subSchedule(project, ss) {
+  const tbody = h("tbody");
+  function row(r) {
+    const tr = h("tr");
+    const tradeTd = h("td"); tradeTd.append(sel(r, "trade", TRADES, { placeholder: "Trade…" }));
+    const statusTd = h("td"); statusTd.append(sel(r, "status", SUB_STATUSES));
+    const coiTd = h("td");
+    const coiBox = h("input", { type: "checkbox", checked: !!r.coi, style: "width:22px;height:22px" });
+    coiBox.addEventListener("change", () => { r.coi = coiBox.checked; commit(); });
+    coiTd.append(coiBox);
+    tr.append(tradeTd,
+      boundCell(r, "company", "120px"),
+      boundCell(r, "contact", "110px"),
+      boundCell(r, "schedStart", "120px", "date"),
+      boundCell(r, "schedEnd", "120px", "date"),
+      boundCell(r, "actStart", "120px", "date"),
+      boundCell(r, "actEnd", "120px", "date"),
+      statusTd, coiTd,
+      boundCell(r, "notes", "120px"),
+      delCell(ss.rows, r, paint));
+    return tr;
+  }
+  function paint() { tbody.replaceChildren(...ss.rows.map(row)); }
+  paint();
+  const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add trade");
+  addRow.addEventListener("click", () => { ss.rows.push(blankSubRow()); paint(); commit(); });
+
+  // pull the board's phase plan in as starter trade rows (Phase 5)
+  const prefill = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only", style: "width:auto" }, "⤓ Prefill from board phases");
+  prefill.addEventListener("click", async () => {
+    prefill.disabled = true;
+    try {
+      const boardRow = await findBoardRow(project);
+      const subs = boardRow && boardRow.data && boardRow.data.subtasks;
+      if (!subs || !subs.length) { toast("No phases on the board for this job yet."); prefill.disabled = false; return; }
+      const rows = phasesToSubRows(subs, blankSubRow);
+      if (ss.rows.length === 1 && !ss.rows[0].trade && !ss.rows[0].company) ss.rows.length = 0;   // drop the starter blank
+      ss.rows.push(...rows);
+      paint(); commit();
+      toast(`Added ${rows.length} trade row(s) from the board phases — set the dates and companies.`);
+    } catch (_) {
+      toast("Couldn't read the board — try again online.");
+    }
+    prefill.disabled = false;
+  });
+
+  return sheet("SUBCONTRACTOR SCHEDULE", "Trade Sequence, Dates & Insurance Tracking", "Subcontractor Schedule",
+    jobInfo(project, ["customer", "address", "workOrderNo", "phone"]),
+    h("div", { class: "app-only", style: "margin-bottom:8px" }, prefill),
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid" },
+        h("thead", {}, h("tr", {}, ...["Trade", "Company", "Contact", "Sched Start", "Sched End", "Act Start", "Act End", "Status", "COI", "Notes"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+        tbody)),
+    addRow,
+    field("Notes", ta(ss, "notes")));
+}
+
+/* ---------- 8e. INSPECTION LOG (multi) ---------- */
+export function inspectionLog(project, ins) {
+  return sheet("INSPECTION RECORD", "Permit Inspection Result & Corrections", "Inspection Record",
+    jobInfo(project, ["customer", "address", "workOrderNo", "phone"]),
+    h("div", { class: "grid2" },
+      field("Inspection Type", sel(ins, "type", INSPECTION_TYPES, { placeholder: "Select…" })),
+      field("Scheduled Date", inp(ins, "scheduled", { type: "date" }))),
+    h("div", { class: "grid2" },
+      field("Inspector", inp(ins, "inspector")),
+      field("Result", seg(ins, "result", INSPECTION_RESULTS.map((r) => ({ value: r, label: r[0].toUpperCase() + r.slice(1) }))))),
+    field("Corrections Required", ta(ins, "corrections", { rows: 3 })),
+    field("Reinspection Date", inp(ins, "reinspection", { type: "date" })),
+    field("Notes", ta(ins, "notes")));
+}
+
+/* ---------- 8f. PUNCH LIST ---------- */
+export function punchList(project, pl) {
+  const tbody = h("tbody");
+  const openLine = h("p", { class: "subtle app-only" });
+  function calcOpen() {
+    const open = pl.rows.filter((r) => r.status === "open" || r.status === "in-progress").length;
+    openLine.textContent = open ? `${open} of ${pl.rows.length} item(s) still open.` : (pl.rows.length ? "All items closed." : "");
+  }
+  function row(r) {
+    const tr = h("tr");
+    const tradeTd = h("td"); tradeTd.append(sel(r, "trade", TRADES, { placeholder: "Trade…" }));
+    const priTd = h("td"); priTd.append(sel(r, "priority", PUNCH_PRIORITIES));
+    const statusTd = h("td"); statusTd.append(sel(r, "status", PUNCH_STATUSES, { onchange: calcOpen }));
+    tr.append(
+      boundCell(r, "area", "90px"),
+      boundCell(r, "item", "180px"),
+      tradeTd, priTd, statusTd,
+      boundCell(r, "completedBy", "100px"),
+      boundCell(r, "completedDate", "120px", "date"),
+      delCell(pl.rows, r, paint));
+    const photoTr = h("tr", { class: "punchphotos" },
+      h("td", { colspan: "8" }, photoUploader(r.photos, "Photo")));
+    return [tr, photoTr];
+  }
+  function paint() { tbody.replaceChildren(...pl.rows.flatMap(row)); calcOpen(); }
+  paint();
+  const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add punch item");
+  addRow.addEventListener("click", () => { pl.rows.push(blankPunchRow()); paint(); commit(); });
+
+  return sheet("PUNCH LIST", "Walkthrough Items to Closeout", "Punch List",
+    jobInfo(project, ["customer", "address", "workOrderNo", "phone"]),
+    openLine,
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid" },
+        h("thead", {}, h("tr", {}, ...["Area", "Item", "Trade", "Priority", "Status", "By", "Done"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+        tbody)),
+    addRow,
+    sectionTitle("Owner Walkthrough"),
+    field("Walkthrough Date", inp(pl, "walkthroughDate", { type: "date" })),
+    sigBlock(pl, "sigOwner", "sigOwnerName", "sigOwnerDate", "Owner — punch list reviewed & accepted"));
+}
+
+/* ---------- 8g. DRAW SCHEDULE / PROGRESS INVOICING ---------- */
+export function drawSchedule(project, ds) {
+  const tbody = h("tbody");
+  const pctEl = h("span", {}, "0%");
+  const totalEl = h("span", {}, money(0));
+  const contractEl = h("span", {}, money(Number(project.contractAmount) || 0));
+  const unallocEl = h("span", {}, money(0));
+  function calc() {
+    const contract = Number(project.contractAmount) || 0;
+    const pct = ds.rows.reduce((t, r) => t + (Number(r.pct) || 0), 0);
+    const amt = ds.rows.reduce((t, r) => t + (Number(r.amount) || 0), 0);
+    pctEl.textContent = pct + "%";
+    totalEl.textContent = money(amt);
+    contractEl.textContent = money(contract);
+    unallocEl.textContent = money(contract - amt);
+  }
+  function row(r, i) {
+    const tr = h("tr");
+    const amtTd = h("td");
+    const amtInput = h("input", { type: "number", value: r.amount ?? "", style: "min-width:90px" });
+    amtInput.addEventListener("input", () => { r.amount = amtInput.value; r._manualAmt = true; calc(); commit(); });
+    amtTd.append(amtInput);
+    const pctTd = h("td");
+    const pctInput = h("input", { type: "number", value: r.pct ?? "", style: "min-width:50px" });
+    pctInput.addEventListener("input", () => {
+      r.pct = pctInput.value;
+      const contract = Number(project.contractAmount) || 0;
+      if (!r._manualAmt && contract) { r.amount = ((Number(r.pct) || 0) / 100 * contract).toFixed(2); amtInput.value = r.amount; }
+      calc(); commit();
+    });
+    pctTd.append(pctInput);
+    const invBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" },
+      r.invoiceId ? "Open invoice" : "→ Invoice");
+    invBtn.addEventListener("click", () => {
+      if (r.invoiceId && (project.invoices || []).some((x) => x.id === r.invoiceId)) {
+        location.hash = `#/p/${project.id}/f/invoices/${r.invoiceId}`;
+        return;
+      }
+      const inv = newInvoice();
+      inv.invoiceNo = "DRAW-" + (i + 1);
+      inv.lossSummary = "Progress draw: " + (r.desc || `milestone ${i + 1}`);
+      inv.items = [{ room: "", desc: r.desc || `Draw ${i + 1}`, qty: "1", unit: "ea", price: String(r.amount || "") }];
+      if (!Array.isArray(project.invoices)) project.invoices = [];
+      project.invoices.push(inv);
+      r.invoiceId = inv.id;
+      if (!r.invoicedDate) r.invoicedDate = todayISO();
+      commit();
+      location.hash = `#/p/${project.id}/f/invoices/${inv.id}`;
+    });
+    tr.append(
+      h("td", { class: "calc" }, String(i + 1)),
+      boundCell(r, "desc", "170px"),
+      pctTd, amtTd,
+      boundCell(r, "invoicedDate", "120px", "date"),
+      boundCell(r, "paidDate", "120px", "date"),
+      h("td", { class: "app-only" }, invBtn),
+      delCell(ds.rows, r, paint));
+    return tr;
+  }
+  function paint() { tbody.replaceChildren(...ds.rows.map(row)); calc(); }
+  paint();
+  const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add draw");
+  addRow.addEventListener("click", () => { ds.rows.push(blankDrawRow()); paint(); commit(); });
+
+  return sheet("DRAW SCHEDULE", "Payment Milestones & Progress Invoicing", "Draw Schedule",
+    jobInfo(project, ["customer", "address", "workOrderNo", "phone"]),
+    h("p", { class: "subtle app-only" }, "“→ Invoice” pre-fills a Mitigation Invoice for the draw — review it before sending."),
+    h("div", { class: "tablewrap" },
+      h("table", { class: "grid" },
+        h("thead", {}, h("tr", {}, ...["#", "Milestone", "% of Contract", "Amount", "Invoiced", "Paid"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""), h("th", { class: "app-only" }, ""))),
+        tbody)),
+    addRow,
+    h("div", { class: "totals" },
+      h("div", { class: "trow" }, h("span", {}, "Scheduled % of Contract"), pctEl),
+      h("div", { class: "trow" }, h("span", {}, "Scheduled Draw Total"), totalEl),
+      h("div", { class: "trow" }, h("span", {}, "Contract Amount"), contractEl),
+      h("div", { class: "trow grand" }, h("span", {}, "Unallocated"), unallocEl)),
+    field("Notes", ta(ds, "notes")));
+}
+
+/* ---------- 8h. CERTIFICATE OF COMPLETION ---------- */
+export function certCompletion(project, c) {
+  const list = h("div");
+  COMPLETION_ITEMS.forEach((txt, i) => list.append(check(c.checklist, i, `${i + 1}. ${txt}`)));
+
+  return sheet("CERTIFICATE OF COMPLETION", "Final Acceptance & Workmanship Warranty", "Certificate of Completion",
+    h("div", { class: "grid2" },
+      field("Certificate #", inp(c, "certNo")),
+      field("Issue Date", inp(c, "issueDate", { type: "date" }))),
+    h("div", { class: "grid2" },
+      field("Project / Job ID", inp(project, "workOrderNo")),
+      field("Completion Date", inp(c, "completionDate", { type: "date" }))),
+    sectionTitle("Property / Owner"),
+    jobInfo(project, ["customer", "address", "phone", "email"]),
+    field("Scope Completed", ta(c, "scopeSummary", { rows: 3 })),
+    sectionTitle("Completion Checklist"),
+    list,
+    sectionTitle("Warranty"),
+    h("div", { class: "grid2" },
+      field("Workmanship Warranty", inp(c, "warrantyWorkmanship")),
+      field("Manufacturer Registrations / Notes", inp(c, "warrantyNotes"))),
+    h("div", { class: "certstmt" },
+      h("p", {}, "The undersigned contractor certifies that the work described above has been completed in a good and workmanlike manner in accordance with the contract documents and applicable codes. The Owner's signature below confirms acceptance of the completed work, subject to the workmanship warranty stated above.")),
+    sectionTitle("Signatures"),
+    signOrUpload(c, () => [
+      sigBlock(c, "sigContractor", "sigContractorName", "sigContractorDate", "Contractor (Roybal Construction, LLC)"),
+      h("hr", { class: "divider" }),
+      sigBlock(c, "sigOwner", "sigOwnerName", "sigOwnerDate", "Property Owner — acceptance of completed work"),
+    ]));
+}
+
 export const RENDERERS = {
   moistureMaps: moistureMap,
   dryingLogs: dryingLog,
@@ -1762,4 +2210,12 @@ export const RENDERERS = {
   certDrying,
   changeOrders: changeOrder,
   invoices: invoice,
+  scopeOfWork,
+  preConChecklist,
+  selections: selectionsSheet,
+  subSchedule,
+  inspections: inspectionLog,
+  punchList,
+  drawSchedule,
+  certCompletion,
 };

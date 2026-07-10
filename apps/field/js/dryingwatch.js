@@ -24,10 +24,12 @@ const hoursSince = (iso, now) => {
   return (now - d.getTime()) / 3600000;
 };
 
-/** True once the job's drying is certified — no more watching needed. */
+/** True once the job's drying is certified — no more watching needed.
+    Signature or uploaded signed copy ONLY: newCertDrying() prefills
+    issueDate, so merely opening the form must never count as certified. */
 export function isCertified(p) {
   const cd = p && p.certDrying;
-  return !!(cd && (cd.sigTech || cd.issueDate || (cd.uploadedPages && cd.uploadedPages.length)));
+  return !!(cd && (cd.sigTech || (cd.uploadedPages && cd.uploadedPages.length)));
 }
 
 /**

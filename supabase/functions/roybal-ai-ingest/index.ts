@@ -22,7 +22,8 @@
  *   {
  *     unified_job_id?:    string | null,   // spine row id (Step B); tolerated null
  *     phase_instance_id?: string | null,
- *     form_key:           "moistureMaps"|"dryingLogs"|"photos"|"constructionLogs",
+ *     form_key:           "moistureMaps"|"dryingLogs"|"photos"|"constructionLogs"
+ *                         |"punchList"|"subSchedule"|"inspections"|"selections"|"changeOrders",
  *     captured_by?:       string,          // which tech (Step E) — recommended for attribution
  *     water_category?:    string,          // "1"|"2"|"3" — prompt context
  *     audio?:             string,          // base64 (raw or data: URL); OR pass transcript
@@ -185,6 +186,119 @@ const FORM_SCHEMAS: Record<string, { label: string; schema: Record<string, unkno
       },
     },
   },
+  // ---------- construction / remodel forms (Phase 4) ----------
+  punchList: {
+    label: "Punch List (walkthrough items: area, item, responsible trade, priority)",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        rows: {
+          type: "array",
+          items: {
+            type: "object", additionalProperties: false,
+            properties: {
+              area: { type: "string", description: "room / area, e.g. Master Bath" },
+              item: { type: "string", description: "the defect / task, e.g. 'door casing scratched'" },
+              trade: { type: "string", enum: ["Demo", "Framing", "Electrical", "Plumbing", "HVAC", "Insulation", "Drywall", "Paint", "Flooring", "Trim / Doors", "Cabinets / Counters", "Roofing", "Other"], description: "who fixes it" },
+              priority: { type: "string", enum: ["low", "normal", "high"] },
+              confidence: CONF,
+            },
+            required: ["item"],
+          },
+        },
+        unmapped: UNMAPPED,
+      },
+    },
+  },
+  subSchedule: {
+    label: "Subcontractor Schedule (trade, company, scheduled dates, status)",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        rows: {
+          type: "array",
+          items: {
+            type: "object", additionalProperties: false,
+            properties: {
+              trade: { type: "string", enum: ["Demo", "Framing", "Electrical", "Plumbing", "HVAC", "Insulation", "Drywall", "Paint", "Flooring", "Trim / Doors", "Cabinets / Counters", "Roofing", "Other"] },
+              company: { type: "string" },
+              schedStart: { type: "string", description: "ISO date if stated (resolve 'Tuesday' etc. only when unambiguous)" },
+              schedEnd: { type: "string", description: "ISO date if stated" },
+              status: { type: "string", enum: ["scheduled", "on-site", "done", "no-show"] },
+              confidence: CONF,
+            },
+            required: ["trade"],
+          },
+        },
+        unmapped: UNMAPPED,
+      },
+    },
+  },
+  inspections: {
+    label: "Inspection Record (type, date, inspector, result, corrections)",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        type: { type: "string", enum: ["Footing / Foundation", "Framing", "Rough Electrical", "Rough Plumbing", "Rough Mechanical", "Insulation", "Drywall / Nailing", "Final Electrical", "Final Plumbing", "Final Mechanical", "Final / CO"] },
+        scheduled: { type: "string", description: "ISO date if stated" },
+        inspector: { type: "string" },
+        result: { type: "string", enum: ["pass", "fail", "partial"] },
+        corrections: { type: "string", description: "required corrections, verbatim gist" },
+        reinspection: { type: "string", description: "ISO reinspection date if stated" },
+        confidence: CONF,
+        unmapped: UNMAPPED,
+      },
+    },
+  },
+  selections: {
+    label: "Selections Sheet (owner finish/fixture choices: area, item, spec, allowance)",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        rows: {
+          type: "array",
+          items: {
+            type: "object", additionalProperties: false,
+            properties: {
+              area: { type: "string" },
+              item: { type: "string", description: "what the owner must choose, e.g. 'kitchen faucet'" },
+              spec: { type: "string", description: "model / color / spec detail if stated" },
+              allowance: { type: "number", description: "allowance dollars if stated" },
+              confidence: CONF,
+            },
+            required: ["item"],
+          },
+        },
+        unmapped: UNMAPPED,
+      },
+    },
+  },
+  changeOrders: {
+    label: "Change Order (scope change description, added days, priced line items)",
+    schema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        description: { type: "string", description: "what changed and why, e.g. 'found rot in the subfloor behind the tub'" },
+        daysAdded: { type: "number", description: "schedule days added if stated" },
+        items: {
+          type: "array",
+          items: {
+            type: "object", additionalProperties: false,
+            properties: {
+              desc: { type: "string", description: "scope line, e.g. 'Sister two floor joists'" },
+              qty: { type: "number" },
+              unit: { type: "string", description: "EA, SF, LF, HR or LS" },
+              price: { type: "number", description: "unit price in dollars; a spoken lump sum goes on one LS line" },
+              confidence: CONF,
+            },
+            required: ["desc"],
+          },
+        },
+        confidence: CONF,
+        unmapped: UNMAPPED,
+      },
+    },
+  },
 };
 
 /* ============================================================
@@ -266,7 +380,7 @@ async function extract(transcript: string, formKey: string, waterCategory?: stri
   const form = FORM_SCHEMAS[formKey];
   const catLine = waterCategory ? ` This is a Category ${waterCategory} water loss.` : "";
   const system =
-    `You extract structured field data from a restoration technician's spoken ${form.label} on an IICRC S500 water-mitigation job.${catLine} ` +
+    `You extract structured field data from a field technician's spoken ${form.label} on a restoration or construction job.${catLine} ` +
     `Call the \`extract\` tool with only the fields the tech actually stated. Use the exact enum values. ` +
     `Give every value a confidence from 0 to 1. Put anything you can't confidently map into \`unmapped\`. Never invent values that weren't spoken.`;
 
@@ -279,7 +393,7 @@ async function extract(transcript: string, formKey: string, waterCategory?: stri
     },
     body: JSON.stringify({
       model: LLM_MODEL,
-      max_tokens: 2048,
+      max_tokens: 4096,
       system,
       messages: [{ role: "user", content: `Technician's spoken ${form.label}:\n\n"${transcript}"` }],
       tools: [{ name: "extract", description: `Return the structured ${form.label}.`, input_schema: form.schema }],
@@ -289,6 +403,11 @@ async function extract(transcript: string, formKey: string, waterCategory?: stri
   const text = await res.text();
   if (!res.ok) throw new Error(`llm_failed (${res.status}): ${text}`);
   const data = JSON.parse(text);
+  // a long dictation (50+ punch rows) can exhaust the budget mid-JSON — fail
+  // loudly instead of silently dropping the tail rows
+  if (data.stop_reason === "max_tokens") {
+    throw new Error("dictation_too_long: that recording has more items than one pass can return — split it into a couple of shorter recordings");
+  }
   const block = (data.content ?? []).find((b: { type: string; name?: string }) => b.type === "tool_use" && b.name === "extract");
   if (!block) throw new Error("extraction_failed: model returned no structured candidates");
   const candidates = { form_key: formKey, ...(block.input ?? {}) };
