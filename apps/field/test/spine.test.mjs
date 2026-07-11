@@ -21,6 +21,9 @@ ok("maps claim/carrier", row.claim_number === "ABC-123" && row.insurance_carrier
 ok("blank string -> null (adjuster)", row.adjuster_name === null);
 ok("water category carried as string", row.water_category === "3");
 ok("loss_type defaults to water", row.loss_type === "water");
+ok("legacy job (no jobType) is water", toUnifiedRow({ id: "fp-2" }).loss_type === "water");
+ok("construction job carries loss_type construction",
+  toUnifiedRow({ id: "fp-3", jobType: "construction" }).loss_type === "construction");
 
 /* normClaim is tolerant of formatting */
 ok("normClaim strips spaces/dashes/case", normClaim(" abc-1 2_3 ") === "ABC123");

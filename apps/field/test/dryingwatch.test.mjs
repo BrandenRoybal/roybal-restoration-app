@@ -81,9 +81,18 @@ check("no drying docs -> no flags", dryingFlags({ ...base(), photos: [{}] }, NOW
 {
   const p = base();
   p.moistureMaps = [{ dryGoal: "12", readings: [{ date: day(9), values: ["30"] }] }];
-  p.certDrying = { issueDate: day(1) };
+  p.certDrying = { sigTech: "data:sig", issueDate: day(1) };
   check("isCertified true", isCertified(p));
   check("certified -> no flags", dryingFlags(p, NOW).length === 0);
+}
+
+// merely opening the cert form (factory prefills issueDate) is NOT certified
+{
+  const p = base();
+  p.moistureMaps = [{ dryGoal: "12", readings: [{ date: day(9), values: ["30"] }] }];
+  p.certDrying = { sigTech: "", issueDate: day(0), uploadedPages: [] };
+  check("blank cert (prefilled issueDate) is not certified", !isCertified(p));
+  check("blank cert keeps the flags alive", dryingFlags(p, NOW).length > 0);
 }
 
 console.log(`\n${passed} drying-watch checks passed.`);

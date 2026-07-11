@@ -17,6 +17,7 @@
    ============================================================ */
 import { rest, isSignedIn } from "./supa.js";
 import { SYNC_ENABLED } from "./config.js";
+import { jobType } from "./model.js";
 
 /* Map a field project (blob) onto the typed unified_jobs columns. Pure. */
 export function toUnifiedRow(project, coordinationJobId = null) {
@@ -32,7 +33,7 @@ export function toUnifiedRow(project, coordinationJobId = null) {
     owner_phone:         s(project.phone),
     owner_email:         s(project.email),
     date_of_loss:        s(project.dateOfLoss),
-    loss_type:           "water",
+    loss_type:           jobType(project) === "construction" ? "construction" : "water",
     water_category:      s(project.waterCategory),
     water_class:         s(project.waterClass),
   };
@@ -77,10 +78,15 @@ export async function syncSpine(project) {
       if (res.ok) coordId = matchCoordinationId(await res.json(), project.claimNo);
     }
     // 2. upsert the spine row keyed by field_project_id
+    const spineRow = toUnifiedRow(project, coordId);
+    // No claim match ≠ no link: the board push (boardpush.linkSpine) may have
+    // set coordination_job_id already — omit the column so the merge-duplicates
+    // upsert leaves an existing link alone instead of nulling it every render.
+    if (!coordId) delete spineRow.coordination_job_id;
     const res2 = await rest(`unified_jobs?on_conflict=field_project_id`, {
       method: "POST",
       headers: { Prefer: "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify([toUnifiedRow(project, coordId)]),
+      body: JSON.stringify([spineRow]),
     });
     if (!res2.ok) return { ok: false, status: res2.status };
     const rows = await res2.json().catch(() => []);

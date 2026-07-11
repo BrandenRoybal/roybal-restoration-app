@@ -105,7 +105,9 @@ function certSummary(p) {
   const verification = arr(cd.verification)
     .filter((v) => v.material || v.final || v.goal)
     .map((v) => ({ material: v.material || "", goal: v.goal || "", final: v.final || "", dry: !!v.dry }));
-  const certified = !!(cd.sigTech || (cd.uploadedPages && cd.uploadedPages.length) || cd.issueDate);
+  // signature or uploaded copy ONLY — the factory prefills issueDate, so a
+  // merely-opened cert form must never read as certified in the narrative
+  const certified = !!(cd.sigTech || (cd.uploadedPages && cd.uploadedPages.length));
   return { certified, certDate: cd.issueDate || cd.sigTechDate || "", verification, dryingDays: num(cd.dryingDays) };
 }
 
@@ -156,6 +158,82 @@ export function narrativeFacts(project) {
       .map((c) => ({ no: c.coNo || "", date: c.coDate || "", description: c.description || "" }))
       .filter((c) => c.description || c.no),
     photos: photoSummary(p),
+  };
+}
+
+/* ============================================================
+   constructionFacts(project) — the digest for CONSTRUCTION jobs:
+   what the assistant and the progress narrative read from. Pure.
+   ============================================================ */
+export function constructionFacts(project, now = Date.now()) {
+  const p = project || {};
+  const scope = arr(p.scopeOfWork && p.scopeOfWork.areas).map((a) => ({
+    area: a.name || "",
+    items: arr(a.items).filter((it) => it.desc).map((it) =>
+      [it.trade, it.desc, [it.qty, it.unit].filter(Boolean).join(" ")].filter(Boolean).join(" — ")),
+  })).filter((a) => a.area || a.items.length);
+  const schedule = arr(p.subSchedule && p.subSchedule.rows).filter((r) => r.trade).map((r) => ({
+    trade: r.trade, company: r.company || "", status: r.status || "",
+    schedStart: r.schedStart || "", schedEnd: r.schedEnd || "",
+    actStart: r.actStart || "", actEnd: r.actEnd || "",
+  }));
+  const inspections = arr(p.inspections).filter((i) => i.type).map((i) => ({
+    type: i.type, scheduled: i.scheduled || "", result: i.result || "",
+    corrections: i.corrections || "", reinspection: i.reinspection || "",
+  }));
+  const selRows = arr(p.selections && p.selections.rows).filter((r) => r.item);
+  // over/under only counts DECIDED rows (an actual price entered) — a pending
+  // selection with a blank actual is an open decision, not money saved
+  const decided = selRows.filter((r) => String(r.actual ?? "").trim() !== "");
+  const selections = {
+    pending: selRows.filter((r) => r.status === "pending").map((r) => [r.area, r.item].filter(Boolean).join(": ")),
+    ordered: selRows.filter((r) => r.status === "ordered").length,
+    installed: selRows.filter((r) => r.status === "installed" || r.status === "delivered").length,
+    netOverAllowance: Math.round(decided.reduce((t, r) =>
+      t + ((parseFloat(r.actual) || 0) - (parseFloat(r.allowance) || 0)), 0)),
+  };
+  const punchRows = arr(p.punchList && p.punchList.rows).filter((r) => r.item);
+  const drawRows = arr(p.drawSchedule && p.drawSchedule.rows).filter((r) => r.desc);
+  return {
+    job: {
+      owner: p.customer || "", property: p.address || "",
+      carrier: p.carrier || "", claim: p.claimNo || "", adjuster: p.adjuster || "",
+      jobId: p.workOrderNo || "",
+      constructionType: p.constructionType || "",
+      contractAmount: p.contractAmount || "",
+      startDate: p.startDate || "", targetCompletion: p.targetCompletion || "",
+      permits: p.permitNumbers || "", lender: p.lender || "",
+    },
+    scope,
+    schedule,
+    inspections,
+    selections,
+    punch: {
+      open: punchRows.filter((r) => r.status === "open" || r.status === "in-progress").length,
+      total: punchRows.length,
+    },
+    draws: {
+      rows: drawRows.map((r) => ({ desc: r.desc, pct: r.pct || "", amount: r.amount || "",
+        invoiced: r.invoicedDate || "", paid: r.paidDate || "" })),
+      invoicedUnpaid: drawRows.filter((r) => r.invoicedDate && !r.paidDate).length,
+    },
+    dailyWork: scopeSummary(p),          // all-time tasks, crew, hours, log-day count
+    // DATED recent work so "this week" means something to the progress update —
+    // the all-time digest above can't distinguish week one from this week
+    recentWork: arr(p.constructionLogs)
+      .filter((c) => { const t = c.date && new Date(c.date + "T12:00:00").getTime(); return t && now - t <= 14 * 86400000; })
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+      .slice(-10)
+      .map((c) => ({
+        date: c.date,
+        tasks: [...new Set(arr(c.rows).map((r) => (r.task || "").trim()).filter(Boolean))].slice(0, 12),
+        hours: Math.round(arr(c.rows).reduce((t, r) => t + (parseFloat(r.hours) || 0), 0) * 10) / 10,
+      })),
+    changeOrders: arr(p.changeOrders)
+      .map((c) => ({ no: c.coNo || "", date: c.coDate || "", description: c.description || "" }))
+      .filter((c) => c.description || c.no),
+    photos: photoSummary(p),
+    convertedFrom: p.mitigationRef ? { claim: p.claimNo || "", lossCause: p.lossCause || "" } : null,
   };
 }
 

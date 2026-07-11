@@ -19,6 +19,7 @@ import { candidateChips, applyChips, AI_FORM_KEYS } from "./ai.js";
 import { capturedBy, hasTech, pickTech } from "./tech.js";
 import {
   blankPsychroRow, blankEquipRow, blankReadingRow, blankWorkRow, newPhoto,
+  blankPunchRow, blankSubRow, blankSelectionRow, blankLineItem,
 } from "./model.js";
 
 const FN_URL = SUPABASE_URL ? `${SUPABASE_URL}/functions/v1/roybal-ai-ingest` : "";
@@ -30,6 +31,10 @@ function makeFactories(formKey) {
       if (formKey === "dryingLogs") return group === "equipment" ? blankEquipRow() : blankPsychroRow();
       if (formKey === "moistureMaps") return blankReadingRow();
       if (formKey === "constructionLogs") return blankWorkRow();
+      if (formKey === "punchList") return blankPunchRow();
+      if (formKey === "subSchedule") return blankSubRow();
+      if (formKey === "selections") return blankSelectionRow();
+      if (formKey === "changeOrders") return blankLineItem();
       return {};
     },
     photo: () => newPhoto(),

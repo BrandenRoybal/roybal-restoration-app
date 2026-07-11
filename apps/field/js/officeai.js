@@ -179,6 +179,26 @@ export function justifyContents(project, items) {
   }).then((b) => b.justifications ?? []);
 }
 
+/* ---------- board timeline estimate ---------- */
+/** Draft the phase plan for the Job Board's Gantt.
+    Returns { phases, notBefore, notBeforeLabel, assumptions }. */
+export function draftTimeline(project, facts, history) {
+  return callOffice(project, "timelineDraft", { facts, history: history || [] }).then((b) => b.draft);
+}
+
+/* ---------- construction progress update ---------- */
+/** Draft the weekly owner/carrier/lender progress summary (markdown). */
+export function draftProgress(project, facts) {
+  return callOffice(project, "progressNarrative", { facts }).then((b) => b.draft);
+}
+
+/* ---------- rebuild draft (restoration → construction conversion) ---------- */
+/** Draft the reconstruction plan from the restoration job's fact pack.
+    Returns { scopeAreas, tradeSequence, selections, questions }. */
+export function draftRebuild(project, facts) {
+  return callOffice(project, "rebuildDraft", { facts }).then((b) => b.draft);
+}
+
 /** Conversational field assistant — returns { reply, transcript? }. */
 export function fieldAssist(project, payload) {
   return callOffice(project, "fieldAssist", payload);

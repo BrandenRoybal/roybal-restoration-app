@@ -25,29 +25,85 @@ export const COMPANY = {
 
 /* The forms shown in the field app. (Invoice moved to the office admin.)
    `multi` forms can have many instances (a new Drying Log / Moisture Map
-   page per day/area). */
+   page per day/area). `types` says which job kinds see the form —
+   restoration (water mitigation) and/or construction (remodel / rebuild);
+   an entry without `types` shows for both. */
 export const FORMS = [
   { key: "moistureMaps",     name: "Moisture Map",       icon: "🗺️", multi: true,
+    types: ["restoration"],
     blurb: "Sketch the affected area + daily MC% readings" },
   { key: "dryingLogs",       name: "Drying Log",         icon: "💧", multi: true,
+    types: ["restoration"],
     blurb: "Equipment runtime + psychrometric readings" },
   { key: "photos",           name: "Job Photos",         icon: "📷", multi: false,
+    types: ["restoration", "construction"],
     blurb: "Before / during / after pictures" },
   { key: "contents",         name: "Contents",           icon: "📦", multi: false,
+    types: ["restoration", "construction"],
     blurb: "Personal property inventory + pack-out" },
   { key: "workAuth",         name: "Work Authorization", icon: "✍️", multi: false,
+    types: ["restoration", "construction"],
     blurb: "Sign on device or upload signed copy" },
   { key: "constructionLogs", name: "Daily Const. Log",   icon: "📋", multi: true,
+    types: ["restoration", "construction"],
     blurb: "Crew, tasks & hours (internal — not in packet)" },
   { key: "laborLog",         name: "Labor Log",          icon: "⏱", multi: false,
+    types: ["restoration", "construction"],
     blurb: "Every job hour from QuickBooks Time — one page for the packet" },
   { key: "certDrying",       name: "Cert. of Drying",    icon: "✅", multi: false,
+    types: ["restoration"],
     blurb: "IICRC S500 dry verification + sign-off" },
+  { key: "scopeOfWork",      name: "Scope of Work",      icon: "📐", multi: false,
+    types: ["construction"],
+    blurb: "Per-area line items + allowances" },
+  { key: "preConChecklist",  name: "Pre-Construction",   icon: "🗒️", multi: false,
+    types: ["construction"],
+    blurb: "Contract, deposit, permits, selections" },
+  { key: "selections",       name: "Selections",         icon: "🎨", multi: false,
+    types: ["construction"],
+    blurb: "Owner finish & fixture choices vs. allowances" },
+  { key: "subSchedule",      name: "Sub Schedule",       icon: "👷", multi: false,
+    types: ["construction"],
+    blurb: "Trades, dates, status & COI tracking" },
+  { key: "inspections",      name: "Inspection Log",     icon: "🏛️", multi: true,
+    types: ["construction"],
+    blurb: "Permit inspections, results & corrections" },
+  { key: "punchList",        name: "Punch List",         icon: "🔧", multi: false,
+    types: ["construction"],
+    blurb: "Walkthrough items to closeout + owner sign-off" },
+  { key: "drawSchedule",     name: "Draw Schedule",      icon: "💰", multi: false,
+    types: ["construction"],
+    blurb: "Payment milestones — one tap to invoice a draw" },
+  { key: "certCompletion",   name: "Cert. of Completion", icon: "🏁", multi: false,
+    types: ["construction"],
+    blurb: "Final checklist, warranty + signatures" },
   { key: "changeOrders",     name: "Change Order",       icon: "🔁", multi: true,
+    types: ["restoration", "construction"],
     blurb: "Scope / supplement changes" },
   { key: "invoices",         name: "Construction Invoice", icon: "🧾", multi: true,
+    types: ["restoration", "construction"],
     blurb: "T&M or contract billing — AI-drafted from the job's documentation or built by hand" },
 ];
+
+/* Job kind. Jobs created before this field existed carry no jobType, so
+   always read it through this helper — never the raw field. */
+export const jobType = (p) => (p && p.jobType === "construction" ? "construction" : "restoration");
+
+/* The forms a job shows: its kind's forms, plus any form that already has
+   data — so a job switched between kinds never hides documents it holds
+   (tiles, packet, and old bookmarks all stay reachable). Entries without
+   `types` apply to both kinds. */
+export const formsFor = (p) => {
+  const t = jobType(p);
+  return FORMS.filter((f) => !f.types || f.types.includes(t) || formCount(p, f.key) > 0);
+};
+
+export const CONSTRUCTION_TYPES = [
+  { value: "remodel",          label: "Remodel" },
+  { value: "new_construction", label: "New Construction" },
+  { value: "reconstruction",   label: "Reconstruction" },
+];
+export const constructionTypeLabel = (v) => CONSTRUCTION_TYPES.find((t) => t.value === v)?.label || "";
 
 export function newProject() {
   return {
@@ -68,6 +124,15 @@ export function newProject() {
     waterCategory: "",   // 1 | 2 | 3
     waterClass: "",      // 1 | 2 | 3 | 4
     dryingSystem: "",    // Open | Closed | Hybrid
+    // job kind + construction header (construction jobs only; blank on water jobs)
+    jobType: "restoration",   // "restoration" | "construction"
+    constructionType: "",     // remodel | new_construction | reconstruction
+    contractAmount: "",
+    startDate: "",
+    targetCompletion: "",
+    permitNumbers: "",
+    lender: "",               // optional — lender on draw-schedule jobs
+    linkedRestorationId: "",  // set when converted from a restoration job
     // project-level job photos (before/during/after, with caption + room)
     photos: [],
     // contents / personal property
@@ -77,6 +142,9 @@ export function newProject() {
     // AI construction narrative (packet cover) — markdown prose + date generated
     narrative: "",
     narrativeDate: "",
+    // AI progress update (construction jobs) — weekly owner/adjuster/lender summary
+    progressNarrative: "",
+    progressNarrativeDate: "",
     // form data
     workAuth: null,
     certDrying: null,
@@ -86,6 +154,15 @@ export function newProject() {
     laborLog: null,
     changeOrders: [],
     invoices: [],
+    // construction / remodel forms
+    scopeOfWork: null,
+    preConChecklist: null,
+    selections: null,
+    subSchedule: null,
+    inspections: [],
+    punchList: null,
+    drawSchedule: null,
+    certCompletion: null,
   };
 }
 
@@ -306,3 +383,140 @@ export const CHANGE_REASONS = [
   "Scope Clarification",
   "Material / Unit Price Adjustment",
 ];
+
+/* ============================================================
+   Construction / remodel forms (jobType "construction")
+   ============================================================ */
+export const TRADES = [
+  "Demo", "Framing", "Electrical", "Plumbing", "HVAC", "Insulation",
+  "Drywall", "Paint", "Flooring", "Trim / Doors", "Cabinets / Counters", "Roofing", "Other",
+];
+export const SELECTION_STATUSES = ["pending", "ordered", "delivered", "installed"];
+export const SUB_STATUSES = ["scheduled", "on-site", "done", "no-show"];
+export const PUNCH_STATUSES = ["open", "in-progress", "done", "verified"];
+export const PUNCH_PRIORITIES = ["low", "normal", "high"];
+export const INSPECTION_TYPES = [
+  "Footing / Foundation", "Framing", "Rough Electrical", "Rough Plumbing", "Rough Mechanical",
+  "Insulation", "Drywall / Nailing", "Final Electrical", "Final Plumbing", "Final Mechanical", "Final / CO",
+];
+export const INSPECTION_RESULTS = ["pass", "fail", "partial"];
+
+export function newScopeOfWork() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    date: todayISO(),
+    summary: "",
+    areas: [ blankScopeArea() ],
+    allowances: [ blankAllowanceRow() ],
+    exclusions: "",
+    referencePlans: [],   // floor plans / sketches (carried over from a linked restoration job)
+  };
+}
+export function blankScopeArea() {
+  return { id: uid(), name: "", items: [ blankScopeItem() ] };
+}
+export function blankScopeItem() {
+  return { trade: "", desc: "", qty: "", unit: "", notes: "" };
+}
+export function blankAllowanceRow() {
+  return { item: "", amount: "", notes: "" };
+}
+
+/* Pre-construction checklist items — completeness gates on the indexes below. */
+export const PRECON_ITEMS = [
+  "Contract signed",
+  "Deposit received",
+  "Permits pulled (list below)",
+  "HOA / covenant approval (if required)",
+  "Utilities located (dig line called)",
+  "Selections finalized with owner",
+  "Material lead times confirmed",
+  "Pre-construction photos taken",
+];
+export const PRECON_CONTRACT = 0;
+export const PRECON_PERMITS = 2;
+
+export function newPreConChecklist() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    items: {},           // checkbox map keyed by PRECON_ITEMS index
+    permits: [ blankPermitRow() ],
+    notes: "",
+  };
+}
+export function blankPermitRow() {
+  return { type: "", number: "", pulled: "", notes: "" };
+}
+
+export function newSelections() {
+  return { id: uid(), createdAt: new Date().toISOString(), rows: [ blankSelectionRow() ], notes: "" };
+}
+export function blankSelectionRow() {
+  return {
+    area: "", item: "", spec: "", allowance: "", actual: "", status: "pending",
+    leadWeeks: "", neededBy: "", decidedDate: "", ownerInit: "",
+  };
+}
+
+export function newSubSchedule() {
+  return { id: uid(), createdAt: new Date().toISOString(), rows: [ blankSubRow() ], notes: "" };
+}
+export function blankSubRow() {
+  return {
+    trade: "", company: "", contact: "", schedStart: "", schedEnd: "",
+    actStart: "", actEnd: "", status: "scheduled", coi: false, notes: "",
+  };
+}
+
+export function newInspection() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    type: "", scheduled: "", inspector: "", result: "",
+    corrections: "", reinspection: "", notes: "",
+  };
+}
+
+export function newPunchList() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    rows: [ blankPunchRow() ],
+    walkthroughDate: "",
+    sigOwner: "", sigOwnerName: "", sigOwnerDate: "",
+  };
+}
+export function blankPunchRow() {
+  return {
+    area: "", item: "", trade: "", priority: "normal", status: "open",
+    photos: [], completedBy: "", completedDate: "",
+  };
+}
+
+export function newDrawSchedule() {
+  return { id: uid(), createdAt: new Date().toISOString(), rows: [ blankDrawRow() ], notes: "" };
+}
+export function blankDrawRow() {
+  return { desc: "", pct: "", amount: "", invoicedDate: "", paidDate: "", invoiceId: "" };
+}
+
+/* Certificate of Completion checklist — mirrors certDrying's structure. */
+export const COMPLETION_ITEMS = [
+  "All contracted scope complete",
+  "Punch list cleared & verified",
+  "Final inspections passed / CO issued (if required)",
+  "Site cleaned & debris removed",
+  "Owner walkthrough completed",
+  "Manuals / warranties / registrations delivered",
+  "Final invoice issued",
+];
+export function newCertCompletion() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    certNo: "", issueDate: todayISO(), completionDate: "",
+    scopeSummary: "",
+    checklist: {},        // keyed by COMPLETION_ITEMS index
+    warrantyWorkmanship: "1 year", warrantyNotes: "",
+    mode: "sign", uploadedDoc: "", uploadedPages: [],
+    sigContractor: "", sigContractorName: "", sigContractorDate: todayISO(),
+    sigOwner: "", sigOwnerName: "", sigOwnerDate: todayISO(),
+  };
+}

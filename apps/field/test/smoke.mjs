@@ -29,6 +29,7 @@ window.requestAnimationFrame = globalThis.requestAnimationFrame;
 window.devicePixelRatio = 1;
 window.print = () => { window.__printed = (window.__printed || 0) + 1; };
 window.confirm = () => true;
+globalThis.confirm = window.confirm;   // app code calls bare confirm() (a browser global)
 window.scrollTo = () => {};
 
 // ---- shim canvas (jsdom has no 2d context without the native canvas pkg) ----
@@ -57,9 +58,10 @@ function setInput(el, val) {
   await import("../js/app.js");
   await tick();
 
-  // 1. empty job list
+  // 1. empty job list (mode-aware copy — fresh devices open in restoration mode)
   await nav("#/");
-  ok(/No jobs yet/.test(text()), "empty job list renders");
+  ok(/No restoration jobs yet/.test(text()), "empty job list renders");
+  ok(/🔨 Construction \(0\)/.test(text()), "home screen shows the construction mode toggle");
 
   // 2. create a job -> edit screen
   await nav("#/new");
@@ -136,8 +138,8 @@ function setInput(el, val) {
   ok(view().querySelectorAll("canvas").length >= 2, "work auth has owner + rep signature pads");
   ok(/Upload signed copy/.test(text()), "work auth offers upload-signed-copy option");
 
-  // Invoice removed from the field app (moved to admin)
-  ok(!FORMS.some((f) => f.key === "invoices"), "invoice form is not in the field app");
+  // Mitigation invoice is back in the field app (AI-drafted or built by hand)
+  ok(FORMS.some((f) => f.key === "invoices"), "mitigation invoice form is in the field app");
   ok(!FORMS.some((f) => f.hero), "moisture/drying tiles are standard size (no hero)");
 
   // 8. remaining single/multi forms render without throwing
@@ -202,6 +204,129 @@ function setInput(el, val) {
   // 9. data persisted across reload (fake-indexeddb keeps state in-process)
   await nav("#/");
   ok(/Jane Homeowner/.test(text()), "job persists and shows in list after navigation");
+
+  // 10. construction mode — home toggle, new construction job, filtered tiles
+  [...view().querySelectorAll(".seg button")].find((b) => /🔨 Construction/.test(b.textContent))?.click();
+  await tick(40);
+  ok(/No construction jobs yet/.test(text()), "construction tab starts empty");
+  await nav("#/new");
+  await tick(40);
+  ok(/Construction details/.test(text()), "new job in construction mode shows construction details");
+  ok(!/Loss classification/.test(text()), "construction edit hides the water loss classification");
+  setInput(view().querySelector("input"), "Hansen Kitchen Remodel");
+  [...view().querySelectorAll(".seg button")].find((b) => b.textContent === "Remodel")?.click();
+  await tick();
+  const conId = window.location.hash.split("/")[2];
+  await nav(`#/p/${conId}`);
+  await tick(40);
+  const conTiles = [...view().querySelectorAll(".tile__name")].map((t) => t.textContent);
+  ok(!conTiles.includes("Moisture Map") && !conTiles.includes("Drying Log") && !conTiles.includes("Cert. of Drying"),
+    "construction job hides the water-only tiles");
+  ok(conTiles.includes("Daily Const. Log") && conTiles.includes("Job Photos"), "construction job shows the shared tiles");
+  ok(conTiles.includes("Scope of Work") && conTiles.includes("Punch List") && conTiles.includes("Draw Schedule"),
+    "construction job shows the construction tiles");
+  ok(view().querySelector(".completeness") !== null, "construction completeness panel renders");
+  ok(/Contract signed/.test(text()), "completeness panel checks the construction matrix");
+  ok(/🔨 Remodel/.test(text()), "construction badge shows the project type");
+
+  // every construction form renders a printable sheet; only AI forms get the mic
+  for (const key of ["scopeOfWork", "preConChecklist", "selections", "subSchedule", "punchList", "drawSchedule", "certCompletion"]) {
+    await nav(`#/p/${conId}/f/${key}`);
+    await tick(40);
+    ok(view().querySelector(".sheet") !== null, `${key} editor renders a printable sheet`);
+    const hasMic = [...view().querySelectorAll("button")].some((b) => /Transcribe/.test(b.textContent));
+    const wantsMic = ["selections", "subSchedule", "punchList"].includes(key);
+    ok(hasMic === wantsMic, `${key} ${wantsMic ? "mounts" : "stays free of"} the voice widget`);
+  }
+  await nav(`#/p/${conId}/f/inspections`);
+  [...view().querySelectorAll("button")].find((b) => /New/.test(b.textContent))?.click();
+  await tick(40);
+  ok(view().querySelector(".sheet") !== null, "inspections editor renders a printable sheet");
+
+  // 10c. Phase 4 — voice capture rides the construction forms; progress page renders
+  await nav(`#/p/${conId}/f/punchList`);
+  await tick(40);
+  ok([...view().querySelectorAll("button")].some((b) => /Transcribe/.test(b.textContent)),
+    "punch list mounts the voice-capture widget");
+  await nav(`#/p/${conId}/f/changeOrders`);
+  [...view().querySelectorAll("button")].find((b) => /New/.test(b.textContent))?.click();
+  await tick(40);
+  ok([...view().querySelectorAll("button")].some((b) => /Transcribe/.test(b.textContent)),
+    "change order mounts the voice-capture widget");
+  await nav(`#/p/${conId}`);
+  await tick(40);
+  ok([...view().querySelectorAll("button")].some((b) => /Progress Update/.test(b.textContent)),
+    "construction job home offers the Progress Update");
+  ok([...view().querySelectorAll("button")].some((b) => /Estimate timeline/.test(b.textContent)),
+    "construction job home offers the board timeline estimate");
+  ok(/Board timeline/.test(text()), "board timeline panel renders");
+  await nav(`#/p/${conId}/progress`);
+  await tick(40);
+  ok(/CONSTRUCTION PROGRESS UPDATE/.test(text()), "progress page renders the letterhead sheet");
+  ok([...view().querySelectorAll("button")].some((b) => /Generate update/.test(b.textContent)),
+    "progress page offers AI generation");
+
+  // 10b. switching a documented water job to construction never hides its documents
+  await nav(`#/p/${id}/packet`);
+  await tick(60);
+  const sheetsBefore = view().querySelectorAll(".sheet").length;
+  await nav(`#/p/${id}/edit`);
+  await tick(40);
+  [...view().querySelectorAll(".seg button")].find((b) => /🔨 Construction/.test(b.textContent))?.click();
+  await tick(40);
+  await nav(`#/p/${id}`);
+  await tick(40);
+  ok([...view().querySelectorAll(".tile__name")].some((t) => t.textContent === "Moisture Map"),
+    "switched job still shows tiles for forms that hold data");
+  await nav(`#/p/${id}/packet`);
+  await tick(60);
+  ok(view().querySelectorAll(".sheet").length === sheetsBefore,
+    "switched job's packet keeps every mitigation document (" + sheetsBefore + " sheets)");
+  await nav(`#/p/${id}/edit`);
+  await tick(40);
+  [...view().querySelectorAll(".seg button")].find((b) => /💧 Restoration/.test(b.textContent))?.click();
+  await tick(40);
+  window.localStorage.setItem("roybal-mode", "restoration");
+
+  // 11. restoration → construction conversion (copy, not mutation)
+  const { Store } = await import("../js/core.js");
+  await nav(`#/p/${id}`);
+  await tick(40);
+  const reconBtn = [...view().querySelectorAll("button")].find((b) => /Start reconstruction/.test(b.textContent));
+  ok(!!reconBtn, "restoration job home offers Start reconstruction");
+  const beforeConvert = JSON.stringify(await Store.get(id));
+  // cancel path: declining the not-certified confirm leaves both sides untouched
+  globalThis.confirm = window.confirm = () => false;
+  reconBtn.click();
+  await tick(80);
+  ok(window.location.hash === `#/p/${id}`, "cancelled conversion stays on the job");
+  ok(JSON.stringify(await Store.get(id)) === beforeConvert, "cancelled conversion changes nothing");
+  globalThis.confirm = window.confirm = () => true;
+  reconBtn.click();                       // not certified — confirm now accepts
+  await tick(80);
+  const reconId = window.location.hash.split("/")[2];
+  ok(reconId && reconId !== id, "conversion navigates to a new job");
+  const reconProj = await Store.get(reconId);
+  ok(reconProj.jobType === "construction" && reconProj.constructionType === "reconstruction",
+    "converted job is a construction / reconstruction job");
+  ok(reconProj.linkedRestorationId === id, "converted job links back to the mitigation job");
+  ok(reconProj.customer === "Jane Homeowner" && reconProj.claimNo === (await Store.get(id)).claimNo,
+    "header carries over to the rebuild");
+  ok(/💧 Mitigation job/.test(text()), "rebuild job home shows the mitigation link chip");
+  ok(/Draft rebuild plan/.test(text()), "AI rebuild setup panel offers a draft");
+  const afterConvert = await Store.get(id);
+  ok(afterConvert.linkedConstructionId === reconId, "original job gains the back-link");
+  const expected = JSON.parse(beforeConvert);
+  expected.linkedConstructionId = reconId;
+  expected.updatedAt = afterConvert.updatedAt;
+  ok(JSON.stringify(expected) === JSON.stringify(afterConvert),
+    "original job otherwise unchanged by the conversion");
+  await nav(`#/p/${id}`);
+  await tick(40);
+  ok(/🔨 Reconstruction job/.test(text()), "mitigation job home shows the reconstruction link chip");
+  ok(![...view().querySelectorAll("button")].some((b) => /Start reconstruction/.test(b.textContent)),
+    "Start reconstruction card gone once linked");
+  window.localStorage.setItem("roybal-mode", "restoration");
 
   console.log("\n" + (failures ? `FAILED: ${failures} check(s)` : "ALL CHECKS PASSED"));
   process.exit(failures ? 1 : 0);
