@@ -83,7 +83,10 @@ export function applyPhotoAnalysis(photo, analysis) {
 
 /* ---------- invoice facts (digest for draft + audit) ---------- */
 function laborSummary(project) {
-  const entries = Array.isArray(project.laborLog?.entries) ? project.laborLog.entries : [];
+  const start = project.laborLog?.startDate || "";
+  const raw = Array.isArray(project.laborLog?.entries) ? project.laborLog.entries : [];
+  // startDate separates reconstruction hours from mitigation on the same job
+  const entries = raw.filter((e) => !start || String(e.date || "") >= start);
   const hours = entries.reduce((a, e) => a + (parseFloat(e.hours) || 0), 0);
   if (!entries.length) return null;
   return {

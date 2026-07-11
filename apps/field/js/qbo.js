@@ -33,7 +33,11 @@ export function qboExchangeCode(code, realmId, connectedBy) {
  * Caller persists the project afterwards (commit / Store.put).
  */
 export async function pushInvoiceToQbo(project, inv) {
-  const items = (inv.items || [])
+  // contract billing pushes ONE lump-sum line; the scope stays on the printed invoice
+  const contract = inv.billingModel === "contract" && (parseFloat(inv.contractAmount) || 0) > 0;
+  const items = contract
+    ? [{ desc: "Reconstruction contract — per approved scope of work", qty: 1, unit: "LS", price: parseFloat(inv.contractAmount) }]
+    : (inv.items || [])
     .filter((it) => String(it.desc || "").trim())
     .map((it) => ({
       // QBO lines are flat, so the room/section prefixes the description

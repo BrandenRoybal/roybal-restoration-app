@@ -109,6 +109,9 @@ table.grid td input.calc { background: #eef6ff !important; }
    left-aligned; shaded room/section rows; hidden delete column handled
    by .app-only */
 table.grid--inv td.invdesc input { text-align: left; }
+/* the print-only description div wraps the FULL text — no clipping on paper */
+table.grid--inv td.invdesc { text-align: left; vertical-align: top; }
+.invdesc-print { font-size: 9.5pt; line-height: 1.3; padding: 2px 4px; white-space: pre-wrap; word-break: break-word; }
 table.grid--inv th.invdesc { text-align: left; }
 table.grid--inv td.lineno { font-size: 7.5pt; color: #5a6b7f; }
 table.grid--inv tr.invsec td { background: #e8edf4 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
