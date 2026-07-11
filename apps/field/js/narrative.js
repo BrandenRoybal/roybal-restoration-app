@@ -133,6 +133,29 @@ function photoSummary(p) {
 }
 
 /* ---------- the digest the model writes from (pure) ---------- */
+/* Latest S500 equipment sizing from the drying logs — the adjuster-facing
+   justification for the unit counts on site. */
+function equipmentSizingSummary(p) {
+  for (const d of arr(p.dryingLogs).slice().reverse()) {
+    const c = d && d.equipCalc;
+    if (!c) continue;
+    const dh = c.dehu || {};
+    return {
+      sizedAt: c.at || "", method: "IICRC WRT worksheets",
+      wetFloorSF: c.inputs.sf, volumeCuFt: c.inputs.volume,
+      recommended: {
+        airMoversLow: c.airMovers.low, airMoversHigh: c.airMovers.high,
+        dehumidifiers: dh.na ? "N/A (conventional, Class 4)" : dh.units,
+        dehuType: dh.type || "lgr",
+        ...(dh.pintsPerDay ? { pintsPerDay: dh.pintsPerDay } : {}),
+        ...(dh.cfm ? { totalCFM: dh.cfm } : {}),
+        airScrubbers: c.scrubbers.count, auxiliaryHeat: !!c.heat.needed,
+      },
+    };
+  }
+  return null;
+}
+
 /* Supporting documents (engineer's reports, estimates…) — the tech-verified
    AI digests, citable by the narrative, invoice, rebuild scope and assistant. */
 function supportingDocsSummary(p) {
@@ -196,6 +219,7 @@ export function narrativeFacts(project) {
     photos: photoSummary(p),
     planDimensions: planDimensionsSummary(p),
     supportingDocs: supportingDocsSummary(p),
+    equipmentSizing: equipmentSizingSummary(p),
     // texts composed from the app — proof of customer/office notification
     notifications: arr(p.smsLog).slice(-20).map((e) => ({
       at: e.at || "", type: e.kind || "text", to: arr(e.to).join(", "), by: e.by || "",

@@ -23,6 +23,7 @@ import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, extractPlanDimensions, digestSupportDoc } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms } from "./sms.js";
+import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
@@ -434,6 +435,119 @@ export function moistureMap(project, m) {
 /* ============================================================
    2. DRYING LOG
    ============================================================ */
+/* ---------- Equipment Sizing — the IICRC WRT worksheets ----------
+   Airmover Calculation Worksheet (low/high range) + Initial
+   Dehumidification factor chart (conventional / LGR / desiccant) +
+   the desiccant formula for AFDs. Rooms come from the AI floor-plan
+   takeoff; class/category/psychrometrics from the job. Deterministic
+   and offline — defensible to an adjuster line by line. */
+function equipSizingSection(project, d) {
+  if (!d.calcRooms) d.calcRooms = {};
+  const planRooms = (project.floorPlan && project.floorPlan.dimensions && Array.isArray(project.floorPlan.dimensions.rooms))
+    ? project.floorPlan.dimensions.rooms.filter((r) => (r.name || "").trim() && (parseFloat(r.floorSF) > 0 || parseFloat(r.perimLF) > 0)) : [];
+
+  const resultsBox = h("div");
+  function paintResults() {
+    resultsBox.replaceChildren();
+    const c = d.equipCalc;
+    if (!c) return;
+    const dep = deployedCounts(d.equipment);
+    const row = (label, rec, have, basis, isShort) => h("tr", {},
+      h("td", { style: "text-align:left;padding:6px 8px;font-weight:600" }, label),
+      h("td", { style: "font-weight:700" }, String(rec)),
+      h("td", { style: isShort ? "color:var(--red,#d23b2e);font-weight:700" : "" }, have == null ? "—" : String(have) + (isShort ? " ⚠" : "")),
+      h("td", { style: "text-align:left;padding:4px 8px;font-size:12px" }, basis));
+    const am = c.airMovers;
+    const amRec = am.low === am.high ? String(am.low) : am.low + "–" + am.high;
+    const dh = c.dehu || {};
+    const dhRec = dh.na ? "N/A" : dh.type === "desiccant" ? `${dh.units} (${dh.cfm} CFM)` : `${dh.units} (${dh.pintsPerDay} PPD)`;
+    const dhLabel = dh.type === "desiccant" ? "Desiccant dehumidifiers" : dh.type === "conv" ? "Conventional dehumidifiers" : `LGR dehumidifiers (${dh.ahamPints || 70}-pint)`;
+    resultsBox.append(
+      h("p", { class: "subtle", style: "font-size:12px;margin:8px 0 4px" },
+        `Sized ${fmtDate((c.at || "").slice(0, 10))} — Class ${c.inputs.waterClass || "?"} / Cat ${c.inputs.waterCategory || "?"}, ` +
+        `${c.inputs.sf.toLocaleString()} SF wet floor across ${c.inputs.rooms} room(s), ${c.inputs.volume.toLocaleString()} cu ft`),
+      h("div", { class: "tablewrap" },
+        h("table", { class: "grid" },
+          h("colgroup", {}, h("col", { style: "width:160px" }), h("col", { style: "width:100px" }), h("col", { style: "width:86px" }), h("col", {})),
+          h("thead", {}, h("tr", {}, h("th", { class: "thleft" }, "Equipment"), h("th", {}, "Recommended"), h("th", {}, "Deployed"), h("th", { class: "thleft" }, "Basis (IICRC WRT worksheets)"))),
+          h("tbody", {},
+            row("Air movers", amRec, dep.airMovers, am.basis, Number(dep.airMovers) < Number(am.low)),
+            row(dhLabel, dhRec, dep.dehus, dh.basis, !dh.na && Number(dep.dehus) < Number(dh.units || 0)),
+            row("Air scrubbers / AFDs", c.scrubbers.count || "None", dep.scrubbers, c.scrubbers.basis, c.scrubbers.count > 0 && Number(dep.scrubbers) < Number(c.scrubbers.count)),
+            row("Auxiliary heat", c.heat.needed ? "Yes" : c.heat.known ? "No" : "?", dep.heaters || "—", c.heat.basis, c.heat.needed && !dep.heaters)))));
+  }
+
+  const controls = h("div", { class: "app-only" });
+  function paintControls() {
+    controls.replaceChildren();
+    if (planRooms.length) {
+      const list = h("div", { style: "display:flex;flex-wrap:wrap;gap:6px;margin:6px 0" });
+      planRooms.forEach((r) => {
+        const name = r.name.trim();
+        const on = !!d.calcRooms[name];
+        const chip = h("button", { type: "button", class: "btn btn--sm " + (on ? "btn--primary" : "btn--ghost"), style: "width:auto" },
+          `${on ? "✓ " : ""}${name} · ${Math.round(parseFloat(r.floorSF) || 0)} SF`);
+        chip.addEventListener("click", () => { d.calcRooms[name] = !on; commit(); paintControls(); });
+        list.append(chip);
+      });
+      controls.append(h("p", { class: "subtle", style: "font-size:12px;margin:4px 0" }, "Tap the AFFECTED rooms (wet-floor SF from the floor-plan takeoff):"), list);
+    } else {
+      controls.append(
+        h("p", { class: "subtle", style: "font-size:12px;margin:4px 0" },
+          "No floor-plan takeoff yet (Floor Plan → ✨ Read dimensions) — enter the wet areas by hand:"),
+        h("div", { class: "grid2" },
+          field("Wet floor area (SF)", inp(d, "calcSF", { type: "number", placeholder: "e.g. 320" })),
+          field("Affected wall perimeter (LF)", inp(d, "calcLF", { type: "number", placeholder: "e.g. 96" }))));
+    }
+    const lowerToggle = check(d, "calcLowerWalls", "Lower walls only (<24\" migration, limited flooring) — sizes at 1 airmover per 14 LF instead of the square-foot method");
+    controls.append(
+      h("div", { class: "grid2" },
+        field("Wet wall & ceiling ABOVE 2 ft (SF, all rooms)", inp(d, "calcUpperSF", { type: "number", placeholder: "0" }),
+          "worksheet step 3 — ÷150 low / ÷100 high"),
+        field("Wall insets / offsets > 18\" (count)", inp(d, "calcInsets", { type: "number", placeholder: "0" }),
+          "worksheet step 4 — +1 airmover each")),
+      lowerToggle,
+      h("div", { class: "grid3", style: "margin:6px 0" },
+        field("Ceiling height (ft)", inp(d, "calcCeiling", { type: "number", placeholder: "8" })),
+        field("Dehumidifier type", sel(d, "calcDehuType", [
+          { value: "lgr", label: "LGR (refrigerant)" },
+          { value: "conv", label: "Conventional refrigerant" },
+          { value: "desiccant", label: "Desiccant" },
+        ], { onchange: paintControls })),
+        (d.calcDehuType === "desiccant"
+          ? field("Unit CFM rating", inp(d, "calcCFM", { type: "number", placeholder: "500" }))
+          : field("Unit size (AHAM pints)", sel(d, "calcPints", DEHU_SIZES.map((v) => ({ value: String(v), label: v + "-pint" })), { placeholder: "70-pint" })))),
+      (() => {
+        const calcBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto;margin-top:2px" }, "🧮 Size the equipment");
+        calcBtn.addEventListener("click", () => {
+          const rooms = planRooms.length
+            ? planRooms.filter((r) => d.calcRooms[r.name.trim()])
+            : [{ name: "Affected area", floorSF: d.calcSF, perimLF: d.calcLF }];
+          const lastAff = [...(d.readings || [])].reverse().find((x) => String(x.affT || "").trim());
+          const affT = lastAff ? lastAff.affT : (latestPsychReading(project) || {}).affT;
+          const out = equipmentCalc({
+            rooms, waterClass: project.waterClass, waterCategory: project.waterCategory, affT,
+            ceiling: parseFloat(d.calcCeiling) || 8,
+            dehuType: d.calcDehuType || "lgr", dehuPints: parseFloat(d.calcPints) || 70, dehuCFM: parseFloat(d.calcCFM) || 500,
+            upperWetSF: parseFloat(d.calcUpperSF) || 0, insets: parseFloat(d.calcInsets) || 0,
+            lowerWallsOnly: !!d.calcLowerWalls,
+          });
+          if (!out) { toast(planRooms.length ? "Tap at least one affected room first." : "Enter the wet floor SF / wall LF first."); return; }
+          out.at = new Date().toISOString();
+          d.equipCalc = out;
+          commit(); paintResults();
+        });
+        return calcBtn;
+      })());
+  }
+  paintControls(); paintResults();
+
+  return h("div", {},
+    sectionTitle("Equipment Sizing (IICRC WRT Worksheets)"),
+    h("p", { class: "subtle app-only" }, "The WRT class worksheets, computed: airmovers as a low–high range (1/room + wet floor ÷70/÷50 + upper wall/ceiling ÷150/÷100 + insets), dehumidification from the factor chart by type, AFDs from the desiccant formula, aux heat when the space runs cold. Rooms come from the floor-plan takeoff."),
+    controls, resultsBox);
+}
+
 export function dryingLog(project, d) {
   /* drying-day counter: start → finish once a finish date is set, else start → today */
   const daysBanner = h("div", { class: "daysbig app-only", style: "margin-bottom:8px" });
@@ -626,6 +740,7 @@ export function dryingLog(project, d) {
       field("Water Category", seg(project, "waterCategory", [{ value: "1", label: "Cat 1" }, { value: "2", label: "Cat 2" }, { value: "3", label: "Cat 3" }])),
       field("Class", seg(project, "waterClass", ["1", "2", "3", "4"]))),
 
+    equipSizingSection(project, d),
     sectionTitle("Equipment Deployment & Runtime"),
     h("p", { class: "subtle app-only" }, "Log each unit placed on site — placed/removed date & time. Days-on-site and total hours calculate automatically; units past 7 days are flagged."),
     warnBox,
