@@ -20,7 +20,7 @@ import {
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
-import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, extractPlanDimensions } from "./officeai.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, extractPlanDimensions, digestSupportDoc } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms } from "./sms.js";
 import { techName } from "./tech.js";
@@ -1773,6 +1773,65 @@ export function floorPlanSheet(project, fp) {
     dimsBox);
 }
 
+/* ---------- SUPPORTING DOCUMENT — third-party docs the AI can read ----------
+   Engineer's report, hygienist/lab report, adjuster estimate, permit
+   letter… Pages print FULL PAGE in the packet (adjusters get the real
+   document); the AI digest below is tech-editable and rides the facts, so
+   the narrative, invoice draft, rebuild scope and assistant can cite it. */
+const SUPPORT_DOC_TYPES = ["Engineer's report", "Hygienist / lab report", "Adjuster estimate", "Permit / code letter", "Contract / legal", "Other"];
+export function supportDocSheet(project, d) {
+  const digestBox = h("div");
+  function paintDigest() {
+    digestBox.replaceChildren();
+    if (!String(d.aiDigest || "").trim() && !uploadedDocPages(d).length) return;
+    digestBox.append(
+      sectionTitle("AI digest — what this document says"),
+      h("p", { class: "subtle app-only" }, "Tech-editable. This digest (not the pages) is what the AI narrative, invoice draft, rebuild scope and assistant read — keep it accurate."),
+      field("Digest", ta(d, "aiDigest", { rows: 6, placeholder: "Tap ✨ Read this document, or type the key points by hand…" })));
+  }
+  const aiBar = h("div", { class: "app-only", style: "margin:10px 0" });
+  function paintAi() {
+    aiBar.replaceChildren();
+    if (!uploadedDocPages(d).length) return;
+    const btn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" },
+      String(d.aiDigest || "").trim() ? "↻ Re-read this document (AI)" : "✨ Read this document (AI)");
+    const status = h("span", { class: "subtle", style: "font-size:12px;margin-left:8px" });
+    btn.addEventListener("click", async () => {
+      if (!aiAvailable()) return;
+      btn.disabled = true; status.textContent = "Reading the document…";
+      try {
+        const out = await digestSupportDoc(project, uploadedDocPages(d), { title: d.title, docType: d.docType });
+        const lines = [out.summary || ""];
+        if (Array.isArray(out.keyFindings) && out.keyFindings.length)
+          lines.push("", "Key findings:", ...out.keyFindings.map((k) => "• " + k));
+        d.aiDigest = lines.join("\n").trim();
+        if (!d.title && out.suggestedTitle) d.title = out.suggestedTitle;
+        if (!d.docType && out.docType && SUPPORT_DOC_TYPES.includes(out.docType)) d.docType = out.docType;
+        commit(); status.textContent = "";
+        // repaint the whole form so the title/type/digest fields refresh
+        const wrap = digestBox.closest("section");
+        if (wrap) wrap.dispatchEvent(new CustomEvent("docpageschange", { bubbles: true }));
+        toast("Document read — check the digest and edit anything off.");
+      } catch (e) { status.textContent = ""; toast((e && e.message) || "Couldn't read the document — try again."); }
+      btn.disabled = false;
+    });
+    aiBar.append(btn, status);
+  }
+  paintAi(); paintDigest();
+  const upload = uploadDoc(d, {
+    blurb: "Upload the document — a PDF (every page comes in) or photos of it. It prints FULL PAGE in the packet, and the AI can read it into the job's facts.",
+    attachedNote: "each prints as its own full page in the packet.",
+  });
+  upload.addEventListener("docpageschange", paintAi);
+  return sheet("SUPPORTING DOCUMENT", "Third-Party Reports & Documents", "Supporting Document",
+    h("div", { class: "grid2" },
+      field("Document title", inp(d, "title", { placeholder: "e.g. Structural engineer's report — Smith" })),
+      field("Type", sel(d, "docType", SUPPORT_DOC_TYPES, { placeholder: "Type…" }))),
+    sectionTitle("Document"),
+    h("div", { class: "app-only" }, upload, aiBar),
+    digestBox);
+}
+
 /* Printable full-page sheets from an uploaded signed document (each PDF page
    / scan becomes its own printed page). Used by the packet to REPLACE the
    generated Work Authorization or Certificate of Drying when one is uploaded. */
@@ -2311,6 +2370,7 @@ export function certCompletion(project, c) {
 
 export const RENDERERS = {
   floorPlan: floorPlanSheet,
+  supportDocs: supportDocSheet,
   moistureMaps: moistureMap,
   dryingLogs: dryingLog,
   workAuth,

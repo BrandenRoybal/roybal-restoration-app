@@ -560,6 +560,62 @@ async function planDimensions(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: docDigest — read an uploaded supporting document
+   (engineer's report, hygienist report, adjuster estimate, permit
+   letter) into a citable digest the facts digests carry. Tech
+   reviews/edits the digest before anything relies on it.
+   ============================================================ */
+const DOC_DIGEST_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["docType", "suggestedTitle", "summary", "keyFindings"],
+  properties: {
+    docType: { type: "string", enum: ["Engineer's report", "Hygienist / lab report", "Adjuster estimate", "Permit / code letter", "Contract / legal", "Other"] },
+    suggestedTitle: { type: "string", description: "Short title, e.g. \"Structural engineer's report — J. Smith PE, 7/8/2026\"" },
+    summary: { type: "string", description: "150-250 words: what the document is, who authored it, what it concludes — stated facts only, no interpretation" },
+    keyFindings: {
+      type: "array",
+      items: { type: "string", description: "One finding/requirement/number per entry, quoted or closely paraphrased, with its location in the doc when useful (e.g. 'p.3: sistered joists required at bays 2-4')" },
+    },
+  },
+} as const;
+
+async function docDigest(body: Record<string, unknown>) {
+  const pages = Array.isArray(body.pages) ? (body.pages as string[]).slice(0, 8) : [];
+  if (!pages.length) throw new Error("Upload the document first.");
+  const hint = (body.hint ?? {}) as { title?: string; docType?: string };
+  const content: unknown[] = [];
+  for (const src of pages) {
+    const img = dataUrlToImage(src);
+    if (img) content.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+  }
+  if (!content.length) throw new Error("Couldn't read those pages as images.");
+  content.push({
+    type: "text",
+    text:
+      "Digest this supporting document for an insurance restoration/construction job file.\n" +
+      (hint.title ? `The tech labeled it: "${hint.title}".\n` : "") +
+      (hint.docType ? `The tech typed it as: ${hint.docType}.\n` : "") +
+      "RULES:\n" +
+      "- Report ONLY what the document states — author, date, conclusions, required repairs, code citations, dollar amounts, limits.\n" +
+      "- keyFindings: every actionable requirement or number, one per entry. Quote or closely paraphrase; never editorialize.\n" +
+      "- Unreadable sections: say so rather than guessing.",
+  });
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You are a senior restoration estimator at Roybal Construction, LLC digesting a third-party document (engineer's report, " +
+      "hygienist report, adjuster estimate, permit letter) so its findings can be cited in the claim narrative and repair scope. " +
+      "Accuracy over completeness: only what is printed. Call `doc_digest` with the digest.",
+    content,
+    toolName: "doc_digest",
+    schema: DOC_DIGEST_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 2048,
+  });
+  const d = input as { keyFindings?: unknown[] };
+  return { result: { digest: input }, usage, model: DOC_MODEL, summary: { pages: content.length - 1, findings: d.keyFindings?.length ?? 0 } };
+}
+
+/* ============================================================
    Action: rebuildDraft — reconstruction plan from a restoration job
    (Phase 3: mitigation job converts to a rebuild construction job)
    ============================================================ */
@@ -841,7 +897,7 @@ async function fieldAssist(body: Record<string, unknown>) {
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest,
 };
 
 serve(async (req: Request) => {

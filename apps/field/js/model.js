@@ -32,6 +32,9 @@ export const FORMS = [
   { key: "floorPlan",        name: "Floor Plan",         icon: "📏", multi: false,
     types: ["restoration", "construction"],
     blurb: "Dimensioned plan — prints FULL PAGE so measurements stay readable" },
+  { key: "supportDocs",      name: "Supporting Docs",    icon: "📎", multi: true,
+    types: ["restoration", "construction"],
+    blurb: "Engineer's reports, estimates, letters — print full page + the AI reads them" },
   { key: "moistureMaps",     name: "Moisture Map",       icon: "🗺️", multi: true,
     types: ["restoration"],
     blurb: "Sketch the affected area + daily MC% readings" },
@@ -334,6 +337,17 @@ export function newInvoice() {
 }
 export function blankLineItem() {
   return { room: "", desc: "", qty: "", unit: "", price: "" };
+}
+
+/* Supporting document — engineer's report, hygienist report, adjuster
+   estimate, permit letter… Pages print FULL PAGE in the packet; the AI
+   digest (aiDigest, tech-editable) rides the facts so the narrative,
+   invoice, rebuild scope and assistant can cite it. */
+export function newSupportDoc() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    title: "", docType: "", mode: "upload", uploadedPages: [], aiDigest: "",
+  };
 }
 
 /* Floor plan — an uploaded dimensioned plan (PDF/photo) whose pages print
