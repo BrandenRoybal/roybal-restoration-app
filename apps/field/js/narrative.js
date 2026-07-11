@@ -133,6 +133,28 @@ function photoSummary(p) {
 }
 
 /* ---------- the digest the model writes from (pure) ---------- */
+/* Dimensions read off the uploaded floor plan (AI takeoff, tech-verified) —
+   SF/LF quantities for scope + invoice lines and any dimension question. */
+function planDimensionsSummary(p) {
+  const d = p.floorPlan && p.floorPlan.dimensions;
+  const rooms = arr(d && d.rooms).filter((r) => r && (r.name || r.dims));
+  if (!rooms.length) return null;
+  const num = (v) => Math.round((parseFloat(v) || 0) * 100) / 100;
+  return {
+    source: "dimensioned floor plan (AI-read, tech-verified)",
+    rooms: rooms.slice(0, 40).map((r) => ({
+      room: r.name || "", dimensions: r.dims || "",
+      floorSF: num(r.floorSF), perimeterLF: num(r.perimLF),
+      ...(r.ceiling ? { ceiling: r.ceiling } : {}),
+      ...(r.notes ? { notes: r.notes } : {}),
+    })),
+    totals: {
+      floorSF: Math.round(rooms.reduce((t, r) => t + (parseFloat(r.floorSF) || 0), 0)),
+      perimeterLF: Math.round(rooms.reduce((t, r) => t + (parseFloat(r.perimLF) || 0), 0)),
+    },
+  };
+}
+
 export function narrativeFacts(project) {
   const p = project || {};
   return {
@@ -158,6 +180,7 @@ export function narrativeFacts(project) {
       .map((c) => ({ no: c.coNo || "", date: c.coDate || "", description: c.description || "" }))
       .filter((c) => c.description || c.no),
     photos: photoSummary(p),
+    planDimensions: planDimensionsSummary(p),
   };
 }
 
@@ -205,6 +228,7 @@ export function constructionFacts(project, now = Date.now()) {
       permits: p.permitNumbers || "", lender: p.lender || "",
     },
     scope,
+    planDimensions: planDimensionsSummary(p),
     schedule,
     inspections,
     selections,

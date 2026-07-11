@@ -149,6 +149,7 @@ export function rebuildFacts(rest) {
     affectedAreas: f.affectedAreas,   // material, dry goal, wet→dry per area
     drying: f.drying,
     changeOrders: f.changeOrders,     // supplements often describe the demo scope
+    planDimensions: f.planDimensions, // room SF/LF off the uploaded dimensioned plan
     demoNotes: demoNotes(r),
     contentsLoss: contentsLoss(r),
     rooms: arr(r.rooms),
