@@ -28,7 +28,7 @@ import { dryingFlags, isCertified } from "./dryingwatch.js";
 import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
-import { smsHref, onOurWaySms } from "./sms.js";
+import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
@@ -743,6 +743,27 @@ function boardCard(project) {
   return wrap;
 }
 
+/* 💬 Message log — claim documentation: every text composed from the app,
+   newest first. Entries record COMPOSED (Messages opened pre-filled);
+   Twilio (Path 2) will upgrade them with real delivery status. */
+function messageLogCard(project) {
+  const log = Array.isArray(project.smsLog) ? project.smsLog : [];
+  if (!log.length) return h("span", { hidden: true });
+  const rows = [...log].reverse().slice(0, 8).map((e) =>
+    h("div", { style: "padding:6px 0;border-bottom:1px solid var(--line,#e2e6ec);font-size:13px" },
+      h("div", {},
+        h("strong", {}, SMS_KIND_LABELS[e.kind] || "Text"),
+        h("span", { class: "subtle" }, "  " + fmtDate((e.at || "").slice(0, 10)) + " " + (e.at || "").slice(11, 16) +
+          " · to " + (e.to || []).join(", ") + (e.by ? " · by " + e.by : ""))),
+      e.preview ? h("div", { class: "subtle", style: "font-size:12px" }, e.preview) : null));
+  return h("div", { class: "card app-only" },
+    h("div", { style: "font-weight:700" }, `💬 Message log (${log.length})`),
+    h("p", { class: "subtle", style: "margin:4px 0 6px;font-size:12px" },
+      "Texts composed from this job — documentation that the customer / office were notified."),
+    ...rows,
+    log.length > 8 ? h("p", { class: "subtle", style: "font-size:12px;margin-top:6px" }, `+ ${log.length - 8} earlier`) : null);
+}
+
 function projectHome(project) {
   setChrome(project.customer || "Job", "#/");
   const body = clear(view);
@@ -776,13 +797,22 @@ function projectHome(project) {
     const tel = project.phone.replace(/[^\d+]/g, "");
     homeActions.append(
       h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none", href: "tel:" + tel }, "📞 Call"),
-      h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none",
-        href: smsHref(project.phone, onOurWaySms(project, techName())),
-        title: "Opens Messages pre-filled — review and send" }, "🚗 Text: on our way"));
+      (() => {
+        const body = onOurWaySms(project, techName());
+        const a = h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none",
+          href: smsHref(project.phone, body),
+          title: "Opens Messages pre-filled — review and send" }, "🚗 Text: on our way");
+        a.addEventListener("click", () => {   // claim documentation: customer was notified
+          logSms(project, { kind: "onOurWay", to: project.phone, body, by: techName() });
+          Store.put(project);
+        });
+        return a;
+      })());
   }
   body.append(homeActions);
 
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
+  body.append(messageLogCard(project));
 
   // Phase 5: keep the board's field-actuals rollup fresh (fire-and-forget)
   if (jobType(project) === "construction") pushActuals(project);

@@ -69,3 +69,26 @@ export function onOurWaySms(project, techName) {
     `we're on our way to ${project.address || "your property"}. ` +
     `Reply here or call ${COMPANY.phone} if anything changes.`;
 }
+
+/* ---------- message log (claim documentation) ----------
+   Every text button stamps the job: who composed what, to whom, when.
+   Honest wording: with SMS links we can only prove the message was
+   COMPOSED (Messages opened pre-filled) — Path 2 (Twilio) upgrades these
+   entries with real delivery status. */
+export function logSms(project, { kind, to, body, by }) {
+  if (!Array.isArray(project.smsLog)) project.smsLog = [];
+  project.smsLog.push({
+    at: new Date().toISOString(),
+    kind: kind || "text",
+    to: (Array.isArray(to) ? to : [to]).map(normalizePhone).filter(Boolean),
+    preview: String(body || "").replace(/\s+/g, " ").slice(0, 120),
+    by: String(by || "").trim(),
+  });
+  if (project.smsLog.length > 200) project.smsLog = project.smsLog.slice(-200);
+  return project.smsLog[project.smsLog.length - 1];
+}
+export const SMS_KIND_LABELS = {
+  fieldReport: "Field Report → office",
+  onOurWay: "On our way → customer",
+  text: "Text",
+};

@@ -37,3 +37,15 @@ ok("on-our-way names the tech + company", /Mike Reyes with Roybal Construction, 
 ok("on-our-way includes the address", /1192 Bemis Ct\./.test(oow));
 
 console.log(`\n${pass} sms checks passed.`);
+
+/* ---------- message log (claim documentation) ---------- */
+const { logSms } = await import("../js/sms.js");
+const projLog = { customer: "Jeff" };
+const entry = logSms(projLog, { kind: "onOurWay", to: "907-322-5450", body: "Hi Jeff, we're on our way…", by: "Mike" });
+ok("log entry stamped with kind/to/by", entry.kind === "onOurWay" && entry.to.join() === "9073225450" && entry.by === "Mike");
+ok("log entry carries an ISO timestamp + preview", /^\d{4}-\d{2}-\d{2}T/.test(entry.at) && entry.preview.startsWith("Hi Jeff"));
+for (let i = 0; i < 210; i++) logSms(projLog, { kind: "text", to: "907", body: "x" + i });
+ok("log capped at 200 entries", projLog.smsLog.length === 200);
+ok("cap keeps the newest entries", projLog.smsLog[199].preview === "x209");
+
+console.log(`(+ message log checks)`);
