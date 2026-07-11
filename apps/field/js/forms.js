@@ -10,7 +10,7 @@ import {
 } from "./formkit.js";
 import {
   SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
-  blankReadingRow, blankPsychroRow, blankEquipRow, blankWorkRow,
+  blankReadingRow, blankPsychroRow, blankEquipRow,
   blankLineItem, blankVerifyRow, COMPANY,
   TRADES, SELECTION_STATUSES, SUB_STATUSES, PUNCH_STATUSES, PUNCH_PRIORITIES,
   INSPECTION_TYPES, INSPECTION_RESULTS, PRECON_ITEMS, COMPLETION_ITEMS,
@@ -19,7 +19,7 @@ import {
 } from "./model.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
-import { pickJobcode, pullDay as qbPullDay, pullRange as qbPullRange, entriesFor as qbEntriesFor, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
+import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, extractPlanDimensions } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 
@@ -710,150 +710,31 @@ function termRow(k, v) {
   return h("div", { class: "termrow" }, h("span", { class: "termrow__k" }, k + ":"), h("span", { class: "termrow__v" }, v));
 }
 
-/* QuickBooks Time control bar for the construction log (app-only, never printed).
-   Links the job to a QB Time jobcode and pulls that day's crew hours into the
-   log's rows. QB-sourced rows are read-only; edit them in QuickBooks + re-pull. */
-function qbTimeBar(project, c, paint, calcTotal) {
-  if (!qbConfigured()) return h("span", { class: "app-only" });
-  const bar = h("div", { class: "app-only qb-bar" });
-  const pullBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "⤓ Pull hours for this date");
-
-  function render() {
-    const linked = !!project.qbJobcodeId;
-    const label = linked
-      ? h("span", { class: "qb-linked" }, "🔗 QuickBooks: ", h("strong", {}, project.qbJobcodeName || project.qbJobcodeId))
-      : h("span", { class: "subtle" }, "Not linked to a QuickBooks job");
-    const linkBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, linked ? "Change" : "Link QuickBooks job");
-    linkBtn.addEventListener("click", async () => {
-      const picked = await pickJobcode(project);
-      if (picked) { commit(); render(); }
-    });
-    bar.replaceChildren(
-      h("div", { class: "qb-bar__row" }, label, linkBtn),
-      h("div", { class: "qb-bar__row" }, pullBtn,
-        h("span", { class: "subtle qb-hint" }, "Imports crew hours from QuickBooks Time for " + (c.date || "this date") + ".")));
-  }
-
-  // Replace the log's QB-sourced rows with `entries` (from time_entries),
-  // preserving manual rows. Returns true if anything actually changed.
-  const qbSig = (rows) => JSON.stringify(rows.filter((r) => r._qb)
-    .map((r) => [r._qbId, r.hours, r.employee, r.start, r.finish]));
-  function applyEntries(entries) {
-    const manual = c.rows.filter((row) => !row._qb);
-    const qbRows = entries.map((e) => ({
-      employee: e.employee, task: e.task, start: e.start, finish: e.finish,
-      hours: e.hours, _qb: true, _qbId: e.qbTimesheetId,
-    }));
-    const next = [...qbRows, ...manual];
-    const changed = qbSig(next) !== qbSig(c.rows);
-    c.rows = next;
-    return changed;
-  }
-
-  pullBtn.addEventListener("click", async () => {
-    if (!project.qbJobcodeId) { const p = await pickJobcode(project); if (!p || !project.qbJobcodeId) return; commit(); render(); }
-    pullBtn.disabled = true;
-    const prev = pullBtn.textContent;
-    pullBtn.textContent = "Pulling…";
-    try {
-      const r = await qbPullDay(project, c.date);          // live refresh from QuickBooks
-      applyEntries(await qbEntriesFor(project, c.date));
-      paint(); calcTotal(); commit();
-      toast(r.pulled
-        ? `Pulled ${r.pulled} entr${r.pulled === 1 ? "y" : "ies"} from QuickBooks.`
-        : "No QuickBooks hours logged for this date.");
-    } catch (e) { toast(e.message || "QuickBooks pull failed"); }
-    finally { pullBtn.disabled = false; pullBtn.textContent = prev; }
-  });
-
-  render();
-
-  // Auto-load: when a linked log opens, reflect the latest time_entries (kept
-  // fresh by the nightly cron) with no tap. Reads the cache, not a live QB call;
-  // silent if offline or not yet synced.
-  if (project.qbJobcodeId) {
-    qbEntriesFor(project, c.date)
-      .then((entries) => { if (applyEntries(entries)) { paint(); calcTotal(); commit(); } })
-      .catch(() => {});
-  }
-
-  return bar;
-}
-
 /* ============================================================
-   4. DAILY CONSTRUCTION LOG
+   4. FIELD REPORT (key constructionLogs, kept for data compatibility)
+   Crew -> office channel: notes, issues and materials needed on site,
+   with photos of anything worth showing. Internal — never in the packet.
+   Hours live in the Labor Log (QuickBooks Time); the old per-day work
+   log + QB pull are gone (legacy rows stay stored, just not shown).
    ============================================================ */
 export function constructionLog(project, c) {
-  const tbody = h("tbody");
-  const totalEl = h("strong", {}, "0.00");
-  function calcTotal() {
-    const t = c.rows.reduce((s, r) => s + (Number(r.hours) || 0), 0);
-    totalEl.textContent = t.toFixed(2);
-  }
-  function hoursFrom(start, finish) {
-    if (!start || !finish) return "";
-    const [sh, sm] = start.split(":").map(Number), [fh, fm] = finish.split(":").map(Number);
-    let mins = (fh * 60 + fm) - (sh * 60 + sm); if (mins < 0) mins += 1440;
-    return (mins / 60).toFixed(2);
-  }
-  // QuickBooks-sourced rows are read-only — edit them in QuickBooks Time and re-pull.
-  function qbRow(r) {
-    const tr = h("tr", { class: "qb-row" });
-    const cell = (v, w) => h("td", { style: `min-width:${w}` }, h("span", { class: "qb-cell" }, v || "—"));
-    tr.append(
-      h("td", { style: "min-width:110px" },
-        h("span", { class: "qb-cell" }, r.employee || "—"),
-        h("span", { class: "qb-tag", title: "From QuickBooks Time" }, "QB")),
-      cell(r.task, "180px"), cell(r.start, "90px"), cell(r.finish, "90px"),
-      h("td", {}, h("strong", {}, r.hours != null && r.hours !== "" ? Number(r.hours).toFixed(2) : "—")),
-      h("td", { class: "app-only" }));
-    return tr;
-  }
-  function row(r, i) {
-    if (r._qb) return qbRow(r);
-    const tr = h("tr");
-    const hoursCell = h("td");
-    const hoursInput = h("input", { value: r.hours ?? "", style: "min-width:56px", inputmode: "decimal" });
-    hoursInput.addEventListener("input", () => { r.hours = hoursInput.value; r._manualHrs = true; calcTotal(); commit(); });
-    hoursCell.append(hoursInput);
-    const mk = (key, w, type = "text") => {
-      const c2 = h("td");
-      const input = h("input", { type, value: r[key] ?? "", style: `min-width:${w}` });
-      input.addEventListener("input", () => {
-        r[key] = input.value;
-        if ((key === "start" || key === "finish") && !r._manualHrs) { r.hours = hoursFrom(r.start, r.finish); hoursInput.value = r.hours; calcTotal(); }
-        commit();
-      });
-      c2.append(input); return c2;
-    };
-    tr.append(mk("employee", "110px"), taCell(r, "task", { minWidth: "180px" }), mk("start", "90px", "time"), mk("finish", "90px", "time"), hoursCell,
-      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { c.rows.splice(c.rows.indexOf(r), 1); paint(); calcTotal(); commit(); } }, "✕")));
-    return tr;
-  }
-  function paint() { tbody.replaceChildren(...c.rows.map(row)); }
-  paint(); calcTotal();
-  const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add crew row");
-  addRow.addEventListener("click", () => { c.rows.push(blankWorkRow()); paint(); commit(); });
-
-  return sheet("DAILY CONSTRUCTION LOG", "Job Site Activity & Labor Record", "Daily Construction Log",
+  if (!Array.isArray(c.photos)) c.photos = [];
+  return sheet("FIELD REPORT", "Crew → Office — Notes, Issues & Materials Needed", "Field Report",
     h("div", { class: "grid3" },
       field("Customer", inp(project, "customer")),
       field("Project / Job", inp(project, "workOrderNo")),
       field("Date", inp(c, "date", { type: "date" }))),
-    qbTimeBar(project, c, paint, calcTotal),
-    sectionTitle("Work Log"),
-    h("div", { class: "tablewrap" },
-      h("table", { class: "grid" },
-        h("thead", {}, h("tr", {}, ...["Employee", "Task Performed", "Start", "Finish", "Hours"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
-        tbody)),
-    addRow,
-    h("div", { class: "totals" }, h("div", { class: "trow grand" }, h("span", {}, "Total Man Hours"), totalEl)),
-    sectionTitle("Notes / Issues / Materials Needed"),
-    field("Notes", ta(c, "notes")),
-    field("Issues", ta(c, "issues")),
-    field("Materials Needed", ta(c, "materials")),
-    sectionTitle("Completed By"),
-    field("Completed By", inp(c, "completedBy")),
+    sectionTitle("Notes for the Office"),
+    field("Notes", ta(c, "notes", { placeholder: "Anything the office should know — progress, access, schedule…" })),
+    sectionTitle("Issues"),
+    field("Issues", ta(c, "issues", { placeholder: "Problems found on site — hidden damage, safety, delays…" })),
+    sectionTitle("Materials Needed"),
+    field("Materials Needed", ta(c, "materials", { placeholder: "What to order or bring out on the next trip…" })),
+    sectionTitle("Photos"),
+    h("p", { class: "subtle app-only" }, "Attach photos of any issue so the office sees exactly what you see."),
+    photoUploader(c.photos, "Add photos"),
+    sectionTitle("Reported By"),
+    field("Reported By", inp(c, "completedBy")),
     sigBlock(c, "signature", "completedBy", "signDate", "Signature"));
 }
 
@@ -1767,6 +1648,15 @@ export function floorPlanSheet(project, fp) {
     const paintRows = () => {
       tbody.replaceChildren(...list.map((r) => {
         const tr = h("tr", { class: Number(r.conf) < 0.7 ? "flag7" : "" });
+        const actions = h("td", { class: "app-only", style: "white-space:nowrap" });
+        if (Number(r.conf) < 0.7) {
+          const ok = h("button", { type: "button", class: "rowdel", style: "color:var(--green)",
+            title: "Confirm — I verified this room against the plan" }, "\u2713");
+          ok.addEventListener("click", () => { r.conf = 1; commit(); paintRows(); });
+          actions.append(ok);
+        }
+        actions.append(h("button", { type: "button", class: "rowdel",
+          onclick: () => { list.splice(list.indexOf(r), 1); paintRows(); recalc(); commit(); } }, "\u2715"));
         tr.append(
           taCell(r, "name", { minWidth: "110px" }),
           boundCell(r, "dims", "100px"),
@@ -1774,7 +1664,7 @@ export function floorPlanSheet(project, fp) {
           boundCell(r, "perimLF", "56px", "text", recalc),
           boundCell(r, "ceiling", "48px"),
           taCell(r, "notes", { minWidth: "120px" }),
-          delCell(list, r, () => { paintRows(); recalc(); }));
+          actions);
         return tr;
       }));
     };
@@ -1783,13 +1673,13 @@ export function floorPlanSheet(project, fp) {
     addRoom.addEventListener("click", () => { list.push(blankRoom()); paintRows(); commit(); });
     dimsBox.append(
       sectionTitle("Room Dimensions (from the plan)"),
-      h("p", { class: "subtle app-only" }, "AI-read from the uploaded plan — verify each line against the plan and edit anything off. Amber rows were computed rather than printed. These quantities feed the AI invoice, rebuild scope and the assistant."),
+      h("p", { class: "subtle app-only" }, "AI-read from the uploaded plan — verify each line against the plan and edit anything off. Amber rows were computed rather than printed: tap \u2713 once you have checked them. These quantities feed the AI invoice, rebuild scope and the assistant."),
       h("div", { class: "tablewrap" },
         h("table", { class: "grid" },
           h("colgroup", {},
             h("col", {}), h("col", { style: "width:110px" }), h("col", { style: "width:64px" }),
             h("col", { style: "width:64px" }), h("col", { style: "width:56px" }), h("col", { style: "width:24%" }),
-            h("col", { class: "app-only", style: "width:32px" })),
+            h("col", { class: "app-only", style: "width:64px" })),
           h("thead", {}, h("tr", {},
             h("th", { class: "thleft" }, "Room / Area"), h("th", {}, "Dimensions"), h("th", {}, "Floor SF"),
             h("th", {}, "Perim. LF"), h("th", {}, "Ceiling"), h("th", { class: "thleft" }, "Notes"), h("th", { class: "app-only" }, ""))),

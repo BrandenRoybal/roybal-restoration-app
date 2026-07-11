@@ -222,7 +222,7 @@ function setInput(el, val) {
   const conTiles = [...view().querySelectorAll(".tile__name")].map((t) => t.textContent);
   ok(!conTiles.includes("Moisture Map") && !conTiles.includes("Drying Log") && !conTiles.includes("Cert. of Drying"),
     "construction job hides the water-only tiles");
-  ok(conTiles.includes("Daily Const. Log") && conTiles.includes("Job Photos"), "construction job shows the shared tiles");
+  ok(conTiles.includes("Field Report") && conTiles.includes("Job Photos"), "construction job shows the shared tiles");
   ok(conTiles.includes("Scope of Work") && conTiles.includes("Punch List") && conTiles.includes("Draw Schedule"),
     "construction job shows the construction tiles");
   ok(view().querySelector(".completeness") !== null, "construction completeness panel renders");
