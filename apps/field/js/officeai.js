@@ -199,6 +199,13 @@ export function draftRebuild(project, facts) {
   return callOffice(project, "rebuildDraft", { facts }).then((b) => b.draft);
 }
 
+/* ---------- supporting-document digest ---------- */
+/** Read an uploaded third-party document (engineer's report, estimate…)
+    into a citable digest: { summary, keyFindings[], docType, suggestedTitle }. */
+export function digestSupportDoc(project, pages, hint) {
+  return callOffice(project, "docDigest", { pages: pages.slice(0, 8), hint: hint || {} }).then((b) => b.digest);
+}
+
 /* ---------- floor plan dimension takeoff ---------- */
 /** Read room dimensions / SF / LF off the uploaded plan pages.
     Returns { rooms:[{name,dims,floorSF,perimLF,ceiling,notes,confidence}], totals, notes }. */

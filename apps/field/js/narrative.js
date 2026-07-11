@@ -133,6 +133,20 @@ function photoSummary(p) {
 }
 
 /* ---------- the digest the model writes from (pure) ---------- */
+/* Supporting documents (engineer's reports, estimates…) — the tech-verified
+   AI digests, citable by the narrative, invoice, rebuild scope and assistant. */
+function supportingDocsSummary(p) {
+  const docs = arr(p.supportDocs)
+    .filter((d) => d && String(d.aiDigest || "").trim())
+    .map((d) => ({
+      title: d.title || d.docType || "Supporting document",
+      type: d.docType || "",
+      digest: String(d.aiDigest).slice(0, 2500),
+    }))
+    .slice(0, 10);
+  return docs.length ? docs : null;
+}
+
 /* Dimensions read off the uploaded floor plan (AI takeoff, tech-verified) —
    SF/LF quantities for scope + invoice lines and any dimension question. */
 function planDimensionsSummary(p) {
@@ -181,6 +195,7 @@ export function narrativeFacts(project) {
       .filter((c) => c.description || c.no),
     photos: photoSummary(p),
     planDimensions: planDimensionsSummary(p),
+    supportingDocs: supportingDocsSummary(p),
     // texts composed from the app — proof of customer/office notification
     notifications: arr(p.smsLog).slice(-20).map((e) => ({
       at: e.at || "", type: e.kind || "text", to: arr(e.to).join(", "), by: e.by || "",
@@ -233,6 +248,7 @@ export function constructionFacts(project, now = Date.now()) {
     },
     scope,
     planDimensions: planDimensionsSummary(p),
+    supportingDocs: supportingDocsSummary(p),
     schedule,
     inspections,
     selections,

@@ -6,7 +6,7 @@ import {
   formByKey, formCount, newProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
-  newInvoice, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan,
+  newInvoice, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
   newScopeOfWork, newPreConChecklist, newSelections, newSubSchedule,
   newInspection, newPunchList, newDrawSchedule, newCertCompletion,
   blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
@@ -51,7 +51,7 @@ const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
   invoices: newInvoice, workAuth: newWorkAuth, certDrying: newCertDrying,
-  laborLog: newLaborLog, floorPlan: newFloorPlan,
+  laborLog: newLaborLog, floorPlan: newFloorPlan, supportDocs: newSupportDoc,
   scopeOfWork: newScopeOfWork, preConChecklist: newPreConChecklist,
   selections: newSelections, subSchedule: newSubSchedule,
   inspections: newInspection, punchList: newPunchList,
@@ -877,6 +877,16 @@ function packetPage(project) {
     const v = project[f.key];
     const render = RENDERERS[f.key];
     if (!render) continue;
+    // Supporting docs: each uploaded document prints FULL PAGE (the sheet is
+    // management UI + AI digest, not packet material)
+    if (f.key === "supportDocs") {
+      for (const d of (v || [])) {
+        const pages = uploadedDocPages(d);
+        if (pages.length) included.push(...uploadedDocSheet(pages,
+          "Supporting Document" + (d.title ? " — " + d.title : d.docType ? " — " + d.docType : "")));
+      }
+      continue;
+    }
     if (f.multi) {
       (v || []).forEach((inst) => included.push(render(project, inst)));
     } else {
@@ -1166,7 +1176,8 @@ function instanceTitle(key, inst) {
   switch (key) {
     case "moistureMaps": return inst.label || inst.material || ("Moisture map — " + fmtDate(inst.readings?.[0]?.date));
     case "dryingLogs": return "Drying log — " + fmtDate(inst.readings?.[0]?.date);
-    case "constructionLogs": return "Construction log — " + fmtDate(inst.date);
+    case "constructionLogs": return "Field report — " + fmtDate(inst.date);
+    case "supportDocs": return inst.title || (inst.docType ? inst.docType + " — " + fmtDate((inst.createdAt || "").slice(0, 10)) : "Supporting document");
     case "changeOrders": return "Change Order " + (inst.coNo || "") + " — " + fmtDate(inst.coDate);
     case "invoices": return "Invoice " + (inst.invoiceNo || "") + " — " + fmtDate(inst.invoiceDate);
     case "inspections": return (inst.type || "Inspection") + " — " +
@@ -1212,6 +1223,14 @@ function formEditor(project, meta, instance) {
   if (meta.key === "floorPlan") {
     const pages = uploadedDocPages(instance);
     if (pages.length) uploadedDocSheet(pages, "Floor Plan — Dimensions & Square Footages").forEach((sh) => body.append(sh));
+    sheetEl.addEventListener("docpageschange", () => formEditor(project, meta, instance));
+  }
+  if (meta.key === "supportDocs") {
+    const pages = uploadedDocPages(instance);
+    if (pages.length) {
+      sheetEl.classList.add("app-only");   // print the document itself, not the management form
+      uploadedDocSheet(pages, "Supporting Document" + (instance.title ? " — " + instance.title : "")).forEach((sh) => body.append(sh));
+    }
     sheetEl.addEventListener("docpageschange", () => formEditor(project, meta, instance));
   }
   if (UPLOAD_REPLACES[meta.key] && instance && instance.mode === "upload") {

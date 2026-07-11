@@ -150,6 +150,7 @@ export function rebuildFacts(rest) {
     drying: f.drying,
     changeOrders: f.changeOrders,     // supplements often describe the demo scope
     planDimensions: f.planDimensions, // room SF/LF off the uploaded dimensioned plan
+    supportingDocs: f.supportingDocs, // engineer's reports etc. — digests the estimator can cite
     demoNotes: demoNotes(r),
     contentsLoss: contentsLoss(r),
     rooms: arr(r.rooms),
