@@ -47,9 +47,9 @@ export const FORMS = [
   { key: "workAuth",         name: "Work Authorization", icon: "✍️", multi: false,
     types: ["restoration", "construction"],
     blurb: "Sign on device or upload signed copy" },
-  { key: "constructionLogs", name: "Daily Const. Log",   icon: "📋", multi: true,
+  { key: "constructionLogs", name: "Field Report",       icon: "📋", multi: true,
     types: ["restoration", "construction"],
-    blurb: "Crew, tasks & hours (internal — not in packet)" },
+    blurb: "Crew → office: notes, issues, materials + photos (internal — not in packet)" },
   { key: "laborLog",         name: "Labor Log",          icon: "⏱", multi: false,
     types: ["restoration", "construction"],
     blurb: "Every job hour from QuickBooks Time — one page for the packet" },
@@ -287,8 +287,8 @@ export function newConstructionLog() {
   return {
     id: uid(), createdAt: new Date().toISOString(),
     date: todayISO(),
-    rows: [ blankWorkRow() ],
-    notes: "", issues: "", materials: "",
+    rows: [],                                    // legacy work-log rows (form no longer collects them)
+    notes: "", issues: "", materials: "", photos: [],
     completedBy: "", signature: "", signDate: todayISO(),
   };
 }

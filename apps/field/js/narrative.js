@@ -252,6 +252,10 @@ export function constructionFacts(project, now = Date.now()) {
         date: c.date,
         tasks: [...new Set(arr(c.rows).map((r) => (r.task || "").trim()).filter(Boolean))].slice(0, 12),
         hours: Math.round(arr(c.rows).reduce((t, r) => t + (parseFloat(r.hours) || 0), 0) * 10) / 10,
+        // the Field Report's crew -> office channel: what the office should hear about
+        ...(String(c.notes || "").trim() ? { notes: String(c.notes).slice(0, 300) } : {}),
+        ...(String(c.issues || "").trim() ? { issues: String(c.issues).slice(0, 300) } : {}),
+        ...(String(c.materials || "").trim() ? { materialsNeeded: String(c.materials).slice(0, 200) } : {}),
       })),
     changeOrders: arr(p.changeOrders)
       .map((c) => ({ no: c.coNo || "", date: c.coDate || "", description: c.description || "" }))

@@ -121,14 +121,18 @@ export function rollupActuals(project, phaseNames) {
   const out = {};
   const names = arr(phaseNames).filter(Boolean).map((n) => ({ raw: n, n: norm(n) })).filter((x) => x.n);
   if (!names.length) return out;
+  const add = (task, hours) => {
+    if (!task || !hours) return;
+    const hit = names.find((x) => task.includes(x.n) || x.n.includes(task));
+    if (hit) out[hit.raw] = Math.round(((out[hit.raw] || 0) + hours) * 100) / 100;
+  };
+  // legacy per-day work-log rows (the Field Report no longer collects them)
   for (const log of arr(project && project.constructionLogs)) {
-    for (const row of arr(log.rows)) {
-      const task = norm(row.task);
-      const hours = parseFloat(row.hours) || 0;
-      if (!task || !hours) continue;
-      const hit = names.find((x) => task.includes(x.n) || x.n.includes(task));
-      if (hit) out[hit.raw] = Math.round(((out[hit.raw] || 0) + hours) * 100) / 100;
-    }
+    for (const row of arr(log.rows)) add(norm(row.task), parseFloat(row.hours) || 0);
+  }
+  // the living source: QuickBooks Time hours from the Labor Log
+  for (const e of arr(project && project.laborLog && project.laborLog.entries)) {
+    add(norm(e.note || e.task || e.service), parseFloat(e.hours) || 0);
   }
   return out;
 }

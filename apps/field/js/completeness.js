@@ -178,7 +178,7 @@ export const CONSTRUCTION_REQUIREMENTS = [
 const FORM_LABELS = {
   workAuth: "Work Authorization", floorPlan: "Floor Plan", moistureMaps: "Moisture Map",
   dryingLogs: "Drying Log", photos: "Photo Log", certDrying: "Certificate of Drying",
-  constructionLogs: "Daily Construction Log", laborLog: "Labor Log",
+  constructionLogs: "Field Report", laborLog: "Labor Log",
   contents: "Contents", changeOrders: "Change Order",
   scopeOfWork: "Scope of Work", preConChecklist: "Pre-Construction Checklist",
   selections: "Selections", subSchedule: "Sub Schedule", inspections: "Inspection Log",

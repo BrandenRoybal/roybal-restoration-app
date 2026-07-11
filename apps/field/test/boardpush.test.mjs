@@ -110,6 +110,20 @@ ok("only matched phases appear in the rollup", Object.keys(acts).sort().join() =
 ok("drywall tasks matched both ways", acts["Drywall"] === 8);
 ok("phase-in-task match works ('Demo & prep utility room')", acts["Demo & prep"] === 4);
 ok("unmatched tasks stay out", !("Paint" in acts) && Object.values(acts).reduce((a, b) => a + b, 0) === 12);
+
+/* Labor Log (QuickBooks Time) is the living hours source now that the Field
+   Report no longer collects per-day work rows — both sources combine. */
+const withLabor = rollupActuals({
+  ...logs,
+  laborLog: { entries: [
+    { date: "2026-07-16", note: "drywall sanding and second coat", hours: 5 },
+    { date: "2026-07-16", note: "", task: "Paint prime walls", hours: 3 },
+    { date: "2026-07-17", note: "lunch run", hours: 1 },
+  ] },
+}, ["Demo & prep", "Drywall", "Paint"]);
+ok("labor-log notes roll into the phase hours", withLabor["Drywall"] === 13);
+ok("labor-log task fallback matches too", withLabor["Paint"] === 3);
+ok("legacy work-log rows still count", withLabor["Demo & prep"] === 4);
 ok("empty inputs safe", Object.keys(rollupActuals({}, ["X"])).length === 0 && Object.keys(rollupActuals(logs, [])).length === 0);
 
 /* ---------- historyDigest: estimate calibration from done jobs ---------- */
