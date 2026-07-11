@@ -85,7 +85,14 @@ const entriesForJob = (jobId) => {
   return entries.filter((e) =>
     e.jobId === jobId || (jc && e.source === "qbtime" && e.qbJobcodeId === jc));
 };
-const actualHours = (jobId) => entriesForJob(jobId).reduce((s, e) => s + (Number(e.hours) || 0), 0);
+/* "Count hours from" — a rebuild job can share its QuickBooks jobcode with the
+   mitigation phase of the same loss; hours before this date stay stored but
+   don't count toward THIS job (mirrors the field app's Labor Log start date). */
+const inHoursScope = (job, e) => !(job && job.hoursFrom) || String(e.date || "") >= job.hoursFrom;
+const actualHours = (jobId) => {
+  const job = jobs.find((j) => j.id === jobId);
+  return entriesForJob(jobId).filter((e) => inHoursScope(job, e)).reduce((s, e) => s + (Number(e.hours) || 0), 0);
+};
 /* Which crew member an entry belongs to. Manual rows carry crewId; QB rows carry
    qbUserId, resolved to a crew member that's been linked to that QuickBooks user. */
 const crewByQbUser = (qbUserId) => qbUserId ? crew.find((c) => c.qbUserId && String(c.qbUserId) === String(qbUserId)) : null;
@@ -1504,9 +1511,12 @@ function buildJobHoursSection(job) {
 
   function render() {
     clear(wrap);
-    const list = entriesForJob(job.id).sort((a, b) =>
+    const all = entriesForJob(job.id);
+    // count only from the start date (reconstruction phase) — like the field app
+    const list = all.filter((e) => inHoursScope(job, e)).sort((a, b) =>
       (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
-    const act = actualHours(job.id);
+    const excluded = all.length - list.length;
+    const act = list.reduce((s, e) => s + (Number(e.hours) || 0), 0);
     const est = Number(job.estimatedHours) || 0;
     const totText = est ? `${fmtH(act)} of ${fmtH(est)}  (${Math.round((act / est) * 100)}%)` : `${fmtH(act)} logged`;
 
@@ -1530,7 +1540,8 @@ function buildJobHoursSection(job) {
                 await deleteTimeEntry(e.id); render();
               },
             }, "✕"));
-    }) : [h("div", { class: "subtle", style: "padding:4px 2px" }, "No time logged yet.")];
+    }) : [h("div", { class: "subtle", style: "padding:4px 2px" },
+      all.length ? "All logged hours are before the start date below — adjust it or log newer time." : "No time logged yet.")];
 
     const roster = activeCrew().length ? activeCrew() : crew;
     let addRow;
@@ -1586,9 +1597,20 @@ function buildJobHoursSection(job) {
       wrap.append(h("div", { class: "qbbar", style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px" }, ...controls));
     }
 
+    // "count hours from" — saved with the job on Save, like the other fields
+    const fromInp = h("input", { type: "date", value: job.hoursFrom || "" });
+    fromInp.addEventListener("change", () => { job.hoursFrom = fromInp.value || ""; render(); });
+    const fromRow = h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:13px" },
+      h("span", { class: "subtle" }, "Count hours from"), fromInp,
+      h("span", { class: "subtle", style: "font-size:12px" },
+        job.hoursFrom
+          ? (excluded ? `${excluded} earlier entr${excluded === 1 ? "y" : "ies"} excluded` : "no earlier entries")
+          : "reconstruction phase: hours before this date won't count toward this job"));
+
     wrap.append(
       h("div", { class: "hsec__head" }, h("strong", {}, "Time logged"),
         h("span", { class: "hsec__tot" + (est && act > est ? " over" : "") }, totText)),
+      fromRow,
       h("div", { class: "hlist" }, ...rows),
       addRow);
   }

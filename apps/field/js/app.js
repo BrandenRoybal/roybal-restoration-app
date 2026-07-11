@@ -424,7 +424,12 @@ function rebuildPanel(project) {
     btn.disabled = true;
     status.textContent = "Drafting the rebuild plan from the mitigation documentation…";
     try {
-      const draft = await draftRebuild(project, rebuildFacts(rest));
+      const facts = rebuildFacts(rest);
+      // everything the estimator has answered becomes documented fact for
+      // this draft — each redraft gets sharper
+      const qa = (project.rebuildQA || []).filter((x) => x && String(x.a || "").trim());
+      if (qa.length) facts.estimatorAnswers = qa.map((x) => ({ question: x.q, answer: x.a }));
+      const draft = await draftRebuild(project, facts);
       // the call can take a while — write onto a FRESH copy (the tech may have
       // kept editing) and only repaint if they're still on this job home
       const fresh = (await Store.get(project.id)) || project;
@@ -477,9 +482,51 @@ function rebuildPanel(project) {
         h("span", { style: "flex:1;font-size:13px" }, String(c.value ?? ""))));
     }
   }
-  if (rd.draft && Array.isArray(rd.draft.questions) && rd.draft.questions.length) {
-    wrap.append(h("div", { class: "note", style: "margin-top:8px" },
-      h("strong", {}, "For the estimator: "), rd.draft.questions.join(" · ")));
+  // Estimator questions — answered ONE AT A TIME; each answer becomes fact
+  // for the next redraft, so the estimate sharpens instead of just nagging.
+  const questions = rd.draft && Array.isArray(rd.draft.questions) ? rd.draft.questions.filter(Boolean) : [];
+  let qaRedraftBtn = null;
+  if (questions.length) {
+    if (!Array.isArray(project.rebuildQA)) project.rebuildQA = [];
+    if (typeof rd.qIndex !== "number") rd.qIndex = 0;
+    const qBox = h("div", { class: "note", style: "margin-top:8px" });
+    function paintQ() {
+      qBox.replaceChildren();
+      const i = rd.qIndex;
+      const answered = project.rebuildQA.length;
+      if (i >= questions.length) {
+        qBox.append(h("strong", {}, "Estimator questions — done. "),
+          answered ? `${answered} answer${answered === 1 ? "" : "s"} on file — tap "↻ Redraft with answers" to fold them into the plan.`
+            : "All skipped — the draft stands as-is.");
+        if (qaRedraftBtn) qaRedraftBtn.style.display = answered ? "" : "none";
+        return;
+      }
+      const input = h("textarea", { rows: "2", placeholder: "Type what you know — measurements, materials, owner decisions…", style: "margin-top:6px" });
+      const advance = async (answer) => {
+        if (answer) project.rebuildQA.push({ q: questions[i], a: answer, at: new Date().toISOString() });
+        rd.qIndex = i + 1;
+        project.updatedAt = new Date().toISOString();
+        await Store.put(project);
+        paintQ();
+      };
+      const saveBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "Save answer");
+      saveBtn.addEventListener("click", () => {
+        const a = input.value.trim();
+        if (!a) { toast("Type an answer — or Skip if you don't know yet."); input.focus(); return; }
+        advance(a);
+      });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveBtn.click(); } });
+      const skipBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "Skip");
+      skipBtn.addEventListener("click", () => advance(""));
+      qBox.append(
+        h("div", {}, h("strong", {}, `Estimator question ${i + 1} of ${questions.length}: `), questions[i]),
+        input,
+        h("div", { style: "display:flex;gap:8px;margin-top:6px" }, saveBtn, skipBtn));
+    }
+    qaRedraftBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto;display:none" }, "↻ Redraft with answers");
+    qaRedraftBtn.addEventListener("click", () => generate(qaRedraftBtn));
+    paintQ();
+    wrap.append(qBox);
   }
 
   const applyBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "Apply checked items");
@@ -500,7 +547,7 @@ function rebuildPanel(project) {
   redoBtn.addEventListener("click", () => generate(redoBtn));
   const dismissBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "Dismiss");
   dismissBtn.addEventListener("click", async () => { rd.status = "dismissed"; await Store.put(project); projectHome(project); });
-  wrap.append(h("div", { style: "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap" }, applyBtn, redoBtn, dismissBtn), status);
+  wrap.append(h("div", { style: "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap" }, applyBtn, qaRedraftBtn, redoBtn, dismissBtn), status);
   return wrap;
 }
 
