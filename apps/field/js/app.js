@@ -28,6 +28,7 @@ import { dryingFlags, isCertified } from "./dryingwatch.js";
 import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
+import { smsHref, onOurWaySms } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
@@ -769,7 +770,17 @@ function projectHome(project) {
     badges.append(h("a", { class: "badge", href: `#/p/${project.linkedConstructionId}`, style: "text-decoration:none" }, "🔨 Reconstruction job →"));
   if (badges.children.length) body.append(badges);
 
-  body.append(h("button", { class: "btn btn--ghost btn--sm", style: "margin-bottom:14px", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"));
+  const homeActions = h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" },
+    h("button", { class: "btn btn--ghost btn--sm", style: "width:auto", onclick: () => go(`#/p/${project.id}/edit`) }, "✎ Edit job details"));
+  if (project.phone) {
+    const tel = project.phone.replace(/[^\d+]/g, "");
+    homeActions.append(
+      h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none", href: "tel:" + tel }, "📞 Call"),
+      h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none",
+        href: smsHref(project.phone, onOurWaySms(project, techName())),
+        title: "Opens Messages pre-filled — review and send" }, "🚗 Text: on our way"));
+  }
+  body.append(homeActions);
 
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
 

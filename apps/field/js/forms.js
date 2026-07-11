@@ -22,6 +22,8 @@ import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, extractPlanDimensions } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
+import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms } from "./sms.js";
+import { techName } from "./tech.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -717,6 +719,31 @@ function termRow(k, v) {
    Hours live in the Labor Log (QuickBooks Time); the old per-day work
    log + QB pull are gone (legacy rows stay stored, just not shown).
    ============================================================ */
+/* app-only: open Messages pre-filled with this report, addressed to the
+   assigned office numbers — sent from the tech's own phone so the office
+   can text straight back. Numbers are per-device (⚙), office # by default. */
+function textToOfficeBar(project, c) {
+  const bar = h("div", { class: "app-only", style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0" });
+  const send = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "📱 Text to office");
+  send.addEventListener("click", () => {
+    const nums = officeNumbers();
+    if (!nums.length) { toast("Add an office number first (⚙)."); return; }
+    const body = fieldReportSms(project, c, techName());
+    if (body.split("\n").length < 2) { toast("Nothing to send yet — add a note, issue or materials."); return; }
+    location.href = smsHref(nums, body);
+  });
+  const cfg = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Office numbers this report texts to" }, "⚙");
+  const label = h("span", { class: "subtle", style: "font-size:12px" });
+  const paintLabel = () => { label.textContent = "to " + officeNumbers().join(", "); };
+  cfg.addEventListener("click", () => {
+    const v = prompt("Office numbers to text (comma-separated):", officeNumbersRaw());
+    if (v != null) { setOfficeNumbers(v); paintLabel(); }
+  });
+  paintLabel();
+  bar.append(send, cfg, label);
+  return bar;
+}
+
 export function constructionLog(project, c) {
   if (!Array.isArray(c.photos)) c.photos = [];
   return sheet("FIELD REPORT", "Crew → Office — Notes, Issues & Materials Needed", "Field Report",
@@ -733,6 +760,7 @@ export function constructionLog(project, c) {
     sectionTitle("Photos"),
     h("p", { class: "subtle app-only" }, "Attach photos of any issue so the office sees exactly what you see."),
     photoUploader(c.photos, "Add photos"),
+    textToOfficeBar(project, c),
     sectionTitle("Reported By"),
     field("Reported By", inp(c, "completedBy")),
     sigBlock(c, "signature", "completedBy", "signDate", "Signature"));
