@@ -139,12 +139,16 @@ function equipmentSizingSummary(p) {
   for (const d of arr(p.dryingLogs).slice().reverse()) {
     const c = d && d.equipCalc;
     if (!c) continue;
+    const dh = c.dehu || {};
     return {
-      sizedAt: c.at || "", method: "IICRC S500",
-      affectedSF: c.inputs.sf, volumeCuFt: c.inputs.volume,
+      sizedAt: c.at || "", method: "IICRC WRT worksheets",
+      wetFloorSF: c.inputs.sf, volumeCuFt: c.inputs.volume,
       recommended: {
-        airMovers: c.airMovers.count,
-        lgrDehumidifiers: c.dehu.units, pintsPerDay: c.dehu.pintsPerDay,
+        airMoversLow: c.airMovers.low, airMoversHigh: c.airMovers.high,
+        dehumidifiers: dh.na ? "N/A (conventional, Class 4)" : dh.units,
+        dehuType: dh.type || "lgr",
+        ...(dh.pintsPerDay ? { pintsPerDay: dh.pintsPerDay } : {}),
+        ...(dh.cfm ? { totalCFM: dh.cfm } : {}),
         airScrubbers: c.scrubbers.count, auxiliaryHeat: !!c.heat.needed,
       },
     };
