@@ -181,6 +181,10 @@ export function narrativeFacts(project) {
       .filter((c) => c.description || c.no),
     photos: photoSummary(p),
     planDimensions: planDimensionsSummary(p),
+    // texts composed from the app — proof of customer/office notification
+    notifications: arr(p.smsLog).slice(-20).map((e) => ({
+      at: e.at || "", type: e.kind || "text", to: arr(e.to).join(", "), by: e.by || "",
+    })),
   };
 }
 
