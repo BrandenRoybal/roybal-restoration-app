@@ -6,7 +6,7 @@ import {
   formByKey, formCount, newProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
-  newInvoice, newWorkAuth, newCertDrying, newLaborLog,
+  newInvoice, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan,
   newScopeOfWork, newPreConChecklist, newSelections, newSubSchedule,
   newInspection, newPunchList, newDrawSchedule, newCertCompletion,
   blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
@@ -50,7 +50,7 @@ const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
   invoices: newInvoice, workAuth: newWorkAuth, certDrying: newCertDrying,
-  laborLog: newLaborLog,
+  laborLog: newLaborLog, floorPlan: newFloorPlan,
   scopeOfWork: newScopeOfWork, preConChecklist: newPreConChecklist,
   selections: newSelections, subSchedule: newSubSchedule,
   inspections: newInspection, punchList: newPunchList,
@@ -826,7 +826,11 @@ function packetPage(project) {
   setCtx(project, null);
 
   // Forms where an uploaded signed PDF/scan REPLACES the generated form.
-  const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
+  const UPLOAD_REPLACES = {
+    workAuth: "Work Authorization & Service Agreement",
+    certDrying: "Certificate of Drying",
+    floorPlan: "Floor Plan — Dimensions & Square Footages",
+  };
 
   const included = [];
   for (const f of formsFor(project)) {
@@ -841,6 +845,7 @@ function packetPage(project) {
     } else {
       let has = Array.isArray(v) ? v.length > 0 : !!v;   // photos/contents are arrays → one report
       if (f.key === "laborLog") has = !!(v && Array.isArray(v.entries) && v.entries.length);  // only when synced
+      if (f.key === "floorPlan") has = !!(v && uploadedDocPages(v).length);   // only with a plan uploaded
       if (!has) continue;
       const pages = UPLOAD_REPLACES[f.key] && v.mode === "upload" ? uploadedDocPages(v) : [];
       if (pages.length) included.push(...uploadedDocSheet(pages, UPLOAD_REPLACES[f.key]));
@@ -1157,13 +1162,20 @@ function formEditor(project, meta, instance) {
   // If a signed copy was uploaded for the Work Auth / Cert of Drying, the printed
   // single-form PDF shows the full-size uploaded document instead of the app form
   // (same as the full packet). The screen still shows the form to manage the upload.
-  const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
+  const UPLOAD_REPLACES = {
+    workAuth: "Work Authorization & Service Agreement",
+    certDrying: "Certificate of Drying",
+    floorPlan: "Floor Plan — Dimensions & Square Footages",
+  };
   if (UPLOAD_REPLACES[meta.key] && instance && instance.mode === "upload") {
     const pages = uploadedDocPages(instance);
     if (pages.length) {
       sheetEl.classList.add("app-only");   // hide the generated form on print
       uploadedDocSheet(pages, UPLOAD_REPLACES[meta.key]).forEach((s) => body.append(s));
     }
+    // uploading / removing pages re-renders the page so an immediate
+    // "Save as PDF" prints the full-size document, not the thumbnails
+    sheetEl.addEventListener("docpageschange", () => formEditor(project, meta, instance));
   }
 
   body.append(h("div", { style: "height:8px" }));

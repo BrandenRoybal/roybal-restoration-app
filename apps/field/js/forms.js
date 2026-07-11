@@ -6,7 +6,7 @@ import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, t
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
-  lineItems, taCell, sheet, sheetFooter, letterhead, commit,
+  lineItems, taCell, sheet, sheetFooter, letterhead, commit, uploadDoc,
 } from "./formkit.js";
 import {
   SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
@@ -1741,6 +1741,23 @@ export function packBackReceipt(project) {
     sigBlock(project, "packbackSig", "packbackName", "packbackDate", "Homeowner / Insured"));
 }
 
+/* ---------- FLOOR PLAN — uploaded dimensioned plan, printed FULL PAGE ----------
+   The moisture map shrinks the plan to sketch size, which makes the printed
+   dimensions unreadable. This form holds the ORIGINAL dimensioned plan
+   (Xactimate / magicplan PDF or a photo); every page prints as its own full
+   letter page in the single-form PDF and the job packet, so the adjuster can
+   read each measurement and square footage. */
+export function floorPlanSheet(project, fp) {
+  return sheet("FLOOR PLAN", "Dimensioned Plan — Room Sizes & Square Footages", "Floor Plan",
+    sectionTitle("Job Information"),
+    jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
+    sectionTitle("Dimensioned Floor Plan"),
+    uploadDoc(fp, {
+      blurb: "Upload the dimensioned plan — a PDF (every page comes in) or a photo. It prints FULL PAGE in the packet so the adjuster can read the room dimensions and square footages.",
+      attachedNote: "each prints as its own full page in the packet.",
+    }));
+}
+
 /* Printable full-page sheets from an uploaded signed document (each PDF page
    / scan becomes its own printed page). Used by the packet to REPLACE the
    generated Work Authorization or Certificate of Drying when one is uploaded. */
@@ -2278,6 +2295,7 @@ export function certCompletion(project, c) {
 }
 
 export const RENDERERS = {
+  floorPlan: floorPlanSheet,
   moistureMaps: moistureMap,
   dryingLogs: dryingLog,
   workAuth,
