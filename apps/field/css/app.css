@@ -192,6 +192,14 @@ table.grid tr:nth-child(even) td { background: #f7f8fa; }
    numeric columns, shaded room/section header rows, continuous line numbers */
 table.grid--inv th.invdesc { text-align: left; padding-left: 8px; }
 table.grid--inv td.invdesc input { text-align: left; padding-left: 8px; }
+/* description cells grow with their text — nothing is ever clipped */
+table.grid--inv td.invdesc { vertical-align: top; }
+table.grid--inv td.invdesc .invdesc-ta {
+  display: block; width: 100%; min-height: 38px; resize: none; overflow: hidden;
+  border: 0; border-radius: 0; background: transparent;
+  text-align: left; padding: 8px; font-size: 13px; line-height: 1.35;
+}
+table.grid--inv td.invdesc .invdesc-ta:focus { outline: 2px solid var(--brand); outline-offset: -2px; box-shadow: none; }
 table.grid--inv td.lineno { font-size: 11px; color: var(--muted); background: #fff; }
 table.grid--inv tr.invsec td { background: #e8edf4; text-align: left; padding: 0; }
 table.grid--inv .invsec__row { display: flex; align-items: center; gap: 6px; padding-right: 6px; }

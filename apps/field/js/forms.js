@@ -912,6 +912,9 @@ function cleanService(s) {
 export function laborLog(project, l) {
   if (!Array.isArray(l.entries)) l.entries = [];
   let editing = false;
+  // reconstruction phase: only count hours on/after the start date (mitigation
+  // hours before it stay stored, just excluded from this log's totals + print)
+  const inScope = (e) => !l.startDate || String(e.date || "") >= l.startDate;
   const ro = (v) => h("div", { style: "font-weight:600;padding:2px 0" }, v);
   const tbody = h("tbody");
   const totalEl = h("strong", {}, "0.00");
@@ -920,7 +923,8 @@ export function laborLog(project, l) {
 
   // Summary + totals only (no table rebuild) — safe to call while typing in an edit cell.
   function paintSummary() {
-    const entries = l.entries;
+    const entries = l.entries.filter(inScope);
+    const excluded = l.entries.length - entries.length;
     const total = entries.reduce((s, e) => s + (Number(e.hours) || 0), 0);
     totalEl.textContent = total.toFixed(2);
     const dates = entries.map((e) => e.date).filter(Boolean).sort();
@@ -930,7 +934,8 @@ export function laborLog(project, l) {
     summaryEl.replaceChildren(
       field("Total Man-Hours", ro(total.toFixed(2))),
       field("Date Range", ro(range)),
-      field("Crew on Job", ro(String(Object.keys(byEmp).length || "—"))));
+      field("Crew on Job", ro(String(Object.keys(byEmp).length || "—"))),
+      ...(l.startDate ? [field("Counting From", ro(fmtDate(l.startDate) + (excluded ? ` (${excluded} earlier entr${excluded === 1 ? "y" : "ies"} excluded)` : "")))] : []));
     empEl.replaceChildren(...Object.entries(byEmp).sort((a, b) => b[1] - a[1]).map(([n, hh]) =>
       h("span", { style: "margin-right:16px;white-space:nowrap" }, h("strong", {}, n), " " + hh.toFixed(2) + "h")));
   }
@@ -963,13 +968,18 @@ export function laborLog(project, l) {
   }
 
   function paintRows() {
-    const entries = l.entries;
+    // read mode shows only in-scope hours (that's what prints); edit mode
+    // shows everything so dates can be corrected
+    const entries = editing ? l.entries : l.entries.filter(inScope);
     if (!entries.length && !editing) {
       tbody.replaceChildren(h("tr", {}, h("td", { colspan: 7, class: "subtle", style: "text-align:center;padding:8px" },
         "No hours synced yet — link the QuickBooks job and tap Sync.")));
       return;
     }
     tbody.replaceChildren(...entries.map((e, i) => editing ? editRow(e, i) : readRow(e)));
+    if (!editing && !entries.length && l.entries.length)
+      tbody.replaceChildren(h("tr", {}, h("td", { colspan: 7, class: "subtle", style: "text-align:center;padding:8px" },
+        "All synced hours are before the start date — adjust “Count labor from” or sync newer days.")));
   }
   const paint = () => { paintSummary(); paintRows(); };
   paint();
@@ -994,6 +1004,9 @@ export function laborLog(project, l) {
     jobInfo(project, ["customer", "address", "claimNo", "workOrderNo"]),
     laborSyncBar(project, l, paint),
     l.syncedAt ? h("p", { class: "subtle app-only", style: "font-size:12px" }, "Last synced " + fmtDate(l.syncedAt.slice(0, 10))) : null,
+    h("div", { class: "app-only" },
+      field("Count labor from (start date)", inp(l, "startDate", { type: "date", oninput: paint }),
+        "Reconstruction phase: hours before this date (the mitigation work) are excluded from this log")),
     sectionTitle("Summary"),
     summaryEl,
     empEl,
@@ -1169,10 +1182,18 @@ function invoiceCharges(inv, onTotals) {
       input.addEventListener("input", () => { it[key] = input.value; extEl.textContent = money((Number(it.qty) || 0) * (Number(it.price) || 0)); recalc(); commit(); });
       return h("td", { class: cls || "" }, input);
     };
+    // Description: an auto-growing textarea on screen (never clips what you
+    // type) + a print-only div that wraps the full text on paper.
+    const dTa = h("textarea", { class: "invdesc-ta app-only", rows: "1" });
+    dTa.value = it.desc ?? "";
+    const dPrint = h("div", { class: "invdesc-print print-only" }, it.desc ?? "");
+    const grow = () => { dTa.style.height = "auto"; dTa.style.height = Math.max(38, dTa.scrollHeight) + "px"; };
+    dTa.addEventListener("input", () => { it.desc = dTa.value; dPrint.textContent = dTa.value; grow(); commit(); });
+    requestAnimationFrame(grow);
     const extEl = h("td", { class: "ext calc" }, money((Number(it.qty) || 0) * (Number(it.price) || 0)));
     tr.append(
       h("td", { class: "lineno" }, String(no) + "."),
-      cell("desc", "invdesc"),
+      h("td", { class: "invdesc" }, dTa, dPrint),
       cell("qty", "", "number"),
       cell("unit"),
       cell("price", "", "number"),
@@ -1195,8 +1216,25 @@ function invoiceCharges(inv, onTotals) {
         inv.items.splice(at, 0, { ...blankLineItem(), room: sec.key });
         commit(); paint();
       });
+      // move the whole room/phase block up or down in the scope of work
+      const moveSec = (dir) => {
+        const secs = sections();
+        const idx = secs.findIndex((x) => x.key === sec.key);
+        const j = idx + dir;
+        if (j < 0 || j >= secs.length) return;
+        const blocks = secs.map((x) => x.items);
+        [blocks[idx], blocks[j]] = [blocks[j], blocks[idx]];
+        inv.items = blocks.flat();
+        commit(); paint(); recalc();
+      };
+      const mkMove = (glyph, dir, title) => {
+        const b = h("button", { type: "button", class: "btn btn--sm app-only", style: "width:auto;min-height:32px;padding:0 9px", title }, glyph);
+        b.addEventListener("click", () => moveSec(dir));
+        return b;
+      };
       tbody.append(h("tr", { class: "invsec" },
-        h("td", { colspan: "7" }, h("div", { class: "invsec__row" }, name, addLine))));
+        h("td", { colspan: "7" }, h("div", { class: "invsec__row" }, name,
+          mkMove("▲", -1, "Move this section up"), mkMove("▼", 1, "Move this section down"), addLine))));
       for (const it of sec.items) tbody.append(itemRow(it, ++no));
     }
   }
@@ -1213,9 +1251,9 @@ function invoiceCharges(inv, onTotals) {
     h("div", { class: "tablewrap" },
       h("table", { class: "grid grid--inv" },
         h("colgroup", {},
-          h("col", { style: "width:34px" }), h("col", {}), h("col", { style: "width:64px" }),
-          h("col", { style: "width:56px" }), h("col", { style: "width:84px" }),
-          h("col", { style: "width:92px" }), h("col", { class: "app-only", style: "width:36px" })),
+          h("col", { style: "width:30px" }), h("col", {}), h("col", { style: "width:52px" }),
+          h("col", { style: "width:46px" }), h("col", { style: "width:72px" }),
+          h("col", { style: "width:84px" }), h("col", { class: "app-only", style: "width:32px" })),
         h("thead", {}, h("tr", {},
           h("th", {}, "#"), h("th", { class: "invdesc" }, "Description"), h("th", {}, "Qty"),
           h("th", {}, "Unit"), h("th", {}, "Unit Price"), h("th", {}, "Total"), h("th", { class: "app-only" }, ""))),
@@ -1256,17 +1294,22 @@ export function invoice(project, inv) {
         h("span", { class: "invrecap__amt" }, money(total)),
         h("span", { class: "invrecap__pct" }, "100.00%")));
   }
+  if (!inv.billingModel) inv.billingModel = "tm";
+  const isContract = () => inv.billingModel === "contract";
   function recalc(sub) {
     if (sub != null) subtotal = sub;
     subEl.textContent = money(subtotal);
-    // Xactimate-style summary: Line Item Total + O&P = Replacement Cost Value
-    const oh = subtotal * ((Number(inv.overheadPct) || 0) / 100);
-    const pf = subtotal * ((Number(inv.profitPct) || 0) / 100);
+    // T&M: Line Item Total + O&P = RCV.  Contract: the agreed amount IS the
+    // total (O&P is inside the contract figure), items are the scope of work.
+    const contract = isContract();
+    const base = contract ? (Number(inv.contractAmount) || 0) : subtotal;
+    const oh = contract ? 0 : subtotal * ((Number(inv.overheadPct) || 0) / 100);
+    const pf = contract ? 0 : subtotal * ((Number(inv.profitPct) || 0) / 100);
     ohEl.textContent = money(oh);
     pfEl.textContent = money(pf);
-    const rcv = subtotal + oh + pf;
+    const rcv = base + oh + pf;
     rcvEl.textContent = money(rcv);
-    const tax = subtotal * ((Number(inv.taxRate) || 0) / 100);
+    const tax = base * ((Number(inv.taxRate) || 0) / 100);
     taxEl.textContent = money(tax);
     const total = rcv - (Number(inv.deductible) || 0) - (Number(inv.previousPayments) || 0) + tax;
     totalEl.textContent = money(total);
@@ -1412,7 +1455,37 @@ export function invoice(project, inv) {
   attachBtn.addEventListener("click", () => attachInput.click());
   paintAttachList(); paintAttachSheets();
 
-  const invoiceSheet = sheet("MITIGATION INVOICE", "Water Mitigation & Restoration Services | IICRC S500 Compliant", "Mitigation Invoice",
+  /* ---- totals: rows switch with the billing model ---- */
+  const trow = (label, right, cls) => h("div", { class: "trow" + (cls ? " " + cls : "") }, h("span", {}, label), right);
+  const subRow = trow("Line Item Total", subEl);
+  const contractRow = trow("Contract Amount", inp(inv, "contractAmount", { type: "number", oninput: () => recalc() }));
+  const ohPctRow = trow("Overhead %", inp(inv, "overheadPct", { type: "number", oninput: () => recalc() }));
+  const ohRow = trow("Overhead", ohEl);
+  const pfPctRow = trow("Profit %", inp(inv, "profitPct", { type: "number", oninput: () => recalc() }));
+  const pfRow = trow("Profit", pfEl);
+  const rcvLabel = h("span", {}, "Replacement Cost Value");
+  const rcvRow = h("div", { class: "trow rcv" }, rcvLabel, rcvEl);
+  const totalsBox = h("div", { class: "totals" },
+    subRow, contractRow, ohPctRow, ohRow, pfPctRow, pfRow, rcvRow,
+    trow("Less: Deductible / Non-Recoverable", inp(inv, "deductible", { type: "number", oninput: () => recalc() })),
+    trow("Less: Previous Payments", inp(inv, "previousPayments", { type: "number", oninput: () => recalc() })),
+    trow("Sales Tax %", inp(inv, "taxRate", { type: "number", oninput: () => recalc() })),
+    trow("Sales Tax", taxEl),
+    trow("Total Due", totalEl, "grand"));
+  function paintMode() {
+    const c = isContract();
+    contractRow.hidden = !c;
+    ohPctRow.hidden = ohRow.hidden = pfPctRow.hidden = pfRow.hidden = c;
+    subRow.hidden = c && !(inv.items || []).some((it) => (Number(it.qty) || 0) * (Number(it.price) || 0) > 0);
+    rcvLabel.textContent = c ? "Contract Total" : "Replacement Cost Value";
+  }
+  const modeSeg = seg(inv, "billingModel", [
+    { value: "tm", label: "Time & Materials" },
+    { value: "contract", label: "Contract (set amount)" },
+  ], { onchange: () => { paintMode(); recalc(); } });
+  paintMode();
+
+  const invoiceSheet = sheet("CONSTRUCTION INVOICE", "Mitigation & Reconstruction Services | IICRC S500 Compliant", "Construction Invoice",
     h("div", { class: "grid2" },
       field("Invoice #", inp(inv, "invoiceNo")),
       field("Invoice Date", inp(inv, "invoiceDate", { type: "date" }))),
@@ -1424,21 +1497,11 @@ export function invoice(project, inv) {
     jobInfo(project, ["carrier", "claimNo", "dateOfLoss", "adjuster"]),
     field("Loss Description / Scope Summary", lossTa),
     sectionTitle("Charges"),
+    h("div", { class: "app-only" }, field("Billing model", modeSeg)),
     aiBar,
     aiPanel,
     itemsWrap,
-    h("div", { class: "totals" },
-      h("div", { class: "trow" }, h("span", {}, "Line Item Total"), subEl),
-      h("div", { class: "trow" }, h("span", {}, "Overhead %"), inp(inv, "overheadPct", { type: "number", oninput: () => recalc() })),
-      h("div", { class: "trow" }, h("span", {}, "Overhead"), ohEl),
-      h("div", { class: "trow" }, h("span", {}, "Profit %"), inp(inv, "profitPct", { type: "number", oninput: () => recalc() })),
-      h("div", { class: "trow" }, h("span", {}, "Profit"), pfEl),
-      h("div", { class: "trow rcv" }, h("span", {}, "Replacement Cost Value"), rcvEl),
-      h("div", { class: "trow" }, h("span", {}, "Less: Deductible / Non-Recoverable"), inp(inv, "deductible", { type: "number", oninput: () => recalc() })),
-      h("div", { class: "trow" }, h("span", {}, "Less: Previous Payments"), inp(inv, "previousPayments", { type: "number", oninput: () => recalc() })),
-      h("div", { class: "trow" }, h("span", {}, "Sales Tax %"), inp(inv, "taxRate", { type: "number", oninput: () => recalc() })),
-      h("div", { class: "trow" }, h("span", {}, "Sales Tax"), taxEl),
-      h("div", { class: "trow grand" }, h("span", {}, "Total Due"), totalEl)),
+    totalsBox,
     recapEl,
     field("Notes / Supporting Documentation", ta(inv, "notes")),
     h("div", { class: "app-only", style: "margin:4px 0 10px" },

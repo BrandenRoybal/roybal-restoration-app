@@ -80,9 +80,9 @@ export const FORMS = [
   { key: "changeOrders",     name: "Change Order",       icon: "🔁", multi: true,
     types: ["restoration", "construction"],
     blurb: "Scope / supplement changes" },
-  { key: "invoices",         name: "Mitigation Invoice", icon: "🧾", multi: true,
+  { key: "invoices",         name: "Construction Invoice", icon: "🧾", multi: true,
     types: ["restoration", "construction"],
-    blurb: "Xactimate-style invoice — AI-drafted from the job's documentation or built by hand" },
+    blurb: "T&M or contract billing — AI-drafted from the job's documentation or built by hand" },
 ];
 
 /* Job kind. Jobs created before this field existed carry no jobType, so
@@ -297,6 +297,7 @@ export function newLaborLog() {
   return {
     id: uid(), createdAt: new Date().toISOString(),
     syncedAt: "",       // last QuickBooks Time pull
+    startDate: "",      // count labor from this date (separates reconstruction from mitigation hours)
     entries: [],        // snapshot: [{ date, employee, start, finish, hours, task, qbId }]
   };
 }
@@ -320,7 +321,9 @@ export function newInvoice() {
     invoiceNo: "", invoiceDate: todayISO(), dueDate: "", terms: "Due on receipt",
     lossSummary: "",
     items: [ blankLineItem() ],
-    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P
+    billingModel: "tm",                   // "tm" (hourly + materials) | "contract" (set amount)
+    contractAmount: "",                   // the agreed figure when billingModel = contract
+    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P (T&M mode)
     deductible: "", previousPayments: "", taxRate: "",
     notes: "",
     attachments: [],   // supporting docs: [{ label, pages: [dataURL…] }]
