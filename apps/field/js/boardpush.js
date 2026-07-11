@@ -183,13 +183,33 @@ async function fetchBoardRows() {
   return (await res.json()).filter((r) => r && r.id !== "__settings__");
 }
 
-/** Find this project's board row: explicit fieldJobId link first, claim # second. */
+/* ---------- pure: customer-name fallback match ----------
+   The coordinator's board jobs rarely carry the claim # and never the
+   fieldJobId until the first push — without this, a push would create a
+   DUPLICATE tile next to the job they already track. Only an unambiguous
+   single hit counts: active (not done), not a milestone, not already
+   linked to a different field job, customer or title equal (normalized). */
+export function matchCustomerRow(rows, project) {
+  const want = norm(project && project.customer);
+  if (!want) return null;
+  const hits = arr(rows).filter((r) => {
+    const d = r && r.data;
+    if (!d || d.isMilestone || d.stage === "done") return false;
+    if (d.fieldJobId && d.fieldJobId !== project.id) return false;
+    return norm(d.customer) === want || norm(d.title) === want;
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/** Find this project's board row: explicit fieldJobId link first, claim #
+    second, unambiguous customer-name match last. */
 export async function findBoardRow(project) {
   const rows = await fetchBoardRows();
   const linked = rows.find((r) => r.data && r.data.fieldJobId === project.id);
   if (linked) return linked;
   const byClaim = matchCoordinationId(rows, project.claimNo);
-  return byClaim ? rows.find((r) => r.id === byClaim) || null : null;
+  if (byClaim) return rows.find((r) => r.id === byClaim) || null;
+  return matchCustomerRow(rows, project);
 }
 
 /* Same optimistic-concurrency guard as the Board's data layer. */

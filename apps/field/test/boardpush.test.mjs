@@ -4,7 +4,7 @@
 import assert from "node:assert";
 import {
   planPhases, boardJobFromProject, mergePlanIntoBoardJob,
-  rollupActuals, historyDigest, phasesToSubRows, isoDateOnly,
+  rollupActuals, historyDigest, phasesToSubRows, isoDateOnly, matchCustomerRow,
 } from "../js/boardpush.js";
 import { blankSubRow } from "../js/model.js";
 
@@ -136,5 +136,33 @@ ok("phase names map to trades", subRows[0].trade === "Drywall" && subRows[1].tra
 ok("unmatched phase lands as Other with the name kept", subRows[2].trade === "Other" && /Shower glass/.test(subRows[2].notes));
 ok("planned hours ride in the notes", /40h planned/.test(subRows[0].notes));
 ok("prefill rows keep the model defaults", subRows.every((r) => r.status === "scheduled" && r.coi === false));
+
+/* ---------- matchCustomerRow: the anti-duplicate fallback ----------
+   A push must land on the coordinator's existing tile even when it has no
+   claim # or field link yet — but only on an UNAMBIGUOUS customer match. */
+const mkRow = (id, data) => ({ id, data });
+const boardRows = [
+  mkRow("b1", { customer: "Jeff Hebard", title: "Hebard Rebuild", stage: "scheduled", fieldJobId: "" }),
+  mkRow("b2", { customer: "Ana Diaz", title: "Diaz Kitchen", stage: "lead", fieldJobId: "" }),
+  mkRow("b3", { customer: "Old Hebard", title: "Jeff Hebard", stage: "done", fieldJobId: "" }),
+];
+const proj = (customer, id = "fp-1") => ({ id, customer });
+ok("matches the one active job by customer name", matchCustomerRow(boardRows, proj("Jeff Hebard"))?.id === "b1");
+ok("match is case/space-insensitive", matchCustomerRow(boardRows, proj("  jeff hebard "))?.id === "b1");
+ok("title matches too", matchCustomerRow(boardRows, proj("Diaz Kitchen"))?.id === "b2");
+ok("done jobs never match", matchCustomerRow([boardRows[2]], proj("Jeff Hebard")) === null);
+ok("no customer on the project -> no match", matchCustomerRow(boardRows, proj("")) === null);
+ok("ambiguous (two active hits) -> no match", matchCustomerRow([
+  boardRows[0], mkRow("b4", { customer: "Jeff Hebard", title: "Hebard Garage", stage: "lead" }),
+], proj("Jeff Hebard")) === null);
+ok("a row linked to a DIFFERENT field job never matches", matchCustomerRow([
+  mkRow("b5", { customer: "Jeff Hebard", stage: "lead", fieldJobId: "other-project" }),
+], proj("Jeff Hebard")) === null);
+ok("a row linked to THIS field job still matches", matchCustomerRow([
+  mkRow("b6", { customer: "Jeff Hebard", stage: "lead", fieldJobId: "fp-1" }),
+], proj("Jeff Hebard"))?.id === "b6");
+ok("milestones never match", matchCustomerRow([
+  mkRow("b7", { customer: "Jeff Hebard", stage: "lead", isMilestone: true }),
+], proj("Jeff Hebard")) === null);
 
 console.log(`\n${pass} board-bridge checks passed.`);
