@@ -184,6 +184,26 @@ export function photoUploader(arr, label = "Add photos", opts = {}) {
   return h("div", {}, h("div", { class: "app-only" }, btn), input, thumbs);
 }
 
+/* ---------- free-text table cell ----------
+   An auto-growing textarea on screen (the cell expands as you type — nothing
+   is ever hidden) + a print-only div that wraps the FULL text on paper. Use
+   for any table column that holds free text; single-line inputs clip both
+   on screen and on the PDF. */
+export function taCell(obj, key, opts = {}) {
+  const el = h("textarea", { class: "cell-ta app-only", rows: "1",
+    placeholder: opts.placeholder || "",
+    style: opts.minWidth ? `min-width:${opts.minWidth}` : "" });
+  el.value = obj[key] ?? "";
+  const print = h("div", { class: "cell-print print-only" }, obj[key] ?? "");
+  const grow = () => { el.style.height = "auto"; el.style.height = Math.max(40, el.scrollHeight) + "px"; };
+  el.addEventListener("input", () => {
+    obj[key] = el.value; print.textContent = el.value; grow();
+    opts.oninput && opts.oninput(el.value); commit();
+  });
+  requestAnimationFrame(grow);
+  return h("td", { class: "tdta" }, el, print);
+}
+
 /* ---------- editable line-items table with live totals ---------- */
 export function lineItems(items, blankFn, opts = {}) {
   const wrap = h("div");
@@ -209,10 +229,10 @@ export function lineItems(items, blankFn, opts = {}) {
       c.append(input); return c;
     };
     tr.append(
-      mk("desc", "160px"),
-      mk("qty", "60px", "number"),
-      mk("unit", "60px"),
-      mk("price", "80px", "number"),
+      taCell(it, "desc", { minWidth: "180px" }),
+      mk("qty", "44px", "number"),
+      mk("unit", "40px"),
+      mk("price", "64px", "number"),
       h("td", { class: "ext calc" }, money((Number(it.qty) || 0) * (Number(it.price) || 0))),
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { items.splice(i, 1); paint(); recalc(); commit(); } }, "✕"))
     );
@@ -224,8 +244,12 @@ export function lineItems(items, blankFn, opts = {}) {
   paint();
   const table = h("div", { class: "tablewrap" },
     h("table", { class: "grid" },
+      h("colgroup", {},
+        h("col", {}), h("col", { style: "width:56px" }), h("col", { style: "width:52px" }),
+        h("col", { style: "width:76px" }), h("col", { style: "width:90px" }),
+        h("col", { class: "app-only", style: "width:32px" })),
       h("thead", {}, h("tr", {},
-        h("th", {}, "Description"), h("th", {}, "Qty"), h("th", {}, "Unit"),
+        h("th", { class: "thleft" }, "Description"), h("th", {}, "Qty"), h("th", {}, "Unit"),
         h("th", {}, "Unit Price"), h("th", {}, "Extended"), h("th", { class: "app-only" }, ""))),
       tbody));
   const add = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add line item");

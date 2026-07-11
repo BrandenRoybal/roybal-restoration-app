@@ -124,9 +124,9 @@ function setInput(el, val) {
   // 7-day equipment flag: place a unit 8 days ago, leave it on site
   const eqTable = tables[0];
   const eqRow = eqTable.querySelector("tbody tr");
-  const eqInputs = eqRow.querySelectorAll("input"); // asset,type,loc,placed,removed,hours,notes
+  // type/location/notes are auto-growing textareas now — grab "placed" by its input type
   const eightAgo = new Date(Date.now() - 8 * 86400000).toISOString().slice(0, 16);
-  setInput(eqInputs[3], eightAgo); // placed
+  setInput(eqRow.querySelector('input[type="datetime-local"]'), eightAgo); // placed
   await tick();
   ok(eqRow.classList.contains("flag7"), "equipment on site 7+ days is flagged");
   ok(/7-day equipment check/.test(text()), "drying log shows the 7-day equipment warning");
