@@ -133,6 +133,25 @@ function photoSummary(p) {
 }
 
 /* ---------- the digest the model writes from (pure) ---------- */
+/* Latest S500 equipment sizing from the drying logs — the adjuster-facing
+   justification for the unit counts on site. */
+function equipmentSizingSummary(p) {
+  for (const d of arr(p.dryingLogs).slice().reverse()) {
+    const c = d && d.equipCalc;
+    if (!c) continue;
+    return {
+      sizedAt: c.at || "", method: "IICRC S500",
+      affectedSF: c.inputs.sf, volumeCuFt: c.inputs.volume,
+      recommended: {
+        airMovers: c.airMovers.count,
+        lgrDehumidifiers: c.dehu.units, pintsPerDay: c.dehu.pintsPerDay,
+        airScrubbers: c.scrubbers.count, auxiliaryHeat: !!c.heat.needed,
+      },
+    };
+  }
+  return null;
+}
+
 /* Supporting documents (engineer's reports, estimates…) — the tech-verified
    AI digests, citable by the narrative, invoice, rebuild scope and assistant. */
 function supportingDocsSummary(p) {
@@ -196,6 +215,7 @@ export function narrativeFacts(project) {
     photos: photoSummary(p),
     planDimensions: planDimensionsSummary(p),
     supportingDocs: supportingDocsSummary(p),
+    equipmentSizing: equipmentSizingSummary(p),
     // texts composed from the app — proof of customer/office notification
     notifications: arr(p.smsLog).slice(-20).map((e) => ({
       at: e.at || "", type: e.kind || "text", to: arr(e.to).join(", "), by: e.by || "",
