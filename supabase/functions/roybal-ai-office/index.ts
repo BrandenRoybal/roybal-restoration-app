@@ -735,6 +735,12 @@ async function fieldAssist(body: Record<string, unknown>) {
     if (!transcript) throw new Error("Didn't catch that — try again closer to the mic.");
     userText = transcript;
   }
+  // dictation mode: STT only, no LLM turn — powers voice answers on the
+  // estimator / timeline questionnaires (costs nothing on the token ledger)
+  if (body.transcribeOnly) {
+    if (!transcript) throw new Error("Dictation needs audio.");
+    return { result: { reply: "", transcript, replyAudio: null }, usage: { inTok: 0, outTok: 0 }, model: "deepgram-stt", summary: { transcribeOnly: true } };
+  }
   if (!userText && !images.length) throw new Error("Ask a question (text or voice), or attach a photo.");
 
   const msgs: unknown[] = history

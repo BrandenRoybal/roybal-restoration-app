@@ -27,6 +27,7 @@ import { aiAvailable, aiReady, draftAdjusterEmail, analyzeContentsItem, scanCont
 import { dryingFlags, isCertified } from "./dryingwatch.js";
 import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
+import { dictateBtn } from "./dictate.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
@@ -410,6 +411,66 @@ function startReconCard(project) {
     btn);
 }
 
+/* ---------- one-question-at-a-time follow-up box ----------
+   Shared by the rebuild draft (questions) and the board timeline
+   (assumptions). Each answer is saved on the project under qaKey and
+   becomes documented fact on the next AI pass; progression state
+   (qIndex) lives on the draft object so a redraft restarts the round.
+   Answers can be typed or dictated (office STT — no LLM cost). */
+function questionnaire(project, state, questions, qaKey, opts = {}) {
+  if (!Array.isArray(project[qaKey])) project[qaKey] = [];
+  if (typeof state.qIndex !== "number") state.qIndex = 0;
+  const box = h("div", { class: "note", style: "margin-top:8px" });
+  const redraftBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto;display:none" },
+    opts.redraftLabel || "↻ Redraft with answers");
+  redraftBtn.addEventListener("click", () => opts.onRedraft && opts.onRedraft(redraftBtn));
+
+  function paint() {
+    box.replaceChildren();
+    const i = state.qIndex;
+    const answered = project[qaKey].length;
+    if (i >= questions.length) {
+      box.append(h("strong", {}, opts.doneTitle || "Questions — done. "),
+        answered ? `${answered} answer${answered === 1 ? "" : "s"} on file — tap "${opts.redraftLabel || "↻ Redraft with answers"}" to fold them into the plan.`
+          : "All skipped — the draft stands as-is.");
+      redraftBtn.style.display = answered ? "" : "none";
+      return;
+    }
+    const input = h("textarea", { rows: "2",
+      placeholder: opts.placeholder || "Type or dictate what you know — measurements, materials, owner decisions…",
+      style: "margin-top:6px" });
+    const advance = async (answer) => {
+      if (answer) project[qaKey].push({ q: questions[i], a: answer, at: new Date().toISOString() });
+      state.qIndex = i + 1;
+      project.updatedAt = new Date().toISOString();
+      await Store.put(project);
+      paint();
+    };
+    const saveBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "Save answer");
+    saveBtn.addEventListener("click", () => {
+      const a = input.value.trim();
+      if (!a) { toast("Type or dictate an answer — or Skip if you don't know yet."); input.focus(); return; }
+      advance(a);
+    });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveBtn.click(); } });
+    const mic = dictateBtn(project, (text) => {
+      input.value = (input.value.trim() ? input.value.trim() + " " : "") + text;
+      input.focus();
+    });
+    const okBtn = opts.confirmLabel ? h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, opts.confirmLabel) : null;
+    if (okBtn) okBtn.addEventListener("click", () => advance("Confirmed correct."));
+    const skipBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "Skip");
+    skipBtn.addEventListener("click", () => advance(""));
+    box.append(
+      h("div", {}, h("strong", {}, `${opts.label || "Question"} ${i + 1} of ${questions.length}: `), questions[i]),
+      input,
+      h("div", { style: "display:flex;gap:8px;margin-top:6px;flex-wrap:wrap" },
+        saveBtn, mic, okBtn, skipBtn));
+  }
+  paint();
+  return { box, redraftBtn };
+}
+
 /* AI rebuild setup — drafts scope / trades / selections from the linked
    mitigation job, reviewed as chips before anything writes. AI failure or
    the spend cap never blocks: the forms work empty. */
@@ -482,51 +543,19 @@ function rebuildPanel(project) {
         h("span", { style: "flex:1;font-size:13px" }, String(c.value ?? ""))));
     }
   }
-  // Estimator questions — answered ONE AT A TIME; each answer becomes fact
-  // for the next redraft, so the estimate sharpens instead of just nagging.
+  // Estimator questions — answered ONE AT A TIME (typed or dictated); each
+  // answer becomes fact for the next redraft, so the estimate sharpens
+  // instead of just nagging.
   const questions = rd.draft && Array.isArray(rd.draft.questions) ? rd.draft.questions.filter(Boolean) : [];
   let qaRedraftBtn = null;
   if (questions.length) {
-    if (!Array.isArray(project.rebuildQA)) project.rebuildQA = [];
-    if (typeof rd.qIndex !== "number") rd.qIndex = 0;
-    const qBox = h("div", { class: "note", style: "margin-top:8px" });
-    function paintQ() {
-      qBox.replaceChildren();
-      const i = rd.qIndex;
-      const answered = project.rebuildQA.length;
-      if (i >= questions.length) {
-        qBox.append(h("strong", {}, "Estimator questions — done. "),
-          answered ? `${answered} answer${answered === 1 ? "" : "s"} on file — tap "↻ Redraft with answers" to fold them into the plan.`
-            : "All skipped — the draft stands as-is.");
-        if (qaRedraftBtn) qaRedraftBtn.style.display = answered ? "" : "none";
-        return;
-      }
-      const input = h("textarea", { rows: "2", placeholder: "Type what you know — measurements, materials, owner decisions…", style: "margin-top:6px" });
-      const advance = async (answer) => {
-        if (answer) project.rebuildQA.push({ q: questions[i], a: answer, at: new Date().toISOString() });
-        rd.qIndex = i + 1;
-        project.updatedAt = new Date().toISOString();
-        await Store.put(project);
-        paintQ();
-      };
-      const saveBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "Save answer");
-      saveBtn.addEventListener("click", () => {
-        const a = input.value.trim();
-        if (!a) { toast("Type an answer — or Skip if you don't know yet."); input.focus(); return; }
-        advance(a);
-      });
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveBtn.click(); } });
-      const skipBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "Skip");
-      skipBtn.addEventListener("click", () => advance(""));
-      qBox.append(
-        h("div", {}, h("strong", {}, `Estimator question ${i + 1} of ${questions.length}: `), questions[i]),
-        input,
-        h("div", { style: "display:flex;gap:8px;margin-top:6px" }, saveBtn, skipBtn));
-    }
-    qaRedraftBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto;display:none" }, "↻ Redraft with answers");
-    qaRedraftBtn.addEventListener("click", () => generate(qaRedraftBtn));
-    paintQ();
-    wrap.append(qBox);
+    const q = questionnaire(project, rd, questions, "rebuildQA", {
+      label: "Estimator question", doneTitle: "Estimator questions — done. ",
+      redraftLabel: "↻ Redraft with answers",
+      onRedraft: (b) => generate(b),
+    });
+    qaRedraftBtn = q.redraftBtn;
+    wrap.append(q.box);
   }
 
   const applyBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "Apply checked items");
@@ -568,7 +597,11 @@ function timelinePanel(project) {
     status.textContent = "Estimating phases from the Scope of Work…";
     try {
       const history = await fetchHistoryDigest();   // est-vs-actual calibration, empty until history exists
-      const draft = await draftTimeline(project, constructionFacts(project), history);
+      const facts = constructionFacts(project);
+      // confirmed / corrected assumptions ride along as documented fact
+      const qa = (project.timelineQA || []).filter((x) => x && String(x.a || "").trim());
+      if (qa.length) facts.plannerAnswers = qa.map((x) => ({ assumption: x.q, answer: x.a }));
+      const draft = await draftTimeline(project, facts, history);
       const fresh = (await Store.get(project.id)) || project;
       fresh.boardPlan = {
         phases: planPhases(draft),
@@ -637,8 +670,21 @@ function timelinePanel(project) {
 
   if (bp.notBefore) wrap.append(h("div", { class: "subtle", style: "font-size:13px;margin-top:6px" },
     "🔒 Can't start before " + fmtDate(bp.notBefore) + (bp.notBeforeLabel ? ` (${bp.notBeforeLabel})` : "")));
-  if (bp.assumptions && bp.assumptions.length) wrap.append(h("div", { class: "note", style: "margin-top:6px" },
-    h("strong", {}, "Assumes: "), bp.assumptions.join(" · ")));
+  // each assumption is reviewed one at a time — confirm it or dictate/type a
+  // correction; corrections feed the next re-estimate as documented fact
+  let tqRedraftBtn = null;
+  const assumptions = (bp.assumptions || []).filter(Boolean);
+  if (assumptions.length) {
+    const tq = questionnaire(project, bp, assumptions, "timelineQA", {
+      label: "Assumption", doneTitle: "Assumptions — reviewed. ",
+      confirmLabel: "✓ Looks right",
+      redraftLabel: "↻ Re-estimate with answers",
+      placeholder: "Correct it — crew size, cure times, lead times, dates…",
+      onRedraft: (b) => estimate(b),
+    });
+    tqRedraftBtn = tq.redraftBtn;
+    wrap.append(tq.box);
+  }
 
   const sendBtn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, pushed ? "📅 Send again" : "📅 Send to Job Board");
   sendBtn.addEventListener("click", async () => {
@@ -664,7 +710,7 @@ function timelinePanel(project) {
   reBtn.addEventListener("click", () => estimate(reBtn));
   const dismissBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "Dismiss");
   dismissBtn.addEventListener("click", async () => { bp.status = "dismissed"; await Store.put(project); projectHome(project); });
-  wrap.append(h("div", { style: "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap" }, sendBtn, reBtn, dismissBtn), status);
+  wrap.append(h("div", { style: "display:flex;gap:8px;margin-top:10px;flex-wrap:wrap" }, sendBtn, tqRedraftBtn, reBtn, dismissBtn), status);
   return wrap;
 }
 

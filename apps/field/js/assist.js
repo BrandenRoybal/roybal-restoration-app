@@ -20,6 +20,32 @@ import { aiAvailable, fieldAssist } from "./officeai.js";
    selections, draws); water jobs keep the mitigation digest. */
 const assistFacts = (p) => (jobType(p) === "construction" ? constructionFacts(p) : narrativeFacts(p));
 
+/* Open follow-ups from the AI drafts (rebuild estimator questions, timeline
+   assumptions awaiting review) — surfaced to the assistant so the tech can
+   talk them through; the answers themselves are recorded on the job home
+   questionnaires. */
+function openFollowups(p) {
+  const out = [];
+  const rd = p.rebuildDraft;
+  if (rd && rd.status === "draft" && rd.draft && Array.isArray(rd.draft.questions)) {
+    const from = typeof rd.qIndex === "number" ? rd.qIndex : 0;
+    out.push(...rd.draft.questions.slice(from).filter(Boolean)
+      .map((q) => ({ type: "rebuild estimator question (answer it on the job home)", q })));
+  }
+  const bp = p.boardPlan;
+  if (bp && bp.status !== "dismissed" && Array.isArray(bp.assumptions)) {
+    const from = typeof bp.qIndex === "number" ? bp.qIndex : 0;
+    out.push(...bp.assumptions.slice(from).filter(Boolean)
+      .map((q) => ({ type: "timeline assumption awaiting confirmation (review it on the job home)", q })));
+  }
+  return out.slice(0, 12);
+}
+function assistContext(p) {
+  const ctx = assistFacts(p);
+  const open = openFollowups(p);
+  return open.length ? { ...ctx, openEstimatorFollowups: open } : ctx;
+}
+
 const sessions = new Map();   // projectId -> [{ role, text, images? }]
 let ui = null;                // singleton { fab, drawer, msgs, input, ... }
 let project = null;
@@ -131,7 +157,7 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
       images,
       audio, audioMime,
       speak: wantSpeech,
-      context: assistFacts(project),
+      context: assistContext(project),
     });
     if (audio && b.transcript) list.push({ role: "user", text: b.transcript, images });
     const reply = b.reply || "…I didn't get an answer back. Try again?";
