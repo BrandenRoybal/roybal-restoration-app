@@ -127,7 +127,7 @@ export function uploadedDocPages(obj) {
   return [];
 }
 
-function uploadDoc(obj) {
+export function uploadDoc(obj, opts = {}) {
   const wrap = h("div", { class: "uploadbox" });
   function render() {
     wrap.replaceChildren();
@@ -135,10 +135,13 @@ function uploadDoc(obj) {
     if (pages.length) {
       wrap.append(
         h("div", { class: "app-only", style: "margin-bottom:8px;color:var(--green);font-weight:600" },
-          `📎 ${pages.length} page(s) attached — this replaces the form in the PDF report.`),
+          `📎 ${pages.length} page(s) attached — ${opts.attachedNote || "this replaces the form in the PDF report."}`),
         ...pages.map((src) => h("img", { src, alt: "Uploaded signed document page", class: "docpage" })),
         h("button", { type: "button", class: "btn btn--danger btn--sm app-only", style: "margin-top:10px",
-          onclick: () => { obj.uploadedPages = []; obj.uploadedDoc = ""; commit(); render(); } }, "Remove"));
+          onclick: () => {
+            obj.uploadedPages = []; obj.uploadedDoc = ""; commit(); render();
+            wrap.dispatchEvent(new CustomEvent("docpageschange", { bubbles: true }));
+          } }, "Remove"));
     } else {
       const input = h("input", { type: "file", accept: "image/*,application/pdf", style: "display:none" });
       const status = h("div", { class: "app-only subtle", style: "margin-top:8px" });
@@ -146,13 +149,16 @@ function uploadDoc(obj) {
       input.addEventListener("change", async () => {
         const f = input.files[0]; if (!f) return;
         btn.disabled = true; status.textContent = "Reading document…";
-        try { obj.uploadedPages = await fileToDocPages(f); obj.uploadedDoc = ""; commit(); render(); }
+        try {
+          obj.uploadedPages = await fileToDocPages(f); obj.uploadedDoc = ""; commit(); render();
+          wrap.dispatchEvent(new CustomEvent("docpageschange", { bubbles: true }));
+        }
         catch { btn.disabled = false; status.textContent = ""; toast("Sorry — couldn't read that file."); }
       });
       btn.addEventListener("click", () => input.click());
       wrap.append(
         h("div", { class: "app-only", style: "margin-bottom:10px" },
-          "Upload a signed PDF or a photo/scan. The uploaded document will replace this form in the PDF report."),
+          opts.blurb || "Upload a signed PDF or a photo/scan. The uploaded document will replace this form in the PDF report."),
         btn, input, status);
     }
   }

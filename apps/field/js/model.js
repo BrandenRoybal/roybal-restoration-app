@@ -29,6 +29,9 @@ export const COMPANY = {
    restoration (water mitigation) and/or construction (remodel / rebuild);
    an entry without `types` shows for both. */
 export const FORMS = [
+  { key: "floorPlan",        name: "Floor Plan",         icon: "📏", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "Dimensioned plan — prints FULL PAGE so measurements stay readable" },
   { key: "moistureMaps",     name: "Moisture Map",       icon: "🗺️", multi: true,
     types: ["restoration"],
     blurb: "Sketch the affected area + daily MC% readings" },
@@ -331,6 +334,13 @@ export function newInvoice() {
 }
 export function blankLineItem() {
   return { room: "", desc: "", qty: "", unit: "", price: "" };
+}
+
+/* Floor plan — an uploaded dimensioned plan (PDF/photo) whose pages print
+   FULL PAGE in the packet; mode stays "upload" so the packet's uploaded-
+   document path renders it instead of a form. */
+export function newFloorPlan() {
+  return { createdAt: new Date().toISOString(), mode: "upload", uploadedPages: [] };
 }
 
 export function newWorkAuth() {
