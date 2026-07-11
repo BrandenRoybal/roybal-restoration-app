@@ -6,7 +6,7 @@ import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, t
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
-  lineItems, sheet, sheetFooter, letterhead, commit,
+  lineItems, taCell, sheet, sheetFooter, letterhead, commit,
 } from "./formkit.js";
 import {
   SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
@@ -301,10 +301,7 @@ export function moistureMap(project, m) {
       flagCell(input);
       c.append(input); tr.append(c);
     }
-    const noteCell = h("td");
-    const noteInput = h("input", { value: row.notes ?? "", style: "min-width:120px" });
-    noteInput.addEventListener("input", () => { row.notes = noteInput.value; commit(); });
-    noteCell.append(noteInput); tr.append(noteCell);
+    tr.append(taCell(row, "notes", { minWidth: "120px" }));
     tr.append(h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { m.readings.splice(i, 1); paintRows(); redrawChart(); commit(); } }, "✕")));
     return tr;
   }
@@ -537,9 +534,16 @@ export function dryingLog(project, d) {
       attachFill(c, i, key);
       return c;
     };
-    const assetC = mk("asset", "50px"), typeC = mk("type", "150px"), locC = mk("location", "110px");
+    // free-text columns grow with their text; the fill handle still works
+    const mkTa = (key, w) => {
+      const c = taCell(row, key, { minWidth: w });
+      c.classList.add("fillcell");
+      attachFill(c, i, key);
+      return c;
+    };
+    const assetC = mk("asset", "50px"), typeC = mkTa("type", "150px"), locC = mkTa("location", "110px");
     const placedC = mk("placed", "150px", "datetime-local"), removedC = mk("removed", "150px", "datetime-local");
-    const hoursC = mk("hours", "56px", "number"), notesC = mk("notes", "120px");
+    const hoursC = mk("hours", "56px", "number"), notesC = mkTa("notes", "120px");
     tr.append(assetC, typeC, locC, placedC, removedC, daysCell, hoursC, notesC,
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { d.equipment.splice(i, 1); paintEq(); refreshWarn(); commit(); } }, "✕")));
     recalcDays();
@@ -589,7 +593,7 @@ export function dryingLog(project, d) {
     recalc(); // fill GPP/GD for any pre-existing T/RH values on load
     tr.append(dateC, timeC, outT, outRH, outG, refT, refRH, refG, affT, affRH, affG, gdC,
       mk("dehu", "40px", "number"), mk("am", "40px", "number"), mk("scrub", "40px", "number"),
-      mk("tech", "70px"), mk("notes", "130px"),
+      mk("tech", "70px"), taCell(row, "notes", { minWidth: "130px" }),
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { d.readings.splice(i, 1); paintPs(); commit(); } }, "✕")));
     return tr;
   }
@@ -822,7 +826,7 @@ export function constructionLog(project, c) {
       });
       c2.append(input); return c2;
     };
-    tr.append(mk("employee", "110px"), mk("task", "180px"), mk("start", "90px", "time"), mk("finish", "90px", "time"), hoursCell,
+    tr.append(mk("employee", "110px"), taCell(r, "task", { minWidth: "180px" }), mk("start", "90px", "time"), mk("finish", "90px", "time"), hoursCell,
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { c.rows.splice(c.rows.indexOf(r), 1); paint(); calcTotal(); commit(); } }, "✕")));
     return tr;
   }
@@ -963,7 +967,7 @@ export function laborLog(project, l) {
       cell("finish", "60px"),
       cell("hours", "52px", "number"),
       cell("service", "130px", "text", cleanService(e.service) || e.task || ""),
-      cell("note", "120px"),
+      taCell(e, "note", { minWidth: "140px" }),
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { l.entries.splice(i, 1); paintRows(); paintSummary(); commit(); } }, "✕")));
   }
 
@@ -1037,7 +1041,7 @@ export function certDrying(project, c) {
     const dryBox = h("input", { type: "checkbox", checked: !!r.dry, style: "width:22px;height:22px" });
     dryBox.addEventListener("change", () => { r.dry = dryBox.checked; commit(); });
     dryTd.append(dryBox);
-    tr.append(mk("material", "150px"), mk("meter", "120px"), mk("goal", "60px"), mk("final", "60px"), mk("reference", "70px"), dryTd,
+    tr.append(taCell(r, "material", { minWidth: "150px" }), taCell(r, "meter", { minWidth: "120px" }), mk("goal", "60px"), mk("final", "60px"), mk("reference", "70px"), dryTd,
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { c.verification.splice(i, 1); paint(); commit(); } }, "✕")));
     return tr;
   }
@@ -1873,10 +1877,10 @@ export function scopeOfWork(project, s) {
       const tradeTd = h("td");
       tradeTd.append(sel(it, "trade", TRADES, { placeholder: "Trade…" }));
       tr.append(tradeTd,
-        boundCell(it, "desc", "220px"),
-        boundCell(it, "qty", "56px"),
-        boundCell(it, "unit", "56px"),
-        boundCell(it, "notes", "140px"),
+        taCell(it, "desc", { minWidth: "200px" }),
+        boundCell(it, "qty", "44px"),
+        boundCell(it, "unit", "40px"),
+        taCell(it, "notes", { minWidth: "120px" }),
         delCell(area.items, it, paintRows));
       return tr;
     }
@@ -1895,7 +1899,13 @@ export function scopeOfWork(project, s) {
         h("div", { class: "field app-only", style: "align-self:end" }, delArea)),
       h("div", { class: "tablewrap" },
         h("table", { class: "grid" },
-          h("thead", {}, h("tr", {}, ...["Trade", "Description", "Qty", "Unit", "Notes"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+          h("colgroup", {},
+            h("col", { style: "width:118px" }), h("col", {}), h("col", { style: "width:52px" }),
+            h("col", { style: "width:48px" }), h("col", { style: "width:26%" }),
+            h("col", { class: "app-only", style: "width:32px" })),
+          h("thead", {}, h("tr", {},
+            h("th", {}, "Trade"), h("th", { class: "thleft" }, "Description"), h("th", {}, "Qty"),
+            h("th", {}, "Unit"), h("th", { class: "thleft" }, "Notes"), h("th", { class: "app-only" }, ""))),
           tbody)),
       addItem);
   }
@@ -1911,8 +1921,8 @@ export function scopeOfWork(project, s) {
   }
   function arow(a) {
     const tr = h("tr");
-    tr.append(boundCell(a, "item", "180px"), boundCell(a, "amount", "90px", "number", calcAllow),
-      boundCell(a, "notes", "160px"), delCell(s.allowances, a, paintAllow));
+    tr.append(taCell(a, "item", { minWidth: "180px" }), boundCell(a, "amount", "90px", "number", calcAllow),
+      taCell(a, "notes", { minWidth: "160px" }), delCell(s.allowances, a, paintAllow));
     return tr;
   }
   function paintAllow() { abody.replaceChildren(...s.allowances.map(arow)); calcAllow(); }
@@ -1936,7 +1946,12 @@ export function scopeOfWork(project, s) {
     h("p", { class: "subtle app-only" }, "Owner-selected items carried in the contract at an allowance amount — actuals land on the Selections sheet."),
     h("div", { class: "tablewrap" },
       h("table", { class: "grid" },
-        h("thead", {}, h("tr", {}, ...["Allowance Item", "Amount", "Notes"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
+        h("colgroup", {},
+          h("col", {}), h("col", { style: "width:96px" }), h("col", { style: "width:36%" }),
+          h("col", { class: "app-only", style: "width:32px" })),
+        h("thead", {}, h("tr", {},
+          h("th", { class: "thleft" }, "Allowance Item"), h("th", {}, "Amount"),
+          h("th", { class: "thleft" }, "Notes"), h("th", { class: "app-only" }, ""))),
         abody)),
     addAllow,
     h("div", { class: "totals" }, h("div", { class: "trow grand" }, h("span", {}, "Total Allowances"), allowTotal)),
@@ -1952,8 +1967,8 @@ export function preConChecklist(project, c) {
   const pbody = h("tbody");
   function prow(r) {
     const tr = h("tr");
-    tr.append(boundCell(r, "type", "130px"), boundCell(r, "number", "110px"),
-      boundCell(r, "pulled", "120px", "date"), boundCell(r, "notes", "150px"),
+    tr.append(taCell(r, "type", { minWidth: "130px" }), boundCell(r, "number", "110px"),
+      boundCell(r, "pulled", "120px", "date"), taCell(r, "notes", { minWidth: "150px" }),
       delCell(c.permits, r, paintPermits));
     return tr;
   }
@@ -2002,9 +2017,9 @@ export function selectionsSheet(project, sl) {
     const statusTd = h("td");
     statusTd.append(sel(r, "status", SELECTION_STATUSES));
     tr.append(
-      boundCell(r, "area", "90px"),
-      boundCell(r, "item", "130px"),
-      boundCell(r, "spec", "150px"),
+      taCell(r, "area", { minWidth: "90px" }),
+      taCell(r, "item", { minWidth: "130px" }),
+      taCell(r, "spec", { minWidth: "150px" }),
       boundCell(r, "allowance", "80px", "number", calc),
       boundCell(r, "actual", "80px", "number", calc),
       h("td", { class: "ext calc" }, "—"),
@@ -2048,14 +2063,14 @@ export function subSchedule(project, ss) {
     coiBox.addEventListener("change", () => { r.coi = coiBox.checked; commit(); });
     coiTd.append(coiBox);
     tr.append(tradeTd,
-      boundCell(r, "company", "120px"),
-      boundCell(r, "contact", "110px"),
+      taCell(r, "company", { minWidth: "120px" }),
+      taCell(r, "contact", { minWidth: "110px" }),
       boundCell(r, "schedStart", "120px", "date"),
       boundCell(r, "schedEnd", "120px", "date"),
       boundCell(r, "actStart", "120px", "date"),
       boundCell(r, "actEnd", "120px", "date"),
       statusTd, coiTd,
-      boundCell(r, "notes", "120px"),
+      taCell(r, "notes", { minWidth: "120px" }),
       delCell(ss.rows, r, paint));
     return tr;
   }
@@ -2123,8 +2138,8 @@ export function punchList(project, pl) {
     const priTd = h("td"); priTd.append(sel(r, "priority", PUNCH_PRIORITIES));
     const statusTd = h("td"); statusTd.append(sel(r, "status", PUNCH_STATUSES, { onchange: calcOpen }));
     tr.append(
-      boundCell(r, "area", "90px"),
-      boundCell(r, "item", "180px"),
+      taCell(r, "area", { minWidth: "90px" }),
+      taCell(r, "item", { minWidth: "180px" }),
       tradeTd, priTd, statusTd,
       boundCell(r, "completedBy", "100px"),
       boundCell(r, "completedDate", "120px", "date"),
@@ -2202,7 +2217,7 @@ export function drawSchedule(project, ds) {
     });
     tr.append(
       h("td", { class: "calc" }, String(i + 1)),
-      boundCell(r, "desc", "170px"),
+      taCell(r, "desc", { minWidth: "170px" }),
       pctTd, amtTd,
       boundCell(r, "invoicedDate", "120px", "date"),
       boundCell(r, "paidDate", "120px", "date"),

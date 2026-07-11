@@ -188,6 +188,17 @@ table.grid td input { min-height: 40px; border: 0; border-radius: 0; text-align:
 table.grid td input:focus { outline: 2px solid var(--brand); outline-offset: -2px; box-shadow: none; }
 table.grid tr:nth-child(even) td { background: #f7f8fa; }
 
+/* Free-text table cells (descriptions, notes, tasks…): an auto-growing
+   textarea — the cell expands as you type so nothing is ever clipped. */
+table.grid th.thleft { text-align: left; padding-left: 8px; }
+table.grid td.tdta { vertical-align: top; }
+table.grid td.tdta .cell-ta {
+  display: block; width: 100%; min-width: 120px; min-height: 40px; resize: none; overflow: hidden;
+  border: 0; border-radius: 0; background: transparent;
+  text-align: left; padding: 8px 6px; font-size: 13px; line-height: 1.35;
+}
+table.grid td.tdta .cell-ta:focus { outline: 2px solid var(--brand); outline-offset: -2px; box-shadow: none; }
+
 /* Invoice charges — Xactimate-style: wide left-aligned description, compact
    numeric columns, shaded room/section header rows, continuous line numbers */
 table.grid--inv th.invdesc { text-align: left; padding-left: 8px; }
