@@ -199,6 +199,13 @@ export function draftRebuild(project, facts) {
   return callOffice(project, "rebuildDraft", { facts }).then((b) => b.draft);
 }
 
+/* ---------- floor plan dimension takeoff ---------- */
+/** Read room dimensions / SF / LF off the uploaded plan pages.
+    Returns { rooms:[{name,dims,floorSF,perimLF,ceiling,notes,confidence}], totals, notes }. */
+export function extractPlanDimensions(project, pages) {
+  return callOffice(project, "planDimensions", { pages: pages.slice(0, 6) }).then((b) => b.dimensions);
+}
+
 /** Conversational field assistant — returns { reply, transcript? }. */
 export function fieldAssist(project, payload) {
   return callOffice(project, "fieldAssist", payload);

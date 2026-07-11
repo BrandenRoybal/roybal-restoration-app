@@ -6,7 +6,7 @@ import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, t
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
-  lineItems, taCell, sheet, sheetFooter, letterhead, commit, uploadDoc,
+  lineItems, taCell, sheet, sheetFooter, letterhead, commit, uploadDoc, uploadedDocPages,
 } from "./formkit.js";
 import {
   SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
@@ -20,7 +20,7 @@ import {
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullDay as qbPullDay, pullRange as qbPullRange, entriesFor as qbEntriesFor, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
-import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice } from "./officeai.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, extractPlanDimensions } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
@@ -1748,14 +1748,109 @@ export function packBackReceipt(project) {
    letter page in the single-form PDF and the job packet, so the adjuster can
    read each measurement and square footage. */
 export function floorPlanSheet(project, fp) {
+  /* ---- AI dimension takeoff: rooms / SF / LF read off the plan, reviewed
+     and edited here, then available as quantities to every AI draft ---- */
+  const dimsBox = h("div");
+  const blankRoom = () => ({ name: "", dims: "", floorSF: "", perimLF: "", ceiling: "", notes: "", conf: 1 });
+  function rooms() { return (fp.dimensions && Array.isArray(fp.dimensions.rooms)) ? fp.dimensions.rooms : []; }
+  function paintDims() {
+    dimsBox.replaceChildren();
+    const list = rooms();
+    if (!list.length) return;
+    const totalEl = h("strong", {}, "");
+    const totalLfEl = h("strong", {}, "");
+    const recalc = () => {
+      totalEl.textContent = Math.round(list.reduce((t, r) => t + (parseFloat(r.floorSF) || 0), 0)) + " SF";
+      totalLfEl.textContent = Math.round(list.reduce((t, r) => t + (parseFloat(r.perimLF) || 0), 0)) + " LF";
+    };
+    const tbody = h("tbody");
+    const paintRows = () => {
+      tbody.replaceChildren(...list.map((r) => {
+        const tr = h("tr", { class: Number(r.conf) < 0.7 ? "flag7" : "" });
+        tr.append(
+          taCell(r, "name", { minWidth: "110px" }),
+          boundCell(r, "dims", "100px"),
+          boundCell(r, "floorSF", "56px", "text", recalc),
+          boundCell(r, "perimLF", "56px", "text", recalc),
+          boundCell(r, "ceiling", "48px"),
+          taCell(r, "notes", { minWidth: "120px" }),
+          delCell(list, r, () => { paintRows(); recalc(); }));
+        return tr;
+      }));
+    };
+    paintRows(); recalc();
+    const addRoom = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add room");
+    addRoom.addEventListener("click", () => { list.push(blankRoom()); paintRows(); commit(); });
+    dimsBox.append(
+      sectionTitle("Room Dimensions (from the plan)"),
+      h("p", { class: "subtle app-only" }, "AI-read from the uploaded plan — verify each line against the plan and edit anything off. Amber rows were computed rather than printed. These quantities feed the AI invoice, rebuild scope and the assistant."),
+      h("div", { class: "tablewrap" },
+        h("table", { class: "grid" },
+          h("colgroup", {},
+            h("col", {}), h("col", { style: "width:110px" }), h("col", { style: "width:64px" }),
+            h("col", { style: "width:64px" }), h("col", { style: "width:56px" }), h("col", { style: "width:24%" }),
+            h("col", { class: "app-only", style: "width:32px" })),
+          h("thead", {}, h("tr", {},
+            h("th", { class: "thleft" }, "Room / Area"), h("th", {}, "Dimensions"), h("th", {}, "Floor SF"),
+            h("th", {}, "Perim. LF"), h("th", {}, "Ceiling"), h("th", { class: "thleft" }, "Notes"), h("th", { class: "app-only" }, ""))),
+          tbody)),
+      addRoom,
+      h("div", { class: "totals" },
+        h("div", { class: "trow" }, h("span", {}, "Total Floor Area"), totalEl),
+        h("div", { class: "trow grand" }, h("span", {}, "Total Wall Perimeter"), totalLfEl)),
+      fp.dimensions && Array.isArray(fp.dimensions.notes) && fp.dimensions.notes.length
+        ? h("p", { class: "subtle app-only", style: "font-size:12px" }, "Plan notes: " + fp.dimensions.notes.join(" · ")) : null);
+  }
+  paintDims();
+
+  const aiBar = h("div", { class: "app-only", style: "margin:10px 0" });
+  function paintAi() {
+    aiBar.replaceChildren();
+    if (!uploadedDocPages(fp).length) return;
+    const btn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" },
+      rooms().length ? "↻ Re-read dimensions (AI)" : "✨ Read dimensions from the plan (AI)");
+    const status = h("span", { class: "subtle", style: "font-size:12px;margin-left:8px" });
+    btn.addEventListener("click", async () => {
+      if (!aiAvailable()) return;
+      btn.disabled = true; status.textContent = "Reading the plan…";
+      try {
+        const d = await extractPlanDimensions(project, uploadedDocPages(fp));
+        fp.dimensions = {
+          rooms: (d.rooms || []).map((r) => ({
+            name: r.name || "", dims: r.dims || "",
+            floorSF: r.floorSF ? String(r.floorSF) : "", perimLF: r.perimLF ? String(r.perimLF) : "",
+            ceiling: r.ceiling || "", notes: r.notes || "", conf: Number(r.confidence) || 0,
+          })),
+          notes: Array.isArray(d.notes) ? d.notes : [],
+          at: new Date().toISOString(),
+        };
+        commit();
+        status.textContent = "";
+        paintDims(); paintAi();
+        toast(fp.dimensions.rooms.length ? `Read ${fp.dimensions.rooms.length} room(s) — verify against the plan.` : "Couldn't find printed dimensions on the plan.");
+      } catch (e) {
+        status.textContent = "";
+        toast((e && e.message) || "Couldn't read the plan — try again.");
+      }
+      btn.disabled = false;
+    });
+    aiBar.append(btn, status);
+  }
+  paintAi();
+
+  const upload = uploadDoc(fp, {
+    blurb: "Upload the dimensioned plan — a PDF (every page comes in) or a photo. It prints FULL PAGE in the packet so the adjuster can read the room dimensions and square footages.",
+    attachedNote: "each prints as its own full page in the packet.",
+  });
+  upload.addEventListener("docpageschange", paintAi);
+
   return sheet("FLOOR PLAN", "Dimensioned Plan — Room Sizes & Square Footages", "Floor Plan",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
     sectionTitle("Dimensioned Floor Plan"),
-    uploadDoc(fp, {
-      blurb: "Upload the dimensioned plan — a PDF (every page comes in) or a photo. It prints FULL PAGE in the packet so the adjuster can read the room dimensions and square footages.",
-      attachedNote: "each prints as its own full page in the packet.",
-    }));
+    // management UI only — the plan itself prints as full pages after this sheet
+    h("div", { class: "app-only" }, upload, aiBar),
+    dimsBox);
 }
 
 /* Printable full-page sheets from an uploaded signed document (each PDF page

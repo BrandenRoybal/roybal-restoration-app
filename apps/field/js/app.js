@@ -826,11 +826,7 @@ function packetPage(project) {
   setCtx(project, null);
 
   // Forms where an uploaded signed PDF/scan REPLACES the generated form.
-  const UPLOAD_REPLACES = {
-    workAuth: "Work Authorization & Service Agreement",
-    certDrying: "Certificate of Drying",
-    floorPlan: "Floor Plan — Dimensions & Square Footages",
-  };
+  const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
 
   const included = [];
   for (const f of formsFor(project)) {
@@ -843,9 +839,16 @@ function packetPage(project) {
     if (f.multi) {
       (v || []).forEach((inst) => included.push(render(project, inst)));
     } else {
+      // Floor plan: the room-dimensions sheet (when read) + every plan page FULL PAGE.
+      if (f.key === "floorPlan") {
+        const pages = v ? uploadedDocPages(v) : [];
+        if (v && Array.isArray(v.dimensions && v.dimensions.rooms) && v.dimensions.rooms.length)
+          included.push(render(project, v));
+        if (pages.length) included.push(...uploadedDocSheet(pages, "Floor Plan — Dimensions & Square Footages"));
+        continue;
+      }
       let has = Array.isArray(v) ? v.length > 0 : !!v;   // photos/contents are arrays → one report
       if (f.key === "laborLog") has = !!(v && Array.isArray(v.entries) && v.entries.length);  // only when synced
-      if (f.key === "floorPlan") has = !!(v && uploadedDocPages(v).length);   // only with a plan uploaded
       if (!has) continue;
       const pages = UPLOAD_REPLACES[f.key] && v.mode === "upload" ? uploadedDocPages(v) : [];
       if (pages.length) included.push(...uploadedDocSheet(pages, UPLOAD_REPLACES[f.key]));
@@ -1162,11 +1165,14 @@ function formEditor(project, meta, instance) {
   // If a signed copy was uploaded for the Work Auth / Cert of Drying, the printed
   // single-form PDF shows the full-size uploaded document instead of the app form
   // (same as the full packet). The screen still shows the form to manage the upload.
-  const UPLOAD_REPLACES = {
-    workAuth: "Work Authorization & Service Agreement",
-    certDrying: "Certificate of Drying",
-    floorPlan: "Floor Plan — Dimensions & Square Footages",
-  };
+  const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
+  // Floor plan: the sheet stays (its dimensions table prints); the uploaded
+  // plan pages print FULL PAGE after it.
+  if (meta.key === "floorPlan") {
+    const pages = uploadedDocPages(instance);
+    if (pages.length) uploadedDocSheet(pages, "Floor Plan — Dimensions & Square Footages").forEach((sh) => body.append(sh));
+    sheetEl.addEventListener("docpageschange", () => formEditor(project, meta, instance));
+  }
   if (UPLOAD_REPLACES[meta.key] && instance && instance.mode === "upload") {
     const pages = uploadedDocPages(instance);
     if (pages.length) {

@@ -294,6 +294,7 @@ async function invoiceDraft(body: Record<string, unknown>) {
       `- Descriptions are plain English exactly as Xactimate reads \u2014 never include catalog code abbreviations and never repeat the room name inside the description.\n` +
       `- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit Cat-3 qualifiers.\n` +
       `- Include scope lines only where the facts support them; state the basis on every line.\n` +
+      `- facts.planDimensions (when present) are measurements read off the dimensioned floor plan and verified by the tech — use them for SF/LF quantities (flooring, drywall, baseboard) and cite the room's dimensions in the basis.\n` +
       `- No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n\n` +
       `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "draft_invoice",
@@ -488,6 +489,77 @@ async function timelineDraft(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: planDimensions — read room dimensions / SF / LF off the
+   uploaded dimensioned floor plan (vision). The result is reviewed
+   and edited by the tech, then feeds scope + invoice quantities.
+   ============================================================ */
+const PLAN_DIM_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["rooms", "totals", "notes"],
+  properties: {
+    rooms: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["name", "dims", "floorSF", "perimLF", "ceiling", "notes", "confidence"],
+        properties: {
+          name: { type: "string", description: "Room / area label exactly as printed on the plan, e.g. 'Master Bedroom'" },
+          dims: { type: "string", description: "The printed dimensions verbatim, e.g. 12' 4\" x 10' 6\"; empty when not printed" },
+          floorSF: { type: "number", description: "Floor area in square feet — the printed value when shown, else length × width from the printed dimensions; 0 when unknown" },
+          perimLF: { type: "number", description: "Wall perimeter in lineal feet computed from the printed dimensions (2×(L+W) for a simple rectangle, follow offsets when dimensioned); 0 when unknown" },
+          ceiling: { type: "string", description: "Ceiling height if printed, else empty" },
+          notes: { type: "string", description: "What's included/excluded (closets, offsets), unreadable text, or how a value was computed" },
+          confidence: { type: "number", minimum: 0, maximum: 1, description: "Below 0.7 when a value is computed or partially readable rather than printed outright" },
+        },
+      },
+    },
+    totals: {
+      type: "object", additionalProperties: false,
+      required: ["floorSF", "perimeterLF"],
+      properties: {
+        floorSF: { type: "number", description: "Sum of room floorSF values; 0 when unknown" },
+        perimeterLF: { type: "number", description: "Sum of room perimeter LF values; 0 when unknown" },
+      },
+    },
+    notes: { type: "array", items: { type: "string" }, description: "Plan-level caveats — missing dimensions, pages that are not floor plans, scale warnings" },
+  },
+} as const;
+
+async function planDimensions(body: Record<string, unknown>) {
+  const pages = Array.isArray(body.pages) ? (body.pages as string[]).slice(0, 6) : [];
+  if (!pages.length) throw new Error("Upload the floor plan first.");
+  const content: unknown[] = [];
+  for (const src of pages) {
+    const img = dataUrlToImage(src);
+    if (img) content.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+  }
+  if (!content.length) throw new Error("Couldn't read those pages as images.");
+  content.push({
+    type: "text",
+    text:
+      "Read the room dimensions off this dimensioned floor plan for an insurance repair estimate.\n" +
+      "RULES:\n" +
+      "- Use ONLY dimensions printed on the plan — never scale or estimate off the drawing itself.\n" +
+      "- One entry per labeled room/area. floorSF: the printed area when shown, else length × width. perimLF: wall perimeter from the printed dimensions.\n" +
+      "- Anything computed rather than printed gets confidence below 0.7 and a note saying how it was derived.\n" +
+      "- Unreadable or missing dimensions: leave the value 0/empty and say so in notes — never guess.",
+  });
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You are a senior reconstruction estimator at Roybal Construction, LLC reading a dimensioned floor plan (Xactimate / magicplan style) " +
+      "to take off room sizes, square footages and lineal footages for scope and invoice quantities. Precision over completeness: report " +
+      "exactly what is printed, flag everything derived. Call `plan_dimensions` with the takeoff.",
+    content,
+    toolName: "plan_dimensions",
+    schema: PLAN_DIM_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 3072,
+  });
+  const d = input as { rooms?: unknown[] };
+  return { result: { dimensions: input }, usage, model: DOC_MODEL, summary: { pages: content.length - 1, rooms: d.rooms?.length ?? 0 } };
+}
+
+/* ============================================================
    Action: rebuildDraft — reconstruction plan from a restoration job
    (Phase 3: mitigation job converts to a rebuild construction job)
    ============================================================ */
@@ -572,6 +644,7 @@ async function rebuildDraft(body: Record<string, unknown>) {
       `- Scope lines restore documented demo: drywall cut heights, removed flooring/insulation/trim, antimicrobial-treated areas needing repaint.\n` +
       `- Group lines by the documented room/area names. Use the trade list verbatim.\n` +
       `- qty/unit only when the documentation supports a number (e.g. cut height × wall length); otherwise qty 0 and a confidence below 0.7.\n` +
+      `- facts.planDimensions (when present) are tech-verified measurements from the dimensioned floor plan — use them to fill SF/LF quantities with confidence.\n` +
       `- tradeSequence: the build order for THIS scope only (demo-complete → rough-in → insulation → drywall → paint → flooring → trim → punch), skipping trades with no scope.\n` +
       `- selections: every owner choice the rebuild needs (flooring, paint colors, trim profile, fixtures) based on what was removed.\n` +
       `- questions: what the estimator must confirm on site (hidden damage, matching, code upgrades).\n\n` +
@@ -768,7 +841,7 @@ async function fieldAssist(body: Record<string, unknown>) {
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions,
 };
 
 serve(async (req: Request) => {
