@@ -64,10 +64,40 @@ ok("copied photos are staged 'before'", con.photos.every((p) => p.stage === "bef
 ok("original stage preserved in caption", con.photos[1].caption === "Mitigation (after): Dried to standard");
 ok("room carried on photos", con.photos[0].room === "Utility");
 
-/* floor plans → scope reference plans (sketch preferred over raw plan) */
+/* no Floor Plan form on this job → moisture-map sketches are the fallback source */
 ok("scope of work pre-created with reference plans", !!con.scopeOfWork && con.scopeOfWork.referencePlans.length === 2);
-ok("sketch preferred over floor plan", con.scopeOfWork.referencePlans[0] === "data:sketch1");
-ok("map without sketch falls back to floor plan", con.scopeOfWork.referencePlans[1] === "data:plan2");
+ok("fallback: sketch preferred over raw map image", con.scopeOfWork.referencePlans[0] === "data:sketch1");
+ok("fallback: map without sketch uses its floor-plan image", con.scopeOfWork.referencePlans[1] === "data:plan2");
+ok("no floor-plan takeoff to carry", con.floorPlan === null || con.floorPlan === undefined);
+
+/* ---------- the Floor Plan form is the preferred reference-plan source ---------- */
+{
+  const withPlan = restorationJob();
+  withPlan.floorPlan = {
+    createdAt: "x", mode: "upload", uploadedPages: ["data:fp-page1", "data:fp-page2"],
+    dimensions: { rooms: [{ name: "Utility", dims: "10' x 8'", floorSF: "80", perimLF: "36", ceiling: "", notes: "", conf: 1 }], notes: [], at: "x" },
+  };
+  const c2 = convertToConstruction(withPlan);
+  ok("floor-plan pages become the reference plans", c2.scopeOfWork.referencePlans.join() === "data:fp-page1,data:fp-page2");
+  ok("moisture-map sketches stay out when a floor plan exists", !c2.scopeOfWork.referencePlans.includes("data:sketch1"));
+  ok("plan takeoff dimensions carried to the rebuild", !!c2.floorPlan && c2.floorPlan.dimensions.rooms.length === 1 && c2.floorPlan.dimensions.rooms[0].floorSF === "80");
+  ok("carried dimensions are a copy, not a shared reference", c2.floorPlan.dimensions !== withPlan.floorPlan.dimensions && c2.floorPlan.dimensions.rooms[0] !== withPlan.floorPlan.dimensions.rooms[0]);
+  ok("no plan images duplicated onto the carried floor plan", c2.floorPlan.uploadedPages.length === 0);
+
+  const legacy = restorationJob();
+  legacy.floorPlan = { uploadedDoc: "data:fp-legacy" };
+  ok("legacy single-page uploadedDoc shape works", convertToConstruction(legacy).scopeOfWork.referencePlans.join() === "data:fp-legacy");
+
+  const emptyPlan = restorationJob();
+  emptyPlan.floorPlan = { createdAt: "x", mode: "upload", uploadedPages: [] };
+  ok("empty floor plan falls back to moisture maps", convertToConstruction(emptyPlan).scopeOfWork.referencePlans[0] === "data:sketch1");
+
+  const bigPage = "data:image/jpeg;base64," + "x".repeat(1_000_000);
+  const heavyFp = restorationJob();
+  heavyFp.floorPlan = { uploadedPages: [bigPage, bigPage] };
+  const hf = convertToConstruction(heavyFp);
+  ok("floor-plan pages respect the byte budget", hf.scopeOfWork.referencePlans.length === 1 && hf.mitigationRef.plansLeftBehind === 1);
+}
 
 /* read-only mitigation reference */
 ok("narrative carried into mitigationRef", con.mitigationRef.narrative === "Mitigation narrative text.");

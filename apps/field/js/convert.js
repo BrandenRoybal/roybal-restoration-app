@@ -11,7 +11,8 @@
      claim, so carrier/adjuster/claim # stay relevant)
    - photos — the mitigation record becomes the rebuild's "before"
      context (stage forced to "before", original stage kept in the caption)
-   - moisture-map sketches / floor plans → Scope of Work reference plans
+   - the Floor Plan form's dimensioned pages → Scope of Work reference
+     plans (moisture-map sketches only when no floor plan was uploaded)
    - the AI narrative + change-order summaries → mitigationRef, a small
      read-only reference block (offline context + the AI fact pack)
 
@@ -55,8 +56,18 @@ function pickPhotos(photos) {
   return { picked: usable.filter((ph) => picked.has(ph)), leftBehind: usable.length - picked.size };
 }
 
-function pickPlans(maps) {
-  const all = arr(maps).map((m) => m.sketch || m.floorPlan).filter(Boolean);
+/* Reference-plan sources, in preference order: the Floor Plan form's
+   uploaded dimensioned pages (drawn for the adjuster — readable SF/LF),
+   then moisture-map sketches/photos for older jobs without one. */
+function planSources(r) {
+  const fp = r.floorPlan || {};
+  const pages = (fp.uploadedPages && fp.uploadedPages.length ? fp.uploadedPages
+    : fp.uploadedDoc ? [fp.uploadedDoc] : []).filter(Boolean);
+  if (pages.length) return pages;
+  return arr(r.moistureMaps).map((m) => m.sketch || m.floorPlan).filter(Boolean);
+}
+
+function pickPlans(all) {
   const picked = [];
   let bytes = 0;
   for (const src of all) {
@@ -89,11 +100,23 @@ export function convertToConstruction(rest) {
     ts: ph.ts || new Date().toISOString(),
   }));
 
-  // moisture-map sketches / floor plans → Scope of Work reference plans (budgeted)
-  const plans = pickPlans(r.moistureMaps);
+  // floor-plan pages (fallback: moisture-map sketches) → Scope of Work
+  // reference plans (budgeted)
+  const plans = pickPlans(planSources(r));
   if (plans.picked.length) {
     p.scopeOfWork = newScopeOfWork();
     p.scopeOfWork.referencePlans = plans.picked;
+  }
+
+  // the plan takeoff (room SF/LF — small, no images) rides along so the
+  // rebuild's own fact digests keep planDimensions without a re-run
+  if (r.floorPlan && r.floorPlan.dimensions && arr(r.floorPlan.dimensions.rooms).length) {
+    p.floorPlan = {
+      createdAt: new Date().toISOString(),
+      mode: "upload",
+      uploadedPages: [],
+      dimensions: JSON.parse(JSON.stringify(r.floorPlan.dimensions)),
+    };
   }
 
   // read-only mitigation reference (kept small — no images)
