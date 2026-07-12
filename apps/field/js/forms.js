@@ -18,7 +18,7 @@ import {
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
   newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
-import { portalProjection, portalShareLink, newShareToken, publishPortal } from "./portal.js";
+import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice } from "./portal.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
@@ -2631,6 +2631,60 @@ export function portalShareForm(project) {
     publishBtn.disabled = false; publishBtn.textContent = t;
   });
 
+  // ---------- customer <-> office message thread ----------
+  // The portal_jobs row id equals portalShare.id (the publish upsert key), so
+  // the office reads/writes the same thread the customer reaches via the gateway.
+  const threadBox = h("div", { class: "portal-thread-wrap", style: "margin-top:14px" });
+  function paintThread() {
+    threadBox.replaceChildren();
+    if (!s.enabled) return;
+    if (!s.publishedAt) {
+      threadBox.append(sectionTitle("Messages"),
+        h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 0" },
+          "Publish to the portal first — then you and the customer can message here."));
+      return;
+    }
+    const list = h("div", { class: "portal-thread" }, h("p", { class: "subtle", style: "font-size:12px" }, "Loading messages…"));
+    const input = h("textarea", { rows: "2", placeholder: "Reply to the customer…", class: "portal-reply__input" });
+    const send = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "Send reply");
+    const status = h("div", { class: "subtle", style: "font-size:12px;color:var(--brand-dark);min-height:1px;margin-top:6px" });
+
+    function renderMsgs(msgs) {
+      if (!msgs.length) { list.replaceChildren(h("p", { class: "subtle", style: "font-size:12px;text-align:center;padding:12px" }, "No messages yet.")); return; }
+      list.replaceChildren(...msgs.map((m) => {
+        const mine = m.direction === "out";
+        const who = mine ? (m.author === "ai" ? "You (AI draft)" : "You") : "Customer";
+        return h("div", { class: "pbubble pbubble--" + (mine ? "me" : "them") },
+          h("div", { class: "pbubble__body" }, m.body),
+          h("div", { class: "pbubble__meta" }, who + " · " + (m.created_at ? fmtDate(m.created_at.slice(0, 10)) + " " + m.created_at.slice(11, 16) : "")));
+      }));
+      list.scrollTop = list.scrollHeight;
+    }
+    async function load() {
+      try {
+        const msgs = await fetchPortalThread(s.id);
+        renderMsgs(msgs);
+        if (msgs.some((m) => m.direction === "in" && !m.read_by_office)) markThreadReadByOffice(s.id);
+      } catch (e) { list.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" }, "Couldn't load messages (" + (e.message || e) + ").")); }
+    }
+    send.addEventListener("click", async () => {
+      const text = input.value.trim();
+      if (!text) return;
+      send.disabled = true; status.textContent = "";
+      try { await sendOfficeReply(s.id, text); input.value = ""; await load(); }
+      catch (e) { status.textContent = "Send failed: " + (e.message || e); }
+      send.disabled = false;
+    });
+
+    threadBox.append(
+      sectionTitle("Messages"),
+      h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 8px" }, "Your conversation with the customer. Replies show on their portal instantly."),
+      list,
+      h("div", { class: "portal-reply" }, input, send),
+      status);
+    load();
+  }
+
   function paint() {
     body.replaceChildren(
       h("p", { class: "subtle", style: "margin:0 0 10px" },
@@ -2642,9 +2696,10 @@ export function portalShareForm(project) {
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Tap to include a photo in the customer view (highlighted = shared)."),
         photoWrap,
         h("div", { style: "margin-top:12px" }, publishBtn),
-        linkBox) : null,
+        linkBox,
+        threadBox) : null,
     );
-    paintPhotos(); paintLink();
+    paintPhotos(); paintLink(); paintThread();
   }
   paint();
 

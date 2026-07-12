@@ -1,7 +1,8 @@
-/* Roybal Customer Portal — read-only status page.
+/* Roybal Customer Portal — read-only status page + message thread.
    Reads the share token from the URL (/j/<token>), asks the roybal-portal
-   gateway for the curated slice, and renders status + milestones + photos.
-   No login: the token in the link is the credential. */
+   gateway for the curated slice, and renders status + milestones + photos +
+   a two-way message thread with the office. No login: the token is the
+   credential. */
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 
 const app = document.getElementById("app");
@@ -12,6 +13,7 @@ const h = (tag, attrs = {}, ...kids) => {
     if (v == null || v === false) continue;
     if (k === "class") el.className = v;
     else if (k === "html") el.innerHTML = v;
+    else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
     else el.setAttribute(k, v);
   }
   for (const c of kids.flat()) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
@@ -25,23 +27,94 @@ function tokenFromUrl() {
   return q && /^[0-9a-f]{16,}$/i.test(q) ? q : "";
 }
 
-async function fetchView(token) {
+async function callGateway(payload) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/roybal-portal`, {
     method: "POST",
     headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "view", token }),
+    body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok || !body.ok) { const e = new Error(body.error || "load_failed"); e.status = res.status; throw e; }
   return body;
 }
 
+const fetchView = (token) => callGateway({ action: "view", token });
+const fetchThread = (token) => callGateway({ action: "messages", token });
+const postMessage = (token, body) => callGateway({ action: "send", token, body });
+
 function message(icon, title, sub) {
   app.replaceChildren(h("div", { class: "msg" },
     h("div", { class: "big" }, icon), h("h2", {}, title), sub ? h("p", {}, sub) : null));
 }
 
-function render(data) {
+/* pretty, terse timestamp for a message bubble */
+function whenLabel(iso) {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d)) return "";
+    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  } catch { return ""; }
+}
+
+/* ---------- message thread ---------- */
+function renderThread(listEl, messages) {
+  const bubbles = (messages || []).map((m) =>
+    h("div", { class: "bubble bubble--" + (m.from === "you" ? "me" : "them") },
+      h("div", { class: "bubble__body" }, m.body),
+      h("div", { class: "bubble__meta" }, (m.from === "you" ? "You" : "Roybal Construction") + " · " + whenLabel(m.at))));
+  if (!bubbles.length) {
+    listEl.replaceChildren(h("p", { class: "thread__empty" },
+      "Have a question about your project? Send us a message and we'll reply here."));
+  } else {
+    listEl.replaceChildren(...bubbles);
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+}
+
+function threadCard(token) {
+  const list = h("div", { class: "thread", id: "thread" },
+    h("p", { class: "thread__empty" }, "Loading messages…"));
+  const input = h("textarea", { class: "composer__input", rows: "1", placeholder: "Write a message…",
+    "aria-label": "Write a message" });
+  const btn = h("button", { class: "composer__send", type: "submit" }, "Send");
+  const status = h("div", { class: "composer__status", role: "status" });
+
+  const grow = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 140) + "px"; };
+  input.addEventListener("input", grow);
+
+  const form = h("form", { class: "composer",
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      btn.disabled = true; status.textContent = "";
+      try {
+        await postMessage(token, text);
+        input.value = ""; grow();
+        renderThread(list, (await fetchThread(token)).messages);
+      } catch (err) {
+        status.textContent = err.status === 429
+          ? "You've sent a lot of messages — please give us a moment to reply."
+          : "Couldn't send. Please try again, or call 907-371-9868.";
+      } finally { btn.disabled = false; }
+    } }, input, btn);
+
+  // Enter sends, Shift+Enter makes a newline
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  });
+
+  const card = h("div", { class: "card" },
+    h("p", { class: "sectitle" }, "Messages"), list, form, status);
+
+  // load the thread
+  fetchThread(token).then((r) => renderThread(list, r.messages)).catch(() => {
+    list.replaceChildren(h("p", { class: "thread__empty" }, "Messages will appear here."));
+  });
+  return card;
+}
+
+function render(data, token) {
   const job = data.job || {};
   const badge = job.status
     ? h("span", { class: "statusbadge" }, h("span", { class: "dot" }),
@@ -70,10 +143,8 @@ function render(data) {
     ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Photos"), h("div", { class: "gallery" }, ...photos))
     : null;
 
-  const empty = (!timeline && !gallery)
-    ? h("div", { class: "msg" }, h("p", {}, "Your project details will appear here soon.")) : null;
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[hero, timeline, gallery, empty].filter(Boolean));
+  app.replaceChildren(...[hero, timeline, gallery, threadCard(token)].filter(Boolean));
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";
@@ -82,7 +153,7 @@ const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.labe
   const token = tokenFromUrl();
   if (!token) return message("🔗", "Link not found", "Open the project link we sent you to view your job status.");
   try {
-    render(await fetchView(token));
+    render(await fetchView(token), token);
   } catch (e) {
     if (e.status === 404) message("🔒", "This link isn't active", "It may have expired or been turned off. Call us at 907-371-9868 and we'll send a fresh one.");
     else message("⚠️", "Couldn't load your project", "Please try again in a moment, or call us at 907-371-9868.");

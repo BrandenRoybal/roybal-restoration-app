@@ -90,3 +90,52 @@ export async function publishPortal(project) {
   if (!res.ok) throw new Error("Publish failed (" + res.status + "): " + (await res.text().catch(() => "")));
   return row;
 }
+
+/* ---------- portal message thread (office side) ----------
+   The customer <-> office conversation lives in portal_messages, keyed by
+   the portal_jobs row id — which equals portalShare.id (the upsert key). The
+   crew hits this table directly over the authenticated REST session; the
+   customer reaches the same thread only through the roybal-portal gateway. */
+
+/* the whole thread for a shared job, oldest first */
+export async function fetchPortalThread(portalJobId) {
+  if (!portalJobId) return [];
+  const { rest } = await import("./supa.js");
+  const q = `portal_messages?portal_job_id=eq.${portalJobId}` +
+    `&select=id,direction,author,body,channel,read_by_office,created_at&order=created_at.asc`;
+  const res = await rest(q, { method: "GET" });
+  if (!res.ok) throw new Error("Thread load failed (" + res.status + ")");
+  return res.json();
+}
+
+/* office (or an approved AI draft) replies to the customer */
+export async function sendOfficeReply(portalJobId, body, author = "office") {
+  const text = (body || "").trim();
+  if (!portalJobId || !text) throw new Error("Nothing to send");
+  const { rest } = await import("./supa.js");
+  const res = await rest("portal_messages", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify([{
+      portal_job_id: portalJobId,
+      direction: "out",
+      channel: "portal",
+      author,
+      body: text,
+      read_by_office: true,
+      read_by_customer: false,
+    }]),
+  });
+  if (!res.ok) throw new Error("Send failed (" + res.status + ")");
+  return (await res.json())[0];
+}
+
+/* mark the customer's inbound messages as seen by the office */
+export async function markThreadReadByOffice(portalJobId) {
+  if (!portalJobId) return;
+  const { rest } = await import("./supa.js");
+  await rest(
+    `portal_messages?portal_job_id=eq.${portalJobId}&direction=eq.in&read_by_office=eq.false`,
+    { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ read_by_office: true }) },
+  ).catch(() => {});
+}
