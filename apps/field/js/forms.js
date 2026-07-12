@@ -819,6 +819,12 @@ export function workAuth(project, wa) {
     sectionTitle("Terms & Conditions"),
     terms,
 
+    sectionTitle("Text Message Consent (Optional)"),
+    check(wa, "smsConsent",
+      "I agree to receive text messages from Roybal Construction, LLC about my job — including technician arrival notices, appointment and walkthrough reminders, equipment-pickup notices, and job-status updates — at the phone number listed above. Message frequency varies. Message and data rates may apply. Consent is not a condition of service. Reply STOP to cancel or HELP for help at any time."),
+    h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 0" },
+      "Terms of Service: app.roybalconstruction.com/terms.html · Privacy Policy: app.roybalconstruction.com/privacy.html"),
+
     sectionTitle("Authorization & Signatures"),
     h("p", { class: "subtle" }, "By signing below, the Property Owner confirms they have read and agree to the Terms & Conditions above, and authorize Roybal Construction, LLC to commence the described scope of work."),
     signOrUpload(wa, () => [
