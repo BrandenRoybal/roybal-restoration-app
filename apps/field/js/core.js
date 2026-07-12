@@ -48,23 +48,26 @@ export function fmtDate(iso) {
 export const money = (n) =>
   (Number(n) || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
-/* ---------- IndexedDB store (single "projects" object store) ---------- */
+/* ---------- IndexedDB store ("projects" + on-device "backups") ---------- */
 const DB_NAME = "roybal-field";
 const STORE = "projects";
+const BACKUPS = "backups";
 let _db;
 function db() {
   if (_db) return Promise.resolve(_db);
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, 2);
     req.onupgradeneeded = () => {
       const d = req.result;
       if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE, { keyPath: "id" });
+      if (!d.objectStoreNames.contains(BACKUPS)) d.createObjectStore(BACKUPS, { keyPath: "id" });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
   });
 }
-function tx(mode) { return db().then((d) => d.transaction(STORE, mode).objectStore(STORE)); }
+function tx(mode, name = STORE) { return db().then((d) => d.transaction(name, mode).objectStore(name)); }
+const reqProm = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
 
 /* save/delete listeners — the sync engine subscribes to push changes up */
 const _savedFns = [], _deletedFns = [];
@@ -106,6 +109,23 @@ export const Store = {
       r.onsuccess = () => { if (!opts.quiet) _deletedFns.forEach((f) => { try { f(id); } catch {} }); res(); };
       r.onerror = () => rej(r.error);
     });
+  },
+
+  /* ---------- on-device backups ----------
+     Snapshotted automatically right before cloud sync overwrites a local
+     job with a copy from another device — the safety net against a stale
+     copy clobbering newer work. Newest first, last 2 per job, this device
+     only (never synced). Restorable from the job page. */
+  async backup(project) {
+    if (!project || !project.id) return;
+    const row = (await reqProm((await tx("readonly", BACKUPS)).get(project.id))) || { id: project.id, snaps: [] };
+    row.snaps.unshift({ takenAt: new Date().toISOString(), data: project });
+    row.snaps = row.snaps.slice(0, 2);
+    await reqProm((await tx("readwrite", BACKUPS)).put(row));
+  },
+  async backups(id) {
+    const row = await reqProm((await tx("readonly", BACKUPS)).get(id));
+    return (row && row.snaps) || [];
   },
 };
 

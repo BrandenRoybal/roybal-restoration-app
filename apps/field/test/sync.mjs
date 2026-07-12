@@ -20,9 +20,17 @@ let clock = 1;
 const nowIso = () => new Date(1700000000000 + clock++ * 1000).toISOString();
 const resp = (status, body) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
 
+const mediaStore = new Map();   // field-media bucket: hash -> text
+
 globalThis.fetch = async (url, opts = {}) => {
   const u = new URL(url);
   const method = (opts.method || "GET").toUpperCase();
+  if (u.pathname.startsWith("/storage/v1/object/field-media/")) {
+    const hash = u.pathname.split("/").pop();
+    if (method === "POST" || method === "PUT") { mediaStore.set(hash, opts.body); return resp(200, {}); }
+    if (mediaStore.has(hash)) return { ok: true, status: 200, json: async () => ({}), text: async () => mediaStore.get(hash) };
+    return resp(404, {});
+  }
   const body = opts.body ? JSON.parse(opts.body) : null;
   if (u.pathname === "/auth/v1/token") {
     return resp(200, { access_token: "tok", refresh_token: "ref", expires_in: 3600, user: { email: body.email } });
@@ -74,6 +82,36 @@ const { syncNow } = await import("../js/sync.js");
   serverRows.set("p2", { id: "p2", data: { id: "p2" }, deleted: true, updated_at: nowIso() });
   await syncNow();
   ok(!(await Store.get("p2")), "remote delete removes the job locally");
+
+  // ---------- media offload: photo-heavy jobs stay under the row cap ----------
+  const BIG = "data:image/jpeg;base64," + "P".repeat(80_000);
+  await Store.put({ id: "p3", customer: "Gamma", photos: [{ id: "ph1", src: BIG }] });
+  await syncNow();
+  const row3 = serverRows.get("p3");
+  ok(row3 && !JSON.stringify(row3.data).includes("PPPPPPPP"), "photo bytes never reach the job row");
+  ok(/^media:[0-9a-f]{64}:\d+$/.test(row3.data.photos[0].src), "row carries a media marker instead");
+  ok(mediaStore.size === 1 && [...mediaStore.values()][0] === BIG, "photo uploaded to the field-media bucket");
+
+  // another device's row referencing that media inflates on pull
+  serverRows.set("p4", { id: "p4", data: { ...row3.data, id: "p4", customer: "Delta", updatedAt: new Date().toISOString() }, deleted: false, updated_at: nowIso() });
+  await syncNow();
+  ok((await Store.get("p4")).photos[0].src === BIG, "pulled marker re-inflates to the original photo");
+
+  // ---------- clobber protection ----------
+  // equal timestamps: local wins the tie, remote is NOT applied
+  const p1 = await Store.get("p1");
+  serverRows.set("p1", { id: "p1", data: { id: "p1", customer: "Alpha-TIE", updatedAt: p1.updatedAt }, deleted: false, updated_at: nowIso() });
+  await syncNow();
+  ok((await Store.get("p1")).customer === "Alpha-EDITED", "equal-timestamp remote does not overwrite local work");
+  const snapsBefore = (await Store.backups("p1")).length;   // the legit overwrite above already took one
+
+  // a strictly newer (stale-content) copy still wins — but the outgoing
+  // local copy is snapshotted to on-device backups first
+  serverRows.set("p1", { id: "p1", data: { id: "p1", customer: "Alpha-CLOBBER", updatedAt: new Date(Date.now() + 18e5).toISOString() }, deleted: false, updated_at: nowIso() });
+  await syncNow();
+  ok((await Store.get("p1")).customer === "Alpha-CLOBBER", "strictly newer remote still applies (last-edit-wins)");
+  const snaps = await Store.backups("p1");
+  ok(snaps.length === snapsBefore + 1 && snaps[0].data.customer === "Alpha-EDITED", "overwritten copy saved to on-device backups (newest first)");
 
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
   process.exit(failures ? 1 : 0);
