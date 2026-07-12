@@ -151,9 +151,37 @@ function equipmentSizingSummary(p) {
         ...(dh.cfm ? { totalCFM: dh.cfm } : {}),
         airScrubbers: c.scrubbers.count, auxiliaryHeat: !!c.heat.needed,
       },
+      // tech-documented reasons deployment differs from the worksheet figures
+      ...(d.calcDeviation && Object.values(d.calcDeviation).some((v) => String(v || "").trim())
+        ? { deviationNotes: Object.fromEntries(Object.entries(d.calcDeviation).filter(([, v]) => String(v || "").trim())) }
+        : {}),
     };
   }
   return null;
+}
+
+/* Receipts / subcontractor invoices attached to invoices & estimates —
+   AI-recognized (vendor, date, total) so drafts can bill documented
+   pass-throughs and the assistant can cite them. */
+function receiptsSummary(p) {
+  const out = [];
+  for (const [key, docLabel] of [["invoices", "invoice"], ["reconEstimates", "estimate"]]) {
+    for (const inv of arr(p[key])) {
+      for (const att of arr(inv.attachments)) {
+        if (!att || !att.ai) continue;
+        out.push({
+          attachedTo: docLabel + (inv.invoiceNo ? " " + inv.invoiceNo : ""),
+          label: att.label || "",
+          docType: att.ai.docType || "",
+          vendor: att.ai.vendor || "",
+          date: att.ai.docDate || "",
+          ...(att.ai.totalAmount != null && att.ai.totalAmount !== "" ? { total: Number(att.ai.totalAmount) } : {}),
+          summary: String(att.ai.summary || "").slice(0, 400),
+        });
+      }
+    }
+  }
+  return out.length ? out.slice(0, 25) : null;
 }
 
 /* Supporting documents (engineer's reports, estimates…) — the tech-verified
@@ -220,6 +248,7 @@ export function narrativeFacts(project) {
     planDimensions: planDimensionsSummary(p),
     supportingDocs: supportingDocsSummary(p),
     equipmentSizing: equipmentSizingSummary(p),
+    receipts: receiptsSummary(p),
     // texts composed from the app — proof of customer/office notification
     notifications: arr(p.smsLog).slice(-20).map((e) => ({
       at: e.at || "", type: e.kind || "text", to: arr(e.to).join(", "), by: e.by || "",
@@ -273,6 +302,7 @@ export function constructionFacts(project, now = Date.now()) {
     scope,
     planDimensions: planDimensionsSummary(p),
     supportingDocs: supportingDocsSummary(p),
+    receipts: receiptsSummary(p),
     schedule,
     inspections,
     selections,

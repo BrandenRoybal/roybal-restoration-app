@@ -6,7 +6,7 @@ import {
   formByKey, formCount, newProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
-  newInvoice, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
+  newInvoice, newReconEstimate, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
   newScopeOfWork, newPreConChecklist, newSelections, newSubSchedule,
   newInspection, newPunchList, newDrawSchedule, newCertCompletion,
   blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
@@ -50,7 +50,7 @@ window.addEventListener("beforeprint", () => {
 const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
-  invoices: newInvoice, workAuth: newWorkAuth, certDrying: newCertDrying,
+  invoices: newInvoice, reconEstimates: newReconEstimate, workAuth: newWorkAuth, certDrying: newCertDrying,
   laborLog: newLaborLog, floorPlan: newFloorPlan, supportDocs: newSupportDoc,
   scopeOfWork: newScopeOfWork, preConChecklist: newPreConChecklist,
   selections: newSelections, subSchedule: newSubSchedule,
@@ -926,11 +926,11 @@ function packetPage(project) {
     if (f.multi) {
       (v || []).forEach((inst) => included.push(render(project, inst)));
     } else {
-      // Floor plan: the room-dimensions sheet (when read) + every plan page FULL PAGE.
+      // Floor plan: every plan page FULL PAGE. The room-dimensions takeoff
+      // table is INTERNAL ONLY — the adjuster reads SF/LF off the full-size
+      // dimensioned plan; the table stays editable in the form for our use.
       if (f.key === "floorPlan") {
         const pages = v ? uploadedDocPages(v) : [];
-        if (v && Array.isArray(v.dimensions && v.dimensions.rooms) && v.dimensions.rooms.length)
-          included.push(render(project, v));
         if (pages.length) included.push(...uploadedDocSheet(pages, "Floor Plan — Dimensions & Square Footages"));
         continue;
       }
@@ -1174,7 +1174,7 @@ async function formPage(project, key, instId) {
 
   // multi-instance: show instance list unless a specific instance is requested
   // (older projects predate some multi forms — e.g. invoices — so default the array)
-  if (!Array.isArray(project[key])) { project[key] = []; await Store.put(project); }
+  if (!Array.isArray(project[key])) { project[key] = []; await Store.put(project, { bump: false, quiet: true }); }
   if (instId) {
     const inst = project[key].find((x) => x.id === instId);
     if (!inst) return go(`#/p/${project.id}/f/${key}`);
@@ -1219,6 +1219,7 @@ function instanceTitle(key, inst) {
     case "supportDocs": return inst.title || (inst.docType ? inst.docType + " — " + fmtDate((inst.createdAt || "").slice(0, 10)) : "Supporting document");
     case "changeOrders": return "Change Order " + (inst.coNo || "") + " — " + fmtDate(inst.coDate);
     case "invoices": return "Invoice " + (inst.invoiceNo || "") + " — " + fmtDate(inst.invoiceDate);
+    case "reconEstimates": return "Estimate " + (inst.invoiceNo || "") + " — " + fmtDate(inst.invoiceDate);
     case "inspections": return (inst.type || "Inspection") + " — " +
       (inst.result ? inst.result : (inst.scheduled ? "sched " + fmtDate(inst.scheduled) : "scheduled"));
     default: return "Entry";
@@ -1257,9 +1258,10 @@ function formEditor(project, meta, instance) {
   // single-form PDF shows the full-size uploaded document instead of the app form
   // (same as the full packet). The screen still shows the form to manage the upload.
   const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
-  // Floor plan: the sheet stays (its dimensions table prints); the uploaded
-  // plan pages print FULL PAGE after it.
+  // Floor plan: the dimensions-table sheet is INTERNAL ONLY (screen, never
+  // paper) — printing this form yields just the uploaded plan pages FULL PAGE.
   if (meta.key === "floorPlan") {
+    sheetEl.classList.add("app-only");
     const pages = uploadedDocPages(instance);
     if (pages.length) uploadedDocSheet(pages, "Floor Plan — Dimensions & Square Footages").forEach((sh) => body.append(sh));
     sheetEl.addEventListener("docpageschange", () => formEditor(project, meta, instance));

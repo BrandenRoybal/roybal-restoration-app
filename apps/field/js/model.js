@@ -89,6 +89,9 @@ export const FORMS = [
   { key: "invoices",         name: "Construction Invoice", icon: "🧾", multi: true,
     types: ["restoration", "construction"],
     blurb: "T&M or contract billing — AI-drafted from the job's documentation or built by hand" },
+  { key: "reconEstimates",   name: "Reconstruction Estimate", icon: "🏗️", multi: true,
+    types: ["restoration"],
+    blurb: "Proposed rebuild scope & pricing — AI-drafted from the documented damage, sends with the packet alongside the mitigation invoice" },
 ];
 
 /* Job kind. Jobs created before this field existed carry no jobType, so
@@ -160,6 +163,7 @@ export function newProject() {
     laborLog: null,
     changeOrders: [],
     invoices: [],
+    reconEstimates: [],   // reconstruction estimates (restoration jobs — sent with the claim packet)
     // construction / remodel forms
     scopeOfWork: null,
     preConChecklist: null,
@@ -337,6 +341,16 @@ export function newInvoice() {
 }
 export function blankLineItem() {
   return { room: "", desc: "", qty: "", unit: "", price: "" };
+}
+
+/* Reconstruction estimate — same shape as an invoice (shared editor/AI
+   machinery) flagged kind:"estimate": proposed rebuild scope priced line
+   by line + O&P, not billing for performed work. */
+export function newReconEstimate() {
+  const e = newInvoice();
+  e.kind = "estimate";
+  e.terms = "";
+  return e;
 }
 
 /* Supporting document — engineer's report, hygienist report, adjuster
