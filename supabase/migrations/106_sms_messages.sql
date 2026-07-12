@@ -29,7 +29,19 @@ create index if not exists sms_messages_sid_idx  on public.sms_messages (twilio_
 create index if not exists sms_messages_time_idx on public.sms_messages (created_at);
 
 alter table public.sms_messages enable row level security;
-drop policy if exists sms_messages_all on public.sms_messages;
-create policy sms_messages_all on public.sms_messages
-  for all to authenticated
-  using (true) with check (true);
+
+-- The message log is claim documentation AND the basis for the monthly send
+-- cap (which counts outbound rows). Signed-in crew may READ, INSERT, and let
+-- the edge function UPDATE delivery status — but NOT DELETE. With no delete
+-- policy, RLS denies deletes, so a row (and the send count it represents) can't
+-- be wiped via the public REST API to reset the cap or erase documentation.
+drop policy if exists sms_messages_all    on public.sms_messages;
+drop policy if exists sms_messages_select on public.sms_messages;
+drop policy if exists sms_messages_insert on public.sms_messages;
+drop policy if exists sms_messages_update on public.sms_messages;
+create policy sms_messages_select on public.sms_messages
+  for select to authenticated using (true);
+create policy sms_messages_insert on public.sms_messages
+  for insert to authenticated with check (true);
+create policy sms_messages_update on public.sms_messages
+  for update to authenticated using (true) with check (true);

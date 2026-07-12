@@ -28,7 +28,10 @@ const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
 const TWILIO_AUTH = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const TWILIO_FROM = Deno.env.get("TWILIO_FROM") ?? "";
-const SMS_MONTHLY_CAP = Number(Deno.env.get("SMS_MONTHLY_CAP") ?? "500");
+// A non-numeric SMS_MONTHLY_CAP secret (e.g. "500 texts") must NOT silently
+// disable the cap — fall back to the 500 default when it isn't a finite number.
+const CAP_RAW = Number(Deno.env.get("SMS_MONTHLY_CAP") ?? "500");
+const SMS_MONTHLY_CAP = Number.isFinite(CAP_RAW) ? CAP_RAW : 500;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -46,16 +49,22 @@ function db(path: string, jwt: string, opts: RequestInit = {}) {
   });
 }
 
-/* +1XXXXXXXXXX from anything a form might hold; empty when unusable. */
+/* +1XXXXXXXXXX for a US / North-American number; empty for anything else.
+   We intentionally reject international and malformed input (including a bare
+   "+" with the wrong digit count) so a fat-fingered or foreign number can
+   never be dialed and billed — every branch here yields a US number or "". */
 export function toE164(raw: unknown): string {
   const s = String(raw ?? "").trim();
   if (!s) return "";
   const digits = s.replace(/[^\d]/g, "");
-  if (s.startsWith("+")) return digits.length >= 8 ? "+" + digits : "";
-  if (digits.length === 10) return "+1" + digits;
-  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits;
-  return "";
+  if (digits.length === 10) return "+1" + digits;                          // 907-371-9868
+  if (digits.length === 11 && digits.startsWith("1")) return "+" + digits; // 1-907-371-9868 / +1 907...
+  return "";                                                               // international / malformed -> rejected
 }
+
+/* Truncate by CODE POINT, never mid-surrogate — slicing a UTF-16 string at a
+   fixed unit index can split an emoji and corrupt the send. */
+const clip = (t: string, n = 1600) => Array.from(t).slice(0, n).join("");
 
 async function monthCount(jwt: string): Promise<number> {
   const from = new Date();
@@ -90,29 +99,42 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
     body: JSON.stringify([{
       unified_job_id: body.unified_job_id ?? null,
       direction: "outbound", to_number: to, from_number: TWILIO_FROM,
-      body: text.slice(0, 1600), kind: String(body.kind ?? "text"),
+      body: clip(text), kind: String(body.kind ?? "text"),
       sent_by: body.captured_by ?? null, status: "pending",
     }]),
   });
   if (!ins.ok) throw new Error(`log insert failed (${ins.status}): ${await ins.text().catch(() => "")}`);
   const row = (await ins.json())[0];
 
+  // mark the row's outcome and never leave it orphaned at "pending"
+  const settle = (patch: Record<string, unknown>) =>
+    db(`sms_messages?id=eq.${row.id}`, jwt, { method: "PATCH", body: JSON.stringify(patch) }).catch(() => {});
+
   // Twilio REST send
-  const form = new URLSearchParams({ To: to, From: TWILIO_FROM, Body: text.slice(0, 1600) });
+  const form = new URLSearchParams({ To: to, From: TWILIO_FROM, Body: clip(text) });
   for (const u of media) form.append("MediaUrl", u);
-  const tw = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
-    method: "POST",
-    headers: {
-      Authorization: "Basic " + btoa(`${TWILIO_SID}:${TWILIO_AUTH}`),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: form.toString(),
-  });
-  const twBody = await tw.json().catch(() => ({}));
+  let tw: Response;
+  let twBody: Record<string, unknown>;
+  try {
+    tw = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + btoa(`${TWILIO_SID}:${TWILIO_AUTH}`),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    });
+    twBody = await tw.json().catch(() => ({}));
+  } catch (netErr) {
+    // the fetch itself rejected (DNS/TLS/reset) — record the failure so the
+    // row isn't stranded at "pending", then surface it to the caller
+    await settle({ status: "failed", error: ("network: " + String((netErr as Error)?.message ?? netErr)).slice(0, 500), updated_at: new Date().toISOString() });
+    throw new Error("send_failed: could not reach Twilio — the message was not sent");
+  }
   const patch = tw.ok
     ? { twilio_sid: twBody.sid ?? null, status: twBody.status ?? "sent", updated_at: new Date().toISOString() }
     : { status: "failed", error: String(twBody.message ?? `twilio ${tw.status}`).slice(0, 500), updated_at: new Date().toISOString() };
-  await db(`sms_messages?id=eq.${row.id}`, jwt, { method: "PATCH", body: JSON.stringify(patch) }).catch(() => {});
+  await settle(patch);
   if (!tw.ok) throw new Error(`send_failed: ${patch.error}`);
 
   return { sid: twBody.sid ?? "", status: twBody.status ?? "sent", month_count: used + 1 };
