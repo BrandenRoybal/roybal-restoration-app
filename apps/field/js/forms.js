@@ -22,7 +22,7 @@ import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
-import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms } from "./sms.js";
+import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
 
@@ -855,9 +855,8 @@ function textToOfficeBar(project, c) {
     if (!nums.length) { toast("Add an office number first (⚙)."); return; }
     const body = fieldReportSms(project, c, techName());
     if (body.split("\n").length < 2) { toast("Nothing to send yet — add a note, issue or materials."); return; }
-    logSms(project, { kind: "fieldReport", to: nums, body, by: techName() });   // claim documentation
-    commit();
-    location.href = smsHref(nums, body);
+    // Path 1 (Messages) or Path 2 (company number) per the messaging toggle
+    smartSend(project, { recipients: nums, body, kind: "fieldReport", by: techName(), onChange: commit });
   });
   const cfg = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Office numbers this report texts to" }, "⚙");
   const label = h("span", { class: "subtle", style: "font-size:12px" });

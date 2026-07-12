@@ -8,6 +8,7 @@
    function) can automate sends behind the same buttons.
    ============================================================ */
 import { COMPANY } from "./model.js";
+import { toast } from "./core.js";
 
 /* keep digits and a leading + — "907-371-9868" -> "9073719868" */
 export function normalizePhone(raw) {
@@ -92,3 +93,70 @@ export const SMS_KIND_LABELS = {
   onOurWay: "On our way → customer",
   text: "Text",
 };
+
+/* ============================================================
+   Path 2 — company-number texting (Twilio via roybal-notify)
+   ------------------------------------------------------------
+   A per-device toggle (default OFF). While OFF, every text button
+   keeps its Path-1 behavior: open Messages pre-filled from the tech's
+   phone. Flip it ON once the toll-free number is verified + the
+   roybal-notify function is deployed, and the same buttons send from
+   the company number, record the real Twilio sid/status on the message
+   log, and fall back to the sms: link if the send can't go through.
+   ============================================================ */
+const COMPANY_SEND_KEY = "roybal-company-sms";
+export function companySendEnabled() {
+  try { return localStorage.getItem(COMPANY_SEND_KEY) === "1"; } catch (_) { return false; }
+}
+export function setCompanySend(on) {
+  try { on ? localStorage.setItem(COMPANY_SEND_KEY, "1") : localStorage.removeItem(COMPANY_SEND_KEY); } catch (_) { /* ignore */ }
+}
+
+/* Send ONE text through the company number. Resolves to { sid, status };
+   throws with a readable message on any failure. supa.js is imported lazily
+   so this module still loads in Node (its localStorage read runs at import). */
+export async function sendViaCompany({ to, body, kind, by, unifiedJobId }) {
+  const { callFunction } = await import("./supa.js");
+  const res = await callFunction("roybal-notify", {
+    action: "sendSms",
+    to: Array.isArray(to) ? to[0] : to,
+    body, kind: kind || "text",
+    captured_by: by || "",
+    unified_job_id: unifiedJobId || null,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || ("send failed (" + res.status + ")"));
+  return { sid: data.sid || "", status: data.status || "sent" };
+}
+
+/* Shared handler behind every text button. OFF -> Path 1 (open Messages,
+   synchronous on the tap so iOS allows it). ON -> Path 2 (send from the
+   company number, one message per recipient), upgrading the just-logged
+   entry with the real sid/status, and falling back to the sms: link if the
+   company send fails. onChange persists the project after each state change. */
+export async function smartSend(project, { recipients, body, kind, by, onChange }) {
+  const to = (Array.isArray(recipients) ? recipients : [recipients]).map(normalizePhone).filter(Boolean);
+  if (!to.length) { toast("No phone number to text."); return; }
+  const entry = logSms(project, { kind, to, body, by });
+  onChange && onChange();
+
+  if (!companySendEnabled()) {
+    location.href = smsHref(to, body);          // Path 1 — must stay synchronous on the tap
+    return;
+  }
+  try {
+    const results = [];
+    for (const num of to) results.push(await sendViaCompany({ to: num, body, kind, by }));
+    entry.via = "company";
+    entry.status = (results[0] && results[0].status) || "sent";
+    entry.sid = results.map((r) => r.sid).filter(Boolean).join(",");
+    onChange && onChange();
+    toast("Sent from your company number ✓");
+  } catch (e) {
+    entry.via = "device";
+    entry.error = String((e && e.message) || e).slice(0, 140);
+    onChange && onChange();
+    toast("Company send failed — opening Messages instead");
+    location.href = smsHref(to, body);          // best-effort fallback
+  }
+}
