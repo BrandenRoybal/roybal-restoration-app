@@ -1,0 +1,72 @@
+/* Roybal Customer Portal — read-only status page. Branded to match the
+   field app (navy chrome, orange accent), responsive, light. */
+:root {
+  --navy: #16395a; --navy-2: #1e4a72; --brand: #f26a21; --brand-dark: #d4520f;
+  --ink: #18202c; --ink-2: #3b4656; --muted: #6a7585;
+  --line: #e6e9ef; --bg: #f3f4f6; --panel: #fff;
+  --green: #1f9d55;
+  --header-grad: linear-gradient(135deg, #21527e 0%, #1a4569 52%, #123450 100%);
+  --shadow: 0 4px 16px rgba(16,24,40,.08);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--ink); line-height: 1.5; font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  display: flex; flex-direction: column; min-height: 100vh;
+}
+
+.top { background: var(--header-grad); color: #fff; padding: calc(env(safe-area-inset-top) + 16px) 16px 16px; }
+.top__inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 13px; }
+.mark { width: 44px; height: 44px; border-radius: 11px; background: #fff; color: var(--brand);
+  display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 20px; flex: 0 0 auto; }
+.top strong { display: block; font-size: 16px; letter-spacing: .2px; }
+.top span { font-size: 12.5px; color: rgba(255,255,255,.82); }
+
+.wrap { flex: 1; max-width: 760px; width: 100%; margin: 0 auto; padding: 20px 16px 40px; }
+.loading, .msg { text-align: center; color: var(--muted); padding: 60px 16px; }
+.msg .big { font-size: 40px; margin-bottom: 10px; }
+.msg h2 { color: var(--navy); margin: 0 0 6px; }
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+  padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow); }
+
+.hero h1 { font-size: 22px; margin: 0 0 2px; letter-spacing: -.2px; }
+.hero .addr { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+.statusbadge { display: inline-flex; align-items: center; gap: 8px; background: var(--brand);
+  color: #fff; font-weight: 700; font-size: 15px; padding: 8px 16px; border-radius: 999px; }
+.statusbadge .dot { width: 9px; height: 9px; border-radius: 50%; background: #fff; }
+
+.sectitle { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--muted); margin: 0 0 14px; }
+
+/* milestone timeline */
+.steps { list-style: none; margin: 0; padding: 0; }
+.step { display: flex; gap: 14px; align-items: flex-start; position: relative; padding-bottom: 18px; }
+.step:last-child { padding-bottom: 0; }
+.step__rail { position: relative; flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; }
+.step__dot { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--line-strong, #d4dae3);
+  background: #fff; display: flex; align-items: center; justify-content: center; font-size: 13px; color: var(--muted); z-index: 1; }
+.step:not(:last-child) .step__rail::after { content: ""; position: absolute; top: 24px; bottom: -18px;
+  width: 2px; background: var(--line); }
+.step--done .step__dot { background: var(--green); border-color: var(--green); color: #fff; }
+.step--done:not(:last-child) .step__rail::after { background: var(--green); }
+.step--current .step__dot { background: var(--brand); border-color: var(--brand); color: #fff;
+  box-shadow: 0 0 0 4px rgba(242,106,33,.18); }
+.step__label { padding-top: 1px; font-size: 15px; color: var(--ink-2); }
+.step--current .step__label { font-weight: 800; color: var(--ink); }
+.step--done .step__label { color: var(--ink); }
+.step--upcoming .step__label { color: var(--muted); }
+
+/* photo gallery */
+.gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (min-width: 620px) { .gallery { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 380px) { .gallery { grid-template-columns: 1fr; } }
+.photo { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #fff; }
+.photo img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; background: #eef1f5; }
+.photo figcaption { padding: 8px 10px; font-size: 12.5px; color: var(--ink-2); }
+.photo .stage { color: var(--muted); text-transform: capitalize; }
+
+.foot { text-align: center; color: var(--muted); font-size: 12.5px; padding: 18px 16px calc(18px + env(safe-area-inset-bottom)); }
+.foot a { color: var(--navy-2); }
