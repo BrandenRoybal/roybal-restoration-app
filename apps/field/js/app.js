@@ -6,7 +6,7 @@ import {
   formByKey, formCount, newProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
-  newInvoice, newReconEstimate, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
+  newInvoice, newReconEstimate, newPortalShare, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
   newScopeOfWork, newPreConChecklist, newSelections, newSubSchedule,
   newInspection, newPunchList, newDrawSchedule, newCertCompletion,
   blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
@@ -50,7 +50,7 @@ window.addEventListener("beforeprint", () => {
 const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
-  invoices: newInvoice, reconEstimates: newReconEstimate, workAuth: newWorkAuth, certDrying: newCertDrying,
+  invoices: newInvoice, reconEstimates: newReconEstimate, portalShare: newPortalShare, workAuth: newWorkAuth, certDrying: newCertDrying,
   laborLog: newLaborLog, floorPlan: newFloorPlan, supportDocs: newSupportDoc,
   scopeOfWork: newScopeOfWork, preConChecklist: newPreConChecklist,
   selections: newSelections, subSchedule: newSubSchedule,
@@ -935,6 +935,8 @@ function packetPage(project) {
     // Daily construction logs are internal (crew notes/issues/materials) — the
     // one-page Labor Log from QuickBooks Time represents the labor in the packet.
     if (f.key === "constructionLogs") continue;
+    // Client Portal is internal office config for the customer share — never packet material.
+    if (f.key === "portalShare") continue;
     const v = project[f.key];
     const render = RENDERERS[f.key];
     if (!render) continue;
