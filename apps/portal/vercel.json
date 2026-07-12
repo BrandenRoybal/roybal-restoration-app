@@ -4,7 +4,6 @@
   "installCommand": "echo 'static site — no install'",
   "buildCommand": "echo 'static site — no build'",
   "outputDirectory": ".",
-  "cleanUrls": true,
   "rewrites": [
     { "source": "/j/(.*)", "destination": "/index.html" }
   ]
