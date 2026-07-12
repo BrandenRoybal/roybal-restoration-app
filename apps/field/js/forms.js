@@ -16,13 +16,15 @@ import {
   INSPECTION_TYPES, INSPECTION_RESULTS, PRECON_ITEMS, COMPLETION_ITEMS,
   blankScopeArea, blankScopeItem, blankAllowanceRow, blankPermitRow,
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
+  newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
+import { portalProjection, portalShareLink, newShareToken, publishPortal } from "./portal.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc, importEstimate } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
-import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms } from "./sms.js";
+import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
 
@@ -819,6 +821,12 @@ export function workAuth(project, wa) {
     sectionTitle("Terms & Conditions"),
     terms,
 
+    sectionTitle("Text Message Consent (Optional)"),
+    check(wa, "smsConsent",
+      "I agree to receive text messages from Roybal Construction, LLC about my job — including technician arrival notices, appointment and walkthrough reminders, equipment-pickup notices, and job-status updates — at the phone number listed above. Message frequency varies. Message and data rates may apply. Consent is not a condition of service. Reply STOP to cancel or HELP for help at any time."),
+    h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 0" },
+      "Terms of Service: app.roybalconstruction.com/terms.html · Privacy Policy: app.roybalconstruction.com/privacy.html"),
+
     sectionTitle("Authorization & Signatures"),
     h("p", { class: "subtle" }, "By signing below, the Property Owner confirms they have read and agree to the Terms & Conditions above, and authorize Roybal Construction, LLC to commence the described scope of work."),
     signOrUpload(wa, () => [
@@ -849,9 +857,8 @@ function textToOfficeBar(project, c) {
     if (!nums.length) { toast("Add an office number first (⚙)."); return; }
     const body = fieldReportSms(project, c, techName());
     if (body.split("\n").length < 2) { toast("Nothing to send yet — add a note, issue or materials."); return; }
-    logSms(project, { kind: "fieldReport", to: nums, body, by: techName() });   // claim documentation
-    commit();
-    location.href = smsHref(nums, body);
+    // Path 1 (Messages) or Path 2 (company number) per the messaging toggle
+    smartSend(project, { recipients: nums, body, kind: "fieldReport", by: techName(), onChange: commit });
   });
   const cfg = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Office numbers this report texts to" }, "⚙");
   const label = h("span", { class: "subtle", style: "font-size:12px" });
@@ -2652,6 +2659,106 @@ export function certCompletion(project, c) {
     ]));
 }
 
+/* ============================================================
+   CLIENT PORTAL — office share panel (internal; never in the packet)
+   Enable the portal, set the current milestone, pick which photos the
+   customer sees, then Publish the curated slice to portal_jobs. The
+   share link opens the read-only portal (Phase A2).
+   ============================================================ */
+export function portalShareForm(project) {
+  if (!project.portalShare) project.portalShare = newPortalShare();
+  const s = project.portalShare;
+
+  const body = h("div", { class: "app-only" });
+  const linkBox = h("div", { style: "margin-top:10px" });
+
+  function paintLink() {
+    linkBox.replaceChildren();
+    if (!s.enabled || !s.shareToken) return;
+    const url = portalShareLink(s.shareToken);
+    const field2 = h("input", { value: url, readOnly: true, style: "flex:1;font-size:13px" });
+    const copy = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Copy");
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(url); toast("Portal link copied."); }
+      catch { field2.select(); document.execCommand && document.execCommand("copy"); toast("Portal link copied."); }
+    });
+    linkBox.append(
+      sectionTitle("Customer link"),
+      h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
+        s.publishedAt ? "Last published " + fmtDate(s.publishedAt.slice(0, 10)) + " " + s.publishedAt.slice(11, 16)
+                      : "Not published yet — tap “Publish to portal”, then share this link."),
+      h("div", { style: "display:flex;gap:8px;align-items:center" }, field2, copy),
+      h("p", { class: "subtle", style: "font-size:11px;margin:6px 0 0" },
+        "Texting this link to the customer arrives in a later step; for now copy + send it yourself. The link opens once the portal app is live."));
+  }
+
+  // enable toggle — mint the token on first enable
+  const enable = h("input", { type: "checkbox", checked: !!s.enabled });
+  enable.addEventListener("change", () => {
+    s.enabled = enable.checked;
+    if (s.enabled && !s.shareToken) s.shareToken = newShareToken();
+    commit(); paint();
+  });
+
+  // current milestone
+  const statusSel = sel(s, "status", PORTAL_MILESTONES.map((m) => ({ value: m.key, label: m.label })), { onchange: commit });
+
+  // photo picker
+  const photoWrap = h("div", { class: "thumbs" });
+  function paintPhotos() {
+    photoWrap.replaceChildren();
+    const photos = Array.isArray(project.photos) ? project.photos.filter((p) => p && p.src) : [];
+    if (!photos.length) { photoWrap.append(h("p", { class: "subtle", style: "font-size:12px" }, "No job photos yet — add some on the Job Photos form.")); return; }
+    photos.forEach((ph) => {
+      const on = s.sharedPhotoIds.includes(ph.id);
+      const tile = h("label", { class: "thumb", style: "cursor:pointer;display:block" },
+        h("img", { src: ph.src, alt: "", style: on ? "outline:3px solid var(--brand);outline-offset:-3px" : "opacity:.6" }));
+      const box = h("input", { type: "checkbox", checked: on, style: "position:absolute;top:4px;left:4px;width:20px;height:20px" });
+      box.addEventListener("change", () => {
+        if (box.checked) { if (!s.sharedPhotoIds.includes(ph.id)) s.sharedPhotoIds.push(ph.id); }
+        else s.sharedPhotoIds = s.sharedPhotoIds.filter((id) => id !== ph.id);
+        commit(); paintPhotos();
+      });
+      tile.prepend(box);
+      photoWrap.append(tile);
+    });
+  }
+
+  const publishBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "⬆ Publish to portal");
+  publishBtn.addEventListener("click", async () => {
+    if (!s.enabled) { toast("Turn the portal on first."); return; }
+    publishBtn.disabled = true; const t = publishBtn.textContent; publishBtn.textContent = "Publishing…";
+    try {
+      await publishPortal(project);
+      s.publishedAt = new Date().toISOString();
+      commit(); paintLink();
+      toast("Published — the customer view is up to date.");
+    } catch (e) {
+      toast("Publish failed: " + (e && e.message ? e.message : e));
+    }
+    publishBtn.disabled = false; publishBtn.textContent = t;
+  });
+
+  function paint() {
+    body.replaceChildren(
+      h("p", { class: "subtle", style: "margin:0 0 10px" },
+        "Share a read-only status page with the customer — job status, milestones and the photos you choose. Internal-only; costs, adjuster notes and Field Reports are never shared."),
+      h("label", { class: "check", style: "margin:0" }, enable, h("span", {}, "Enable the customer portal for this job")),
+      s.enabled ? h("div", {},
+        field("Current status", statusSel),
+        sectionTitle("Shared photos"),
+        h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Tap to include a photo in the customer view (highlighted = shared)."),
+        photoWrap,
+        h("div", { style: "margin-top:12px" }, publishBtn),
+        linkBox) : null,
+    );
+    paintPhotos(); paintLink();
+  }
+  paint();
+
+  return h("div", {}, h("h1", { class: "app-only" }, "🌐 Client Portal"), body);
+}
+
 export const RENDERERS = {
   floorPlan: floorPlanSheet,
   supportDocs: supportDocSheet,
@@ -2666,6 +2773,7 @@ export const RENDERERS = {
   changeOrders: changeOrder,
   invoices: invoice,
   reconEstimates: invoice,   // same editor; kind:"estimate" switches labels + AI
+  portalShare: portalShareForm,
   scopeOfWork,
   preConChecklist,
   selections: selectionsSheet,

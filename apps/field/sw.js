@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v97";
+const CACHE = "roybal-field-v101";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
@@ -16,7 +16,7 @@ const CORE = [
   // AI office features: photo analysis, invoice draft/audit, adjuster email,
   // drying watch, QuickBooks Online push — statically imported by app.js/forms.js,
   // so they must precache or the module graph fails to load offline
-  "js/officeai.js", "js/pricing.js", "js/dryingwatch.js", "js/dryingcalc.js", "js/buildwatch.js", "js/convert.js", "js/boardpush.js", "js/qbo.js", "js/assist.js", "js/dictate.js", "js/sms.js",
+  "js/officeai.js", "js/pricing.js", "js/dryingwatch.js", "js/dryingcalc.js", "js/buildwatch.js", "js/convert.js", "js/boardpush.js", "js/qbo.js", "js/assist.js", "js/dictate.js", "js/sms.js", "js/portal.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];

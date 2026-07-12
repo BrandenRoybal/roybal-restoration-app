@@ -434,6 +434,33 @@ table.rtable .num.under { color: var(--green); }
 .cbchip.is-over .cbchip__hrs { background: #d23b2e; }
 @media (max-width: 560px) { .cbcol { flex-basis: 150px; } }
 
+/* ============================================================
+   Responsive: small windows, tablets & phones
+   (the board is desktop-first; these rules make every view work
+   down to a phone — kanban swipes one column at a time, tables
+   scroll inside their card, toolbars wrap, the Gantt keeps a
+   narrower sticky label column)
+   ============================================================ */
+.rtable-wrap { overflow-x: auto; }   /* report tables scroll inside the card, never crush */
+@media (max-width: 700px) {
+  .tbar { flex-wrap: wrap; row-gap: 6px; padding: 10px 12px; }
+  .tbar__right { flex-wrap: wrap; row-gap: 6px; }
+  .bview { padding: 12px 10px 60px; }
+  .btoolbar h1 { font-size: 19px; }
+  .btools { width: 100%; }
+  .btools input[type=search] { flex: 1 1 160px; min-width: 0; }
+  .btools select { flex: 1 1 130px; min-width: 0; }
+  /* kanban: swipe one column at a time instead of shrinking five columns */
+  .bboard { scroll-snap-type: x proximity; }
+  .bcol { min-width: 80vw; scroll-snap-align: start; }
+  .bmodal-overlay { padding: 10px 8px; }
+  .bmodal__head, .bmodal__foot { padding-left: 14px; padding-right: 14px; }
+  .bmodal__body { padding: 14px; max-height: 72vh; }
+  .rtable-wrap table.rtable { min-width: 520px; }
+  .gantt__corner, .gantt__label { width: 120px; flex: 0 0 120px; }
+  .calnav__label { min-width: 0; font-size: 15px; }
+}
+
 /* crew board — per-day override controls */
 .cb-scope { display: inline-flex; align-items: center; gap: 7px; }
 .cb-scope__l { font-size: 12px; font-weight: 700; color: var(--muted); }

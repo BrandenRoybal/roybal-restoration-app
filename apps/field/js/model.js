@@ -92,6 +92,9 @@ export const FORMS = [
   { key: "reconEstimates",   name: "Reconstruction Estimate", icon: "🏗️", multi: true,
     types: ["restoration"],
     blurb: "Proposed rebuild scope & pricing — AI-drafted from the documented damage, sends with the packet alongside the mitigation invoice" },
+  { key: "portalShare",      name: "Client Portal",      icon: "🌐", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "Share job status & photos with the customer — internal only, never in the packet" },
 ];
 
 /* Job kind. Jobs created before this field existed carry no jobType, so
@@ -164,6 +167,7 @@ export function newProject() {
     changeOrders: [],
     invoices: [],
     reconEstimates: [],   // reconstruction estimates (restoration jobs — sent with the claim packet)
+    portalShare: null,    // office config for the customer portal (Client Portal form)
     // construction / remodel forms
     scopeOfWork: null,
     preConChecklist: null,
@@ -355,6 +359,32 @@ export function newReconEstimate() {
   return e;
 }
 
+/* ---------- Client Portal (office share config) ----------
+   The customer-facing milestone journey a restoration/reconstruction job
+   moves through. The office marks which one is "current"; the portal shows
+   the timeline. Keys are stable (stored); labels are what the customer sees. */
+export const PORTAL_MILESTONES = [
+  { key: "scheduled",   label: "Scheduled" },
+  { key: "mitigation",  label: "Water mitigation" },
+  { key: "drying",      label: "Structural drying" },
+  { key: "approved",    label: "Repairs approved" },
+  { key: "reconstruction", label: "Reconstruction" },
+  { key: "final",       label: "Final walkthrough" },
+  { key: "complete",    label: "Job complete" },
+];
+export const portalMilestoneLabel = (k) => PORTAL_MILESTONES.find((m) => m.key === k)?.label || "";
+
+export function newPortalShare() {
+  return {
+    id: uid(),                 // stable portal_jobs primary key (upsert target)
+    enabled: false,
+    shareToken: "",            // set on first enable — the Phase-A credential
+    status: "scheduled",       // current milestone key
+    sharedPhotoIds: [],        // which project.photos are shown to the customer
+    publishedAt: "",           // last publish to the portal
+  };
+}
+
 /* Supporting document — engineer's report, hygienist report, adjuster
    estimate, permit letter… Pages print FULL PAGE in the packet; the AI
    digest (aiDigest, tech-editable) rides the facts so the narrative,
@@ -380,6 +410,7 @@ export function newWorkAuth() {
       0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
     },
     mode: "sign",                // "sign" | "upload"
+    smsConsent: false,           // owner opts in to job text messages (affirmative, optional)
     ownerSig: "", ownerName: "", ownerDate: todayISO(),
     repSig: "", repName: "", repDate: todayISO(),
     uploadedDoc: "",             // legacy: single dataURL of a wet-signed scan/photo

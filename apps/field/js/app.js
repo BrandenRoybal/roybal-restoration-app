@@ -6,7 +6,7 @@ import {
   formByKey, formCount, newProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
-  newInvoice, newReconEstimate, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
+  newInvoice, newReconEstimate, newPortalShare, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
   newScopeOfWork, newPreConChecklist, newSelections, newSubSchedule,
   newInspection, newPunchList, newDrawSchedule, newCertCompletion,
   blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
@@ -28,7 +28,7 @@ import { dryingFlags, isCertified } from "./dryingwatch.js";
 import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
-import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS } from "./sms.js";
+import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
@@ -50,7 +50,7 @@ window.addEventListener("beforeprint", () => {
 const FACTORY = {
   moistureMaps: newMoistureMap, dryingLogs: newDryingLog,
   constructionLogs: newConstructionLog, changeOrders: newChangeOrder,
-  invoices: newInvoice, reconEstimates: newReconEstimate, workAuth: newWorkAuth, certDrying: newCertDrying,
+  invoices: newInvoice, reconEstimates: newReconEstimate, portalShare: newPortalShare, workAuth: newWorkAuth, certDrying: newCertDrying,
   laborLog: newLaborLog, floorPlan: newFloorPlan, supportDocs: newSupportDoc,
   scopeOfWork: newScopeOfWork, preConChecklist: newPreConChecklist,
   selections: newSelections, subSchedule: newSubSchedule,
@@ -783,18 +783,40 @@ function backupsCard(project) {
 
 function messageLogCard(project) {
   const log = Array.isArray(project.smsLog) ? project.smsLog : [];
-  if (!log.length) return h("span", { hidden: true });
+
+  // per-device toggle: send texts from the company (toll-free) number vs the
+  // tech's phone. Off by default; flip on once the number is verified + deployed.
+  const toggle = h("input", { type: "checkbox", checked: companySendEnabled() });
+  const hint = h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 0" });
+  const paintHint = () => {
+    hint.textContent = companySendEnabled()
+      ? "On — text buttons send from your company number and log delivery status."
+      : "Off — text buttons open your phone's Messages app to send.";
+  };
+  toggle.addEventListener("change", () => { setCompanySend(toggle.checked); paintHint(); });
+  paintHint();
+  const setting = h("div", {},
+    h("label", { class: "check", style: "margin:0" }, toggle,
+      h("span", {}, "Send texts from the company number")),
+    hint);
+
+  const via = (e) => e.via === "company"
+    ? h("span", { style: "color:var(--green);font-weight:700" }, " · sent ✓")
+    : e.error ? h("span", { style: "color:var(--red);font-weight:700" }, " · failed")
+    : e.via === "device" ? h("span", { class: "subtle" }, " · composed") : null;
   const rows = [...log].reverse().slice(0, 8).map((e) =>
     h("div", { style: "padding:6px 0;border-bottom:1px solid var(--line,#e2e6ec);font-size:13px" },
       h("div", {},
         h("strong", {}, SMS_KIND_LABELS[e.kind] || "Text"),
         h("span", { class: "subtle" }, "  " + fmtDate((e.at || "").slice(0, 10)) + " " + (e.at || "").slice(11, 16) +
-          " · to " + (e.to || []).join(", ") + (e.by ? " · by " + e.by : ""))),
+          " · to " + (e.to || []).join(", ") + (e.by ? " · by " + e.by : "")),
+        via(e)),
       e.preview ? h("div", { class: "subtle", style: "font-size:12px" }, e.preview) : null));
+
   return h("div", { class: "card app-only" },
-    h("div", { style: "font-weight:700" }, `💬 Message log (${log.length})`),
-    h("p", { class: "subtle", style: "margin:4px 0 6px;font-size:12px" },
-      "Texts composed from this job — documentation that the customer / office were notified."),
+    h("div", { style: "font-weight:700" }, log.length ? `💬 Messaging — log (${log.length})` : "💬 Messaging"),
+    setting,
+    log.length ? h("hr", { class: "divider", style: "margin:10px 0" }) : null,
     ...rows,
     log.length > 8 ? h("p", { class: "subtle", style: "font-size:12px;margin-top:6px" }, `+ ${log.length - 8} earlier`) : null);
 }
@@ -833,15 +855,18 @@ function projectHome(project) {
     homeActions.append(
       h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none", href: "tel:" + tel }, "📞 Call"),
       (() => {
-        const body = onOurWaySms(project, techName());
-        const a = h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none",
-          href: smsHref(project.phone, body),
-          title: "Opens Messages pre-filled — review and send" }, "🚗 Text: on our way");
-        a.addEventListener("click", () => {   // claim documentation: customer was notified
-          logSms(project, { kind: "onOurWay", to: project.phone, body, by: techName() });
-          Store.put(project);
-        });
-        return a;
+        const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto",
+          title: companySendEnabled() ? "Sends from your company number" : "Opens Messages pre-filled — review and send" },
+          "🚗 Text: on our way");
+        // Path 1 (Messages) or Path 2 (company number) per the messaging toggle;
+        // either way the send is logged as claim documentation.
+        btn.addEventListener("click", () => smartSend(project, {
+          recipients: project.phone,
+          body: onOurWaySms(project, techName()),
+          kind: "onOurWay", by: techName(),
+          onChange: () => Store.put(project),
+        }));
+        return btn;
       })());
   }
   body.append(homeActions);
@@ -910,6 +935,8 @@ function packetPage(project) {
     // Daily construction logs are internal (crew notes/issues/materials) — the
     // one-page Labor Log from QuickBooks Time represents the labor in the packet.
     if (f.key === "constructionLogs") continue;
+    // Client Portal is internal office config for the customer share — never packet material.
+    if (f.key === "portalShare") continue;
     const v = project[f.key];
     const render = RENDERERS[f.key];
     if (!render) continue;
