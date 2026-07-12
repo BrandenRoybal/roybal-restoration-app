@@ -333,7 +333,9 @@ export function newInvoice() {
     items: [ blankLineItem() ],
     billingModel: "tm",                   // "tm" (hourly + materials) | "contract" (set amount)
     contractAmount: "",                   // the agreed figure when billingModel = contract
-    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P (T&M mode)
+    opMode: "pct",                        // "pct" = O&P as % of line items | "amount" = fixed $ (imported Xactimate O&P)
+    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P (% mode)
+    overheadAmount: "", profitAmount: "", // fixed O&P dollars (amount mode)
     deductible: "", previousPayments: "", taxRate: "",
     notes: "",
     attachments: [],   // supporting docs: [{ label, pages: [dataURL…] }]

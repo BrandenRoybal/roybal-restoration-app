@@ -20,7 +20,7 @@ import {
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
-import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc } from "./officeai.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc, importEstimate } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
@@ -1334,16 +1334,19 @@ export function invoice(project, inv) {
         h("span", { class: "invrecap__pct" }, "100.00%")));
   }
   if (!inv.billingModel) inv.billingModel = "tm";
+  if (!inv.opMode) inv.opMode = "pct";   // "pct" = % of line items | "amount" = fixed $ (e.g. imported Xactimate O&P)
   const isContract = () => inv.billingModel === "contract";
+  const isOpAmount = () => inv.opMode === "amount";
   function recalc(sub) {
     if (sub != null) subtotal = sub;
     subEl.textContent = money(subtotal);
     // T&M: Line Item Total + O&P = RCV.  Contract: the agreed amount IS the
     // total (O&P is inside the contract figure), items are the scope of work.
     const contract = isContract();
+    const amt = isOpAmount();   // O&P entered as fixed dollars, not % of line items
     const base = contract ? (Number(inv.contractAmount) || 0) : subtotal;
-    const oh = contract ? 0 : subtotal * ((Number(inv.overheadPct) || 0) / 100);
-    const pf = contract ? 0 : subtotal * ((Number(inv.profitPct) || 0) / 100);
+    const oh = contract ? 0 : (amt ? (Number(inv.overheadAmount) || 0) : subtotal * ((Number(inv.overheadPct) || 0) / 100));
+    const pf = contract ? 0 : (amt ? (Number(inv.profitAmount) || 0) : subtotal * ((Number(inv.profitPct) || 0) / 100));
     ohEl.textContent = money(oh);
     pfEl.textContent = money(pf);
     const rcv = base + oh + pf;
@@ -1439,6 +1442,93 @@ export function invoice(project, inv) {
     busyBtn(auditBtn, false, "\ud83d\udd0e Find missed items");
   });
 
+  /* ---- AI: import an uploaded Xactimate / carrier estimate ----
+     The tech uploads the carrier's Xactimate (or Symbility) estimate PDF and
+     the AI transcribes its line items + O&P/tax verbatim so this estimate/
+     invoice is built FROM the approved numbers, not re-priced. The source PDF
+     is kept as an attachment so it prints with the packet for provenance. */
+  const importInput = h("input", { type: "file", accept: "image/*,application/pdf", multiple: true, style: "display:none" });
+  const importBtn = h("button", { type: "button", class: "btn btn--sm" }, "📥 Import Xactimate estimate");
+  async function runEstimateImport(files) {
+    if (!aiAvailable()) return;
+    const pages = [];
+    for (const f of files) {
+      try { pages.push(...await fileToDocPages(f)); }
+      catch { toast("Couldn't read " + (f.name || "that file") + " — try a PDF or photo."); }
+    }
+    if (!pages.length) return;
+    const hasItems = (inv.items || []).some((it) => String(it.desc || "").trim());
+    if (hasItems && !window.confirm("Replace the current line items with the ones read off the uploaded estimate?")) return;
+    busyBtn(importBtn, true, "📥 Reading estimate…");
+    try {
+      const est = await importEstimate(project, pages);
+      const lines = Array.isArray(est.items) ? est.items : [];
+      if (!lines.length) {
+        aiPanel.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" },
+          "📥 No line items were read from that file. Make sure it's the estimate's line-item pages (not just a cover sheet or photo report), then try again."
+          + (Array.isArray(est.notes) && est.notes.length ? " Notes: " + est.notes.join("; ") : "")));
+        busyBtn(importBtn, false, "📥 Import Xactimate estimate");
+        return;
+      }
+      inv.items = lines.map((li) => ({
+        room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
+        unit: li.unit || "", price: li.price != null ? String(li.price) : "",
+      }));
+      if (est.lossSummary && !String(inv.lossSummary || "").trim()) { inv.lossSummary = est.lossSummary; lossTa.value = inv.lossSummary; }
+      const sum = est.summary || {};
+      // O&P: transcribe the estimate's ACTUAL Overhead/Profit dollars straight in
+      // (Xactimate applies 10&10 to eligible trades only, so the printed $ is far
+      // less than 10% of the subtotal). Switch the editor to fixed-$ O&P mode so
+      // the amounts show exactly as the carrier printed them and the totals match.
+      const lineTotal = inv.items.reduce((t, it) => t + (Number(it.qty) || 0) * (Number(it.price) || 0), 0);
+      if (sum.overhead != null || sum.profit != null) {
+        inv.opMode = "amount";
+        inv.overheadAmount = sum.overhead != null ? String(sum.overhead) : "";
+        inv.profitAmount = sum.profit != null ? String(sum.profit) : "";
+      }
+      // sales tax stays a percentage (usually 0 in AK); back it out if the estimate has one
+      if (sum.tax != null && lineTotal > 0) inv.taxRate = String(Math.round((Number(sum.tax) / lineTotal) * 1e6) / 1e4);
+      if (est.estimateNo && !String(inv.invoiceNo || "").trim()) inv.invoiceNo = est.estimateNo;
+      if (est.estimateDate && /^\d{4}-\d{2}-\d{2}$/.test(est.estimateDate)) inv.invoiceDate = est.estimateDate;
+      // record provenance + keep the source PDF as a printed attachment
+      inv.pricingSource = { source: est.source || "estimate", importedAt: new Date().toISOString(), rcvTotal: sum.rcvTotal ?? null, confidence: est.confidence ?? null };
+      if (!Array.isArray(inv.attachments)) inv.attachments = [];
+      const srcLabel = (est.source && est.source !== "unknown" ? est.source : "Carrier") + " estimate" + (est.estimateNo ? " " + est.estimateNo : "");
+      inv.attachments.push({ label: srcLabel, pages, isPricingSource: true, ai: { docType: "Adjuster estimate", vendor: est.source || "", docDate: est.estimateDate || "", totalAmount: sum.rcvTotal ?? null, summary: String(est.lossSummary || "").slice(0, 600) } });
+      commit(); paintItems(); paintAttachList(); paintAttachSheets();
+      // reconciliation: our subtotal + imported O&P vs. the estimate's printed RCV
+      const rcv = lineTotal + (Number(sum.overhead) || 0) + (Number(sum.profit) || 0) + (Number(sum.tax) || 0);
+      const printed = sum.rcvTotal;
+      const off = printed != null ? Math.abs(rcv - printed) : null;
+      const reconOk = off != null && off <= Math.max(1, printed * 0.005);
+      const opNote = (sum.overhead != null || sum.profit != null)
+        ? "Overhead & Profit imported as fixed dollars from the estimate — Overhead " + money(Number(sum.overhead) || 0)
+          + ", Profit " + money(Number(sum.profit) || 0) + "."
+        : "";
+      aiPanel.replaceChildren(
+        h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc;font-size:12px" },
+          h("strong", {}, "📥 Imported " + lines.length + " line" + (lines.length !== 1 ? "s" : "") + " from the "
+            + (est.source && est.source !== "unknown" ? est.source : "uploaded") + " estimate — review every line before sending."),
+          opNote ? h("div", { style: "margin-top:4px;color:#5a6b7f" }, opNote) : null,
+          printed != null
+            ? h("div", { style: "margin-top:4px;color:" + (reconOk ? "#2e7d32" : "#b26a00") },
+                (reconOk ? "✓ " : "⚠ ") + "Line items " + money(lineTotal) + " + O&P → " + money(rcv)
+                + " vs. the estimate's printed " + money(printed)
+                + (reconOk ? " — reconciles." : " — off by " + money(off) + "; a line may have been misread, check against the PDF."))
+            : h("div", { style: "margin-top:4px;color:#5a6b7f" }, "Line items total " + money(lineTotal) + ". The estimate's grand total wasn't printed — verify against the source."),
+          est.confidence != null && est.confidence < 0.7
+            ? h("div", { style: "margin-top:4px;color:#b26a00" }, "⚠ Low read confidence — double-check quantities and prices against the PDF.") : null,
+          Array.isArray(est.notes) && est.notes.length
+            ? h("div", { style: "margin-top:4px;color:#5a6b7f" }, "Notes: " + est.notes.join("; ")) : null));
+      toast("Estimate imported — the source PDF is attached and every line is editable.");
+    } catch (e) {
+      toast("Estimate import failed: " + (e && e.message ? e.message : e));
+    }
+    busyBtn(importBtn, false, "📥 Import Xactimate estimate");
+  }
+  importInput.addEventListener("change", () => { const fs = [...importInput.files]; importInput.value = ""; runEstimateImport(fs); });
+  importBtn.addEventListener("click", () => { if (aiAvailable()) importInput.click(); });
+
   /* ---- Push to QuickBooks Online (separate office connection; see admin) ---- */
   const qboStatusEl = h("span", { class: "subtle", style: "font-size:12px;align-self:center" },
     inv.qboSyncedAt ? `In QuickBooks as ${inv.qboDocNumber || "invoice"} \u00b7 ${fmtDate(inv.qboSyncedAt.slice(0, 10))}` : "");
@@ -1459,7 +1549,7 @@ export function invoice(project, inv) {
   });
 
   const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" },
-    ...(isEst ? [draftBtn, auditBtn] : [draftBtn, auditBtn, qboBtn, qboStatusEl]));
+    ...(isEst ? [draftBtn, importBtn, auditBtn] : [draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);
 
   /* ---- supporting documents: receipts, sub invoices, dump tickets…
      Attached PDFs/photos become full pages after the invoice when printed. ---- */
@@ -1539,13 +1629,24 @@ export function invoice(project, inv) {
   const subRow = trow("Line Item Total", subEl);
   const contractRow = trow("Contract Amount", inp(inv, "contractAmount", { type: "number", oninput: () => recalc() }));
   const ohPctRow = trow("Overhead %", inp(inv, "overheadPct", { type: "number", oninput: () => recalc() }));
-  const ohRow = trow("Overhead", ohEl);
+  // the Overhead/Profit value cell swaps between the computed figure (% mode)
+  // and an editable dollar input (amount mode — e.g. imported Xactimate O&P)
+  const ohAmtInput = inp(inv, "overheadAmount", { type: "number", oninput: () => recalc() });
+  const ohRow = trow("Overhead", h("span", {}, ohEl, ohAmtInput));
   const pfPctRow = trow("Profit %", inp(inv, "profitPct", { type: "number", oninput: () => recalc() }));
-  const pfRow = trow("Profit", pfEl);
+  const pfAmtInput = inp(inv, "profitAmount", { type: "number", oninput: () => recalc() });
+  const pfRow = trow("Profit", h("span", {}, pfEl, pfAmtInput));
   const rcvLabel = h("span", {}, "Replacement Cost Value");
   const rcvRow = h("div", { class: "trow rcv" }, rcvLabel, rcvEl);
+  // O&P entry mode: percentage of the line items (manual estimates) vs. a fixed
+  // dollar amount transcribed straight off a carrier/Xactimate estimate
+  const opModeSeg = seg(inv, "opMode", [
+    { value: "pct", label: "% of line items" },
+    { value: "amount", label: "Fixed $ (from estimate)" },
+  ], { onchange: () => { paintMode(); recalc(); } });
+  const opModeRow = h("div", { class: "trow app-only" }, h("span", {}, "Overhead & Profit"), opModeSeg);
   const totalsBox = h("div", { class: "totals" },
-    subRow, contractRow, ohPctRow, ohRow, pfPctRow, pfRow, rcvRow,
+    subRow, contractRow, opModeRow, ohPctRow, ohRow, pfPctRow, pfRow, rcvRow,
     trow("Less: Deductible / Non-Recoverable", inp(inv, "deductible", { type: "number", oninput: () => recalc() })),
     trow("Less: Previous Payments", inp(inv, "previousPayments", { type: "number", oninput: () => recalc() })),
     trow("Sales Tax %", inp(inv, "taxRate", { type: "number", oninput: () => recalc() })),
@@ -1553,8 +1654,15 @@ export function invoice(project, inv) {
     trow(isEst ? "Estimate Total" : "Total Due", totalEl, "grand"));
   function paintMode() {
     const c = isContract();
+    const amt = isOpAmount();
     contractRow.hidden = !c;
-    ohPctRow.hidden = ohRow.hidden = pfPctRow.hidden = pfRow.hidden = c;
+    // O&P rows hide entirely in contract mode. Otherwise: the % input rows show
+    // only in % mode, the Overhead/Profit rows always show and swap their value.
+    opModeRow.hidden = c;
+    ohPctRow.hidden = pfPctRow.hidden = c || amt;
+    ohRow.hidden = pfRow.hidden = c;
+    ohEl.hidden = amt; ohAmtInput.hidden = !amt;
+    pfEl.hidden = amt; pfAmtInput.hidden = !amt;
     subRow.hidden = c && !(inv.items || []).some((it) => (Number(it.qty) || 0) * (Number(it.price) || 0) > 0);
     rcvLabel.textContent = c ? "Contract Total" : "Replacement Cost Value";
   }
