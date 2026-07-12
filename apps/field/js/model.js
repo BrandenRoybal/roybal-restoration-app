@@ -378,6 +378,7 @@ export function newWorkAuth() {
       0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
     },
     mode: "sign",                // "sign" | "upload"
+    smsConsent: false,           // owner opts in to job text messages (affirmative, optional)
     ownerSig: "", ownerName: "", ownerDate: todayISO(),
     repSig: "", repName: "", repDate: todayISO(),
     uploadedDoc: "",             // legacy: single dataURL of a wet-signed scan/photo
