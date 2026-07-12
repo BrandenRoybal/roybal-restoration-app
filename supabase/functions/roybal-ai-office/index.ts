@@ -108,6 +108,9 @@ async function forcedTool(opts: {
   const text = await res.text();
   if (!res.ok) throw new Error(`llm_failed (${res.status}): ${text}`);
   const data = JSON.parse(text);
+  // a forced tool call cut off by max_tokens parses as an EMPTY/partial input —
+  // surface it as an error instead of silently returning a blank draft
+  if (data.stop_reason === "max_tokens") throw new Error("llm_truncated: the response hit its output limit before finishing — try again");
   const block = (data.content ?? []).find((b: { type: string; name?: string }) => b.type === "tool_use" && b.name === opts.toolName);
   if (!block) throw new Error("extraction_failed: model returned no structured result");
   const usage = data.usage ?? {};
@@ -321,7 +324,9 @@ async function invoiceDraft(body: Record<string, unknown>) {
       `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "draft_invoice",
     schema: DRAFT_SCHEMA as unknown as Record<string, unknown>,
-    maxTokens: 4096,
+    // reconstruction estimates run long (every room × the full finish chain,
+    // verbose basis strings) — 4096 truncated them into empty drafts
+    maxTokens: 16384,
   });
   return { result: { draft: input }, usage, model: DOC_MODEL, summary: { items: Array.isArray((input as { items?: unknown[] }).items) ? (input as { items: unknown[] }).items.length : 0 } };
 }
@@ -387,7 +392,7 @@ async function invoiceAudit(body: Record<string, unknown>) {
         `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "audit",
     schema: AUDIT_SCHEMA as unknown as Record<string, unknown>,
-    maxTokens: 4096,
+    maxTokens: 8192,
   });
   return { result: input, usage, model: DOC_MODEL, summary: { suggestions: Array.isArray((input as { suggestions?: unknown[] }).suggestions) ? (input as { suggestions: unknown[] }).suggestions.length : 0 } };
 }

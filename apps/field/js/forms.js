@@ -1376,12 +1376,20 @@ export function invoice(project, inv) {
     try {
       const draft = isEst ? await draftReconEstimate(project) : await draftInvoice(project);
       const lines = Array.isArray(draft.items) ? draft.items : [];
+      if (!lines.length) {
+        // an empty draft is a signal, not a result \u2014 never wipe the current items
+        aiPanel.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" },
+          "\u2728 The draft came back with no line items. " + (isEst
+            ? "The model couldn't trace rebuild scope to the documented damage \u2014 check the job has demo/tear-out notes (moisture map notes, Field Reports), affected areas, and verified plan dimensions, then try again."
+            : "The model couldn't trace billable work to the documentation \u2014 check labor entries, equipment logs and moisture maps, then try again.")));
+        busyBtn(draftBtn, false, isEst ? "\u2728 Draft rebuild estimate" : "\u2728 Draft from documentation");
+        return;
+      }
       if (draft.lossSummary) { inv.lossSummary = draft.lossSummary; lossTa.value = inv.lossSummary; }
       inv.items = lines.map((li) => ({
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
       }));
-      if (!inv.items.length) inv.items = [blankLineItem()];
       commit(); paintItems();
       aiPanel.replaceChildren(
         h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc;font-size:12px" },
