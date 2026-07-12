@@ -52,3 +52,20 @@ table.atable tbody tr:hover { background: #f7f9fc; }
 /* login */
 .alogin { max-width: 380px; margin: 9vh auto 0; text-align: center; }
 .alogin img { width: 84px; height: 84px; border-radius: 18px; }
+
+/* ============================================================
+   Responsive: small windows & phones (admin is desktop-first)
+   ============================================================ */
+.atable-wrap { overflow-x: auto; }   /* the jobs table scrolls inside its card, never the page */
+@media (max-width: 700px) {
+  .abar { flex-wrap: wrap; row-gap: 6px; padding: 10px 12px; }
+  .abar__right { flex-wrap: wrap; row-gap: 6px; }
+  .aview { padding: 14px 12px 60px; }
+  .atoolbar input[type=search] { min-width: 0; flex: 1; }
+  table.atable { min-width: 560px; }
+  .kpis { gap: 10px; }
+}
+@media (max-width: 420px) {
+  .kpi { padding: 12px; }
+  .kpi__n { font-size: 24px; }
+}
