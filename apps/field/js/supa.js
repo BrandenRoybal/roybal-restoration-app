@@ -93,6 +93,38 @@ export async function upsertRows(rows) {
   return res.json();
 }
 
+/* ---------- media storage (field-media bucket) ----------
+   Sync offloads big data-URL strings (photos, plan pages, sketches) to
+   the private field-media bucket, content-addressed by sha256, so the
+   field_projects JSON rows stay small enough to always back up. */
+const MEDIA_BUCKET = "field-media";
+
+/** Upload one media string. Idempotent: same content → same object. */
+export async function uploadMedia(hash, text) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${hash}`;
+  const send = () => fetch(url, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "text/plain", "x-upsert": "true" },
+    body: text,
+  });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  if (!res.ok && res.status !== 409) throw new Error("Media upload failed (" + res.status + ")");
+}
+
+/** Download a media string; null when it no longer exists on the server. */
+export async function downloadMedia(hash) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${hash}`;
+  const send = () => fetch(url, { headers: { ...authHeaders() } });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  if (res.status === 404 || res.status === 400) return null;   // storage says "Object not found" with either
+  if (!res.ok) throw new Error("Media download failed (" + res.status + ")");
+  return res.text();
+}
+
 /** Fetch rows changed since an ISO timestamp (exclusive). */
 export async function fetchSince(iso) {
   const q = iso ? `&updated_at=gt.${encodeURIComponent(iso)}` : "";

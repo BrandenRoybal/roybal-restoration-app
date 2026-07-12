@@ -183,7 +183,7 @@ function syncLabel() {
   if (s.state === "syncing") return "Syncing…";
   if (s.state === "offline") return "Offline — will sync when back online";
   if (s.state === "error") return "Sync issue: " + (s.message || "retrying");
-  if (s.skipped) return `Synced (${s.skipped} large item(s) pending media sync)`;
+  if (s.skipped) return `Synced — ⚠ ${s.skipped} job(s) too large to back up`;
   return s.lastSync ? "All changes synced ✓" : "Synced ✓";
 }
 
@@ -746,6 +746,41 @@ function boardCard(project) {
 /* 💬 Message log — claim documentation: every text composed from the app,
    newest first. Entries record COMPOSED (Messages opened pre-filled);
    Twilio (Path 2) will upgrade them with real delivery status. */
+/* ---------- on-device backups card ----------
+   Sync snapshots the local copy of a job right before a pulled version
+   overwrites it (Store.backup). If snapshots exist, the job page offers
+   one-tap restore — the undo for a stale copy clobbering newer work. */
+function backupsCard(project) {
+  const box = h("div");
+  Store.backups(project.id).then((snaps) => {
+    if (!snaps.length) return;
+    const rows = snaps.map((s) => {
+      const d = s.data || {};
+      const when = String(s.takenAt || "").replace("T", " ").slice(0, 16);
+      const desc = `${when} — ${(d.photos || []).length} photos, ${(d.moistureMaps || []).length} moisture maps, ` +
+        `${(d.dryingLogs || []).length} drying logs, ${(d.constructionLogs || []).length} field reports`;
+      const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Replace the current copy of this job with the backup from ${when}?\n\nThe current copy is saved as a backup first, so you can switch back.`)) return;
+        btn.disabled = true;
+        const current = await Store.get(project.id);
+        if (current) await Store.backup(current);
+        await Store.put(s.data);   // fresh updatedAt → this version wins and re-syncs everywhere
+        toast("Backup restored.");
+        setTimeout(() => location.reload(), 400);
+      });
+      return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
+        h("span", { class: "subtle", style: "font-size:13px" }, desc), btn);
+    });
+    box.append(h("div", { class: "card app-only" },
+      h("div", { style: "font-weight:700" }, "⏪ Backups on this device"),
+      h("p", { class: "subtle", style: "margin:6px 0 2px;font-size:13px" },
+        "Saved automatically right before cloud sync replaced this job with a version from another device. Restore if work went missing."),
+      ...rows));
+  }).catch(() => {});
+  return box;
+}
+
 function messageLogCard(project) {
   const log = Array.isArray(project.smsLog) ? project.smsLog : [];
   if (!log.length) return h("span", { hidden: true });
@@ -813,6 +848,7 @@ function projectHome(project) {
 
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
   body.append(messageLogCard(project));
+  body.append(backupsCard(project));         // on-device snapshots taken before sync overwrote this job
 
   // Phase 5: keep the board's field-actuals rollup fresh (fire-and-forget)
   if (jobType(project) === "construction") pushActuals(project);
@@ -1125,11 +1161,14 @@ async function formPage(project, key, instId) {
 
   // single-instance forms: open editor directly
   if (!meta.multi) {
+    // shape heals must NOT bump updatedAt or trigger a push: merely opening a
+    // form on a stale copy would otherwise make that copy "newest" and let it
+    // overwrite real work on other devices via last-edit-wins
     if (key === "photos") {
-      if (!Array.isArray(project.photos)) { project.photos = []; await Store.put(project); }
+      if (!Array.isArray(project.photos)) { project.photos = []; await Store.put(project, { bump: false, quiet: true }); }
       return formEditor(project, meta, project.photos);
     }
-    if (!project[key]) { project[key] = FACTORY[key](); await Store.put(project); }
+    if (!project[key]) { project[key] = FACTORY[key](); await Store.put(project, { bump: false, quiet: true }); }
     return formEditor(project, meta, project[key]);
   }
 
