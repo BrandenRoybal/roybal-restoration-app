@@ -129,4 +129,35 @@ ok("converted job notes its mitigation origin", cf.convertedFrom !== null);
 ok("empty construction job -> safe facts",
   constructionFacts({}).scope.length === 0 && constructionFacts(null).punch.total === 0);
 
+/* ---------- recognized receipts + sizing deviation notes ride the facts ---------- */
+{
+  const job = {
+    invoices: [{
+      invoiceNo: "1042",
+      attachments: [
+        { label: "Dump receipt", ai: { docType: "Receipt", vendor: "FNSB Landfill", docDate: "2026-07-02", totalAmount: 86.5, summary: "Two loads of demo debris." } },
+        { label: "unrecognized attachment (no ai)" },
+      ],
+    }],
+    reconEstimates: [{
+      invoiceNo: "E-7",
+      attachments: [{ label: "Electrician quote", ai: { docType: "Subcontractor invoice", vendor: "Arctic Electric", docDate: "", totalAmount: null, summary: "Rewire two circuits." } }],
+    }],
+    dryingLogs: [{
+      equipCalc: { at: "2026-07-10T00:00:00Z", inputs: { sf: 300, volume: 2400, rooms: 2, waterClass: "2", waterCategory: "2" },
+        airMovers: { low: 6, high: 8, basis: "" }, dehu: { units: 2, type: "lgr", pintsPerDay: 60, basis: "" },
+        scrubbers: { count: 0, basis: "" }, heat: { needed: false, known: true, basis: "" } },
+      calcDeviation: { am: "Only 2 circuits available — staged deployment day 1", dehu: "", scrub: "", heat: "" },
+    }],
+  };
+  const f = narrativeFacts(job);
+  ok("recognized receipts ride the facts", f.receipts.length === 2);
+  ok("receipt carries vendor + total", f.receipts[0].vendor === "FNSB Landfill" && f.receipts[0].total === 86.5);
+  ok("attachment without recognition is skipped", !f.receipts.some((r) => /unrecognized/.test(r.label)));
+  ok("estimate attachments ride too (null total omitted)", f.receipts[1].attachedTo === "estimate E-7" && !("total" in f.receipts[1]));
+  ok("sizing deviation notes ride the facts (blank keys dropped)",
+    f.equipmentSizing.deviationNotes.am.includes("staged deployment") && !("dehu" in f.equipmentSizing.deviationNotes));
+  ok("no receipts -> null", narrativeFacts({}).receipts === null);
+}
+
 console.log(`\n${pass} checks passed.`);

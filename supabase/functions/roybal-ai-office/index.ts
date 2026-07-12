@@ -275,13 +275,34 @@ function catalogText(catalog: unknown): string {
 async function invoiceDraft(body: Record<string, unknown>) {
   const facts = body.facts;
   if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  // mode "reconEstimate": the same schema drafts a RECONSTRUCTION ESTIMATE —
+  // proposed put-back scope priced per unit (labor in the unit price), not
+  // T&M billing for performed mitigation work.
+  const estimate = body.mode === "reconEstimate";
+  const estimateContent =
+    `Draft the reconstruction (rebuild) estimate line items for this job.\n\n` +
+    `PRICE CATALOG (code | description | unit | default price) — prefer these when a line matches; price uncataloged trades at fair Fairbanks-area rates:\n${catalogText(body.catalog)}\n\n` +
+    `RULES:\n` +
+    `- SCOPE = PUT-BACK of the documented demolition and damage: everything removed or destroyed during mitigation gets rebuilt (facts.demoNotes, facts.affectedAreas — flood cuts mean new drywall; removed flooring means underlayment, new flooring, baseboard, paint). Include the full finish chain per assembly: hang, tape, texture, prime, paint.\n` +
+    `- QUANTITIES from facts.planDimensions (tech-verified SF/LF off the dimensioned plan) — cite the room's dimensions in the basis. Where a dimension is missing, derive conservatively from the documented areas and say so in the basis.\n` +
+    `- Group every line into its room/area via the room field (Xactimate style); job-wide lines (debris, floor protection, final clean, permits) go under 'Main Level'.\n` +
+    `- Unit-priced scope lines with labor and material INSIDE the unit price, as reconstruction estimates read — never hourly T&M lines.\n` +
+    `- Include trade lines the damage clearly requires (electrical/plumbing/HVAC disturbed by demo, insulation in opened walls, code items facts.supportingDocs cites). State the basis on every line.\n` +
+    `- STRUCTURE ONLY: contents / personal property (facts.contentsLoss) are NOT estimated here — mention in the lossSummary that contents are claimed separately.\n` +
+    `- lossSummary: 2-3 sentences — the damage and the proposed rebuild scope.\n` +
+    `- No overhead/profit/tax lines (O&P applies separately on the estimate). Prices in DOLLARS.\n\n` +
+    `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``;
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
-    system:
-      "You are a senior restoration estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) writing an Xactimate-style " +
-      "mitigation invoice for an insurance claim. Every line must trace to the documented facts — never bill undocumented work. " +
-      "Call `draft_invoice` with the complete line-item draft.",
-    content:
+    system: estimate
+      ? "You are a senior reconstruction estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) writing an " +
+        "Xactimate-style RECONSTRUCTION ESTIMATE for insurance review: the proposed scope and pricing to rebuild the structure " +
+        "after water mitigation. This estimates FUTURE work — it is not billing for performed work. Every line must trace to " +
+        "documented damage; never invent scope. Call `draft_invoice` with the complete line-item draft."
+      : "You are a senior restoration estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) writing an Xactimate-style " +
+        "mitigation invoice for an insurance claim. Every line must trace to the documented facts — never bill undocumented work. " +
+        "Call `draft_invoice` with the complete line-item draft.",
+    content: estimate ? estimateContent :
       `Draft the mitigation invoice line items for this job.\n\n` +
       `PRICE CATALOG (code | description | unit | default price) — prefer these codes and prices when a line matches:\n${catalogText(body.catalog)}\n\n` +
       `RULES:\n` +
@@ -295,6 +316,7 @@ async function invoiceDraft(body: Record<string, unknown>) {
       `- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit Cat-3 qualifiers.\n` +
       `- Include scope lines only where the facts support them; state the basis on every line.\n` +
       `- facts.planDimensions (when present) are measurements read off the dimensioned floor plan and verified by the tech — use them for SF/LF quantities (flooring, drywall, baseboard) and cite the room's dimensions in the basis.\n` +
+      `- facts.receipts (when present) are AI-read receipts / subcontractor invoices attached to the claim — bill each documented pass-through (dump fees, materials, sub charges) at its receipt total, citing vendor and date in the basis. Never bill the same receipt twice.\n` +
       `- No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n\n` +
       `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "draft_invoice",
@@ -332,24 +354,37 @@ const AUDIT_SCHEMA = {
 async function invoiceAudit(body: Record<string, unknown>) {
   const facts = body.facts;
   if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  const estimate = body.mode === "reconEstimate";
   const items = Array.isArray(body.items) ? body.items as Array<{ room?: string; desc: string; qty: string; unit: string; price: string }> : [];
   const itemsText = items.length
     ? items.map((it) => `- [${it.room || "Main Level"}] ${it.desc} | ${it.qty} ${it.unit} @ $${it.price}`).join("\n")
-    : "(the invoice is currently empty)";
+    : (estimate ? "(the estimate is currently empty)" : "(the invoice is currently empty)");
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
-    system:
-      "You are a supplement auditor for Roybal Construction, LLC. Find DOCUMENTED work missing from an invoice — billable items " +
-      "clearly supported by the job facts but absent from the current line items. Never suggest speculative work: every suggestion " +
-      "must cite its supporting documentation. If nothing is missing, call `audit` with an empty suggestions array.",
-    content:
-      `Audit this invoice against the documented job facts and list missed billable items.\n\n` +
-      `CURRENT INVOICE LINE ITEMS:\n${itemsText}\n\n` +
-      `PRICE CATALOG (prefer these codes/prices when a suggestion matches):\n${catalogText(body.catalog)}\n\n` +
-      `Do not duplicate or re-price items already on the invoice. BILLING MODEL — time & materials: all labor bills hourly at $125.00/HR (never baked into unit prices).\n` +
-      `MOST IMPORTANT CHECK — hour reconciliation: compare the total HR billed across the invoice's hourly lines to facts.labor.totalHours. If logged hours are unbilled, suggest hourly line(s) at $125.00/HR that bill the gap, describing the work from the labor entries' notes and citing them as the reason. Unbilled logged hours are lost revenue.\n` +
-      `Also flag missing equipment-rental days, materials, and pass-through fees the facts support. Never suggest labor-loaded piecework: labor belongs only in HR lines. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
-      `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
+    system: estimate
+      ? "You are a reconstruction scope auditor for Roybal Construction, LLC. Find DOCUMENTED rebuild scope missing from a " +
+        "reconstruction estimate — put-back work the documented damage clearly requires but the current line items omit. " +
+        "Never suggest speculative scope: every suggestion must cite its supporting documentation. If nothing is missing, " +
+        "call `audit` with an empty suggestions array."
+      : "You are a supplement auditor for Roybal Construction, LLC. Find DOCUMENTED work missing from an invoice — billable items " +
+        "clearly supported by the job facts but absent from the current line items. Never suggest speculative work: every suggestion " +
+        "must cite its supporting documentation. If nothing is missing, call `audit` with an empty suggestions array.",
+    content: estimate
+      ? `Audit this reconstruction estimate against the documented damage and list missed rebuild scope.\n\n` +
+        `CURRENT ESTIMATE LINE ITEMS:\n${itemsText}\n\n` +
+        `PRICE CATALOG (prefer these codes/prices when a suggestion matches; price uncataloged trades at fair Fairbanks-area rates):\n${catalogText(body.catalog)}\n\n` +
+        `Do not duplicate or re-price items already on the estimate.\n` +
+        `MOST IMPORTANT CHECK — demo put-back reconciliation: walk facts.demoNotes and facts.affectedAreas; every flood cut, tear-out and removed finish must have corresponding rebuild lines (including the finish chain: hang, tape, texture, prime, paint; underlayment, install, transitions). Suggest what's missing.\n` +
+        `Also check: trades disturbed by demo (electrical/plumbing/HVAC/insulation), code items facts.supportingDocs cites, and job-wide lines (debris, floor protection, final clean, permits). Quantities from facts.planDimensions where available.\n` +
+        `Unit-priced scope lines (labor inside the unit price) — never hourly T&M. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
+        `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``
+      : `Audit this invoice against the documented job facts and list missed billable items.\n\n` +
+        `CURRENT INVOICE LINE ITEMS:\n${itemsText}\n\n` +
+        `PRICE CATALOG (prefer these codes/prices when a suggestion matches):\n${catalogText(body.catalog)}\n\n` +
+        `Do not duplicate or re-price items already on the invoice. BILLING MODEL — time & materials: all labor bills hourly at $125.00/HR (never baked into unit prices).\n` +
+        `MOST IMPORTANT CHECK — hour reconciliation: compare the total HR billed across the invoice's hourly lines to facts.labor.totalHours. If logged hours are unbilled, suggest hourly line(s) at $125.00/HR that bill the gap, describing the work from the labor entries' notes and citing them as the reason. Unbilled logged hours are lost revenue.\n` +
+        `Also flag missing equipment-rental days, materials, and pass-through fees the facts support — including facts.receipts (AI-read receipts / sub invoices) not yet billed. Never suggest labor-loaded piecework: labor belongs only in HR lines. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
+        `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "audit",
     schema: AUDIT_SCHEMA as unknown as Record<string, unknown>,
     maxTokens: 4096,
@@ -569,13 +604,16 @@ const DOC_DIGEST_SCHEMA = {
   type: "object", additionalProperties: false,
   required: ["docType", "suggestedTitle", "summary", "keyFindings"],
   properties: {
-    docType: { type: "string", enum: ["Engineer's report", "Hygienist / lab report", "Adjuster estimate", "Permit / code letter", "Contract / legal", "Other"] },
-    suggestedTitle: { type: "string", description: "Short title, e.g. \"Structural engineer's report — J. Smith PE, 7/8/2026\"" },
-    summary: { type: "string", description: "150-250 words: what the document is, who authored it, what it concludes — stated facts only, no interpretation" },
+    docType: { type: "string", enum: ["Engineer's report", "Hygienist / lab report", "Adjuster estimate", "Permit / code letter", "Contract / legal", "Receipt", "Subcontractor invoice", "Supplier quote", "Other"] },
+    suggestedTitle: { type: "string", description: "Short title, e.g. \"Structural engineer's report — J. Smith PE, 7/8/2026\" or \"Fairbanks Landfill dump receipt — 6/21/2026\"" },
+    summary: { type: "string", description: "150-250 words (a few sentences suffice for receipts): what the document is, who authored it, what it concludes — stated facts only, no interpretation" },
     keyFindings: {
       type: "array",
       items: { type: "string", description: "One finding/requirement/number per entry, quoted or closely paraphrased, with its location in the doc when useful (e.g. 'p.3: sistered joists required at bays 2-4')" },
     },
+    vendor: { type: "string", description: "Receipts / sub invoices / quotes: the vendor or subcontractor name printed on the document (empty otherwise)" },
+    docDate: { type: "string", description: "The date printed on the document, ISO YYYY-MM-DD (empty if not printed)" },
+    totalAmount: { type: ["number", "null"], description: "Receipts / sub invoices / quotes: the document's TOTAL in dollars; null when the document has no total" },
   },
 } as const;
 
@@ -598,6 +636,7 @@ async function docDigest(body: Record<string, unknown>) {
       "RULES:\n" +
       "- Report ONLY what the document states — author, date, conclusions, required repairs, code citations, dollar amounts, limits.\n" +
       "- keyFindings: every actionable requirement or number, one per entry. Quote or closely paraphrase; never editorialize.\n" +
+      "- Receipts, subcontractor invoices and supplier quotes: fill vendor, docDate (ISO) and totalAmount (the printed TOTAL in dollars) — these become billable pass-throughs on the claim. Line-level charges go in keyFindings.\n" +
       "- Unreadable sections: say so rather than guessing.",
   });
   const { input, usage } = await forcedTool({

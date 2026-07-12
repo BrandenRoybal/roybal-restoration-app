@@ -20,7 +20,7 @@ import {
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
-import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, extractPlanDimensions, digestSupportDoc } from "./officeai.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
@@ -413,7 +413,7 @@ export function moistureMap(project, m) {
     pad.tools, areaTitle, pad.el,
     h("details", { class: "app-only", style: "margin-top:10px" },
       h("summary", { class: "linklike" }, "Or attach photos of the area instead"),
-      photoUploader(m.photos, "Add area photos")),
+      photoUploader(m.photos || (m.photos = []), "Add area photos")),   // maps predating the photos field
 
     sectionTitle("Equipment Placement"),
     h("p", { class: "subtle app-only" }, "Tap a tool, then tap the floor plan to drop it. Tap a placed unit to move it; use ↺ ↻ to aim it (air-mover direction)."),
@@ -443,6 +443,7 @@ export function moistureMap(project, m) {
    and offline — defensible to an adjuster line by line. */
 function equipSizingSection(project, d) {
   if (!d.calcRooms) d.calcRooms = {};
+  if (!d.calcDeviation) d.calcDeviation = {};   // per-row deviation-from-worksheet notes (am/dehu/scrub/heat)
   const planRooms = (project.floorPlan && project.floorPlan.dimensions && Array.isArray(project.floorPlan.dimensions.rooms))
     ? project.floorPlan.dimensions.rooms.filter((r) => (r.name || "").trim() && (parseFloat(r.floorSF) > 0 || parseFloat(r.perimLF) > 0)) : [];
 
@@ -452,11 +453,12 @@ function equipSizingSection(project, d) {
     const c = d.equipCalc;
     if (!c) return;
     const dep = deployedCounts(d.equipment);
-    const row = (label, rec, have, basis, isShort) => h("tr", {},
+    const row = (label, rec, have, basis, isShort, devKey) => h("tr", {},
       h("td", { style: "text-align:left;padding:6px 8px;font-weight:600" }, label),
       h("td", { style: "font-weight:700" }, String(rec)),
       h("td", { style: isShort ? "color:var(--red,#d23b2e);font-weight:700" : "" }, have == null ? "—" : String(have) + (isShort ? " ⚠" : "")),
-      h("td", { style: "text-align:left;padding:4px 8px;font-size:12px" }, basis));
+      h("td", { style: "text-align:left;padding:4px 8px;font-size:12px" }, basis),
+      taCell(d.calcDeviation, devKey, { minWidth: "130px", placeholder: "e.g. limited circuits — staged deployment" }));
     const am = c.airMovers;
     const amRec = am.low === am.high ? String(am.low) : am.low + "–" + am.high;
     const dh = c.dehu || {};
@@ -468,13 +470,15 @@ function equipSizingSection(project, d) {
         `${c.inputs.sf.toLocaleString()} SF wet floor across ${c.inputs.rooms} room(s), ${c.inputs.volume.toLocaleString()} cu ft`),
       h("div", { class: "tablewrap" },
         h("table", { class: "grid" },
-          h("colgroup", {}, h("col", { style: "width:160px" }), h("col", { style: "width:100px" }), h("col", { style: "width:86px" }), h("col", {})),
-          h("thead", {}, h("tr", {}, h("th", { class: "thleft" }, "Equipment"), h("th", {}, "Recommended"), h("th", {}, "Deployed"), h("th", { class: "thleft" }, "Basis (IICRC WRT worksheets)"))),
+          h("colgroup", {}, h("col", { style: "width:150px" }), h("col", { style: "width:96px" }), h("col", { style: "width:80px" }), h("col", {}), h("col", { style: "width:150px" })),
+          h("thead", {}, h("tr", {}, h("th", { class: "thleft" }, "Equipment"), h("th", {}, "Recommended"), h("th", {}, "Deployed"), h("th", { class: "thleft" }, "Basis (IICRC WRT worksheets)"), h("th", { class: "thleft" }, "Deviation from worksheet"))),
           h("tbody", {},
-            row("Air movers", amRec, dep.airMovers, am.basis, Number(dep.airMovers) < Number(am.low)),
-            row(dhLabel, dhRec, dep.dehus, dh.basis, !dh.na && Number(dep.dehus) < Number(dh.units || 0)),
-            row("Air scrubbers / AFDs", c.scrubbers.count || "None", dep.scrubbers, c.scrubbers.basis, c.scrubbers.count > 0 && Number(dep.scrubbers) < Number(c.scrubbers.count)),
-            row("Auxiliary heat", c.heat.needed ? "Yes" : c.heat.known ? "No" : "?", dep.heaters || "—", c.heat.basis, c.heat.needed && !dep.heaters)))));
+            row("Air movers", amRec, dep.airMovers, am.basis, Number(dep.airMovers) < Number(am.low), "am"),
+            row(dhLabel, dhRec, dep.dehus, dh.basis, !dh.na && Number(dep.dehus) < Number(dh.units || 0), "dehu"),
+            row("Air scrubbers / AFDs", c.scrubbers.count || "None", dep.scrubbers, c.scrubbers.basis, c.scrubbers.count > 0 && Number(dep.scrubbers) < Number(c.scrubbers.count), "scrub"),
+            row("Auxiliary heat", c.heat.needed ? "Yes" : c.heat.known ? "No" : "?", dep.heaters || "—", c.heat.basis, c.heat.needed && !dep.heaters, "heat")))),
+      h("p", { class: "subtle app-only", style: "font-size:11px;margin:4px 0 0" },
+        "Deviation column: when deployment intentionally differs from the worksheet figure, say why (power limits, containment, staged demo…) — it prints with the log for the adjuster."));
   }
 
   const controls = h("div", { class: "app-only" });
@@ -1292,6 +1296,11 @@ function invoiceCharges(inv, onTotals) {
 }
 
 export function invoice(project, inv) {
+  /* kind:"estimate" → the same editor renders a RECONSTRUCTION ESTIMATE:
+     proposed rebuild scope priced line-by-line + O&P, drafted by the AI from
+     the documented damage. No QBO push, no billing-model toggle. */
+  const isEst = inv.kind === "estimate";
+  if (isEst) inv.billingModel = "tm";   // estimate math is always line items + O&P
   const subEl = h("span", {}, money(0));
   const ohEl = h("span", {}, money(0));
   const pfEl = h("span", {}, money(0));
@@ -1357,14 +1366,15 @@ export function invoice(project, inv) {
   const aiPanel = h("div", { class: "app-only" });
   const busyBtn = (btn, on, label) => { btn.disabled = on; btn.textContent = label; };
 
-  const draftBtn = h("button", { type: "button", class: "btn btn--sm" }, "\u2728 Draft from documentation");
+  const draftBtn = h("button", { type: "button", class: "btn btn--sm" },
+    isEst ? "\u2728 Draft rebuild estimate" : "\u2728 Draft from documentation");
   draftBtn.addEventListener("click", async () => {
     if (!aiAvailable()) return;
     const hasItems = (inv.items || []).some((it) => String(it.desc || "").trim());
     if (hasItems && !window.confirm("Replace the current line items with an AI draft built from the job documentation?")) return;
     busyBtn(draftBtn, true, "\u2728 Drafting\u2026");
     try {
-      const draft = await draftInvoice(project);
+      const draft = isEst ? await draftReconEstimate(project) : await draftInvoice(project);
       const lines = Array.isArray(draft.items) ? draft.items : [];
       if (draft.lossSummary) { inv.lossSummary = draft.lossSummary; lossTa.value = inv.lossSummary; }
       inv.items = lines.map((li) => ({
@@ -1378,11 +1388,11 @@ export function invoice(project, inv) {
           h("strong", {}, "\u2728 Draft basis \u2014 review every line before sending:"),
           ...lines.map((li) => h("div", { style: "margin-top:4px;color:#5a6b7f" },
             h("strong", { style: "color:#2b3a4d" }, li.desc || ""), li.basis ? " \u2014 " + li.basis : ""))));
-      toast("Invoice draft ready \u2014 every line is editable.");
+      toast((isEst ? "Estimate" : "Invoice") + " draft ready \u2014 every line is editable.");
     } catch (e) {
       toast("AI draft failed: " + (e && e.message ? e.message : e));
     }
-    busyBtn(draftBtn, false, "\u2728 Draft from documentation");
+    busyBtn(draftBtn, false, isEst ? "\u2728 Draft rebuild estimate" : "\u2728 Draft from documentation");
   });
 
   const auditBtn = h("button", { type: "button", class: "btn btn--sm" }, "\ud83d\udd0e Find missed items");
@@ -1390,10 +1400,11 @@ export function invoice(project, inv) {
     if (!aiAvailable()) return;
     busyBtn(auditBtn, true, "\ud83d\udd0e Auditing\u2026");
     try {
-      const suggestions = await auditInvoice(project, inv);
+      const suggestions = isEst ? await auditReconEstimate(project, inv) : await auditInvoice(project, inv);
       if (!suggestions.length) {
         aiPanel.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" },
-          "\u2728 No missed items found \u2014 everything documented appears to be billed."));
+          isEst ? "\u2728 No missed scope found \u2014 the estimate appears to cover the documented damage."
+                : "\u2728 No missed items found \u2014 everything documented appears to be billed."));
       } else {
         const rows = suggestions.map((sug) => {
           const add = h("button", { type: "button", class: "btn btn--sm" }, "+ Add");
@@ -1439,7 +1450,8 @@ export function invoice(project, inv) {
     busyBtn(qboBtn, false, inv.qboInvoiceId ? "\u2b06\ufe0f Update in QuickBooks" : "\u2b06\ufe0f Push to QuickBooks");
   });
 
-  const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" }, draftBtn, auditBtn, qboBtn, qboStatusEl);
+  const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" },
+    ...(isEst ? [draftBtn, auditBtn] : [draftBtn, auditBtn, qboBtn, qboStatusEl]));
 
   /* ---- supporting documents: receipts, sub invoices, dump tickets…
      Attached PDFs/photos become full pages after the invoice when printed. ---- */
@@ -1461,11 +1473,37 @@ export function invoice(project, inv) {
         if (!confirm("Remove this attachment from the invoice?")) return;
         inv.attachments.splice(i, 1); commit(); paintAttachList(); paintAttachSheets();
       });
-      return h("div", { style: "display:flex;gap:8px;align-items:center;margin-top:6px" },
-        h("span", {}, "📎"), label,
+      const row = h("div", { style: "display:flex;gap:8px;align-items:center;margin-top:6px" },
+        h("span", {}, att.aiPending ? "⏳" : "📎"), label,
         h("span", { class: "subtle", style: "font-size:12px;white-space:nowrap" }, (att.pages || []).length + " pg"),
         del);
+      const recognized = att.ai
+        ? h("div", { class: "subtle", style: "font-size:11px;margin:1px 0 0 26px" },
+            "✨ " + [att.ai.docType, att.ai.vendor, att.ai.docDate ? fmtDate(att.ai.docDate) : "",
+              att.ai.totalAmount != null && att.ai.totalAmount !== "" ? money(att.ai.totalAmount) : ""]
+              .filter(Boolean).join(" · "))
+        : null;
+      return h("div", {}, row, recognized);
     }));
+  }
+
+  /* AI recognition (best-effort, online only): read the receipt / sub invoice
+     so vendor, date and total ride the job facts — the invoice draft & audit
+     can then bill documented pass-throughs and the assistant can cite them. */
+  async function recognizeAttachment(att) {
+    if (!aiAvailable() || !(att.pages || []).length) return;
+    att.aiPending = true; paintAttachList();
+    try {
+      const digest = await digestSupportDoc(project, att.pages, { title: att.label || "" });
+      att.ai = {
+        docType: digest.docType || "", vendor: digest.vendor || "", docDate: digest.docDate || "",
+        totalAmount: digest.totalAmount ?? null,
+        summary: String(digest.summary || "").slice(0, 600),
+      };
+      if (digest.suggestedTitle) att.label = digest.suggestedTitle;
+    } catch { /* recognition is optional — the attachment stays regardless */ }
+    delete att.aiPending;
+    commit(); paintAttachList(); paintAttachSheets();
   }
   const attachNote = h("div", { class: "print-only", style: "font-size:9pt;margin:2px 0" },
     "Supporting documentation attached: see following page(s).");
@@ -1473,14 +1511,17 @@ export function invoice(project, inv) {
   const attachBtn = h("button", { type: "button", class: "btn btn--sm", style: "width:auto;margin-top:8px" }, "📎 Attach PDF / photo");
   attachInput.addEventListener("change", async () => {
     attachBtn.disabled = true; const t = attachBtn.textContent; attachBtn.textContent = "📎 Reading…";
+    const added = [];
     for (const f of attachInput.files) {
       try {
         const pages = await fileToDocPages(f);
-        inv.attachments.push({ label: (f.name || "").replace(/\.[^.]+$/, ""), pages });
+        const att = { label: (f.name || "").replace(/\.[^.]+$/, ""), pages };
+        inv.attachments.push(att); added.push(att);
       } catch { toast("Couldn't read " + (f.name || "that file") + " — try a PDF or photo."); }
     }
     attachInput.value = ""; attachBtn.disabled = false; attachBtn.textContent = t;
     commit(); paintAttachList(); paintAttachSheets();
+    added.forEach((att) => recognizeAttachment(att));   // fire-and-forget per attachment
   });
   attachBtn.addEventListener("click", () => attachInput.click());
   paintAttachList(); paintAttachSheets();
@@ -1501,7 +1542,7 @@ export function invoice(project, inv) {
     trow("Less: Previous Payments", inp(inv, "previousPayments", { type: "number", oninput: () => recalc() })),
     trow("Sales Tax %", inp(inv, "taxRate", { type: "number", oninput: () => recalc() })),
     trow("Sales Tax", taxEl),
-    trow("Total Due", totalEl, "grand"));
+    trow(isEst ? "Estimate Total" : "Total Due", totalEl, "grand"));
   function paintMode() {
     const c = isContract();
     contractRow.hidden = !c;
@@ -1515,19 +1556,24 @@ export function invoice(project, inv) {
   ], { onchange: () => { paintMode(); recalc(); } });
   paintMode();
 
-  const invoiceSheet = sheet("CONSTRUCTION INVOICE", "Mitigation & Reconstruction Services | IICRC S500 Compliant", "Construction Invoice",
+  const invoiceSheet = sheet(
+    isEst ? "RECONSTRUCTION ESTIMATE" : "CONSTRUCTION INVOICE",
+    isEst ? "Proposed rebuild scope & pricing — post-mitigation reconstruction" : "Mitigation & Reconstruction Services | IICRC S500 Compliant",
+    isEst ? "Reconstruction Estimate" : "Construction Invoice",
     h("div", { class: "grid2" },
-      field("Invoice #", inp(inv, "invoiceNo")),
-      field("Invoice Date", inp(inv, "invoiceDate", { type: "date" }))),
-    h("div", { class: "grid2" },
-      field("Due Date", inp(inv, "dueDate", { type: "date" })),
-      field("Payment Terms", inp(inv, "terms"))),
-    sectionTitle("Bill To / Insured & Claim"),
+      field(isEst ? "Estimate #" : "Invoice #", inp(inv, "invoiceNo")),
+      field(isEst ? "Estimate Date" : "Invoice Date", inp(inv, "invoiceDate", { type: "date" }))),
+    isEst
+      ? h("div", { class: "grid2" }, field("Valid Until", inp(inv, "dueDate", { type: "date" })), h("div"))
+      : h("div", { class: "grid2" },
+          field("Due Date", inp(inv, "dueDate", { type: "date" })),
+          field("Payment Terms", inp(inv, "terms"))),
+    sectionTitle(isEst ? "Prepared For / Insured & Claim" : "Bill To / Insured & Claim"),
     jobInfo(project, ["customer", "address", "phone", "email"]),
     jobInfo(project, ["carrier", "claimNo", "dateOfLoss", "adjuster"]),
-    field("Loss Description / Scope Summary", lossTa),
-    sectionTitle("Charges"),
-    h("div", { class: "app-only" }, field("Billing model", modeSeg)),
+    field(isEst ? "Damage Description / Rebuild Scope Summary" : "Loss Description / Scope Summary", lossTa),
+    sectionTitle(isEst ? "Estimated Scope of Repairs" : "Charges"),
+    isEst ? null : h("div", { class: "app-only" }, field("Billing model", modeSeg)),
     aiBar,
     aiPanel,
     itemsWrap,
@@ -1539,11 +1585,16 @@ export function invoice(project, inv) {
         "Attach receipts, subcontractor invoices or other supporting documents — each prints as its own page after the invoice."),
       attachList, attachBtn, attachInput),
     attachNote,
-    h("div", { class: "remit print-only" },
-      h("strong", {}, "Remit to: Roybal Construction, LLC"),
-      h("div", {}, "2170 Chateau Court, North Pole, AK 99705"),
-      h("div", {}, "Phone: 907-371-9868 · branden@roybalconstruction.com"),
-      h("div", {}, "Methods: Check, ACH, or credit card on request")));
+    isEst
+      ? h("div", { class: "remit print-only" },
+          h("strong", {}, "Roybal Construction, LLC — Reconstruction Estimate"),
+          h("div", {}, "2170 Chateau Court, North Pole, AK 99705 · 907-371-9868 · branden@roybalconstruction.com"),
+          h("div", {}, "This is an estimate of proposed reconstruction, not an invoice. Pricing subject to hidden-condition supplements and carrier-approved change orders."))
+      : h("div", { class: "remit print-only" },
+          h("strong", {}, "Remit to: Roybal Construction, LLC"),
+          h("div", {}, "2170 Chateau Court, North Pole, AK 99705"),
+          h("div", {}, "Phone: 907-371-9868 · branden@roybalconstruction.com"),
+          h("div", {}, "Methods: Check, ACH, or credit card on request")));
 
   return h("div", {}, invoiceSheet, attachSheets);
 }
@@ -1885,6 +1936,8 @@ export function floorPlanSheet(project, fp) {
     sectionTitle("Dimensioned Floor Plan"),
     // management UI only — the plan itself prints as full pages after this sheet
     h("div", { class: "app-only" }, upload, aiBar),
+    h("p", { class: "subtle app-only", style: "font-size:11px;margin:4px 0" },
+      "Internal use only: this dimensions table never prints — the packet carries the full-size dimensioned plan pages, and these figures feed the AI estimates and equipment sizing."),
     dimsBox);
 }
 
@@ -2351,7 +2404,7 @@ export function punchList(project, pl) {
       boundCell(r, "completedDate", "120px", "date"),
       delCell(pl.rows, r, paint));
     const photoTr = h("tr", { class: "punchphotos" },
-      h("td", { colspan: "8" }, photoUploader(r.photos, "Photo")));
+      h("td", { colspan: "8" }, photoUploader(r.photos || (r.photos = []), "Photo")));
     return [tr, photoTr];
   }
   function paint() { tbody.replaceChildren(...pl.rows.flatMap(row)); calcOpen(); }
@@ -2496,6 +2549,7 @@ export const RENDERERS = {
   certDrying,
   changeOrders: changeOrder,
   invoices: invoice,
+  reconEstimates: invoice,   // same editor; kind:"estimate" switches labels + AI
   scopeOfWork,
   preConChecklist,
   selections: selectionsSheet,

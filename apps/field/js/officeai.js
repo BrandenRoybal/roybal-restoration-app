@@ -13,6 +13,7 @@ import { isSignedIn, accessToken } from "./supa.js";
 import { getUnifiedJobId } from "./spine.js";
 import { capturedBy } from "./tech.js";
 import { narrativeFacts } from "./narrative.js";
+import { rebuildFacts } from "./convert.js";
 import { PRICE_CATALOG } from "./pricing.js";
 import { toast } from "./core.js";
 
@@ -138,6 +139,29 @@ export function auditInvoice(project, inv) {
     facts: invoiceFacts(project),
     items: (inv.items || []).filter((it) => String(it.desc || "").trim()),
     catalog: PRICE_CATALOG,
+  }).then((b) => b.suggestions ?? []);
+}
+
+/* ---------- reconstruction estimate (restoration jobs) ----------
+   Same schema/editor as the invoice, but the fact pack is the REBUILD
+   digest (demo extent, plan dimensions, contents loss) and the edge
+   prompt writes proposed repair scope, not billing for performed work. */
+function reconEstimateFacts(project) {
+  return { ...rebuildFacts(project), labor: laborSummary(project), photoFindings: photoAiSummary(project) };
+}
+export function draftReconEstimate(project) {
+  return callOffice(project, "invoiceDraft", {
+    facts: reconEstimateFacts(project),
+    catalog: PRICE_CATALOG,
+    mode: "reconEstimate",
+  }).then((b) => b.draft);
+}
+export function auditReconEstimate(project, inv) {
+  return callOffice(project, "invoiceAudit", {
+    facts: reconEstimateFacts(project),
+    items: (inv.items || []).filter((it) => String(it.desc || "").trim()),
+    catalog: PRICE_CATALOG,
+    mode: "reconEstimate",
   }).then((b) => b.suggestions ?? []);
 }
 
