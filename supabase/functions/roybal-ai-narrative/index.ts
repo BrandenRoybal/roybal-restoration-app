@@ -25,11 +25,11 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                       // Anthropic (shared)
-const LLM_MODEL = Deno.env.get("NARRATIVE_MODEL") ?? "claude-sonnet-4-6";     // better prose than Haiku
+const LLM_MODEL = Deno.env.get("NARRATIVE_MODEL") ?? "claude-opus-4-8";       // top-tier prose for the packet cover
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 // Sonnet 4.6 pricing $/1M tokens (override via env if it changes)
-const LLM_PRICE_IN = Number(Deno.env.get("NARRATIVE_PRICE_IN") ?? "3.0");
-const LLM_PRICE_OUT = Number(Deno.env.get("NARRATIVE_PRICE_OUT") ?? "15.0");
+const LLM_PRICE_IN = Number(Deno.env.get("NARRATIVE_PRICE_IN") ?? "5.0");    // claude-opus-4-8 input $/1M
+const LLM_PRICE_OUT = Number(Deno.env.get("NARRATIVE_PRICE_OUT") ?? "25.0"); // claude-opus-4-8 output $/1M
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

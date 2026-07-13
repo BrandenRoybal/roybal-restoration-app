@@ -41,8 +41,12 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                        // Anthropic (shared)
 // Photos are many + cheap; documents (invoice/email) want better reasoning/prose.
-const PHOTO_MODEL = Deno.env.get("OFFICE_PHOTO_MODEL") ?? "claude-haiku-4-5";
-const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-sonnet-4-6";
+// Written deliverables run on Opus (quality wins; the office reviews them and a
+// few seconds slower is fine). Photos and the live voice/chat assistant run on
+// Sonnet — near-Opus quality but fast, since someone is waiting on those.
+const PHOTO_MODEL = Deno.env.get("OFFICE_PHOTO_MODEL") ?? "claude-sonnet-4-6";
+const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-opus-4-8";
+const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const STT_API_KEY = Deno.env.get("STT_API_KEY") ?? "";        // Deepgram (shared with roybal-ai-ingest)
 const STT_MODEL = Deno.env.get("STT_MODEL") ?? "nova-3";
@@ -1015,11 +1019,11 @@ async function fieldAssist(body: Record<string, unknown>) {
   msgs.push({ role: "user", content: finalContent });
 
   const context = body.context ? `\n\nJOB CONTEXT (current job):\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
-  const { text, usage } = await chatText({ model: DOC_MODEL, system: ASSIST_SYSTEM + context, messages: msgs, maxTokens: 1024 });
+  const { text, usage } = await chatText({ model: ASSIST_MODEL, system: ASSIST_SYSTEM + context, messages: msgs, maxTokens: 1024 });
   // voice agent: speak the reply back (best-effort — a TTS hiccup never eats the answer)
   let replyAudio: string | null = null;
   if (body.speak && text) { try { replyAudio = await ttsSpeak(text); } catch (_) { replyAudio = null; } }
-  return { result: { reply: text, transcript, replyAudio }, usage, model: DOC_MODEL, summary: { turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio } };
+  return { result: { reply: text, transcript, replyAudio }, usage, model: ASSIST_MODEL, summary: { turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio } };
 }
 
 /* ============================================================

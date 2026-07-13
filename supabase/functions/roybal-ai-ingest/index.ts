@@ -48,7 +48,7 @@ const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const STT_API_KEY = Deno.env.get("STT_API_KEY") ?? "";        // Deepgram
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";        // Anthropic
 const STT_MODEL = Deno.env.get("STT_MODEL") ?? "nova-3";
-const LLM_MODEL = Deno.env.get("LLM_MODEL") ?? "claude-haiku-4-5";
+const LLM_MODEL = Deno.env.get("LLM_MODEL") ?? "claude-sonnet-4-6";   // voice-capture extraction — fast, runs on every dictation
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const STT_PRICE_PER_MIN = Number(Deno.env.get("STT_PRICE_PER_MIN") ?? "0.0043"); // Deepgram nova-3 PAYG
 
