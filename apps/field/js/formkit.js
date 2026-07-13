@@ -34,9 +34,17 @@ export function inp(obj, key, opts = {}) {
 export function ta(obj, key, opts = {}) {
   const el = h("textarea", { placeholder: opts.placeholder || "", rows: opts.rows || 3 });
   el.value = obj[key] ?? "";
-  // Auto-grow to fit the content so the FULL text prints (a fixed-row textarea
-  // clips longer text on the PDF — e.g. the Loss Cause).
-  const grow = () => { if (!el.isConnected) return; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; };
+  // Auto-grow to fit the content so the FULL text shows on screen and prints on
+  // the PDF (a fixed-row textarea clips longer text — e.g. Loss Description /
+  // Scope Summary). Retry until the element is in the DOM so text set before it
+  // is connected (AI draft fill, estimate import) still expands.
+  const grow = () => {
+    if (!el.isConnected) { requestAnimationFrame(grow); return; }
+    el.style.height = "auto";
+    el.style.height = el.scrollHeight + "px";
+  };
+  // Expose so callers that set el.value programmatically can re-fit the box.
+  el.autoGrow = grow;
   el.addEventListener("input", () => { obj[key] = el.value; grow(); commit(); });
   requestAnimationFrame(grow);
   return el;

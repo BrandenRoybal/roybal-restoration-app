@@ -1395,7 +1395,7 @@ export function invoice(project, inv) {
         busyBtn(draftBtn, false, isEst ? "\u2728 Draft rebuild estimate" : "\u2728 Draft from documentation");
         return;
       }
-      if (draft.lossSummary) { inv.lossSummary = draft.lossSummary; lossTa.value = inv.lossSummary; }
+      if (draft.lossSummary) { inv.lossSummary = draft.lossSummary; lossTa.value = inv.lossSummary; lossTa.autoGrow(); }
       inv.items = lines.map((li) => ({
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
@@ -1481,7 +1481,7 @@ export function invoice(project, inv) {
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
       }));
-      if (est.lossSummary && !String(inv.lossSummary || "").trim()) { inv.lossSummary = est.lossSummary; lossTa.value = inv.lossSummary; }
+      if (est.lossSummary && !String(inv.lossSummary || "").trim()) { inv.lossSummary = est.lossSummary; lossTa.value = inv.lossSummary; lossTa.autoGrow(); }
       const sum = est.summary || {};
       // O&P: transcribe the estimate's ACTUAL Overhead/Profit dollars straight in
       // (Xactimate applies 10&10 to eligible trades only, so the printed $ is far
