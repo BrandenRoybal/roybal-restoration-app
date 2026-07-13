@@ -88,10 +88,14 @@ data — and every AI touch is logged against the `ai_usage` ledger under the mo
 Build order (each independently shippable):
 
 1. **Thread — SHIPPED (M1).** Two-way portal messaging, office ↔ customer.
-2. **Office AI assist on the thread.** *AI reply drafts* (draft, office edits + approves,
-   sent as `author:'ai'`); *AI status narratives* (turn milestone + shared-photo changes
-   into a friendly customer update); *AI photo captions* on share. Human-in-the-loop:
-   nothing reaches the customer without an office tap.
+2. **Office AI assist on the thread — SHIPPED (M3).** In the Client Portal reply panel,
+   *✨ Draft reply* (answers the customer's latest message) and *✨ Draft update* (a
+   proactive progress note) fill the composer for the office to review, edit, and send.
+   New `portalDraft` action on `roybal-ai-office`, grounded ONLY in the customer-safe
+   digest (`portalDigest`: status, milestone labels, shared-photo captions) + the thread —
+   never internal data — and metered on the same `ai_usage` cap. Human-in-the-loop:
+   nothing sends without an office tap. *AI photo captions* already come from the Job
+   Photos analysis feeding the shared-photo captions.
 3. **Customer "Ask about your project" concierge.** Grounded strictly in the customer-safe
    digest (status, milestones, shared photos, thread). Default posture: **draft-and-notify**
    — the concierge answers routine questions instantly and flags anything it can't ground

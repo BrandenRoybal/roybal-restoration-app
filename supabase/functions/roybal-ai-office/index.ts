@@ -1023,12 +1023,67 @@ async function fieldAssist(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: portalDraft — customer-facing message drafts for the portal
+   thread. mode "reply": answer the customer's latest message(s);
+   mode "status": a proactive progress update. The office reviews and
+   sends — nothing here reaches the customer unattended.
+
+   PRIVACY: this action is given ONLY the customer-safe digest the client
+   assembles from the curated projection + the portal thread (status,
+   milestone labels, shared-photo captions, the messages both parties
+   already exchanged). No costs, adjuster, claim, or Field Report data is
+   ever passed in, so none can surface in a draft.
+   ============================================================ */
+const PORTAL_DRAFT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["message"],
+  properties: {
+    message: { type: "string", description: "The customer-facing message, plain text, ready to send as-is (the office may still edit)." },
+  },
+} as const;
+
+async function portalDraft(body: Record<string, unknown>) {
+  const mode = body.mode === "status" ? "status" : "reply";
+  const digest = (body.digest ?? {}) as Record<string, unknown>;
+  const thread = Array.isArray(body.thread) ? (body.thread as Array<{ from?: string; body?: string }>).slice(-20) : [];
+  if (mode === "reply" && !thread.some((m) => m.from === "customer"))
+    throw new Error("No customer message to reply to yet.");
+
+  const threadText = thread.length
+    ? thread.map((m) => `${m.from === "customer" ? "CUSTOMER" : "US"}: ${String(m.body || "").slice(0, 800)}`).join("\n")
+    : "(no messages yet)";
+
+  const ask = mode === "status"
+    ? "Write a short, warm proactive update to send the customer about where their project stands right now — what's done, what's happening now, and what's next. 2-4 sentences. Don't promise specific dates unless a date is in the facts."
+    : "Write a friendly, helpful reply to the customer's most recent message. Answer their question directly from the facts you have. 1-4 sentences. If they ask something the facts don't cover (a specific date, a price, an insurance detail), don't guess — say we'll check with the team and get right back to them.";
+
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You are the office at Roybal Construction, LLC (a family water/fire restoration and reconstruction company in North Pole / Fairbanks, " +
+      "Alaska) writing to a residential customer through their project portal. Warm, plain-spoken, reassuring, and concise — a real person " +
+      "who knows their job, not a form letter. You know ONLY the customer-safe facts provided below (job status, milestones, shared photos, " +
+      "and the message thread). NEVER invent completion dates, prices, insurance details, or anything not in the facts. Never mention internal " +
+      "costs, adjusters, or claim specifics. No subject line, no signature (the portal adds our name). Call `portal_message` with the text.",
+    content:
+      `${ask}\n\n` +
+      `CUSTOMER-SAFE JOB FACTS:\n\`\`\`json\n${JSON.stringify(digest, null, 2)}\n\`\`\`\n\n` +
+      `MESSAGE THREAD SO FAR (oldest to newest):\n${threadText}`,
+    toolName: "portal_message",
+    schema: PORTAL_DRAFT_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 800,
+  });
+  const msg = String((input as { message?: string }).message ?? "");
+  return { result: { draft: { message: msg } }, usage, model: DOC_MODEL, summary: { mode, chars: msg.length } };
+}
+
+/* ============================================================
    Handler — same self-protection invariants as roybal-ai-ingest:
    anon key only (RLS always applies), the caller's JWT on every DB op,
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
 };
 
 serve(async (req: Request) => {

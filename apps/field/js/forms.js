@@ -18,11 +18,11 @@ import {
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
   newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
-import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice } from "./portal.js";
+import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi } from "./portal.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
-import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc, importEstimate } from "./officeai.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
@@ -2768,10 +2768,13 @@ export function portalShareForm(project) {
       }));
       list.scrollTop = list.scrollHeight;
     }
+    let currentMsgs = [];
     async function load() {
       try {
         const msgs = await fetchPortalThread(s.id);
+        currentMsgs = msgs;
         renderMsgs(msgs);
+        refreshDraftBtns();
         if (msgs.some((m) => m.direction === "in" && !m.read_by_office)) markThreadReadByOffice(s.id);
       } catch (e) { list.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" }, "Couldn't load messages (" + (e.message || e) + ").")); }
     }
@@ -2784,12 +2787,37 @@ export function portalShareForm(project) {
       send.disabled = false;
     });
 
+    // ---- AI draft assist (human-in-the-loop: fills the box, office sends) ----
+    const draftReply = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "✨ Draft reply");
+    const draftUpdate = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "✨ Draft update");
+    function refreshDraftBtns() {
+      // reply needs a customer message to answer; update can go anytime
+      draftReply.disabled = !currentMsgs.some((m) => m.direction === "in");
+    }
+    async function runDraft(mode, btn) {
+      if (!aiAvailable()) return;
+      const label = btn.textContent; btn.disabled = true; btn.textContent = "Drafting…"; status.textContent = "";
+      try {
+        const text = await draftPortalMessage(project, mode, portalDigest(project), threadForAi(currentMsgs));
+        if (text) {
+          input.value = text; input.focus();
+          status.textContent = "Draft ready — review, edit, then Send reply.";
+          status.style.color = "var(--muted)";
+        } else { status.textContent = "No draft came back — try again."; status.style.color = "var(--brand-dark)"; }
+      } catch (e) { status.textContent = "Draft failed: " + (e.message || e); status.style.color = "var(--brand-dark)"; }
+      btn.disabled = false; btn.textContent = label; refreshDraftBtns();
+    }
+    draftReply.addEventListener("click", () => runDraft("reply", draftReply));
+    draftUpdate.addEventListener("click", () => runDraft("status", draftUpdate));
+
     threadBox.append(
       sectionTitle("Messages"),
       h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 8px" }, "Your conversation with the customer. Replies show on their portal instantly."),
       list,
+      h("div", { style: "display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap" }, draftReply, draftUpdate),
       h("div", { class: "portal-reply" }, input, send),
       status);
+    refreshDraftBtns();
     load();
   }
 
