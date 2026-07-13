@@ -1732,8 +1732,9 @@ export function photosForm(project) {
   const refreshers = new Map();               // photo.id -> refresh that card in place
 
   function card(p, i) {
-    const cap = h("input", { value: p.caption || "", placeholder: "Caption" });
-    cap.addEventListener("input", () => { p.caption = cap.value; refresh(); commit(); });
+    const cap = h("textarea", { class: "photocaption", rows: "3", placeholder: "Caption" });
+    const growCap = () => { cap.style.height = "auto"; cap.style.height = Math.max(cap.scrollHeight, 64) + "px"; };
+    cap.addEventListener("input", () => { p.caption = cap.value; growCap(); refresh(); commit(); });
     const room = h("input", { value: p.room || "", placeholder: "Room / location" });
     room.addEventListener("input", () => { p.room = room.value; refresh(); commit(); });
     const stage = sel(p, "stage", [
@@ -1752,7 +1753,7 @@ export function photosForm(project) {
        keyboard) mid-edit, and fields only sync from the model while they
        aren't the field being typed in. */
     function refresh() {
-      if (document.activeElement !== cap) cap.value = p.caption || "";
+      if (document.activeElement !== cap) { cap.value = p.caption || ""; growCap(); }
       printCap.replaceChildren(
         [p.stage ? p.stage.toUpperCase() : "", p.room, p.caption].filter(Boolean).join(" \u00b7 "), " ",
         h("span", { class: "photometa" }, fmtDate((p.ts || "").slice(0, 10))));

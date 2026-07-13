@@ -290,6 +290,13 @@ tr.flag7 td { background: #fdf3e0 !important; }
   font-size: 12px; line-height: 1.45; color: #5a6b7f; padding: 4px 8px 6px; margin: 0;
 }
 .photocard .ainote:focus { border-color: var(--brand); background: #fff; color: var(--ink); outline: none; box-shadow: none; }
+/* multi-line caption editor — roomy and resizable for easy typing */
+.photocard .photocaption {
+  width: 100%; box-sizing: border-box; display: block; resize: vertical; min-height: 64px;
+  font: inherit; font-size: 15px; line-height: 1.4; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink);
+}
+.photocard .photocaption:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px var(--brand-tint); }
 .photometa { color: var(--muted); font-size: 12px; }
 
 /* ---------- Account / sync row ---------- */
