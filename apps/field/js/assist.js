@@ -232,7 +232,7 @@ function buildUi() {
   const send = h("button", { type: "button", class: "assist__btn assist__btn--send" }, "➤");
   const mic = h("button", { type: "button", class: "assist__btn" }, "🎙️");
   const cam = h("button", { type: "button", class: "assist__btn" }, "📷");
-  const file = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, style: "display:none" });
+  const file = h("input", { type: "file", accept: "image/*", multiple: true, style: "display:none" });
 
   const submit = () => {
     const t = input.value.trim();

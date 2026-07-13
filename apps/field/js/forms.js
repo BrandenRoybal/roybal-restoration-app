@@ -1815,7 +1815,7 @@ export function photosForm(project) {
   }
   aiBtn.addEventListener("click", () => runAi(pendingAi()));
 
-  const input = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, style: "display:none" });
+  const input = h("input", { type: "file", accept: "image/*", multiple: true, style: "display:none" });
   input.addEventListener("change", async () => {
     const added = [];
     for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f); project.photos.push(ph); added.push(ph); }

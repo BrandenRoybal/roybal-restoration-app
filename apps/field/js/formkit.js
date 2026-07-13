@@ -195,7 +195,7 @@ export function photoUploader(arr, label = "Add photos", opts = {}) {
         h("button", { type: "button", class: "app-only", onclick: () => { arr.splice(i, 1); commit(); paint(); } }, "✕")));
     });
   }
-  const input = h("input", { type: "file", accept: "image/*", capture: "environment", multiple: true, style: "display:none" });
+  const input = h("input", { type: "file", accept: "image/*", multiple: true, style: "display:none" });
   input.addEventListener("change", async () => {
     for (const f of input.files) arr.push(await fileToDataURL(f));
     input.value = ""; commit(); paint();
