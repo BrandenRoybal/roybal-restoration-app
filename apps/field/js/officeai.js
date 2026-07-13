@@ -251,3 +251,11 @@ export function extractPlanDimensions(project, pages) {
 export function fieldAssist(project, payload) {
   return callOffice(project, "fieldAssist", payload);
 }
+
+/* ---------- customer portal message drafts ----------
+   mode "reply": answer the customer's latest message; mode "status": a
+   proactive progress update. Grounded ONLY in the customer-safe digest +
+   thread — office reviews before sending. Returns the drafted message text. */
+export function draftPortalMessage(project, mode, digest, thread) {
+  return callOffice(project, "portalDraft", { mode, digest, thread }).then((b) => b.draft?.message || "");
+}

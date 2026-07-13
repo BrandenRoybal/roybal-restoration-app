@@ -130,6 +130,27 @@ export async function sendOfficeReply(portalJobId, body, author = "office") {
   return (await res.json())[0];
 }
 
+/* PURE + customer-safe: the digest handed to portal AI drafts. Built from the
+   curated projection only (status, milestone labels, shared-photo captions) —
+   never internal facts — so an AI draft physically cannot reference anything
+   the customer shouldn't see. The message thread is passed separately. */
+export function portalDigest(project) {
+  const proj = portalProjection(project);
+  return {
+    customerName: proj.customer_name,
+    address: proj.property_address,
+    statusLabel: proj.statusLabel,
+    milestones: proj.milestones.map((m) => ({ label: m.label, state: m.state })),
+    sharedPhotos: proj.photos.map((p) => ({ caption: p.caption, stage: p.stage })),
+  };
+}
+
+/* map a stored thread (portal_messages rows) to the {from,body} shape the AI
+   draft action reads — customer messages vs ours. */
+export function threadForAi(messages) {
+  return (messages || []).map((m) => ({ from: m.direction === "in" ? "customer" : "office", body: m.body || "" }));
+}
+
 /* mark the customer's inbound messages as seen by the office */
 export async function markThreadReadByOffice(portalJobId) {
   if (!portalJobId) return;

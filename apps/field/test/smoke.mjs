@@ -152,6 +152,18 @@ function setInput(el, val) {
     ok(view().querySelector(".sheet") !== null, `${key} editor renders a printable sheet`);
   }
 
+  // 8a2. Client Portal office panel renders (disabled + enabled), incl. the
+  // message-thread + AI-draft controls, without throwing.
+  await nav(`#/p/${id}/f/portalShare`);
+  await tick(20);
+  ok(/Client Portal/.test(text()), "client portal office panel renders");
+  const portalToggle = view().querySelector('input[type="checkbox"]');
+  ok(portalToggle !== null, "portal enable toggle renders");
+  portalToggle.click();               // enable → mints token, reveals status/photos/publish
+  await tick(40);
+  ok([...view().querySelectorAll("button")].some((b) => /Publish to portal/.test(b.textContent)),
+    "enabling the portal reveals the Publish action");
+
   // 8b. Job Photos (project-level gallery -> Photo Report sheet)
   await nav(`#/p/${id}/f/photos`);
   await tick(40);

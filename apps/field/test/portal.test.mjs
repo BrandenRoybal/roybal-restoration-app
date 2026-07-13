@@ -2,7 +2,7 @@
    portalProjection(project) must expose ONLY curated, customer-safe fields
    and never any internal data. Run: node apps/field/test/portal.test.mjs */
 import assert from "node:assert";
-import { portalProjection, portalMilestones, portalShareLink, newShareToken } from "../js/portal.js";
+import { portalProjection, portalMilestones, portalShareLink, newShareToken, portalDigest, threadForAi } from "../js/portal.js";
 
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); console.log("  ✓ " + name); pass++; };
@@ -72,5 +72,25 @@ ok("share token is long, hex, unguessable, unique", /^[0-9a-f]{48}$/.test(t1) &&
 /* ---------- empty / disabled safety ---------- */
 ok("no shared photos when none selected", portalProjection({ ...project, portalShare: { sharedPhotoIds: [] } }).photos.length === 0);
 ok("null job -> safe empty projection", portalProjection(null).customer_name === "" && portalProjection(null).photos.length === 0);
+
+/* ---------- portalDigest: what AI drafts are allowed to see ---------- */
+const digest = portalDigest(project);
+const dj = JSON.stringify(digest);
+ok("digest exposes customer name + status label", digest.customerName === "Erica Swift" && digest.statusLabel === "Structural drying");
+ok("digest carries milestone labels + states", Array.isArray(digest.milestones) && digest.milestones.every((m) => m.label && m.state));
+ok("digest lists only shared-photo captions", digest.sharedPhotos.length === 1 && digest.sharedPhotos[0].caption === "Kitchen after");
+ok("digest keys are the safe set only",
+  Object.keys(digest).sort().join(",") === "address,customerName,milestones,sharedPhotos,statusLabel");
+for (const needle of FORBIDDEN)
+  ok(`digest never leaks internal data: "${needle}"`, !dj.includes(needle));
+
+/* ---------- threadForAi: maps direction to who-said-it ---------- */
+const forAi = threadForAi([
+  { direction: "in", body: "When do you start?" },
+  { direction: "out", body: "Next week." },
+]);
+ok("threadForAi maps in->customer, out->office",
+  forAi[0].from === "customer" && forAi[0].body === "When do you start?" && forAi[1].from === "office");
+ok("threadForAi handles empty", threadForAi(null).length === 0);
 
 console.log(`\n${pass} portal checks passed.`);
