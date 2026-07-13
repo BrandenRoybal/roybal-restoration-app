@@ -37,7 +37,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const MEDIA_BUCKET = "field-media";
-const SIGN_TTL = 3600;   // signed photo URL lifetime (seconds)
+const PHOTO_MAX = 24;    // max full images inlined in a view response
 const MSG_MAX = 2000;    // max characters a customer may send in one message
 const MSG_LIMIT = 200;   // most-recent messages returned per thread
 const FLOOD_WINDOW_MS = 60_000;  // inbound-message rate window
@@ -85,17 +85,17 @@ async function jobByToken(token: string) {
   return Array.isArray(rows) ? rows[0] || null : null;
 }
 
-/* short-lived signed URL for one field-media object (by content hash = path) */
-async function signMedia(hash: string): Promise<string | null> {
+/* the image for one field-media object (by content hash = path). Sync stores
+   each photo as its ORIGINAL `data:` URL string (text/plain), so a signed
+   storage URL would hand the <img> a text file, not an image. We instead
+   fetch the object and return the data URL itself, which <img src> renders
+   natively. Returns null when the object is missing or isn't an image. */
+async function mediaSrc(hash: string): Promise<string | null> {
   if (!/^[0-9a-f]{64}$/.test(String(hash || ""))) return null;
-  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${MEDIA_BUCKET}/${hash}`, {
-    method: "POST",
-    headers: { ...svc, "Content-Type": "application/json" },
-    body: JSON.stringify({ expiresIn: SIGN_TTL }),
-  });
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${hash}`, { headers: svc });
   if (!res.ok) return null;
-  const b = await res.json().catch(() => ({}));
-  return b.signedURL ? `${SUPABASE_URL}/storage/v1${b.signedURL}` : null;
+  const text = await res.text();
+  return text.startsWith("data:image/") ? text : null;
 }
 
 /* count of inbound messages the customer hasn't-yet been the concern of —
@@ -116,8 +116,10 @@ async function view(token: string) {
   const row = await jobByToken(token);
   if (!row) return null;
   const photos: Array<{ url: string; caption: string; stage: string }> = [];
-  for (const p of (Array.isArray(row.photos) ? row.photos : [])) {
-    const url = await signMedia(p.mediaHash);
+  // Cap how many full images we inline so the response stays reasonable on a
+  // phone; the office shares a handful of progress photos in practice.
+  for (const p of (Array.isArray(row.photos) ? row.photos : []).slice(0, PHOTO_MAX)) {
+    const url = await mediaSrc(p.mediaHash);
     if (url) photos.push({ url, caption: p.caption || "", stage: p.stage || "" });
   }
   return {
