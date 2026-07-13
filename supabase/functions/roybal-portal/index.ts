@@ -50,7 +50,7 @@ const FLOOD_MAX = 8;             // max inbound messages per window per job
    so it is fenced by three limits: the per-minute flood guard (below), a
    per-job daily answer cap, and the account-wide monthly spend cap. */
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                      // Anthropic (shared secret)
-const CONCIERGE_MODEL = Deno.env.get("CONCIERGE_MODEL") ?? "claude-haiku-4-5";
+const CONCIERGE_MODEL = Deno.env.get("CONCIERGE_MODEL") ?? "claude-opus-4-8";
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const CONCIERGE_DAILY_MAX = Number(Deno.env.get("CONCIERGE_DAILY_MAX") ?? "40"); // AI answers/job/24h
 const LLM_PRICES: Record<string, { in: number; out: number }> = {
