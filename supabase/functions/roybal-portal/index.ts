@@ -19,6 +19,17 @@
  *   messages — { token } -> { ok, messages:[{id,from,body,at,channel}] }
  *              (also marks outbound messages as seen by the customer)
  *   send     — { token, body } -> { ok, message:{id,from,body,at} }
+ *   ask      — { token, body } -> { ok, posted, answered, handoff, reply }
+ *              The customer concierge: posts the question, then answers it
+ *              instantly from the customer-safe slice + thread, or hands off
+ *              to the office. This is the ONLY place this public endpoint
+ *              calls a paid LLM, so it is fenced by three limits — a
+ *              per-minute flood guard, a per-job daily answer cap
+ *              (CONCIERGE_DAILY_MAX), and the account monthly spend cap
+ *              (SPEND_CAP_USD) — and every call is logged to ai_usage. The
+ *              model is handed ONLY the curated portal_jobs digest, so it
+ *              physically cannot reveal anything the customer shouldn't see.
+ *              Requires the LLM_API_KEY secret (shared with roybal-ai-office).
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -31,6 +42,26 @@ const MSG_MAX = 2000;    // max characters a customer may send in one message
 const MSG_LIMIT = 200;   // most-recent messages returned per thread
 const FLOOD_WINDOW_MS = 60_000;  // inbound-message rate window
 const FLOOD_MAX = 8;             // max inbound messages per window per job
+
+/* ---------- concierge (customer-facing AI) config ----------
+   The concierge answers routine questions instantly, grounded ONLY in the
+   customer-safe portal_jobs slice + the thread, and hands off anything it
+   can't ground. It is the one place this public endpoint calls a paid LLM,
+   so it is fenced by three limits: the per-minute flood guard (below), a
+   per-job daily answer cap, and the account-wide monthly spend cap. */
+const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                      // Anthropic (shared secret)
+const CONCIERGE_MODEL = Deno.env.get("CONCIERGE_MODEL") ?? "claude-haiku-4-5";
+const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
+const CONCIERGE_DAILY_MAX = Number(Deno.env.get("CONCIERGE_DAILY_MAX") ?? "40"); // AI answers/job/24h
+const LLM_PRICES: Record<string, { in: number; out: number }> = {
+  "claude-haiku-4-5": { in: 1.0, out: 5.0 },
+  "claude-sonnet-4-6": { in: 3.0, out: 15.0 },
+  "claude-opus-4-8": { in: 5.0, out: 25.0 },
+};
+const priceFor = (m: string) => LLM_PRICES[m] ?? { in: 1.0, out: 5.0 };
+const HANDOFF_LINE =
+  "Thanks for your message! I've passed this along to the Roybal Construction team and they'll get back to you soon. " +
+  "If it's urgent, please call us at 907-371-9868.";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -132,6 +163,106 @@ async function messages(token: string) {
   };
 }
 
+/* count rows matching a portal_messages filter (service role, exact count) */
+async function countMessages(filter: string): Promise<number> {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages?${filter}&select=id`, {
+    headers: { ...svc, Prefer: "count=exact", Range: "0-0" },
+  });
+  const n = Number((res.headers.get("content-range") || "").split("/")[1]);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/* per-minute inbound flood guard (throws rate_limited) */
+async function floodGuard(jobId: string) {
+  const sinceIso = new Date(Date.now() - FLOOD_WINDOW_MS).toISOString();
+  const recent = await countMessages(`portal_job_id=eq.${jobId}&direction=eq.in&created_at=gt.${encodeURIComponent(sinceIso)}`);
+  if (recent >= FLOOD_MAX) throw new Error("rate_limited");
+}
+
+/* insert one message row; returns the saved row */
+async function insertMessage(m: Record<string, unknown>) {
+  const ins = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
+    method: "POST",
+    headers: { ...svc, "Content-Type": "application/json", Prefer: "return=representation" },
+    body: JSON.stringify([m]),
+  });
+  if (!ins.ok) throw new Error(`insert failed (${ins.status})`);
+  return (await ins.json())[0] || {};
+}
+
+/* month-to-date AI spend across the account (service role) */
+async function monthSpend(): Promise<number> {
+  const month = new Date().toISOString().slice(0, 7);
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/ai_usage?select=cost_usd&billing_month=eq.${month}`, { headers: svc });
+  if (!res.ok) return 0;   // fail-open on read; the daily cap + flood guard still fence abuse
+  return ((await res.json().catch(() => [])) as Array<{ cost_usd: number }>).reduce((a, r) => a + (Number(r.cost_usd) || 0), 0);
+}
+
+/* record concierge spend on the shared ai_usage ledger (service role) */
+async function logConciergeUsage(jobId: string, inTok: number, outTok: number, cost: number, capped: boolean) {
+  await insertRowSvc("ai_usage", {
+    form_key: "portalAsk", captured_by: "portal-concierge", provider: capped ? "none" : "anthropic",
+    llm_model: capped ? null : CONCIERGE_MODEL, input_tokens: inTok, output_tokens: outTok,
+    llm_cost_usd: cost, cost_usd: cost, capped, note: `portal_job ${jobId}`,
+  }).catch(() => {});
+}
+async function insertRowSvc(table: string, row: Record<string, unknown>) {
+  return fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify([row]),
+  });
+}
+
+/* Anthropic forced tool-call — returns the structured input + token usage. */
+async function conciergeAnswer(digest: unknown, thread: Array<{ from: string; body: string }>, question: string):
+  Promise<{ answerable: boolean; message: string; inTok: number; outTok: number }> {
+  if (!LLM_API_KEY) throw new Error("llm_key_missing");
+  const threadText = thread.slice(-12).map((m) => `${m.from === "customer" ? "CUSTOMER" : "ROYBAL"}: ${m.body.slice(0, 600)}`).join("\n") || "(none yet)";
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "x-api-key": LLM_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: CONCIERGE_MODEL,
+      max_tokens: 600,
+      system:
+        "You are the friendly virtual assistant on the customer project portal for Roybal Construction, LLC (a family water/fire " +
+        "restoration and reconstruction company in North Pole / Fairbanks, Alaska). You are chatting with the CUSTOMER about THEIR job. " +
+        "You may use ONLY the JOB FACTS and MESSAGE THREAD provided — nothing else. Answer routine questions: what their current status " +
+        "means, what each milestone is, what generally comes next, and what the shared photos show.\n" +
+        "SET answerable=false (do not attempt an answer) whenever a good answer would need information you were NOT given — a specific " +
+        "completion or visit DATE, any PRICE / cost / estimate / deductible, INSURANCE or claim or adjuster details, scheduling or " +
+        "rescheduling a visit, or any promise, commitment, or decision. Never guess, never invent dates or numbers, never quote policy. " +
+        "When unsure, choose answerable=false. When answerable=true, write a warm, brief reply (1-4 sentences, plain language, no " +
+        "signature). Call `respond`.",
+      messages: [{ role: "user", content:
+        `JOB FACTS (all you may use):\n\`\`\`json\n${JSON.stringify(digest)}\n\`\`\`\n\n` +
+        `MESSAGE THREAD (oldest to newest):\n${threadText}\n\n` +
+        `The customer just asked:\n"${question.slice(0, MSG_MAX)}"` }],
+      tools: [{
+        name: "respond", description: "Return whether you can answer from the facts, and the answer if so.",
+        input_schema: {
+          type: "object", additionalProperties: false, required: ["answerable", "message"],
+          properties: {
+            answerable: { type: "boolean", description: "true only if the JOB FACTS/THREAD fully support a correct answer" },
+            message: { type: "string", description: "the reply to the customer when answerable; empty string otherwise" },
+          },
+        },
+      }],
+      tool_choice: { type: "tool", name: "respond" },
+    }),
+  });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`llm_failed (${res.status})`);
+  const data = JSON.parse(raw);
+  const block = (data.content ?? []).find((b: { type: string; name?: string }) => b.type === "tool_use" && b.name === "respond");
+  const inp = (block?.input ?? {}) as { answerable?: boolean; message?: string };
+  const u = data.usage ?? {};
+  return {
+    answerable: inp.answerable === true, message: String(inp.message ?? ""),
+    inTok: Number(u.input_tokens) || 0, outTok: Number(u.output_tokens) || 0,
+  };
+}
+
 /* the customer posts a message onto their job's thread (inbound). */
 async function send(token: string, bodyText: string) {
   if (!goodToken(token)) throw new Error("bad_token");
@@ -140,33 +271,92 @@ async function send(token: string, bodyText: string) {
   if (text.length > MSG_MAX) throw new Error("too_long");
   const row = await jobByToken(token);
   if (!row) return null;
-
-  // simple flood guard: cap inbound messages per job per minute
-  const sinceIso = new Date(Date.now() - FLOOD_WINDOW_MS).toISOString();
-  const fq = `portal_messages?portal_job_id=eq.${row.id}&direction=eq.in` +
-    `&created_at=gt.${encodeURIComponent(sinceIso)}&select=id`;
-  const fres = await fetch(`${SUPABASE_URL}/rest/v1/${fq}`, {
-    headers: { ...svc, Prefer: "count=exact", Range: "0-0" },
+  await floodGuard(row.id);
+  const saved = await insertMessage({
+    portal_job_id: row.id, direction: "in", channel: "portal", author: "customer",
+    body: text, read_by_office: false, read_by_customer: true,
   });
-  const recent = Number((fres.headers.get("content-range") || "").split("/")[1]);
-  if (Number.isFinite(recent) && recent >= FLOOD_MAX) throw new Error("rate_limited");
-
-  const ins = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
-    method: "POST",
-    headers: { ...svc, "Content-Type": "application/json", Prefer: "return=representation" },
-    body: JSON.stringify([{
-      portal_job_id: row.id,
-      direction: "in",
-      channel: "portal",
-      author: "customer",
-      body: text,
-      read_by_office: false,
-      read_by_customer: true,
-    }]),
-  });
-  if (!ins.ok) throw new Error(`send failed (${ins.status})`);
-  const saved = (await ins.json())[0] || {};
   return { message: { id: saved.id, from: "you", body: text, at: saved.created_at } };
+}
+
+/* the customer asks a question — posted to the thread, then the concierge
+   answers instantly from the customer-safe slice, or hands off to the office.
+   Every branch leaves an auditable trail: the question always lands in the
+   thread; handoffs stay unread for the office; answers are logged + visible. */
+async function ask(token: string, bodyText: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const text = (bodyText || "").trim();
+  if (!text) throw new Error("empty");
+  if (text.length > MSG_MAX) throw new Error("too_long");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  await floodGuard(row.id);
+
+  // customer question always goes on the thread first
+  const q = await insertMessage({
+    portal_job_id: row.id, direction: "in", channel: "portal", author: "customer",
+    body: text, read_by_office: false, read_by_customer: true,
+  });
+
+  // customer-safe digest (portal_jobs already holds only curated fields)
+  const digest = {
+    customerName: row.customer_name || "", status: row.status || "",
+    milestones: (Array.isArray(row.milestones) ? row.milestones : []).map((m: Record<string, unknown>) => ({ label: m.label, state: m.state })),
+    sharedPhotos: (Array.isArray(row.photos) ? row.photos : []).map((p: Record<string, unknown>) => ({ caption: p.caption || "", stage: p.stage || "" })),
+  };
+
+  // recent thread for context (customer POV)
+  const tRes = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages?portal_job_id=eq.${row.id}&select=direction,body&order=created_at.asc&limit=${MSG_LIMIT}`, { headers: svc });
+  const tRows = tRes.ok ? await tRes.json() : [];
+  const thread = (Array.isArray(tRows) ? tRows : []).map((m: Record<string, unknown>) => ({ from: m.direction === "in" ? "customer" : "office", body: String(m.body ?? "") }));
+
+  // GUARDRAILS before any paid call: daily per-job cap, then monthly spend cap
+  const dayIso = new Date(Date.now() - 86_400_000).toISOString();
+  const answersToday = await countMessages(`portal_job_id=eq.${row.id}&author=eq.ai&created_at=gt.${encodeURIComponent(dayIso)}`);
+  const overDaily = answersToday >= CONCIERGE_DAILY_MAX;
+  const spent = await monthSpend();
+  const overMonthly = SPEND_CAP_USD > 0 && spent >= SPEND_CAP_USD;
+
+  const handoff = async (reason: "capped" | "handoff", inTok = 0, outTok = 0, cost = 0) => {
+    // the question stays unread for the office (needs a human)
+    const a = await insertMessage({
+      portal_job_id: row.id, direction: "out", channel: "portal", author: "ai",
+      body: HANDOFF_LINE, read_by_office: true, read_by_customer: true,
+    });
+    await logConciergeUsage(row.id, inTok, outTok, cost, reason === "capped");
+    return { posted: { id: q.id }, answered: false, handoff: true, reply: { id: a.id, from: "office", body: HANDOFF_LINE, at: a.created_at } };
+  };
+
+  if (overDaily || overMonthly) return handoff("capped");
+  if (!LLM_API_KEY) return handoff("capped");
+
+  let ai;
+  try { ai = await conciergeAnswer(digest, thread, text); }
+  catch (_) { return handoff("handoff"); }   // any LLM hiccup → graceful handoff
+
+  const price = priceFor(CONCIERGE_MODEL);
+  const cost = Math.max(0, (ai.inTok / 1e6) * price.in + (ai.outTok / 1e6) * price.out);
+
+  if (!ai.answerable || !ai.message.trim()) {
+    // leave the question unread for the office so a human follows up
+    await fetch(`${SUPABASE_URL}/rest/v1/portal_messages?id=eq.${q.id}`, {
+      method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify({ read_by_office: false }),
+    }).catch(() => {});
+    return handoff("handoff", ai.inTok, ai.outTok, cost);
+  }
+
+  // answered: post the reply, mark the question handled (still visible for audit)
+  const a = await insertMessage({
+    portal_job_id: row.id, direction: "out", channel: "portal", author: "ai",
+    body: ai.message.trim(), read_by_office: true, read_by_customer: true,
+  });
+  await fetch(`${SUPABASE_URL}/rest/v1/portal_messages?id=eq.${q.id}`, {
+    method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ read_by_office: true }),
+  }).catch(() => {});
+  await logConciergeUsage(row.id, ai.inTok, ai.outTok, cost, false);
+  return { posted: { id: q.id }, answered: true, handoff: false, reply: { id: a.id, from: "office", body: ai.message.trim(), at: a.created_at } };
 }
 
 serve(async (req: Request) => {
@@ -181,6 +371,7 @@ serve(async (req: Request) => {
     if (action === "view") result = await view(token);
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));
+    else if (action === "ask") result = await ask(token, String(body.body ?? ""));
     else return json({ ok: false, error: "Unknown action" }, 400);
 
     if (result === null) return json({ ok: false, error: "not_found" }, 404);

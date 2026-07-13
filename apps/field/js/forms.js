@@ -2761,7 +2761,7 @@ export function portalShareForm(project) {
       if (!msgs.length) { list.replaceChildren(h("p", { class: "subtle", style: "font-size:12px;text-align:center;padding:12px" }, "No messages yet.")); return; }
       list.replaceChildren(...msgs.map((m) => {
         const mine = m.direction === "out";
-        const who = mine ? (m.author === "ai" ? "You (AI draft)" : "You") : "Customer";
+        const who = mine ? (m.author === "ai" ? "AI assistant" : "You") : "Customer";
         return h("div", { class: "pbubble pbubble--" + (mine ? "me" : "them") },
           h("div", { class: "pbubble__body" }, m.body),
           h("div", { class: "pbubble__meta" }, who + " · " + (m.created_at ? fmtDate(m.created_at.slice(0, 10)) + " " + m.created_at.slice(11, 16) : "")));

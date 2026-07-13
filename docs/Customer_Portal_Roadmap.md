@@ -96,10 +96,15 @@ Build order (each independently shippable):
    never internal data — and metered on the same `ai_usage` cap. Human-in-the-loop:
    nothing sends without an office tap. *AI photo captions* already come from the Job
    Photos analysis feeding the shared-photo captions.
-3. **Customer "Ask about your project" concierge.** Grounded strictly in the customer-safe
-   digest (status, milestones, shared photos, thread). Default posture: **draft-and-notify**
-   — the concierge answers routine questions instantly and flags anything it can't ground
-   for the office, rather than guessing. (Autonomy is a per-account dial we can raise.)
+3. **Customer "Ask about your project" concierge — SHIPPED (M4).** The portal composer now
+   routes to a new token-gated `ask` action: the customer's question always lands on the
+   thread, then the concierge (`claude-haiku-4-5`) answers instantly **grounded only in the
+   customer-safe portal_jobs slice + thread**. Anything needing a date, price, insurance
+   detail, or a commitment → `answerable:false` → a friendly hand-off line, and the question
+   stays **unread for the office** so a human follows up. Guardrails on the one public LLM
+   endpoint: per-minute flood guard, per-job daily answer cap (`CONCIERGE_DAILY_MAX`), and
+   the account-wide monthly spend cap — all logged to `ai_usage` (`form_key:'portalAsk'`).
+   Answered questions are marked handled but stay in the thread for office audit.
 4. **Proactive + smart.** Milestone nudges ("drying complete → here's what's next"),
    triage/priority on inbound messages, multilingual replies, voice notes (existing
    Deepgram stack). Approvals-as-messages and selections helper land with B3/B4.
