@@ -18,7 +18,7 @@ import {
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
   newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
-import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi } from "./portal.js";
+import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge } from "./portal.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
@@ -2703,6 +2703,10 @@ export function portalShareForm(project) {
   // current milestone
   const statusSel = sel(s, "status", PORTAL_MILESTONES.map((m) => ({ value: m.key, label: m.label })), { onchange: commit });
 
+  // proactive nudge toggle — message the customer when the status advances
+  const notifyBox = h("input", { type: "checkbox", checked: s.notifyOnStatus !== false });
+  notifyBox.addEventListener("change", () => { s.notifyOnStatus = notifyBox.checked; commit(); });
+
   // photo picker
   const photoWrap = h("div", { class: "thumbs" });
   function paintPhotos() {
@@ -2731,8 +2735,13 @@ export function portalShareForm(project) {
     try {
       await publishPortal(project);
       s.publishedAt = new Date().toISOString();
-      commit(); paintLink();
-      toast("Published — the customer view is up to date.");
+      // proactive nudge: announce a NEW status to the customer on the thread
+      let nudged = false;
+      if (s.notifyOnStatus !== false && s.status && s.status !== (s.lastNotifiedStatus || "")) {
+        try { if (await postMilestoneNudge(s.id, s.status)) { s.lastNotifiedStatus = s.status; nudged = true; } } catch (_) { /* publish still succeeded */ }
+      }
+      commit(); paintLink(); paintThread();
+      toast(nudged ? "Published — and the customer was notified of the new status." : "Published — the customer view is up to date.");
     } catch (e) {
       toast("Publish failed: " + (e && e.message ? e.message : e));
     }
@@ -2828,6 +2837,8 @@ export function portalShareForm(project) {
       h("label", { class: "check", style: "margin:0" }, enable, h("span", {}, "Enable the customer portal for this job")),
       s.enabled ? h("div", {},
         field("Current status", statusSel),
+        h("label", { class: "check", style: "margin:2px 0 0" }, notifyBox,
+          h("span", {}, "Message the customer when I publish a new status")),
         sectionTitle("Shared photos"),
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Tap to include a photo in the customer view (highlighted = shared)."),
         photoWrap,

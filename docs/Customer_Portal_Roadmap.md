@@ -105,9 +105,13 @@ Build order (each independently shippable):
    endpoint: per-minute flood guard, per-job daily answer cap (`CONCIERGE_DAILY_MAX`), and
    the account-wide monthly spend cap — all logged to `ai_usage` (`form_key:'portalAsk'`).
    Answered questions are marked handled but stay in the thread for office audit.
-4. **Proactive + smart.** Milestone nudges ("drying complete → here's what's next"),
-   triage/priority on inbound messages, multilingual replies, voice notes (existing
-   Deepgram stack). Approvals-as-messages and selections helper land with B3/B4.
+4. **Proactive + smart.**
+   - **Milestone nudges — SHIPPED (M5).** When the office publishes a NEW status, a warm,
+     per-milestone line (`PORTAL_MILESTONE_NUDGES`) auto-posts to the customer's thread —
+     off a default-on "Message the customer when I publish a new status" toggle, tracked by
+     `lastNotifiedStatus` so it fires once per advance. Rides the SMS bridge (M2) once live.
+   - Still ahead: triage/priority on inbound messages, multilingual replies, voice notes
+     (existing Deepgram stack). Approvals-as-messages and selections helper land with B3/B4.
 
 Privacy/safety spine: customer AI sees a customer-safe digest only; office AI may see
 internal data but its output is office-reviewed before sending; all calls metered +

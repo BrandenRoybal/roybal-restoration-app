@@ -374,6 +374,20 @@ export const PORTAL_MILESTONES = [
 ];
 export const portalMilestoneLabel = (k) => PORTAL_MILESTONES.find((m) => m.key === k)?.label || "";
 
+/* Friendly, customer-facing lines announcing a milestone — posted to the
+   portal thread when the office advances the status (a proactive nudge).
+   Plain, warm, no dates or promises. */
+export const PORTAL_MILESTONE_NUDGES = {
+  scheduled:      "Good news — your project is on our schedule. We'll keep you posted right here as things move along.",
+  mitigation:     "We've started water mitigation at your property — removing standing water and affected materials to stop further damage.",
+  drying:         "Your project is now in structural drying. We've set up equipment to dry things out, and we'll monitor it until it's fully dry.",
+  approved:       "Your repairs are approved — we're getting everything lined up to begin the rebuild.",
+  reconstruction: "Reconstruction is underway! We've started putting your space back together.",
+  final:          "We're at the final walkthrough stage — nearly done. We'll go over everything to make sure it's just right.",
+  complete:       "Your project is complete. Thank you for trusting Roybal Construction — please reach out any time if you need anything.",
+};
+export const portalMilestoneNudge = (k) => PORTAL_MILESTONE_NUDGES[k] || "";
+
 export function newPortalShare() {
   return {
     id: uid(),                 // stable portal_jobs primary key (upsert target)
@@ -382,6 +396,8 @@ export function newPortalShare() {
     status: "scheduled",       // current milestone key
     sharedPhotoIds: [],        // which project.photos are shown to the customer
     publishedAt: "",           // last publish to the portal
+    notifyOnStatus: true,      // auto-post a nudge to the thread when status advances
+    lastNotifiedStatus: "",    // the milestone the customer was last notified of
   };
 }
 
