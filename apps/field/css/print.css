@@ -75,8 +75,15 @@ input, select, textarea {
   color: #000 !important; -webkit-appearance: none; appearance: none;
   font-family: inherit;
 }
-/* height comes from the JS auto-grow (fits content); never clip on print */
-textarea { border: 1px solid #c4ccd8 !important; min-height: 38px !important; height: auto; overflow: visible !important; white-space: pre-wrap; }
+/* The on-screen textarea is .app-only (hidden on print). Its .ta-print mirror
+   is a plain div that flows to the full text at the print font/width — a
+   <textarea> can't auto-size in CSS, so it clipped. */
+.ta-print {
+  display: block; border: 1px solid #c4ccd8; border-radius: 2px;
+  min-height: 34px; padding: 3px 5px; margin-top: 1px;
+  font-size: 11pt !important; line-height: 1.35; color: #000;
+  white-space: pre-wrap; overflow-wrap: break-word; break-inside: avoid;
+}
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 16px; }
 
