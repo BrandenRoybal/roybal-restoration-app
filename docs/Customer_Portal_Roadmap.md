@@ -59,6 +59,12 @@ first one so nothing gets rebuilt.*
   link still works. Office "Invite customer" action.
 - **B2 · Communication thread.** One conversation per job unifying portal messages +
   SMS; office replies from admin, customer from the portal.
+  - **M1 · Portal-native thread — SHIPPED.** `portal_messages` table (108) + `messages`/
+    `send` gateway actions; customer composer on the portal, office reply panel in the
+    Client Portal form. `channel` column reserves the `sms` bridge (M2). Thread is keyed
+    to `portal_jobs.id` (= `portalShare.id`), so office and customer share one thread.
+  - **M2 · SMS bridge** (after Twilio go-live): office reply also texts the customer;
+    inbound texts append to the same thread via a Twilio inbound webhook → edge function.
 - **B3 · Material selections.** Customer picks finishes against allowances + uploads
   inspiration photos, flowing into the existing **Selections** form; office reviews.
 - **B4 · Approvals & e-sign.** Customer approves the reconstruction estimate and
@@ -72,6 +78,31 @@ first one so nothing gets rebuilt.*
   customer confirms or requests a reschedule.
 - **C3 · Closeout.** Warranty info + warranty-service requests, final documents
   (Certificate of Completion, warranty), and a review/referral ask.
+
+## AI + Communication expansion (building now, on top of the thread)
+
+The message thread (M1) is the backbone; AI and richer communication ride on it. All
+customer-facing AI reads **only** the curated projection + the thread — never internal
+data — and every AI touch is logged against the `ai_usage` ledger under the monthly cap.
+
+Build order (each independently shippable):
+
+1. **Thread — SHIPPED (M1).** Two-way portal messaging, office ↔ customer.
+2. **Office AI assist on the thread.** *AI reply drafts* (draft, office edits + approves,
+   sent as `author:'ai'`); *AI status narratives* (turn milestone + shared-photo changes
+   into a friendly customer update); *AI photo captions* on share. Human-in-the-loop:
+   nothing reaches the customer without an office tap.
+3. **Customer "Ask about your project" concierge.** Grounded strictly in the customer-safe
+   digest (status, milestones, shared photos, thread). Default posture: **draft-and-notify**
+   — the concierge answers routine questions instantly and flags anything it can't ground
+   for the office, rather than guessing. (Autonomy is a per-account dial we can raise.)
+4. **Proactive + smart.** Milestone nudges ("drying complete → here's what's next"),
+   triage/priority on inbound messages, multilingual replies, voice notes (existing
+   Deepgram stack). Approvals-as-messages and selections helper land with B3/B4.
+
+Privacy/safety spine: customer AI sees a customer-safe digest only; office AI may see
+internal data but its output is office-reviewed before sending; all calls metered +
+capped; refusal-to-guess over hallucination.
 
 ## Integrations
 

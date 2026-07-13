@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node serve.mjs",
     "start": "node serve.mjs",
-    "test": "node test/smoke.mjs && node test/sync.mjs && node test/completeness.test.mjs && node test/spine.test.mjs && node test/ai.test.mjs && node test/tech.test.mjs && node test/equipment.test.mjs && node test/narrative.test.mjs && node test/dryingwatch.test.mjs && node test/mode.test.mjs && node test/buildwatch.test.mjs && node test/convert.test.mjs && node test/boardpush.test.mjs"
+    "test": "node test/smoke.mjs && node test/sync.mjs && node test/completeness.test.mjs && node test/spine.test.mjs && node test/ai.test.mjs && node test/tech.test.mjs && node test/equipment.test.mjs && node test/narrative.test.mjs && node test/dryingwatch.test.mjs && node test/mode.test.mjs && node test/buildwatch.test.mjs && node test/convert.test.mjs && node test/boardpush.test.mjs && node test/portal.test.mjs && node test/portal-thread.test.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",

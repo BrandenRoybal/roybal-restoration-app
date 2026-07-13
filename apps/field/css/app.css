@@ -486,3 +486,16 @@ tr.fill-target > td { background: var(--brand-tint); box-shadow: inset 0 0 0 1px
   .sticky-actions { max-width: 1100px; }
   .assist { max-width: 760px; }
 }
+
+/* ---------- Client Portal message thread (office side) ---------- */
+.portal-thread { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto;
+  padding: 6px; margin-bottom: 10px; background: #f7f8fa; border: 1px solid var(--line, #e6e9ef); border-radius: 12px; }
+.pbubble { max-width: 84%; padding: 8px 12px; border-radius: 14px; }
+.pbubble__body { white-space: pre-wrap; word-wrap: break-word; font-size: 14px; }
+.pbubble__meta { font-size: 11px; margin-top: 3px; opacity: .7; }
+.pbubble--them { align-self: flex-start; background: #fff; border: 1px solid var(--line, #e6e9ef); color: #18202c; border-bottom-left-radius: 5px; }
+.pbubble--me { align-self: flex-end; background: var(--brand); color: #fff; border-bottom-right-radius: 5px; }
+.pbubble--me .pbubble__meta { color: #fff; }
+.portal-reply { display: flex; gap: 8px; align-items: flex-end; }
+.portal-reply__input { flex: 1; resize: vertical; font: inherit; font-size: 15px; min-height: 44px;
+  padding: 9px 12px; border: 1px solid var(--line, #e6e9ef); border-radius: 11px; }
