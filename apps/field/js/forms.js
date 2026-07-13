@@ -2181,28 +2181,22 @@ export function narrativeSheet(project) {
   if (lossRow) cells.push(cell("LOSS TYPE / CAUSE", lossRow[1], infoRows.length, true));
   const table = h("div", { style: "display:grid;grid-template-columns:1fr 1fr;border:1px solid #e2e6ec;border-radius:8px;overflow:hidden;margin:12px 0" },
     ...cells);
+  // Uses the SAME shared letterhead + footer as every other form, so the
+  // packet's first page is uniform with the rest of the document.
   return h("section", { class: "sheet" },
-    h("div", { style: "display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid var(--navy,#0f1b2d);padding-bottom:8px" },
-      h("div", {},
-        h("div", { style: "font-weight:800;font-size:16px" },
-          h("span", { style: "color:var(--orange,#f26a21)" }, "ROYBAL"),
-          h("span", { style: "color:#000" }, " CONSTRUCTION, LLC")),
-        h("div", { style: "color:#5b6470;font-size:12px" }, COMPANY.tagline)),
-      h("div", { style: "text-align:right;color:#5b6470;font-size:11.5px;line-height:1.5" },
-        h("div", {}, COMPANY.address), h("div", {}, COMPANY.phone + " • " + COMPANY.email))),
-    h("div", { style: "text-align:center;margin:14px 0 2px" },
-      h("h2", { style: "margin:0;color:var(--navy,#0f1b2d);font-size:20px;letter-spacing:.4px" }, "CONSTRUCTION / RECONSTRUCTION NARRATIVE"),
-      h("div", { style: "color:#5b6470;font-size:13px;font-style:italic" }, "Scope Justification for Repair to Pre-Loss Condition — Per IICRC S500 & FNSB / IRC"),
-      facts.job.carrier ? h("div", { style: "color:#5b6470;font-size:12px;margin-top:2px" }, `Prepared for ${facts.job.carrier} — Submitted with Estimate, Photo Report, Moisture Map & Certificate of Drying`) : null),
+    letterhead("CONSTRUCTION / RECONSTRUCTION NARRATIVE",
+      "Scope Justification for Repair to Pre-Loss Condition — Per IICRC S500 & FNSB / IRC"),
+    facts.job.carrier
+      ? h("div", { class: "narrative-preparedfor" },
+          `Prepared for ${facts.job.carrier} — Submitted with Estimate, Photo Report, Moisture Map & Certificate of Drying`)
+      : null,
     table,
     h("div", { class: "narrative-body" }, ...mdToNodes(project.narrative || "")),
     h("div", { style: "margin-top:18px" },
       h("div", { style: "font-size:13px" }, "Respectfully submitted,"),
       h("div", { style: "font-weight:700;color:var(--navy,#0f1b2d);margin-top:8px" }, COMPANY.signatory),
       h("div", { style: "color:#5b6470;font-size:12px" }, COMPANY.signatoryTitle + " — " + COMPANY.name)),
-    h("div", { style: "margin-top:16px;border-top:1px solid #e2e6ec;padding-top:6px;text-align:center;color:#8a93a0;font-size:9.5px;line-height:1.6" },
-      h("div", {}, `${COMPANY.name} • ${COMPANY.address} • ${COMPANY.phone} • ${COMPANY.email}`),
-      h("div", {}, COMPANY.licenses.join("  •  "))));
+    sheetFooter("Construction / Reconstruction Narrative"));
 }
 
 /* Progress update sheet (construction jobs) — letterhead + info + markdown body. */

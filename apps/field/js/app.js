@@ -1098,7 +1098,7 @@ function narrativePage(project) {
   editor.value = project.narrative || "";
   const renderPreview = () => preview.replaceChildren(
     h("div", { class: "subtle", style: "font-size:12px;margin-bottom:6px" }, "Packet cover preview:"),
-    narrativeSheet(project));
+    h("div", { class: "packet-preview" }, narrativeSheet(project)));
 
   const genBtn = h("button", { class: "btn btn--primary" }, project.narrative ? "↻ Regenerate" : "✨ Generate narrative");
   genBtn.addEventListener("click", async () => {
