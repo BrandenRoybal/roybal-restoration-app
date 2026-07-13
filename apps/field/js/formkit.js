@@ -32,20 +32,29 @@ export function inp(obj, key, opts = {}) {
   return el;
 }
 export function ta(obj, key, opts = {}) {
-  const el = h("textarea", { placeholder: opts.placeholder || "", rows: opts.rows || 3 });
+  const el = h("textarea", { class: "app-only", placeholder: opts.placeholder || "", rows: opts.rows || 3 });
   el.value = obj[key] ?? "";
-  // Auto-grow to fit the content so the FULL text shows on screen and prints on
-  // the PDF (a fixed-row textarea clips longer text — e.g. Loss Description /
-  // Scope Summary). Retry until the element is in the DOM so text set before it
-  // is connected (AI draft fill, estimate import) still expands.
+  // A <textarea> can't grow to its content in CSS (it obeys the rows/height
+  // attribute), and the JS auto-grow height below is measured on screen at 16px.
+  // On the PDF the same box renders at 11pt in a different column width, so a
+  // fixed inline height clips the text (e.g. Loss Description / Scope Summary).
+  // So the PRINT output is a plain div that flows to any height at the print
+  // font/width and never clips — same trick taCell uses for table cells.
+  const print = h("div", { class: "ta-print print-only" });
+  print.textContent = el.value;
+  const sync = () => { print.textContent = el.value; };
+  // Auto-grow the on-screen textarea so nothing is hidden while editing. Retry
+  // until it is in the DOM so text set before it is connected (AI draft fill,
+  // estimate import) still expands.
   const grow = () => {
     if (!el.isConnected) { requestAnimationFrame(grow); return; }
+    if (!print.isConnected) el.after(print);
     el.style.height = "auto";
     el.style.height = el.scrollHeight + "px";
   };
-  // Expose so callers that set el.value programmatically can re-fit the box.
-  el.autoGrow = grow;
-  el.addEventListener("input", () => { obj[key] = el.value; grow(); commit(); });
+  // Expose so callers that set el.value programmatically can re-fit + re-sync.
+  el.autoGrow = () => { grow(); sync(); };
+  el.addEventListener("input", () => { obj[key] = el.value; grow(); sync(); commit(); });
   requestAnimationFrame(grow);
   return el;
 }
