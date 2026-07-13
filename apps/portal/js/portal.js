@@ -40,7 +40,7 @@ async function callGateway(payload) {
 
 const fetchView = (token) => callGateway({ action: "view", token });
 const fetchThread = (token) => callGateway({ action: "messages", token });
-const postMessage = (token, body) => callGateway({ action: "send", token, body });
+const askConcierge = (token, body) => callGateway({ action: "ask", token, body });
 
 function message(icon, title, sub) {
   app.replaceChildren(h("div", { class: "msg" },
@@ -64,7 +64,7 @@ function renderThread(listEl, messages) {
       h("div", { class: "bubble__meta" }, (m.from === "you" ? "You" : "Roybal Construction") + " · " + whenLabel(m.at))));
   if (!bubbles.length) {
     listEl.replaceChildren(h("p", { class: "thread__empty" },
-      "Have a question about your project? Send us a message and we'll reply here."));
+      "Have a question about your project? Ask here — you'll get an answer right away, and anything that needs our team we'll follow up on personally."));
   } else {
     listEl.replaceChildren(...bubbles);
     listEl.scrollTop = listEl.scrollHeight;
@@ -88,11 +88,19 @@ function threadCard(token) {
       const text = input.value.trim();
       if (!text) return;
       btn.disabled = true; status.textContent = "";
+      // optimistic: show the question + a "typing" bubble immediately
+      const typing = h("div", { class: "bubble bubble--them bubble--typing" },
+        h("div", { class: "bubble__body" }, h("span", { class: "dots" }, h("i"), h("i"), h("i"))));
+      list.append(h("div", { class: "bubble bubble--me" },
+        h("div", { class: "bubble__body" }, text),
+        h("div", { class: "bubble__meta" }, "You · just now")), typing);
+      list.scrollTop = list.scrollHeight;
+      input.value = ""; grow();
       try {
-        await postMessage(token, text);
-        input.value = ""; grow();
+        await askConcierge(token, text);
         renderThread(list, (await fetchThread(token)).messages);
       } catch (err) {
+        typing.remove();
         status.textContent = err.status === 429
           ? "You've sent a lot of messages — please give us a moment to reply."
           : "Couldn't send. Please try again, or call 907-371-9868.";
