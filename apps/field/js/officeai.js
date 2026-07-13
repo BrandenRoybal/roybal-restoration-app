@@ -230,6 +230,16 @@ export function digestSupportDoc(project, pages, hint) {
   return callOffice(project, "docDigest", { pages: pages.slice(0, 8), hint: hint || {} }).then((b) => b.digest);
 }
 
+/* ---------- Xactimate / carrier estimate import ----------
+   Read an uploaded Xactimate (or Symbility / carrier) estimate PDF into
+   structured line items + O&P/tax totals so the invoice or reconstruction
+   estimate is built FROM the carrier's approved numbers, not re-priced from
+   scratch. Returns { source, confidence, lossSummary, estimateNo,
+   estimateDate, items:[{room,desc,qty,unit,price}], summary, notes }. */
+export function importEstimate(project, pages) {
+  return callOffice(project, "estimateImport", { pages: pages.slice(0, 12) }).then((b) => b.estimate);
+}
+
 /* ---------- floor plan dimension takeoff ---------- */
 /** Read room dimensions / SF / LF off the uploaded plan pages.
     Returns { rooms:[{name,dims,floorSF,perimLF,ceiling,notes,confidence}], totals, notes }. */

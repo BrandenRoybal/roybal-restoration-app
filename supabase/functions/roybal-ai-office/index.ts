@@ -660,6 +660,93 @@ async function docDigest(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: estimateImport — read an uploaded Xactimate / Symbility /
+   carrier estimate PDF into structured line items + O&P/tax totals so
+   the invoice or reconstruction estimate is built FROM the carrier's
+   approved numbers, transcribed verbatim (never re-priced). Vision,
+   multi-page. The tech reviews the imported lines before sending.
+   ============================================================ */
+const ESTIMATE_IMPORT_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["source", "confidence", "lossSummary", "items", "summary", "notes"],
+  properties: {
+    source: { type: "string", description: "The estimating platform this document was produced with, judged from its layout/branding — 'Xactimate', 'Symbility', 'carrier estimate', or 'unknown'." },
+    confidence: { type: "number", minimum: 0, maximum: 1, description: "Confidence the line items and totals were read correctly. Below 0.7 when the scan is faint, columns are ambiguous, or the totals don't reconcile." },
+    lossSummary: { type: "string", description: "2-3 sentence scope / loss description from the estimate header or cover; empty string if none is printed." },
+    estimateNo: { type: "string", description: "The estimate / claim number printed on the document, else empty." },
+    estimateDate: { type: "string", description: "The estimate date printed on the document, ISO YYYY-MM-DD, else empty." },
+    items: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["room", "desc", "qty", "unit", "price"],
+        properties: {
+          room: { type: "string", description: "The room / area heading this line falls beneath, verbatim (Xactimate lists line items under a room header). Use 'Main Level' for general / job-wide lines printed with no room heading." },
+          desc: { type: "string", description: "The line item description EXACTLY as printed, expanding any Xactimate/Symbility item code to its printed plain-English description. Never leave a bare code; never repeat the room name inside the description." },
+          qty: { type: "number", description: "The QUANTITY column value." },
+          unit: { type: "string", description: "The unit column verbatim — SF, LF, EA, HR, DA, SY, CF, etc." },
+          price: { type: "number", description: "The UNIT PRICE column in dollars (the per-unit rate) — NOT the extended/line-total column. This is the pre-O&P RCV unit price as printed." },
+        },
+      },
+    },
+    summary: {
+      type: "object", additionalProperties: false,
+      required: ["lineItemTotal", "overhead", "profit", "tax", "rcvTotal"],
+      properties: {
+        lineItemTotal: { type: ["number", "null"], description: "The printed 'Line Item Total' / net subtotal BEFORE overhead & profit, in DOLLARS; null if not printed." },
+        overhead: { type: ["number", "null"], description: "The Overhead line from the Summary in DOLLARS (e.g. 944.24) — the actual dollar amount, NOT the percentage. Xactimate applies O&P only to eligible trades, so this is usually far less than 10% of the line item total. null when the estimate has no overhead line." },
+        profit: { type: ["number", "null"], description: "The Profit line from the Summary in DOLLARS (e.g. 1038.66) — the actual dollar amount, NOT the percentage. null when none." },
+        tax: { type: ["number", "null"], description: "Total sales tax from the Summary in DOLLARS; null when none (Alaska estimates usually have none)." },
+        rcvTotal: { type: ["number", "null"], description: "The estimate's printed 'Replacement Cost Value' / grand total / Net Claim, in DOLLARS (e.g. 28421.93); null if not printed. Used to verify the import reconciles." },
+      },
+    },
+    notes: { type: "array", items: { type: "string" }, description: "Caveats — pages that were not estimate line-item pages (cover, recaps, area totals), unreadable lines, columns you had to infer, or totals that don't reconcile." },
+  },
+} as const;
+
+async function estimateImport(body: Record<string, unknown>) {
+  const pages = Array.isArray(body.pages) ? (body.pages as string[]).slice(0, 12) : [];
+  if (!pages.length) throw new Error("Upload the estimate PDF or photos first.");
+  const content: unknown[] = [];
+  for (const src of pages) {
+    const img = dataUrlToImage(src);
+    if (img) content.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+  }
+  if (!content.length) throw new Error("Couldn't read those pages as images.");
+  content.push({
+    type: "text",
+    text:
+      "Read EVERY line item off this insurance repair estimate (Xactimate, Symbility, or a carrier's own format) so it can be imported verbatim into our estimate.\n" +
+      "LINE FORMAT — each printed line reads:  <line#>. <description>   <qty> <unit> @   <unitPrice> =   <extendedTotal>\n" +
+      "  e.g.  '6. Air mover axial fan-up to 1/2 (per 24 hour period)-No monit.   70.00 EA @   32.25 =   2,257.50'  ->  desc='Air mover axial fan-up to 1/2 (per 24 hour period)-No monit.', qty=70, unit='EA', price=32.25\n" +
+      "RULES:\n" +
+      "- Import the numbers AS PRINTED — this is the carrier's approved pricing. Do NOT re-price, round, or add scope of your own.\n" +
+      "- price = the UNIT PRICE column (the number right after '@', before '='). NEVER use the extended TOTAL column (the number after '='). qty = the quantity column; unit = the code between qty and '@' (SF, LF, EA, DA, HR, SY, CF...) verbatim.\n" +
+      "- Strip the leading line number and period from the description. Line numbers may be out of sequence (Xactimate keeps original numbers when items are regrouped) — keep only the description text.\n" +
+      "- ROOMS: line items are grouped beneath a room header printed as the room name with a right-aligned \"Height: 8'\" (e.g. 'Closet', 'Bathroom', 'kitchen/living room'). Put each line's room name verbatim in `room`. Lines printed BEFORE the first room header (directly under the estimate name — emergency service, dumpster, drying/air equipment, paid bills) have no room: put them under 'Main Level'.\n" +
+      "- IGNORE non-line-item text inside room blocks: 'Missing Wall … Opens into X', 'Subroom:', dimension callouts and 'Height:' labels are NOT line items — never emit them as items.\n" +
+      "- Expand any bare item code to its printed plain-English description; never put a raw code in desc, and never repeat the room name inside desc.\n" +
+      "- Fill `summary` from the 'Summary' page in DOLLARS: Line Item Total, Overhead (dollars), Profit (dollars), sales tax (dollars — usually none in AK), and the Replacement Cost Value / Net Claim. Overhead & Profit are the DOLLAR figures, not the 10% labels. Leave a field null when not printed.\n" +
+      "- SKIP pages that are not line-item pages: the cover/coversheet, 'Grand Total Areas', 'Summary' (except the totals above), 'Recap of Taxes, Overhead and Profit', 'Recap by Room', and 'Recap by Category'. Their subtotals are NOT line items. Never invent lines to fill gaps.",
+  });
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You are a senior estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) importing an insurance repair estimate " +
+      "(Xactimate / Symbility / carrier format) into the company's own estimate. Transcribe the printed line items and totals EXACTLY — " +
+      "the carrier's approved numbers are the source of truth and you never re-price or add scope. Precision over completeness: flag anything " +
+      "unreadable rather than guessing. Call `estimate_import` with the transcription.",
+    content,
+    toolName: "estimate_import",
+    schema: ESTIMATE_IMPORT_SCHEMA as unknown as Record<string, unknown>,
+    // full estimates run long (every room × many trades) — match the draft cap
+    maxTokens: 16384,
+  });
+  const d = input as { items?: unknown[] };
+  return { result: { estimate: input }, usage, model: DOC_MODEL, summary: { pages: content.length - 1, items: d.items?.length ?? 0 } };
+}
+
+/* ============================================================
    Action: rebuildDraft — reconstruction plan from a restoration job
    (Phase 3: mitigation job converts to a rebuild construction job)
    ============================================================ */
@@ -941,7 +1028,7 @@ async function fieldAssist(body: Record<string, unknown>) {
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest,
+  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport,
 };
 
 serve(async (req: Request) => {

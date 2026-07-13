@@ -169,6 +169,9 @@ function receiptsSummary(p) {
     for (const inv of arr(p[key])) {
       for (const att of arr(inv.attachments)) {
         if (!att || !att.ai) continue;
+        // an imported Xactimate/carrier estimate is the PRICING SOURCE for these
+        // line items, not a pass-through receipt — never bill its RCV total again
+        if (att.isPricingSource) continue;
         out.push({
           attachedTo: docLabel + (inv.invoiceNo ? " " + inv.invoiceNo : ""),
           label: att.label || "",
