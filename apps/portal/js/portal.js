@@ -144,7 +144,8 @@ function render(data, token) {
 
   const photos = (data.photos || []).map((p) =>
     h("figure", { class: "photo" },
-      h("img", { src: p.url, alt: p.caption || "Project photo", loading: "lazy" }),
+      h("img", { src: p.url, alt: p.caption || "Project photo", loading: "lazy",
+        onclick: () => openLightbox(p.url, p.caption || "Project photo") }),
       (p.caption || p.stage) ? h("figcaption", {}, p.caption || "",
         p.stage ? h("span", { class: "stage" }, (p.caption ? " · " : "") + p.stage) : null) : null));
   const gallery = photos.length
@@ -156,6 +157,17 @@ function render(data, token) {
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";
+
+/* full-screen photo viewer — tap the backdrop, the ✕, or Esc to close */
+function openLightbox(src, alt) {
+  const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const box = h("div", { class: "lightbox", role: "dialog", "aria-label": "Photo", onclick: close },
+    h("button", { class: "lightbox__close", "aria-label": "Close", onclick: close }, "✕"),
+    h("img", { src, alt, onclick: (e) => e.stopPropagation() }));
+  document.addEventListener("keydown", onKey);
+  document.body.append(box);
+}
 
 (async () => {
   const token = tokenFromUrl();

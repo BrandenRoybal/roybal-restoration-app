@@ -1439,7 +1439,7 @@ function contentsManager(project) {
   /* ✨ Bulk capture: photograph a room/shelf, the AI lists every item it
      sees, the tech checks off what to add. Photos are not attached to the
      created items — take close-ups on the ones that matter for the claim. */
-  const scanInput = h("input", { type: "file", accept: "image/*", capture: "environment", style: "display:none" });
+  const scanInput = h("input", { type: "file", accept: "image/*", style: "display:none" });
   const scanBtn = h("button", { class: "btn btn--ghost btn--sm" }, "✨ Scan room photo");
   const scanPanel = h("div", {});
   scanBtn.addEventListener("click", () => { if (aiAvailable()) scanInput.click(); });
@@ -1716,7 +1716,7 @@ function boxesManager(project) {
   }
   /* 📷✨ photograph the open box before sealing — the AI lists what it sees */
   function boxSnapBtn(b) {
-    const input = h("input", { type: "file", accept: "image/*", capture: "environment", style: "display:none" });
+    const input = h("input", { type: "file", accept: "image/*", style: "display:none" });
     const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "📷✨ Snap contents");
     btn.addEventListener("click", () => { if (aiAvailable()) input.click(); });
     input.addEventListener("change", async () => {
