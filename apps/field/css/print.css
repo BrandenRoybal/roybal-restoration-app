@@ -42,6 +42,7 @@ section.sheet--doc .sheet-foot { flex: 0 0 auto; margin-top: 6px; }
 .sheet-head__title { flex-basis: 100%; text-align: center; margin-top: 8px; }
 .sheet-head__title h2 { font-size: 15pt; margin: 4px 0 1px; color: #0f1b2d; letter-spacing: .5px; border: 0; }
 .sheet-head__sub { font-size: 8.5pt; color: #5b6b80; }
+.narrative-preparedfor { text-align: center; font-size: 8.5pt; color: #5b6b80; font-style: italic; margin: 0 0 6px; }
 /* narrative (AI cover) body — match the form font sizes on the PDF */
 .narrative-body p, .narrative-body li, .narrative-body .nb-p, .narrative-body .nb-ul { font-size: 11.5pt !important; line-height: 1.5; }
 .narrative-body .nb-note { font-size: 10.5pt !important; }
