@@ -67,4 +67,19 @@ await assert.rejects(portal.sendOfficeReply("", "hi"), /Nothing to send/);
 await assert.rejects(portal.sendOfficeReply("ps-1", "   "), /Nothing to send/);
 ok("empty job or body rejected", true);
 
+/* ---------- proactive milestone nudge ---------- */
+calls.length = 0;
+nextBody = [{ id: "n1", direction: "out", author: "office", body: "x", created_at: "2026-07-12T13:00:00Z" }];
+const nudged = await portal.postMilestoneNudge("ps-1", "drying");
+const np = calls.find((c) => c.method === "POST");
+ok("nudge posts an outbound office message on this job",
+  np && np.body[0].portal_job_id === "ps-1" && np.body[0].direction === "out" && np.body[0].author === "office");
+ok("nudge body is the customer-friendly drying line", np && /structural drying/i.test(np.body[0].body));
+ok("nudge returns the saved row", nudged && nudged.id === "n1");
+
+calls.length = 0;
+const noNudge = await portal.postMilestoneNudge("ps-1", "not-a-milestone");
+ok("unknown status -> no post, returns null", noNudge === null && !calls.some((c) => c.method === "POST"));
+ok("missing job id -> no post", (await portal.postMilestoneNudge("", "drying")) === null);
+
 console.log(`\n${pass} portal-thread checks passed.`);

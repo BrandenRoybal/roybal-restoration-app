@@ -13,7 +13,7 @@
    and media.js are imported lazily so this module (and portalProjection's
    test) load under Node.
    ============================================================ */
-import { PORTAL_MILESTONES, portalMilestoneLabel } from "./model.js";
+import { PORTAL_MILESTONES, portalMilestoneLabel, portalMilestoneNudge } from "./model.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 
@@ -149,6 +149,15 @@ export function portalDigest(project) {
    draft action reads — customer messages vs ours. */
 export function threadForAi(messages) {
   return (messages || []).map((m) => ({ from: m.direction === "in" ? "customer" : "office", body: m.body || "" }));
+}
+
+/* proactive milestone nudge: post the friendly line for `status` to the thread
+   as an office message (customer sees it as from the company). Returns the
+   saved row, or null when there's no template for that status. */
+export async function postMilestoneNudge(portalJobId, status) {
+  const text = portalMilestoneNudge(status);
+  if (!portalJobId || !text) return null;
+  return sendOfficeReply(portalJobId, text, "office");
 }
 
 /* mark the customer's inbound messages as seen by the office */
