@@ -14,7 +14,6 @@ import { getUnifiedJobId } from "./spine.js";
 import { capturedBy } from "./tech.js";
 import { narrativeFacts } from "./narrative.js";
 import { rebuildFacts } from "./convert.js";
-import { PRICE_CATALOG } from "./pricing.js";
 import { toast } from "./core.js";
 
 const FN_URL = SUPABASE_URL ? `${SUPABASE_URL}/functions/v1/roybal-ai-office` : "";
@@ -125,20 +124,26 @@ export function invoiceFacts(project) {
 }
 
 /* ---------- invoice draft + audit ---------- */
-/** Draft { lossSummary, items:[{room,desc,qty,unit,price,basis}] } from the documented facts. */
-export function draftInvoice(project) {
+/* Pricing pulls from the Supabase price_list (Fairbanks Xactimate) server-side;
+   the client only passes the pricing MODE toggle:
+     "piecework" — Xactimate unit-priced lines (labor+material in the unit price)
+     "tm"        — hourly trade labor (LAB rates) + material/equipment lines
+   Undefined lets the edge default (estimate→piecework, invoice→tm). */
+
+/** Draft { lossSummary, items:[{room,desc,qty,unit,price,basis,code,priced}] } from the documented facts. */
+export function draftInvoice(project, pricingMode) {
   return callOffice(project, "invoiceDraft", {
     facts: invoiceFacts(project),
-    catalog: PRICE_CATALOG,
+    pricingMode,
   }).then((b) => b.draft);
 }
 
-/** Audit the current items; returns suggestions [{room,desc,qty,unit,price,reason}]. */
-export function auditInvoice(project, inv) {
+/** Audit the current items; returns suggestions [{room,desc,qty,unit,price,reason,code,priced}]. */
+export function auditInvoice(project, inv, pricingMode) {
   return callOffice(project, "invoiceAudit", {
     facts: invoiceFacts(project),
     items: (inv.items || []).filter((it) => String(it.desc || "").trim()),
-    catalog: PRICE_CATALOG,
+    pricingMode,
   }).then((b) => b.suggestions ?? []);
 }
 
@@ -149,19 +154,19 @@ export function auditInvoice(project, inv) {
 function reconEstimateFacts(project) {
   return { ...rebuildFacts(project), labor: laborSummary(project), photoFindings: photoAiSummary(project) };
 }
-export function draftReconEstimate(project) {
+export function draftReconEstimate(project, pricingMode) {
   return callOffice(project, "invoiceDraft", {
     facts: reconEstimateFacts(project),
-    catalog: PRICE_CATALOG,
     mode: "reconEstimate",
+    pricingMode,
   }).then((b) => b.draft);
 }
-export function auditReconEstimate(project, inv) {
+export function auditReconEstimate(project, inv, pricingMode) {
   return callOffice(project, "invoiceAudit", {
     facts: reconEstimateFacts(project),
     items: (inv.items || []).filter((it) => String(it.desc || "").trim()),
-    catalog: PRICE_CATALOG,
     mode: "reconEstimate",
+    pricingMode,
   }).then((b) => b.suggestions ?? []);
 }
 

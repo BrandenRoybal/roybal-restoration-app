@@ -1,0 +1,1 @@
+-- placeholder: price_list DDL applied via MCP apply_migration on 2026-07-13; empty to reconcile CLI history (real DDL lives in 109_price_list.sql).
