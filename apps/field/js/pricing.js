@@ -1,6 +1,12 @@
 /* ============================================================
    Roybal Field Forms — price catalog (T&M in Xactimate format)
    ------------------------------------------------------------
+   DEPRECATED as the estimating source (2026-07-13). Estimating now prices
+   off the Supabase `price_list` table (Fairbanks Xactimate, 2,959 items),
+   resolved server-side in the roybal-ai-office edge function. This small
+   hardcoded catalog is no longer sent to the AI; kept only as a manual
+   reference. See memory: fairbanks-price-list-db.
+   ------------------------------------------------------------
    BILLING MODEL: labor is billed by the HOUR at $125/HR and is NEVER
    baked into unit prices (we use Xactimate's room-by-room line-item
    FORMAT, not its loaded pricing). Every logged QuickBooks Time hour

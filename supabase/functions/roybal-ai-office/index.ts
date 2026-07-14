@@ -259,14 +259,17 @@ const DRAFT_SCHEMA = {
       type: "array",
       items: {
         type: "object", additionalProperties: false,
-        required: ["room", "desc", "qty", "unit", "price", "basis"],
+        required: ["room", "desc", "qty", "unit", "price", "basis", "category", "code", "priceBasis"],
         properties: {
           room: { type: "string", description: "Room / area this line belongs to, exactly as documented (e.g. 'Living Room', 'Bathroom'). Use 'Main Level' for job-wide lines (haul-off, service call, whole-structure treatment)." },
           desc: { type: "string", description: "Plain-English scope description as it reads in an Xactimate estimate, e.g. 'Tear out wet drywall, cleanup, bag, per LF - up to 2 ft tall'. NO catalog code abbreviations, NO room name in the description." },
           qty: { type: "number" },
           unit: { type: "string", description: "EA, SF, LF, HR, Day or LS" },
-          price: { type: "number", description: "Unit price in DOLLARS" },
+          price: { type: "number", description: "Unit price in DOLLARS. Your best estimate — it is OVERRIDDEN by the catalog's authoritative price whenever category+code match a real line, so it only stands for lines you cannot map to a catalog code." },
           basis: { type: "string", description: "The documentation this line traces to (equipment log, moisture map, hours...)" },
+          category: { type: "string", description: "The Xactimate CATEGORY code of the catalog line you are billing (e.g. 'DRY', 'PNT', 'LAB'). Empty string ONLY if no catalog line fits." },
+          code: { type: "string", description: "The Xactimate SELECTOR/code from the price catalog you are billing (e.g. '1/2', 'AC', 'DMO'). Must be a code that appears in the provided catalog. Empty string ONLY if no catalog line fits." },
+          priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: 'replace' = install/put-back unit price; 'remove' = tear-out/demo; 'detach_reset' = detach & reset; 'labor' = an hourly LAB trade rate (T&M); 'estimate' = no catalog match, price is your own estimate." },
         },
       },
     },
@@ -279,60 +282,153 @@ function catalogText(catalog: unknown): string {
     `${c.code} | ${c.description} | ${c.unit} | $${Number(c.price).toFixed(2)}`).join("\n");
 }
 
+/* ============================================================
+   Fairbanks price_list — the pricing basis for ALL estimating.
+   The model drafts scope and tags each line with the Xactimate
+   category+code+priceBasis it is billing; resolvePrices() then stamps the
+   AUTHORITATIVE unit price from public.price_list, so prices always come from
+   the sheet, never the model. Two pricing modes:
+     piecework — unit price carries labor+material: replace_price (put-back),
+                 remove_price (demo/tear-out) or detach_reset_price (D&R).
+     tm        — labor bills hourly at the trade's LAB rate (× hours); materials,
+                 equipment and pass-throughs price per unit from their own rows.
+   ============================================================ */
+type CatalogRow = {
+  category: string; code: string; description: string; unit: string | null;
+  replace_price: number | null; remove_price: number | null; detach_reset_price: number | null;
+};
+type PricingMode = "piecework" | "tm";
+// Categories offered to the model per mode (kept scoped so the prompt stays lean).
+const RECON_CATS = ["DRY", "PNT", "INS", "FNC", "FRM", "ACT", "APP"]; // reconstruction put-back trades
+const TM_CATS = ["LAB", "WTR", "DRY", "INS", "APP"];                   // trade labor + water/equipment + common material lines
+const catsForMode = (mode: PricingMode) => (mode === "piecework" ? RECON_CATS : TM_CATS);
+
+async function fetchCatalogRows(jwt: string, categories: string[]): Promise<CatalogRow[]> {
+  if (!categories.length) return [];
+  const inList = categories.map((c) => encodeURIComponent(c)).join(",");
+  const res = await db(
+    `price_list?select=category,code,description,unit,replace_price,remove_price,detach_reset_price&category=in.(${inList})&order=category,code&limit=5000`,
+    jwt, { method: "GET" });
+  if (!res.ok) return [];
+  return ((await res.json().catch(() => [])) as CatalogRow[]) ?? [];
+}
+
+const money = (n: number | null) => (n == null ? "—" : `$${Number(n).toFixed(2)}`);
+
+/** Compact catalog block for the prompt: CATEGORY CODE | description | unit | prices. */
+function catalogTextFromRows(rows: CatalogRow[], mode: PricingMode): string {
+  if (mode === "tm") {
+    const labor = rows.filter((r) => r.category === "LAB" && r.unit === "HR" && (r.replace_price ?? 0) > 0);
+    const other = rows.filter((r) => r.category !== "LAB" && (r.replace_price ?? 0) > 0);
+    const laborTxt = labor.map((r) => `${r.code} | ${r.description} | HR | ${money(r.replace_price)}`).join("\n");
+    const otherTxt = other.map((r) => `${r.category} ${r.code} | ${r.description} | ${r.unit} | ${money(r.replace_price)}`).join("\n");
+    return `LABOR RATES (category LAB — bill hours × this rate):\n${laborTxt}\n\nMATERIALS / EQUIPMENT / PASS-THROUGH (price per unit):\n${otherTxt}`;
+  }
+  // piecework: drop $0 placeholders (Bid/Agreed) and material-only sheet rows (SH)
+  const usable = rows.filter((r) => (r.replace_price ?? 0) > 0 || (r.remove_price ?? 0) > 0);
+  return usable.map((r) =>
+    `${r.category} ${r.code} | ${r.description} | ${r.unit} | replace ${money(r.replace_price)}`
+    + (r.remove_price != null ? ` | tear-out ${money(r.remove_price)}` : "")
+    + (r.detach_reset_price != null ? ` | D&R ${money(r.detach_reset_price)}` : "")
+  ).join("\n");
+}
+
+/** Stamp authoritative prices from the catalog onto drafted/suggested lines. */
+type DraftLine = {
+  room?: string; desc?: string; qty?: number; unit?: string; price?: number; basis?: string; reason?: string;
+  category?: string; code?: string; priceBasis?: string;
+};
+async function resolvePrices(items: DraftLine[], jwt: string, mode: PricingMode): Promise<DraftLine[]> {
+  const list = Array.isArray(items) ? items : [];
+  const cats = [...new Set(list.map((i) => i.category).filter((c): c is string => !!c))];
+  const rows = cats.length ? await fetchCatalogRows(jwt, cats) : [];
+  const byKey = new Map(rows.map((r) => [`${r.category}::${r.code}`, r] as const));
+  return list.map((it) => {
+    const row = it.category && it.code ? byKey.get(`${it.category}::${it.code}`) : undefined;
+    if (!row) { const { priceBasis: _pb, ...rest } = it; return { ...rest, priced: "estimate" }; }
+    const basis = it.priceBasis;
+    const col = basis === "remove" ? row.remove_price
+      : basis === "detach_reset" ? row.detach_reset_price
+      : row.replace_price; // "replace" | "labor" both live in replace_price
+    if (col == null || col <= 0) { const { priceBasis: _pb, ...rest } = it; return { ...rest, priced: "estimate" }; }
+    const { priceBasis: _pb, ...rest } = it;
+    return { ...rest, price: col, code: row.code, catalogDesc: row.description, unit: it.unit || row.unit || "", priced: "catalog" };
+  });
+}
+
 async function invoiceDraft(body: Record<string, unknown>) {
   const facts = body.facts;
   if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
-  // mode "reconEstimate": the same schema drafts a RECONSTRUCTION ESTIMATE —
-  // proposed put-back scope priced per unit (labor in the unit price), not
-  // T&M billing for performed mitigation work.
+  const jwt = String((body as Record<string, unknown>)._jwt ?? "");
+  // Two independent axes:
+  //  - doc type: reconstruction ESTIMATE (future put-back) vs INVOICE (performed work)
+  //  - pricing mode: PIECEWORK (unit-priced) vs T&M (hourly trade labor) — the toggle
   const estimate = body.mode === "reconEstimate";
-  const estimateContent =
-    `Draft the reconstruction (rebuild) estimate line items for this job.\n\n` +
-    `PRICE CATALOG (code | description | unit | default price) — prefer these when a line matches; price uncataloged trades at fair Fairbanks-area rates:\n${catalogText(body.catalog)}\n\n` +
-    `RULES:\n` +
-    `- SCOPE = PUT-BACK of the documented demolition and damage: everything removed or destroyed during mitigation gets rebuilt (facts.demoNotes, facts.affectedAreas — flood cuts mean new drywall; removed flooring means underlayment, new flooring, baseboard, paint). Include the full finish chain per assembly: hang, tape, texture, prime, paint.\n` +
-    `- QUANTITIES from facts.planDimensions (tech-verified SF/LF off the dimensioned plan) — cite the room's dimensions in the basis. Where a dimension is missing, derive conservatively from the documented areas and say so in the basis.\n` +
-    `- Group every line into its room/area via the room field (Xactimate style); job-wide lines (debris, floor protection, final clean, permits) go under 'Main Level'.\n` +
-    `- Unit-priced scope lines with labor and material INSIDE the unit price, as reconstruction estimates read — never hourly T&M lines.\n` +
-    `- Include trade lines the damage clearly requires (electrical/plumbing/HVAC disturbed by demo, insulation in opened walls, code items facts.supportingDocs cites). State the basis on every line.\n` +
-    `- STRUCTURE ONLY: contents / personal property (facts.contentsLoss) are NOT estimated here — mention in the lossSummary that contents are claimed separately.\n` +
-    `- lossSummary: 2-3 sentences — the damage and the proposed rebuild scope.\n` +
-    `- No overhead/profit/tax lines (O&P applies separately on the estimate). Prices in DOLLARS.\n\n` +
-    `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``;
+  const pm: PricingMode =
+    body.pricingMode === "tm" || body.pricingMode === "piecework"
+      ? (body.pricingMode as PricingMode)
+      : estimate ? "piecework" : "tm";
+  const rows = await fetchCatalogRows(jwt, catsForMode(pm));
+  const catText = catalogTextFromRows(rows, pm);
+
+  const codeRule =
+    "- EVERY line MUST be tagged with the catalog line it bills: set `category` + `code` to a real row from the PRICE CATALOG and `priceBasis` to how it is priced. The catalog's authoritative Fairbanks price OVERRIDES your `price`, so your number only stands when NO catalog code fits (then category=\"\" code=\"\" priceBasis=\"estimate\", and price it at a fair Fairbanks rate).\n";
+  const pricingRules =
+    pm === "piecework"
+      ? "PRICING MODE — PIECEWORK (Xactimate unit-priced): each line's unit price carries BOTH labor and material.\n" +
+        "- priceBasis: 'replace' for install / put-back, 'remove' for tear-out / demo, 'detach_reset' for detach & reset. The catalog lists replace / tear-out / D&R prices per row.\n" +
+        codeRule
+      : "PRICING MODE — TIME & MATERIALS: labor bills HOURLY at the trade's rate; materials, equipment and pass-throughs price per unit. Labor is NEVER baked into a unit price.\n" +
+        "- LABOR lines: category='LAB', code = the trade that did the work (DMO demolition, CLN-R remediation cleaning, CLN cleaning, LBR general laborer, DRY drywall, PNT painter, INS insulation, FLR flooring, CARPFRM framer, CARPFNC finish carpenter, ELE electrician, PLM plumber, EQU equipment operator), priceBasis='labor', unit='HR', qty=hours. Match the WORK to the trade: tear-out to DMO, water extraction/cleanup to CLN-R, general help to LBR.\n" +
+        "- MATERIALS / EQUIPMENT / PASS-THROUGH lines: pick the catalog row (category+code), priceBasis='replace', qty=units (equipment: units × days).\n" +
+        codeRule;
+  const scopeFraming =
+    estimate
+      ? "Draft the RECONSTRUCTION ESTIMATE line items — the proposed scope to REBUILD the structure after mitigation (future work, not billing for performed work).\n" +
+        "- SCOPE = PUT-BACK of the documented demolition/damage (facts.demoNotes, facts.affectedAreas): flood cuts to new drywall; removed flooring to underlayment, flooring, baseboard, paint. Include the full finish chain per assembly (hang, tape, texture, prime, paint).\n" +
+        "- QUANTITIES from facts.planDimensions (tech-verified SF/LF) — cite the room's dimensions in the basis; where missing, derive conservatively and say so.\n" +
+        "- Include trades the damage clearly requires (electrical/plumbing/HVAC disturbed by demo, insulation in opened walls, code items facts.supportingDocs cites).\n" +
+        "- STRUCTURE ONLY: contents / personal property (facts.contentsLoss) are claimed separately — note that in lossSummary.\n"
+      : "Draft the line items billing the DOCUMENTED PERFORMED work for this job.\n" +
+        "- Bill only what the facts support; state the basis on every line.\n" +
+        "- facts.receipts (when present) are AI-read receipts / sub invoices — bill each pass-through at its receipt total, citing vendor + date; never bill a receipt twice.\n";
+  const hourRule =
+    pm === "tm" && !estimate
+      ? "- RECONCILE HOURS: HR quantities across ALL labor lines MUST sum to facts.labor.totalHours. Split facts.labor.entries into trade-specific labor lines by their work notes; bill any remainder as one 'General mitigation labor' (LAB / LBR) line so no logged hour goes unbilled. Moisture mapping / monitoring visits bill hourly, never as flat per-visit fees.\n"
+      : "";
+  const commonRules =
+    "- Group every line into its room/area via the room field (Xactimate style); job-wide lines (debris, floor protection, final clean, permits) go under 'Main Level'.\n" +
+    "- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit it.\n" +
+    "- Descriptions are plain English as Xactimate reads — never include catalog code abbreviations, never repeat the room name in the description.\n" +
+    "- lossSummary: 2-3 sentences. No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n";
+  const content =
+    scopeFraming + "\n" + pricingRules + hourRule + commonRules + "\n" +
+    "PRICE CATALOG (tag each line with a CATEGORY + CODE from here — Fairbanks Xactimate):\n" + catText + "\n\n" +
+    "DOCUMENTED FACTS (use ONLY these):\n```json\n" + JSON.stringify(facts, null, 2) + "\n```";
+
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
-    system: estimate
-      ? "You are a senior reconstruction estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) writing an " +
-        "Xactimate-style RECONSTRUCTION ESTIMATE for insurance review: the proposed scope and pricing to rebuild the structure " +
-        "after water mitigation. This estimates FUTURE work — it is not billing for performed work. Every line must trace to " +
-        "documented damage; never invent scope. Call `draft_invoice` with the complete line-item draft."
-      : "You are a senior restoration estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) writing an Xactimate-style " +
-        "mitigation invoice for an insurance claim. Every line must trace to the documented facts — never bill undocumented work. " +
-        "Call `draft_invoice` with the complete line-item draft.",
-    content: estimate ? estimateContent :
-      `Draft the mitigation invoice line items for this job.\n\n` +
-      `PRICE CATALOG (code | description | unit | default price) — prefer these codes and prices when a line matches:\n${catalogText(body.catalog)}\n\n` +
-      `RULES:\n` +
-      `- BILLING MODEL \u2014 time & materials in Xactimate FORMAT (not Xactimate pricing): ALL labor bills by the hour at $125.00/HR and is never baked into a unit price. EVERY documented crew hour must appear on the invoice inside an hourly line.\n` +
-      `- Divide the documented labor entries (facts.labor.entries \u2014 each has date, employee, hours and a 'work' note) into task-specific hourly lines: same task -> one line, qty = summed hours, unit HR, price 125. The work notes are the justification \u2014 phrase each line as the scope performed (e.g. 'Tear out wet drywall, bag and haul debris', 'Water extraction from carpeted floors').\n` +
-      `- RECONCILE THE HOURS: the HR quantities across all labor lines MUST sum to facts.labor.totalHours. If some hours have vague or missing notes, bill the remainder as one 'General mitigation labor' line \u2014 no logged hour goes unbilled.\n` +
-      `- Moisture mapping / monitoring visits bill hourly at $125.00/HR \u2014 never as flat per-visit fees.\n` +
-      `- Group every line into its documented room/area via the room field (Xactimate style). Use room names mentioned in work notes, moisture maps and photos; hours or job-wide lines that name no room go under 'Main Level'.\n` +
-      `- Non-labor lines: equipment rental per unit per day phrased 'Air mover (per 24 hour period) - N units x D days' (qty = N*D, unit EA); materials & consumables (product only); pass-through fees (haul/dump loads, equipment decontamination, PPE, service call). NEVER bill labor-loaded piecework unit prices \u2014 labor rides only in HR lines.\n` +
-      `- Descriptions are plain English exactly as Xactimate reads \u2014 never include catalog code abbreviations and never repeat the room name inside the description.\n` +
-      `- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit Cat-3 qualifiers.\n` +
-      `- Include scope lines only where the facts support them; state the basis on every line.\n` +
-      `- facts.planDimensions (when present) are measurements read off the dimensioned floor plan and verified by the tech — use them for SF/LF quantities (flooring, drywall, baseboard) and cite the room's dimensions in the basis.\n` +
-      `- facts.receipts (when present) are AI-read receipts / subcontractor invoices attached to the claim — bill each documented pass-through (dump fees, materials, sub charges) at its receipt total, citing vendor and date in the basis. Never bill the same receipt twice.\n` +
-      `- No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n\n` +
-      `DOCUMENTED FACTS (use ONLY these):\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
+    system:
+      "You are a senior " + (estimate ? "reconstruction" : "restoration") + " estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) " +
+      "writing an Xactimate-style " + (estimate ? "reconstruction estimate for insurance review" : "insurance-claim invoice") + " in " +
+      (pm === "piecework" ? "PIECEWORK (unit-priced)" : "TIME & MATERIALS") + " format. Every line must trace to documented " +
+      (estimate ? "damage" : "work") + " — never invent scope — and must be tagged with the catalog category+code it bills. " +
+      "Call `draft_invoice` with the complete line-item draft.",
+    content,
     toolName: "draft_invoice",
     schema: DRAFT_SCHEMA as unknown as Record<string, unknown>,
     // reconstruction estimates run long (every room × the full finish chain,
     // verbose basis strings) — 4096 truncated them into empty drafts
     maxTokens: 16384,
   });
-  return { result: { draft: input }, usage, model: DOC_MODEL, summary: { items: Array.isArray((input as { items?: unknown[] }).items) ? (input as { items: unknown[] }).items.length : 0 } };
+  const drafted = Array.isArray((input as { items?: DraftLine[] }).items) ? (input as { items: DraftLine[] }).items : [];
+  const priced = await resolvePrices(drafted, jwt, pm);
+  (input as Record<string, unknown>).items = priced;
+  return {
+    result: { draft: input },
+    usage, model: DOC_MODEL,
+    summary: { items: priced.length, mode: pm, catalog_priced: priced.filter((i) => (i as { priced?: string }).priced === "catalog").length },
+  };
 }
 
 /* ============================================================
@@ -346,14 +442,17 @@ const AUDIT_SCHEMA = {
       type: "array",
       items: {
         type: "object", additionalProperties: false,
-        required: ["room", "desc", "qty", "unit", "price", "reason"],
+        required: ["room", "desc", "qty", "unit", "price", "reason", "category", "code", "priceBasis"],
         properties: {
           room: { type: "string", description: "Room / area the missed line belongs to ('Main Level' for job-wide)" },
           desc: { type: "string", description: "Plain-English Xactimate-style description — no catalog code abbreviations" },
           qty: { type: "number" },
           unit: { type: "string" },
-          price: { type: "number", description: "Unit price in DOLLARS" },
+          price: { type: "number", description: "Unit price in DOLLARS — overridden by the catalog price when category+code match." },
           reason: { type: "string", description: "The specific documentation supporting this missed line" },
+          category: { type: "string", description: "Xactimate CATEGORY code of the catalog line billed (e.g. 'DRY','LAB'); empty only if none fits." },
+          code: { type: "string", description: "Xactimate SELECTOR/code from the catalog (e.g. '1/2','DMO'); empty only if none fits." },
+          priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: replace/remove/detach_reset unit price, hourly 'labor' LAB rate, or 'estimate' when uncataloged." },
         },
       },
     },
@@ -363,11 +462,30 @@ const AUDIT_SCHEMA = {
 async function invoiceAudit(body: Record<string, unknown>) {
   const facts = body.facts;
   if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  const jwt = String((body as Record<string, unknown>)._jwt ?? "");
   const estimate = body.mode === "reconEstimate";
+  const pm: PricingMode =
+    body.pricingMode === "tm" || body.pricingMode === "piecework"
+      ? (body.pricingMode as PricingMode)
+      : estimate ? "piecework" : "tm";
+  const rows = await fetchCatalogRows(jwt, catsForMode(pm));
+  const catText = catalogTextFromRows(rows, pm);
   const items = Array.isArray(body.items) ? body.items as Array<{ room?: string; desc: string; qty: string; unit: string; price: string }> : [];
   const itemsText = items.length
     ? items.map((it) => `- [${it.room || "Main Level"}] ${it.desc} | ${it.qty} ${it.unit} @ $${it.price}`).join("\n")
     : (estimate ? "(the estimate is currently empty)" : "(the invoice is currently empty)");
+  const codeRule =
+    "- Tag every suggestion with the catalog line it bills: set category + code from the PRICE CATALOG and priceBasis (replace/remove/detach_reset/labor). The catalog price is authoritative and overrides your price; use category=\"\" code=\"\" priceBasis=\"estimate\" only when nothing fits.\n";
+  const modeRule =
+    pm === "piecework"
+      ? "PRICING MODE — PIECEWORK: unit-priced lines (labor+material inside the unit price); priceBasis 'replace' for put-back, 'remove' for demo, 'detach_reset' for D&R. Never hourly T&M.\n"
+      : "PRICING MODE — TIME & MATERIALS: labor bills hourly at the trade LAB rate (category='LAB', code=the trade, priceBasis='labor', unit='HR'); materials/equipment/pass-throughs per unit (priceBasis='replace'). Labor is never baked into a unit price.\n";
+  const focus =
+    estimate
+      ? "MOST IMPORTANT CHECK — demo put-back reconciliation: walk facts.demoNotes and facts.affectedAreas; every flood cut, tear-out and removed finish must have corresponding rebuild lines (the finish chain: hang, tape, texture, prime, paint; underlayment, install, transitions). Also check trades disturbed by demo (electrical/plumbing/HVAC/insulation), code items facts.supportingDocs cites, and job-wide lines (debris, floor protection, final clean, permits). Quantities from facts.planDimensions where available.\n"
+      : (pm === "tm"
+          ? "MOST IMPORTANT CHECK — hour reconciliation: compare total HR billed across the current hourly lines to facts.labor.totalHours; if logged hours are unbilled, suggest labor line(s) at the appropriate trade rate that bill the gap, describing the work from the labor entries' notes. Unbilled logged hours are lost revenue. Also flag missing equipment-rental days, materials and pass-throughs — including facts.receipts not yet billed.\n"
+          : "MOST IMPORTANT CHECK: flag documented scope, equipment days, materials and pass-throughs the facts support but the current lines omit — including facts.receipts not yet billed.\n");
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
     system: estimate
@@ -378,27 +496,22 @@ async function invoiceAudit(body: Record<string, unknown>) {
       : "You are a supplement auditor for Roybal Construction, LLC. Find DOCUMENTED work missing from an invoice — billable items " +
         "clearly supported by the job facts but absent from the current line items. Never suggest speculative work: every suggestion " +
         "must cite its supporting documentation. If nothing is missing, call `audit` with an empty suggestions array.",
-    content: estimate
-      ? `Audit this reconstruction estimate against the documented damage and list missed rebuild scope.\n\n` +
-        `CURRENT ESTIMATE LINE ITEMS:\n${itemsText}\n\n` +
-        `PRICE CATALOG (prefer these codes/prices when a suggestion matches; price uncataloged trades at fair Fairbanks-area rates):\n${catalogText(body.catalog)}\n\n` +
-        `Do not duplicate or re-price items already on the estimate.\n` +
-        `MOST IMPORTANT CHECK — demo put-back reconciliation: walk facts.demoNotes and facts.affectedAreas; every flood cut, tear-out and removed finish must have corresponding rebuild lines (including the finish chain: hang, tape, texture, prime, paint; underlayment, install, transitions). Suggest what's missing.\n` +
-        `Also check: trades disturbed by demo (electrical/plumbing/HVAC/insulation), code items facts.supportingDocs cites, and job-wide lines (debris, floor protection, final clean, permits). Quantities from facts.planDimensions where available.\n` +
-        `Unit-priced scope lines (labor inside the unit price) — never hourly T&M. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
-        `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``
-      : `Audit this invoice against the documented job facts and list missed billable items.\n\n` +
-        `CURRENT INVOICE LINE ITEMS:\n${itemsText}\n\n` +
-        `PRICE CATALOG (prefer these codes/prices when a suggestion matches):\n${catalogText(body.catalog)}\n\n` +
-        `Do not duplicate or re-price items already on the invoice. BILLING MODEL — time & materials: all labor bills hourly at $125.00/HR (never baked into unit prices).\n` +
-        `MOST IMPORTANT CHECK — hour reconciliation: compare the total HR billed across the invoice's hourly lines to facts.labor.totalHours. If logged hours are unbilled, suggest hourly line(s) at $125.00/HR that bill the gap, describing the work from the labor entries' notes and citing them as the reason. Unbilled logged hours are lost revenue.\n` +
-        `Also flag missing equipment-rental days, materials, and pass-through fees the facts support — including facts.receipts (AI-read receipts / sub invoices) not yet billed. Never suggest labor-loaded piecework: labor belongs only in HR lines. No overhead/profit/tax lines. Prices in DOLLARS.\n\n` +
-        `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
+    content:
+      "Audit this " + (estimate ? "reconstruction estimate against the documented damage and list missed rebuild scope" : "invoice against the documented job facts and list missed billable items") + ".\n\n" +
+      "CURRENT LINE ITEMS:\n" + itemsText + "\n\n" +
+      modeRule + codeRule + "Do not duplicate or re-price items already present.\n" +
+      focus +
+      "No overhead/profit/tax lines. Prices in DOLLARS.\n\n" +
+      "PRICE CATALOG (tag each suggestion with a CATEGORY + CODE — Fairbanks Xactimate):\n" + catText + "\n\n" +
+      "DOCUMENTED FACTS:\n```json\n" + JSON.stringify(facts, null, 2) + "\n```",
     toolName: "audit",
     schema: AUDIT_SCHEMA as unknown as Record<string, unknown>,
     maxTokens: 8192,
   });
-  return { result: input, usage, model: DOC_MODEL, summary: { suggestions: Array.isArray((input as { suggestions?: unknown[] }).suggestions) ? (input as { suggestions: unknown[] }).suggestions.length : 0 } };
+  const suggested = Array.isArray((input as { suggestions?: DraftLine[] }).suggestions) ? (input as { suggestions: DraftLine[] }).suggestions : [];
+  const priced = await resolvePrices(suggested, jwt, pm);
+  (input as Record<string, unknown>).suggestions = priced;
+  return { result: input, usage, model: DOC_MODEL, summary: { suggestions: priced.length, mode: pm } };
 }
 
 /* ============================================================
@@ -1099,6 +1212,9 @@ serve(async (req: Request) => {
   let captureEventId: string | null = null;
   try {
     const body = (await req.json()) ?? {};
+    // Actions that price against public.price_list need the caller's JWT (RLS
+    // lets any authenticated user READ the catalog). Thread it through the body.
+    (body as Record<string, unknown>)._jwt = jwt;
     const action = String(body.action ?? "");
     const run = ACTIONS[action];
     if (!run) return json({ ok: false, error: `Unknown action. Expected one of: ${Object.keys(ACTIONS).join(", ")}` }, 400);

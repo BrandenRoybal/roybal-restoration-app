@@ -1342,6 +1342,10 @@ export function invoice(project, inv) {
   }
   if (!inv.billingModel) inv.billingModel = "tm";
   if (!inv.opMode) inv.opMode = "pct";   // "pct" = % of line items | "amount" = fixed $ (e.g. imported Xactimate O&P)
+  // pricingMode toggles how the AI PRICES each line off the Fairbanks price_list:
+  //   "piecework" = Xactimate unit-priced (labor+material in the unit price)
+  //   "tm"        = hourly trade labor (LAB rates) + material/equipment lines
+  if (!inv.pricingMode) inv.pricingMode = isEst ? "piecework" : "tm";
   const isContract = () => inv.billingModel === "contract";
   const isOpAmount = () => inv.opMode === "amount";
   function recalc(sub) {
@@ -1384,7 +1388,7 @@ export function invoice(project, inv) {
     if (hasItems && !window.confirm("Replace the current line items with an AI draft built from the job documentation?")) return;
     busyBtn(draftBtn, true, "\u2728 Drafting\u2026");
     try {
-      const draft = isEst ? await draftReconEstimate(project) : await draftInvoice(project);
+      const draft = isEst ? await draftReconEstimate(project, inv.pricingMode) : await draftInvoice(project, inv.pricingMode);
       const lines = Array.isArray(draft.items) ? draft.items : [];
       if (!lines.length) {
         // an empty draft is a signal, not a result \u2014 never wipe the current items
@@ -1399,13 +1403,21 @@ export function invoice(project, inv) {
       inv.items = lines.map((li) => ({
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
+        code: li.code || "", priced: li.priced || "",   // pricing provenance (Fairbanks code / estimate)
       }));
       commit(); paintItems();
+      const fromCatalog = lines.filter((li) => li.priced === "catalog").length;
       aiPanel.replaceChildren(
         h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc;font-size:12px" },
           h("strong", {}, "\u2728 Draft basis \u2014 review every line before sending:"),
+          h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 4px" },
+            `${fromCatalog} of ${lines.length} line${lines.length !== 1 ? "s" : ""} priced from the Fairbanks list; the rest are estimates \u2014 verify those.`),
           ...lines.map((li) => h("div", { style: "margin-top:4px;color:#5a6b7f" },
-            h("strong", { style: "color:#2b3a4d" }, li.desc || ""), li.basis ? " \u2014 " + li.basis : ""))));
+            h("strong", { style: "color:#2b3a4d" }, li.desc || ""),
+            li.priced === "catalog"
+              ? h("span", { style: "color:#1f9d55" }, ` \u00b7 Fairbanks ${li.code || ""}`)
+              : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
+            li.basis ? " \u2014 " + li.basis : ""))));
       toast((isEst ? "Estimate" : "Invoice") + " draft ready \u2014 every line is editable.");
     } catch (e) {
       toast("AI draft failed: " + (e && e.message ? e.message : e));
@@ -1418,7 +1430,7 @@ export function invoice(project, inv) {
     if (!aiAvailable()) return;
     busyBtn(auditBtn, true, "\ud83d\udd0e Auditing\u2026");
     try {
-      const suggestions = isEst ? await auditReconEstimate(project, inv) : await auditInvoice(project, inv);
+      const suggestions = isEst ? await auditReconEstimate(project, inv, inv.pricingMode) : await auditInvoice(project, inv, inv.pricingMode);
       if (!suggestions.length) {
         aiPanel.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" },
           isEst ? "\u2728 No missed scope found \u2014 the estimate appears to cover the documented damage."
@@ -1430,10 +1442,13 @@ export function invoice(project, inv) {
             h("div", { style: "flex:1;font-size:12px" },
               h("strong", { style: "color:#2b3a4d" }, sug.desc || ""),
               ` \u2014 ${sug.qty} ${sug.unit} @ $${Number(sug.price || 0).toFixed(2)}`,
+              sug.priced === "catalog"
+                ? h("span", { style: "color:#1f9d55" }, ` \u00b7 Fairbanks ${sug.code || ""}`)
+                : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
               h("div", { style: "color:#5a6b7f" }, sug.reason || "")),
             add);
           add.addEventListener("click", () => {
-            inv.items.push({ room: sug.room || "", desc: sug.desc || "", qty: String(sug.qty ?? ""), unit: sug.unit || "", price: sug.price != null ? String(sug.price) : "" });
+            inv.items.push({ room: sug.room || "", desc: sug.desc || "", qty: String(sug.qty ?? ""), unit: sug.unit || "", price: sug.price != null ? String(sug.price) : "", code: sug.code || "", priced: sug.priced || "" });
             commit(); paintItems(); row.remove();
           });
           return row;
@@ -1679,6 +1694,17 @@ export function invoice(project, inv) {
   ], { onchange: () => { paintMode(); recalc(); } });
   paintMode();
 
+  // Pricing mode — how the AI draft/audit prices each line off the Fairbanks
+  // price_list. Independent of the billing-model (totals) toggle above.
+  const pmSeg = seg(inv, "pricingMode", [
+    { value: "piecework", label: "Piecework (unit price)" },
+    { value: "tm", label: "Time & Materials (hourly labor)" },
+  ]);
+  const pmRow = h("div", { class: "app-only" },
+    field("Pricing mode", pmSeg),
+    h("div", { class: "subtle", style: "font-size:11px;margin:-4px 0 4px" },
+      "Piecework = Xactimate unit prices (labor + material in each line). Time & Materials = crew hours at trade labor rates + separate material/equipment lines. Both price off the Fairbanks list."));
+
   const invoiceSheet = sheet(
     isEst ? "RECONSTRUCTION ESTIMATE" : "CONSTRUCTION INVOICE",
     isEst ? "Proposed rebuild scope & pricing — post-mitigation reconstruction" : "Mitigation & Reconstruction Services | IICRC S500 Compliant",
@@ -1697,6 +1723,7 @@ export function invoice(project, inv) {
     field(isEst ? "Damage Description / Rebuild Scope Summary" : "Loss Description / Scope Summary", lossTa),
     sectionTitle(isEst ? "Estimated Scope of Repairs" : "Charges"),
     isEst ? null : h("div", { class: "app-only" }, field("Billing model", modeSeg)),
+    pmRow,
     aiBar,
     aiPanel,
     itemsWrap,
