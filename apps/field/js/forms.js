@@ -1403,20 +1403,24 @@ export function invoice(project, inv) {
       inv.items = lines.map((li) => ({
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
-        code: li.code || "", priced: li.priced || "",   // pricing provenance (Fairbanks code / estimate)
+        code: li.code || "", priced: li.priced || "", flag: li.priceFlag || "",   // pricing provenance + any guardrail flag
       }));
       commit(); paintItems();
       const fromCatalog = lines.filter((li) => li.priced === "catalog").length;
+      const flagged = lines.filter((li) => li.priced === "flag").length;
       aiPanel.replaceChildren(
         h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc;font-size:12px" },
           h("strong", {}, "\u2728 Draft basis \u2014 review every line before sending:"),
           h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 4px" },
-            `${fromCatalog} of ${lines.length} line${lines.length !== 1 ? "s" : ""} priced from the Fairbanks list; the rest are estimates \u2014 verify those.`),
+            `${fromCatalog} of ${lines.length} line${lines.length !== 1 ? "s" : ""} priced from the Fairbanks list; the rest are estimates \u2014 verify those.`
+            + (flagged ? ` \u26a0\ufe0f ${flagged} need${flagged !== 1 ? "" : "s"} attention (blank price).` : "")),
           ...lines.map((li) => h("div", { style: "margin-top:4px;color:#5a6b7f" },
             h("strong", { style: "color:#2b3a4d" }, li.desc || ""),
             li.priced === "catalog"
               ? h("span", { style: "color:#1f9d55" }, ` \u00b7 Fairbanks ${li.code || ""}`)
-              : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
+              : li.priced === "flag"
+                ? h("span", { style: "color:#c0392b" }, " \u00b7 \u26a0\ufe0f " + (li.priceFlag || "needs manual price"))
+                : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
             li.basis ? " \u2014 " + li.basis : ""))));
       toast((isEst ? "Estimate" : "Invoice") + " draft ready \u2014 every line is editable.");
     } catch (e) {
