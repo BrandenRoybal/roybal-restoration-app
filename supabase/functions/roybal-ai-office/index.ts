@@ -401,6 +401,7 @@ async function invoiceDraft(body: Record<string, unknown>) {
         "- Include trades the damage clearly requires (electrical/plumbing/HVAC disturbed by demo, insulation in opened walls, code items facts.supportingDocs cites).\n" +
         "- STRUCTURE ONLY: contents / personal property (facts.contentsLoss) are claimed separately — note that in lossSummary.\n"
       : "Draft the line items billing the DOCUMENTED PERFORMED work for this job.\n" +
+        "- VERIFIED SCOPE (HIGHEST PRIORITY): if facts.verifiedScope is present it is the estimator's CONFIRMED billable scope (their narration in .summary/.narration plus .answers) — bill it exactly, using the documented facts below for quantities / hours / support; it OVERRIDES inference.\n" +
         "- Bill only what the facts support; state the basis on every line.\n" +
         "- facts.receipts (when present) are AI-read receipts / sub invoices — bill each pass-through at its receipt total, citing vendor + date; never bill a receipt twice.\n";
   const hourRule =
@@ -569,23 +570,33 @@ async function scopeInterview(body: Record<string, unknown>) {
   if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
   const narration = typeof body.narration === "string" ? body.narration.trim() : "";
   const answers = Array.isArray(body.answers) ? body.answers as Array<{ question: string; answer: string }> : [];
+  const estimate = body.mode === "reconEstimate";
   const asked = answers.length;
   const qaText = answers.length
     ? answers.map((a, i) => `Q${i + 1}: ${a.question}\nA${i + 1}: ${a.answer}`).join("\n")
     : "(no questions answered yet)";
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
-    system:
-      "You are a senior reconstruction estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) INTERVIEWING the field tech to pin down " +
-      "the rebuild scope BEFORE anything is priced — eliminating guesswork. Given the documented job facts, the tech's spoken scope narration, and the " +
-      "answers gathered so far, either ask the SINGLE most important still-unresolved scope question, or declare the scope complete. Ask about what most " +
-      "changes the estimate and is NOT already settled by the narration or facts: which rooms/areas are in the rebuild; replace vs detach-&-reset per " +
-      "major item (rule: REPLACE if damaged by the loss OR Cat 3 + porous material, else detach & reset); flooring type and match-existing vs upgrade; " +
-      "drywall extent (flood-cut ~2 ft vs full height); paint extent (full room vs spot/patch); trades disturbed (electrical / plumbing / HVAC / " +
-      "insulation in opened walls); water category (drives the Cat 3 package); and whether a subcontractor is on the job (drives O&P). ONE question at a " +
-      "time, plain English, with 2-4 concrete options the tech can tap (they can also free-type). NEVER ask about something already answered or already " +
-      "clear from the narration/facts. Set done=true as soon as you could write a tight, unambiguous scope, and NEVER exceed 8 questions total (asked so " +
-      "far: " + asked + " — if that is 7+, strongly prefer done). When done, return a consolidated scopeSummary. Call `scope_interview`.",
+    system: estimate
+      ? "You are a senior reconstruction estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) INTERVIEWING the field tech to pin down " +
+        "the REBUILD scope BEFORE anything is priced — eliminating guesswork. Given the documented job facts, the tech's spoken scope narration, and the " +
+        "answers gathered so far, either ask the SINGLE most important still-unresolved scope question, or declare the scope complete. Ask about what most " +
+        "changes the estimate and is NOT already settled by the narration or facts: which rooms/areas are in the rebuild; replace vs detach-&-reset per " +
+        "major item (rule: REPLACE if damaged by the loss OR Cat 3 + porous material, else detach & reset); flooring type and match-existing vs upgrade; " +
+        "drywall extent (flood-cut ~2 ft vs full height); paint extent (full room vs spot/patch); trades disturbed (electrical / plumbing / HVAC / " +
+        "insulation in opened walls); water category (drives the Cat 3 package); and whether a subcontractor is on the job (drives O&P). ONE question at a " +
+        "time, plain English, with 2-4 concrete options the tech can tap (they can also free-type). NEVER ask about something already answered or already " +
+        "clear from the narration/facts. Set done=true as soon as you could write a tight, unambiguous scope, and NEVER exceed 8 questions total (asked so " +
+        "far: " + asked + " — if that is 7+, strongly prefer done). When done, return a consolidated scopeSummary. Call `scope_interview`."
+      : "You are a senior restoration estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) INTERVIEWING the field tech to confirm the " +
+        "BILLABLE scope of the PERFORMED mitigation work BEFORE it is priced — so nothing billable is missed and nothing unsupported is billed. Given the " +
+        "documented job facts (labor hours, equipment days, drying, demo notes, receipts), the tech's spoken narration of what was done, and the answers " +
+        "so far, either ask the SINGLE most important still-unresolved question, or declare the scope complete. Ask about what most changes the invoice and " +
+        "is NOT already settled by the logs or narration: areas/rooms worked; demo & tear-out actually performed; equipment run and days; billable work not " +
+        "captured in the logs; pass-throughs / subcontractor invoices to bill (facts.receipts); water category (drives the Cat 3 mitigation package + PPE); " +
+        "and whether a subcontractor is on the job (drives O&P). ONE question at a time, plain English, with 2-4 concrete tap options (they can also " +
+        "free-type). NEVER ask about something already answered or clear from the facts. Set done=true as soon as you could write a tight billable scope, " +
+        "and NEVER exceed 8 questions (asked so far: " + asked + " — if 7+, strongly prefer done). When done, return a consolidated scopeSummary. Call `scope_interview`.",
     content:
       "TECH'S SPOKEN SCOPE NARRATION:\n" + (narration || "(none provided yet)") + "\n\n" +
       "ANSWERS SO FAR:\n" + qaText + "\n\n" +

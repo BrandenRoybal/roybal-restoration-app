@@ -131,9 +131,12 @@ export function invoiceFacts(project) {
    Undefined lets the edge default (estimate→piecework, invoice→tm). */
 
 /** Draft { lossSummary, items:[{room,desc,qty,unit,price,basis,code,priced}] } from the documented facts. */
-export function draftInvoice(project, pricingMode) {
+export function draftInvoice(project, pricingMode, verifiedScope) {
+  const facts = invoiceFacts(project);
+  if (verifiedScope && (verifiedScope.summary || verifiedScope.narration || (Array.isArray(verifiedScope.answers) && verifiedScope.answers.length)))
+    facts.verifiedScope = verifiedScope;
   return callOffice(project, "invoiceDraft", {
-    facts: invoiceFacts(project),
+    facts,
     pricingMode,
   }).then((b) => b.draft);
 }
@@ -158,12 +161,12 @@ function reconEstimateFacts(project) {
    at a time; returns { done, question, options, why, scopeSummary }. The client
    loops (passing the growing answers list) until done, then draftReconEstimate
    prices FROM the confirmed scope. */
-export function runScopeInterview(project, { narration = "", answers = [] } = {}) {
+export function runScopeInterview(project, { narration = "", answers = [], isEst = true } = {}) {
   return callOffice(project, "scopeInterview", {
-    facts: reconEstimateFacts(project),
+    facts: isEst ? reconEstimateFacts(project) : invoiceFacts(project),
     narration,
     answers: Array.isArray(answers) ? answers : [],
-    mode: "reconEstimate",
+    mode: isEst ? "reconEstimate" : "invoice",
   });
 }
 export function draftReconEstimate(project, pricingMode, verifiedScope) {
