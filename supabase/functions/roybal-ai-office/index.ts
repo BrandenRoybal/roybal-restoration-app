@@ -395,6 +395,7 @@ async function invoiceDraft(body: Record<string, unknown>) {
   const scopeFraming =
     estimate
       ? "Draft the RECONSTRUCTION ESTIMATE line items — the proposed scope to REBUILD the structure after mitigation (future work, not billing for performed work).\n" +
+        "- VERIFIED SCOPE (HIGHEST PRIORITY): if facts.verifiedScope is present it is the estimator's CONFIRMED scope of work — their spoken narration (facts.verifiedScope.summary / .narration) plus their answers to scope questions (facts.verifiedScope.answers). Build the line items to fulfil it EXACTLY; it OVERRIDES any inference. Use the documented facts below only for quantities and support. If facts.verifiedScope is absent, infer scope from the documented demolition/damage as described next.\n" +
         "- SCOPE = PUT-BACK of the documented demolition/damage (facts.demoNotes, facts.affectedAreas): flood cuts to new drywall; removed flooring to underlayment, flooring, baseboard, paint. Include the full finish chain per assembly (hang, tape, texture, prime, paint).\n" +
         "- QUANTITIES from facts.planDimensions (tech-verified SF/LF) — cite the room's dimensions in the basis; where missing, derive conservatively and say so.\n" +
         "- Include trades the damage clearly requires (electrical/plumbing/HVAC disturbed by demo, insulation in opened walls, code items facts.supportingDocs cites).\n" +
@@ -540,6 +541,71 @@ async function invoiceAudit(body: Record<string, unknown>) {
   const priced = await resolvePrices(suggested, jwt, pm);
   (input as Record<string, unknown>).suggestions = priced;
   return { result: input, usage, model: DOC_MODEL, summary: { suggestions: priced.length, mode: pm } };
+}
+
+/* ============================================================
+   Action: scopeInterview — verify reconstruction scope BEFORE drafting.
+   Reads the estimator's spoken scope narration + documented facts + the
+   answers gathered so far, and either asks the SINGLE most important
+   still-open question (with tap options + free text) or declares the scope
+   complete with a consolidated summary. The client loops until done, then
+   the draft prices FROM the verified scope — turning "AI guesses scope" into
+   "AI asks, the estimator confirms, AI prices."
+   ============================================================ */
+const SCOPE_INTERVIEW_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["done", "question", "options", "why", "scopeSummary"],
+  properties: {
+    done: { type: "boolean", description: "true when the scope is determined enough to draft a tight estimate; false while a question still needs answering." },
+    question: { type: "string", description: "The SINGLE most important still-open scope question for the estimator, plain English. Empty string when done=true." },
+    options: { type: "array", items: { type: "string" }, description: "2-4 concrete tap-to-answer options for the question (the client always also offers a free-text answer). Empty when done=true." },
+    why: { type: "string", description: "One short phrase — why this matters to the estimate (e.g. 'drives replace vs reset', 'sets paint extent'). Empty when done." },
+    scopeSummary: { type: "string", description: "When done=true: a tight 2-5 sentence consolidated scope of work reflecting the narration + every answer, ready to seed the estimate's scope summary. Empty until done." },
+  },
+} as const;
+
+async function scopeInterview(body: Record<string, unknown>) {
+  const facts = body.facts;
+  if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  const narration = typeof body.narration === "string" ? body.narration.trim() : "";
+  const answers = Array.isArray(body.answers) ? body.answers as Array<{ question: string; answer: string }> : [];
+  const asked = answers.length;
+  const qaText = answers.length
+    ? answers.map((a, i) => `Q${i + 1}: ${a.question}\nA${i + 1}: ${a.answer}`).join("\n")
+    : "(no questions answered yet)";
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system:
+      "You are a senior reconstruction estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) INTERVIEWING the field tech to pin down " +
+      "the rebuild scope BEFORE anything is priced — eliminating guesswork. Given the documented job facts, the tech's spoken scope narration, and the " +
+      "answers gathered so far, either ask the SINGLE most important still-unresolved scope question, or declare the scope complete. Ask about what most " +
+      "changes the estimate and is NOT already settled by the narration or facts: which rooms/areas are in the rebuild; replace vs detach-&-reset per " +
+      "major item (rule: REPLACE if damaged by the loss OR Cat 3 + porous material, else detach & reset); flooring type and match-existing vs upgrade; " +
+      "drywall extent (flood-cut ~2 ft vs full height); paint extent (full room vs spot/patch); trades disturbed (electrical / plumbing / HVAC / " +
+      "insulation in opened walls); water category (drives the Cat 3 package); and whether a subcontractor is on the job (drives O&P). ONE question at a " +
+      "time, plain English, with 2-4 concrete options the tech can tap (they can also free-type). NEVER ask about something already answered or already " +
+      "clear from the narration/facts. Set done=true as soon as you could write a tight, unambiguous scope, and NEVER exceed 8 questions total (asked so " +
+      "far: " + asked + " — if that is 7+, strongly prefer done). When done, return a consolidated scopeSummary. Call `scope_interview`.",
+    content:
+      "TECH'S SPOKEN SCOPE NARRATION:\n" + (narration || "(none provided yet)") + "\n\n" +
+      "ANSWERS SO FAR:\n" + qaText + "\n\n" +
+      "DOCUMENTED JOB FACTS:\n```json\n" + JSON.stringify(facts, null, 2) + "\n```",
+    toolName: "scope_interview",
+    schema: SCOPE_INTERVIEW_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 1024,
+  });
+  const done = !!(input as { done?: boolean }).done;
+  return {
+    result: {
+      done,
+      question: String((input as { question?: string }).question ?? ""),
+      options: Array.isArray((input as { options?: string[] }).options) ? (input as { options: string[] }).options : [],
+      why: String((input as { why?: string }).why ?? ""),
+      scopeSummary: String((input as { scopeSummary?: string }).scopeSummary ?? ""),
+    },
+    usage, model: DOC_MODEL,
+    summary: { done, asked: asked + 1 },
+  };
 }
 
 /* ============================================================
@@ -1228,7 +1294,7 @@ async function portalDraft(body: Record<string, unknown>) {
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
-  photoAnalysis, invoiceDraft, invoiceAudit, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
+  photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
 };
 
 serve(async (req: Request) => {

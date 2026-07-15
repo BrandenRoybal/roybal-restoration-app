@@ -154,9 +154,24 @@ export function auditInvoice(project, inv, pricingMode) {
 function reconEstimateFacts(project) {
   return { ...rebuildFacts(project), labor: laborSummary(project), photoFindings: photoAiSummary(project) };
 }
-export function draftReconEstimate(project, pricingMode) {
-  return callOffice(project, "invoiceDraft", {
+/* Scope interview — verify rebuild scope BEFORE drafting. One adaptive question
+   at a time; returns { done, question, options, why, scopeSummary }. The client
+   loops (passing the growing answers list) until done, then draftReconEstimate
+   prices FROM the confirmed scope. */
+export function runScopeInterview(project, { narration = "", answers = [] } = {}) {
+  return callOffice(project, "scopeInterview", {
     facts: reconEstimateFacts(project),
+    narration,
+    answers: Array.isArray(answers) ? answers : [],
+    mode: "reconEstimate",
+  });
+}
+export function draftReconEstimate(project, pricingMode, verifiedScope) {
+  const facts = reconEstimateFacts(project);
+  if (verifiedScope && (verifiedScope.summary || verifiedScope.narration || (Array.isArray(verifiedScope.answers) && verifiedScope.answers.length)))
+    facts.verifiedScope = verifiedScope;
+  return callOffice(project, "invoiceDraft", {
+    facts,
     mode: "reconEstimate",
     pricingMode,
   }).then((b) => b.draft);

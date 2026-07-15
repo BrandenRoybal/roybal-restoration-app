@@ -22,8 +22,9 @@ import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchP
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
-import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
+import { dictateBtn } from "./dictate.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
@@ -1361,10 +1362,10 @@ export function invoice(project, inv) {
   }
   if (!inv.billingModel) inv.billingModel = "tm";
   if (!inv.opMode) inv.opMode = "pct";   // "pct" = % of line items | "amount" = fixed $ (e.g. imported Xactimate O&P)
-  // pricingMode toggles how the AI PRICES each line off the Fairbanks price_list:
-  //   "piecework" = Xactimate unit-priced (labor+material in the unit price)
-  //   "tm"        = hourly trade labor (LAB rates) + material/equipment lines
-  if (!inv.pricingMode) inv.pricingMode = isEst ? "piecework" : "tm";
+  // pricingMode is DERIVED from the document kind — no separate toggle (it was
+  // redundant with the billing model). A reconstruction ESTIMATE prices piecework
+  // (Xactimate unit prices); a mitigation INVOICE prices T&M (hourly LAB + materials).
+  inv.pricingMode = isEst ? "piecework" : "tm";
   // GC O&P rule: auto-set 10&10 only when a subcontractor is on the job, else 0.
   // opAuto stays true until the user edits an O&P %; legacy invoices (opAuto
   // undefined) are never auto-touched, so historical O&P is preserved.
@@ -1415,7 +1416,7 @@ export function invoice(project, inv) {
     if (hasItems && !window.confirm("Replace the current line items with an AI draft built from the job documentation?")) return;
     busyBtn(draftBtn, true, "\u2728 Drafting\u2026");
     try {
-      const draft = isEst ? await draftReconEstimate(project, inv.pricingMode) : await draftInvoice(project, inv.pricingMode);
+      const draft = isEst ? await draftReconEstimate(project, inv.pricingMode, inv.scopeInterview) : await draftInvoice(project, inv.pricingMode);
       const lines = Array.isArray(draft.items) ? draft.items : [];
       if (!lines.length) {
         // an empty draft is a signal, not a result \u2014 never wipe the current items
@@ -1601,8 +1602,78 @@ export function invoice(project, inv) {
     busyBtn(qboBtn, false, inv.qboInvoiceId ? "\u2b06\ufe0f Update in QuickBooks" : "\u2b06\ufe0f Push to QuickBooks");
   });
 
+  /* ---- AI: Verify Scope (reconstruction estimates) — voice-narrate the rebuild
+     scope, then answer a few adaptive questions so the draft prices from a
+     CONFIRMED scope instead of guessing. Loops one question at a time. ---- */
+  const scopeBtn = h("button", { type: "button", class: "btn btn--sm" }, "🎙️ Verify scope");
+  function renderScopeStart(seedNarration) {
+    const prior = inv.scopeInterview || {};
+    const narrTa = h("textarea", {
+      class: "app-only", rows: "4",
+      placeholder: "Describe what needs to be rebuilt — talk or type. E.g. “Master bath: new LVP throughout, replace the vanity (particleboard, Cat 3), reset the toilet, drywall the flood cut, repaint the whole room…”",
+      style: "flex:1;min-width:0;font-size:13px",
+    });
+    narrTa.value = (typeof seedNarration === "string" && seedNarration) || prior.narration || String(inv.lossSummary || "");
+    const mic = dictateBtn(project, (t) => { narrTa.value = (narrTa.value ? narrTa.value.trim() + " " : "") + t; }, { title: "Dictate the scope of work" });
+    const go = h("button", { type: "button", class: "btn btn--sm", style: "margin-top:8px" }, "Start questions →");
+    go.addEventListener("click", () => runInterview(narrTa.value.trim(), []));
+    aiPanel.replaceChildren(h("div", { class: "app-only", style: "border:1px dashed #b9c4d4;border-radius:10px;padding:10px 12px;margin:0 0 10px;background:#f7f9fc" },
+      h("strong", { style: "font-size:13px" }, "🎙️ Verify scope of work"),
+      h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 6px" }, "Talk through the rebuild in your own words, then answer a few questions. The draft prices from your confirmed scope."),
+      h("div", { style: "display:flex;gap:8px;align-items:flex-start" }, narrTa, mic),
+      go));
+  }
+  async function runInterview(narration, answers) {
+    if (!aiAvailable()) return;
+    aiPanel.replaceChildren(h("p", { class: "subtle app-only", style: "font-size:12px" }, "🎙️ Working out the next question…"));
+    let res;
+    try { res = await runScopeInterview(project, { narration, answers }); }
+    catch (e) { return renderScopeError(narration, answers, e && e.message ? e.message : String(e)); }
+    if (res.done) return renderScopeDone(narration, answers, String(res.scopeSummary || ""));
+    renderScopeQuestion(narration, answers, res);
+  }
+  function renderScopeError(narration, answers, msg) {
+    // A mid-interview failure (flaky signal, 500, spend cap) must NOT discard the
+    // narration + answers already gathered — retry the SAME step, keeping them.
+    aiPanel.replaceChildren(h("div", { class: "app-only", style: "border:1px solid #e6c9c9;border-radius:10px;padding:10px 12px;margin:0 0 10px;background:#fdf5f5" },
+      h("strong", { style: "font-size:13px;color:#b3261e" }, "Scope interview hit a snag"),
+      h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 6px" },
+        (msg || "Couldn't reach the AI.") + " Your narration and " + answers.length + " answer" + (answers.length === 1 ? "" : "s") + " are safe — retry the last step."),
+      h("button", { type: "button", class: "btn btn--sm", onclick: () => runInterview(narration, answers) }, "Retry →"),
+      h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "margin-left:6px", onclick: () => renderScopeStart(narration) }, "Back to scope")));
+  }
+  function renderScopeQuestion(narration, answers, q) {
+    const answer = (val) => { const a = String(val || "").trim(); if (a) runInterview(narration, [...answers, { question: q.question, answer: a }]); };
+    const free = h("input", { type: "text", placeholder: "…or type your own answer", style: "flex:1;min-width:0;font-size:13px",
+      onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); answer(free.value); } } });
+    const mic = dictateBtn(project, (t) => { free.value = (free.value ? free.value.trim() + " " : "") + t; }, { title: "Dictate your answer" });
+    const opts = (Array.isArray(q.options) ? q.options : []).map((o) =>
+      h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "margin:3px 4px 0 0", onclick: () => answer(o) }, o));
+    aiPanel.replaceChildren(h("div", { class: "app-only", style: "border:1px dashed #b9c4d4;border-radius:10px;padding:10px 12px;margin:0 0 10px;background:#f7f9fc" },
+      h("div", { class: "subtle", style: "font-size:11px" }, "Question " + (answers.length + 1) + (q.why ? " · " + q.why : "")),
+      h("div", { style: "font-size:14px;font-weight:600;color:#2b3a4d;margin:2px 0 6px" }, q.question || ""),
+      h("div", {}, ...opts),
+      h("div", { style: "display:flex;gap:8px;align-items:center;margin-top:6px" }, free, mic,
+        h("button", { type: "button", class: "btn btn--sm", onclick: () => answer(free.value) }, "Answer →")),
+      h("div", { style: "margin-top:6px" },
+        h("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => runInterview(narration, [...answers, { question: q.question, answer: "(not sure / skip)" }]) }, "Skip"),
+        h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "margin-left:6px", onclick: () => renderScopeDone(narration, answers, "") }, "That's enough — draft now"))));
+  }
+  function renderScopeDone(narration, answers, summary) {
+    inv.scopeInterview = { narration, answers, summary, at: new Date().toISOString() };
+    if (summary) { inv.lossSummary = summary; lossTa.value = summary; lossTa.autoGrow(); }
+    commit();
+    aiPanel.replaceChildren(h("div", { class: "app-only", style: "border:1px solid #cfe3d0;border-radius:10px;padding:10px 12px;margin:0 0 10px;background:#f3f9f4" },
+      h("strong", { style: "font-size:13px;color:#2e7d32" }, "✓ Scope confirmed"),
+      summary ? h("div", { style: "font-size:12px;color:#3a4b3c;margin-top:4px" }, summary) : null,
+      h("div", { class: "subtle", style: "font-size:11px;margin-top:6px" }, "Now tap “Draft rebuild estimate” — it prices from this confirmed scope."),
+      h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "margin-top:6px", onclick: renderScopeStart }, "Edit scope again")));
+    toast("Scope confirmed — the draft will use it.");
+  }
+  scopeBtn.addEventListener("click", () => { if (aiAvailable()) renderScopeStart(); });
+
   const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" },
-    ...(isEst ? [draftBtn, importBtn, auditBtn] : [draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);
+    ...(isEst ? [scopeBtn, draftBtn, importBtn, auditBtn] : [draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);
 
   /* ---- supporting documents: receipts, sub invoices, dump tickets…
      Attached PDFs/photos become full pages after the invoice when printed. ---- */
@@ -1730,16 +1801,8 @@ export function invoice(project, inv) {
   ], { onchange: () => { paintMode(); recalc(); } });
   paintMode();
 
-  // Pricing mode — how the AI draft/audit prices each line off the Fairbanks
-  // price_list. Independent of the billing-model (totals) toggle above.
-  const pmSeg = seg(inv, "pricingMode", [
-    { value: "piecework", label: "Piecework (unit price)" },
-    { value: "tm", label: "Time & Materials (hourly labor)" },
-  ]);
-  const pmRow = h("div", { class: "app-only" },
-    field("Pricing mode", pmSeg),
-    h("div", { class: "subtle", style: "font-size:11px;margin:-4px 0 4px" },
-      "Piecework = Xactimate unit prices (labor + material in each line). Time & Materials = crew hours at trade labor rates + separate material/equipment lines. Both price off the Fairbanks list."));
+  // (Pricing mode has no toggle — it's derived from the document kind above:
+  //  estimate = piecework, invoice = T&M. Removed the redundant control.)
 
   const invoiceSheet = sheet(
     isEst ? "RECONSTRUCTION ESTIMATE" : "CONSTRUCTION INVOICE",
@@ -1759,7 +1822,6 @@ export function invoice(project, inv) {
     field(isEst ? "Damage Description / Rebuild Scope Summary" : "Loss Description / Scope Summary", lossTa),
     sectionTitle(isEst ? "Estimated Scope of Repairs" : "Charges"),
     isEst ? null : h("div", { class: "app-only" }, field("Billing model", modeSeg)),
-    pmRow,
     aiBar,
     aiPanel,
     itemsWrap,
