@@ -338,7 +338,8 @@ export function newInvoice() {
     billingModel: "tm",                   // "tm" (hourly + materials) | "contract" (set amount)
     contractAmount: "",                   // the agreed figure when billingModel = contract
     opMode: "pct",                        // "pct" = O&P as % of line items | "amount" = fixed $ (imported Xactimate O&P)
-    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P (% mode)
+    opAuto: true,                         // GC O&P rule: auto-set 10&10 only when a sub is on the job, else 0 — turns false once the user edits an O&P %
+    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P (% mode) — overwritten on open while opAuto is true
     overheadAmount: "", profitAmount: "", // fixed O&P dollars (amount mode)
     deductible: "", previousPayments: "", taxRate: "",
     notes: "",

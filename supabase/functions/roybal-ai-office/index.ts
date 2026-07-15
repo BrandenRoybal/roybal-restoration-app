@@ -411,8 +411,22 @@ async function invoiceDraft(body: Record<string, unknown>) {
     "- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit it.\n" +
     "- Descriptions are plain English as Xactimate reads — never include catalog code abbreviations, never repeat the room name in the description.\n" +
     "- lossSummary: 2-3 sentences. No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n";
+  // Roybal company estimating standards — the "what to include" judgment distilled
+  // from Branden's past estimates (see docs/Estimating_Rules_Draft.md).
+  const inclusionUniversal =
+    "ROYBAL INCLUSION RULES (company estimating standards — apply within the scope above):\n" +
+    "- DETACH & RESET vs REMOVE & REPLACE: REPLACE (remove + install new) when an item is DAMAGED by the loss, OR the loss is Category 3 (facts.job.waterCategory = '3') AND the item is a POROUS material (plywood, particleboard, MDF, fiberboard). Otherwise an undamaged item detached only to dry the assembly behind it is DETACH & RESET. Apply to vanities, cabinets, toilets, trim, doors.\n" +
+    "- LABOR MINIMUMS: never auto-add a trade labor minimum to pad a small quantity — carriers flag and cut them. At most note in lossSummary that one may apply; do not insert the line.\n";
+  const inclusionMitigation =
+    "- CATEGORY 3 PACKAGE: when facts.job.waterCategory is '3' (black / contaminated water), ALWAYS bill EVERY one of — containment barrier, negative-air / HEPA air scrubber (per 24 hr × days), floor protection over unaffected paths, HEPA vacuuming of affected surfaces, antimicrobial application, and PPE CONSUMABLES billed as equipment replacement (Tyvek / Type-X suits, HEPA / P100 respirator cartridges, gloves, boot covers). Never omit any of these on a Cat 3 job.\n" +
+    "- HEPA FILTER REPLACEMENT: with any HEPA / negative-air scrubber on the job, add a filter-replacement line, qty = (# scrubbers) × (1.0 on Cat 3 or mold — filter contaminated, must be discarded; else 0.5 — proportional filter life). State the reason in the basis.\n" +
+    "- DRYING EQUIPMENT — DO NOT GUESS QUANTITIES: bill from facts.equipmentSizing.recommended (IICRC S500 worksheet counts already computed on site: airMoversLow/High, dehumidifiers, dehuType, airScrubbers, auxiliaryHeat) × the DEPLOYED unit-days in facts.equipment (unitDays) — fallback facts.drying.days. Air movers & dehumidifiers bill per-24-hr period × unit-days. Dehumidifiers are LGR RENTALS in 70 / 110 / 130 PPD sizes. If facts.equipmentSizing is null, size conservatively and say so in the basis.\n";
+  const inclusionRestoration =
+    "- PUT-BACK COMPLETENESS: every tear-out / flood cut / removal in facts.demoNotes and facts.affectedAreas needs its FULL rebuild — removed flooring → floor prep + flooring + transitions; drywall → hang, tape, texture, prime, two coats paint; baseboard / trim / paneling → reinstall; detached fixtures → reset or replace per the rule above. Leave no demo line without its put-back.\n" +
+    "- FINISH CHAIN: any new or patched drywall → mask & prep → PVA primer (one coat) → paint (two coats); any flooring install → a floor-prep line first. Always include a final construction cleaning line and floor / surface protection.\n";
+  const inclusionRules = inclusionUniversal + (estimate ? inclusionRestoration : inclusionMitigation);
   const content =
-    scopeFraming + "\n" + pricingRules + hourRule + commonRules + "\n" +
+    scopeFraming + "\n" + pricingRules + hourRule + commonRules + "\n" + inclusionRules + "\n" +
     "PRICE CATALOG (tag each line with a CATEGORY + CODE from here — Fairbanks Xactimate):\n" + catText + "\n\n" +
     "DOCUMENTED FACTS (use ONLY these):\n```json\n" + JSON.stringify(facts, null, 2) + "\n```";
 
@@ -496,6 +510,10 @@ async function invoiceAudit(body: Record<string, unknown>) {
       : (pm === "tm"
           ? "MOST IMPORTANT CHECK — hour reconciliation: compare total HR billed across the current hourly lines to facts.labor.totalHours; if logged hours are unbilled, suggest labor line(s) at the appropriate trade rate that bill the gap, describing the work from the labor entries' notes. Unbilled logged hours are lost revenue. Also flag missing equipment-rental days, materials and pass-throughs — including facts.receipts not yet billed.\n"
           : "MOST IMPORTANT CHECK: flag documented scope, equipment days, materials and pass-throughs the facts support but the current lines omit — including facts.receipts not yet billed.\n");
+  // Roybal inclusion checklist — mirror of the drafter's rules (docs/Estimating_Rules_Draft.md)
+  const inclusionCheck = estimate
+    ? "ROYBAL INCLUSION CHECKS — also flag when missing: any tear-out in facts.demoNotes without its put-back (floor prep + flooring + transitions; drywall hang / tape / texture / prime / two-coat paint; baseboard / trim reinstall); missing final construction cleaning; missing mask-&-prep or PVA primer before paint. Do NOT suggest trade labor minimums (carriers cut them).\n"
+    : "ROYBAL INCLUSION CHECKS — also flag when missing: on Cat 3 (facts.job.waterCategory '3') any of containment barrier, negative-air / HEPA scrubber, floor protection, HEPA vacuuming, antimicrobial, PPE consumables (Tyvek suits, HEPA / P100 cartridges, gloves, boot covers), or the HEPA filter replacement; drying-equipment days that don't match facts.equipmentSizing.recommended × facts.equipment unit-days. Do NOT suggest trade labor minimums (carriers cut them).\n";
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
     system: estimate
@@ -510,7 +528,7 @@ async function invoiceAudit(body: Record<string, unknown>) {
       "Audit this " + (estimate ? "reconstruction estimate against the documented damage and list missed rebuild scope" : "invoice against the documented job facts and list missed billable items") + ".\n\n" +
       "CURRENT LINE ITEMS:\n" + itemsText + "\n\n" +
       modeRule + codeRule + "Do not duplicate or re-price items already present.\n" +
-      focus +
+      focus + inclusionCheck +
       "No overhead/profit/tax lines. Prices in DOLLARS.\n\n" +
       "PRICE CATALOG (tag each suggestion with a CATEGORY + CODE — Fairbanks Xactimate):\n" + catText + "\n\n" +
       "DOCUMENTED FACTS:\n```json\n" + JSON.stringify(facts, null, 2) + "\n```",
