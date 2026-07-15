@@ -300,7 +300,7 @@ type CatalogRow = {
 type PricingMode = "piecework" | "tm";
 // Categories offered to the model per mode (kept scoped so the prompt stays lean).
 const RECON_CATS = ["DRY", "PNT", "INS", "FNC", "FRM", "ACT", "APP"]; // reconstruction put-back trades
-const TM_CATS = ["LAB", "WTR", "DRY", "INS", "APP"];                   // trade labor + water/equipment + common material lines
+const TM_CATS = ["LAB"];                                               // T&M prices labor from the sheet's LAB rates; materials are ESTIMATED, not piecework
 const catsForMode = (mode: PricingMode) => (mode === "piecework" ? RECON_CATS : TM_CATS);
 
 async function fetchCatalogRows(jwt: string, categories: string[]): Promise<CatalogRow[]> {
@@ -318,11 +318,11 @@ const money = (n: number | null) => (n == null ? "—" : `$${Number(n).toFixed(2
 /** Compact catalog block for the prompt: CATEGORY CODE | description | unit | prices. */
 function catalogTextFromRows(rows: CatalogRow[], mode: PricingMode): string {
   if (mode === "tm") {
+    // T&M uses ONLY these hourly labor rates from the sheet. Materials are estimated
+    // by the model (no piecework unit prices), so no material catalog is sent.
     const labor = rows.filter((r) => r.category === "LAB" && r.unit === "HR" && (r.replace_price ?? 0) > 0);
-    const other = rows.filter((r) => r.category !== "LAB" && (r.replace_price ?? 0) > 0);
-    const laborTxt = labor.map((r) => `${r.code} | ${r.description} | HR | ${money(r.replace_price)}`).join("\n");
-    const otherTxt = other.map((r) => `${r.category} ${r.code} | ${r.description} | ${r.unit} | ${money(r.replace_price)}`).join("\n");
-    return `LABOR RATES (category LAB — bill hours × this rate):\n${laborTxt}\n\nMATERIALS / EQUIPMENT / PASS-THROUGH (price per unit):\n${otherTxt}`;
+    const laborTxt = labor.map((r) => `LAB ${r.code} | ${r.description} | HR | ${money(r.replace_price)}`).join("\n");
+    return `LABOR RATES — category LAB, billed HOURS × rate (the ONLY catalog prices in T&M):\n${laborTxt}`;
   }
   // piecework: drop $0 placeholders (Bid/Agreed) and material-only sheet rows (SH)
   const usable = rows.filter((r) => (r.replace_price ?? 0) > 0 || (r.remove_price ?? 0) > 0);
@@ -344,14 +344,21 @@ async function resolvePrices(items: DraftLine[], jwt: string, mode: PricingMode)
   const rows = cats.length ? await fetchCatalogRows(jwt, cats) : [];
   const byKey = new Map(rows.map((r) => [`${r.category}::${r.code}`, r] as const));
   return list.map((it) => {
+    const { priceBasis: basis, ...rest } = it;
     const row = it.category && it.code ? byKey.get(`${it.category}::${it.code}`) : undefined;
-    if (!row) { const { priceBasis: _pb, ...rest } = it; return { ...rest, priced: "estimate" }; }
-    const basis = it.priceBasis;
+    if (!row) return { ...rest, priced: "estimate" };
+    // GUARDRAIL: an hourly LAB rate may ONLY bill an HR line. If the model tags a
+    // line priceBasis='labor' but leaves an area/count unit (SF/LF/EA), applying the
+    // hourly rate would multiply it by the AREA (e.g. $81.27/hr × 508 SF = $41k for a
+    // 3-hour tear-out). Refuse to price it and flag for manual crew-hours instead.
+    if (basis === "labor" && String(it.unit || "").toUpperCase() !== "HR") {
+      return { ...rest, price: undefined, code: row.code, priced: "flag",
+        priceFlag: `${row.code} is an hourly labor rate (${money(row.replace_price)}/HR) — bill this as HR × crew-hours, not per ${it.unit || "unit"}` };
+    }
     const col = basis === "remove" ? row.remove_price
       : basis === "detach_reset" ? row.detach_reset_price
       : row.replace_price; // "replace" | "labor" both live in replace_price
-    if (col == null || col <= 0) { const { priceBasis: _pb, ...rest } = it; return { ...rest, priced: "estimate" }; }
-    const { priceBasis: _pb, ...rest } = it;
+    if (col == null || col <= 0) return { ...rest, priced: "estimate" };
     return { ...rest, price: col, code: row.code, catalogDesc: row.description, unit: it.unit || row.unit || "", priced: "catalog" };
   });
 }
@@ -378,10 +385,13 @@ async function invoiceDraft(body: Record<string, unknown>) {
       ? "PRICING MODE — PIECEWORK (Xactimate unit-priced): each line's unit price carries BOTH labor and material.\n" +
         "- priceBasis: 'replace' for install / put-back, 'remove' for tear-out / demo, 'detach_reset' for detach & reset. The catalog lists replace / tear-out / D&R prices per row.\n" +
         codeRule
-      : "PRICING MODE — TIME & MATERIALS: labor bills HOURLY at the trade's rate; materials, equipment and pass-throughs price per unit. Labor is NEVER baked into a unit price.\n" +
-        "- LABOR lines: category='LAB', code = the trade that did the work (DMO demolition, CLN-R remediation cleaning, CLN cleaning, LBR general laborer, DRY drywall, PNT painter, INS insulation, FLR flooring, CARPFRM framer, CARPFNC finish carpenter, ELE electrician, PLM plumber, EQU equipment operator), priceBasis='labor', unit='HR', qty=hours. Match the WORK to the trade: tear-out to DMO, water extraction/cleanup to CLN-R, general help to LBR.\n" +
-        "- MATERIALS / EQUIPMENT / PASS-THROUGH lines: pick the catalog row (category+code), priceBasis='replace', qty=units (equipment: units × days).\n" +
-        codeRule;
+      : "PRICING MODE — TIME & MATERIALS: this bills LABOR HOURLY at the sheet's trade rates and MATERIALS at your ESTIMATED cost. It does NOT use Xactimate piecework unit prices — the only catalog prices are the LABOR RATES.\n" +
+        "- LABOR lines: category='LAB', code = the trade doing the work (DMO demolition, CLN-R remediation cleaning, CLN cleaning, LBR general laborer, DRY drywall, PNT painter, INS insulation, FLR flooring, CARPFRM framer, CARPFNC finish carpenter, ELE electrician, PLM plumber, EQU equipment operator, SUPERR residential supervision), priceBasis='labor', unit MUST be 'HR', qty = ESTIMATED CREW-HOURS.\n" +
+        "  · NEVER put an area/count (SF/LF/EA) on a labor line — convert the task to hours. E.g. tear out ~500 SF drywall ceiling ≈ 3-4 crew-hours (NOT qty 500); hang/finish ~500 SF drywall ≈ 16-20 hrs. A labor line with a non-HR unit is a hard error.\n" +
+        "  · The sheet's LAB rate is stamped automatically — put the trade code and the hours; leave price 0.\n" +
+        "- MATERIAL lines: category='' code='' priceBasis='estimate'. Estimate a fair MATERIAL-ONLY cost per unit (drywall board, mud/tape, insulation, paint, primer, trim, fasteners, poly) — unit = SF/LF/EA, qty = the material quantity. Materials-only, NO labor baked in (labor is the HR lines). These stay flagged for the office to true-up against receipts.\n" +
+        "- Equipment / consumables / pass-through (dehumidifier & air-mover days, dumpster/haul, PPE) also go as priceBasis='estimate' at a fair cost.\n" +
+        "- Do NOT emit a single per-SF assembly price that covers labor + material — that double-bills labor. Split every assembly into LABOR (hours) + MATERIAL (estimate).\n";
   const scopeFraming =
     estimate
       ? "Draft the RECONSTRUCTION ESTIMATE line items — the proposed scope to REBUILD the structure after mitigation (future work, not billing for performed work).\n" +
@@ -401,8 +411,22 @@ async function invoiceDraft(body: Record<string, unknown>) {
     "- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit it.\n" +
     "- Descriptions are plain English as Xactimate reads — never include catalog code abbreviations, never repeat the room name in the description.\n" +
     "- lossSummary: 2-3 sentences. No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n";
+  // Roybal company estimating standards — the "what to include" judgment distilled
+  // from Branden's past estimates (see docs/Estimating_Rules_Draft.md).
+  const inclusionUniversal =
+    "ROYBAL INCLUSION RULES (company estimating standards — apply within the scope above):\n" +
+    "- DETACH & RESET vs REMOVE & REPLACE: REPLACE (remove + install new) when an item is DAMAGED by the loss, OR the loss is Category 3 (facts.job.waterCategory = '3') AND the item is a POROUS material (plywood, particleboard, MDF, fiberboard). Otherwise an undamaged item detached only to dry the assembly behind it is DETACH & RESET. Apply to vanities, cabinets, toilets, trim, doors.\n" +
+    "- LABOR MINIMUMS: never auto-add a trade labor minimum to pad a small quantity — carriers flag and cut them. At most note in lossSummary that one may apply; do not insert the line.\n";
+  const inclusionMitigation =
+    "- CATEGORY 3 PACKAGE: when facts.job.waterCategory is '3' (black / contaminated water), ALWAYS bill EVERY one of — containment barrier, negative-air / HEPA air scrubber (per 24 hr × days), floor protection over unaffected paths, HEPA vacuuming of affected surfaces, antimicrobial application, and PPE CONSUMABLES billed as equipment replacement (Tyvek / Type-X suits, HEPA / P100 respirator cartridges, gloves, boot covers). Never omit any of these on a Cat 3 job.\n" +
+    "- HEPA FILTER REPLACEMENT: with any HEPA / negative-air scrubber on the job, add a filter-replacement line, qty = (# scrubbers) × (1.0 on Cat 3 or mold — filter contaminated, must be discarded; else 0.5 — proportional filter life). State the reason in the basis.\n" +
+    "- DRYING EQUIPMENT — DO NOT GUESS QUANTITIES: bill from facts.equipmentSizing.recommended (IICRC S500 worksheet counts already computed on site: airMoversLow/High, dehumidifiers, dehuType, airScrubbers, auxiliaryHeat) × the DEPLOYED unit-days in facts.equipment (unitDays) — fallback facts.drying.days. Air movers & dehumidifiers bill per-24-hr period × unit-days. Dehumidifiers are LGR RENTALS in 70 / 110 / 130 PPD sizes. If facts.equipmentSizing is null, size conservatively and say so in the basis.\n";
+  const inclusionRestoration =
+    "- PUT-BACK COMPLETENESS: every tear-out / flood cut / removal in facts.demoNotes and facts.affectedAreas needs its FULL rebuild — removed flooring → floor prep + flooring + transitions; drywall → hang, tape, texture, prime, two coats paint; baseboard / trim / paneling → reinstall; detached fixtures → reset or replace per the rule above. Leave no demo line without its put-back.\n" +
+    "- FINISH CHAIN: any new or patched drywall → mask & prep → PVA primer (one coat) → paint (two coats); any flooring install → a floor-prep line first. Always include a final construction cleaning line and floor / surface protection.\n";
+  const inclusionRules = inclusionUniversal + (estimate ? inclusionRestoration : inclusionMitigation);
   const content =
-    scopeFraming + "\n" + pricingRules + hourRule + commonRules + "\n" +
+    scopeFraming + "\n" + pricingRules + hourRule + commonRules + "\n" + inclusionRules + "\n" +
     "PRICE CATALOG (tag each line with a CATEGORY + CODE from here — Fairbanks Xactimate):\n" + catText + "\n\n" +
     "DOCUMENTED FACTS (use ONLY these):\n```json\n" + JSON.stringify(facts, null, 2) + "\n```";
 
@@ -479,13 +503,17 @@ async function invoiceAudit(body: Record<string, unknown>) {
   const modeRule =
     pm === "piecework"
       ? "PRICING MODE — PIECEWORK: unit-priced lines (labor+material inside the unit price); priceBasis 'replace' for put-back, 'remove' for demo, 'detach_reset' for D&R. Never hourly T&M.\n"
-      : "PRICING MODE — TIME & MATERIALS: labor bills hourly at the trade LAB rate (category='LAB', code=the trade, priceBasis='labor', unit='HR'); materials/equipment/pass-throughs per unit (priceBasis='replace'). Labor is never baked into a unit price.\n";
+      : "PRICING MODE — TIME & MATERIALS: labor bills HOURLY at the sheet's LAB rate — category='LAB', code=the trade, priceBasis='labor', unit MUST be 'HR', qty=crew-hours (NEVER an area on a labor line). Materials are ESTIMATED: category='' code='' priceBasis='estimate', material-only cost per unit, no labor baked in. No Xactimate piecework unit prices. Do not double-bill labor (a piecework assembly line PLUS labor hours for the same work).\n";
   const focus =
     estimate
       ? "MOST IMPORTANT CHECK — demo put-back reconciliation: walk facts.demoNotes and facts.affectedAreas; every flood cut, tear-out and removed finish must have corresponding rebuild lines (the finish chain: hang, tape, texture, prime, paint; underlayment, install, transitions). Also check trades disturbed by demo (electrical/plumbing/HVAC/insulation), code items facts.supportingDocs cites, and job-wide lines (debris, floor protection, final clean, permits). Quantities from facts.planDimensions where available.\n"
       : (pm === "tm"
           ? "MOST IMPORTANT CHECK — hour reconciliation: compare total HR billed across the current hourly lines to facts.labor.totalHours; if logged hours are unbilled, suggest labor line(s) at the appropriate trade rate that bill the gap, describing the work from the labor entries' notes. Unbilled logged hours are lost revenue. Also flag missing equipment-rental days, materials and pass-throughs — including facts.receipts not yet billed.\n"
           : "MOST IMPORTANT CHECK: flag documented scope, equipment days, materials and pass-throughs the facts support but the current lines omit — including facts.receipts not yet billed.\n");
+  // Roybal inclusion checklist — mirror of the drafter's rules (docs/Estimating_Rules_Draft.md)
+  const inclusionCheck = estimate
+    ? "ROYBAL INCLUSION CHECKS — also flag when missing: any tear-out in facts.demoNotes without its put-back (floor prep + flooring + transitions; drywall hang / tape / texture / prime / two-coat paint; baseboard / trim reinstall); missing final construction cleaning; missing mask-&-prep or PVA primer before paint. Do NOT suggest trade labor minimums (carriers cut them).\n"
+    : "ROYBAL INCLUSION CHECKS — also flag when missing: on Cat 3 (facts.job.waterCategory '3') any of containment barrier, negative-air / HEPA scrubber, floor protection, HEPA vacuuming, antimicrobial, PPE consumables (Tyvek suits, HEPA / P100 cartridges, gloves, boot covers), or the HEPA filter replacement; drying-equipment days that don't match facts.equipmentSizing.recommended × facts.equipment unit-days. Do NOT suggest trade labor minimums (carriers cut them).\n";
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
     system: estimate
@@ -500,7 +528,7 @@ async function invoiceAudit(body: Record<string, unknown>) {
       "Audit this " + (estimate ? "reconstruction estimate against the documented damage and list missed rebuild scope" : "invoice against the documented job facts and list missed billable items") + ".\n\n" +
       "CURRENT LINE ITEMS:\n" + itemsText + "\n\n" +
       modeRule + codeRule + "Do not duplicate or re-price items already present.\n" +
-      focus +
+      focus + inclusionCheck +
       "No overhead/profit/tax lines. Prices in DOLLARS.\n\n" +
       "PRICE CATALOG (tag each suggestion with a CATEGORY + CODE — Fairbanks Xactimate):\n" + catText + "\n\n" +
       "DOCUMENTED FACTS:\n```json\n" + JSON.stringify(facts, null, 2) + "\n```",

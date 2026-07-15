@@ -1302,6 +1302,25 @@ function invoiceCharges(inv, onTotals) {
     addSection);
 }
 
+/* GC Overhead & Profit rule (docs/Estimating_Rules_Draft.md §1.2): Roybal bills
+   10 & 10 O&P only when acting as GENERAL CONTRACTOR over a subcontractor. Detect a
+   sub on the job from any attached "Subcontractor invoice" across the job's invoices,
+   estimates and supporting docs. */
+function jobHasSubcontractor(project) {
+  const p = project || {};
+  for (const k of ["invoices", "reconEstimates"]) {
+    for (const doc of Array.isArray(p[k]) ? p[k] : []) {
+      for (const att of Array.isArray(doc.attachments) ? doc.attachments : []) {
+        if (att && att.ai && att.ai.docType === "Subcontractor invoice") return true;
+      }
+    }
+  }
+  for (const d of Array.isArray(p.supportDocs) ? p.supportDocs : []) {
+    if (d && (d.docType === "Subcontractor invoice" || (d.ai && d.ai.docType === "Subcontractor invoice"))) return true;
+  }
+  return false;
+}
+
 export function invoice(project, inv) {
   /* kind:"estimate" → the same editor renders a RECONSTRUCTION ESTIMATE:
      proposed rebuild scope priced line-by-line + O&P, drafted by the AI from
@@ -1346,6 +1365,14 @@ export function invoice(project, inv) {
   //   "piecework" = Xactimate unit-priced (labor+material in the unit price)
   //   "tm"        = hourly trade labor (LAB rates) + material/equipment lines
   if (!inv.pricingMode) inv.pricingMode = isEst ? "piecework" : "tm";
+  // GC O&P rule: auto-set 10&10 only when a subcontractor is on the job, else 0.
+  // opAuto stays true until the user edits an O&P %; legacy invoices (opAuto
+  // undefined) are never auto-touched, so historical O&P is preserved.
+  const subOnJob = jobHasSubcontractor(project);
+  if (inv.opAuto === true && inv.opMode === "pct") {
+    inv.overheadPct = subOnJob ? "10" : "0";
+    inv.profitPct = subOnJob ? "10" : "0";
+  }
   const isContract = () => inv.billingModel === "contract";
   const isOpAmount = () => inv.opMode === "amount";
   function recalc(sub) {
@@ -1403,20 +1430,24 @@ export function invoice(project, inv) {
       inv.items = lines.map((li) => ({
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
-        code: li.code || "", priced: li.priced || "",   // pricing provenance (Fairbanks code / estimate)
+        code: li.code || "", priced: li.priced || "", flag: li.priceFlag || "",   // pricing provenance + any guardrail flag
       }));
       commit(); paintItems();
       const fromCatalog = lines.filter((li) => li.priced === "catalog").length;
+      const flagged = lines.filter((li) => li.priced === "flag").length;
       aiPanel.replaceChildren(
         h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc;font-size:12px" },
           h("strong", {}, "\u2728 Draft basis \u2014 review every line before sending:"),
           h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 4px" },
-            `${fromCatalog} of ${lines.length} line${lines.length !== 1 ? "s" : ""} priced from the Fairbanks list; the rest are estimates \u2014 verify those.`),
+            `${fromCatalog} of ${lines.length} line${lines.length !== 1 ? "s" : ""} priced from the Fairbanks list; the rest are estimates \u2014 verify those.`
+            + (flagged ? ` \u26a0\ufe0f ${flagged} need${flagged !== 1 ? "" : "s"} attention (blank price).` : "")),
           ...lines.map((li) => h("div", { style: "margin-top:4px;color:#5a6b7f" },
             h("strong", { style: "color:#2b3a4d" }, li.desc || ""),
             li.priced === "catalog"
               ? h("span", { style: "color:#1f9d55" }, ` \u00b7 Fairbanks ${li.code || ""}`)
-              : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
+              : li.priced === "flag"
+                ? h("span", { style: "color:#c0392b" }, " \u00b7 \u26a0\ufe0f " + (li.priceFlag || "needs manual price"))
+                : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
             li.basis ? " \u2014 " + li.basis : ""))));
       toast((isEst ? "Estimate" : "Invoice") + " draft ready \u2014 every line is editable.");
     } catch (e) {
@@ -1650,12 +1681,12 @@ export function invoice(project, inv) {
   const trow = (label, right, cls) => h("div", { class: "trow" + (cls ? " " + cls : "") }, h("span", {}, label), right);
   const subRow = trow("Line Item Total", subEl);
   const contractRow = trow("Contract Amount", inp(inv, "contractAmount", { type: "number", oninput: () => recalc() }));
-  const ohPctRow = trow("Overhead %", inp(inv, "overheadPct", { type: "number", oninput: () => recalc() }));
+  const ohPctRow = trow("Overhead %", inp(inv, "overheadPct", { type: "number", oninput: () => { inv.opAuto = false; paintMode(); recalc(); } }));
   // the Overhead/Profit value cell swaps between the computed figure (% mode)
   // and an editable dollar input (amount mode — e.g. imported Xactimate O&P)
   const ohAmtInput = inp(inv, "overheadAmount", { type: "number", oninput: () => recalc() });
   const ohRow = trow("Overhead", h("span", {}, ohEl, ohAmtInput));
-  const pfPctRow = trow("Profit %", inp(inv, "profitPct", { type: "number", oninput: () => recalc() }));
+  const pfPctRow = trow("Profit %", inp(inv, "profitPct", { type: "number", oninput: () => { inv.opAuto = false; paintMode(); recalc(); } }));
   const pfAmtInput = inp(inv, "profitAmount", { type: "number", oninput: () => recalc() });
   const pfRow = trow("Profit", h("span", {}, pfEl, pfAmtInput));
   const rcvLabel = h("span", {}, "Replacement Cost Value");
@@ -1667,8 +1698,12 @@ export function invoice(project, inv) {
     { value: "amount", label: "Fixed $ (from estimate)" },
   ], { onchange: () => { paintMode(); recalc(); } });
   const opModeRow = h("div", { class: "trow app-only" }, h("span", {}, "Overhead & Profit"), opModeSeg);
+  const opAutoNote = h("div", { class: "subtle app-only", style: "font-size:12px;margin:-2px 0 6px" },
+    subOnJob
+      ? "O&P auto-set to 10 & 10 — subcontractor invoice detected on this job (GC coordination). Edit % to override."
+      : "O&P auto-set to 0 — self-performed, no subcontractor detected. Edit % to override.");
   const totalsBox = h("div", { class: "totals" },
-    subRow, contractRow, opModeRow, ohPctRow, ohRow, pfPctRow, pfRow, rcvRow,
+    subRow, contractRow, opModeRow, opAutoNote, ohPctRow, ohRow, pfPctRow, pfRow, rcvRow,
     trow("Less: Deductible / Non-Recoverable", inp(inv, "deductible", { type: "number", oninput: () => recalc() })),
     trow("Less: Previous Payments", inp(inv, "previousPayments", { type: "number", oninput: () => recalc() })),
     trow("Sales Tax %", inp(inv, "taxRate", { type: "number", oninput: () => recalc() })),
@@ -1681,6 +1716,7 @@ export function invoice(project, inv) {
     // O&P rows hide entirely in contract mode. Otherwise: the % input rows show
     // only in % mode, the Overhead/Profit rows always show and swap their value.
     opModeRow.hidden = c;
+    opAutoNote.hidden = inv.opAuto !== true || c || amt;
     ohPctRow.hidden = pfPctRow.hidden = c || amt;
     ohRow.hidden = pfRow.hidden = c;
     ohEl.hidden = amt; ohAmtInput.hidden = !amt;
