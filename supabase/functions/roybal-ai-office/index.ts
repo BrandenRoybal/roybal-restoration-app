@@ -584,10 +584,14 @@ async function scopeInterview(body: Record<string, unknown>) {
         "changes the estimate and is NOT already settled by the narration or facts: which rooms/areas are in the rebuild; replace vs detach-&-reset per " +
         "major item (rule: REPLACE if damaged by the loss OR Cat 3 + porous material, else detach & reset); flooring type and match-existing vs upgrade; " +
         "drywall extent (flood-cut ~2 ft vs full height); paint extent (full room vs spot/patch); trades disturbed (electrical / plumbing / HVAC / " +
-        "insulation in opened walls); water category (drives the Cat 3 package); and whether a subcontractor is on the job (drives O&P). ONE question at a " +
-        "time, plain English, with 2-4 concrete options the tech can tap (they can also free-type). NEVER ask about something already answered or already " +
-        "clear from the narration/facts. Set done=true as soon as you could write a tight, unambiguous scope, and NEVER exceed 8 questions total (asked so " +
-        "far: " + asked + " — if that is 7+, strongly prefer done). When done, return a consolidated scopeSummary. Call `scope_interview`."
+        "insulation in opened walls); water category ONLY IF facts.job.waterCategory is blank (never re-ask a category already on file); and whether a " +
+        "subcontractor is on the job (drives O&P). ONE question at a time, plain English, with 2-4 concrete options the tech can tap (they can also " +
+        "free-type). NEVER ask about something already answered or already clear from the narration/facts. COVERAGE CHECK — before you set done=true, " +
+        "reconcile the scope against EVERY documented damaged/affected area (facts.affectedAreas, facts.demoNotes, the loss description): if any documented " +
+        "damage is not yet assigned to a rebuild line or explicitly excluded (e.g. exterior siding / soffit / fascia / gutters, or a room the narration " +
+        "never mentioned), ASK about it — never finish with documented damage unaccounted for. Set done=true once every documented area is covered and you " +
+        "could write a tight, unambiguous scope; NEVER exceed 8 questions total (asked so far: " + asked + " — if that is 7+, strongly prefer done). When " +
+        "done, return a consolidated scopeSummary. Call `scope_interview`."
       : "You are a senior restoration estimator at Roybal Construction, LLC (North Pole / Fairbanks, Alaska) INTERVIEWING the field tech to confirm the " +
         "BILLABLE scope of the PERFORMED mitigation work BEFORE it is priced — so nothing billable is missed and nothing unsupported is billed. Given the " +
         "documented job facts (labor hours, equipment days, drying, demo notes, receipts), the tech's spoken narration of what was done, and the answers " +
@@ -595,8 +599,11 @@ async function scopeInterview(body: Record<string, unknown>) {
         "is NOT already settled by the logs or narration: areas/rooms worked; demo & tear-out actually performed; equipment run and days; billable work not " +
         "captured in the logs; pass-throughs / subcontractor invoices to bill (facts.receipts); water category (drives the Cat 3 mitigation package + PPE); " +
         "and whether a subcontractor is on the job (drives O&P). ONE question at a time, plain English, with 2-4 concrete tap options (they can also " +
-        "free-type). NEVER ask about something already answered or clear from the facts. Set done=true as soon as you could write a tight billable scope, " +
-        "and NEVER exceed 8 questions (asked so far: " + asked + " — if 7+, strongly prefer done). When done, return a consolidated scopeSummary. Call `scope_interview`.",
+        "free-type). NEVER ask about something already answered or clear from the facts. COVERAGE CHECK — before you set done=true, reconcile the billable " +
+        "scope against every documented affected area and logged item (facts.affectedAreas, facts.demoNotes, facts.equipment, facts.labor): if documented " +
+        "work or equipment is not reflected in the scope, ask about it — never finish with documented work unbilled. Set done=true once everything documented " +
+        "is accounted for and you could write a tight billable scope; NEVER exceed 8 questions (asked so far: " + asked + " — if 7+, strongly prefer done). " +
+        "When done, return a consolidated scopeSummary. Call `scope_interview`.",
     content:
       "TECH'S SPOKEN SCOPE NARRATION:\n" + (narration || "(none provided yet)") + "\n\n" +
       "ANSWERS SO FAR:\n" + qaText + "\n\n" +
