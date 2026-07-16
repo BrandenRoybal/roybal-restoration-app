@@ -283,6 +283,13 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .photocard { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #fff; box-shadow: var(--shadow); }
 .photocard img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; }
 .photoedit { padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+/* per-photo toolbar: reorder + delete */
+.photocard__tools { display: flex; align-items: center; gap: 6px; }
+.photocard__spacer { flex: 1; }
+/* photo-size selector row above the grid */
+.phototools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.photosize { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.photosize select { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 /* editable AI findings under each photo — reads like a label, edits like a field */
 .photocard .ainote {
   width: 100%; min-height: 0; resize: none; display: block;
@@ -292,7 +299,7 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .photocard .ainote:focus { border-color: var(--brand); background: #fff; color: var(--ink); outline: none; box-shadow: none; }
 /* multi-line caption editor — roomy and resizable for easy typing */
 .photocard .photocaption {
-  width: 100%; box-sizing: border-box; display: block; resize: vertical; min-height: 64px;
+  width: 100%; box-sizing: border-box; display: block; resize: vertical; min-height: 120px;
   font: inherit; font-size: 15px; line-height: 1.4; padding: 9px 11px;
   border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--ink);
 }
