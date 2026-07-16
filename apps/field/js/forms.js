@@ -2,7 +2,7 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
+import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
@@ -1852,22 +1852,58 @@ export function invoice(project, inv) {
 /* ============================================================
    8. JOB PHOTOS — project-level gallery + printable Photo Report
    ============================================================ */
+/* Photo-size tiers for the emailable report. "full" keeps the captured image
+   (~1600px); the smaller tiers re-encode each photo down so a photo-heavy PDF
+   stays under typical email attachment limits. Applied to display + print only —
+   the stored master is never touched, so tiers can be switched losslessly. */
+const PHOTO_SIZES = {
+  full:   { label: "Standard — full quality",        maxDim: 1600, quality: 0.72 },
+  medium: { label: "Smaller — easier to email",      maxDim: 1100, quality: 0.6 },
+  small:  { label: "Smallest — best for many photos", maxDim: 800,  quality: 0.5 },
+};
+
 export function photosForm(project) {
   if (!Array.isArray(project.photos)) project.photos = [];
+  if (!PHOTO_SIZES[project.photoSize]) project.photoSize = "medium";
   const grid = h("div", { class: "photogrid" });
 
   const refreshers = new Map();               // photo.id -> refresh that card in place
+  const sizeCache = new Map();                // `${photo.id}:${tier}` -> shrunk dataURL (in-memory only)
+
+  /* Point an <img> at the version for the current size tier. Shows the master
+     immediately, then swaps in the shrunk copy once encoded (cached per tier). */
+  async function applySize(imgEl, p) {
+    const tier = project.photoSize;
+    if (!p.src || tier === "full") { imgEl.src = p.src || ""; return; }
+    const key = p.id + ":" + tier;
+    if (sizeCache.has(key)) { imgEl.src = sizeCache.get(key); return; }
+    imgEl.src = p.src;
+    const t = PHOTO_SIZES[tier];
+    const small = await shrinkDataURL(p.src, t.maxDim, t.quality);
+    sizeCache.set(key, small);
+    if (project.photoSize === tier) imgEl.src = small;   // tier may have changed while encoding
+  }
+
+  function movePhoto(from, to) {
+    if (to < 0 || to >= project.photos.length) return;
+    const [ph] = project.photos.splice(from, 1);
+    project.photos.splice(to, 0, ph);
+    paint(); commit();
+  }
 
   function card(p, i) {
-    const cap = h("textarea", { class: "photocaption", rows: "3", placeholder: "Caption" });
-    const growCap = () => { cap.style.height = "auto"; cap.style.height = Math.max(cap.scrollHeight, 64) + "px"; };
+    const cap = h("textarea", { class: "photocaption", rows: "5", placeholder: "Caption" });
+    const growCap = () => { cap.style.height = "auto"; cap.style.height = Math.max(cap.scrollHeight, 120) + "px"; };
     cap.addEventListener("input", () => { p.caption = cap.value; growCap(); refresh(); commit(); });
     const room = h("input", { value: p.room || "", placeholder: "Room / location" });
     room.addEventListener("input", () => { p.room = room.value; refresh(); commit(); });
     const stage = sel(p, "stage", [
       { value: "before", label: "Before" }, { value: "during", label: "During" }, { value: "after", label: "After" }]);
     stage.addEventListener("change", () => refresh());
+    const moveL = h("button", { type: "button", class: "btn btn--sm", title: "Move earlier", disabled: i === 0, onclick: () => movePhoto(i, i - 1) }, "◀");
+    const moveR = h("button", { type: "button", class: "btn btn--sm", title: "Move later", disabled: i === project.photos.length - 1, onclick: () => movePhoto(i, i + 1) }, "▶");
     const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); project.photos.splice(i, 1); paint(); commit(); } }, "Delete");
+    const tools = h("div", { class: "photocard__tools" }, moveL, moveR, h("span", { class: "photocard__spacer" }), del);
     const printCap = h("div", { class: "photocap print-only" });
     /* The AI findings under the photo are EDITABLE — reword or delete
        anything the analysis got wrong (stored as p.aiNote; an emptied note
@@ -1894,10 +1930,12 @@ export function photosForm(project) {
     }
     refreshers.set(p.id, refresh);
     refresh();
+    const imgEl = h("img", { alt: p.caption || "" });
+    applySize(imgEl, p);
     return h("div", { class: "photocard" },
-      h("img", { src: p.src, alt: p.caption || "" }),
+      imgEl,
       printCap,
-      h("div", { class: "app-only photoedit" }, room, stage, cap, del),
+      h("div", { class: "app-only photoedit" }, tools, room, stage, cap),
       aiLine);
   }
   function paint() {
@@ -1952,13 +1990,25 @@ export function photosForm(project) {
   });
   const addBtn = h("button", { type: "button", class: "btn btn--primary" }, "📷 Add photos");
   addBtn.addEventListener("click", () => input.click());
+
+  /* Photo size for the emailed PDF — re-encodes every photo when changed so a
+     photo-heavy report stays small enough to send. */
+  const sizeSel = h("select", {},
+    ...Object.entries(PHOTO_SIZES).map(([v, t]) =>
+      h("option", { value: v, ...(v === project.photoSize ? { selected: true } : {}) }, t.label)));
+  sizeSel.addEventListener("change", () => {
+    project.photoSize = sizeSel.value; commit(); paint();
+  });
+  const sizeRow = h("label", { class: "app-only photosize" },
+    h("span", {}, "Photo size for email:"), sizeSel);
+
   paint();
   paintAiBtn();
 
   return sheet("PHOTO REPORT", "Job Site Documentation", "Photo Report",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
-    h("div", { class: "app-only", style: "margin:10px 0" }, addBtn, aiBtn, input),
+    h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, sizeRow, input),
     grid);
 }
 

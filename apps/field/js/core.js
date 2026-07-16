@@ -208,6 +208,29 @@ export function fileToDataURL(file, maxDim = 1600, quality = 0.72) {
   });
 }
 
+/* ---------- shrink an existing image dataURL (for emailable reports) ----------
+   Re-encodes a stored photo down to maxDim / quality so a photo-heavy PDF stays
+   small enough to email. Non-destructive: the caller keeps the original src and
+   uses the returned value only for display/print. Non-raster or already-tiny
+   inputs come back unchanged. */
+export function shrinkDataURL(src, maxDim = 1100, quality = 0.6) {
+  return new Promise((resolve) => {
+    if (!src || !/^data:image\//.test(src)) return resolve(src);
+    const img = new Image();
+    img.onerror = () => resolve(src);
+    img.onload = () => {
+      let { width, height } = img;
+      const s = Math.min(1, maxDim / Math.max(width, height));
+      width = Math.round(width * s); height = Math.round(height * s);
+      const c = document.createElement("canvas");
+      c.width = width; c.height = height;
+      c.getContext("2d").drawImage(img, 0, 0, width, height);
+      resolve(c.toDataURL("image/jpeg", quality));
+    };
+    img.src = src;
+  });
+}
+
 /* ============================================================
    Signature pad — draw on canvas, returns PNG dataURL.
    Mounts into a container; supports clear + restore from value.
