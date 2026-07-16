@@ -1416,7 +1416,7 @@ export function invoice(project, inv) {
     if (hasItems && !window.confirm("Replace the current line items with an AI draft built from the job documentation?")) return;
     busyBtn(draftBtn, true, "\u2728 Drafting\u2026");
     try {
-      const draft = isEst ? await draftReconEstimate(project, inv.pricingMode, inv.scopeInterview) : await draftInvoice(project, inv.pricingMode);
+      const draft = isEst ? await draftReconEstimate(project, inv.pricingMode, inv.scopeInterview) : await draftInvoice(project, inv.pricingMode, inv.scopeInterview);
       const lines = Array.isArray(draft.items) ? draft.items : [];
       if (!lines.length) {
         // an empty draft is a signal, not a result \u2014 never wipe the current items
@@ -1610,7 +1610,9 @@ export function invoice(project, inv) {
     const prior = inv.scopeInterview || {};
     const narrTa = h("textarea", {
       class: "app-only", rows: "4",
-      placeholder: "Describe what needs to be rebuilt — talk or type. E.g. “Master bath: new LVP throughout, replace the vanity (particleboard, Cat 3), reset the toilet, drywall the flood cut, repaint the whole room…”",
+      placeholder: isEst
+        ? "Describe what needs to be rebuilt — talk or type. E.g. “Master bath: new LVP throughout, replace the vanity (particleboard, Cat 3), reset the toilet, drywall the flood cut, repaint the whole room…”"
+        : "Describe the work performed / to bill — talk or type. E.g. “Master bath: extracted Cat 3 water, ran 4 air movers + a dehu for 3 days, tore out the wet drywall and flooring, hauled two loads, set containment and a HEPA scrubber…”",
       style: "flex:1;min-width:0;font-size:13px",
     });
     narrTa.value = (typeof seedNarration === "string" && seedNarration) || prior.narration || String(inv.lossSummary || "");
@@ -1618,8 +1620,8 @@ export function invoice(project, inv) {
     const go = h("button", { type: "button", class: "btn btn--sm", style: "margin-top:8px" }, "Start questions →");
     go.addEventListener("click", () => runInterview(narrTa.value.trim(), []));
     aiPanel.replaceChildren(h("div", { class: "app-only", style: "border:1px dashed #b9c4d4;border-radius:10px;padding:10px 12px;margin:0 0 10px;background:#f7f9fc" },
-      h("strong", { style: "font-size:13px" }, "🎙️ Verify scope of work"),
-      h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 6px" }, "Talk through the rebuild in your own words, then answer a few questions. The draft prices from your confirmed scope."),
+      h("strong", { style: "font-size:13px" }, isEst ? "🎙️ Verify scope of work" : "🎙️ Verify billable scope"),
+      h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 6px" }, "Talk through the " + (isEst ? "rebuild" : "work done") + " in your own words, then answer a few questions. The draft prices from your confirmed scope."),
       h("div", { style: "display:flex;gap:8px;align-items:flex-start" }, narrTa, mic),
       go));
   }
@@ -1627,7 +1629,7 @@ export function invoice(project, inv) {
     if (!aiAvailable()) return;
     aiPanel.replaceChildren(h("p", { class: "subtle app-only", style: "font-size:12px" }, "🎙️ Working out the next question…"));
     let res;
-    try { res = await runScopeInterview(project, { narration, answers }); }
+    try { res = await runScopeInterview(project, { narration, answers, isEst }); }
     catch (e) { return renderScopeError(narration, answers, e && e.message ? e.message : String(e)); }
     if (res.done) return renderScopeDone(narration, answers, String(res.scopeSummary || ""));
     renderScopeQuestion(narration, answers, res);
@@ -1666,14 +1668,14 @@ export function invoice(project, inv) {
     aiPanel.replaceChildren(h("div", { class: "app-only", style: "border:1px solid #cfe3d0;border-radius:10px;padding:10px 12px;margin:0 0 10px;background:#f3f9f4" },
       h("strong", { style: "font-size:13px;color:#2e7d32" }, "✓ Scope confirmed"),
       summary ? h("div", { style: "font-size:12px;color:#3a4b3c;margin-top:4px" }, summary) : null,
-      h("div", { class: "subtle", style: "font-size:11px;margin-top:6px" }, "Now tap “Draft rebuild estimate” — it prices from this confirmed scope."),
+      h("div", { class: "subtle", style: "font-size:11px;margin-top:6px" }, "Now tap “" + (isEst ? "Draft rebuild estimate" : "Draft from documentation") + "” — it prices from this confirmed scope."),
       h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "margin-top:6px", onclick: renderScopeStart }, "Edit scope again")));
     toast("Scope confirmed — the draft will use it.");
   }
   scopeBtn.addEventListener("click", () => { if (aiAvailable()) renderScopeStart(); });
 
   const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" },
-    ...(isEst ? [scopeBtn, draftBtn, importBtn, auditBtn] : [draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);
+    ...(isEst ? [scopeBtn, draftBtn, importBtn, auditBtn] : [scopeBtn, draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);
 
   /* ---- supporting documents: receipts, sub invoices, dump tickets…
      Attached PDFs/photos become full pages after the invoice when printed. ---- */
