@@ -113,6 +113,23 @@ const { syncNow } = await import("../js/sync.js");
   const snaps = await Store.backups("p1");
   ok(snaps.length === snapsBefore + 1 && snaps[0].data.customer === "Alpha-EDITED", "overwritten copy saved to on-device backups (newest first)");
 
+  // ---------- unresolvable media never blanks a good local copy ----------
+  // A good photo lives locally (data URL). A strictly-newer remote references a
+  // media hash the bucket can't serve yet (transient auth gap / not-yet-uploaded).
+  await Store.put({ id: "p5", customer: "Echo", photos: [{ id: "ph5", src: BIG }] });
+  await syncNow();                       // push the good copy up
+  const HASH = "a".repeat(64);           // a hash the bucket doesn't have (download → 404 → null)
+  const missMarker = `media:${HASH}:${BIG.length}`;
+  serverRows.set("p5", { id: "p5", data: { id: "p5", customer: "Echo-NEW", photos: [{ id: "ph5", src: missMarker }], updatedAt: new Date(Date.now() + 27e5).toISOString() }, deleted: false, updated_at: nowIso() });
+  await syncNow();
+  ok((await Store.get("p5")).photos[0].src === BIG, "failed media download does NOT overwrite the good local photo");
+
+  // once the object is actually in the bucket, the next sync resolves it
+  mediaStore.set(HASH, BIG);
+  await syncNow();
+  const p5done = await Store.get("p5");
+  ok(p5done.customer === "Echo-NEW" && p5done.photos[0].src === BIG, "the row re-inflates and applies once the media is downloadable");
+
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error("THREW:", e); process.exit(1); });

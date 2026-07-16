@@ -89,12 +89,18 @@ async function pull() {
     const local = await Store.get(row.id);
     // local wins ties: only a STRICTLY newer remote may replace local work
     if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bumpCursor(row.updated_at); continue; }
-    let full;
+    let full, missing;
     try {
-      full = (await inflateProject(remote, downloadMedia)).project;
+      ({ project: full, missing } = await inflateProject(remote, downloadMedia));
     } catch {
       break;   // media fetch failed (network) — retry this row from the same cursor next cycle
     }
+    // Some referenced media (photos, plan pages) came back empty — a transient
+    // auth gap, or objects still propagating just after another device uploaded
+    // them. NEVER overwrite a good local copy with blank markers and advance past
+    // it (that stranded photos on desktop until a full re-pull). Leave the cursor
+    // put and retry this row next cycle; it resolves once the downloads succeed.
+    if (missing > 0 && local) break;
     if (local) await Store.backup(local);   // safety net: the outgoing copy stays restorable on-device
     await Store.put(full, { quiet: true, bump: false });
     pushed[row.id] = remote.updatedAt;               // local now matches server

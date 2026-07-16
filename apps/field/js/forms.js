@@ -1857,9 +1857,9 @@ export function invoice(project, inv) {
    stays under typical email attachment limits. Applied to display + print only —
    the stored master is never touched, so tiers can be switched losslessly. */
 const PHOTO_SIZES = {
-  full:   { label: "Standard — full quality",        maxDim: 1600, quality: 0.72 },
-  medium: { label: "Smaller — easier to email",      maxDim: 1100, quality: 0.6 },
-  small:  { label: "Smallest — best for many photos", maxDim: 800,  quality: 0.5 },
+  full:   { label: "Standard — full quality",        maxDim: 1200, quality: 0.6 },
+  medium: { label: "Smaller — easier to email",      maxDim: 900,  quality: 0.55 },
+  small:  { label: "Smallest — best for many photos", maxDim: 700,  quality: 0.5 },
 };
 
 export function photosForm(project) {
@@ -1984,7 +1984,9 @@ export function photosForm(project) {
   const input = h("input", { type: "file", accept: "image/*", multiple: true, style: "display:none" });
   input.addEventListener("change", async () => {
     const added = [];
-    for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f); project.photos.push(ph); added.push(ph); }
+    // Photolog photos don't need camera-res: capture at ~1200px / q0.6 so jobs
+    // stay small to sync and email. The size-tier control shrinks them further.
+    for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f, 1200, 0.6); project.photos.push(ph); added.push(ph); }
     input.value = ""; commit(); paint(); paintAiBtn();
     runAi(added, { silent: true });          // fire-and-forget; typed captions still work offline
   });
