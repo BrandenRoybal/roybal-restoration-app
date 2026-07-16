@@ -223,10 +223,18 @@ table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover;
 .boxlabel__meta td { border-bottom: 0.5px solid #c4ccd8; padding: 3px 2px; }
 .boxlabel__meta td:first-child { color: #5b6b80; width: 38%; text-transform: uppercase; font-size: 7pt; }
 
-/* job photos */
-.photogrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.photocard { border: 0.6px solid #6b7892; border-radius: 0; overflow: hidden; break-inside: avoid; }
-.photocard img { width: 100%; height: auto; max-height: 2.6in; object-fit: cover; }
+/* job photos — inline-block, NOT grid: Chrome ignores break-inside:avoid on grid
+   items, so photos were splitting across page breaks. Inline-block cards honor
+   the avoid, so a photo that won't fit drops whole to the next page.
+   (font-size:0 kills the inline-block whitespace gap; .photocap restores it.) */
+.photogrid { display: block; font-size: 0; }
+.photocard {
+  display: inline-block; width: 49%; vertical-align: top; box-sizing: border-box;
+  margin: 0 0 8px; border: 0.6px solid #6b7892; border-radius: 0; overflow: hidden;
+  break-inside: avoid; page-break-inside: avoid;
+}
+.photocard:nth-child(odd) { margin-right: 2%; }
+.photocard img { width: 100%; height: auto; max-height: 2.6in; object-fit: cover; break-inside: avoid; page-break-inside: avoid; }
 .photoedit { display: none !important; }
 .photocap { font-size: 8.5pt; padding: 2px 4px; }
 .photometa { color: #5b6b80; }
