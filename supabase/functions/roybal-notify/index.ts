@@ -10,12 +10,22 @@
  *   sendSms — { to, body, kind?, unified_job_id?, captured_by?, mediaUrls?[] }
  *             sends from TWILIO_FROM, records the row, returns { sid, status }.
  *
+ * Inbound (POST …/roybal-notify/inbound):
+ *   Twilio's incoming-message webhook (form-encoded, no JWT). Auth is the
+ *   X-Twilio-Signature check — only Twilio holds the auth token — and only
+ *   after it passes does the service-role key log the reply (direction
+ *   'inbound'). If SMS_FORWARD_TO is set, the reply is also forwarded as a
+ *   text from the company number (never back to the sender, never past the
+ *   monthly cap). Responds with empty TwiML so no auto-reply goes out.
+ *
  * Secrets:  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM (+1XXXXXXXXXX)
  *           SMS_MONTHLY_CAP (optional, default 500 messages / month)
+ *           SMS_FORWARD_TO  (optional — US number that inbound texts forward to)
  * Deploy:   supabase functions deploy roybal-notify --no-verify-jwt
- *   (--no-verify-jwt required for browser CORS preflight; the function
- *    self-protects — the sms_messages insert runs under the caller's JWT,
- *    so an unauthenticated caller can never reach the Twilio call.)
+ *   (--no-verify-jwt required for browser CORS preflight + the Twilio
+ *    webhook; the function self-protects — sendSms runs its DB ops under
+ *    the caller's JWT and /inbound demands a valid Twilio signature, so an
+ *    unauthenticated caller can never reach a paid Twilio call.)
  *
  * Success (200): { ok:true, sid, status, month_count }
  * Error   (400): { ok:false, error }
@@ -25,9 +35,11 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
 const TWILIO_AUTH = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const TWILIO_FROM = Deno.env.get("TWILIO_FROM") ?? "";
+const SMS_FORWARD_TO = Deno.env.get("SMS_FORWARD_TO") ?? "";
 // A non-numeric SMS_MONTHLY_CAP secret (e.g. "500 texts") must NOT silently
 // disable the cap — fall back to the 500 default when it isn't a finite number.
 const CAP_RAW = Number(Deno.env.get("SMS_MONTHLY_CAP") ?? "500");
@@ -41,11 +53,13 @@ const corsHeaders = {
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-/* ---------- Supabase REST via the caller's JWT (RLS applies) ---------- */
-function db(path: string, jwt: string, opts: RequestInit = {}) {
+/* ---------- Supabase REST via the caller's token (RLS applies for user
+   JWTs; /inbound passes the service-role key AFTER the Twilio signature
+   check, since Twilio has no user session) ---------- */
+function db(path: string, token: string, opts: RequestInit = {}, apikey = ANON_KEY) {
   return fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...opts,
-    headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json", ...(opts.headers || {}) },
+    headers: { apikey, Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opts.headers || {}) },
   });
 }
 
@@ -66,15 +80,32 @@ export function toE164(raw: unknown): string {
    fixed unit index can split an emoji and corrupt the send. */
 const clip = (t: string, n = 1600) => Array.from(t).slice(0, n).join("");
 
-async function monthCount(jwt: string): Promise<number> {
+async function monthCount(token: string, apikey = ANON_KEY): Promise<number> {
   const from = new Date();
   from.setUTCDate(1); from.setUTCHours(0, 0, 0, 0);
   const res = await db(
     `sms_messages?select=id&direction=eq.outbound&created_at=gte.${encodeURIComponent(from.toISOString())}`,
-    jwt, { method: "GET", headers: { Prefer: "count=exact", Range: "0-0" } });
+    token, { method: "GET", headers: { Prefer: "count=exact", Range: "0-0" } }, apikey);
   if (!res.ok) throw new Error(`send-count read failed (${res.status})`);
   const range = res.headers.get("content-range") || "";           // e.g. "0-0/37"
   return Number(range.split("/")[1]) || 0;
+}
+
+/* Bare Twilio REST send. Resolves with the parsed outcome; rejects only on a
+   network-level failure (DNS/TLS/reset) so callers decide what failure means. */
+async function twilioPost(to: string, text: string, media: string[] = []) {
+  const form = new URLSearchParams({ To: to, From: TWILIO_FROM, Body: clip(text) });
+  for (const u of media) form.append("MediaUrl", u);
+  const tw = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
+    method: "POST",
+    headers: {
+      Authorization: "Basic " + btoa(`${TWILIO_SID}:${TWILIO_AUTH}`),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: form.toString(),
+  });
+  const body = (await tw.json().catch(() => ({}))) as Record<string, unknown>;
+  return { ok: tw.ok, status: tw.status, body };
 }
 
 async function sendSms(body: Record<string, unknown>, jwt: string) {
@@ -110,39 +141,124 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
   const settle = (patch: Record<string, unknown>) =>
     db(`sms_messages?id=eq.${row.id}`, jwt, { method: "PATCH", body: JSON.stringify(patch) }).catch(() => {});
 
-  // Twilio REST send
-  const form = new URLSearchParams({ To: to, From: TWILIO_FROM, Body: clip(text) });
-  for (const u of media) form.append("MediaUrl", u);
-  let tw: Response;
-  let twBody: Record<string, unknown>;
+  let r: { ok: boolean; status: number; body: Record<string, unknown> };
   try {
-    tw = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
-      method: "POST",
-      headers: {
-        Authorization: "Basic " + btoa(`${TWILIO_SID}:${TWILIO_AUTH}`),
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
-    });
-    twBody = await tw.json().catch(() => ({}));
+    r = await twilioPost(to, text, media);
   } catch (netErr) {
     // the fetch itself rejected (DNS/TLS/reset) — record the failure so the
     // row isn't stranded at "pending", then surface it to the caller
     await settle({ status: "failed", error: ("network: " + String((netErr as Error)?.message ?? netErr)).slice(0, 500), updated_at: new Date().toISOString() });
     throw new Error("send_failed: could not reach Twilio — the message was not sent");
   }
-  const patch = tw.ok
-    ? { twilio_sid: twBody.sid ?? null, status: twBody.status ?? "sent", updated_at: new Date().toISOString() }
-    : { status: "failed", error: String(twBody.message ?? `twilio ${tw.status}`).slice(0, 500), updated_at: new Date().toISOString() };
+  const patch = r.ok
+    ? { twilio_sid: r.body.sid ?? null, status: r.body.status ?? "sent", updated_at: new Date().toISOString() }
+    : { status: "failed", error: String(r.body.message ?? `twilio ${r.status}`).slice(0, 500), updated_at: new Date().toISOString() };
   await settle(patch);
-  if (!tw.ok) throw new Error(`send_failed: ${patch.error}`);
+  if (!r.ok) throw new Error(`send_failed: ${patch.error}`);
 
-  return { sid: twBody.sid ?? "", status: twBody.status ?? "sent", month_count: used + 1 };
+  return { sid: r.body.sid ?? "", status: r.body.status ?? "sent", month_count: used + 1 };
+}
+
+/* ---------- inbound: Twilio incoming-message webhook ---------- */
+
+/* Twilio webhook auth: base64(HMAC-SHA1(auth token, URL + params sorted by
+   name)). The URL must be byte-identical to the one configured in Twilio;
+   req.url is the URL Twilio actually hit, with the SUPABASE_URL form as a
+   fallback in case the edge runtime ever rewrites the host. */
+async function twilioSignatureValid(req: Request, params: URLSearchParams): Promise<boolean> {
+  const sig = req.headers.get("X-Twilio-Signature") ?? "";
+  if (!sig || !TWILIO_AUTH) return false;
+  const payload = [...new Set(params.keys())].sort().map((n) => n + (params.get(n) ?? "")).join("");
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(TWILIO_AUTH), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  for (const url of new Set([req.url, `${SUPABASE_URL}/functions/v1/roybal-notify/inbound`])) {
+    const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(url + payload)));
+    if (btoa(String.fromCharCode(...mac)) === sig) return true;
+  }
+  return false;
+}
+
+/* Log the reply, optionally forward it to the office, answer empty TwiML
+   (empty <Response> = receive without auto-replying to the customer). */
+async function handleInbound(req: Request): Promise<Response> {
+  const params = new URLSearchParams(await req.text());
+  if (!(await twilioSignatureValid(req, params)))
+    return new Response("signature mismatch", { status: 403 });
+
+  const from = String(params.get("From") ?? "");
+  let text = String(params.get("Body") ?? "").trim();
+  const nMedia = Math.min(Number(params.get("NumMedia") ?? "0") || 0, 10);
+  for (let i = 0; i < nMedia; i++) {
+    const u = params.get(`MediaUrl${i}`);
+    if (u) text += (text ? "\n" : "") + "[media] " + u;
+  }
+
+  const admin = (path: string, opts: RequestInit = {}) => db(path, SERVICE_KEY, opts, SERVICE_KEY);
+
+  // best-effort job link: match the sender's number to a unified job so the
+  // field app's Message log can find this reply by JOB, not just by number
+  let unified_job_id: string | null = null;
+  try {
+    const fromDigits = from.replace(/[^\d]/g, "").slice(-10);
+    if (fromDigits.length === 10) {
+      const jr = await admin("unified_jobs?select=id,owner_phone&owner_phone=not.is.null&limit=500", { method: "GET" });
+      if (jr.ok) {
+        const hit = ((await jr.json()) as Array<{ id: string; owner_phone: string }>)
+          .find((j) => String(j.owner_phone).replace(/[^\d]/g, "").slice(-10) === fromDigits);
+        unified_job_id = hit?.id ?? null;
+      }
+    }
+  } catch (_) { /* the link is optional — the row still logs by number */ }
+
+  const ins = await admin("sms_messages", {
+    method: "POST",
+    body: JSON.stringify([{
+      unified_job_id,
+      direction: "inbound", to_number: String(params.get("To") ?? ""), from_number: from,
+      body: clip(text), kind: "reply", status: "received",
+      twilio_sid: params.get("MessageSid") ?? null,
+    }]),
+  });
+  if (!ins.ok) console.error("inbound log insert failed", ins.status, await ins.text().catch(() => ""));
+
+  // best-effort forward — never back to the sender (a one-hop echo guard),
+  // never past the monthly cap, and a failure still ACKs Twilio with TwiML
+  const fwd = toE164(SMS_FORWARD_TO);
+  if (fwd && fwd !== toE164(from) && TWILIO_SID && TWILIO_AUTH && TWILIO_FROM) {
+    try {
+      const used = await monthCount(SERVICE_KEY, SERVICE_KEY);
+      if (SMS_MONTHLY_CAP <= 0 || used < SMS_MONTHLY_CAP) {
+        const r = await twilioPost(fwd, `${from}: ${text}`);
+        // this row is claim documentation AND what monthCount() bills the cap
+        // against — a silent insert failure would drift the cap optimistic
+        const flog = await admin("sms_messages", {
+          method: "POST",
+          body: JSON.stringify([{
+            unified_job_id,
+            direction: "outbound", to_number: fwd, from_number: TWILIO_FROM,
+            body: clip(`${from}: ${text}`), kind: "forward",
+            status: r.ok ? (r.body.status ?? "sent") : "failed",
+            error: r.ok ? null : String(r.body.message ?? `twilio ${r.status}`).slice(0, 500),
+            twilio_sid: r.ok ? (r.body.sid ?? null) : null,
+          }]),
+        });
+        if (!flog.ok) console.error("forward log insert failed", flog.status, await flog.text().catch(() => ""));
+      } else {
+        console.error(`forward skipped: sms_cap_reached (${used}/${SMS_MONTHLY_CAP})`);
+      }
+    } catch (e) {
+      console.error("forward failed", e);
+    }
+  }
+
+  return new Response('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+    { headers: { "Content-Type": "text/xml" } });
 }
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
+  if (/\/inbound\/?$/.test(new URL(req.url).pathname)) return handleInbound(req);
   const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
   if (!jwt) return json({ ok: false, error: "Missing Authorization bearer token" }, 401);
   try {

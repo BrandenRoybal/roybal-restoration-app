@@ -35,6 +35,8 @@ export function aiAvailable() {
   return true;
 }
 
+/* project may be null (board/admin mounts have no field project) — the job
+   link and tech identity then come from the payload, or stay null/default. */
 async function callOffice(project, action, payload) {
   const res = await fetch(FN_URL, {
     method: "POST",
@@ -45,7 +47,7 @@ async function callOffice(project, action, payload) {
     },
     body: JSON.stringify({
       action,
-      unified_job_id: getUnifiedJobId(project.id),
+      unified_job_id: project ? getUnifiedJobId(project.id) : null,
       captured_by: capturedBy(),
       ...payload,
     }),

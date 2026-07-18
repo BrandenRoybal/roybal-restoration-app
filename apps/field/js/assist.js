@@ -1,14 +1,18 @@
 /* ============================================================
-   Roybal — 💬 Ask the office (conversational field assistant)
+   Roybal — 💬 Ask the office (conversational assistant, shared)
    ------------------------------------------------------------
-   A bottom-sheet chat that floats over every job page, so a tech
-   can ask a restoration question mid-form — by voice, text, or
-   photo — and slide right back into data entry. Answers come from
-   the fieldAssist edge action: short, actionable, IICRC-citing,
-   aware of THIS job's category/class/readings/equipment.
+   A bottom-sheet chat that floats over the page — voice, text, or
+   photo in; short colleague answers out (fieldAssist edge action).
 
-   Conversations are per-job and in-memory only (cleared on app
-   reload) — they are working chatter, not job documentation.
+   Shared across the field app, Job Board, and Office Admin via the
+   PROVIDER seam: mountAssistProvider({ key, app, title, sub,
+   greeting(), buildContext(), project?, capturedBy?() }) supplies
+   everything app-specific — the session key, the persona routing
+   key sent to the server, and the context digest. mountAssist(p)
+   is the field app's wrapper (unchanged external contract).
+
+   Conversations are per-provider-key and in-memory only (cleared
+   on app reload) — working chatter, not job documentation.
    Online-only, same spend cap + ai_usage ledger as all AI.
    ============================================================ */
 import { h, toast, fileToDataURL } from "./core.js";
@@ -46,11 +50,28 @@ function assistContext(p) {
   return open.length ? { ...ctx, openEstimatorFollowups: open } : ctx;
 }
 
-const sessions = new Map();   // projectId -> [{ role, text, images? }]
+const sessions = new Map();   // provider.key -> [{ role, text, images? }]
 let ui = null;                // singleton { fab, drawer, msgs, input, ... }
-let project = null;
+let provider = null;          // the active app-specific provider
 let pendingImages = [];       // photos attached to the next message
 let recorder = null, stream = null, chunks = [];
+
+/* The field app's provider — job-scoped, digest from narrative.js. */
+function fieldProvider(p) {
+  return {
+    key: p.id,
+    app: "field",
+    project: p,
+    title: "💬 Ask the office",
+    sub: "Job-aware AI colleague · cites IICRC standards · verify anything safety-critical",
+    greeting: () =>
+      (jobType(p) === "construction"
+        ? "Hey — what's the question? I can see this job's scope, sub schedule, inspections, selections, and draws. "
+        : "Hey — what's the question? I can see this job's readings, category, and equipment. ") +
+      "Talk to me with the mic, type, or send a photo of what you're looking at.",
+    buildContext: () => assistContext(p),
+  };
+}
 
 /* ---------- voice agent (spoken replies + hands-free loop) ---------- */
 const SPEAK_KEY = "roybal-assist-speak";
@@ -97,8 +118,8 @@ function blobToBase64(blob) {
 }
 
 const transcript = () => {
-  if (!sessions.has(project.id)) sessions.set(project.id, []);
-  return sessions.get(project.id);
+  if (!sessions.has(provider.key)) sessions.set(provider.key, []);
+  return sessions.get(provider.key);
 };
 
 /* ---------- rendering ---------- */
@@ -111,15 +132,11 @@ function bubble(m) {
   return b;
 }
 function paintMessages() {
-  if (!ui || !project) return;
+  if (!ui || !provider) return;
   const list = transcript();
   ui.msgs.replaceChildren(
     list.length ? h("span") : h("div", { class: "amsg amsg--ai" },
-      h("div", { class: "amsg__text" },
-        (project && jobType(project) === "construction"
-          ? "Hey — what's the question? I can see this job's scope, sub schedule, inspections, selections, and draws. "
-          : "Hey — what's the question? I can see this job's readings, category, and equipment. ") +
-        "Talk to me with the mic, type, or send a photo of what you're looking at.")),
+      h("div", { class: "amsg__text" }, provider.greeting())),
     ...list.map(bubble));
   ui.msgs.scrollTop = ui.msgs.scrollHeight;
 }
@@ -151,13 +168,15 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
     const prior = (audio ? list : list.slice(0, -1)).slice(-12)
       .map((m) => ({ role: m.role, text: m.text || "" }));
     const wantSpeech = speakerOn && (!!audio || handsFree);
-    const b = await fieldAssist(project, {
+    const b = await fieldAssist(provider.project || null, {
       messages: prior,
       text: audio ? "" : text,
       images,
       audio, audioMime,
       speak: wantSpeech,
-      context: assistContext(project),
+      app: provider.app,
+      context: provider.buildContext(),
+      ...(provider.capturedBy ? { captured_by: provider.capturedBy() } : {}),
     });
     if (audio && b.transcript) list.push({ role: "user", text: b.transcript, images });
     const reply = b.reply || "…I didn't get an answer back. Try again?";
@@ -272,11 +291,11 @@ function buildUi() {
     } else { stopSpeaking(); if (recorder) try { recorder.stop(); } catch (_) {} }
   });
   const speaking = h("div", { class: "assist__speaking", hidden: true }, "🔊 speaking — tap 🎙️ to jump in");
+  const title = h("strong", {}, "💬 Ask the office");
+  const sub = h("div", { class: "assist__sub" }, "");
   const drawer = h("div", { class: "assist app-only", hidden: true },
     h("div", { class: "assist__head" },
-      h("div", {},
-        h("strong", {}, "💬 Ask the office"),
-        h("div", { class: "assist__sub" }, "Job-aware AI colleague · cites IICRC standards · verify anything safety-critical")),
+      h("div", {}, title, sub),
       h("div", { class: "assist__headbtns" }, hf, spk, close)),
     msgs, thinking, speaking, attach,
     h("div", { class: "assist__row" }, cam, mic, input, send),
@@ -292,15 +311,24 @@ function buildUi() {
   fab.addEventListener("click", unlockAudio);
   send.addEventListener("click", unlockAudio);
   document.body.append(fab, drawer);
-  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam, speaking };
+  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam, speaking, title, sub };
 }
 
-/** Called by the router: show the assistant on job pages, hide elsewhere. */
-export function mountAssist(p) {
-  if (!p) { if (ui) { ui.fab.hidden = true; ui.drawer.hidden = true; } project = null; return; }
+/** Mount the assistant with an app-specific provider (board/admin/field).
+    Pass null to hide. Switching providers closes the drawer and keeps each
+    conversation under its own session key. */
+export function mountAssistProvider(p) {
+  if (!p) { if (ui) { ui.fab.hidden = true; ui.drawer.hidden = true; } provider = null; return; }
   if (!ui) buildUi();
-  const switched = !project || project.id !== p.id;
-  project = p;
+  const switched = !provider || provider.key !== p.key;
+  provider = p;
+  ui.title.textContent = p.title || "💬 Ask the office";
+  ui.sub.textContent = p.sub || "";
   ui.fab.hidden = false;
   if (switched) { ui.drawer.hidden = true; pendingImages = []; paintPending(); }
+}
+
+/** Called by the field router: show the assistant on job pages, hide elsewhere. */
+export function mountAssist(p) {
+  mountAssistProvider(p ? fieldProvider(p) : null);
 }

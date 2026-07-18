@@ -10,6 +10,7 @@ import { isSignedIn, signIn, signOut, currentEmail } from "../../js/supa.js";
 import { startSync, syncNow } from "../../js/sync.js";
 import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
+import { messagesPanel } from "./messages.js";
 
 const view = $("#view");
 const FIELD_ROOT = location.pathname.replace(/\/admin\/?.*$/, "/") || "/";
@@ -112,7 +113,7 @@ async function renderDashboard() {
     kpi(drying, "Drying in progress"),
     kpi(attention, "Need attention (7-day equip.)", attention > 0)));
 
-  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel());
+  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel(), messagesPanel());
 
   const search = h("input", { type: "search", placeholder: "Search customer, address, claim #…", value: filterText });
   search.addEventListener("input", () => { filterText = search.value.toLowerCase(); paintTable(); });

@@ -25,6 +25,12 @@
  *                   for the owner / adjuster / lender, from the
  *                   constructionFacts digest.
  *
+ * fieldAssist personas: body.app (field | board | admin) picks the persona
+ * (server-defined text only) and is stamped on the envelope + ledger.
+ * Voice is metered: Deepgram STT seconds and Aura TTS characters land in
+ * ai_usage (audio_seconds/stt_cost_usd, tts_chars/tts_cost_usd — 203) and
+ * roll into cost_usd, so the monthly cap governs voice honestly.
+ *
  * Deploy:  supabase functions deploy roybal-ai-office --no-verify-jwt
  *   (--no-verify-jwt required — browser CORS preflight carries no token; the
  *    function self-protects: every DB op uses the caller's JWT under RLS, and
@@ -51,6 +57,9 @@ const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const STT_API_KEY = Deno.env.get("STT_API_KEY") ?? "";        // Deepgram (shared with roybal-ai-ingest)
 const STT_MODEL = Deno.env.get("STT_MODEL") ?? "nova-3";
 const TTS_MODEL = Deno.env.get("TTS_MODEL") ?? "aura-2-thalia-en";  // Deepgram Aura voice
+// Deepgram pricing — metered into ai_usage so voice rides the cap honestly.
+const STT_PRICE_PER_MIN = Number(Deno.env.get("STT_PRICE_PER_MIN") ?? "0.0043");
+const TTS_PRICE_PER_1K = Number(Deno.env.get("TTS_PRICE_PER_1K") ?? "0.03");
 
 // $/1M tokens (override via env if pricing shifts) — same table as roybal-ai-ingest.
 const LLM_PRICES: Record<string, { in: number; out: number }> = {
@@ -81,9 +90,21 @@ async function patchCaptureEvent(id: string, patch: Record<string, unknown>, jwt
 }
 const billingMonth = () => new Date().toISOString().slice(0, 7);
 async function monthSpend(jwt: string): Promise<number> {
-  const res = await db(`ai_usage?select=cost_usd&billing_month=eq.${billingMonth()}`, jwt, { method: "GET" });
-  if (!res.ok) throw new Error(`spend read failed (${res.status})`);
-  return ((await res.json().catch(() => [])) as Array<{ cost_usd: number }>).reduce((a, r) => a + (Number(r.cost_usd) || 0), 0);
+  // Page through the month's rows: PostgREST caps one response at max-rows
+  // (Supabase default 1000), so a single-request sum silently undercounts a
+  // busy month — and an undercounted sum is a cap that never trips.
+  let sum = 0;
+  for (let page = 0; page < 20; page++) {
+    const from = page * 1000;
+    const res = await db(`ai_usage?select=cost_usd&billing_month=eq.${billingMonth()}`, jwt,
+      { method: "GET", headers: { Range: `${from}-${from + 999}` } });
+    if (res.status === 416) break;                     // ranged past the end
+    if (!res.ok) throw new Error(`spend read failed (${res.status})`);
+    const rows = (await res.json().catch(() => [])) as Array<{ cost_usd: number }>;
+    sum += rows.reduce((a, r) => a + (Number(r.cost_usd) || 0), 0);
+    if (rows.length < 1000) break;
+  }
+  return sum;
 }
 
 /* ---------- Anthropic (raw fetch, forced tool-call) ---------- */
@@ -112,13 +133,21 @@ async function forcedTool(opts: {
   const text = await res.text();
   if (!res.ok) throw new Error(`llm_failed (${res.status}): ${text}`);
   const data = JSON.parse(text);
+  const u = data.usage ?? {};
+  const used: Usage = { inTok: Number(u.input_tokens) || 0, outTok: Number(u.output_tokens) || 0 };
+  // a 200 we reject was still BILLED — attach the usage so the handler's
+  // error path can put the incurred tokens on the ledger
+  const billedThrow = (msg: string) => {
+    const e = new Error(msg) as Error & { usage?: Usage; model?: string };
+    e.usage = used; e.model = opts.model;
+    return e;
+  };
   // a forced tool call cut off by max_tokens parses as an EMPTY/partial input —
   // surface it as an error instead of silently returning a blank draft
-  if (data.stop_reason === "max_tokens") throw new Error("llm_truncated: the response hit its output limit before finishing — try again");
+  if (data.stop_reason === "max_tokens") throw billedThrow("llm_truncated: the response hit its output limit before finishing — try again");
   const block = (data.content ?? []).find((b: { type: string; name?: string }) => b.type === "tool_use" && b.name === opts.toolName);
-  if (!block) throw new Error("extraction_failed: model returned no structured result");
-  const usage = data.usage ?? {};
-  return { input: block.input ?? {}, usage: { inTok: Number(usage.input_tokens) || 0, outTok: Number(usage.output_tokens) || 0 } };
+  if (!block) throw billedThrow("extraction_failed: model returned no structured result");
+  return { input: block.input ?? {}, usage: used };
 }
 
 /* Plain conversational call — no forced tool; returns the assistant's text. */
@@ -139,20 +168,24 @@ async function chatText(opts: {
   return { text, usage: { inTok: Number(usage.input_tokens) || 0, outTok: Number(usage.output_tokens) || 0 } };
 }
 
-/* Deepgram pre-recorded STT (same account as voice capture). */
-async function sttTranscribe(audio: Uint8Array, mime: string): Promise<string> {
+/* Deepgram pre-recorded STT (same account as voice capture). Returns the
+   transcript plus the measured audio duration so the caller can meter it. */
+async function sttTranscribe(audio: Uint8Array, mime: string): Promise<{ transcript: string; seconds: number }> {
   if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
   const ct = String(mime || "audio/webm").split(";")[0].trim();   // iOS sends audio/mp4;codecs=… — params confuse STT
   const url = `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(STT_MODEL)}&smart_format=true&punctuate=true`;
   const res = await fetch(url, { method: "POST", headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": ct }, body: audio as unknown as BodyInit });
   if (!res.ok) throw new Error(`stt_failed (${res.status}): ${await res.text().catch(() => "")}`);
   const data = await res.json();
-  return String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "").trim();
+  return {
+    transcript: String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "").trim(),
+    seconds: Number(data?.metadata?.duration) || 0,
+  };
 }
 
-/* Deepgram Aura TTS — returns base64 MP3 of the spoken reply (same API key).
-   Cost is ~$0.03 per 1k characters — pennies per answer; not separately metered. */
-async function ttsSpeak(text: string): Promise<string> {
+/* Deepgram Aura TTS — returns base64 MP3 of the spoken reply (same API key)
+   plus the billed character count (~$0.03/1k chars, metered into ai_usage). */
+async function ttsSpeak(text: string): Promise<{ b64: string; chars: number }> {
   if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
   const clean = text.replace(/[*_#`>]/g, "").replace(/\s+/g, " ").trim().slice(0, 1800);
   const res = await fetch(`https://api.deepgram.com/v1/speak?model=${encodeURIComponent(TTS_MODEL)}&encoding=mp3`, {
@@ -164,7 +197,7 @@ async function ttsSpeak(text: string): Promise<string> {
   const bytes = new Uint8Array(await res.arrayBuffer());
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
+  return { b64: btoa(bin), chars: clean.length };
 }
 
 function b64ToBytes(src: string): Uint8Array {
@@ -1213,22 +1246,52 @@ const ASSIST_SYSTEM =
   "- Go deeper only when the tech asks (why / explain / walk me through it).\n" +
   "Tone: warm, plain language, zero fluff — a knowledgeable colleague, never a manual. No headings, no bullet lists unless listing steps the tech must do in order.";
 
+/* Per-app personas — selected by body.app (server-defined text only; the
+   client sends a KEY, never prompt text). field = the shipped ASSIST_SYSTEM. */
+const PERSONAS: Record<string, string> = {
+  field: ASSIST_SYSTEM,
+  board:
+    "You are the dispatcher/scheduler at Roybal Construction, LLC (water/fire restoration and reconstruction, Fairbanks Alaska), " +
+    "talking with the owner at the Job Board — the scheduling whiteboard for every active job and crew. Answer like a sharp back-office " +
+    "dispatcher on the phone:\n" +
+    "- Lead with the answer: who's free, what's slipping, what's overloaded, what starts or ends soon. Two to four short sentences.\n" +
+    "- Use the BOARD CONTEXT numbers exactly — crew load, start/target dates, stages, hours. Never invent jobs, dates, or hours not in the context.\n" +
+    "- Flag conflicts plainly ('Mike is double-booked Thursday') and say the simplest fix, but never claim to have changed the board — you can't; the owner makes the change.\n" +
+    "- If asked something the board context doesn't cover (job-site detail, pricing), say which app has it rather than guessing.\n" +
+    "Tone: brisk, warm, zero fluff — the coordinator who knows where everyone is. No headings, no bullet lists unless listing jobs or crew in order.",
+  admin:
+    "You are the office manager at Roybal Construction, LLC (water/fire restoration and reconstruction, Fairbanks Alaska), " +
+    "talking with the owner in the Office Admin dashboard — the desk view over every job. Answer like the person who runs the office:\n" +
+    "- Lead with what needs attention: stale jobs, equipment out too long, drying not certified, missing paperwork, unread customer messages. Two to four short sentences.\n" +
+    "- Use the OFFICE CONTEXT exactly — job list, KPIs, attention flags, QuickBooks status. Never invent jobs or numbers not in the context.\n" +
+    "- When a job needs a closer look, name it so the owner can tap into it; the answer should say WHERE to act, not pretend to act.\n" +
+    "- If asked something the office digest doesn't cover (live readings, board schedule), say which app has it rather than guessing.\n" +
+    "Tone: calm, organized, plain language — the office manager who has the whole picture. No headings, no bullet lists unless listing jobs in priority order.",
+};
+
 async function fieldAssist(body: Record<string, unknown>) {
   const history = Array.isArray(body.messages) ? (body.messages as Array<{ role: string; text: string }>).slice(-12) : [];
   const images = Array.isArray(body.images) ? (body.images as string[]).slice(0, 4) : [];
   let userText = String(body.text ?? "").trim();
   let transcript: string | null = null;
+  let audioSeconds = 0;
+
+  // any throw AFTER a successful (billed) Deepgram transcription must carry
+  // the incurred seconds out, or failed voice turns evade the spend cap
+  try {
 
   if (body.audio) {
-    transcript = await sttTranscribe(b64ToBytes(String(body.audio)), String(body.audioMime || "audio/webm"));
+    const stt = await sttTranscribe(b64ToBytes(String(body.audio)), String(body.audioMime || "audio/webm"));
+    transcript = stt.transcript;
+    audioSeconds = stt.seconds;
     if (!transcript) throw new Error("Didn't catch that — try again closer to the mic.");
     userText = transcript;
   }
   // dictation mode: STT only, no LLM turn — powers voice answers on the
-  // estimator / timeline questionnaires (costs nothing on the token ledger)
+  // estimator / timeline questionnaires (STT seconds still hit the ledger)
   if (body.transcribeOnly) {
     if (!transcript) throw new Error("Dictation needs audio.");
-    return { result: { reply: "", transcript, replyAudio: null }, usage: { inTok: 0, outTok: 0 }, model: "deepgram-stt", summary: { transcribeOnly: true } };
+    return { result: { reply: "", transcript, replyAudio: null }, usage: { inTok: 0, outTok: 0 }, model: "deepgram-stt", summary: { transcribeOnly: true }, audioSeconds, ttsChars: 0 };
   }
   if (!userText && !images.length) throw new Error("Ask a question (text or voice), or attach a photo.");
 
@@ -1243,12 +1306,29 @@ async function fieldAssist(body: Record<string, unknown>) {
   finalContent.push({ type: "text", text: userText || "Here's the situation in the photo — what should I do?" });
   msgs.push({ role: "user", content: finalContent });
 
-  const context = body.context ? `\n\nJOB CONTEXT (current job):\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
-  const { text, usage } = await chatText({ model: ASSIST_MODEL, system: ASSIST_SYSTEM + context, messages: msgs, maxTokens: 1024 });
+  const appKey = String(body.app ?? "field");
+  // own-property lookup only — PERSONAS is a plain object, so a hostile app
+  // key like "constructor" would otherwise resolve Object.prototype members
+  // and replace the server-defined persona with coerced native-function text
+  const persona = Object.prototype.hasOwnProperty.call(PERSONAS, appKey) ? PERSONAS[appKey] : PERSONAS.field;
+  const ctxLabel = appKey === "board" ? "BOARD CONTEXT (current schedule)" : appKey === "admin" ? "OFFICE CONTEXT (all jobs)" : "JOB CONTEXT (current job)";
+  const context = body.context ? `\n\n${ctxLabel}:\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
+  const { text, usage } = await chatText({ model: ASSIST_MODEL, system: persona + context, messages: msgs, maxTokens: 1024 });
   // voice agent: speak the reply back (best-effort — a TTS hiccup never eats the answer)
   let replyAudio: string | null = null;
-  if (body.speak && text) { try { replyAudio = await ttsSpeak(text); } catch (_) { replyAudio = null; } }
-  return { result: { reply: text, transcript, replyAudio }, usage, model: ASSIST_MODEL, summary: { turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio } };
+  let ttsChars = 0;
+  if (body.speak && text) {
+    try { const tts = await ttsSpeak(text); replyAudio = tts.b64; ttsChars = tts.chars; }
+    catch (_) { replyAudio = null; }
+  }
+  return { result: { reply: text, transcript, replyAudio }, usage, model: ASSIST_MODEL, summary: { app: appKey, turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio }, audioSeconds, ttsChars };
+
+  } catch (err) {
+    const e = err as Error & { audioSeconds?: number; model?: string };
+    if (audioSeconds > 0 && e.audioSeconds == null) e.audioSeconds = audioSeconds;
+    if (e.model == null) e.model = ASSIST_MODEL;
+    throw e;
+  }
 }
 
 /* ============================================================
@@ -1311,7 +1391,7 @@ async function portalDraft(body: Record<string, unknown>) {
    anon key only (RLS always applies), the caller's JWT on every DB op,
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
-const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown> }>> = {
+const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number }>> = {
   photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
 };
 
@@ -1332,11 +1412,14 @@ serve(async (req: Request) => {
     if (!run) return json({ ok: false, error: `Unknown action. Expected one of: ${Object.keys(ACTIONS).join(", ")}` }, 400);
     const unified_job_id = body.unified_job_id ?? null;
     const captured_by = body.captured_by ?? null;
+    // which app is asking (field | board | admin) — per-app attribution on
+    // the envelope + ledger; also selects the fieldAssist persona
+    const app = String(body.app ?? "field");
 
     // Envelope (RLS-gated insert before any paid call — see deploy note).
     const ev = await insertRow("capture_events", {
       unified_job_id, source_type: "office_ai", form_key: action, captured_by,
-      raw_payload: { action }, status: "pending",
+      raw_payload: { action, app }, status: "pending",
     }, jwt);
     captureEventId = ev?.id ?? null;
 
@@ -1348,23 +1431,58 @@ serve(async (req: Request) => {
       return json({ ok: true, capped: true, spend: { month_to_date_usd: spent, cap_usd: SPEND_CAP_USD } });
     }
 
-    const { result, usage, model, summary } = await run(body as Record<string, unknown>);
+    const { result, usage, model, summary, audioSeconds = 0, ttsChars = 0 } = await run(body as Record<string, unknown>);
+    // Full cost of the call: LLM tokens + Deepgram STT seconds + Aura TTS
+    // characters — ALL of it lands in cost_usd so the cap governs honestly.
     const price = priceFor(model);
-    const cost = Math.max(0, (usage.inTok / 1e6) * price.in + (usage.outTok / 1e6) * price.out);
+    const llmCost = Math.max(0, (usage.inTok / 1e6) * price.in + (usage.outTok / 1e6) * price.out);
+    const sttCost = Math.max(0, (audioSeconds / 60) * STT_PRICE_PER_MIN);
+    const ttsCost = Math.max(0, (ttsChars / 1000) * TTS_PRICE_PER_1K);
+    const cost = llmCost + sttCost + ttsCost;
+    const usedLlm = usage.inTok > 0 || usage.outTok > 0;
+    const usedVoice = audioSeconds > 0 || ttsChars > 0;
+    const provider = usedVoice ? (usedLlm ? "deepgram+anthropic" : "deepgram") : "anthropic";
 
     await patchCaptureEvent(captureEventId!, {
       result: summary, status: "extracted", processed_at: new Date().toISOString(),
-      raw_payload: { action, llm_model: model, input_tokens: usage.inTok, output_tokens: usage.outTok, cost_usd: cost },
+      raw_payload: { action, app, llm_model: usedLlm ? model : null, input_tokens: usage.inTok, output_tokens: usage.outTok, audio_seconds: audioSeconds, tts_chars: ttsChars, cost_usd: cost },
     }, jwt);
     await insertRow("ai_usage", {
       capture_event_id: captureEventId, unified_job_id, captured_by, form_key: action,
-      provider: "anthropic", llm_model: model, input_tokens: usage.inTok, output_tokens: usage.outTok,
-      llm_cost_usd: cost, cost_usd: cost, capped: false,
+      provider, llm_model: usedLlm ? model : null, stt_model: audioSeconds > 0 ? STT_MODEL : null,
+      input_tokens: usage.inTok, output_tokens: usage.outTok, audio_seconds: audioSeconds,
+      stt_cost_usd: sttCost, llm_cost_usd: llmCost, tts_chars: ttsChars, tts_cost_usd: ttsCost,
+      cost_usd: cost, capped: false, note: app !== "field" ? `app:${app}` : null,
     }, jwt);
 
     return json({ ok: true, capped: false, ...result, spend: { month_to_date_usd: spent + cost, cap_usd: SPEND_CAP_USD, this_call_usd: cost } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // Paid work incurred BEFORE the throw (billed Deepgram seconds, tokens on
+    // a 200 we rejected) still lands on the ledger — the cap must see every
+    // dollar, not just successful calls. Best-effort; never masks the error.
+    try {
+      const e = err as { usage?: Usage; audioSeconds?: number; ttsChars?: number; model?: string };
+      const u = e?.usage ?? { inTok: 0, outTok: 0 };
+      const aSec = Number(e?.audioSeconds) || 0;
+      const tCh = Number(e?.ttsChars) || 0;
+      if (u.inTok > 0 || u.outTok > 0 || aSec > 0 || tCh > 0) {
+        const p = priceFor(String(e?.model ?? ""));
+        const llmC = Math.max(0, (u.inTok / 1e6) * p.in + (u.outTok / 1e6) * p.out);
+        const sttC = Math.max(0, (aSec / 60) * STT_PRICE_PER_MIN);
+        const ttsC = Math.max(0, (tCh / 1000) * TTS_PRICE_PER_1K);
+        const usedLlmE = u.inTok > 0 || u.outTok > 0;
+        await insertRow("ai_usage", {
+          capture_event_id: captureEventId,
+          provider: aSec > 0 || tCh > 0 ? (usedLlmE ? "deepgram+anthropic" : "deepgram") : "anthropic",
+          llm_model: usedLlmE ? e?.model ?? null : null, stt_model: aSec > 0 ? STT_MODEL : null,
+          input_tokens: u.inTok, output_tokens: u.outTok, audio_seconds: aSec,
+          stt_cost_usd: sttC, llm_cost_usd: llmC, tts_chars: tCh, tts_cost_usd: ttsC,
+          cost_usd: llmC + sttC + ttsC, capped: false,
+          note: ("error-path: " + message).slice(0, 200),
+        }, jwt);
+      }
+    } catch (_) { /* metering on the error path is best-effort */ }
     if (captureEventId) await patchCaptureEvent(captureEventId, { error: message }, jwt);
     return json({ ok: false, error: message, capture_event_id: captureEventId }, 400);
   }
