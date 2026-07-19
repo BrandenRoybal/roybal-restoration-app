@@ -92,7 +92,9 @@ const clip = (t: string, n = 1600) => Array.from(t).slice(0, n).join("");
    is the dispatcher's call — assistCrew is user-confirmed by the tap).
    Every unknown kind counts as customer-facing, so a new send path is
    quiet-hours-guarded by default until it's deliberately exempted. */
-const CREW_KINDS = new Set(["fieldReport", "forward", "assistCrew"]);
+/* phoneOwner = the phone receptionist's owner alerts — a 2am new-loss
+   call MUST reach the owner's cell, so it is quiet-hours exempt. */
+const CREW_KINDS = new Set(["fieldReport", "forward", "assistCrew", "phoneOwner"]);
 const qh = (v: string | undefined, dflt: number) => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 && n <= 24 ? n : dflt;

@@ -4,6 +4,11 @@
    start/finish dates from Finish-to-Start dependencies, crew hours,
    and an editable work calendar, then writes the result back onto
    job.startDate / job.targetDate (which the Gantt + Calendar read).
+
+   ⚠️ SERVER-SHARED: the phone agent (services/phone-agent) imports
+   this file in Node for real availability answers — keep it pure
+   ESM (no DOM, no browser globals, no imports) or the phone lane
+   breaks at its next deploy.
    ============================================================ */
 
 export const DEFAULT_SETTINGS = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 10, holidays: [] };
