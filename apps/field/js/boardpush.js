@@ -13,11 +13,11 @@
    a job save only lands when the server is still on the rev the
    write started from — a stale copy can never clobber newer edits.
    ============================================================ */
-import { uid } from "./core.js";
+import { uid, Store } from "./core.js";
 import { rest, isSignedIn } from "./supa.js";
 import { SYNC_ENABLED } from "./config.js";
-import { matchCoordinationId } from "./spine.js";
-import { jobType, TRADES } from "./model.js";
+import { matchCoordinationId, normClaim } from "./spine.js";
+import { jobType, TRADES, newProject } from "./model.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const norm = (s) => String(s || "").trim().toLowerCase();
@@ -53,8 +53,11 @@ const toSubtasks = (phases) => arr(phases).map((p) => ({
   estimatedHours: p.estimatedHours, lagDays: p.lagDays || 0, crewIds: [],
 }));
 
-/* constructionType -> board job type */
+/* constructionType -> board job type; water jobs get the board's own
+   "Water Mitigation" column color instead of masquerading as a remodel */
 const BOARD_TYPE = { remodel: "remodel", new_construction: "new_build", reconstruction: "restoration" };
+const boardTypeFor = (project) =>
+  jobType(project) === "construction" ? (BOARD_TYPE[project.constructionType] || "remodel") : "water";
 
 /* ---------- pure: build a brand-new board job from a field project ---------- */
 export function boardJobFromProject(project, plan, nowISO) {
@@ -62,7 +65,7 @@ export function boardJobFromProject(project, plan, nowISO) {
   return {
     id: uid(),
     stage: project.startDate ? "scheduled" : "lead",
-    type: BOARD_TYPE[project.constructionType] || "remodel",
+    type: boardTypeFor(project),
     priority: "normal", materials: "none",
     crewIds: [],
     title: project.customer || project.address || "Job",
@@ -337,5 +340,145 @@ export async function fetchHistoryDigest() {
     return historyDigest(await fetchBoardRows());
   } catch (_) {
     return [];
+  }
+}
+
+/* ============================================================
+   Phase 6 — one job, two views (no double entry)
+   The FIELD side runs both directions; the board app is untouched:
+     field job saved with real details -> a board tile appears (Leads,
+                                          or Scheduled with a start date)
+     board tile reaches Scheduled /
+     In Progress                       -> a field job file appears
+   ============================================================ */
+
+/* ---------- pure: which field projects could this tile belong to? ----------
+   Claim # first, customer/title second — ARCHIVED jobs count too (an
+   archived file must still block re-creation). ANY candidate means "don't
+   create a file"; actual linking happens from the project side
+   (ensureBoardTile), where the match rules are strict. */
+export function tileCandidates(d, projects) {
+  const claim = normClaim(d && (d.claimNo || d.claimNumber || d.claim));
+  if (claim) {
+    const hits = arr(projects).filter((p) => normClaim(p.claimNo) === claim);
+    if (hits.length) return hits;
+  }
+  const want = norm(d && d.customer) || norm(d && d.title);
+  if (!want) return [];
+  return arr(projects).filter((p) => norm(p.customer) === want);
+}
+
+/* ---------- pure: which tiles are real work with no job file? ----------
+   Leads/bids stay board-only (dead leads must not litter crew phones);
+   milestones are calendar markers, never jobs. A tile that EVER linked a
+   field job (fieldJobId set) is respected even if that job was deleted —
+   deleting a job file must not resurrect it on the next open. */
+export function tilesNeedingFieldFile(rows, projects) {
+  return arr(rows).filter((r) => {
+    const d = r && r.data;
+    if (!d || d.isMilestone) return false;
+    if (d.stage !== "scheduled" && d.stage !== "in_progress") return false;
+    if (d.fieldJobId) return false;
+    return tileCandidates(d, projects).length === 0;
+  });
+}
+
+/* ---------- pure: board tile -> a fresh field job file ----------
+   The id derives from the tile id, so two crew devices adopting the same
+   tile at the same moment converge on ONE row instead of duplicating. */
+const FIELD_TYPE = { remodel: "remodel", new_build: "new_construction", restoration: "reconstruction" };
+export function fieldSeedFromBoardJob(row, blank) {
+  const d = (row && row.data) || {};
+  const p = { ...blank, id: "bj-" + row.id };
+  p.jobType = (d.type === "water" || d.type === "fire" || d.type === "mold") ? "restoration" : "construction";
+  if (p.jobType === "construction") {
+    p.constructionType = FIELD_TYPE[d.type] || "";
+    p.startDate = d.startDate || "";
+    p.targetCompletion = d.targetDate || "";
+    if (Number(d.contractValue)) p.contractAmount = String(d.contractValue);
+  }
+  p.customer = d.customer || d.title || "";
+  p.address = d.address || "";
+  p.phone = d.phone || "";
+  p.claimNo = d.claimNo || "";
+  return p;
+}
+
+/* Has this id ever existed on the server (live or tombstoned)? A tombstone
+   means someone deliberately deleted the auto-created file — never recreate.
+   Fails CLOSED: if the check can't run, no file is created this pass. */
+async function serverHasProject(id) {
+  const res = await rest(`field_projects?id=eq.${encodeURIComponent(id)}&select=id`, { method: "GET" });
+  if (!res.ok) return true;
+  return (await res.json()).length > 0;
+}
+
+/** Create job files for board tiles that reached real work. Returns how many
+    were created. Fail-safe and re-entrancy-guarded — safe to fire from the
+    jobs list on every load. */
+let _adopting = false;
+export async function adoptBoardJobs(rows, projects) {
+  if (_adopting || !ready()) return 0;
+  _adopting = true;
+  let created = 0;
+  try {
+    for (const row of tilesNeedingFieldFile(rows, projects)) {
+      if (await serverHasProject("bj-" + row.id)) continue;
+      const p = fieldSeedFromBoardJob(row, newProject());
+      await Store.put(p);   // the sync engine's saved-listener pushes it up
+      // Stamp the link on the tile (same-rev annotation — never blocks a
+      // coordinator's save; ensureBoardTile re-stamps if this write loses).
+      const base = Number(row.data.rev) || 0;
+      try { await guardedWrite(row.id, base, { ...row.data, fieldJobId: p.id, rev: base }); } catch (_) {}
+      await linkSpine(p, row.id);
+      created++;
+    }
+  } catch (_) { /* offline mid-loop etc. — whatever was created stands */ }
+  _adopting = false;
+  return created;
+}
+
+/* ---------- field job -> board tile (no double entry) ----------
+   Fires from the job home. Creates a phase-less tile the first time a job
+   has real details; afterwards keeps the tile's identity fields (customer,
+   address, phone, claim #, unset contract value) in step. The FIELD app owns
+   identity; the board owns stage/dates/crew/phases. Identity writes keep the
+   SAME rev (annotation semantics, like pushActuals): a coordinator mid-edit
+   always wins, and the next job-home visit re-pushes. */
+const _tileEnsured = new Map();   // projectId -> identity signature confirmed this session
+export async function ensureBoardTile(project) {
+  try {
+    if (!ready() || project.archivedAt) return { skipped: true };
+    if (!norm(project.customer) && !norm(project.address)) return { skipped: true };   // still a blank "+ New Job"
+    const sig = JSON.stringify([project.customer, project.address, project.phone, project.claimNo, project.contractAmount]);
+    if (_tileEnsured.get(project.id) === sig) return { unchanged: true };
+    const row = await findBoardRow(project);
+    if (!row) {
+      const job = boardJobFromProject(project, null, new Date().toISOString());
+      const r = await guardedWrite(job.id, 0, job);
+      if (r.conflict) return { skipped: true };
+      await linkSpine(project, job.id);
+      _tileEnsured.set(project.id, sig);
+      return { mode: "created", boardJobId: job.id };
+    }
+    const d = row.data || { id: row.id };
+    const next = { ...d, fieldJobId: project.id };
+    let changed = d.fieldJobId !== project.id;
+    for (const [key, val] of [["customer", project.customer], ["address", project.address],
+                              ["phone", project.phone], ["claimNo", project.claimNo]]) {
+      const v = String(val || "").trim();
+      if (v && d[key] !== v) { next[key] = v; changed = true; }
+    }
+    if (!Number(d.contractValue) && Number(project.contractAmount)) { next.contractValue = Number(project.contractAmount); changed = true; }
+    if (changed) {
+      const base = Number(d.rev) || 0;
+      const r = await guardedWrite(row.id, base, { ...next, rev: base });
+      if (r.conflict) return { skipped: true };
+      await linkSpine(project, row.id);
+    }
+    _tileEnsured.set(project.id, sig);
+    return changed ? { mode: "synced", boardJobId: row.id } : { unchanged: true };
+  } catch (_) {
+    return { skipped: true };
   }
 }

@@ -29,7 +29,7 @@ import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
-import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
+import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -319,6 +319,8 @@ function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
 
 let _boardRows = null;   // session cache of board tiles → stage groups paint instantly next time
 let _archOpen = false;   // keep the Archived section open across re-renders
+let _listRender = null;  // token identifying the projectList render currently on screen
+const stageSig = (rows) => JSON.stringify((rows || []).map((r) => [r.id, r.data && r.data.stage, r.data && r.data.fieldJobId]).sort());
 
 async function projectList() {
   setChrome("Field Forms", null);
@@ -347,6 +349,8 @@ async function projectList() {
 
   if (SYNC_ENABLED) body.append(accountRow());
 
+  let paintLive = null;   // set when an active list is on screen
+
   if (!active.length && !archived.length) {
     body.append(h("div", { class: "empty" },
       h("div", { class: "big" }, mode === "construction" ? "🔨" : "🧰"),
@@ -366,7 +370,6 @@ async function projectList() {
     /* Paint the active list: grouped under the board's stage columns when any
        job is linked to a board tile, a plain flat list otherwise (offline, or
        nothing on the board — typical for restoration mode). */
-    const stageSig = (rows) => JSON.stringify((rows || []).map((r) => [r.id, r.data && r.data.stage, r.data && r.data.fieldJobId]).sort());
     const paint = (rows) => {
       clear(listWrap);
       const staged = active.map((p) => {
@@ -400,13 +403,25 @@ async function projectList() {
       });
     };
     paint(_boardRows);
-    fetchBoardRowsSafe().then((rows) => {
-      if (!rows || !listWrap.isConnected) return;   // offline / signed out / navigated away
-      const changed = stageSig(rows) !== stageSig(_boardRows);
-      _boardRows = rows;
-      if (changed) paint(rows);
-    });
+    paintLive = (rows) => { if (listWrap.isConnected) paint(rows); };
   }
+
+  // The board refresh + tile adoption run even when this mode's active list is
+  // EMPTY — a fresh device may have no local jobs until tiles are adopted.
+  const render = (_listRender = {});
+  fetchBoardRowsSafe().then(async (rows) => {
+    if (!rows) return;   // offline / signed out
+    const changed = stageSig(rows) !== stageSig(_boardRows);
+    _boardRows = rows;
+    if (changed && paintLive) paintLive(rows);
+    // Phase 6: board tiles that reached Scheduled / In Progress with no job
+    // file get one now (idempotent — deterministic ids, tombstones honored)
+    const n = await adoptBoardJobs(rows, projects);
+    if (n && _listRender === render) {
+      toast(n === 1 ? "Started a job file from the Job Board." : `Started ${n} job files from the Job Board.`);
+      projectList();
+    }
+  });
 
   if (archived.length) {
     const archList = h("div", { class: "joblist", style: "margin-top:8px" });
@@ -1047,6 +1062,10 @@ function projectHome(project) {
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
   body.append(messageLogCard(project));
   body.append(backupsCard(project));         // on-device snapshots taken before sync overwrote this job
+
+  // Phase 6: no double entry — a job with real details gets/updates its board
+  // tile (Leads until the coordinator stages it); fire-and-forget, offline-safe
+  ensureBoardTile(project);
 
   // Phase 5: keep the board's field-actuals rollup fresh (fire-and-forget)
   if (jobType(project) === "construction") pushActuals(project);

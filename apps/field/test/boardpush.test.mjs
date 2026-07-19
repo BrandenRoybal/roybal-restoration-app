@@ -5,7 +5,7 @@ import assert from "node:assert";
 import {
   planPhases, boardJobFromProject, mergePlanIntoBoardJob,
   rollupActuals, historyDigest, phasesToSubRows, isoDateOnly, matchCustomerRow,
-  boardRowFor,
+  boardRowFor, tileCandidates, tilesNeedingFieldFile, fieldSeedFromBoardJob,
 } from "../js/boardpush.js";
 import { blankSubRow } from "../js/model.js";
 
@@ -199,5 +199,51 @@ ok("converted restoration job never claim/customer-matches",
   boardRowFor(stageRows, { id: "fp-E", claimNo: "CL-88", customer: "Ana Diaz", linkedConstructionId: "fp-F" }) === null);
 ok("converted restoration job still honors an explicit link",
   boardRowFor(stageRows, { id: "fp-A", linkedConstructionId: "fp-F" })?.id === "s1");
+
+/* ---------- Phase 6: board tile -> field job adoption ----------
+   Leads stay board-only; Scheduled / In Progress tiles with no matching
+   job file (by link, claim, or customer — archived files count) get one. */
+const tile = (id, data) => ({ id, data });
+const T_ROWS = [
+  tile("t1", { stage: "scheduled",   type: "remodel", customer: "Echo New", claimNo: "CL-300", phone: "907-555-2001",
+               address: "5 Elm", contractValue: 22000, startDate: "2026-08-03", targetDate: "2026-09-12", rev: 2 }),
+  tile("t2", { stage: "in_progress", type: "water", customer: "Foxtrot Water", rev: 0 }),
+  tile("t3", { stage: "lead",        type: "remodel", customer: "Golf Lead" }),
+  tile("t4", { stage: "scheduled",   type: "remodel", customer: "Hotel Marker", isMilestone: true }),
+  tile("t5", { stage: "scheduled",   type: "remodel", customer: "India Linked", fieldJobId: "fp-x" }),
+  tile("t6", { stage: "scheduled",   type: "remodel", customer: "Juliet Existing", claimNo: "CL-500" }),
+  tile("t7", { stage: "scheduled",   type: "remodel", title: "Kilo Title Only" }),
+];
+const T_PROJECTS = [
+  { id: "fp-j", customer: "Juliet Existing", claimNo: "CL-500" },
+  { id: "fp-k", customer: "Kilo Title Only", archivedAt: "2026-06-01T00:00:00.000Z" },
+];
+const needs = tilesNeedingFieldFile(T_ROWS, T_PROJECTS);
+ok("only real unlinked work needs a file", needs.map((r) => r.id).join(",") === "t1,t2");
+ok("leads stay board-only", !needs.find((r) => r.id === "t3"));
+ok("milestones never spawn a file", !needs.find((r) => r.id === "t4"));
+ok("a tile that ever linked a job is respected (job may be deleted)", !needs.find((r) => r.id === "t5"));
+ok("claim-match blocks creation", !needs.find((r) => r.id === "t6"));
+ok("archived job files still block creation (title match)", !needs.find((r) => r.id === "t7"));
+ok("tileCandidates matches claim tolerant of formatting", tileCandidates({ claimNo: "cl 500" }, T_PROJECTS)[0].id === "fp-j");
+ok("tileCandidates empty for a blank tile", tileCandidates({}, T_PROJECTS).length === 0);
+
+const blankSeed = () => ({ id: "x", jobType: "restoration", constructionType: "", customer: "", address: "",
+  phone: "", claimNo: "", contractAmount: "", startDate: "", targetCompletion: "" });
+const seedA = fieldSeedFromBoardJob(T_ROWS[0], blankSeed());
+ok("seed id derives from the tile (idempotent across devices)", seedA.id === "bj-t1");
+ok("remodel tile -> construction/remodel job", seedA.jobType === "construction" && seedA.constructionType === "remodel");
+ok("header, money and dates carried into the seed",
+  seedA.customer === "Echo New" && seedA.claimNo === "CL-300" && seedA.contractAmount === "22000" &&
+  seedA.startDate === "2026-08-03" && seedA.targetCompletion === "2026-09-12");
+const seedB = fieldSeedFromBoardJob(T_ROWS[1], blankSeed());
+ok("water tile -> restoration job, no construction fields", seedB.jobType === "restoration" && !seedB.startDate && seedB.constructionType === "");
+ok("title stands in for a missing customer", fieldSeedFromBoardJob(T_ROWS[6], blankSeed()).customer === "Kilo Title Only");
+
+/* ---------- Phase 6: field restoration job -> a "water" tile in Leads ---------- */
+const waterJob = boardJobFromProject({ id: "fp-w", customer: "Lima Wet", jobType: "restoration" }, null, NOW_ISO);
+ok("water job lands as the board's Water Mitigation type", waterJob.type === "water");
+ok("water job starts in Leads (no start date)", waterJob.stage === "lead");
+ok("plan-less tile carries no phases or hours", waterJob.subtasks.length === 0 && waterJob.estimatedHours === "");
 
 console.log(`\n${pass} board-bridge checks passed.`);
