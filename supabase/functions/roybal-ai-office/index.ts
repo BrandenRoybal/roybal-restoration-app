@@ -26,10 +26,14 @@
  *                   constructionFacts digest.
  *
  * fieldAssist personas: body.app (field | board | admin) picks the persona
- * (server-defined text only) and is stamped on the envelope + ledger.
- * Voice is metered: Deepgram STT seconds and Aura TTS characters land in
- * ai_usage (audio_seconds/stt_cost_usd, tts_chars/tts_cost_usd — 203) and
- * roll into cost_usd, so the monthly cap governs voice honestly.
+ * (server-defined text only, registry in ./personas.ts) and is stamped on
+ * the envelope + ledger. The assistant carries READ tools (priceLookup,
+ * jobLookup, boardRead, smsThread, hoursLookup) run server-side through a
+ * bounded loop (≤2 rounds, RLS-scoped under the caller's JWT, cap re-checked
+ * between rounds). Voice is metered: Deepgram STT seconds and Aura TTS
+ * characters land in ai_usage (audio_seconds/stt_cost_usd,
+ * tts_chars/tts_cost_usd — 203) and roll into cost_usd, so the monthly cap
+ * governs voice honestly.
  *
  * Deploy:  supabase functions deploy roybal-ai-office --no-verify-jwt
  *   (--no-verify-jwt required — browser CORS preflight carries no token; the
@@ -42,6 +46,9 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+// personas + tool schemas live in the shared registry (pure data) — the
+// future phone-receptionist agent imports the same file
+import { PERSONAS, CTX_LABELS, TOOL_RULE, TOOLS, TOOLSETS } from "./personas.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -1240,43 +1247,185 @@ async function contentsJustify(body: Record<string, unknown>) {
 /* ============================================================
    Action: fieldAssist — conversational, job-aware field Q&A
    Voice (Deepgram STT) + photos (vision) + short colleague answers.
+   Personas + tool schemas: ./personas.ts (shared registry).
    ============================================================ */
-const ASSIST_SYSTEM =
-  "You are the senior IICRC WRT-certified lead at Roybal Construction, LLC (water/fire restoration and reconstruction, Fairbanks Alaska), " +
-  "taking a quick call from one of your techs in the field mid-job. Answer like a sharp, friendly colleague on the phone:\n" +
-  "- Lead with what to DO. Two to four short sentences for a typical question — actionable and direct.\n" +
-  "- Cite the standard when it backs the call (IICRC S500 water, S520 mold, S700/S740 fire) in plain terms, e.g. 'S500 puts that at Cat 3 — it touched sewage'.\n" +
-  "- On rebuild/construction questions cite the code the same way: 2022 International Residential Code (IRC) for framing/structural/general residential work, " +
-  "2021 International Mechanical Code (IMC) for mechanical/HVAC/venting, 2026 National Electrical Code (NEC, NFPA 70) for electrical — " +
-  "e.g. 'IRC R302 wants that wall fire-blocked' or 'NEC 210.8 means GFCI within 6 ft of that sink'. Note when the local AHJ may have amended the adopted edition.\n" +
-  "- Safety gates first: possible Cat 3, energized electrical, structural concerns, pre-1980s materials (asbestos/lead), or mold beyond ~10 sq ft mean STOP and say exactly what to check or who to call before proceeding.\n" +
-  "- Use the JOB CONTEXT so the answer fits THIS job (category, class, cause, materials, equipment, readings). Never invent readings or facts.\n" +
-  "- If you need one piece of information to answer safely, ask ONE pointed question back instead of guessing.\n" +
-  "- Go deeper only when the tech asks (why / explain / walk me through it).\n" +
-  "Tone: warm, plain language, zero fluff — a knowledgeable colleague, never a manual. No headings, no bullet lists unless listing steps the tech must do in order.";
 
-/* Per-app personas — selected by body.app (server-defined text only; the
-   client sends a KEY, never prompt text). field = the shipped ASSIST_SYSTEM. */
-const PERSONAS: Record<string, string> = {
-  field: ASSIST_SYSTEM,
-  board:
-    "You are the dispatcher/scheduler at Roybal Construction, LLC (water/fire restoration and reconstruction, Fairbanks Alaska), " +
-    "talking with the owner at the Job Board — the scheduling whiteboard for every active job and crew. Answer like a sharp back-office " +
-    "dispatcher on the phone:\n" +
-    "- Lead with the answer: who's free, what's slipping, what's overloaded, what starts or ends soon. Two to four short sentences.\n" +
-    "- Use the BOARD CONTEXT numbers exactly — crew load, start/target dates, stages, hours. Never invent jobs, dates, or hours not in the context.\n" +
-    "- Flag conflicts plainly ('Mike is double-booked Thursday') and say the simplest fix, but never claim to have changed the board — you can't; the owner makes the change.\n" +
-    "- If asked something the board context doesn't cover (job-site detail, pricing), say which app has it rather than guessing.\n" +
-    "Tone: brisk, warm, zero fluff — the coordinator who knows where everyone is. No headings, no bullet lists unless listing jobs or crew in order.",
-  admin:
-    "You are the office manager at Roybal Construction, LLC (water/fire restoration and reconstruction, Fairbanks Alaska), " +
-    "talking with the owner in the Office Admin dashboard — the desk view over every job. Answer like the person who runs the office:\n" +
-    "- Lead with what needs attention: stale jobs, equipment out too long, drying not certified, missing paperwork, unread customer messages. Two to four short sentences.\n" +
-    "- Use the OFFICE CONTEXT exactly — job list, KPIs, attention flags, QuickBooks status. Never invent jobs or numbers not in the context.\n" +
-    "- When a job needs a closer look, name it so the owner can tap into it; the answer should say WHERE to act, not pretend to act.\n" +
-    "- If asked something the office digest doesn't cover (live readings, board schedule), say which app has it rather than guessing.\n" +
-    "Tone: calm, organized, plain language — the office manager who has the whole picture. No headings, no bullet lists unless listing jobs in priority order.",
-};
+/* ---------- read tools — every executor runs RLS-scoped under the
+   caller's JWT via db(); results are kept token-lean. ---------- */
+
+/* sanitize a model-supplied word for a PostgREST ilike pattern — letters,
+   digits, space, dash, slash only (commas/parens would break out of the
+   filter expression) */
+const likeSafe = (s: unknown) => String(s ?? "").toLowerCase().replace(/[^a-z0-9 /-]/g, " ").replace(/\s+/g, " ").trim();
+
+async function toolPriceLookup(input: Record<string, unknown>, jwt: string) {
+  const q = likeSafe(input.query);
+  if (!q) return { error: "give a 1-4 word search phrase" };
+  const words = q.split(" ").slice(0, 4);
+  const cat = String(input.category ?? "").toUpperCase().replace(/[^A-Z-]/g, "");
+  const ands = words.map((w) => `description.ilike.*${w}*`).join(",");
+  const res = await db(
+    `price_list?select=category,code,description,unit,replace_price,remove_price,detach_reset_price&and=(${ands})${cat ? `&category=eq.${cat}` : ""}&order=category,code&limit=15`,
+    jwt, { method: "GET" });
+  if (!res.ok) return { error: `price list read failed (${res.status})` };
+  const rows = await res.json();
+  return { matches: rows.length, note: rows.length === 15 ? "first 15 — narrow the search for more precision" : undefined, rows };
+}
+
+async function toolJobLookup(input: Record<string, unknown>, jwt: string) {
+  const q = likeSafe(input.query);
+  if (!q) return { error: "give a customer name, claim number, or address fragment" };
+  const pat = q.replace(/ /g, "*");
+  const res = await db(
+    `unified_jobs?select=claim_number,owner_name,owner_phone,property_address,status,loss_type,water_category,date_of_loss,updated_at&or=(claim_number.ilike.*${pat}*,owner_name.ilike.*${pat}*,property_address.ilike.*${pat}*)&order=updated_at.desc&limit=10`,
+    jwt, { method: "GET" });
+  if (!res.ok) return { error: `job spine read failed (${res.status})` };
+  const rows = await res.json();
+  return { matches: rows.length, rows };
+}
+
+/* board tables store the object in a `data` jsonb envelope ({id, data,
+   deleted}) — unwrap, skip deleted rows and the reserved settings row */
+async function boardRows(table: string, jwt: string, limit = 300): Promise<Array<Record<string, unknown>>> {
+  const res = await db(`${table}?select=id,data,deleted&limit=${limit}`, jwt, { method: "GET" });
+  if (!res.ok) throw new Error(`${table} read failed (${res.status})`);
+  return ((await res.json()) as Array<{ id: string; data: Record<string, unknown>; deleted: boolean }>)
+    .filter((r) => r && !r.deleted && r.id !== "__settings__" && r.data)
+    .map((r) => r.data);
+}
+
+async function toolBoardRead(input: Record<string, unknown>, jwt: string) {
+  const [jobs, crew] = await Promise.all([boardRows("coordination_jobs", jwt), boardRows("crew_members", jwt, 100)]);
+  const nameById = new Map(crew.map((c) => [c.id, c.name || "—"]));
+  const rows = jobs
+    .filter((j) => !j.isMilestone && (input.include_done ? true : j.stage !== "done"))
+    .map((j) => ({
+      title: j.title || j.customer || "Job",
+      customer: j.customer || "",
+      stage: j.stage || "",
+      start: j.startDate || "",
+      target: j.targetDate || "",
+      crew: (Array.isArray(j.crewIds) ? j.crewIds : []).map((id) => nameById.get(id) || id),
+      materials: j.materials && j.materials !== "received" ? j.materials : undefined,
+    }))
+    .slice(0, 60);
+  return { jobs: rows.length, rows };
+}
+
+async function toolSmsThread(input: Record<string, unknown>, jwt: string) {
+  const limit = Math.min(Math.max(Number(input.limit) || 20, 1), 30);
+  const digits = String(input.phone ?? "").replace(/[^\d]/g, "").slice(-10);
+  const phoneFilter = digits.length === 10 ? `&or=(from_number.like.*${digits},to_number.like.*${digits})` : "";
+  const res = await db(
+    `sms_messages?select=created_at,direction,from_number,to_number,kind,status,body&order=created_at.desc&limit=${limit}${phoneFilter}`,
+    jwt, { method: "GET" });
+  if (!res.ok) return { error: `message log read failed (${res.status})` };
+  const rows = ((await res.json()) as Array<Record<string, unknown>>).map((m) => ({
+    at: String(m.created_at ?? "").slice(0, 16), direction: m.direction, from: m.from_number, to: m.to_number,
+    kind: m.kind, status: m.status, body: String(m.body ?? "").slice(0, 160),
+  }));
+  return { messages: rows.length, note: "times are UTC", rows };
+}
+
+async function toolHoursLookup(input: Record<string, unknown>, jwt: string) {
+  const days = Math.min(Math.max(Number(input.since_days) || 7, 1), 90);
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const [entries, jobs, crew] = await Promise.all([
+    boardRows("time_entries", jwt, 1000), boardRows("coordination_jobs", jwt), boardRows("crew_members", jwt, 100),
+  ]);
+  const jobTitle = new Map(jobs.map((j) => [j.id, j.title || j.customer || "Job"]));
+  const crewName = new Map(crew.map((c) => [c.id, c.name || "—"]));
+  const byJob = new Map<string, number>(), byCrew = new Map<string, number>();
+  let total = 0;
+  for (const e of entries) {
+    if (!e || String(e.date ?? "") < since) continue;
+    const h = Number(e.hours) || 0;
+    if (!h) continue;
+    total += h;
+    const jt = String(jobTitle.get(e.jobId as string) ?? "(unassigned)");
+    const cn = String(crewName.get(e.crewId as string) ?? "(unknown)");
+    byJob.set(jt, (byJob.get(jt) || 0) + h);
+    byCrew.set(cn, (byCrew.get(cn) || 0) + h);
+  }
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  return {
+    sinceDays: days, totalHours: r1(total),
+    byJob: [...byJob].map(([job, hours]) => ({ job, hours: r1(hours) })).sort((a, b) => b.hours - a.hours),
+    byCrew: [...byCrew].map(([name, hours]) => ({ name, hours: r1(hours) })).sort((a, b) => b.hours - a.hours),
+    note: "manual board entries only — QuickBooks Time entries appear once the daily pull runs",
+  };
+}
+
+async function runTool(name: string, input: Record<string, unknown>, jwt: string): Promise<unknown> {
+  switch (name) {
+    case "priceLookup": return toolPriceLookup(input, jwt);
+    case "jobLookup": return toolJobLookup(input, jwt);
+    case "boardRead": return toolBoardRead(input, jwt);
+    case "smsThread": return toolSmsThread(input, jwt);
+    case "hoursLookup": return toolHoursLookup(input, jwt);
+    default: return { error: `unknown tool: ${name}` };
+  }
+}
+
+/* Conversational call WITH server-executed read tools — a bounded agentic
+   loop (≤2 tool rounds, then the model must answer). The spend cap is
+   re-checked between rounds so a tool-happy turn can't sail past it, and
+   cumulative usage rides any thrown error so the ledger sees billed tokens
+   even on failure. Tool failures return {error} to the model, never throw. */
+async function chatWithTools(opts: {
+  model: string; system: string; messages: unknown[]; jwt: string;
+  tools: Array<Record<string, unknown>>; maxTokens?: number;
+}): Promise<{ text: string; usage: Usage; toolCalls: number }> {
+  if (!LLM_API_KEY) throw new Error("llm_key_missing: set the LLM_API_KEY function secret (Anthropic)");
+  const total: Usage = { inTok: 0, outTok: 0 };
+  const msgs = [...opts.messages];
+  let toolCalls = 0;
+  let capped = false;
+  try {
+    for (let round = 0; round <= 2; round++) {
+      const useTools = !capped && round < 2 && opts.tools.length > 0;
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": LLM_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: opts.model, max_tokens: opts.maxTokens ?? 1024, system: opts.system,
+          messages: msgs, ...(useTools ? { tools: opts.tools } : {}),
+        }),
+      });
+      const raw = await res.text();
+      if (!res.ok) throw new Error(`llm_failed (${res.status}): ${raw}`);
+      const data = JSON.parse(raw);
+      const u = data.usage ?? {};
+      total.inTok += Number(u.input_tokens) || 0;
+      total.outTok += Number(u.output_tokens) || 0;
+      const toolUses = (data.content ?? []).filter((b: { type: string }) => b.type === "tool_use");
+      if (!useTools || data.stop_reason !== "tool_use" || !toolUses.length) {
+        const text = (data.content ?? []).filter((b: { type: string }) => b.type === "text")
+          .map((b: { text: string }) => b.text).join("\n").trim();
+        return { text, usage: total, toolCalls };
+      }
+      msgs.push({ role: "assistant", content: data.content });
+      const results: unknown[] = [];
+      for (const tu of toolUses as Array<{ id: string; name: string; input?: Record<string, unknown> }>) {
+        toolCalls++;
+        let out: unknown;
+        try { out = await runTool(String(tu.name), tu.input ?? {}, opts.jwt); }
+        catch (e) { out = { error: String((e as Error)?.message ?? e) }; }
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: JSON.stringify(out).slice(0, 8000) });
+      }
+      msgs.push({ role: "user", content: results });
+      // mid-turn cap check: if the month filled up while we looped, the next
+      // call answers from what it already has instead of buying more rounds
+      if (SPEND_CAP_USD > 0 && (await monthSpend(opts.jwt)) >= SPEND_CAP_USD) capped = true;
+    }
+    throw new Error("tool_loop_overrun");   // unreachable: the toolless final round always returns
+  } catch (err) {
+    const e = err as Error & { usage?: Usage };
+    if (e.usage == null) e.usage = { ...total };
+    else e.usage = { inTok: e.usage.inTok + total.inTok, outTok: e.usage.outTok + total.outTok };
+    throw e;
+  }
+}
 
 async function fieldAssist(body: Record<string, unknown>) {
   const history = Array.isArray(body.messages) ? (body.messages as Array<{ role: string; text: string }>).slice(-12) : [];
@@ -1326,9 +1475,14 @@ async function fieldAssist(body: Record<string, unknown>) {
   const spokenRule = wantSpeak
     ? "\n\nSPOKEN MODE: this reply is read aloud by TTS while the tech works. About two short sentences (three max), no lists, no long citations — say the one thing to do, then stop. They'll ask if they want more."
     : "";
-  const ctxLabel = appKey === "board" ? "BOARD CONTEXT (current schedule)" : appKey === "admin" ? "OFFICE CONTEXT (all jobs)" : "JOB CONTEXT (current job)";
+  const ctxLabel = Object.prototype.hasOwnProperty.call(CTX_LABELS, appKey) ? CTX_LABELS[appKey] : CTX_LABELS.field;
   const context = body.context ? `\n\n${ctxLabel}:\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
-  const { text, usage } = await chatText({ model, system: persona + spokenRule + context, messages: msgs, maxTokens: 1024 });
+  const toolNames = Object.prototype.hasOwnProperty.call(TOOLSETS, appKey) ? TOOLSETS[appKey] : TOOLSETS.field;
+  const tools = toolNames.map((n) => TOOLS[n]).filter(Boolean);
+  const { text, usage, toolCalls } = await chatWithTools({
+    model, system: persona + (tools.length ? TOOL_RULE : "") + spokenRule + context,
+    messages: msgs, jwt: String((body as Record<string, unknown>)._jwt ?? ""), tools, maxTokens: 1024,
+  });
   // voice agent: speak the reply back (best-effort — a TTS hiccup never eats the answer)
   let replyAudio: string | null = null;
   let ttsChars = 0;
@@ -1336,7 +1490,7 @@ async function fieldAssist(body: Record<string, unknown>) {
     try { const tts = await ttsSpeak(text); replyAudio = tts.b64; ttsChars = tts.chars; }
     catch (_) { replyAudio = null; }
   }
-  return { result: { reply: text, transcript, replyAudio }, usage, model, summary: { app: appKey, turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio }, audioSeconds, ttsChars };
+  return { result: { reply: text, transcript, replyAudio }, usage, model, summary: { app: appKey, turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio, toolCalls }, audioSeconds, ttsChars };
 
   } catch (err) {
     const e = err as Error & { audioSeconds?: number; model?: string };

@@ -116,17 +116,18 @@ conversation before the new mounts land.
 - [ ] Fix stale "Roybal Restoration" title in `apps/admin/index.html` (rebrand miss).
 - [ ] Job answers deep-link via existing `openJob()` → field `#/p/<id>`.
 
-### Phase 4 — Server read tools (M)
-Extend `chatText()` with an Anthropic tools array + bounded tool-use loop (≤2
-rounds; `forcedTool()` already speaks the wire format). **Re-check `monthSpend`
-between tool rounds**, not just per-request. All tools RLS-scoped via the
-existing `db()` helper with the caller's JWT — never a service key.
-- [ ] `priceLookup` — `resolvePrices`/`fetchCatalogRows` against `public.price_list` (2,959 Fairbanks Xactimate items); honors the $125/HR labor rule
-- [ ] `jobLookup` — `unified_jobs` by claim/name/address
-- [ ] `boardRead` — `coordination_jobs` stage/dates/crew
-- [ ] `smsThread` — `sms_messages` both directions by job: "did the customer text back?" *(the conversation lane went live today; the assistant must read it, not just send into it)*
-- [ ] `hoursLookup` — `time_entries` aggregates ("hours on Smith this week"); note the QB Time daily-pull deploy is the gate for real timesheet nudges
-- [ ] Extract personas + tool schemas to `supabase/functions/_shared/personas.ts` — the file the phone agent imports later
+### Phase 4 — Server read tools (M) — ✅ SHIPPED Jul 18 2026 (v45)
+`chatWithTools()`: bounded tool-use loop (≤2 rounds, then the model must
+answer), `monthSpend` re-checked between rounds, cumulative usage rides
+thrown errors onto the ledger. All tools RLS-scoped via `db()` with the
+caller's JWT — never a service key. Tool failures return `{error}` to the
+model instead of failing the turn.
+- [x] `priceLookup` — word-match search over `public.price_list` (ilike, sanitized), category filter, 15-row cap
+- [x] `jobLookup` — `unified_jobs` by claim/name/address
+- [x] `boardRead` — `coordination_jobs` stage/dates/crew names (jsonb envelope unwrapped)
+- [x] `smsThread` — `sms_messages` both directions, optional phone filter: "did the customer text back?"
+- [x] `hoursLookup` — `time_entries` aggregates by job + crew since N days (manual board entries; QB Time daily-pull still the gate for full coverage)
+- [x] Personas + tool schemas + per-app toolsets extracted to `supabase/functions/roybal-ai-office/personas.ts` *(inside the function dir rather than `_shared/` so the MCP two-file deploy bundles it; the phone agent imports the same repo path later)* — all three personas share all five read tools today; the phone persona will get a narrow set
 
 ### Phase 5 — Confirmed actions: chips, not autonomy (M)
 Reply schema gains `proposedActions[]`; `assist.js` renders confirm chips (same
