@@ -1,0 +1,11 @@
+# Build context for the phone agent's Docker image (fly deploy from the repo
+# root). The image only needs services/phone-agent + two shared files, so keep
+# the heavyweight directories out of the upload (~1.5 GB → a few MB).
+.claude
+.git
+**/node_modules
+apps/field
+apps/web
+apps/mobile
+apps/admin
+docs

@@ -57,8 +57,10 @@ caller → Twilio (+1 866 345-2290)
      PHONE_RELAY_TOKEN="<any long random string>" \
      OWNER_CELL="<your cell, e.g. 907xxxxxxx>"
    fly deploy --config services/phone-agent/fly.toml \
-     --dockerfile services/phone-agent/Dockerfile .
+     --dockerfile services/phone-agent/Dockerfile --ha=false .
    ```
+   (`--ha=false` = ONE machine, on purpose: the per-caller rate limits are
+   in-memory, and one always-on shared-1x is plenty for a phone line.)
 3. **Edge-function secrets** — Supabase Dashboard → Edge Functions → Secrets,
    add: `PHONE_AGENT_WSS` = `wss://roybal-phone.fly.dev/relay`,
    `PHONE_RELAY_TOKEN` = the same random string, `OWNER_CELL` = your cell.
