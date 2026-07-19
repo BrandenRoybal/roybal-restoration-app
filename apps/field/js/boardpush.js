@@ -205,15 +205,35 @@ export function matchCustomerRow(rows, project) {
   return hits.length === 1 ? hits[0] : null;
 }
 
-/** Find this project's board row: explicit fieldJobId link first, claim #
-    second, unambiguous customer-name match last. */
-export async function findBoardRow(project) {
-  const rows = await fetchBoardRows();
-  const linked = rows.find((r) => r.data && r.data.fieldJobId === project.id);
+/* ---------- pure: match a project to its board row ----------
+   Explicit fieldJobId link first, claim # second, unambiguous customer-name
+   match last. A restoration job that spawned a reconstruction job shares its
+   claim # AND customer with the recon job — the board tile belongs to the
+   recon side, so fallback matching is skipped for it (fieldJobId still wins). */
+export function boardRowFor(rows, project) {
+  const linked = arr(rows).find((r) => r.data && r.data.fieldJobId === project.id);
   if (linked) return linked;
-  const byClaim = matchCoordinationId(rows, project.claimNo);
-  if (byClaim) return rows.find((r) => r.id === byClaim) || null;
+  if (project && project.linkedConstructionId) return null;
+  const byClaim = matchCoordinationId(rows, project && project.claimNo);
+  if (byClaim) return arr(rows).find((r) => r.id === byClaim) || null;
   return matchCustomerRow(rows, project);
+}
+
+/** Find this project's board row (one network fetch + boardRowFor). */
+export async function findBoardRow(project) {
+  return boardRowFor(await fetchBoardRows(), project);
+}
+
+/** One batched read of every live board row, for stamping a whole job list.
+    Fail-safe: null when offline / signed out / anything goes wrong — the
+    caller just skips stage chips. */
+export async function fetchBoardRowsSafe() {
+  try {
+    if (!ready()) return null;
+    return await fetchBoardRows();
+  } catch (_) {
+    return null;
+  }
 }
 
 /* Same optimistic-concurrency guard as the Board's data layer. */

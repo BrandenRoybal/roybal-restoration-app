@@ -5,6 +5,7 @@ import assert from "node:assert";
 import {
   planPhases, boardJobFromProject, mergePlanIntoBoardJob,
   rollupActuals, historyDigest, phasesToSubRows, isoDateOnly, matchCustomerRow,
+  boardRowFor,
 } from "../js/boardpush.js";
 import { blankSubRow } from "../js/model.js";
 
@@ -178,5 +179,25 @@ ok("a row linked to THIS field job still matches", matchCustomerRow([
 ok("milestones never match", matchCustomerRow([
   mkRow("b7", { customer: "Jeff Hebard", stage: "lead", isMilestone: true }),
 ], proj("Jeff Hebard")) === null);
+
+/* ---------- boardRowFor: the batched list matcher ----------
+   Same order as findBoardRow (fieldJobId -> claim # -> customer), against
+   pre-fetched rows — used to stamp board stages onto the whole jobs list. */
+const stageRows = [
+  mkRow("s1", { customer: "Jeff Hebard", claimNo: "CL-77", stage: "in_progress", fieldJobId: "fp-A" }),
+  mkRow("s2", { customer: "Ana Diaz", claimNo: "CL-88", stage: "scheduled", fieldJobId: "" }),
+  mkRow("s3", { customer: "Sam Rowe", title: "Rowe Addition", stage: "lead", fieldJobId: "" }),
+];
+ok("explicit fieldJobId link wins", boardRowFor(stageRows, { id: "fp-A", customer: "Somebody Else" })?.id === "s1");
+ok("claim # matches when unlinked", boardRowFor(stageRows, { id: "fp-B", claimNo: "cl 88" })?.id === "s2");
+ok("customer-name fallback still applies", boardRowFor(stageRows, { id: "fp-C", customer: "Sam Rowe" })?.id === "s3");
+ok("no match -> null", boardRowFor(stageRows, { id: "fp-D", customer: "Nobody", claimNo: "CL-99" }) === null);
+ok("empty rows -> null", boardRowFor([], { id: "fp-A" }) === null && boardRowFor(null, { id: "fp-A" }) === null);
+/* A restoration job converted to a recon job shares claim # + customer with
+   it — the board tile belongs to the RECON job, so fallbacks must not bite. */
+ok("converted restoration job never claim/customer-matches",
+  boardRowFor(stageRows, { id: "fp-E", claimNo: "CL-88", customer: "Ana Diaz", linkedConstructionId: "fp-F" }) === null);
+ok("converted restoration job still honors an explicit link",
+  boardRowFor(stageRows, { id: "fp-A", linkedConstructionId: "fp-F" })?.id === "s1");
 
 console.log(`\n${pass} board-bridge checks passed.`);
