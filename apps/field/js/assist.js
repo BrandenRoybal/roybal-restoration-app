@@ -117,6 +117,71 @@ function blobToBase64(blob) {
   });
 }
 
+/* ---------- earcons — tiny WebAudio cues so hands-free is usable without
+   looking at the screen: rising chirp = listening, falling blip = sent. */
+let earCtx = null;
+function earcon(kind) {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    earCtx = earCtx || new Ctx();
+    if (earCtx.state === "suspended") earCtx.resume();
+    const o = earCtx.createOscillator(), g = earCtx.createGain();
+    o.connect(g); g.connect(earCtx.destination);
+    const t = earCtx.currentTime;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.1, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    o.frequency.setValueAtTime(kind === "listen" ? 620 : 520, t);
+    o.frequency.exponentialRampToValueAtTime(kind === "listen" ? 880 : 392, t + 0.14);
+    o.start(t); o.stop(t + 0.18);
+  } catch (_) { /* cues are best-effort */ }
+}
+
+/* ---------- VAD auto-endpointing (hands-free only) ----------
+   Watches the mic's RMS level; once the tech has spoken and then goes
+   ~0.8s quiet, the recording stops itself — no glove-tap needed to send.
+   If nothing is said for 8s the mic closes and hands-free pauses instead
+   of looping "too quick" errors. Tap-to-stop always still works. */
+let vad = null;
+function startVad() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx || !stream) return;
+    const ctx = new Ctx();
+    const an = ctx.createAnalyser();
+    an.fftSize = 512;
+    ctx.createMediaStreamSource(stream).connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    const t0 = Date.now();
+    let spoke = false, lastVoice = 0;
+    const timer = setInterval(() => {
+      if (!recorder) return stopVad();
+      an.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+      const rms = Math.sqrt(sum / buf.length);
+      const now = Date.now();
+      if (rms > 0.03) { spoke = true; lastVoice = now; }
+      if ((spoke && now - lastVoice > 800) || (!spoke && now - t0 > 8000)) {
+        stopVad();
+        try { recorder.stop(); } catch (_) {}
+      }
+    }, 100);
+    vad = { ctx, timer };
+  } catch (_) { /* VAD is best-effort — tap-to-stop always works */ }
+}
+function stopVad() {
+  if (!vad) return;
+  clearInterval(vad.timer);
+  try { vad.ctx.close(); } catch (_) {}
+  vad = null;
+}
+function setHandsFree(on) {
+  handsFree = on;
+  if (ui) ui.hf.classList.toggle("on", on);
+}
+
 const transcript = () => {
   if (!sessions.has(provider.key)) sessions.set(provider.key, []);
   return sessions.get(provider.key);
@@ -208,7 +273,13 @@ async function toggleMic() {
   if (!aiAvailable()) return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined")
     return toast("This device can't record audio — type your question.");
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  // truck-cab audio: cancel the speaker's own TTS echo, suppress engine/fan
+  // noise, and auto-level a voice that's an arm's length from the phone
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  }
   catch (err) {
     const name = (err && err.name) || "";
     return toast(name === "NotAllowedError"
@@ -224,19 +295,30 @@ async function toggleMic() {
   catch { recorder = new MediaRecorder(stream); }
   recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
   recorder.onstop = async () => {
+    stopVad();
     stream?.getTracks().forEach((t) => t.stop());
     stream = null;
     const mime = recorder.mimeType || picked || "audio/mp4";
     recorder = null;
     ui.mic.classList.remove("rec"); ui.mic.textContent = "🎙️";
     const blob = new Blob(chunks, { type: mime });
-    if (!blob.size) return toast("Didn't catch any audio — check the mic permission and try again.");
-    if (blob.size < 2000) return toast("That was too quick — hold the mic open a beat longer.");
+    if (!blob.size || blob.size < 2000) {
+      // hands-free: a silent open mic (VAD timeout or a stray tap) must not
+      // loop error toasts while the phone sits in a pocket — pause instead
+      if (handsFree) { setHandsFree(false); return toast("Didn't hear anything — hands-free paused. Tap 🎧 to talk again."); }
+      return toast(!blob.size
+        ? "Didn't catch any audio — check the mic permission and try again."
+        : "That was too quick — hold the mic open a beat longer.");
+    }
+    earcon("done");
     ask({ audio: await blobToBase64(blob), audioMime: mime });
   };
   // timeslice: iOS Safari can return an empty blob when data is only requested
   // at stop — chunked delivery every 250ms makes recordings reliable
   recorder.start(250);
+  earcon("listen");
+  // hands-free: the recording ends itself ~0.8s after the tech stops talking
+  if (handsFree) startVad();
   ui.mic.classList.add("rec"); ui.mic.textContent = "⏹";
 }
 
@@ -249,7 +331,8 @@ function buildUi() {
 
   const input = h("input", { class: "assist__input", placeholder: "Ask anything — e.g. “drywall wicked 3 feet, cut 2 or 4?”", enterkeyhint: "send" });
   const send = h("button", { type: "button", class: "assist__btn assist__btn--send" }, "➤");
-  const mic = h("button", { type: "button", class: "assist__btn" }, "🎙️");
+  // the mic is the one button pressed with wet gloves in a truck cab — 64px
+  const mic = h("button", { type: "button", class: "assist__btn assist__btn--mic" }, "🎙️");
   const cam = h("button", { type: "button", class: "assist__btn" }, "📷");
   const file = h("input", { type: "file", accept: "image/*", multiple: true, style: "display:none" });
 
@@ -281,12 +364,11 @@ function buildUi() {
   const hf = h("button", { type: "button", class: "assist__mini" }, "🎧");
   hf.title = "Hands-free conversation — it talks back and re-opens the mic";
   hf.addEventListener("click", () => {
-    handsFree = !handsFree;
-    hf.classList.toggle("on", handsFree);
+    setHandsFree(!handsFree);
     if (handsFree) {
       unlockAudio();
       if (!speakerOn) spk.click();
-      toast("Hands-free on — talk, listen, talk again. Tap 🎧 to stop.");
+      toast("Hands-free on — just talk; it sends itself when you pause. Tap 🎧 to stop.");
       if (!recorder) toggleMic();
     } else { stopSpeaking(); if (recorder) try { recorder.stop(); } catch (_) {} }
   });
@@ -303,7 +385,7 @@ function buildUi() {
   close.addEventListener("click", () => {
     drawer.hidden = true;
     stopSpeaking();
-    if (handsFree) { handsFree = false; hf.classList.remove("on"); }
+    if (handsFree) setHandsFree(false);
     if (recorder) try { recorder.stop(); } catch (_) {}
   });
   fab.addEventListener("click", () => { drawer.hidden = !drawer.hidden; if (!drawer.hidden) { paintMessages(); setTimeout(() => input.focus(), 50); } });
@@ -311,7 +393,7 @@ function buildUi() {
   fab.addEventListener("click", unlockAudio);
   send.addEventListener("click", unlockAudio);
   document.body.append(fab, drawer);
-  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam, speaking, title, sub };
+  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam, speaking, title, sub, hf };
 }
 
 /** Mount the assistant with an app-specific provider (board/admin/field).

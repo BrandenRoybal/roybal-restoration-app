@@ -13,6 +13,8 @@ import {
 } from "./data.js";
 import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, crewAssignments, workDaysBetween, effCrew, DEFAULT_SETTINGS } from "./schedule.js";
 import { pickJobcode, pickQbUser, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
+import { mountAssistProvider } from "../../js/assist.js";
+import { boardAssistProvider } from "./assistctx.js";
 
 /* ---------- config ---------- */
 const STAGES = [
@@ -125,6 +127,9 @@ async function startUI() {
   jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries();
   applySchedule();
   render();              // instant from cache
+  // 💬 dispatcher assistant — floats on document.body, so the wholesale
+  // #view re-renders and the 20s poll never touch it
+  mountAssistProvider(boardAssistProvider());
   await refresh();            // then from server
   startPoll();
   window.addEventListener("online", refresh);

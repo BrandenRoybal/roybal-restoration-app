@@ -53,9 +53,17 @@ const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                        //
 const PHOTO_MODEL = Deno.env.get("OFFICE_PHOTO_MODEL") ?? "claude-sonnet-4-6";
 const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-opus-4-8";
 const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
+// Spoken turns can run a faster model (someone is standing there listening);
+// defaults to the same assistant model until the env override is set.
+const ASSIST_VOICE_MODEL = Deno.env.get("OFFICE_ASSIST_VOICE_MODEL") ?? ASSIST_MODEL;
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const STT_API_KEY = Deno.env.get("STT_API_KEY") ?? "";        // Deepgram (shared with roybal-ai-ingest)
 const STT_MODEL = Deno.env.get("STT_MODEL") ?? "nova-3";
+// nova-3 keyterm boosting — trade vocabulary the transcriber would otherwise
+// mangle ("LGR" -> "algae are"). Comma-separated; override via STT_KEYTERMS.
+const STT_KEYTERMS = (Deno.env.get("STT_KEYTERMS") ??
+  "LGR,dehu,Cat 3,antimicrobial,air mover,air scrubber,flood cut,Xactimate,subfloor,baseboard,drywall,moisture map,containment,HEPA")
+  .split(",").map((s) => s.trim()).filter(Boolean);
 const TTS_MODEL = Deno.env.get("TTS_MODEL") ?? "aura-2-thalia-en";  // Deepgram Aura voice
 // Deepgram pricing — metered into ai_usage so voice rides the cap honestly.
 const STT_PRICE_PER_MIN = Number(Deno.env.get("STT_PRICE_PER_MIN") ?? "0.0043");
@@ -173,7 +181,8 @@ async function chatText(opts: {
 async function sttTranscribe(audio: Uint8Array, mime: string): Promise<{ transcript: string; seconds: number }> {
   if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
   const ct = String(mime || "audio/webm").split(";")[0].trim();   // iOS sends audio/mp4;codecs=… — params confuse STT
-  const url = `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(STT_MODEL)}&smart_format=true&punctuate=true`;
+  const kt = STT_KEYTERMS.map((t) => `&keyterm=${encodeURIComponent(t)}`).join("");
+  const url = `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(STT_MODEL)}&smart_format=true&punctuate=true${kt}`;
   const res = await fetch(url, { method: "POST", headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": ct }, body: audio as unknown as BodyInit });
   if (!res.ok) throw new Error(`stt_failed (${res.status}): ${await res.text().catch(() => "")}`);
   const data = await res.json();
@@ -1311,22 +1320,28 @@ async function fieldAssist(body: Record<string, unknown>) {
   // key like "constructor" would otherwise resolve Object.prototype members
   // and replace the server-defined persona with coerced native-function text
   const persona = Object.prototype.hasOwnProperty.call(PERSONAS, appKey) ? PERSONAS[appKey] : PERSONAS.field;
+  const wantSpeak = !!body.speak;
+  const model = wantSpeak ? ASSIST_VOICE_MODEL : ASSIST_MODEL;
+  // a spoken answer is LISTENED to, not skimmed — long replies are unusable
+  const spokenRule = wantSpeak
+    ? "\n\nSPOKEN MODE: this reply is read aloud by TTS while the tech works. About two short sentences (three max), no lists, no long citations — say the one thing to do, then stop. They'll ask if they want more."
+    : "";
   const ctxLabel = appKey === "board" ? "BOARD CONTEXT (current schedule)" : appKey === "admin" ? "OFFICE CONTEXT (all jobs)" : "JOB CONTEXT (current job)";
   const context = body.context ? `\n\n${ctxLabel}:\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
-  const { text, usage } = await chatText({ model: ASSIST_MODEL, system: persona + context, messages: msgs, maxTokens: 1024 });
+  const { text, usage } = await chatText({ model, system: persona + spokenRule + context, messages: msgs, maxTokens: 1024 });
   // voice agent: speak the reply back (best-effort — a TTS hiccup never eats the answer)
   let replyAudio: string | null = null;
   let ttsChars = 0;
-  if (body.speak && text) {
+  if (wantSpeak && text) {
     try { const tts = await ttsSpeak(text); replyAudio = tts.b64; ttsChars = tts.chars; }
     catch (_) { replyAudio = null; }
   }
-  return { result: { reply: text, transcript, replyAudio }, usage, model: ASSIST_MODEL, summary: { app: appKey, turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio }, audioSeconds, ttsChars };
+  return { result: { reply: text, transcript, replyAudio }, usage, model, summary: { app: appKey, turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio }, audioSeconds, ttsChars };
 
   } catch (err) {
     const e = err as Error & { audioSeconds?: number; model?: string };
     if (audioSeconds > 0 && e.audioSeconds == null) e.audioSeconds = audioSeconds;
-    if (e.model == null) e.model = ASSIST_MODEL;
+    if (e.model == null) e.model = body.speak ? ASSIST_VOICE_MODEL : ASSIST_MODEL;
     throw e;
   }
 }
