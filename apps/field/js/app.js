@@ -29,7 +29,7 @@ import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
-import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
+import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -263,6 +263,63 @@ function modeChip(p) {
   }, isConst ? "🔨 CONSTRUCTION" : "💧 RESTORATION");
 }
 
+/* Board stage vocabulary — labels/colors mirror the Job Board's STAGES
+   (apps/board/js/board.js). `order` is the home-list grouping order: working
+   stages first, pipeline next, Complete last (right above the archive).
+   The board OWNS stage (the field app only reads it) — see boardpush.js. */
+const BOARD_STAGES = {
+  in_progress: { label: "In Progress",   color: "#f26a21", order: 0 },
+  final:       { label: "Final / Punch", color: "#8a6fb0", order: 1 },
+  on_hold:     { label: "On Hold",       color: "#e0a800", order: 2 },
+  scheduled:   { label: "Scheduled",     color: "#1c5fb0", order: 3 },
+  lead:        { label: "Leads / Bids",  color: "#7a8aa0", order: 4 },
+  done:        { label: "Complete",      color: "#1f9d55", order: 6 },
+};
+const NO_STAGE = { label: "Not on the board", color: "#98a3b3", order: 5 };
+
+/* Archive = filed away, never deleted: the job keeps syncing and every form,
+   photo and log stays on the device and in the cloud. */
+async function setArchived(project, on) {
+  project.archivedAt = on ? new Date().toISOString() : "";
+  await Store.put(project);
+  toast(on ? "Archived — it's under 🗂 Archived at the bottom of the jobs list."
+           : "Moved back to the active jobs list.");
+}
+
+/* One job card for the home list. Archived rows render dimmed with an
+   Unarchive button; a Complete-on-the-board row offers one-tap Archive. */
+function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
+  const isConst = jobType(p) === "construction";
+  const cat = p.waterCategory ? `Cat ${p.waterCategory}` : "";
+  const flags = p.archivedAt ? [] : (isConst ? buildFlags(p) : dryingFlags(p));   // rule-based watch flags — no AI, no cost
+  const sub = isConst
+    ? [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "",
+       constructionTypeLabel(p.constructionType),
+       p.targetCompletion ? "Target " + fmtDate(p.targetCompletion) : "",
+       "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ")
+    : [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "", cat, "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ");
+  const sideBtn = (label, fn) => {
+    const b = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, label);
+    b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); fn(); });
+    return b;
+  };
+  return h("a", { class: "card card--tap jobrow", href: `#/p/${p.id}`, style: p.archivedAt ? "opacity:.65" : "" },
+    h("div", { class: "jobrow__main" },
+      h("div", { class: "jobrow__title" }, p.customer || p.address || "Untitled job", modeChip(p)),
+      h("div", { class: "jobrow__sub" }, sub),
+      flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" },
+        ...flags.map((f) => h("span", {
+          style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
+            (f.tone === "bad" ? "background:#fdecea;color:#b3261e" : "background:#fff4e5;color:#8a6d00"),
+        }, (f.icon || "💧") + " " + f.label))) : null),
+    onUnarchive ? sideBtn("↩ Unarchive", onUnarchive)
+      : onArchive ? sideBtn("🗂 Archive", onArchive)
+      : h("div", { class: "jobrow__chev" }, "›"));
+}
+
+let _boardRows = null;   // session cache of board tiles → stage groups paint instantly next time
+let _archOpen = false;   // keep the Archived section open across re-renders
+
 async function projectList() {
   setChrome("Field Forms", null);
   const projects = await Store.all();
@@ -270,7 +327,9 @@ async function projectList() {
   const mode = activeMode();
   const byMode = { restoration: [], construction: [] };
   projects.forEach((p) => byMode[jobType(p)].push(p));
-  const shown = byMode[mode];
+  const active = byMode[mode].filter((p) => !p.archivedAt);
+  const archived = byMode[mode].filter((p) => p.archivedAt);
+  const activeCount = (m) => byMode[m].filter((p) => !p.archivedAt).length;
 
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
@@ -278,8 +337,8 @@ async function projectList() {
       h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job")));
 
   const modeSeg = h("div", { class: "seg", style: "margin:0 0 10px" });
-  [["restoration", `💧 Restoration (${byMode.restoration.length})`],
-   ["construction", `🔨 Construction (${byMode.construction.length})`]].forEach(([m, label]) => {
+  [["restoration", `💧 Restoration (${activeCount("restoration")})`],
+   ["construction", `🔨 Construction (${activeCount("construction")})`]].forEach(([m, label]) => {
     const b = h("button", { type: "button", class: m === mode ? "active" : "" }, label);
     b.addEventListener("click", () => { if (m !== mode) { setMode(m); projectList(); } });
     modeSeg.append(b);
@@ -288,7 +347,7 @@ async function projectList() {
 
   if (SYNC_ENABLED) body.append(accountRow());
 
-  if (!shown.length) {
+  if (!active.length && !archived.length) {
     body.append(h("div", { class: "empty" },
       h("div", { class: "big" }, mode === "construction" ? "🔨" : "🧰"),
       h("p", {}, mode === "construction" ? "No construction jobs yet." : "No restoration jobs yet."),
@@ -296,30 +355,72 @@ async function projectList() {
         ? "Tap “+ New Job” to start a remodel, new build, or reconstruction. Everything works offline and saves to this device."
         : "Tap “+ New Job” to start a water restoration project. Everything works offline and saves to this device."),
       h("button", { class: "btn btn--primary", style: "max-width:260px;margin:10px auto 0", onclick: () => go("#/new") }, "+ New Job")));
+  } else if (!active.length) {
+    body.append(h("div", { class: "empty" },
+      h("div", { class: "big" }, "🗂"),
+      h("p", {}, "No active jobs — " + archived.length + " archived below.")));
   } else {
-    const list = h("div", { class: "joblist" });
-    shown.forEach((p) => {
-      const isConst = jobType(p) === "construction";
-      const cat = p.waterCategory ? `Cat ${p.waterCategory}` : "";
-      const flags = isConst ? buildFlags(p) : dryingFlags(p);   // rule-based watch flags — no AI, no cost
-      const sub = isConst
-        ? [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "",
-           constructionTypeLabel(p.constructionType),
-           p.targetCompletion ? "Target " + fmtDate(p.targetCompletion) : "",
-           "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ")
-        : [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "", cat, "Updated " + fmtDate((p.updatedAt || "").slice(0, 10))].filter(Boolean).join(" · ");
-      list.append(h("a", { class: "card card--tap jobrow", href: `#/p/${p.id}` },
-        h("div", { class: "jobrow__main" },
-          h("div", { class: "jobrow__title" }, p.customer || p.address || "Untitled job", modeChip(p)),
-          h("div", { class: "jobrow__sub" }, sub),
-          flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" },
-            ...flags.map((f) => h("span", {
-              style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
-                (f.tone === "bad" ? "background:#fdecea;color:#b3261e" : "background:#fff4e5;color:#8a6d00"),
-            }, (f.icon || "💧") + " " + f.label))) : null),
-        h("div", { class: "jobrow__chev" }, "›")));
+    const listWrap = h("div");
+    body.append(listWrap);
+
+    /* Paint the active list: grouped under the board's stage columns when any
+       job is linked to a board tile, a plain flat list otherwise (offline, or
+       nothing on the board — typical for restoration mode). */
+    const stageSig = (rows) => JSON.stringify((rows || []).map((r) => [r.id, r.data && r.data.stage, r.data && r.data.fieldJobId]).sort());
+    const paint = (rows) => {
+      clear(listWrap);
+      const staged = active.map((p) => {
+        const row = rows ? boardRowFor(rows, p) : null;
+        const sid = row && row.data && BOARD_STAGES[row.data.stage] ? row.data.stage : null;
+        return { p, sid };
+      });
+      if (!staged.some((x) => x.sid)) {
+        const list = h("div", { class: "joblist" });
+        staged.forEach(({ p }) => list.append(jobRow(p)));
+        listWrap.append(list);
+        return;
+      }
+      const groups = new Map();   // order -> { meta, items } — items keep Store.all()'s newest-first order
+      staged.forEach((x) => {
+        const meta = x.sid ? BOARD_STAGES[x.sid] : NO_STAGE;
+        if (!groups.has(meta.order)) groups.set(meta.order, { meta, items: [] });
+        groups.get(meta.order).items.push(x);
+      });
+      [...groups.keys()].sort((a, b) => a - b).forEach((ord) => {
+        const g = groups.get(ord);
+        listWrap.append(h("div", { style: "display:flex;align-items:center;gap:7px;margin:14px 2px 8px;font-size:12px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--muted)" },
+          h("span", { style: `width:9px;height:9px;border-radius:50%;flex:none;background:${g.meta.color}` }),
+          `${g.meta.label} (${g.items.length})`));
+        const list = h("div", { class: "joblist" });
+        g.items.forEach(({ p, sid }) => list.append(jobRow(p, {
+          // Complete on the board → one-tap archive right on the card
+          onArchive: sid === "done" ? async () => { await setArchived(p, true); projectList(); } : null,
+        })));
+        listWrap.append(list);
+      });
+    };
+    paint(_boardRows);
+    fetchBoardRowsSafe().then((rows) => {
+      if (!rows || !listWrap.isConnected) return;   // offline / signed out / navigated away
+      const changed = stageSig(rows) !== stageSig(_boardRows);
+      _boardRows = rows;
+      if (changed) paint(rows);
     });
-    body.append(list);
+  }
+
+  if (archived.length) {
+    const archList = h("div", { class: "joblist", style: "margin-top:8px" });
+    archived.forEach((p) => archList.append(jobRow(p, {
+      onUnarchive: async () => { await setArchived(p, false); projectList(); },
+    })));
+    const det = h("details", { style: "margin-top:18px" },
+      h("summary", { style: "cursor:pointer;font-weight:700;color:var(--muted);padding:6px 2px" }, `🗂 Archived (${archived.length})`),
+      h("div", { class: "subtle", style: "font-size:12px;margin:4px 2px 0" },
+        "Filed away, never deleted — every form, photo and log is still saved and searchable."),
+      archList);
+    det.open = _archOpen;
+    det.addEventListener("toggle", () => { _archOpen = det.open; });
+    body.append(det);
   }
   body.append(installHint());
 }
@@ -717,7 +818,7 @@ function timelinePanel(project) {
 
 /* Read-only "on the board" card — what the coordinator has scheduled.
    Renders async when a linked board job is found; hidden otherwise. */
-const BOARD_STAGES = { lead: "Leads / Bids", scheduled: "Scheduled", in_progress: "In Progress", on_hold: "On Hold", final: "Final / Punch", done: "Complete" };
+const stageLabel = (id) => (BOARD_STAGES[id] ? BOARD_STAGES[id].label : id);
 function boardCard(project) {
   const wrap = h("div", { class: "card", hidden: true });
   (async () => {
@@ -728,16 +829,24 @@ function boardCard(project) {
       const when = d.startDate && d.targetDate ? `${fmtDate(d.startDate)} → ${fmtDate(d.targetDate)}`
         : d.startDate ? "starts " + fmtDate(d.startDate) : "not scheduled yet";
       wrap.hidden = false;
-      wrap.append(
+      // native append() stringifies null — filter, unlike the h() helper
+      wrap.append(...[
         h("div", { style: "font-weight:700" }, "🗓 On the Job Board"),
         h("div", { class: "subtle", style: "font-size:13px;margin-top:4px" },
-          [BOARD_STAGES[d.stage] || d.stage, when,
+          [stageLabel(d.stage), when,
            d.notBefore ? "🔒 not before " + fmtDate(d.notBefore) : ""].filter(Boolean).join(" · ")),
         (d.subtasks || []).length ? h("div", { style: "margin-top:6px;font-size:13px" },
           ...d.subtasks.map((st, i) => h("div", {},
             `${i + 1}. ${st.name || "Phase"}${st.estimatedHours ? " — " + st.estimatedHours + "h" : ""}${st.lagDays ? ` (+${st.lagDays}d lag)` : ""}`))) : null,
         d.fieldPlanProposal ? h("div", { class: "note", style: "margin-top:6px" },
-          "⚠ Your phase proposal is waiting for review on the board.") : null);
+          "⚠ Your phase proposal is waiting for review on the board.") : null,
+      ].filter(Boolean));
+      if (d.stage === "done" && !project.archivedAt) {
+        const b = h("button", { class: "btn btn--primary btn--sm", style: "width:auto;margin-top:8px" }, "🗂 Archive this job");
+        b.addEventListener("click", async () => { await setArchived(project, true); go("#/"); });
+        wrap.append(h("div", { class: "note", style: "margin-top:8px" },
+          "The board marked this job Complete. Archive it to tidy the jobs list — every form and photo stays saved."), b);
+      }
     } catch (_) { /* offline / signed out — the card just stays hidden */ }
   })();
   return wrap;
@@ -895,6 +1004,9 @@ function projectHome(project) {
     if (project.waterClass) badges.append(h("span", { class: "badge" }, "Class " + project.waterClass));
     if (project.dryingSystem) badges.append(h("span", { class: "badge" }, project.dryingSystem + " drying"));
   }
+  if (project.archivedAt)
+    badges.append(h("span", { class: "badge", style: "background:#eceff3;color:#5b6672" },
+      "🗂 Archived " + fmtDate(project.archivedAt.slice(0, 10))));
   // conversion cross-links — each side of a converted job links to the other
   if (project.linkedRestorationId)
     badges.append(h("a", { class: "badge", href: `#/p/${project.linkedRestorationId}`, style: "text-decoration:none" }, "💧 Mitigation job →"));
@@ -923,6 +1035,13 @@ function projectHome(project) {
         return btn;
       })());
   }
+  const archBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" },
+    project.archivedAt ? "↩ Unarchive" : "🗂 Archive");
+  archBtn.addEventListener("click", async () => {
+    await setArchived(project, !project.archivedAt);
+    if (project.archivedAt) go("#/"); else projectHome(project);
+  });
+  homeActions.append(archBtn);
   body.append(homeActions);
 
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix

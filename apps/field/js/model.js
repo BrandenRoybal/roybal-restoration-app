@@ -122,6 +122,7 @@ export function newProject() {
     id: uid(),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    archivedAt: "",      // set when filed away from the home list — never deleted, keeps syncing
     // shared header — entered once, flows into every form
     workOrderNo: "",
     claimNo: "",
