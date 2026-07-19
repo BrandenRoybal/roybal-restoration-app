@@ -240,7 +240,9 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
       audio, audioMime,
       speak: wantSpeech,
       app: provider.app,
-      context: provider.buildContext(),
+      // await tolerates sync providers too — admin builds its digest async
+      // (IndexedDB + portal/QBO lookups), field/board return plain objects
+      context: await provider.buildContext(),
       ...(provider.capturedBy ? { captured_by: provider.capturedBy() } : {}),
     });
     if (audio && b.transcript) list.push({ role: "user", text: b.transcript, images });

@@ -11,6 +11,8 @@ import { startSync, syncNow } from "../../js/sync.js";
 import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
 import { messagesPanel } from "./messages.js";
+import { mountAssistProvider } from "../../js/assist.js";
+import { adminAssistProvider } from "./assistctx.js";
 
 const view = $("#view");
 const FIELD_ROOT = location.pathname.replace(/\/admin\/?.*$/, "/") || "/";
@@ -20,6 +22,8 @@ let started = false;
 function startSyncUI() {
   $("#acctEmail").textContent = currentEmail();
   $("#signOutBtn").hidden = false;
+  // 💬 office-manager assistant — floats on document.body, survives re-renders
+  mountAssistProvider(adminAssistProvider());
   if (!started) { started = true; startSync(onStatus); } else syncNow();
 }
 function onStatus(s) {
