@@ -142,9 +142,18 @@ so each app runs its own guarded paths. Nothing executes without the tap.
 - [x] **Audit trail**: chip execution patches the originating capture_event (`result.executed[]` — type/label/ok/detail/at, best-effort) and SMS sends land in `sms_messages`/`smsLog` as before
 - [x] Feedback loop: chip outcomes queue per provider and ride the next turn as `body.actionResults` → surfaced to the model as CHIP RESULTS in the user turn (client history is text-only, so wire-level `tool_result` blocks can't survive turns)
 
-### Phase 6 — Phone lane: the virtual receptionist (L) — *gate: Fly.io (~$5/mo)*
-Deferred until Phases 1–5 have been lived with — but nothing above gets thrown
-away. Twilio Voice webhook on **+1 (866) 345-2290** → TwiML
+### Phase 6 — Phone lane: the virtual receptionist (L) — 🚧 BUILT Jul 18 2026, awaiting owner deploy steps
+Code complete + tested (7/7 agent tests, fake Twilio client over a real
+WebSocket): `services/phone-agent` (Fly.io Node agent — streaming Claude loop,
+phone persona + PHONE_TOOLS from the registry, machine JWT, envelope + metering
++ voice-minutes cap, per-call/per-caller rate limits), `roybal-voice` edge fn
+(signature-verified: Dial-owner-first no-answer forwarding → ConversationRelay
+TwiML → /action handoff: escalate-Dial / voicemail), migration 204 (restrictive
+deny RLS for the machine email — applied). **Owner steps to go live are in
+`services/phone-agent/README.md`**: create the machine user, Fly launch +
+secrets, edge-fn secrets (PHONE_AGENT_WSS / PHONE_RELAY_TOKEN / OWNER_CELL),
+point the Twilio Voice webhook at roybal-voice. Original design (kept):
+Twilio Voice webhook on **+1 (866) 345-2290** → TwiML
 `<Connect><ConversationRelay>` (Twilio does streaming STT/TTS + barge-in) → a
 small always-on Node agent on Fly.io → Claude.
 - Rollout: **no-answer forwarding first** — the AI only takes calls that would have been missed
