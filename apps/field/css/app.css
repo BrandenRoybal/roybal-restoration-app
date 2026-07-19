@@ -472,6 +472,8 @@ tr.fill-target > td { background: var(--brand-tint); box-shadow: inset 0 0 0 1px
 .assist__row { display: flex; gap: 8px; padding: 10px 14px 12px; border-top: 1px solid var(--line); align-items: center; }
 .assist__input { flex: 1; min-height: 44px; }
 .assist__btn { border: 1px solid var(--line-strong); background: #fff; width: 44px; height: 44px; min-height: 44px; border-radius: 12px; font-size: 19px; cursor: pointer; flex: 0 0 auto; padding: 0; }
+/* the mic gets a glove-size target — it's the button hit with wet gloves */
+.assist__btn--mic { width: 64px; height: 64px; min-height: 64px; border-radius: 16px; font-size: 26px; }
 .assist__btn--send { background: var(--brand-grad); border-color: transparent; color: #fff; }
 .assist__btn.rec { background: #ffe3de; border-color: var(--red); animation: apulse 1.1s ease-in-out infinite; }
 @keyframes apulse { 50% { box-shadow: 0 0 0 6px rgba(210, 59, 46, .18); } }

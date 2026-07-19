@@ -87,12 +87,15 @@ function moistureChartSvg(m, goal) {
     s += `<text x="${W - padR}" y="${(y - 4).toFixed(1)}" text-anchor="end" font-size="9" fill="#1f9d55">Dry goal ${goal}%</text>`;
   }
   let legend = "";
-  for (let n = 0; n < 13; n++) {
+  const maxLoc = Math.max(13, ...rows.map((r) => (r.values || []).length));
+  for (let n = 0; n < maxLoc; n++) {
     const pts = [];
     rows.forEach((r, i) => { const v = parseFloat((r.values || [])[n]); if (isFinite(v)) pts.push([xOf(i), yOf(v)]); });
     if (!pts.length) continue;
     const col = CHART_PALETTE[n % CHART_PALETTE.length];
-    if (pts.length > 1) s += `<path d="${pts.map((p, k) => (k ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ")}" fill="none" stroke="${col}" stroke-width="2"/>`;
+    /* the palette repeats every 13 locations — dash the repeats so 14+ stay tellable from 1–13 */
+    const dash = n >= 26 ? ' stroke-dasharray="2 3"' : n >= 13 ? ' stroke-dasharray="6 3"' : "";
+    if (pts.length > 1) s += `<path d="${pts.map((p, k) => (k ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ")}" fill="none" stroke="${col}" stroke-width="2"${dash}/>`;
     pts.forEach((p) => (s += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="2.6" fill="${col}"/>`));
     legend += `<span class="mchart__leg"><i style="background:${col}"></i>${n + 1}</span>`;
   }
@@ -284,37 +287,89 @@ export function moistureMap(project, m) {
     input.classList.remove("dry", "wet");
     if (goal != null && input.value !== "" && !isNaN(v)) input.classList.add(v <= goal ? "dry" : "wet");
   }
-  function reflagAll() { tbody.querySelectorAll("input.mc").forEach(flagCell); }
+  function reflagAll() { gridsBox.querySelectorAll("input.mc").forEach(flagCell); }
 
   /* drying-trend chart */
   const chartBox = h("div", { class: "mchart-wrap" });
   function redrawChart() { chartBox.innerHTML = moistureChartSvg(m, goalNum()); }
   setTimeout(redrawChart, 0);   // initial render once mounted
 
-  /* reading grid */
-  const tbody = h("tbody");
-  function rowEl(row, i) {
+  /* reading grid — location columns come in blocks of 13; jobs with more
+     than 13 reading locations continue on stacked tables (14–26, 27–39, …)
+     so wide grids still fit the printed page. Rows (dates) are shared
+     across every block; Notes + row-delete live on the first block only. */
+  const LOC_BLOCK = 13;
+  const locCount = () => Math.max(LOC_BLOCK, m.locCount || 0, ...m.readings.map((r) => (r.values || []).length));
+  const gridsBox = h("div");
+  function valueCell(row, n) {
+    const c = h("td");
+    const input = h("input", { class: "mc", value: row.values[n] ?? "", inputmode: "decimal", style: "min-width:42px" });
+    input.addEventListener("input", () => { row.values[n] = input.value; flagCell(input); redrawChart(); commit(); });
+    flagCell(input);
+    c.append(input);
+    return c;
+  }
+  function rowEl(row, i, start, end, first) {
     const tr = h("tr");
     const dateCell = h("td");
-    const dateInput = h("input", { type: "date", value: row.date, style: "min-width:120px" });
-    dateInput.addEventListener("input", () => { row.date = dateInput.value; redrawChart(); commit(); });
-    dateCell.append(dateInput);
-    tr.append(dateCell);
-    for (let n = 0; n < 13; n++) {
-      const c = h("td");
-      const input = h("input", { class: "mc", value: row.values[n] ?? "", inputmode: "decimal", style: "min-width:42px" });
-      input.addEventListener("input", () => { row.values[n] = input.value; flagCell(input); redrawChart(); commit(); });
-      flagCell(input);
-      c.append(input); tr.append(c);
+    if (first) {
+      const dateInput = h("input", { type: "date", value: row.date, style: "min-width:120px" });
+      dateInput.addEventListener("input", () => {
+        row.date = dateInput.value;
+        gridsBox.querySelectorAll(`[data-dtecho="${i}"]`).forEach((el) => { el.textContent = fmtDate(row.date); });
+        redrawChart(); commit();
+      });
+      dateCell.append(dateInput);
+    } else {
+      dateCell.dataset.dtecho = String(i);
+      dateCell.style.minWidth = "120px";
+      dateCell.textContent = fmtDate(row.date);
     }
-    tr.append(taCell(row, "notes", { minWidth: "120px" }));
-    tr.append(h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { m.readings.splice(i, 1); paintRows(); redrawChart(); commit(); } }, "✕")));
+    tr.append(dateCell);
+    for (let n = start; n < end; n++) tr.append(valueCell(row, n));
+    if (first) {
+      tr.append(taCell(row, "notes", { minWidth: "120px" }));
+      tr.append(h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { m.readings.splice(i, 1); paintRows(); redrawChart(); commit(); } }, "✕")));
+    }
     return tr;
   }
-  function paintRows() { tbody.replaceChildren(...m.readings.map(rowEl)); }
-  paintRows();
-  const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add reading date");
+  function blockTable(b) {
+    const start = b * LOC_BLOCK, end = start + LOC_BLOCK, first = b === 0;
+    const head = h("tr", {}, h("th", {}, "Date"));
+    for (let n = start + 1; n <= end; n++) head.append(h("th", {}, String(n)));
+    if (first) head.append(h("th", {}, "Notes"), h("th", { class: "app-only" }, ""));
+    const body = h("tbody", {}, ...m.readings.map((row, i) => rowEl(row, i, start, end, first)));
+    return h("div", { class: "tablewrap", style: first ? "" : "margin-top:8px" },
+      h("table", { class: "grid" }, h("thead", {}, head), body));
+  }
+  function paintRows() {
+    const blocks = Math.ceil(locCount() / LOC_BLOCK);
+    gridsBox.replaceChildren(...Array.from({ length: blocks }, (_, b) => blockTable(b)));
+    paintColBtns();
+  }
+  const addRow = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "+ Add reading date");
   addRow.addEventListener("click", () => { m.readings.push(blankReadingRow()); paintRows(); redrawChart(); commit(); });
+  const addCols = h("button", { type: "button", class: "btn btn--ghost btn--sm" });
+  addCols.addEventListener("click", () => {
+    m.locCount = (Math.ceil(locCount() / LOC_BLOCK) + 1) * LOC_BLOCK;
+    paintRows(); commit();
+  });
+  const delCols = h("button", { type: "button", class: "btn btn--danger btn--sm" });
+  delCols.addEventListener("click", () => {
+    const keep = (Math.ceil(locCount() / LOC_BLOCK) - 1) * LOC_BLOCK;
+    const hasData = m.readings.some((r) => (r.values || []).slice(keep).some((v) => String(v ?? "").trim() !== ""));
+    if (hasData && !confirm(`Locations ${keep + 1}–${locCount()} have readings — remove them anyway?`)) return;
+    m.readings.forEach((r) => { if (Array.isArray(r.values) && r.values.length > keep) r.values.length = keep; });
+    m.locCount = keep;
+    paintRows(); redrawChart(); commit();
+  });
+  function paintColBtns() {
+    const total = Math.ceil(locCount() / LOC_BLOCK) * LOC_BLOCK;
+    addCols.textContent = `+ Add locations ${total + 1}–${total + LOC_BLOCK}`;
+    delCols.textContent = `✕ Remove locations ${total - LOC_BLOCK + 1}–${total}`;
+    delCols.hidden = total <= LOC_BLOCK;
+  }
+  paintRows();
 
   /* material picker auto-fills the dry goal */
   const dryGoalInput = inp(m, "dryGoal", { placeholder: "≤ 16%", oninput: () => { reflagAll(); redrawChart(); } });
@@ -359,10 +414,6 @@ export function moistureMap(project, m) {
     }
   }
   renderFp();
-
-  const headCols = ["Date"];
-  for (let n = 1; n <= 13; n++) headCols.push(String(n));
-  headCols.push("Notes");
 
   /* Room / Area name — titles both maps so multi-room jobs stay readable */
   const areaTitle = h("div", { class: "maptitle" });
@@ -424,11 +475,8 @@ export function moistureMap(project, m) {
 
     sectionTitle("Moisture Reading Locations (MC% or equivalent)"),
     h("p", { class: "flagnote app-only" }, "Cells flag ", h("span", { class: "dot g" }, "green = at/below dry goal"), " · ", h("span", { class: "dot r" }, "red = still wet"), " automatically."),
-    h("div", { class: "tablewrap" },
-      h("table", { class: "grid" },
-        h("thead", {}, h("tr", {}, ...headCols.map((c) => h("th", {}, c)), h("th", { class: "app-only" }, ""))),
-        tbody)),
-    addRow,
+    gridsBox,
+    h("div", { class: "app-only row-add", style: "display:flex;gap:8px;flex-wrap:wrap" }, addRow, addCols, delCols),
 
     sectionTitle("Drying Trend"),
     h("p", { class: "subtle app-only" }, "MC% over time for each reading location — the line should fall toward the dry goal."),

@@ -17,10 +17,10 @@ import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } fro
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
-import { isSignedIn, signIn, signOut, currentEmail } from "./supa.js";
+import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
 import { startSync, syncNow, resetSync } from "./sync.js";
 import { panelModel, evaluateProject } from "./completeness.js";
-import { syncSpine } from "./spine.js";
+import { syncSpine, getUnifiedJobId } from "./spine.js";
 import { generateNarrative, constructionFacts } from "./narrative.js";
 import { transcribeWidget } from "./voice.js";
 import { aiAvailable, aiReady, draftAdjusterEmail, analyzeContentsItem, scanContentsPhoto, justifyContents, draftRebuild, draftProgress, draftTimeline } from "./officeai.js";
@@ -804,21 +804,75 @@ function messageLogCard(project) {
     ? h("span", { style: "color:var(--green);font-weight:700" }, " · sent ✓")
     : e.error ? h("span", { style: "color:var(--red);font-weight:700" }, " · failed")
     : e.via === "device" ? h("span", { class: "subtle" }, " · composed") : null;
-  const rows = [...log].reverse().slice(0, 8).map((e) =>
+  // timestamps are stored UTC (ISO / Postgres timestamptz) — render LOCAL time,
+  // or an evening Fairbanks text displays with tomorrow's date at a 00:xx hour
+  const localWhen = (iso) => {
+    const d = new Date(iso || "");
+    if (isNaN(d)) return "";
+    const day = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    return fmtDate(day) + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  };
+  const composedRow = (e) =>
     h("div", { style: "padding:6px 0;border-bottom:1px solid var(--line,#e2e6ec);font-size:13px" },
       h("div", {},
         h("strong", {}, SMS_KIND_LABELS[e.kind] || "Text"),
-        h("span", { class: "subtle" }, "  " + fmtDate((e.at || "").slice(0, 10)) + " " + (e.at || "").slice(11, 16) +
+        h("span", { class: "subtle" }, "  " + localWhen(e.at) +
           " · to " + (e.to || []).join(", ") + (e.by ? " · by " + e.by : "")),
         via(e)),
-      e.preview ? h("div", { class: "subtle", style: "font-size:12px" }, e.preview) : null));
+      e.preview ? h("div", { class: "subtle", style: "font-size:12px" }, e.preview) : null);
+  // inbound replies live in sms_messages (logged by the Twilio webhook) —
+  // merged in below so the office sees the customer's side of the thread
+  const inboundRow = (m) =>
+    h("div", { style: "padding:6px 8px;border-bottom:1px solid var(--line,#e2e6ec);font-size:13px;background:rgba(242,106,33,.08);border-left:3px solid #f26a21" },
+      h("div", {},
+        h("strong", {}, "↩ Customer reply"),
+        h("span", { class: "subtle" }, "  " + localWhen(m.created_at) +
+          " · from " + (m.from_number || ""))),
+      m.body ? h("div", { style: "font-size:12px" }, String(m.body).slice(0, 200)) : null);
 
-  return h("div", { class: "card app-only" },
-    h("div", { style: "font-weight:700" }, log.length ? `💬 Messaging — log (${log.length})` : "💬 Messaging"),
-    setting,
-    log.length ? h("hr", { class: "divider", style: "margin:10px 0" }) : null,
-    ...rows,
-    log.length > 8 ? h("p", { class: "subtle", style: "font-size:12px;margin-top:6px" }, `+ ${log.length - 8} earlier`) : null);
+  const heading = h("div", { style: "font-weight:700" }, "💬 Messaging");
+  const divider = h("hr", { class: "divider", style: "margin:10px 0", hidden: true });
+  const rowsBox = h("div");
+  const more = h("p", { class: "subtle", style: "font-size:12px;margin-top:6px", hidden: true });
+
+  const paintRows = (inbound) => {
+    const items = [
+      ...log.map((e) => ({ at: e.at || "", node: composedRow(e) })),
+      ...inbound.map((m) => ({ at: m.created_at || "", node: inboundRow(m) })),
+    ].sort((a, b) => (a.at < b.at ? 1 : -1));   // newest first
+    rowsBox.replaceChildren(...items.slice(0, 10).map((x) => x.node));
+    heading.textContent = items.length
+      ? `💬 Messaging — log (${log.length} sent${inbound.length ? ` · ${inbound.length} received` : ""})`
+      : "💬 Messaging";
+    divider.hidden = !items.length;
+    more.hidden = items.length <= 10;
+    more.textContent = `+ ${items.length - 10} earlier`;
+  };
+  paintRows([]);
+
+  // fetch this job's inbound texts (by unified-job link, or the customer's
+  // number) — online-only enhancement; offline the card shows sends as before
+  (async () => {
+    try {
+      if (!SYNC_ENABLED || !isSignedIn() || navigator.onLine === false) return;
+      const uid = getUnifiedJobId(project.id);
+      const digits = String(project.phone || "").replace(/[^\d]/g, "");
+      const e164 = digits.length === 10 ? "+1" + digits
+        : digits.length === 11 && digits.startsWith("1") ? "+" + digits : "";
+      const ors = [];
+      if (uid) ors.push(`unified_job_id.eq.${uid}`);
+      if (e164) ors.push(`from_number.eq.${encodeURIComponent(e164)}`);
+      if (!ors.length) return;
+      const res = await rest(
+        `sms_messages?select=created_at,from_number,body&direction=eq.inbound&or=(${ors.join(",")})&order=created_at.desc&limit=20`,
+        { method: "GET" });
+      if (!res.ok) return;
+      const inbound = await res.json();
+      if (Array.isArray(inbound) && inbound.length) paintRows(inbound);
+    } catch (_) { /* offline / signed out — sends-only view is fine */ }
+  })();
+
+  return h("div", { class: "card app-only" }, heading, setting, divider, rowsBox, more);
 }
 
 function projectHome(project) {

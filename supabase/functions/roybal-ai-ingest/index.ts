@@ -340,10 +340,21 @@ function billingMonth(): string {
 }
 
 async function monthSpend(jwt: string): Promise<number> {
-  const res = await db(`ai_usage?select=cost_usd&billing_month=eq.${billingMonth()}`, jwt, { method: "GET" });
-  if (!res.ok) throw new Error(`spend read failed (${res.status}): ${await res.text().catch(() => "")}`);
-  const rows = (await res.json().catch(() => [])) as Array<{ cost_usd: number }>;
-  return rows.reduce((a, r) => a + (Number(r.cost_usd) || 0), 0);
+  // Page through the month's rows: PostgREST caps one response at max-rows
+  // (Supabase default 1000), so a single-request sum silently undercounts a
+  // busy month — and an undercounted sum is a cap that never trips.
+  let sum = 0;
+  for (let page = 0; page < 20; page++) {
+    const from = page * 1000;
+    const res = await db(`ai_usage?select=cost_usd&billing_month=eq.${billingMonth()}`, jwt,
+      { method: "GET", headers: { Range: `${from}-${from + 999}` } });
+    if (res.status === 416) break;                     // ranged past the end
+    if (!res.ok) throw new Error(`spend read failed (${res.status})`);
+    const rows = (await res.json().catch(() => [])) as Array<{ cost_usd: number }>;
+    sum += rows.reduce((a, r) => a + (Number(r.cost_usd) || 0), 0);
+    if (rows.length < 1000) break;
+  }
+  return sum;
 }
 
 /* ============================================================
