@@ -2,7 +2,7 @@
 # a cold start). Deploy from the repo root:
 #   fly deploy --config services/phone-agent/fly.toml --dockerfile services/phone-agent/Dockerfile .
 app = "roybal-phone"
-primary_region = "sea"
+primary_region = "sjc"   # sea was deprecated by Fly (Jul 2026); sjc is the closest West Coast region
 
 [http_service]
   internal_port = 8080

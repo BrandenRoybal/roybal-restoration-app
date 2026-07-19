@@ -69,6 +69,8 @@ async function onSetup(session, msg) {
   session.callSid = String(msg.callSid || "");
   const token = msg.customParameters && msg.customParameters.token;
   if (!RELAY_TOKEN || token !== RELAY_TOKEN) {
+    // loud in the logs — this is a config mismatch, not a caller problem
+    console.error("relay token mismatch — PHONE_RELAY_TOKEN differs between Fly and the roybal-voice edge secrets");
     endWith(session.ws, "voicemail", "relay token mismatch");
     return;
   }
