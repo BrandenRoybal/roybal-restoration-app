@@ -8,16 +8,28 @@
  * Call flow (all endpoints Twilio-signature verified, no JWT — Twilio has
  * no user session; auth is X-Twilio-Signature exactly like roybal-notify's
  * /inbound):
- *   POST /            incoming call → <Dial> the owner's cell (timeout
- *                     DIAL_TIMEOUT, default 15s) with action=/screen.
- *                     OWNER_CELL unset → straight to the relay/fallback.
- *   POST /screen      after the dial attempt: answered → hang up (the
- *                     humans are talking); no-answer/busy/failed → hand the
- *                     call to the AI receptionist via
+ *   POST /            incoming call → <Dial answerOnBridge> the owner's
+ *                     cell (timeout DIAL_TIMEOUT, default 15s) with a
+ *                     press-any-key SCREEN on the callee leg, action=
+ *                     /screen. OWNER_CELL unset → straight to the relay.
+ *   POST /whisper     runs on the OWNER's leg when their phone answers:
+ *                     "Call for Roybal Construction — press any key."
+ *                     Only a human can pass it — the owner's carrier
+ *                     VOICEMAIL answering counts as an answer to Twilio,
+ *                     but voicemail can't press keys, so an unattended
+ *                     forward always falls through to the AI instead of
+ *                     dying in personal voicemail.
+ *   POST /accept      a key was pressed → empty TwiML → the legs bridge.
+ *   POST /screen      after the dial attempt. DialBridged (not
+ *                     DialCallStatus!) is the truth: a rejected screen
+ *                     reports status "completed", so only DialBridged
+ *                     "true" means humans talked (→ hang up); anything
+ *                     else → hand the call to the AI receptionist via
  *                     <Connect action=/action><ConversationRelay …>.
  *   POST /action      when the relay session ends: escalate handoff →
- *                     <Dial> the owner (urgent); session failed (agent
- *                     down / WS error) → voicemail; else hang up.
+ *                     <Dial> the owner (urgent); a voicemail handoff
+ *                     (agent capped / token mismatch / envelope failure)
+ *                     or a failed session → voicemail; else hang up.
  *
  * Day-one resilience: if PHONE_AGENT_WSS is unset, or the relay session
  * FAILS, the caller never dead-ends — they get voicemail (<Record>) after
@@ -98,19 +110,32 @@ serve(async (req: Request) => {
   if (!(await twilioSignatureValid(req, params, path)))
     return new Response("signature mismatch", { status: 403 });
 
-  // ---- incoming call: try the owner first (no-answer forwarding) ----
+  const base = `${esc(SUPABASE_URL)}/functions/v1/roybal-voice`;
+
+  // ---- incoming call: try the owner first (no-answer forwarding).
+  // answerOnBridge keeps ringback playing for the caller while the owner's
+  // leg runs the press-any-key screen. ----
   if (path === "") {
     if (!OWNER_CELL) return twiml(relayTwiml());
     return twiml(
-      `<Dial timeout="${DIAL_TIMEOUT}" action="${esc(SUPABASE_URL)}/functions/v1/roybal-voice/screen">` +
-      `${esc(OWNER_CELL)}</Dial>`);
+      `<Dial timeout="${DIAL_TIMEOUT}" answerOnBridge="true" action="${base}/screen">` +
+      `<Number url="${base}/whisper">${esc(OWNER_CELL)}</Number></Dial>`);
   }
 
-  // ---- after the dial attempt ----
+  // ---- the owner's leg answered: human gate (voicemail can't press keys) ----
+  if (path === "/whisper") {
+    return twiml(
+      `<Gather action="${base}/accept" numDigits="1" timeout="4">` +
+      `<Say>Call for Roybal Construction — press any key to take it.</Say>` +
+      `</Gather><Hangup/>`);
+  }
+  if (path === "/accept") return twiml("");                 // key pressed → bridge the legs
+
+  // ---- after the dial attempt: DialBridged is the truth (a rejected
+  // screen still reports DialCallStatus "completed") ----
   if (path === "/screen") {
-    const status = String(params.get("DialCallStatus") ?? "");
-    if (status === "completed") return twiml("<Hangup/>");  // the owner took it
-    return twiml(relayTwiml());                             // missed → the AI answers
+    if (String(params.get("DialBridged") ?? "") === "true") return twiml("<Hangup/>"); // humans talked
+    return twiml(relayTwiml());                             // missed / screened-out → the AI answers
   }
 
   // ---- relay session ended ----
@@ -124,7 +149,10 @@ serve(async (req: Request) => {
         `<Dial timeout="25">${esc(OWNER_CELL)}</Dial>` +
         voicemail("We couldn't reach anyone directly."));
     }
-    if (status === "failed") return twiml(voicemail("Sorry — our assistant hit a snag."));
+    // the agent deliberately handed off (capped / token mismatch / envelope
+    // failure) — the caller must land in voicemail, never a bare hangup
+    if (handoff.reasonCode === "voicemail" || status === "failed")
+      return twiml(voicemail("Sorry — our assistant couldn't take this one."));
     return twiml("<Hangup/>");                              // normal wrap-up or caller hung up
   }
 
