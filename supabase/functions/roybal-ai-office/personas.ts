@@ -123,3 +123,61 @@ export const TOOLSETS: Record<string, string[]> = {
   board: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup"],
   admin: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup"],
 };
+
+/* ---------- proposed actions (Phase 5) — chips, not autonomy ----------
+   The model PROPOSES; the user CONFIRMS. Every proposal renders as a
+   tap-to-confirm chip in the client and executes CLIENT-SIDE through the
+   app's own guarded paths (sms.js company lane, the board's guarded job
+   writes, portal.js) — this server never executes an action. Pure data,
+   same reason as the tools above: the phone agent imports this registry
+   later with its own deliberately narrow actionset. */
+
+/* Appended to the persona whenever the turn carries an actionset. */
+export const ACTION_RULE =
+  "\n\nPROPOSED ACTIONS: when the natural next step is an action you can propose (see the proposeActions tool), call proposeActions — " +
+  "each proposal shows the user a tap-to-confirm chip and NOTHING executes unless they tap it, so never claim an action already happened. " +
+  "Propose at most 3 per turn, and only what the user clearly wants or just asked for; never re-propose one already confirmed or ignored. " +
+  "Compose message text completely — it sends verbatim. Use phone numbers, names, and dates exactly as they appear in the context or a " +
+  "lookup; if you don't have a number, look it up or say so rather than inventing one. After proposing, still give your normal short " +
+  "answer and point at the chip ('tap to send it').";
+
+/* Per-action contract, embedded in the proposeActions tool description.
+   params stay a free object on the wire; each desc IS the params spec. */
+export const ACTION_DEFS: Record<string, { desc: string }> = {
+  sendText: {
+    desc:
+      "Send an SMS from the company number. params: { to: string — the recipient's phone from the context or a lookup (NEVER invented), " +
+      "message: string — the complete text, sent verbatim, audience: 'customer' | 'crew' }. Customer texts only go out 8am–8pm Alaska " +
+      "(quiet hours) — an off-hours tap fails with a clear error, so warn the user when it's late.",
+  },
+  moveJob: {
+    desc:
+      "Pin a Job Board job's start date (the schedule engine reflows dependent jobs). params: { job: string — the job's title or " +
+      "customer, enough to match exactly one job, newStart: 'YYYY-MM-DD' }.",
+  },
+  logHours: {
+    desc:
+      "Log crew hours on a board job's time log. params: { crew: string — the crew member's name, job: string — job title or customer, " +
+      "date: 'YYYY-MM-DD' (omit for today), hours: number, note: string — what the work was (optional) }.",
+  },
+  adjusterEmail: {
+    desc:
+      "Draft the claim-submission email for a job (subject + body from its documented facts). The user reviews the draft — nothing is " +
+      "emailed automatically. params: { job: string — customer name or address, enough to match exactly one job }.",
+  },
+  portalReply: {
+    desc:
+      "Draft a message for a job's customer-portal thread. The user reviews the draft, then confirms a second chip before it posts. " +
+      "params: { job: string — customer name or address to match, mode: 'reply' (answer their last message) | 'status' (proactive update) }.",
+  },
+};
+
+/* Which persona may propose which actions. The phone persona (later) gets
+   at most a narrow crew-notify set — never customer sends or board writes. */
+export const ACTIONSETS: Record<string, string[]> = {
+  field: ["sendText"],
+  board: ["sendText", "moveJob", "logHours"],
+  admin: ["sendText", "adjusterEmail", "portalReply"],
+};
+
+export const PROPOSE_TOOL_NAME = "proposeActions";

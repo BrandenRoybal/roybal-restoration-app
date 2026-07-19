@@ -14,11 +14,24 @@
    Conversations are per-provider-key and in-memory only (cleared
    on app reload) — working chatter, not job documentation.
    Online-only, same spend cap + ai_usage ledger as all AI.
+
+   Phase 5 — proposed actions (chips, not autonomy): a reply can
+   carry proposedActions[]; each renders as a tap-to-confirm chip
+   and NOTHING executes without the tap. Execution is delegated to
+   the provider's executeAction(action) → { ok, detail, message?,
+   followup? } so each app runs its own guarded paths (sms.js /
+   guardedJobWrite / portal.js). Executions patch the originating
+   capture_event (result.executed — the audit trail) and ride the
+   next turn as actionResults so the model knows what really ran.
    ============================================================ */
-import { h, toast, fileToDataURL } from "./core.js";
+import { h, toast, fileToDataURL, Store } from "./core.js";
 import { narrativeFacts, constructionFacts } from "./narrative.js";
 import { jobType } from "./model.js";
 import { aiAvailable, fieldAssist } from "./officeai.js";
+import { rest } from "./supa.js";
+import { normalizePhone, smsHref, logSms, companySendEnabled, sendViaCompany } from "./sms.js";
+import { capturedBy } from "./tech.js";
+import { getUnifiedJobId } from "./spine.js";
 
 /* Construction jobs get the construction digest (scope, schedule, inspections,
    selections, draws); water jobs keep the mitigation digest. */
@@ -50,11 +63,119 @@ function assistContext(p) {
   return open.length ? { ...ctx, openEstimatorFollowups: open } : ctx;
 }
 
-const sessions = new Map();   // provider.key -> [{ role, text, images? }]
+const sessions = new Map();   // provider.key -> [{ role, text, images?, actions?, evId? }]
 let ui = null;                // singleton { fab, drawer, msgs, input, ... }
 let provider = null;          // the active app-specific provider
 let pendingImages = [];       // photos attached to the next message
 let recorder = null, stream = null, chunks = [];
+
+/* ---------- proposed-action chips (Phase 5) ----------
+   Chip results wait per provider key and ride the NEXT ask as
+   actionResults — the model learns what the user actually ran. */
+const pendingResults = new Map();  // provider.key -> [{ type, label, ok, detail }]
+function queueResult(key, r) {
+  if (!pendingResults.has(key)) pendingResults.set(key, []);
+  const q = pendingResults.get(key);
+  q.push(r);
+  if (q.length > 6) q.splice(0, q.length - 6);
+}
+
+const ACTION_ICONS = { sendText: "💬", moveJob: "📅", logHours: "⏱️", adjusterEmail: "✉️", portalReply: "🧡", portalPost: "📨" };
+function actionPreview(a) {
+  const p = a.params || {};
+  switch (a.type) {
+    case "sendText": return (p.to ? "to " + p.to + " — " : "") + "“" + String(p.message || "") + "”";
+    case "moveJob": return String(p.job || "?") + " → starts " + String(p.newStart || "?");
+    case "logHours": return (p.hours != null ? p.hours + "h — " : "") + String(p.crew || "?") + " on " + String(p.job || "?") + (p.date ? " (" + p.date + ")" : "");
+    case "adjusterEmail": return "drafts the adjuster email for " + String(p.job || "?");
+    case "portalReply": return "drafts a " + (p.mode === "status" ? "status update" : "reply") + " for " + String(p.job || "?") + "’s portal";
+    case "portalPost": return "“" + String(p.message || "").slice(0, 160) + "”";
+    default: return "";
+  }
+}
+const actionStateText = (a) =>
+  a.state === "running" ? "…working" :
+  a.state === "done" ? "✓ " + (a.detail || "done") :
+  a.state === "failed" ? "✗ " + (a.detail || "didn't run") + " — tap to retry" : "tap to confirm";
+
+function runAction(entry, a) {
+  if (a.state === "running" || a.state === "done") return;
+  if (!provider || typeof provider.executeAction !== "function")
+    return toast("This app can't run that action.");
+  const key = provider.key;
+  a.state = "running"; paintMessages();
+  // call synchronously: the field Path-1 sms: link must fire inside the
+  // tap's synchronous window (iOS) — async executors just return a promise
+  let out;
+  try { out = provider.executeAction(a); }
+  catch (e) { out = { ok: false, detail: String((e && e.message) || e).slice(0, 140) }; }
+  Promise.resolve(out).then(
+    (r) => settleAction(key, entry, a, r && typeof r === "object" ? r : { ok: false, detail: "didn't run" }),
+    (e) => settleAction(key, entry, a, { ok: false, detail: String((e && e.message) || e).slice(0, 140) }));
+}
+function settleAction(key, entry, a, r) {
+  a.state = r.ok ? "done" : "failed";
+  a.detail = String(r.detail || "").slice(0, 140);
+  queueResult(key, { type: a.type, label: a.label, ok: !!r.ok, detail: a.detail });
+  auditExecution(entry, a, r);
+  // long results (drafted emails / portal messages) land as their own
+  // assistant bubble, optionally carrying a follow-up chip (review → post)
+  if (r.message && sessions.has(key)) {
+    sessions.get(key).push({
+      role: "assistant", text: r.message,
+      ...(r.followup ? { actions: [{ ...r.followup, state: "" }], evId: entry.evId } : {}),
+    });
+  }
+  if (provider && provider.key === key) paintMessages();
+}
+/* audit trail: stamp the originating capture_event with what actually ran —
+   AI-proposed + human-confirmed stays reconstructable. Best-effort. */
+async function auditExecution(entry, a, r) {
+  if (!entry.evId) return;
+  try {
+    const g = await rest(`capture_events?id=eq.${entry.evId}&select=result`, { method: "GET" });
+    if (!g.ok) return;
+    const cur = ((await g.json())[0] || {}).result || {};
+    const executed = Array.isArray(cur.executed) ? cur.executed : [];
+    executed.push({ type: a.type, label: a.label, ok: !!r.ok, detail: String(r.detail || "").slice(0, 140), at: new Date().toISOString() });
+    await rest(`capture_events?id=eq.${entry.evId}`, {
+      method: "PATCH", body: JSON.stringify({ result: { ...cur, executed } }),
+    });
+  } catch (_) { /* the audit stamp is best-effort — never blocks the chip */ }
+}
+
+/* The field app's executor — sendText only (form write-backs stay on the
+   voice-capture chip path). Company lane when enabled, Messages fallback;
+   quiet_hours failures NEVER fall back to the device link — that would
+   sidestep the server's guard the user just hit. */
+function runFieldAction(project, a) {
+  if (a.type !== "sendText") return { ok: false, detail: "not available in the field app" };
+  const p = a.params || {};
+  const to = normalizePhone(p.to);
+  const message = String(p.message || "").trim();
+  if (!to || !message) return { ok: false, detail: "missing a phone number or message" };
+  const kind = p.audience === "crew" ? "assistCrew" : "assist";
+  const entry = logSms(project, { kind, to, body: message, by: capturedBy() });
+  Store.put(project);
+  if (!companySendEnabled()) {
+    location.href = smsHref(to, message);            // synchronous in the tap window
+    return { ok: true, detail: "opened Messages — review and hit send" };
+  }
+  return sendViaCompany({ to, body: message, kind, by: capturedBy(), unifiedJobId: getUnifiedJobId(project.id) })
+    .then((r) => {
+      entry.via = "company"; entry.status = r.status || "sent"; entry.sid = r.sid || "";
+      Store.put(project);
+      return { ok: true, detail: "sent from the company number" };
+    })
+    .catch((e) => {
+      const msg = String((e && e.message) || e).slice(0, 140);
+      entry.via = "device"; entry.error = msg;
+      Store.put(project);
+      if (/quiet_hours/.test(msg)) return { ok: false, detail: msg };
+      location.href = smsHref(to, message);          // best-effort fallback
+      return { ok: true, detail: "company send failed — opened Messages instead (review and send)" };
+    });
+}
 
 /* The field app's provider — job-scoped, digest from narrative.js. */
 function fieldProvider(p) {
@@ -70,6 +191,7 @@ function fieldProvider(p) {
         : "Hey — what's the question? I can see this job's readings, category, and equipment. ") +
       "Talk to me with the mic, type, or send a photo of what you're looking at.",
     buildContext: () => assistContext(p),
+    executeAction: (a) => runFieldAction(p, a),
   };
 }
 
@@ -194,6 +316,17 @@ function bubble(m) {
     b.append(h("div", { class: "amsg__imgs" }, ...m.images.map((src) => h("img", { src, alt: "" }))));
   }
   if (m.text) b.append(h("div", { class: "amsg__text" }, m.text));
+  if (m.actions && m.actions.length) {
+    b.append(h("div", { class: "amsg__acts" }, ...m.actions.map((a) => {
+      const btn = h("button", { type: "button", class: "actchip" + (a.state ? " actchip--" + a.state : "") },
+        h("span", { class: "actchip__label" }, (ACTION_ICONS[a.type] || "⚡") + " " + (a.label || a.type)),
+        h("span", { class: "actchip__preview" }, actionPreview(a)),
+        h("span", { class: "actchip__state" }, actionStateText(a)));
+      btn.disabled = a.state === "running" || a.state === "done";
+      btn.addEventListener("click", () => runAction(m, a));
+      return btn;
+    })));
+  }
   return b;
 }
 function paintMessages() {
@@ -227,6 +360,9 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
   // voice: the user bubble appears once the server returns the transcript
   if (!audio) { list.push({ role: "user", text, images }); paintMessages(); }
   busy(true);
+  // chip results queued since the last turn ride out with this one; on a
+  // failed ask they re-queue so the feedback isn't lost
+  const chipResults = (pendingResults.get(provider.key) || []).splice(0);
   try {
     // the server appends the final user turn itself (from text/audio+images),
     // so prior turns exclude the message we just painted for a text ask
@@ -243,11 +379,19 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
       // await tolerates sync providers too — admin builds its digest async
       // (IndexedDB + portal/QBO lookups), field/board return plain objects
       context: await provider.buildContext(),
+      ...(chipResults.length ? { actionResults: chipResults } : {}),
       ...(provider.capturedBy ? { captured_by: provider.capturedBy() } : {}),
     });
     if (audio && b.transcript) list.push({ role: "user", text: b.transcript, images });
     const reply = b.reply || "…I didn't get an answer back. Try again?";
-    list.push({ role: "assistant", text: reply });
+    const entry = { role: "assistant", text: reply };
+    // proposed actions → confirm chips (only when this provider can run them)
+    if (Array.isArray(b.proposedActions) && b.proposedActions.length &&
+        typeof provider.executeAction === "function") {
+      entry.actions = b.proposedActions.map((a) => ({ ...a, state: "" }));
+      entry.evId = b.capture_event_id || null;
+    }
+    list.push(entry);
     paintMessages();
     if (wantSpeech) {
       ui.speaking.hidden = false;
@@ -258,6 +402,7 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
       });
     }
   } catch (e) {
+    chipResults.forEach((r) => queueResult(provider.key, r));   // feedback survives the retry
     toast((e && e.message) || "Couldn't reach the assistant — try again.");
     paintMessages();
   }

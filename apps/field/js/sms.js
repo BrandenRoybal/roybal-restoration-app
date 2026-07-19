@@ -92,6 +92,8 @@ export const SMS_KIND_LABELS = {
   fieldReport: "Field Report → office",
   onOurWay: "On our way → customer",
   text: "Text",
+  assist: "Assistant → customer (confirmed)",
+  assistCrew: "Assistant → crew (confirmed)",
 };
 
 /* ============================================================
@@ -127,6 +129,30 @@ export async function sendViaCompany({ to, body, kind, by, unifiedJobId }) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) throw new Error(data.error || ("send failed (" + res.status + ")"));
   return { sid: data.sid || "", status: data.status || "sent" };
+}
+
+/* Assistant confirm-chip send WITHOUT a field project (board / admin mounts —
+   the server's sms_messages row is the log there). Same lane rules as
+   smartSend, except a quiet_hours refusal NEVER falls back to the device
+   link — that would sidestep the guard the user just hit. Must be called
+   synchronously from the tap so the Path-1 sms: link fires in its window. */
+export function assistSend({ to, message, audience, by }) {
+  const num = normalizePhone(to);
+  const msg = String(message || "").trim();
+  if (!num || !msg) return { ok: false, detail: "missing a phone number or message" };
+  const kind = audience === "crew" ? "assistCrew" : "assist";
+  if (!companySendEnabled()) {
+    location.href = smsHref(num, msg);            // synchronous in the tap window
+    return { ok: true, detail: "opened Messages — review and hit send" };
+  }
+  return sendViaCompany({ to: num, body: msg, kind, by: by || "", unifiedJobId: null })
+    .then(() => ({ ok: true, detail: "sent from the company number" }))
+    .catch((e) => {
+      const m = String((e && e.message) || e).slice(0, 140);
+      if (/quiet_hours/.test(m)) return { ok: false, detail: m };
+      location.href = smsHref(num, msg);          // best-effort fallback
+      return { ok: true, detail: "company send failed — opened Messages instead (review and send)" };
+    });
 }
 
 /* Shared handler behind every text button. OFF -> Path 1 (open Messages,

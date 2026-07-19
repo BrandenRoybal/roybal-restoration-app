@@ -13,6 +13,9 @@
 import { Store, daysSince, todayISO } from "../../js/core.js";
 import { rest, isSignedIn } from "../../js/supa.js";
 import { qboStatus } from "../../js/qbo.js";
+import { assistSend } from "../../js/sms.js";
+import { draftAdjusterEmail, draftPortalMessage } from "../../js/officeai.js";
+import { fetchPortalThread, portalDigest, threadForAi, sendOfficeReply } from "../../js/portal.js";
 
 /* mirrors admin.js jobAttention(): drying equipment on site ≥7 days */
 const equipOut7 = (p) => (p.dryingLogs || []).some((d) =>
@@ -81,6 +84,72 @@ export async function buildAdminContext() {
   };
 }
 
+/* ---------- assistant action executors (Phase 5 confirm chips) ----------
+   Drafting chips (adjuster email, portal reply) produce a DRAFT the owner
+   reads in the thread — nothing is emailed, and a portal post takes a
+   second confirm chip. No project mutations from /admin, by design. */
+
+/* match exactly one shared-store project by customer/address fragment */
+async function findProject(q) {
+  const needle = String(q || "").trim().toLowerCase();
+  if (!needle) return { err: "which job? none named" };
+  const all = await Store.all().catch(() => []);
+  const hits = all.filter((p) => `${p.customer || ""} ${p.address || ""}`.toLowerCase().includes(needle));
+  if (!hits.length) return { err: `no job matches “${q}”` };
+  if (hits.length > 1) {
+    const exact = hits.filter((p) => String(p.customer || "").toLowerCase() === needle);
+    if (exact.length === 1) return { hit: exact[0] };
+    return { err: `${hits.length} jobs match “${q}” — be more specific` };
+  }
+  return { hit: hits[0] };
+}
+
+async function adjusterEmailChip(params) {
+  const m = await findProject(params.job);
+  if (m.err) return { ok: false, detail: m.err };
+  const draft = await draftAdjusterEmail(m.hit);
+  const text = `✉️ Draft adjuster email — ${m.hit.customer || "job"}\n\nSubject: ${draft.subject || ""}\n\n${draft.body || ""}`;
+  try { await navigator.clipboard.writeText(`Subject: ${draft.subject || ""}\n\n${draft.body || ""}`); } catch (_) { /* clipboard is a bonus */ }
+  return { ok: true, detail: "draft below — copied to the clipboard, nothing was emailed", message: text };
+}
+
+async function portalReplyChip(params) {
+  const m = await findProject(params.job);
+  if (m.err) return { ok: false, detail: m.err };
+  const p = m.hit;
+  const portalJobId = p.portalShare && p.portalShare.id;
+  if (!portalJobId) return { ok: false, detail: `${p.customer || "that job"} isn't shared to the customer portal yet` };
+  const mode = params.mode === "status" ? "status" : "reply";
+  const thread = await fetchPortalThread(portalJobId);
+  const draft = await draftPortalMessage(p, mode, portalDigest(p), threadForAi(thread));
+  if (!draft) return { ok: false, detail: "the draft came back empty — try again" };
+  return {
+    ok: true, detail: "draft below — posts only if you confirm the next chip",
+    message: `🧡 Portal ${mode === "status" ? "status update" : "reply"} draft — ${p.customer || "job"}\n\n${draft}`,
+    // review → second confirm: the post itself is its own chip
+    followup: { type: "portalPost", label: `Post to ${p.customer || "the customer"}'s portal thread`, params: { portalJobId, message: draft } },
+  };
+}
+
+async function portalPostChip(params) {
+  const text = String(params.message || "").trim();
+  const id = params.portalJobId;
+  if (!id || !text) return { ok: false, detail: "nothing to post" };
+  await sendOfficeReply(id, text, "office");
+  return { ok: true, detail: "posted to the portal thread" };
+}
+
+function runAdminAction(a) {
+  const p = (a && a.params) || {};
+  switch (a && a.type) {
+    case "sendText": return assistSend({ to: p.to, message: p.message, audience: p.audience, by: "office" });
+    case "adjusterEmail": return adjusterEmailChip(p);
+    case "portalReply": return portalReplyChip(p);
+    case "portalPost": return portalPostChip(p);
+    default: return { ok: false, detail: "not available in the office admin" };
+  }
+}
+
 /** The provider assist.js mounts — see mountAssistProvider(). */
 export function adminAssistProvider() {
   return {
@@ -90,8 +159,10 @@ export function adminAssistProvider() {
     sub: "Office manager · every job at a glance",
     greeting: () =>
       "Hey — ask me what needs attention: stale jobs, equipment out too long, " +
-      "customer messages waiting, drying status, QuickBooks. I answer from the dashboard's live data.",
+      "customer messages waiting, drying status, QuickBooks. I answer from the dashboard's live data, " +
+      "and I can queue up a text, an adjuster-email draft, or a portal reply — you confirm with a tap.",
     capturedBy: () => "office",
     buildContext: buildAdminContext,
+    executeAction: runAdminAction,
   };
 }

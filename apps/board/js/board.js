@@ -128,8 +128,9 @@ async function startUI() {
   applySchedule();
   render();              // instant from cache
   // 💬 dispatcher assistant — floats on document.body, so the wholesale
-  // #view re-renders and the 20s poll never touch it
-  mountAssistProvider(boardAssistProvider());
+  // #view re-renders and the 20s poll never touch it; refresh lets an
+  // executed confirm chip repaint the board immediately
+  mountAssistProvider(boardAssistProvider(refresh));
   await refresh();            // then from server
   startPoll();
   window.addEventListener("online", refresh);

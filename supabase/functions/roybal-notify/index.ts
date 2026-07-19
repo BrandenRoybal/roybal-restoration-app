@@ -9,6 +9,8 @@
  * Actions (body.action):
  *   sendSms — { to, body, kind?, unified_job_id?, captured_by?, mediaUrls?[] }
  *             sends from TWILIO_FROM, records the row, returns { sid, status }.
+ *             Customer-facing kinds only send 8am–8pm Alaska (quiet hours);
+ *             crew/office kinds (fieldReport, forward) are exempt.
  *
  * Inbound (POST …/roybal-notify/inbound):
  *   Twilio's incoming-message webhook (form-encoded, no JWT). Auth is the
@@ -21,6 +23,8 @@
  * Secrets:  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM (+1XXXXXXXXXX)
  *           SMS_MONTHLY_CAP (optional, default 500 messages / month)
  *           SMS_FORWARD_TO  (optional — US number that inbound texts forward to)
+ *           SMS_QUIET_START / SMS_QUIET_END (optional, default 8 / 20 — the
+ *           Alaska-time window customer-facing texts may send in)
  * Deploy:   supabase functions deploy roybal-notify --no-verify-jwt
  *   (--no-verify-jwt required for browser CORS preflight + the Twilio
  *    webhook; the function self-protects — sendSms runs its DB ops under
@@ -80,6 +84,36 @@ export function toE164(raw: unknown): string {
    fixed unit index can split an emoji and corrupt the send. */
 const clip = (t: string, n = 1600) => Array.from(t).slice(0, n).join("");
 
+/* ---------- quiet hours ----------
+   Customer-facing texts only go out 8am–8pm America/Anchorage — a 6am
+   "on our way" or an evening assistant-proposed text waits for morning.
+   Crew/office kinds are exempt (the office WANTS a 6am field report,
+   and a chip-confirmed evening text to the crew about tomorrow's start
+   is the dispatcher's call — assistCrew is user-confirmed by the tap).
+   Every unknown kind counts as customer-facing, so a new send path is
+   quiet-hours-guarded by default until it's deliberately exempted. */
+const CREW_KINDS = new Set(["fieldReport", "forward", "assistCrew"]);
+const qh = (v: string | undefined, dflt: number) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 24 ? n : dflt;
+};
+const QUIET_START = qh(Deno.env.get("SMS_QUIET_START"), 8);
+const QUIET_END = qh(Deno.env.get("SMS_QUIET_END"), 20);
+export function anchorageHour(d = new Date()): number {
+  return Number(new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Anchorage", hour: "numeric", hourCycle: "h23",
+  }).format(d));
+}
+function assertSendWindow(kind: string) {
+  if (CREW_KINDS.has(kind)) return;
+  const hr = anchorageHour();
+  if (hr >= QUIET_START && hr < QUIET_END) return;
+  const fmt = (h: number) => (h === 0 || h === 24 ? "midnight" : h === 12 ? "noon" : h < 12 ? `${h}am` : `${h - 12}pm`);
+  throw new Error(
+    `quiet_hours: customer texts send between ${fmt(QUIET_START)} and ${fmt(QUIET_END)} Alaska time — ` +
+    `it's ${fmt(hr === 0 ? 24 : hr)}–${fmt(hr + 1)} there now. It was NOT sent; try again in the window.`);
+}
+
 async function monthCount(token: string, apikey = ANON_KEY): Promise<number> {
   const from = new Date();
   from.setUTCDate(1); from.setUTCHours(0, 0, 0, 0);
@@ -115,6 +149,8 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
   if (!to) throw new Error("Provide `to` as a valid US phone number.");
   const text = String(body.body ?? "").trim();
   if (!text) throw new Error("Provide `body` — the message text.");
+  const kind = String(body.kind ?? "text");
+  assertSendWindow(kind);
   const media = (Array.isArray(body.mediaUrls) ? body.mediaUrls : [])
     .map((u) => String(u)).filter((u) => /^https:\/\//.test(u)).slice(0, 5);
 
@@ -130,7 +166,7 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
     body: JSON.stringify([{
       unified_job_id: body.unified_job_id ?? null,
       direction: "outbound", to_number: to, from_number: TWILIO_FROM,
-      body: clip(text), kind: String(body.kind ?? "text"),
+      body: clip(text), kind,
       sent_by: body.captured_by ?? null, status: "pending",
     }]),
   });

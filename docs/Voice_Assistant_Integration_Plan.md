@@ -129,17 +129,18 @@ model instead of failing the turn.
 - [x] `hoursLookup` — `time_entries` aggregates by job + crew since N days (manual board entries; QB Time daily-pull still the gate for full coverage)
 - [x] Personas + tool schemas + per-app toolsets extracted to `supabase/functions/roybal-ai-office/personas.ts` *(inside the function dir rather than `_shared/` so the MCP two-file deploy bundles it; the phone agent imports the same repo path later)* — all three personas share all five read tools today; the phone persona will get a narrow set
 
-### Phase 5 — Confirmed actions: chips, not autonomy (M)
-Reply schema gains `proposedActions[]`; `assist.js` renders confirm chips (same
-HITL pattern as `applyChips`). Nothing executes without a tap; every action type
-starts at compose → review → tap per the roadmap ground rules.
-- [ ] **Prerequisite: quiet-hours guard in `roybal-notify`** — there is no quiet-hours logic anywhere today (roadmap claims it prematurely); ~10 lines server-side: customer-kind sends blocked outside 8am–8pm America/Anchorage, crew kinds exempt. Ship before any assistant-proposed customer text.
-- [ ] SMS chips (all apps) → `sms.js` `smartSend`/`sendViaCompany` → `roybal-notify` (logging preserved); degrade to the device-SMS-link fallback when the company lane is unreachable
-- [ ] Board chips → new `apps/board/js/actions.js` (moveJob/reschedule via `scheduleMode='manual'`+`pinnedStart` → `recomputeAndPersist`; `saveTimeEntry`) — **all writes through `data.js` `guardedJobWrite`**, never raw server updates, so the rev counter is never bypassed
-- [ ] Admin chips: draft adjuster email (`draftAdjusterEmail` exists), **draft portal reply** (wired to existing `draftPortalMessage` → `portalDraft` — cheapest action in the plan, whole backend exists), text customer. No project mutations from /admin yet.
-- [ ] Field chips: form write-backs via the existing chip path
-- [ ] **Audit trail** ("everything is logged"): on chip execution, patch the originating capture_event (`result.executed=true`) or write a Message-log entry — AI-proposed + human-confirmed must be reconstructable
-- [ ] Feedback loop: after a chip executes client-side, post the `tool_result` back on the next turn so the model knows it happened
+### Phase 5 — Confirmed actions: chips, not autonomy (M) — ✅ SHIPPED Jul 18 2026 (v46)
+`proposeActions` tool (registry: `ACTION_DEFS`/`ACTIONSETS`/`ACTION_RULE` in
+`personas.ts`) → replies carry `proposedActions[]` → `assist.js` renders
+tap-to-confirm chips; execution is the provider seam's `executeAction(action)`
+so each app runs its own guarded paths. Nothing executes without the tap.
+- [x] **Prerequisite: quiet-hours guard in `roybal-notify`** — `assertSendWindow()`: customer-facing kinds blocked outside 8am–8pm America/Anchorage (`SMS_QUIET_START/END` overridable); crew kinds (`fieldReport`, `forward`, chip-confirmed `assistCrew`) exempt; unknown kinds guarded by default
+- [x] SMS chips (all apps) → field: `runFieldAction` (logs `smsLog` kind `assist`/`assistCrew` + company lane + Messages fallback); board/admin: shared `assistSend()` in `sms.js`. A `quiet_hours` refusal never falls back to the device link — that would sidestep the guard.
+- [x] Board chips → new `apps/board/js/actions.js`: `moveJob` (pin `scheduleMode='manual'`+`pinnedStart`, `computeSchedule` reflow, persist every moved job via guarded `saveJob`), `logHours` (`saveTimeEntry`); exact-match-beats-ambiguity job/crew matching; board `refresh()` repaints on execution
+- [x] Admin chips: `adjusterEmail` (draft + clipboard, nothing emailed), `portalReply` → `portalDraft` draft in-thread with a SECOND confirm chip (`portalPost` → `sendOfficeReply`) before anything reaches the customer, `sendText`. No project mutations from /admin.
+- [x] Field chips: `sendText` (job-scoped, logged as claim documentation). *Form write-backs deliberately deferred — the voice-capture chip path already covers form-scoped capture; mapping free chat onto form instances is a separate design (revisit post-Phase 6).*
+- [x] **Audit trail**: chip execution patches the originating capture_event (`result.executed[]` — type/label/ok/detail/at, best-effort) and SMS sends land in `sms_messages`/`smsLog` as before
+- [x] Feedback loop: chip outcomes queue per provider and ride the next turn as `body.actionResults` → surfaced to the model as CHIP RESULTS in the user turn (client history is text-only, so wire-level `tool_result` blocks can't survive turns)
 
 ### Phase 6 — Phone lane: the virtual receptionist (L) — *gate: Fly.io (~$5/mo)*
 Deferred until Phases 1–5 have been lived with — but nothing above gets thrown
