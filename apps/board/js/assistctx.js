@@ -13,6 +13,7 @@
 import { todayISO } from "../../js/core.js";
 import { cachedJobs, cachedCrew, cachedSettings, cachedEntries } from "./data.js";
 import { computeSchedule, computeCfoSnapshot } from "./schedule.js";
+import { runBoardAction } from "./actions.js";
 
 /* One token-lean row per job — enough to answer scheduling questions,
    nothing the dispatcher persona doesn't need. Cap 50 (newest first). */
@@ -59,8 +60,10 @@ export function buildBoardContext() {
   };
 }
 
-/** The provider assist.js mounts — see mountAssistProvider(). */
-export function boardAssistProvider() {
+/** The provider assist.js mounts — see mountAssistProvider(). `refresh` is
+    board.js's pull-and-render, so an executed chip shows on the board at
+    once instead of waiting out the 20s poll. */
+export function boardAssistProvider(refresh) {
   return {
     key: "board",
     app: "board",
@@ -68,8 +71,10 @@ export function boardAssistProvider() {
     sub: "Schedule-aware dispatcher · answers from the live board",
     greeting: () =>
       "Hey — ask me about the schedule: who's free this week, what's slipping, " +
-      "what starts or wraps soon, who's overloaded. I answer from the board in front of you.",
+      "what starts or wraps soon, who's overloaded. I answer from the board in front of you, " +
+      "and I can queue up a move, logged hours, or a text — you confirm with a tap.",
     capturedBy: () => "board",
     buildContext: buildBoardContext,
+    executeAction: (a) => runBoardAction(a, refresh),
   };
 }

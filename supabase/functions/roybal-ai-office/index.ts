@@ -30,7 +30,10 @@
  * the envelope + ledger. The assistant carries READ tools (priceLookup,
  * jobLookup, boardRead, smsThread, hoursLookup) run server-side through a
  * bounded loop (≤2 rounds, RLS-scoped under the caller's JWT, cap re-checked
- * between rounds). Voice is metered: Deepgram STT seconds and Aura TTS
+ * between rounds). It can also PROPOSE actions (proposeActions tool, per-app
+ * ACTIONSETS): proposals return as result.proposedActions and render as
+ * tap-to-confirm chips in the client — NOTHING executes server-side, and
+ * body.actionResults on the next turn tells the model what the user ran. Voice is metered: Deepgram STT seconds and Aura TTS
  * characters land in ai_usage (audio_seconds/stt_cost_usd,
  * tts_chars/tts_cost_usd — 203) and roll into cost_usd, so the monthly cap
  * governs voice honestly.
@@ -48,7 +51,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 // personas + tool schemas live in the shared registry (pure data) — the
 // future phone-receptionist agent imports the same file
-import { PERSONAS, CTX_LABELS, TOOL_RULE, TOOLS, TOOLSETS } from "./personas.ts";
+import { PERSONAS, CTX_LABELS, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS, PROPOSE_TOOL_NAME } from "./personas.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -1367,6 +1370,54 @@ async function runTool(name: string, input: Record<string, unknown>, jwt: string
   }
 }
 
+/* ---------- proposed actions (Phase 5) — the propose tool ----------
+   One tool whose description embeds the per-type param contracts from the
+   registry. Calling it EXECUTES NOTHING server-side: chatWithTools collects
+   the proposals and the client renders them as tap-to-confirm chips. */
+type ProposedAction = { type: string; label: string; params: Record<string, unknown> };
+function proposeTool(actionNames: string[]): Record<string, unknown> {
+  return {
+    name: PROPOSE_TOOL_NAME,
+    description:
+      "Propose concrete next-step actions for the user to confirm. Each renders as a tap-to-confirm chip — NOTHING executes " +
+      "unless tapped, so never claim an action already happened. Action types available here:\n" +
+      actionNames.map((n) => `- ${n}: ${ACTION_DEFS[n]?.desc ?? ""}`).join("\n"),
+    input_schema: {
+      type: "object", additionalProperties: false, required: ["actions"],
+      properties: {
+        actions: {
+          type: "array", maxItems: 3,
+          items: {
+            type: "object", additionalProperties: false, required: ["type", "label", "params"],
+            properties: {
+              type: { type: "string", enum: actionNames },
+              label: { type: "string", description: "Short imperative chip label, e.g. 'Text Sarah the ETA'" },
+              params: { type: "object", description: "This action type's params, per the contract in the tool description" },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+/* Validate a propose call against the app's allowlist; cap 3 per turn. */
+function takeProposals(input: unknown, actionNames: string[], already: number): ProposedAction[] {
+  const wanted = Array.isArray((input as { actions?: unknown[] })?.actions) ? (input as { actions: unknown[] }).actions : [];
+  const out: ProposedAction[] = [];
+  for (const a of wanted as Array<Record<string, unknown>>) {
+    if (already + out.length >= 3) break;
+    const type = String(a?.type ?? "");
+    if (!actionNames.includes(type)) continue;
+    out.push({
+      type,
+      label: String(a?.label ?? type).slice(0, 80),
+      params: a?.params && typeof a.params === "object" ? (a.params as Record<string, unknown>) : {},
+    });
+  }
+  return out;
+}
+
 /* Conversational call WITH server-executed read tools — a bounded agentic
    loop (≤2 tool rounds, then the model must answer). The spend cap is
    re-checked between rounds so a tool-happy turn can't sail past it, and
@@ -1374,11 +1425,12 @@ async function runTool(name: string, input: Record<string, unknown>, jwt: string
    even on failure. Tool failures return {error} to the model, never throw. */
 async function chatWithTools(opts: {
   model: string; system: string; messages: unknown[]; jwt: string;
-  tools: Array<Record<string, unknown>>; maxTokens?: number;
-}): Promise<{ text: string; usage: Usage; toolCalls: number }> {
+  tools: Array<Record<string, unknown>>; actionNames?: string[]; maxTokens?: number;
+}): Promise<{ text: string; usage: Usage; toolCalls: number; proposals: ProposedAction[] }> {
   if (!LLM_API_KEY) throw new Error("llm_key_missing: set the LLM_API_KEY function secret (Anthropic)");
   const total: Usage = { inTok: 0, outTok: 0 };
   const msgs = [...opts.messages];
+  const proposals: ProposedAction[] = [];
   let toolCalls = 0;
   let capped = false;
   try {
@@ -1402,12 +1454,23 @@ async function chatWithTools(opts: {
       if (!useTools || data.stop_reason !== "tool_use" || !toolUses.length) {
         const text = (data.content ?? []).filter((b: { type: string }) => b.type === "text")
           .map((b: { text: string }) => b.text).join("\n").trim();
-        return { text, usage: total, toolCalls };
+        return { text, usage: total, toolCalls, proposals };
       }
       msgs.push({ role: "assistant", content: data.content });
       const results: unknown[] = [];
       for (const tu of toolUses as Array<{ id: string; name: string; input?: Record<string, unknown> }>) {
         toolCalls++;
+        // propose call: collect (validated against the app's actionset) —
+        // never executed here; the client renders tap-to-confirm chips
+        if (String(tu.name) === PROPOSE_TOOL_NAME) {
+          const taken = takeProposals(tu.input, opts.actionNames ?? [], proposals.length);
+          proposals.push(...taken);
+          results.push({
+            type: "tool_result", tool_use_id: tu.id,
+            content: JSON.stringify({ shown: taken.length, note: "chips shown — each runs only if the user taps it; give your final answer now and reference them naturally" }),
+          });
+          continue;
+        }
         let out: unknown;
         try { out = await runTool(String(tu.name), tu.input ?? {}, opts.jwt); }
         catch (e) { out = { error: String((e as Error)?.message ?? e) }; }
@@ -1461,7 +1524,17 @@ async function fieldAssist(body: Record<string, unknown>) {
     const img = dataUrlToImage(src);
     if (img) finalContent.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
   }
-  finalContent.push({ type: "text", text: userText || "Here's the situation in the photo — what should I do?" });
+  // chip feedback: proposals the user tapped since the last reply, executed
+  // client-side — surfaced as part of the user turn (the client history is
+  // text-only, so wire-level tool_result blocks can't survive across turns)
+  const actionResults = Array.isArray(body.actionResults) ? (body.actionResults as Array<Record<string, unknown>>).slice(0, 6) : [];
+  const feedback = actionResults.length
+    ? "[CHIP RESULTS — proposals from your last reply the user acted on: " +
+      actionResults.map((r) =>
+        `${String(r.label ?? r.type ?? "action").slice(0, 80)} → ${r.ok ? "done" : "FAILED"}${r.detail ? ` (${String(r.detail).slice(0, 120)})` : ""}`).join("; ") +
+      ". These executed client-side — don't re-propose the done ones.]\n\n"
+    : "";
+  finalContent.push({ type: "text", text: feedback + (userText || "Here's the situation in the photo — what should I do?") });
   msgs.push({ role: "user", content: finalContent });
 
   const appKey = String(body.app ?? "field");
@@ -1479,9 +1552,13 @@ async function fieldAssist(body: Record<string, unknown>) {
   const context = body.context ? `\n\n${ctxLabel}:\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
   const toolNames = Object.prototype.hasOwnProperty.call(TOOLSETS, appKey) ? TOOLSETS[appKey] : TOOLSETS.field;
   const tools = toolNames.map((n) => TOOLS[n]).filter(Boolean);
-  const { text, usage, toolCalls } = await chatWithTools({
-    model, system: persona + (tools.length ? TOOL_RULE : "") + spokenRule + context,
-    messages: msgs, jwt: String((body as Record<string, unknown>)._jwt ?? ""), tools, maxTokens: 1024,
+  // per-app actionset (hasOwnProperty for the same prototype-pollution reason
+  // as the persona) — unknown apps get NO actions, never a fallback set
+  const actionNames = Object.prototype.hasOwnProperty.call(ACTIONSETS, appKey) ? ACTIONSETS[appKey] : [];
+  if (actionNames.length) tools.push(proposeTool(actionNames));
+  const { text, usage, toolCalls, proposals } = await chatWithTools({
+    model, system: persona + (tools.length ? TOOL_RULE : "") + (actionNames.length ? ACTION_RULE : "") + spokenRule + context,
+    messages: msgs, jwt: String((body as Record<string, unknown>)._jwt ?? ""), tools, actionNames, maxTokens: 1024,
   });
   // voice agent: speak the reply back (best-effort — a TTS hiccup never eats the answer)
   let replyAudio: string | null = null;
@@ -1490,7 +1567,7 @@ async function fieldAssist(body: Record<string, unknown>) {
     try { const tts = await ttsSpeak(text); replyAudio = tts.b64; ttsChars = tts.chars; }
     catch (_) { replyAudio = null; }
   }
-  return { result: { reply: text, transcript, replyAudio }, usage, model, summary: { app: appKey, turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio, toolCalls }, audioSeconds, ttsChars };
+  return { result: { reply: text, transcript, replyAudio, proposedActions: proposals }, usage, model, summary: { app: appKey, turns: history.length + 1, images: images.length, voice: !!transcript, spoken: !!replyAudio, toolCalls, proposed: proposals.length }, audioSeconds, ttsChars };
 
   } catch (err) {
     const e = err as Error & { audioSeconds?: number; model?: string };
@@ -1624,7 +1701,9 @@ serve(async (req: Request) => {
       cost_usd: cost, capped: false, note: app !== "field" ? `app:${app}` : null,
     }, jwt);
 
-    return json({ ok: true, capped: false, ...result, spend: { month_to_date_usd: spent + cost, cap_usd: SPEND_CAP_USD, this_call_usd: cost } });
+    // capture_event_id rides every success so chip executions can stamp the
+    // originating envelope (result.executed) — the Phase 5 audit trail
+    return json({ ok: true, capped: false, ...result, capture_event_id: captureEventId, spend: { month_to_date_usd: spent + cost, cap_usd: SPEND_CAP_USD, this_call_usd: cost } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Paid work incurred BEFORE the throw (billed Deepgram seconds, tokens on
