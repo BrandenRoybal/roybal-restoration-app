@@ -30,7 +30,7 @@ import { WebSocketServer } from "ws";
 import { PERSONAS, PHONE_TOOLS, PHONE_TOOL_RULE } from "../../supabase/functions/roybal-ai-office/personas.ts";
 import { RELAY_TOKEN, OWNER_NAME, PORT, SPEND_CAP_USD, VOICE_MINUTES_CAP, VOICE_PRICE_PER_MIN, PHONE_MODEL, priceFor } from "./config.mjs";
 import { signIn, insertRow, patchCaptureEvent, monthSpend, monthPhoneSeconds } from "./supa.mjs";
-import { runTurn } from "./brain.mjs";
+import { runTurn, probeLLM } from "./brain.mjs";
 
 const TOOLS = Object.values(PHONE_TOOLS);
 
@@ -45,13 +45,16 @@ function newSession(ws) {
     messages: [], usage: { inTok: 0, outTok: 0 }, turns: 0, toolCalls: 0,
     leadsCreated: 0, textsSent: 0, leadId: null, escalate: null,
     captureEventId: null, abort: null, busy: false, closedOut: false,
+    llmFails: 0, pending: "", ended: false,
   };
 }
 
 const send = (ws, obj) => { try { ws.send(JSON.stringify(obj)); } catch { /* socket already gone */ } };
 const say = (ws, text, last = true) => send(ws, { type: "text", token: text, last });
-const endWith = (ws, reasonCode, reason) =>
-  send(ws, { type: "end", handoffData: JSON.stringify({ reasonCode, reason: String(reason || "").slice(0, 140) }) });
+const endWith = (session, reasonCode, reason) => {
+  session.ended = true;
+  send(session.ws, { type: "end", handoffData: JSON.stringify({ reasonCode, reason: String(reason || "").slice(0, 140) }) });
+};
 
 /* caps checked at call start — a capped month greets, apologizes, and
    hands off to voicemail instead of burning tokens */
@@ -71,13 +74,13 @@ async function onSetup(session, msg) {
   if (!RELAY_TOKEN || token !== RELAY_TOKEN) {
     // loud in the logs — this is a config mismatch, not a caller problem
     console.error("relay token mismatch — PHONE_RELAY_TOKEN differs between Fly and the roybal-voice edge secrets");
-    endWith(session.ws, "voicemail", "relay token mismatch");
+    endWith(session, "voicemail", "relay token mismatch");
     return;
   }
   const capped = await overCap();
   if (capped) {
     say(session.ws, "Sorry — our assistant is unavailable right now. Let me get you to voicemail.");
-    endWith(session.ws, "voicemail", capped);
+    endWith(session, "voicemail", capped);
     return;
   }
   // envelope BEFORE any paid call (rulebook #2)
@@ -91,14 +94,24 @@ async function onSetup(session, msg) {
     // no envelope → no paid work; the caller still reaches a human lane
     console.error("envelope insert failed", e.message);
     say(session.ws, "Sorry — I'm having trouble on my end. Let me get you to voicemail.");
-    endWith(session.ws, "voicemail", "envelope failed");
+    endWith(session, "voicemail", "envelope failed");
+    return;
+  }
+  // anything the caller said while the envelope was in flight (people often
+  // talk right over the greeting) was queued, not dropped — answer it now
+  if (session.pending && !session.busy) {
+    const queued = session.pending; session.pending = "";
+    await runOneTurn(session, queued);
   }
 }
 
-async function onPrompt(session, msg) {
-  if (!msg.last) return;                       // partials off; finals only
-  const text = String(msg.voicePrompt || "").trim();
-  if (!text || session.busy || !session.captureEventId) return;
+/* One LLM turn + failure policy. First failure: an honest apology (the
+   problem is OUR side, not the caller's audio) and one retry courtesy of
+   the pending queue. Second consecutive failure: stop wasting the caller's
+   time — hand off to voicemail (the /action handler routes it). Six rounds
+   of "could you say that once more?" is how a dead LLM key reads as "the
+   agent can't hear me". */
+async function runOneTurn(session, text) {
   session.busy = true;
   session.turns++;
   session.abort = new AbortController();
@@ -108,14 +121,39 @@ async function onPrompt(session, msg) {
       onToken: (tok) => say(session.ws, tok, false),
     });
     say(session.ws, "", true);                 // close the talk cycle
-    if (session.escalate) endWith(session.ws, "escalate", session.escalate);
+    session.llmFails = 0;
+    if (session.escalate) endWith(session, "escalate", session.escalate);
   } catch (e) {
     if (e.name !== "AbortError") {
       console.error("turn failed", e.message);
-      say(session.ws, "Sorry — I'm having trouble hearing myself think. Could you say that once more?");
+      session.llmFails++;
+      if (session.llmFails >= 2) {
+        say(session.ws, "I'm so sorry — I'm having technical trouble on my end. Let me get you to voicemail so we don't lose you.");
+        endWith(session, "voicemail", `llm failed: ${e.message}`);
+      } else {
+        // the failed turn rolled its history back, so a repeat starts clean
+        say(session.ws, "Sorry — I hit a snag on my end, not you. Could you say that once more?");
+      }
     }
   }
   session.busy = false;
+  // whatever the caller said while we were busy gets answered, not dropped
+  if (!session.ended && session.pending && session.captureEventId) {
+    const queued = session.pending; session.pending = "";
+    await runOneTurn(session, queued);
+  }
+}
+
+async function onPrompt(session, msg) {
+  if (!msg.last || session.ended) return;      // partials off; finals only
+  const text = String(msg.voicePrompt || "").trim();
+  if (!text) return;
+  if (session.busy || !session.captureEventId) {
+    // mid-turn or setup still in flight — queue (accumulate) instead of drop
+    session.pending = session.pending ? `${session.pending} ${text}` : text;
+    return;
+  }
+  await runOneTurn(session, text);
 }
 
 /* hangup / end: settle the ledger + envelope exactly once */
@@ -139,6 +177,7 @@ async function closeOut(session) {
       result: {
         seconds, turns: session.turns, toolCalls: session.toolCalls,
         leadId: session.leadId, escalated: !!session.escalate, cost_usd: llmCost + voiceCost,
+        llmFails: session.llmFails,            // >0 with 0 tokens = check LLM_API_KEY on Fly
       },
     });
   } catch (e) { console.error("closeout failed", e.message); }
@@ -172,5 +211,11 @@ if (process.env.NODE_ENV !== "test") {
   signIn()
     .then(() => console.log("machine session ready"))
     .catch((e) => console.error("machine sign-in failed (will retry per call):", e.message));
+  probeLLM()
+    .then(() => console.log(`LLM ready — ${PHONE_MODEL} reachable with this key`))
+    .catch((e) => console.error(
+      "LLM PROBE FAILED — the receptionist will answer but cannot think; " +
+      "callers get two apologies then voicemail. Fix LLM_API_KEY / PHONE_MODEL in Fly secrets. " +
+      `Probe error ${e.message}`));
   createAgentServer().listen(PORT, () => console.log(`phone agent on :${PORT}`));
 }

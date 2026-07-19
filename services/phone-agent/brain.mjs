@@ -74,25 +74,45 @@ export async function streamOnce({ system, messages, tools, onToken, signal }) {
 }
 
 /** One caller turn: stream rounds until the model answers without tools
-    (≤3 rounds). Mutates session.messages; totals ride session.usage. */
+    (≤3 rounds). Mutates session.messages; totals ride session.usage.
+    A failed turn rolls the history back to its pre-turn shape — a dangling
+    user message would corrupt every later turn of the call. */
 export async function runTurn(session, userText, { system, tools, onToken }) {
+  const mark = session.messages.length;
   session.messages.push({ role: "user", content: userText });
-  for (let round = 0; round < 3; round++) {
-    const useTools = round < 2 ? tools : [];    // final round must answer
-    const { content, stopReason, usage } = await streamOnce({
-      system, messages: session.messages, tools: useTools, onToken, signal: session.abort?.signal,
-    });
-    session.usage.inTok += usage.inTok;
-    session.usage.outTok += usage.outTok;
-    session.messages.push({ role: "assistant", content });
-    const toolUses = content.filter((b) => b.type === "tool_use");
-    if (stopReason !== "tool_use" || !toolUses.length) return;
-    const results = [];
-    for (const tu of toolUses) {
-      session.toolCalls++;
-      const out = await runPhoneTool(tu.name, tu.input, session);
-      results.push({ type: "tool_result", tool_use_id: tu.id, content: JSON.stringify(out).slice(0, 4000) });
+  try {
+    for (let round = 0; round < 3; round++) {
+      const useTools = round < 2 ? tools : [];    // final round must answer
+      const { content, stopReason, usage } = await streamOnce({
+        system, messages: session.messages, tools: useTools, onToken, signal: session.abort?.signal,
+      });
+      session.usage.inTok += usage.inTok;
+      session.usage.outTok += usage.outTok;
+      session.messages.push({ role: "assistant", content });
+      const toolUses = content.filter((b) => b.type === "tool_use");
+      if (stopReason !== "tool_use" || !toolUses.length) return;
+      const results = [];
+      for (const tu of toolUses) {
+        session.toolCalls++;
+        const out = await runPhoneTool(tu.name, tu.input, session);
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: JSON.stringify(out).slice(0, 4000) });
+      }
+      session.messages.push({ role: "user", content: results });
     }
-    session.messages.push({ role: "user", content: results });
+  } catch (e) {
+    session.messages.length = mark;
+    throw e;
   }
+}
+
+/** Boot-time sanity check via the Models API (GET /v1/models/{id}) — free,
+    spends no tokens. Validates BOTH the key (401) and the model id (404),
+    so a mispasted LLM_API_KEY / PHONE_MODEL secret is one loud log line at
+    deploy time instead of a receptionist that "can't hear" callers. */
+export async function probeLLM() {
+  if (!LLM_API_KEY) throw new Error("LLM_API_KEY not set");
+  const res = await fetch(`https://api.anthropic.com/v1/models/${encodeURIComponent(PHONE_MODEL)}`, {
+    headers: { "x-api-key": LLM_API_KEY, "anthropic-version": "2023-06-01" },
+  });
+  if (!res.ok) throw new Error(`(${res.status}): ${(await res.text()).slice(0, 200)}`);
 }

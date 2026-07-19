@@ -75,6 +75,28 @@ caller → Twilio (+1 866 345-2290)
 ## Day-2 ops
 
 - `fly logs -a roybal-phone` — live call logs (no transcripts, just events).
+
+### Troubleshooting: "it answers but can't hear me"
+
+The greeting and the hearing are both Twilio's job (ConversationRelay does the
+STT), so this symptom is almost never about audio — it's the agent's BRAIN
+failing. If every Anthropic call errors (bad `LLM_API_KEY` paste, bogus
+`PHONE_MODEL`), the agent used to answer each utterance with "could you say
+that once more?", which callers experience as deafness. How to confirm and fix:
+
+1. `fly logs -a roybal-phone` right after a deploy/restart — the boot probe
+   prints either `LLM ready — <model> reachable with this key` or
+   `LLM PROBE FAILED ...` with the HTTP status (401 = bad key, 404 = bad model).
+   During a call, each failed turn logs `turn failed llm_failed (...)`.
+2. In the database: `ai_usage` rows for the phone lane with `audio_seconds > 0`
+   but `input_tokens = 0` mean the calls happened and the LLM never answered;
+   the call's `capture_events.result.llmFails` counts the failures.
+3. Fix: re-set the secret and restart —
+   `fly secrets set -a roybal-phone LLM_API_KEY="<the working key>"`
+   (secrets changes restart the machine; watch the probe line come up green).
+
+Callers are protected meanwhile: the first LLM failure gets an honest
+apology + retry, a second consecutive failure hands the call to voicemail.
 - Kill switch: remove the Twilio voice webhook (calls ring straight through
   as before), or `fly scale count 0 -a roybal-phone` (callers then get
   voicemail via the edge function's failure path).

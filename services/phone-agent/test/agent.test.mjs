@@ -16,6 +16,8 @@ process.env.OWNER_CELL = "907-555-0000";
 /* ---------- fetch stub ---------- */
 const LOG = [];
 let anthropicScript = [];        // queued SSE bodies, consumed per call
+let anthropicFails = 0;          // fail the next N anthropic calls (529)
+let anthropicGate = null;        // if set, anthropic calls await this promise
 let leadInsertFails = false;
 
 const sse = (events) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
@@ -42,6 +44,11 @@ globalThis.fetch = async (url, opts = {}) => {
   LOG.push(entry);
   const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { "Content-Type": "application/json" } });
   if (u.includes("api.anthropic.com")) {
+    if (anthropicGate) await anthropicGate;
+    if (anthropicFails > 0) {
+      anthropicFails--;
+      return new Response('{"type":"error","error":{"type":"overloaded_error"}}', { status: 529 });
+    }
     const body = anthropicScript.length ? anthropicScript.shift() : textReply("Fallback answer.");
     return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
   }
@@ -191,6 +198,74 @@ test("escalate tool ends the session with the escalate handoff", async () => {
   const handoff = JSON.parse(end.handoffData);
   assert.equal(handoff.reasonCode, "escalate");
   assert.match(handoff.reason, /flowing/);
+  c.close();
+});
+
+test("caller speech during setup is queued, not dropped", async () => {
+  LOG.length = 0;
+  anthropicScript = [textReply("Heard you the first time.")];
+  const c = call({ from: "+19075555555" });
+  await c.setup();
+  c.prompt("My basement is flooding!");        // no sleep — envelope may still be in flight
+  const last = await c.waitFor((m) => m.type === "text" && m.last === true);
+  assert.ok(last, "the first utterance got an answer");
+  assert.equal(LOG.filter((e) => e.url.includes("anthropic")).length, 1);
+  c.close();
+});
+
+test("one LLM failure: honest our-side apology, and the retry starts from clean history", async () => {
+  LOG.length = 0;
+  anthropicFails = 1;
+  anthropicScript = [textReply("Now I've got you — go ahead.")];
+  const c = call({ from: "+19075554444" });
+  await c.setup(); await sleep(150);
+  c.prompt("My roof is leaking");
+  const apology = await c.waitFor((m) => m.type === "text" && /snag on my end/.test(m.token || ""));
+  assert.ok(apology, "apology owns the failure instead of blaming the caller's audio");
+  c.prompt("I said my roof is leaking");
+  await c.waitFor((m) => m.type === "text" && (m.token || "").includes("got you"));
+  const calls = LOG.filter((e) => e.url.includes("anthropic"));
+  assert.equal(calls.length, 2);
+  // the failed turn rolled back — the retry carries ONE user message, not two
+  const retry = JSON.parse(calls[1].body);
+  assert.equal(retry.messages.length, 1);
+  assert.match(retry.messages[0].content, /I said my roof is leaking/);
+  c.close();
+});
+
+test("two consecutive LLM failures: bail to voicemail instead of a deaf loop", async () => {
+  LOG.length = 0;
+  anthropicFails = 2;
+  const c = call({ from: "+19075553333" });
+  await c.setup(); await sleep(150);
+  c.prompt("Hello?");
+  await c.waitFor((m) => m.type === "text" && /snag on my end/.test(m.token || ""));
+  c.prompt("Can you hear me?");
+  const end = await c.waitFor((m) => m.type === "end");
+  const handoff = JSON.parse(end.handoffData);
+  assert.equal(handoff.reasonCode, "voicemail");
+  assert.match(handoff.reason, /llm failed/);
+  c.close();
+  await sleep(150);                            // closeOut settles the ledger
+  const patched = LOG.filter((e) => e.url.includes("capture_events?id=eq.") && e.method === "PATCH");
+  assert.ok(patched.some((e) => e.body.includes('"llmFails":2')), "envelope records the failure count");
+});
+
+test("caller speech while the agent is mid-turn is queued and answered next", async () => {
+  LOG.length = 0;
+  anthropicScript = [textReply("First answer."), textReply("Second answer.")];
+  let open;
+  anthropicGate = new Promise((r) => { open = r; });
+  const c = call({ from: "+19075552222" });
+  await c.setup(); await sleep(150);
+  c.prompt("First thing");
+  await sleep(100);                            // turn one is now awaiting the gate
+  c.prompt("and another thing");               // arrives while busy → queued
+  open(); anthropicGate = null;
+  await c.waitFor((m) => m.type === "text" && (m.token || "").includes("Second answer"));
+  const calls = LOG.filter((e) => e.url.includes("anthropic"));
+  assert.equal(calls.length, 2);
+  assert.match(JSON.parse(calls[1].body).messages.at(-1).content, /another thing/);
   c.close();
 });
 
