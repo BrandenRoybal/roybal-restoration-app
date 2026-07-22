@@ -284,9 +284,10 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
     desc:
       "Create or update a job's reconstruction estimate, line by line. params: { job: string — customer/address/claim, matching exactly one job, " +
       "estimateId?: string — omit to create; an existing estimate's number (e.g. 'EST-1') to update, lineItems: [{ description: string, " +
-      "category?: string — Xactimate code (DRY/PNT/INS/FNC/FRM/ACT/APP/LAB), quantity: number, unit: string (SF/LF/EA/HR), unitPrice: number, " +
-      "type?: 'replace'|'tearout'|'detach_reset'|'labor' }], notes?: string, status?: 'draft'|'pending_approval'|'approved'|'rejected' }. " +
-      "Pull unit prices with priceLookup and quote them exactly — NEVER invent a price.",
+      "category?: string — Xactimate code (DRY/PNT/INS/FNC/FRM/ACT/APP/LAB), quantity: number, unit: string (SF/LF/EA/HR), unitPrice: number " +
+      "(negative = credit), type?: 'replace'|'tearout'|'detach_reset'|'labor' }], notes?: string, status?: 'draft'|'pending_approval'|'approved'|'rejected' }. " +
+      "On update, lineItems REPLACES the whole item list — omit it to keep the existing lines. O&P is set automatically by the GC rule " +
+      "(10&10 only when a subcontractor is on file, else 0). Pull unit prices with priceLookup and quote them exactly — NEVER invent a price.",
   },
   invoiceCreate: {
     desc:
@@ -295,15 +296,16 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
   },
   invoiceStatusUpdate: {
     desc:
-      "Update an invoice's payment lifecycle. params: { invoiceId: string — the invoice number (e.g. 'INV-2'), status: 'sent'|'viewed'|" +
-      "'partially_paid'|'paid'|'void', amountReceived?: number — required for partially_paid, paymentDate?: 'YYYY-MM-DD', " +
-      "paymentMethod?: 'check'|'ACH'|'card'|'insurance_draft', notes?: string }. The confirmation reports the running balance.",
+      "Update an invoice's payment lifecycle. params: { invoiceId: string — the invoice number (e.g. 'INV-2'), job?: string — add the customer/claim " +
+      "when that number exists on more than one job, status: 'sent'|'viewed'|'partially_paid'|'paid'|'void', amountReceived?: number — required for " +
+      "partially_paid, never more than the balance, paymentDate?: 'YYYY-MM-DD', paymentMethod?: string — e.g. check/ACH/card/insurance_draft, " +
+      "notes?: string }. The confirmation reports the running balance.",
   },
   changeOrderWrite: {
     desc:
       "Create or update a change order on a job. params: { job: string, changeOrderId?: string — omit to create, description: string, " +
-      "reason: string — e.g. 'hidden damage', 'owner request', 'code upgrade', lineItems?: same schema as estimateWrite, " +
-      "costDelta: number — positive adds, negative credits, approvalStatus?: 'pending'|'approved'|'rejected' }.",
+      "reason: string — e.g. 'hidden damage', 'owner request', 'code upgrade', lineItems?: same schema as estimateWrite (REPLACES existing lines " +
+      "when provided; negative unitPrice for credits), costDelta: number — positive adds, negative credits, approvalStatus?: 'pending'|'approved'|'rejected' }.",
   },
   receiptLog: {
     desc:
