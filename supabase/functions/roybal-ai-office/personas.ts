@@ -280,6 +280,36 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
       "Draft a message for a job's customer-portal thread. The user reviews the draft, then confirms a second chip before it posts. " +
       "params: { job: string — customer name or address to match, mode: 'reply' (answer their last message) | 'status' (proactive update) }.",
   },
+  estimateWrite: {
+    desc:
+      "Create or update a job's reconstruction estimate, line by line. params: { job: string — customer/address/claim, matching exactly one job, " +
+      "estimateId?: string — omit to create; an existing estimate's number (e.g. 'EST-1') to update, lineItems: [{ description: string, " +
+      "category?: string — Xactimate code (DRY/PNT/INS/FNC/FRM/ACT/APP/LAB), quantity: number, unit: string (SF/LF/EA/HR), unitPrice: number, " +
+      "type?: 'replace'|'tearout'|'detach_reset'|'labor' }], notes?: string, status?: 'draft'|'pending_approval'|'approved'|'rejected' }. " +
+      "Pull unit prices with priceLookup and quote them exactly — NEVER invent a price.",
+  },
+  invoiceCreate: {
+    desc:
+      "Generate an invoice from an APPROVED estimate (refuses any other status). params: { job: string, estimateId: string — the estimate's number " +
+      "or id, invoiceDate: 'YYYY-MM-DD', dueDate: 'YYYY-MM-DD', billedTo: string — customer, carrier, or entity from the job record, notes?: string }.",
+  },
+  invoiceStatusUpdate: {
+    desc:
+      "Update an invoice's payment lifecycle. params: { invoiceId: string — the invoice number (e.g. 'INV-2'), status: 'sent'|'viewed'|" +
+      "'partially_paid'|'paid'|'void', amountReceived?: number — required for partially_paid, paymentDate?: 'YYYY-MM-DD', " +
+      "paymentMethod?: 'check'|'ACH'|'card'|'insurance_draft', notes?: string }. The confirmation reports the running balance.",
+  },
+  changeOrderWrite: {
+    desc:
+      "Create or update a change order on a job. params: { job: string, changeOrderId?: string — omit to create, description: string, " +
+      "reason: string — e.g. 'hidden damage', 'owner request', 'code upgrade', lineItems?: same schema as estimateWrite, " +
+      "costDelta: number — positive adds, negative credits, approvalStatus?: 'pending'|'approved'|'rejected' }.",
+  },
+  receiptLog: {
+    desc:
+      "Log a material/equipment receipt against a job (feeds the budget-vs-estimate flag). params: { job: string, vendor: string, " +
+      "amount: number, category?: string — e.g. 'materials'|'equipment'|'dump'|'sub', date?: 'YYYY-MM-DD' (omit for today), notes?: string }.",
+  },
 };
 
 /* Which persona may propose which actions. The phone persona (later) gets
@@ -287,7 +317,8 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
 export const ACTIONSETS: Record<string, string[]> = {
   field: ["sendText"],
   board: ["sendText", "boardWrite", "jobCreate", "crewAvailabilityWrite", "crewSwap", "hoursWrite"],
-  admin: ["sendText", "adjusterEmail", "portalReply"],
+  admin: ["sendText", "adjusterEmail", "portalReply",
+    "estimateWrite", "invoiceCreate", "invoiceStatusUpdate", "changeOrderWrite", "receiptLog"],
 };
 
 export const PROPOSE_TOOL_NAME = "proposeActions";

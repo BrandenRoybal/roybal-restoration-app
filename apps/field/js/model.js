@@ -168,6 +168,7 @@ export function newProject() {
     changeOrders: [],
     invoices: [],
     reconEstimates: [],   // reconstruction estimates (restoration jobs — sent with the claim packet)
+    receipts: [],         // job-level cost log: [{id, vendor, amount, category, date, notes}] — assistant receiptLog + budget flag
     portalShare: null,    // office config for the customer portal (Client Portal form)
     // construction / remodel forms
     scopeOfWork: null,
