@@ -273,6 +273,48 @@ export function effCrew(base, ov) {
   return base.filter((c) => !rem.includes(c)).concat(add.filter((c) => !base.includes(c)));
 }
 
+/* Inclusive calendar-day list [startISO, endISO] — the granularity outDays and
+   dayCrew keys use. Order-tolerant; capped so a typo'd year can't build a
+   10,000-day array. Returns [] on malformed dates. */
+export function listDays(startISO, endISO, cap = 92) {
+  const ISO = /^\d{4}-\d{2}-\d{2}$/;
+  if (!ISO.test(String(startISO || "")) || !ISO.test(String(endISO || ""))) return [];
+  let lo = startISO <= endISO ? startISO : endISO;
+  const hi = startISO <= endISO ? endISO : startISO;
+  const out = [];
+  while (lo <= hi && out.length < cap) { out.push(lo); lo = addDaysISO(lo, 1); }
+  return out;
+}
+
+/* Per-day crew override edits — the pure core of the Crew board's drag moves
+   (dayPull/dayPush there), exported so the assistant's confirm-chip executors
+   write byte-identical dayCrew deltas. `base` is the roster the override
+   applies against (the job's or active phase's crewIds); empty deltas are
+   cleaned away so an undone move leaves no residue. */
+function dayCrewDelta(job, day) {
+  job.dayCrew = job.dayCrew || {};
+  return (job.dayCrew[day] = job.dayCrew[day] || { add: [], remove: [] });
+}
+function dayCrewClean(job, day) {
+  const m = job.dayCrew; if (!m) return;
+  const d = m[day]; if (d && !(d.add || []).length && !(d.remove || []).length) delete m[day];
+  if (!Object.keys(m).length) delete job.dayCrew;
+}
+export function dayCrewPull(job, day, cid, base) {      // off this job, this day only
+  base = base || [];
+  const d = dayCrewDelta(job, day);
+  d.add = (d.add || []).filter((x) => x !== cid);
+  if (base.includes(cid) && !(d.remove || []).includes(cid)) d.remove.push(cid);
+  dayCrewClean(job, day);
+}
+export function dayCrewPush(job, day, cid, base) {      // onto this job, this day only
+  base = base || [];
+  const d = dayCrewDelta(job, day);
+  d.remove = (d.remove || []).filter((x) => x !== cid);
+  if (!base.includes(cid) && !(d.add || []).includes(cid)) d.add.push(cid);
+  dayCrewClean(job, day);
+}
+
 export function crewDayLoad(jobs, settings) {
   const s = settings || DEFAULT_SETTINGS;
   const hpd = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);

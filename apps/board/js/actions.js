@@ -1,20 +1,36 @@
 /* ============================================================
-   Job Board — assistant action executors (Phase 5)
+   Job Board — assistant action executors (Phase 5 + 7)
    ------------------------------------------------------------
-   Runs the confirm chips the dispatcher persona proposes: move a
-   job's start, log crew hours, text from the company number.
+   Runs the confirm chips the dispatcher persona proposes: update
+   or create board jobs, block out crew availability, per-day crew
+   swaps, log hours, text from the company number.
    Every job write goes through data.js saveJob — the GUARDED rev
    write — never a raw server update, so a chip on a stale board
-   can't clobber newer office edits. moveJob mirrors the drag
-   interaction: pin the start (scheduleMode 'manual'), let the
-   engine reflow dependents, persist every job it moved.
+   can't clobber newer office edits. Date pins mirror the drag
+   interaction (scheduleMode 'manual' + engine reflow); per-day
+   crew edits write the same dayCrew deltas as the Crew board's
+   drags; availability blocks pair outDays with freed day slots,
+   exactly like dropping a guy on the "Out today" column.
    ============================================================ */
 import { uid, todayISO } from "../../js/core.js";
 import { assistSend } from "../../js/sms.js";
-import { cachedJobs, cachedCrew, cachedSettings, saveJob, saveTimeEntry, currentEmail } from "./data.js";
-import { computeSchedule } from "./schedule.js";
+import {
+  cachedJobs, cachedCrew, cachedEntries, cachedSettings,
+  saveJob, saveCrewMember, saveTimeEntry, currentEmail,
+} from "./data.js";
+import {
+  computeSchedule, workDaysBetween, layoutSubtasks,
+  effCrew, listDays, dayCrewPull, dayCrewPush,
+} from "./schedule.js";
 
 const jobName = (j) => String(j.title || j.customer || "Job");
+const ISO = /^\d{4}-\d{2}-\d{2}$/;
+const isoOr = (v) => (ISO.test(String(v || "")) ? String(v) : "");
+
+/* keep in sync with board.js STAGES / MATERIALS / TYPES ids */
+const STAGE_IDS = ["lead", "scheduled", "in_progress", "on_hold", "final", "done"];
+const MATERIAL_IDS = ["none", "ordered", "received"];
+const TYPE_IDS = ["remodel", "new_build", "restoration", "water", "fire", "mold", "other"];
 
 /* match exactly one item by name fragment; an exact hit on any single
    name field (title OR customer) beats fragment ambiguity */
@@ -30,46 +46,277 @@ function matchOne(list, q, namesOf, what) {
   }
   return { hit: hits[0] };
 }
-const findJob = (jobs, q) =>
-  matchOne(jobs.filter((j) => j && !j.isMilestone), q, (j) => [j.title || "", j.customer || ""].filter(Boolean), "job");
-const findCrew = (crew, q) => matchOne(crew, q, (c) => [String(c.name || "")], "crew member");
+function findJob(jobs, q) {
+  const byId = jobs.find((j) => j && !j.isMilestone && j.id === q);
+  if (byId) return { hit: byId };
+  return matchOne(jobs.filter((j) => j && !j.isMilestone), q, (j) => [j.title || "", j.customer || ""].filter(Boolean), "job");
+}
+function findCrew(crew, q) {
+  const byId = crew.find((c) => c && c.id === q);
+  if (byId) return { hit: byId };
+  return matchOne(crew, q, (c) => [String(c.name || "")], "crew member");
+}
 
-/* pin the job's start and persist everything the engine reflowed */
-async function moveJob(params, refresh) {
-  const date = String(params.newStart || "").trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, detail: "newStart must be a YYYY-MM-DD date" };
-  const jobs = cachedJobs();                       // fresh throwaway copies (last-synced revs)
+/* names[] → unique crew ids, erroring on any miss/ambiguity (a confirmed
+   chip must do exactly what its label said, or nothing) */
+function resolveCrewNames(names) {
+  const crew = cachedCrew();
+  const ids = [], members = [];
+  for (const n of Array.isArray(names) ? names : []) {
+    const m = findCrew(crew, n);
+    if (m.err) return { err: m.err };
+    if (!ids.includes(m.hit.id)) { ids.push(m.hit.id); members.push(m.hit); }
+  }
+  return { ids, members };
+}
+
+/* ---- day-level helpers mirroring the Crew board's slot logic ---- */
+function jobActiveOn(j, iso) {
+  const s = j.startDate, t = j.targetDate;
+  if (s && t) return iso >= s && iso <= t;
+  if (s) return iso === s;
+  if (t) return iso === t;
+  return false;
+}
+/* the roster a day's override applies against: the phase active that day for
+   phase-staffed jobs, otherwise the job's own crew (mirrors board.js jobSlotOn) */
+function baseCrewOn(j, day, settings) {
+  const subs = j.subtasks || [];
+  if (subs.some((st) => (st.crewIds || []).length) && j.startDate) {
+    const L = layoutSubtasks(subs, j.startDate, settings);
+    let act = L.find((x) => day >= x.start && day <= x.finish);
+    if (!act) act = [...L].reverse().find((x) => x.start <= day) || L[L.length - 1];
+    if (act) return (act.sub.crewIds || []).slice();
+  }
+  return (j.crewIds || []).slice();
+}
+const onJobThatDay = (j, day, cid, settings) =>
+  effCrew(baseCrewOn(j, day, settings), (j.dayCrew || {})[day]).includes(cid);
+
+const snap = (x) => `${x.startDate || ""}|${x.endDate || ""}|${x.targetDate || ""}`;
+
+/* reflow the whole board and persist every job the engine moved; a conflict
+   on the PRIMARY job aborts loudly, secondary reflow conflicts self-heal on
+   the next pull (the server copy wins — guarded writes never clobber) */
+async function reflowAndSave(jobs, before, primary, refresh) {
+  try { computeSchedule(jobs, cachedSettings()); } catch (_) { /* saved dates still work */ }
+  const changed = jobs.filter((x) => x.id === primary.id || before.get(x.id) !== snap(x));
+  for (const c of changed) {
+    const r = await saveJob(c);
+    if (r && r.conflict && c.id === primary.id) return { conflict: true };
+  }
+  if (refresh) refresh();
+  return { reflowed: changed.length - 1 };
+}
+const CONFLICT_MSG = "the board changed on another device — reopen the job and try again";
+
+/* ---- boardWrite: stage / dates / crew / materials / note on one job ---- */
+async function boardWrite(params, refresh) {
+  const jobs = cachedJobs();                        // fresh throwaway copies (last-synced revs)
   const m = findJob(jobs, params.job);
   if (m.err) return { ok: false, detail: m.err };
   const j = m.hit;
-  const before = new Map(jobs.map((x) => [x.id, `${x.startDate || ""}|${x.endDate || ""}`]));
-  j.scheduleMode = "manual";
-  j.pinnedStart = date;
-  try { computeSchedule(jobs, cachedSettings()); } catch (_) { j.startDate = date; }
-  const changed = jobs.filter((x) => x.id === j.id || before.get(x.id) !== `${x.startDate || ""}|${x.endDate || ""}`);
-  for (const c of changed) {
-    const r = await saveJob(c);
-    if (r && r.conflict && c.id === j.id)
-      return { ok: false, detail: "the board changed on another device — reopen the job and try again" };
+  const before = new Map(jobs.map((x) => [x.id, snap(x)]));
+  const did = [];
+
+  // unused optional fields sometimes arrive as "" — treat empty as absent
+  if (params.stage) {
+    const st = String(params.stage);
+    if (!STAGE_IDS.includes(st)) return { ok: false, detail: `stage must be one of ${STAGE_IDS.join(" / ")}` };
+    j.stage = st; did.push(`stage → ${st}`);
   }
-  if (refresh) refresh();
-  const moved = changed.length - 1;
-  return { ok: true, detail: `${jobName(j)} now starts ${j.startDate || date}${moved > 0 ? ` (+${moved} linked job${moved === 1 ? "" : "s"} reflowed)` : ""}` };
+  if (params.materialStatus) {
+    const mt = String(params.materialStatus);
+    if (!MATERIAL_IDS.includes(mt)) return { ok: false, detail: `materialStatus must be one of ${MATERIAL_IDS.join(" / ")}` };
+    j.materials = mt; did.push(`materials → ${mt}`);
+  }
+  if (Array.isArray(params.assignedCrew)) {         // [] is legit: "take everyone off"
+    const r = resolveCrewNames(params.assignedCrew);
+    if (r.err) return { ok: false, detail: r.err };
+    j.crewIds = r.ids;
+    did.push(`crew → ${r.members.map((c) => c.name).join(", ") || "nobody"}`);
+  }
+  if (params.notes) {
+    const line = `[${todayISO()}] ${String(params.notes).slice(0, 400)}`;
+    j.notes = j.notes ? `${j.notes}\n${line}` : line;
+    did.push("note added");
+  }
+  const start = params.startDate ? isoOr(params.startDate) : "";
+  if (params.startDate && !start) return { ok: false, detail: "startDate must be a YYYY-MM-DD date" };
+  const target = params.targetDate ? isoOr(params.targetDate) : "";
+  if (params.targetDate && !target) return { ok: false, detail: "targetDate must be a YYYY-MM-DD date" };
+  if (start) { j.scheduleMode = "manual"; j.pinnedStart = start; did.push(`starts ${start}`); }
+  if (target) {
+    const from = start || j.startDate;
+    if (from && target < from) return { ok: false, detail: `targetDate ${target} is before the start ${from}` };
+    if (from) j.durationDays = workDaysBetween(from, target, cachedSettings());
+    j.targetDate = target;                          // sticks directly on undated leads
+    did.push(`target ${target}`);
+  }
+  if (!did.length) return { ok: false, detail: "nothing to change — give at least one field" };
+
+  const r = await reflowAndSave(jobs, before, j, refresh);
+  if (r.conflict) return { ok: false, detail: CONFLICT_MSG };
+  return {
+    ok: true,
+    detail: `${jobName(j)}: ${did.join("; ")}` +
+      (r.reflowed > 0 ? ` (+${r.reflowed} linked job${r.reflowed === 1 ? "" : "s"} reflowed)` : ""),
+  };
 }
 
-async function logHours(params) {
+/* ---- jobCreate: stand up a new board job ---- */
+async function jobCreate(params, refresh) {
+  const insured = String(params.insured || "").trim().slice(0, 80);
+  const address = String(params.address || "").trim().slice(0, 160);
+  let type = String(params.lossType || "").trim().toLowerCase();
+  if (type === "rebuild") type = "remodel";         // spec alias → board type id
+  if (!insured || !address) return { ok: false, detail: "need at least the insured's name and the property address" };
+  if (!TYPE_IDS.includes(type)) return { ok: false, detail: `lossType must be one of ${TYPE_IDS.join(" / ")}` };
+  const start = params.startDate ? isoOr(params.startDate) : "";
+  if (params.startDate && !start) return { ok: false, detail: "startDate must be a YYYY-MM-DD date" };
+  const target = params.targetDate ? isoOr(params.targetDate) : "";
+  if (params.targetDate && !target) return { ok: false, detail: "targetDate must be a YYYY-MM-DD date" };
+  if (start && target && target < start) return { ok: false, detail: `targetDate ${target} is before startDate ${start}` };
+  let crewIds = [], crewNames = [];
+  if (Array.isArray(params.assignedCrew)) {
+    const r = resolveCrewNames(params.assignedCrew);
+    if (r.err) return { ok: false, detail: r.err };
+    crewIds = r.ids; crewNames = r.members.map((c) => c.name);
+  }
+
+  const j = {                                       // mirrors the job modal's new-job template
+    id: uid(), stage: start ? "scheduled" : "lead", type, priority: "normal", materials: "none",
+    crewIds, title: `${insured} — ${type.replace("_", " ")}`, customer: insured, address, phone: "",
+    startDate: "", targetDate: target, estimatedHours: "", fieldJobId: "",
+    notes: String(params.notes || "").slice(0, 500),
+    contractValue: "", billedToDate: "",
+    deps: [], durationDays: null, scheduleMode: start ? "manual" : "auto", pinnedStart: start,
+    notBefore: "", notBeforeLabel: "", subtasks: [], isMilestone: false,
+  };
+  if (start && target) j.durationDays = workDaysBetween(start, target, cachedSettings());
+
+  if (start) {                                      // dated → let the engine place it + reflow
+    const jobs = [...cachedJobs(), j];
+    const before = new Map(jobs.map((x) => [x.id, snap(x)]));
+    const r = await reflowAndSave(jobs, before, j, refresh);
+    if (r.conflict) return { ok: false, detail: CONFLICT_MSG };
+  } else {                                          // undated lead → save as-is, no reflow
+    const r = await saveJob(j);
+    if (r && r.conflict) return { ok: false, detail: CONFLICT_MSG };
+    if (refresh) refresh();
+  }
+  return {
+    ok: true,
+    detail: `created ${jobName(j)} (${j.stage}${j.startDate ? `, starts ${j.startDate}` : ""}` +
+      `${crewNames.length ? `, crew: ${crewNames.join(", ")}` : ""})`,
+  };
+}
+
+/* ---- crewAvailabilityWrite: block/restore days, freeing job slots like the
+   Crew board's "Out today" column (outDays flag + per-day dayCrew override) ---- */
+async function crewAvailabilityWrite(params, refresh) {
+  if (typeof params.available !== "boolean")
+    return { ok: false, detail: "available must be true (restore) or false (block)" };
+  const cm = findCrew(cachedCrew(), params.crewMember ?? params.crew);
+  if (cm.err) return { ok: false, detail: cm.err };
+  const c = cm.hit;
+  const days = listDays(String(params.startDate || ""), String(params.endDate || ""));
+  if (!days.length) return { ok: false, detail: "startDate and endDate must be YYYY-MM-DD dates (up to ~3 months)" };
+
+  const settings = cachedSettings();
+  const jobs = cachedJobs();
+  const mark = new Map(jobs.map((x) => [x.id, JSON.stringify(x.dayCrew || null)]));
+  const set = new Set(c.outDays || []);
+  let slotDays = 0;
+  for (const day of days) {
+    if (!params.available) {
+      set.add(day);
+      for (const j of jobs) {                       // free every slot they held that day
+        if (j.isMilestone || !jobActiveOn(j, day)) continue;
+        if (onJobThatDay(j, day, c.id, settings)) { dayCrewPull(j, day, c.id, baseCrewOn(j, day, settings)); slotDays++; }
+      }
+    } else {
+      set.delete(day);
+      for (const j of jobs) {                       // undo only absences this flow recorded
+        if ((((j.dayCrew || {})[day] || {}).remove || []).includes(c.id)) {
+          dayCrewPush(j, day, c.id, baseCrewOn(j, day, settings)); slotDays++;
+        }
+      }
+    }
+  }
+  c.outDays = [...set].sort();
+  await saveCrewMember(c);
+  const touched = jobs.filter((x) => mark.get(x.id) !== JSON.stringify(x.dayCrew || null));
+  for (const t of touched) await saveJob(t);        // guarded; a stale copy never clobbers
+  if (refresh) refresh();
+
+  const span = days.length === 1 ? days[0] : `${days[0]} → ${days[days.length - 1]}`;
+  return {
+    ok: true,
+    detail: `${c.name} ${params.available ? "available again" : "out"} ${span}` +
+      `${params.reason ? ` (${String(params.reason).slice(0, 40)})` : ""}` +
+      `${slotDays ? ` — ${slotDays} job-day slot${slotDays === 1 ? "" : "s"} ${params.available ? "restored" : "freed"}` : ""}`,
+  };
+}
+
+/* ---- crewSwap: move guys between jobs for ONE day (dayCrew override) ---- */
+async function crewSwap(params, refresh) {
+  const date = isoOr(params.date);
+  if (!date) return { ok: false, detail: "date must be a YYYY-MM-DD date" };
+  const jobs = cachedJobs();
+  const fm = findJob(jobs, params.fromJob);
+  if (fm.err) return { ok: false, detail: fm.err };
+  const tm = findJob(jobs, params.toJob);
+  if (tm.err) return { ok: false, detail: tm.err };
+  if (fm.hit.id === tm.hit.id) return { ok: false, detail: "fromJob and toJob match the same job" };
+  const r = resolveCrewNames(params.crewMembers);
+  if (r.err) return { ok: false, detail: r.err };
+  if (!r.ids.length) return { ok: false, detail: "who's moving? crewMembers is empty" };
+
+  const s = cachedSettings();
+  const from = fm.hit, to = tm.hit;
+  // a day-scoped swap only means something while both jobs are running that day
+  if (!jobActiveOn(from, date)) return { ok: false, detail: `${jobName(from)} isn't running on ${date}` };
+  if (!jobActiveOn(to, date)) return { ok: false, detail: `${jobName(to)} isn't running on ${date} — pin its dates first (boardWrite)` };
+  const notOn = r.members.filter((c) => !onJobThatDay(from, date, c.id, s));
+  if (notOn.length)
+    return { ok: false, detail: `${notOn.map((c) => c.name).join(", ")} ${notOn.length === 1 ? "isn't" : "aren't"} on ${jobName(from)} that day` };
+
+  for (const c of r.members) {
+    dayCrewPull(from, date, c.id, baseCrewOn(from, date, s));
+    dayCrewPush(to, date, c.id, baseCrewOn(to, date, s));
+  }
+  const r1 = await saveJob(from);
+  if (r1 && r1.conflict) return { ok: false, detail: CONFLICT_MSG };
+  const r2 = await saveJob(to);
+  if (r2 && r2.conflict)
+    return { ok: false, detail: `${jobName(from)} updated, but ${jobName(to)} changed on another device — redo the swap` };
+  if (refresh) refresh();
+  return { ok: true, detail: `${r.members.map((c) => c.name).join(", ")} → ${jobName(to)} for ${date} (from ${jobName(from)}; that day only)` };
+}
+
+/* ---- hoursWrite: time entry + running job total ---- */
+async function hoursWrite(params) {
   const hours = Number(params.hours);
   if (!(hours > 0 && hours <= 24)) return { ok: false, detail: "hours must be between 0 and 24" };
   const jm = findJob(cachedJobs(), params.job);
   if (jm.err) return { ok: false, detail: jm.err };
-  const cm = findCrew(cachedCrew(), params.crew);
+  const cm = findCrew(cachedCrew(), params.crewMember ?? params.crew);
   if (cm.err) return { ok: false, detail: cm.err };
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(params.date || "")) ? String(params.date) : todayISO();
+  const date = isoOr(params.date) || todayISO();
+  const trade = String(params.trade || "").slice(0, 40);
   await saveTimeEntry({
     id: uid(), jobId: jm.hit.id, crewId: cm.hit.id, date, hours,
-    note: String(params.note || "").slice(0, 200), enteredBy: currentEmail(),
+    ...(trade ? { trade } : {}),
+    note: String(params.notes ?? params.note ?? "").slice(0, 200), enteredBy: currentEmail(),
   });
-  return { ok: true, detail: `${hours}h — ${cm.hit.name} on ${jobName(jm.hit)} (${date})` };
+  const total = cachedEntries().filter((e) => e.jobId === jm.hit.id)
+    .reduce((a, e) => a + (Number(e.hours) || 0), 0);
+  return {
+    ok: true,
+    detail: `${hours}h — ${cm.hit.name} on ${jobName(jm.hit)} (${date}${trade ? `, ${trade}` : ""})` +
+      ` · job total ${Math.round(total * 10) / 10}h`,
+  };
 }
 
 /** The board provider's executeAction — see mountAssistProvider(). */
@@ -77,8 +324,14 @@ export function runBoardAction(a, refresh) {
   const p = (a && a.params) || {};
   switch (a && a.type) {
     case "sendText": return assistSend({ to: p.to, message: p.message, audience: p.audience, by: "board" });
-    case "moveJob": return moveJob(p, refresh);
-    case "logHours": return logHours(p);
+    case "boardWrite": return boardWrite(p, refresh);
+    case "jobCreate": return jobCreate(p, refresh);
+    case "crewAvailabilityWrite": return crewAvailabilityWrite(p, refresh);
+    case "crewSwap": return crewSwap(p, refresh);
+    case "hoursWrite": return hoursWrite(p);
+    // legacy chip names (proposals still sitting in open transcripts)
+    case "moveJob": return boardWrite({ job: p.job, startDate: p.newStart }, refresh);
+    case "logHours": return hoursWrite(p);
     default: return { ok: false, detail: "not available on the board" };
   }
 }
