@@ -16,12 +16,15 @@ import { qboStatus } from "../../js/qbo.js";
 import { assistSend } from "../../js/sms.js";
 import { draftAdjusterEmail, draftPortalMessage } from "../../js/officeai.js";
 import { fetchPortalThread, portalDigest, threadForAi, sendOfficeReply } from "../../js/portal.js";
+import { budgetStatus } from "../../js/fincalc.js";
+import { runFinanceAction } from "./finactions.js";
 
 /* mirrors admin.js jobAttention(): drying equipment on site ≥7 days */
 const equipOut7 = (p) => (p.dryingLogs || []).some((d) =>
   (d.equipment || []).some((e) => e.placed && !e.removed && (daysSince(e.placed) ?? 0) >= 7));
 
 function jobRow(p) {
+  const budget = budgetStatus(p);   // null when no approved estimate / contract amount
   return {
     customer: p.customer || "Untitled job",
     address: p.address || "",
@@ -33,6 +36,9 @@ function jobRow(p) {
     photos: (p.photos || []).length,
     contents: (p.contents || []).length,
     equipmentOut7Days: equipOut7(p) || undefined,
+    estimates: (p.reconEstimates || []).length || undefined,
+    invoices: (p.invoices || []).length || undefined,
+    ...(budget ? { budgetPct: budget.pct, overBudget: budget.over || undefined } : {}),
   };
 }
 
@@ -65,7 +71,8 @@ export async function buildAdminContext() {
   const rows = projects.map(jobRow);
   const active = rows.filter((r) => r.updated && daysSince(r.updated) <= 7);
   const stale = rows.filter((r) => !r.updated || daysSince(r.updated) > 14);
-  const attention = rows.filter((r) => r.equipmentOut7Days);
+  const equipFlags = rows.filter((r) => r.equipmentOut7Days);
+  const budgetFlags = rows.filter((r) => r.overBudget);
   const [qbo, unread] = await Promise.all([quickbooks(), portalUnread()]);
   return {
     today: todayISO(),
@@ -73,10 +80,14 @@ export async function buildAdminContext() {
       totalJobs: rows.length,
       activeLast7Days: active.length,
       dryingInProgress: rows.filter((r) => r.dryingLogs > 0).length,
-      equipmentOut7Days: attention.length,
+      equipmentOut7Days: equipFlags.length,
+      overBudget: budgetFlags.length,
       staleOver14Days: stale.length,
     },
-    needsAttention: attention.map((r) => r.customer),
+    needsAttention: [
+      ...equipFlags.map((r) => r.customer + " (equipment out 7+ days)"),
+      ...budgetFlags.map((r) => r.customer + ` (costs at ${r.budgetPct}% of budget)`),
+    ],
     staleJobs: stale.slice(0, 15).map((r) => r.customer + (r.updated ? ` (last ${r.updated})` : " (never updated)")),
     quickbooks: qbo,                      // null = status unavailable right now
     portalMessagesWaiting: unread,        // null = portal unreachable right now
@@ -84,10 +95,12 @@ export async function buildAdminContext() {
   };
 }
 
-/* ---------- assistant action executors (Phase 5 confirm chips) ----------
+/* ---------- assistant action executors (Phase 5 + Section 1 chips) ----------
    Drafting chips (adjuster email, portal reply) produce a DRAFT the owner
    reads in the thread — nothing is emailed, and a portal post takes a
-   second confirm chip. No project mutations from /admin, by design. */
+   second confirm chip. Job-record writes from /admin happen ONLY through
+   the financial chips in finactions.js — human-confirmed, one tap per
+   write, never silent (the old "no mutations" invariant, upgraded). */
 
 /* match exactly one shared-store project by customer/address fragment */
 async function findProject(q) {
@@ -146,7 +159,8 @@ function runAdminAction(a) {
     case "adjusterEmail": return adjusterEmailChip(p);
     case "portalReply": return portalReplyChip(p);
     case "portalPost": return portalPostChip(p);
-    default: return { ok: false, detail: "not available in the office admin" };
+    default:
+      return runFinanceAction(a) ?? { ok: false, detail: "not available in the office admin" };
   }
 }
 
@@ -158,9 +172,9 @@ export function adminAssistProvider() {
     title: "💬 Ask the office",
     sub: "Office manager · every job at a glance",
     greeting: () =>
-      "Hey — ask me what needs attention: stale jobs, equipment out too long, " +
+      "Hey — ask me what needs attention: stale jobs, equipment out too long, budgets running hot, " +
       "customer messages waiting, drying status, QuickBooks. I answer from the dashboard's live data, " +
-      "and I can queue up a text, an adjuster-email draft, or a portal reply — you confirm with a tap.",
+      "and I can queue up estimates, invoices, change orders, receipts, texts, or drafts — you confirm every one with a tap.",
     capturedBy: () => "office",
     buildContext: buildAdminContext,
     executeAction: runAdminAction,

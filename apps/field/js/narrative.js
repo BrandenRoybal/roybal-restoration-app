@@ -184,6 +184,19 @@ function receiptsSummary(p) {
       }
     }
   }
+  // job-level receipts logged by the office assistant (receiptLog chip)
+  for (const r of arr(p.receipts)) {
+    if (!r) continue;
+    out.push({
+      attachedTo: "job receipts",
+      label: r.category || "receipt",
+      docType: "receipt",
+      vendor: r.vendor || "",
+      date: r.date || "",
+      ...(r.amount != null && r.amount !== "" ? { total: Number(r.amount) } : {}),
+      summary: String(r.notes || "").slice(0, 400),
+    });
+  }
   return out.length ? out.slice(0, 25) : null;
 }
 

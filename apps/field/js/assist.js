@@ -83,6 +83,7 @@ function queueResult(key, r) {
 const ACTION_ICONS = {
   sendText: "💬", moveJob: "📅", logHours: "⏱️", adjusterEmail: "✉️", portalReply: "🧡", portalPost: "📨",
   boardWrite: "📋", jobCreate: "➕", crewAvailabilityWrite: "🏖️", crewSwap: "🔄", hoursWrite: "⏱️",
+  estimateWrite: "🧮", invoiceCreate: "🧾", invoiceStatusUpdate: "💵", changeOrderWrite: "🔁", receiptLog: "🛒",
 };
 function actionPreview(a) {
   const p = a.params || {};
@@ -112,6 +113,23 @@ function actionPreview(a) {
     case "logHours":
       return (p.hours != null ? p.hours + "h — " : "") + String(p.crewMember || p.crew || "?") + " on " + String(p.job || "?") +
         (p.date ? " (" + p.date + ")" : "") + (p.trade ? " · " + p.trade : "");
+    case "estimateWrite":
+      return (p.estimateId ? "updates " + p.estimateId : "new estimate") + " on " + String(p.job || "?") +
+        (Array.isArray(p.lineItems) ? " — " + p.lineItems.length + " line item" + (p.lineItems.length === 1 ? "" : "s") : "") +
+        (p.status ? " (" + p.status + ")" : "");
+    case "invoiceCreate":
+      return "invoice from " + String(p.estimateId || "?") + " on " + String(p.job || "?") +
+        " — billed to " + String(p.billedTo || "?") + (p.dueDate ? ", due " + p.dueDate : "");
+    case "invoiceStatusUpdate":
+      return String(p.invoiceId || "?") + " → " + String(p.status || "?").replace("_", " ") +
+        (p.amountReceived != null && p.amountReceived !== "" ? " ($" + p.amountReceived + " received)" : "");
+    case "changeOrderWrite":
+      return (p.changeOrderId ? "updates " + p.changeOrderId : "new change order") + " on " + String(p.job || "?") +
+        (p.costDelta != null ? " — " + (Number(p.costDelta) >= 0 ? "+$" : "−$") + Math.abs(Number(p.costDelta) || 0) : "") +
+        (p.reason ? " (" + String(p.reason).slice(0, 40) + ")" : "");
+    case "receiptLog":
+      return "$" + String(p.amount ?? "?") + " — " + String(p.vendor || "?") + " on " + String(p.job || "?") +
+        (p.category ? " (" + p.category + ")" : "");
     case "adjusterEmail": return "drafts the adjuster email for " + String(p.job || "?");
     case "portalReply": return "drafts a " + (p.mode === "status" ? "status update" : "reply") + " for " + String(p.job || "?") + "’s portal";
     case "portalPost": return "“" + String(p.message || "").slice(0, 160) + "”";
