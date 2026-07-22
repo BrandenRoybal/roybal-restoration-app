@@ -8,6 +8,7 @@ import {
   isWorkDay, addWorkDays, workDaysBetween, durationOf, durationFracOf,
   layoutSubtasks, computeSchedule, effCrew, crewDayLoad, findOverAllocations,
   wouldCreateCycle, computeCriticalPath, linkComponents, computeCfoSnapshot, DEFAULT_SETTINGS,
+  listDays, dayCrewPull, dayCrewPush,
 } from "../js/schedule.js";
 
 const S = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 10, holidays: [] };
@@ -232,6 +233,52 @@ test("Block D: draw triggers carry uninvoiced dollars, sorted high→low", () =>
   assert.deepEqual(snap.drawTriggers.map((x) => x.id), ["D1", "D3"]); // D2 final+fully-billed excluded; X not final/done
   assert.equal(snap.drawTriggers.find((x) => x.id === "D1").uninvoiced, 27000);
   assert.equal(snap.uninvoicedTotal, 47000); // 27k + 20k
+});
+
+group("day lists (assistant availability writes)");
+test("listDays: inclusive calendar range, order-tolerant", () => {
+  assert.deepEqual(listDays("2026-06-13", "2026-06-15"), ["2026-06-13", "2026-06-14", "2026-06-15"]); // weekend included — outDays are calendar days
+  assert.deepEqual(listDays("2026-06-15", "2026-06-13"), ["2026-06-13", "2026-06-14", "2026-06-15"]); // swapped bounds
+  assert.deepEqual(listDays("2026-06-15", "2026-06-15"), ["2026-06-15"]);
+});
+test("listDays: malformed dates → empty; runaway ranges are capped", () => {
+  assert.deepEqual(listDays("June 15", "2026-06-16"), []);
+  assert.deepEqual(listDays("", ""), []);
+  assert.equal(listDays("2026-01-01", "2036-01-01").length, 92);   // cap, not a 3650-day array
+  assert.equal(listDays("2026-01-01", "2026-01-10", 5).length, 5); // explicit cap wins
+});
+
+group("per-day crew override edits (assistant chip core)");
+test("dayCrewPull removes a base member for one day; effCrew agrees", () => {
+  const j = { id: "J", crewIds: ["a", "b"] };
+  dayCrewPull(j, "2026-06-15", "a", ["a", "b"]);
+  assert.deepEqual(j.dayCrew["2026-06-15"], { add: [], remove: ["a"] });
+  assert.deepEqual(effCrew(["a", "b"], j.dayCrew["2026-06-15"]), ["b"]);
+  dayCrewPull(j, "2026-06-15", "a", ["a", "b"]);                   // idempotent
+  assert.deepEqual(j.dayCrew["2026-06-15"].remove, ["a"]);
+});
+test("dayCrewPush adds a non-base member; pushing a base member only clears their remove", () => {
+  const j = { id: "J", crewIds: ["a"] };
+  dayCrewPush(j, "2026-06-15", "c", ["a"]);
+  assert.deepEqual(effCrew(["a"], j.dayCrew["2026-06-15"]), ["a", "c"]);
+  dayCrewPull(j, "2026-06-15", "a", ["a"]);
+  dayCrewPush(j, "2026-06-15", "a", ["a"]);                        // back on → no add entry, no remove entry
+  assert.deepEqual(j.dayCrew["2026-06-15"], { add: ["c"], remove: [] });
+  assert.deepEqual(effCrew(["a"], j.dayCrew["2026-06-15"]), ["a", "c"]);
+});
+test("an undone move leaves no residue (empty deltas are cleaned away)", () => {
+  const j = { id: "J", crewIds: ["a"] };
+  dayCrewPull(j, "2026-06-15", "a", ["a"]);   // off for the day
+  dayCrewPush(j, "2026-06-15", "a", ["a"]);   // changed your mind
+  assert.equal(j.dayCrew, undefined);
+});
+test("a swap day composes: pulled from one job, pushed onto another", () => {
+  const from = { id: "F", crewIds: ["m"] }, to = { id: "T", crewIds: [] };
+  dayCrewPull(from, "2026-06-16", "m", ["m"]);
+  dayCrewPush(to, "2026-06-16", "m", []);
+  assert.deepEqual(effCrew(["m"], from.dayCrew["2026-06-16"]), []);
+  assert.deepEqual(effCrew([], to.dayCrew["2026-06-16"]), ["m"]);
+  assert.equal(from.dayCrew["2026-06-17"], undefined);             // other days untouched
 });
 
 group("defaults");

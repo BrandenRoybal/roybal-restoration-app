@@ -80,13 +80,38 @@ function queueResult(key, r) {
   if (q.length > 6) q.splice(0, q.length - 6);
 }
 
-const ACTION_ICONS = { sendText: "💬", moveJob: "📅", logHours: "⏱️", adjusterEmail: "✉️", portalReply: "🧡", portalPost: "📨" };
+const ACTION_ICONS = {
+  sendText: "💬", moveJob: "📅", logHours: "⏱️", adjusterEmail: "✉️", portalReply: "🧡", portalPost: "📨",
+  boardWrite: "📋", jobCreate: "➕", crewAvailabilityWrite: "🏖️", crewSwap: "🔄", hoursWrite: "⏱️",
+};
 function actionPreview(a) {
   const p = a.params || {};
   switch (a.type) {
     case "sendText": return (p.to ? "to " + p.to + " — " : "") + "“" + String(p.message || "") + "”";
     case "moveJob": return String(p.job || "?") + " → starts " + String(p.newStart || "?");
-    case "logHours": return (p.hours != null ? p.hours + "h — " : "") + String(p.crew || "?") + " on " + String(p.job || "?") + (p.date ? " (" + p.date + ")" : "");
+    case "boardWrite": {
+      const parts = [];
+      if (p.stage) parts.push("stage → " + p.stage);
+      if (p.startDate) parts.push("starts " + p.startDate);
+      if (p.targetDate) parts.push("target " + p.targetDate);
+      if (Array.isArray(p.assignedCrew)) parts.push("crew → " + (p.assignedCrew.join(", ") || "nobody"));
+      if (p.materialStatus) parts.push("materials → " + p.materialStatus);
+      if (p.notes) parts.push("adds a note");
+      return String(p.job || "?") + ": " + (parts.join(", ") || "no changes");
+    }
+    case "jobCreate":
+      return "new " + String(p.lossType || "job") + " — " + String(p.insured || "?") + ", " + String(p.address || "?") +
+        (p.startDate ? " (starts " + p.startDate + ")" : "");
+    case "crewAvailabilityWrite":
+      return String(p.crewMember || p.crew || "?") + (p.available ? " back " : " out ") + String(p.startDate || "?") +
+        (p.endDate && p.endDate !== p.startDate ? " → " + p.endDate : "") + (p.reason ? " (" + String(p.reason) + ")" : "");
+    case "crewSwap":
+      return (Array.isArray(p.crewMembers) ? p.crewMembers.join(", ") : "?") + ": " + String(p.fromJob || "?") +
+        " → " + String(p.toJob || "?") + " on " + String(p.date || "?");
+    case "hoursWrite":
+    case "logHours":
+      return (p.hours != null ? p.hours + "h — " : "") + String(p.crewMember || p.crew || "?") + " on " + String(p.job || "?") +
+        (p.date ? " (" + p.date + ")" : "") + (p.trade ? " · " + p.trade : "");
     case "adjusterEmail": return "drafts the adjuster email for " + String(p.job || "?");
     case "portalReply": return "drafts a " + (p.mode === "status" ? "status update" : "reply") + " for " + String(p.job || "?") + "’s portal";
     case "portalPost": return "“" + String(p.message || "").slice(0, 160) + "”";

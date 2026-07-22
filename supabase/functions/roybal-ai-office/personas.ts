@@ -239,15 +239,36 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
       "message: string — the complete text, sent verbatim, audience: 'customer' | 'crew' }. Customer texts only go out 8am–8pm Alaska " +
       "(quiet hours) — an off-hours tap fails with a clear error, so warn the user when it's late.",
   },
-  moveJob: {
+  boardWrite: {
     desc:
-      "Pin a Job Board job's start date (the schedule engine reflows dependent jobs). params: { job: string — the job's title or " +
-      "customer, enough to match exactly one job, newStart: 'YYYY-MM-DD' }.",
+      "Update ONE existing Job Board job. params: { job: string — the job's title or customer (or its exact id), enough to match exactly one job, " +
+      "stage?: 'lead'|'scheduled'|'in_progress'|'on_hold'|'final'|'done', startDate?: 'YYYY-MM-DD' — pins the start and the engine reflows dependent jobs, " +
+      "targetDate?: 'YYYY-MM-DD' — sets the job's duration so it finishes that day, assignedCrew?: string[] — crew member names; REPLACES the whole crew list, " +
+      "materialStatus?: 'none'|'ordered'|'received', notes?: string — appended to the job's notes, never overwrites }. Include only the fields being changed.",
   },
-  logHours: {
+  jobCreate: {
     desc:
-      "Log crew hours on a board job's time log. params: { crew: string — the crew member's name, job: string — job title or customer, " +
-      "date: 'YYYY-MM-DD' (omit for today), hours: number, note: string — what the work was (optional) }.",
+      "Create a new job on the Job Board. params: { insured: string — the customer's name, address: string, " +
+      "lossType: 'water'|'fire'|'mold'|'restoration'|'remodel'|'new_build'|'other', startDate?: 'YYYY-MM-DD' — pins the start (the job lands in stage " +
+      "'scheduled'; without it, 'lead'), targetDate?: 'YYYY-MM-DD', assignedCrew?: string[] — crew member names, notes?: string }.",
+  },
+  crewAvailabilityWrite: {
+    desc:
+      "Block out or restore a crew member's availability (PTO, training, injury, no-show). params: { crewMember: string — full name, " +
+      "startDate: 'YYYY-MM-DD', endDate: 'YYYY-MM-DD' — inclusive, same date for a single day, available: boolean — false blocks the days, true restores " +
+      "them, reason?: string }. Blocking also frees the member's job slots on those days (a per-day override), exactly like the Crew board's Out column.",
+  },
+  crewSwap: {
+    desc:
+      "Move crew from one job to another for ONE day (a per-day override — the rest of each job keeps its planned crew). params: { fromJob: string, " +
+      "toJob: string — each a title or customer matching exactly one job, crewMembers: string[] — names to move, date: 'YYYY-MM-DD' }. " +
+      "For a permanent reassignment use boardWrite's assignedCrew instead.",
+  },
+  hoursWrite: {
+    desc:
+      "Log crew hours on a board job's time log. params: { job: string — job title or customer, crewMember: string — the crew member's name, " +
+      "date?: 'YYYY-MM-DD' (omit for today), hours: number, trade?: string — e.g. 'demo'|'framing'|'drying'|'general', notes?: string — what the work was }. " +
+      "The confirmation reports the job's new logged-hours total.",
   },
   adjusterEmail: {
     desc:
@@ -265,7 +286,7 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
    at most a narrow crew-notify set — never customer sends or board writes. */
 export const ACTIONSETS: Record<string, string[]> = {
   field: ["sendText"],
-  board: ["sendText", "moveJob", "logHours"],
+  board: ["sendText", "boardWrite", "jobCreate", "crewAvailabilityWrite", "crewSwap", "hoursWrite"],
   admin: ["sendText", "adjusterEmail", "portalReply"],
 };
 
