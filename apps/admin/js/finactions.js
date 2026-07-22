@@ -14,7 +14,7 @@
 import { Store, uid, todayISO } from "../../js/core.js";
 import { newInvoice, newReconEstimate, newChangeOrder, blankLineItem, CHANGE_REASONS } from "../../js/model.js";
 import {
-  invoiceTotals, money, budgetStatus,
+  invoiceTotals, money, budgetStatus, hasSubcontractorDocs,
   ESTIMATE_STATUSES, INVOICE_STATUSES, LINE_TYPES,
 } from "../../js/fincalc.js";
 
@@ -54,7 +54,7 @@ function mapLineItems(lineItems) {
     const price = Number(li && li.unitPrice);
     if (!desc) return { err: "every line item needs a description" };
     if (!(qty > 0)) return { err: `“${desc.slice(0, 40)}”: quantity must be > 0` };
-    if (!(Number.isFinite(price) && price >= 0)) return { err: `“${desc.slice(0, 40)}”: unitPrice must be a number` };
+    if (!Number.isFinite(price)) return { err: `“${desc.slice(0, 40)}”: unitPrice must be a number (negative = credit)` };
     const type = li && li.type ? String(li.type) : "";
     if (type && !LINE_TYPES.includes(type)) return { err: `line type must be one of ${LINE_TYPES.join(" / ")}` };
     items.push({
@@ -87,6 +87,13 @@ async function estimateWrite(params) {
   } else {
     est = newReconEstimate();
     est.invoiceNo = `EST-${p.reconEstimates.length + 1}`;
+    // apply the GC O&P rule EXPLICITLY (the editor's opAuto would silently
+    // rewrite factory 10&10 to 0/0 on open for self-performed jobs — the
+    // chip's confirmed total must be the total the editor shows)
+    est.opAuto = false;
+    const gcOP = hasSubcontractorDocs(p) ? "10" : "0";
+    est.overheadPct = gcOP;
+    est.profitPct = gcOP;
     p.reconEstimates.push(est);
     created = true;
   }
@@ -135,6 +142,7 @@ async function invoiceCreate(params) {
   inv.overheadPct = est.overheadPct; inv.profitPct = est.profitPct;
   inv.overheadAmount = est.overheadAmount; inv.profitAmount = est.profitAmount;
   inv.taxRate = est.taxRate;
+  inv.deductible = est.deductible;           // the approved figure was net of it
   inv.lossSummary = est.lossSummary;
   inv.billedTo = billedTo;                                   // additive — shown here + in notes
   inv.estimateId = est.id;
@@ -153,28 +161,44 @@ async function invoiceCreate(params) {
 }
 
 /* ---- invoiceStatusUpdate: lifecycle + payments + running balance ----
-   No job param in the spec — the invoice number is the address, searched
-   across every job; an ambiguous number errors with the jobs it hit. */
+   Addressed by invoice number; per-job numbering (INV-n) collides across
+   jobs, so an optional `job` param scopes the search and the ambiguity
+   error says exactly how to retry. */
 async function invoiceStatusUpdate(params) {
   const status = String(params.status || "");
   if (!INVOICE_STATUSES.includes(status))
     return { ok: false, detail: `status must be one of ${INVOICE_STATUSES.join(" / ")}` };
   const key = String(params.invoiceId || "").trim();
   if (!key) return { ok: false, detail: "which invoice? give invoiceId or the invoice number" };
-  const all = await Store.all().catch(() => []);
+  if (params.paymentDate && !isoOr(params.paymentDate))
+    return { ok: false, detail: "paymentDate must be a YYYY-MM-DD date" };
+
+  let pool;
+  if (params.job) {
+    const m = await findProjectWide(params.job);
+    if (m.err) return { ok: false, detail: m.err };
+    pool = [m.hit];
+  } else {
+    pool = await Store.all().catch(() => []);
+  }
   const hits = [];
-  for (const p of all)
+  for (const p of pool)
     for (const inv of p.invoices || [])
       if (inv && (inv.id === key || inv.invoiceNo === key || inv.qboDocNumber === key)) hits.push({ p, inv });
-  if (!hits.length) return { ok: false, detail: `no invoice matches “${key}”` };
+  if (!hits.length) return { ok: false, detail: `no invoice matches “${key}”${params.job ? ` on ${jobLabel(pool[0])}` : ""}` };
   if (hits.length > 1)
-    return { ok: false, detail: `“${key}” matches invoices on ${hits.map((h) => jobLabel(h.p)).join(" and ")} — use the job's exact invoice id` };
+    return { ok: false, detail: `“${key}” exists on ${hits.map((h) => jobLabel(h.p)).join(" and ")} — retry with job: "<customer>"` };
   const { p, inv } = hits[0];
 
   const amount = params.amountReceived != null && params.amountReceived !== "" ? Number(params.amountReceived) : null;
   if (status === "partially_paid" && !(amount > 0))
     return { ok: false, detail: "partially_paid needs amountReceived > 0" };
   if (amount != null && !(amount > 0)) return { ok: false, detail: "amountReceived must be > 0" };
+  if (amount != null) {
+    const owing = invoiceTotals(inv).total;
+    if (amount > owing + 0.005)
+      return { ok: false, detail: `payment ${money(amount)} exceeds the ${money(owing)} balance on ${inv.invoiceNo || "that invoice"}` };
+  }
 
   inv.status = status;
   if (amount != null) {
@@ -184,8 +208,12 @@ async function invoiceStatusUpdate(params) {
       method: String(params.paymentMethod || "").slice(0, 30),
       ...(params.notes ? { notes: String(params.notes).slice(0, 200) } : {}),
     });
-    // previousPayments feeds the editor's total math — the balance stays honest there too
-    inv.previousPayments = String((Number(inv.previousPayments) || 0) + amount);
+    // previousPayments feeds the editor's total math — the balance stays
+    // honest there too (rounded to cents so floats never leave artifacts)
+    inv.previousPayments = String(Math.round(((Number(inv.previousPayments) || 0) + amount) * 100) / 100);
+  } else if (params.notes) {
+    const line = `[${todayISO()}] ${String(params.notes).slice(0, 200)}`;
+    inv.notes = inv.notes ? `${inv.notes}\n${line}` : line;
   }
   await Store.put(p);
   const balance = invoiceTotals(inv).total;
@@ -223,11 +251,13 @@ async function changeOrderWrite(params) {
     p.changeOrders.push(co);
     created = true;
   }
-  co.description = description;
-  // tick the matching standard reason checkbox; the raw text always survives
-  const match = CHANGE_REASONS.find((r) => r.toLowerCase().includes(reason.toLowerCase()) || reason.toLowerCase().includes(r.toLowerCase().split(" ")[0]));
-  if (match) co.reasons = { ...(co.reasons || {}), [match]: true };
-  co.reasonNote = reason.slice(0, 120);
+  // tick the matching standard reason checkbox — the editor keys the boxes
+  // by CHANGE_REASONS INDEX (formkit check()), not by label. An unmatched
+  // reason rides the description so the signed/printed CO always shows it.
+  const idx = CHANGE_REASONS.findIndex((r) => r.toLowerCase().includes(reason.toLowerCase()) || reason.toLowerCase().includes(r.toLowerCase().split(" ")[0]));
+  if (idx >= 0) co.reasons = { ...(co.reasons || {}), [idx]: true };
+  co.description = idx >= 0 ? description : `Reason: ${reason.slice(0, 120)}\n${description}`;
+  const match = idx >= 0 ? CHANGE_REASONS[idx] : null;
   if (params.lineItems != null) {
     const r = mapLineItems(params.lineItems);
     if (r.err) return { ok: false, detail: r.err };
@@ -261,6 +291,7 @@ async function receiptLog(params) {
   const amount = Number(params.amount);
   if (!vendor) return { ok: false, detail: "vendor is required" };
   if (!(amount > 0)) return { ok: false, detail: "amount must be > 0" };
+  if (params.date && !isoOr(params.date)) return { ok: false, detail: "date must be a YYYY-MM-DD date" };
   p.receipts = p.receipts || [];
   p.receipts.push({
     id: uid(), vendor: vendor.slice(0, 80), amount,

@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import {
   lineSubtotal, invoiceTotals, money, loggedCosts, budgetBase, budgetStatus,
-  ESTIMATE_STATUSES, INVOICE_STATUSES, LINE_TYPES,
+  hasSubcontractorDocs, ESTIMATE_STATUSES, INVOICE_STATUSES, LINE_TYPES,
 } from "../js/fincalc.js";
 
 let pass = 0;
@@ -54,9 +54,19 @@ test("contract billing: the agreed amount IS the base, O&P inside it", () => {
   assert.equal(t.total, 5100);
 });
 
-test("money formats for chip text", () => {
+test("money formats for chip text, negatives with a real minus", () => {
   assert.equal(money(1234.5), "$1,234.50");
+  assert.equal(money(-20), "−$20.00");
   assert.equal(money("bad"), "$0.00");
+});
+
+test("hasSubcontractorDocs mirrors the editor's GC O&P rule", () => {
+  assert.equal(hasSubcontractorDocs({}), false);
+  assert.equal(hasSubcontractorDocs({ invoices: [{ attachments: [{ ai: { docType: "Receipt" } }] }] }), false);
+  assert.equal(hasSubcontractorDocs({ invoices: [{ attachments: [{ ai: { docType: "Subcontractor invoice" } }] }] }), true);
+  assert.equal(hasSubcontractorDocs({ reconEstimates: [{ attachments: [{ ai: { docType: "Subcontractor invoice" } }] }] }), true);
+  assert.equal(hasSubcontractorDocs({ supportDocs: [{ docType: "Subcontractor invoice" }] }), true);
+  assert.equal(hasSubcontractorDocs({ supportDocs: [{ ai: { docType: "Subcontractor invoice" } }] }), true);
 });
 
 test("loggedCosts: receipts + AI receipt attachments, never the pricing source", () => {
@@ -79,6 +89,8 @@ test("budgetBase: strongest approved estimate wins, else contractAmount, else nu
   assert.equal(budgetBase({ contractAmount: "8000" }), 8000);
   assert.equal(budgetBase({ reconEstimates: [est("draft", 9000)] }), null);
   assert.equal(budgetBase({}), null);
+  // a zeroed/empty approved estimate must not block the contract fallback
+  assert.equal(budgetBase({ reconEstimates: [est("approved", 0)], contractAmount: "8000" }), 8000);
 });
 
 test("budgetStatus: over only past the threshold; null without a base", () => {

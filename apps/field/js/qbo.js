@@ -8,6 +8,7 @@
    ============================================================ */
 import { callFunction, isSignedIn } from "./supa.js";
 import { SYNC_ENABLED } from "./config.js";
+import { invoiceTotals } from "./fincalc.js";
 
 async function proxy(action, payload = {}) {
   if (!SYNC_ENABLED) throw new Error("Offline — QuickBooks needs a connection");
@@ -44,6 +45,13 @@ export async function pushInvoiceToQbo(project, inv) {
       desc: (String(it.room || "").trim() ? it.room.trim() + " — " : "") + it.desc,
       qty: parseFloat(it.qty) || 0, unit: it.unit || "", price: parseFloat(it.price) || 0,
     }));
+  // O&P is part of the invoice total (T&M mode) — without its own line the
+  // QBO invoice undershoots what the printed invoice bills
+  if (!contract) {
+    const t = invoiceTotals(inv);
+    const op = Math.round((t.overhead + t.profit) * 100) / 100;
+    if (op > 0) items.push({ desc: "Overhead & Profit", qty: 1, unit: "LS", price: op });
+  }
   const data = await proxy("pushInvoice", {
     invoice: {
       qboInvoiceId: inv.qboInvoiceId || undefined,

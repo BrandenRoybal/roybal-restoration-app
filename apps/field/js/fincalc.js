@@ -37,9 +37,30 @@ export function invoiceTotals(inv) {
   return { subtotal, base, overhead, profit, rcv, tax, total };
 }
 
-/** money for chip text: 1234.5 → "$1,234.50" */
-export const money = (n) =>
-  "$" + (Math.round(num(n) * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** money for chip text: 1234.5 → "$1,234.50", -20 → "−$20.00" */
+export const money = (n) => {
+  const v = Math.round(num(n) * 100) / 100;
+  return (v < 0 ? "−$" : "$") + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+/** GC O&P rule (mirror of the invoice editor's jobHasSubcontractor): 10 & 10
+    only when a "Subcontractor invoice" is on file anywhere on the job —
+    self-performed work carries 0/0. Chip-created estimates apply this rule
+    EXPLICITLY (opAuto=false) so the totals a chip confirms are the totals
+    the editor shows. */
+export function hasSubcontractorDocs(p) {
+  for (const k of ["invoices", "reconEstimates"]) {
+    for (const doc of (p && p[k]) || []) {
+      for (const att of (doc && doc.attachments) || []) {
+        if (att && att.ai && att.ai.docType === "Subcontractor invoice") return true;
+      }
+    }
+  }
+  for (const d of (p && p.supportDocs) || []) {
+    if (d && (d.docType === "Subcontractor invoice" || (d.ai && d.ai.docType === "Subcontractor invoice"))) return true;
+  }
+  return false;
+}
 
 /* ---------- budget vs estimate (the budgetAlert flag) ----------
    Logged costs = structured job receipts + AI-recognized receipt
@@ -62,8 +83,11 @@ export function loggedCosts(p) {
 }
 
 export function budgetBase(p) {
-  const approved = (p.reconEstimates || []).filter((e) => e && e.status === "approved");
-  if (approved.length) return Math.max(...approved.map((e) => invoiceTotals(e).total));
+  const approvedTotals = (p.reconEstimates || [])
+    .filter((e) => e && e.status === "approved")
+    .map((e) => invoiceTotals(e).total)
+    .filter((t) => t > 0);                 // a zeroed estimate never blocks the contract fallback
+  if (approvedTotals.length) return Math.max(...approvedTotals);
   const contract = num(p.contractAmount);
   return contract > 0 ? contract : null;
 }
