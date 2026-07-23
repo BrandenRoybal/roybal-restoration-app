@@ -22,7 +22,7 @@ export const QB_TIME_CLIENT_ID = "3902ee19a693773d69dd4a355e1f8984";
 // the admin "Connect QuickBooks Online" button; the Client Secret and tokens
 // live only in the qbo-proxy Edge Function's secrets. Register the admin
 // app's URL as the redirect URI AND set it as QBO_REDIRECT_URI on the function.
-export const QBO_CLIENT_ID = "";
+export const QBO_CLIENT_ID = "ABMJSHRQNeCncge2Hd1VwJ4VTQYdyY2cGxgIlcwxhQD2KsqKVb";
 
 // Gmail OAuth client id — PUBLIC (safe to ship). Enables the email lane:
 // job-matched inbox pull + confirm-chip sends from the office mailbox.
