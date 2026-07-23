@@ -169,7 +169,7 @@ function settleAction(key, entry, a, r) {
       ...(r.followup ? { actions: [{ ...r.followup, state: "" }], evId: entry.evId } : {}),
     });
   }
-  if (provider && provider.key === key) paintMessages();
+  if (provider && provider.key === key) { paintMessages(); noteReply(); }
 }
 /* audit trail: stamp the originating capture_event with what actually ran —
    AI-proposed + human-confirmed stays reconstructable. Best-effort. */
@@ -236,6 +236,67 @@ function fieldProvider(p) {
     buildContext: () => assistContext(p),
     executeAction: (a) => runFieldAction(p, a),
   };
+}
+
+/* ---------- window state: name, float position, minimize ----------
+   The panel started life as a phone bottom-sheet; on the board/admin
+   desktops it also needs to get OUT of the way — drag the header to
+   float it anywhere (drop it back at the bottom edge to re-dock),
+   minimize it to a title bar that keeps the conversation (and
+   hands-free) alive while you navigate, and tap the title to name
+   the assistant. The name rides the context digest, so the model
+   actually answers to it. */
+const NAME_KEY = "roybal-assist-name";
+const POS_KEY = "roybal-assist-pos";
+const assistName = () => (localStorage.getItem(NAME_KEY) || "").trim().slice(0, 24);
+
+function applyTitle() {
+  if (!ui || !provider) return;
+  const name = assistName();
+  ui.title.textContent = name ? "💬 " + name : (provider.title || "💬 Ask the office");
+  ui.sub.textContent = provider.sub || "";
+}
+
+const isMin = () => !!ui && ui.drawer.classList.contains("assist--min");
+function setMin(on) {
+  if (!ui || on === isMin()) return;
+  ui.drawer.classList.toggle("assist--min", on);
+  ui.minb.textContent = on ? "❐" : "—";
+  ui.minb.title = on ? "Restore the conversation" : "Minimize — keeps the chat going while you use the app";
+  if (!on) { ui.dot.hidden = true; paintMessages(); }
+  clampFloat();
+}
+/* a reply that lands while minimized lights a dot on the title bar */
+function noteReply() {
+  if (ui && !ui.drawer.hidden && isMin()) ui.dot.hidden = false;
+}
+
+function placeFloat(l, t) {
+  const d = ui.drawer, r = d.getBoundingClientRect();
+  l = Math.max(8, Math.min(l, window.innerWidth - r.width - 8));
+  t = Math.max(8, Math.min(t, window.innerHeight - 72));   // the header stays reachable
+  d.style.left = l + "px";
+  d.style.top = t + "px";
+  d.style.maxHeight = Math.max(140, window.innerHeight - t - 12) + "px";
+}
+function clampFloat() {
+  if (!ui || ui.drawer.hidden || !ui.drawer.classList.contains("assist--float")) return;
+  const r = ui.drawer.getBoundingClientRect();
+  placeFloat(r.left, r.top);
+}
+function dockDrawer() {
+  const d = ui.drawer;
+  d.classList.remove("assist--float");
+  d.style.left = d.style.top = d.style.maxHeight = "";
+  try { localStorage.removeItem(POS_KEY); } catch (_) {}
+}
+function restoreFloat() {
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(POS_KEY) || "null"); } catch (_) {}
+  if (!p || typeof p.l !== "number" || typeof p.t !== "number") return;
+  ui.drawer.classList.add("assist--float");
+  ui.drawer.style.left = p.l + "px";
+  ui.drawer.style.top = p.t + "px";
 }
 
 /* ---------- voice agent (spoken replies + hands-free loop) ---------- */
@@ -412,6 +473,11 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
     const prior = (audio ? list : list.slice(0, -1)).slice(-12)
       .map((m) => ({ role: m.role, text: m.text || "" }));
     const wantSpeech = speakerOn && (!!audio || handsFree);
+    // the custom name rides the digest so the model answers to it
+    const name = assistName();
+    const baseCtx = await provider.buildContext();
+    const context = name && baseCtx && typeof baseCtx === "object" && !Array.isArray(baseCtx)
+      ? { assistantName: name, ...baseCtx } : baseCtx;
     const b = await fieldAssist(provider.project || null, {
       messages: prior,
       text: audio ? "" : text,
@@ -421,7 +487,7 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
       app: provider.app,
       // await tolerates sync providers too — admin builds its digest async
       // (IndexedDB + portal/QBO lookups), field/board return plain objects
-      context: await provider.buildContext(),
+      context,
       ...(chipResults.length ? { actionResults: chipResults } : {}),
       ...(provider.capturedBy ? { captured_by: provider.capturedBy() } : {}),
     });
@@ -436,6 +502,7 @@ async function ask({ text = "", audio = null, audioMime = "" }) {
     }
     list.push(entry);
     paintMessages();
+    noteReply();
     if (wantSpeech) {
       ui.speaking.hidden = false;
       speak(b.replyAudio, reply, () => {
@@ -563,12 +630,16 @@ function buildUi() {
     } else { stopSpeaking(); if (recorder) try { recorder.stop(); } catch (_) {} }
   });
   const speaking = h("div", { class: "assist__speaking", hidden: true }, "🔊 speaking — tap 🎙️ to jump in");
-  const title = h("strong", {}, "💬 Ask the office");
+  const minb = h("button", { type: "button", class: "assist__mini",
+    title: "Minimize — keeps the chat going while you use the app" }, "—");
+  const title = h("strong", { class: "assist__title", title: "Tap to name your assistant" }, "💬 Ask the office");
+  const dot = h("span", { class: "assist__dot", hidden: true });
   const sub = h("div", { class: "assist__sub" }, "");
+  const head = h("div", { class: "assist__head", title: "Drag to move — drop at the bottom edge to re-dock" },
+    h("div", {}, title, dot, sub),
+    h("div", { class: "assist__headbtns" }, hf, spk, minb, close));
   const drawer = h("div", { class: "assist app-only", hidden: true },
-    h("div", { class: "assist__head" },
-      h("div", {}, title, sub),
-      h("div", { class: "assist__headbtns" }, hf, spk, close)),
+    head,
     msgs, thinking, speaking, attach,
     h("div", { class: "assist__row" }, cam, mic, input, send),
     file);
@@ -578,12 +649,70 @@ function buildUi() {
     if (handsFree) setHandsFree(false);
     if (recorder) try { recorder.stop(); } catch (_) {}
   });
-  fab.addEventListener("click", () => { drawer.hidden = !drawer.hidden; if (!drawer.hidden) { paintMessages(); setTimeout(() => input.focus(), 50); } });
+  minb.addEventListener("click", () => setMin(!isMin()));
+  fab.addEventListener("click", () => {
+    if (drawer.hidden) {
+      drawer.hidden = false;
+      setMin(false);                       // opening always brings the full window back
+      paintMessages();
+      requestAnimationFrame(clampFloat);   // a saved float spot may be off a resized screen
+      setTimeout(() => input.focus(), 50);
+    } else if (isMin()) {
+      setMin(false);
+      setTimeout(() => input.focus(), 50);
+    } else {
+      drawer.hidden = true;
+    }
+  });
+
+  // tap the title to (re)name the assistant — a drag that started on the
+  // title must not open the prompt, so drags set a one-shot suppress flag
+  let dragged = false;
+  title.addEventListener("click", () => {
+    if (dragged) return;
+    const next = prompt("Name your assistant (leave blank for the default):", assistName());
+    if (next === null) return;
+    const v = next.trim().slice(0, 24);
+    try { v ? localStorage.setItem(NAME_KEY, v) : localStorage.removeItem(NAME_KEY); } catch (_) {}
+    applyTitle();
+    toast(v ? "Done — say hi to " + v + "." : "Back to the default name.");
+  });
+
+  // drag the header to float the window anywhere; drop it near the bottom
+  // edge to snap back to the docked bottom-sheet. Buttons still just click.
+  head.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button") || (e.button != null && e.button !== 0)) return;
+    dragged = false;
+    const r0 = drawer.getBoundingClientRect();
+    const ox = e.clientX - r0.left, oy = e.clientY - r0.top;
+    const x0 = e.clientX, y0 = e.clientY;
+    const move = (ev) => {
+      if (!dragged && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) return;
+      if (!dragged) { dragged = true; drawer.classList.add("assist--float", "assist--drag"); }
+      placeFloat(ev.clientX - ox, ev.clientY - oy);
+      ev.preventDefault();
+    };
+    const up = (ev) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      drawer.classList.remove("assist--drag");
+      if (!dragged) return;
+      if (ev.type === "pointerup" && ev.clientY > window.innerHeight - 48) { dockDrawer(); return; }
+      const r = drawer.getBoundingClientRect();
+      try { localStorage.setItem(POS_KEY, JSON.stringify({ l: Math.round(r.left), t: Math.round(r.top) })); } catch (_) {}
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  });
+  window.addEventListener("resize", clampFloat);
 
   fab.addEventListener("click", unlockAudio);
   send.addEventListener("click", unlockAudio);
   document.body.append(fab, drawer);
-  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam, speaking, title, sub, hf };
+  ui = { fab, drawer, msgs, thinking, attach, input, send, mic, cam, speaking, title, sub, hf, minb, dot };
+  restoreFloat();                          // last dragged spot survives reloads
 }
 
 /** Mount the assistant with an app-specific provider (board/admin/field).
@@ -594,8 +723,7 @@ export function mountAssistProvider(p) {
   if (!ui) buildUi();
   const switched = !provider || provider.key !== p.key;
   provider = p;
-  ui.title.textContent = p.title || "💬 Ask the office";
-  ui.sub.textContent = p.sub || "";
+  applyTitle();                    // the custom name (if set) wins over p.title
   ui.fab.hidden = false;
   if (switched) { ui.drawer.hidden = true; pendingImages = []; paintPending(); }
 }
