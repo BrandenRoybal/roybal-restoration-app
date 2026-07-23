@@ -82,6 +82,9 @@ export function boardJobFromProject(project, plan, nowISO) {
     notBeforeLabel: isoDateOnly(plan && plan.notBefore) ? (plan.notBeforeLabel || "") : "",
     notes: "Pushed from the field app" + (project.workOrderNo ? " — WO " + project.workOrderNo : ""),
     fieldJobId: project.id,
+    // carry the QuickBooks Time link over — the board's live schedule reads
+    // QB hours by jobcode, and a board job without it sees zero logged hours
+    ...(project.qbJobcodeId ? { qbJobcodeId: project.qbJobcodeId, qbJobcodeName: project.qbJobcodeName || "" } : {}),
     subtasks: toSubtasks(phases),
     isMilestone: false,
     createdAt: nowISO, updatedAt: nowISO,
@@ -99,6 +102,9 @@ export function mergePlanIntoBoardJob(existing, project, plan, nowISO) {
   const hasPhases = arr(existing.subtasks).some((st) => norm(st.name));
   const phases = arr(plan && plan.phases);
   if (!data.contractValue && Number(project.contractAmount)) data.contractValue = Number(project.contractAmount);
+  // QuickBooks Time link crosses over when the board doesn't have one yet —
+  // without it the board's live schedule sees zero QB hours for this job
+  if (!data.qbJobcodeId && project.qbJobcodeId) { data.qbJobcodeId = project.qbJobcodeId; data.qbJobcodeName = project.qbJobcodeName || ""; }
   if (!data.notBefore && plan && isoDateOnly(plan.notBefore)) {
     data.notBefore = isoDateOnly(plan.notBefore);
     data.notBeforeLabel = plan.notBeforeLabel || "";
@@ -484,9 +490,13 @@ export async function pushActuals(project) {
     if (!row || !row.data || row.data.fieldJobId !== project.id) return { skipped: true };
     const actuals = rollupActuals(project, arr(row.data.subtasks).map((st) => st.name));
     const done = () => { if (localSig) _pushedActuals.set(project.id, localSig); };
-    if (sortedJson(actuals) === sortedJson(row.data.fieldActuals)) { done(); return { unchanged: true }; }
+    // piggyback the QuickBooks jobcode link if the board row lacks it (same
+    // field-owned-annotation stance as fieldActuals — no rev consumed)
+    const jc = !row.data.qbJobcodeId && project.qbJobcodeId
+      ? { qbJobcodeId: project.qbJobcodeId, qbJobcodeName: project.qbJobcodeName || "" } : null;
+    if (!jc && sortedJson(actuals) === sortedJson(row.data.fieldActuals)) { done(); return { unchanged: true }; }
     const base = Number(row.data.rev) || 0;
-    const r = await guardedWrite(row.id, base, { ...row.data, fieldActuals: actuals, rev: base });
+    const r = await guardedWrite(row.id, base, { ...row.data, fieldActuals: actuals, ...(jc || {}), rev: base });
     if (r.conflict) return { skipped: true };
     done();
     return { ok: true };

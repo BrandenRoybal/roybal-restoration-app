@@ -98,9 +98,14 @@ serve(async (req: Request) => {
     const boardJobs: Blob[] = boardRows
       .filter((r: Blob) => r?.data && r.id !== "__settings__")
       .map((r: Blob) => r.data);
+    // the board's baseline snapshot (Gantt "Baseline") rides the settings row —
+    // it's the reference that catches phased jobs the live engine keeps
+    // re-dating to >= today (they're never "past target", only "behind baseline")
+    const boardBaseline: Blob | null =
+      (boardRows.find((r: Blob) => r?.id === "__settings__")?.data?.baseline as Blob) || null;
 
     const brief = buildBrief({
-      projects, boardJobs, portalWaiting, emailsWaiting,
+      projects, boardJobs, boardBaseline, portalWaiting, emailsWaiting,
       today: akDate(), pretty: akPretty(), budgetThreshold: BUDGET_THRESHOLD,
     });
 

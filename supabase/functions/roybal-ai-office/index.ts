@@ -1337,7 +1337,14 @@ async function toolHoursLookup(input: Record<string, unknown>, jwt: string) {
     boardRows("time_entries", jwt, 1000), boardRows("coordination_jobs", jwt), boardRows("crew_members", jwt, 100),
   ]);
   const jobTitle = new Map(jobs.map((j) => [j.id, j.title || j.customer || "Job"]));
+  // QuickBooks Time rows join by JOBCODE (not jobId) and by qbUserId (not
+  // crewId) — same rules as the board, or the assistant misreports the very
+  // hours that now drive the live schedule
+  const jcTitle = new Map(jobs.filter((j) => j.qbJobcodeId)
+    .map((j) => [String(j.qbJobcodeId), j.title || j.customer || "Job"]));
   const crewName = new Map(crew.map((c) => [c.id, c.name || "—"]));
+  const crewByQbUser = new Map(crew.filter((c) => c.qbUserId)
+    .map((c) => [String(c.qbUserId), c.name || "—"]));
   const byJob = new Map<string, number>(), byCrew = new Map<string, number>();
   let total = 0;
   for (const e of entries) {
@@ -1345,17 +1352,20 @@ async function toolHoursLookup(input: Record<string, unknown>, jwt: string) {
     const h = Number(e.hours) || 0;
     if (!h) continue;
     total += h;
-    const jt = String(jobTitle.get(e.jobId as string) ?? "(unassigned)");
-    const cn = String(crewName.get(e.crewId as string) ?? "(unknown)");
-    byJob.set(jt, (byJob.get(jt) || 0) + h);
-    byCrew.set(cn, (byCrew.get(cn) || 0) + h);
+    const isQb = e.source === "qbtime";
+    let jt = jobTitle.get(e.jobId as string);
+    if (!jt && isQb) jt = jcTitle.get(String(e.qbJobcodeId ?? ""));
+    let cn = e.crewId ? crewName.get(e.crewId as string) : undefined;
+    if (!cn && isQb) cn = crewByQbUser.get(String(e.qbUserId ?? "")) ?? (e.employee ? `${e.employee} · QB` : "(QuickBooks)");
+    byJob.set(String(jt ?? "(unassigned)"), (byJob.get(String(jt ?? "(unassigned)")) || 0) + h);
+    byCrew.set(String(cn ?? "(unknown)"), (byCrew.get(String(cn ?? "(unknown)")) || 0) + h);
   }
   const r1 = (n: number) => Math.round(n * 10) / 10;
   return {
     sinceDays: days, totalHours: r1(total),
     byJob: [...byJob].map(([job, hours]) => ({ job, hours: r1(hours) })).sort((a, b) => b.hours - a.hours),
     byCrew: [...byCrew].map(([name, hours]) => ({ name, hours: r1(hours) })).sort((a, b) => b.hours - a.hours),
-    note: "manual board entries only — QuickBooks Time entries appear once the daily pull runs",
+    note: "manual board entries + QuickBooks Time (nightly pull / on-demand sync); QB hours attribute to their linked crew member, '· QB' rows await a one-time link",
   };
 }
 

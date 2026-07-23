@@ -106,6 +106,9 @@
 }
 .crewpick label.on { border-color: var(--orange); background: var(--brand-tint); }
 .crewpick input { display: none; }
+.crewpick .crewspan { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--ink-soft, #64748b); white-space: nowrap; }
+.crewpick .crewspan__x { border: 0; background: none; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; color: var(--orange); }
+.crewpick .crewspan__x:hover { transform: scale(1.15); }
 
 /* crew roster list */
 .crewlist { display: flex; flex-direction: column; gap: 8px; }
@@ -331,6 +334,13 @@ table.rtable .num.under { color: var(--green); }
 .chip.is-phase { background: #ede9fb; color: #5b4ba8; border-color: #d6cdf3; }
 .subtasks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 6px; }
 .st-block { border: 1px solid var(--line); border-radius: 10px; padding: 8px 9px; background: #fafbfc; }
+.st-block.is-done { background: #f2f8f3; border-color: #bfdec6; }
+.st-block.is-done .st-name { text-decoration: line-through; color: #5a7a63; }
+.st-donecb { width: 18px; height: 18px; accent-color: #1f9d55; flex: 0 0 auto; cursor: pointer; }
+.st-row .st-donedate { flex: 0 0 auto; width: 138px; min-height: 36px; font-size: 12px; }
+.st-prog { align-self: end; font-size: 11px; font-weight: 800; color: var(--ink-soft, #64748b); background: #eef1f5; border-radius: 6px; padding: 3px 7px; white-space: nowrap; }
+.st-prog.is-late { color: #fff; background: #d23b2e; }
+.st-prog.is-done { color: #14683a; background: #dcefe2; }
 .st-row { display: flex; align-items: center; gap: 6px; }
 .st-row2 { display: flex; align-items: flex-end; gap: 10px 14px; flex-wrap: wrap; margin-top: 9px; }
 .st-row input { min-height: 38px; }
@@ -353,6 +363,8 @@ table.rtable .num.under { color: var(--green); }
 .gantt__row--sub { background: #fafbfc; }
 .gantt__row--sub .gantt__label { font-size: 12px; color: var(--muted); padding-left: 18px; font-weight: 600; background: #fafbfc; }
 .gantt__bar--sub { top: 12px; height: 16px; font-size: 10.5px; font-weight: 600; opacity: .95; border-left-width: 3px; }
+.gantt__bar--sub.is-phdone { opacity: .68; color: #14683a; }
+.gantt__bar--sub.is-phlate { border-color: #d23b2e; box-shadow: 0 0 0 1.5px rgba(210, 59, 46, .35); color: #a02417; }
 
 /* ---------- milestones ---------- */
 .bmodal__body.is-milestone .hide-for-ms { display: none; }

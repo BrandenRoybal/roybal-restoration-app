@@ -5,7 +5,9 @@ answers the call and does streaming STT/TTS + barge-in (ConversationRelay);
 this agent is pure text — the caller's words arrive over a WebSocket, Claude
 streams the reply back, and Twilio speaks it. Same brain as the in-app
 assistant: it imports the `personas.ts` registry (phone persona + narrow
-phone toolset) and the board's pure `schedule.js` for real availability.
+phone toolset) and the board's pure `schedule.js` for real availability —
+run LIVE (jobs + logged hours via `buildLiveOpts`), the same actuals-driven
+schedule the board shows, not the pre-delay plan.
 
 **Rollout stance: no-answer forwarding first.** The `roybal-voice` edge
 function dials the owner's cell for ~15s on every call; the AI only takes

@@ -14,7 +14,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY, OWNER_CELL } from "./config.mjs";
 import { accessToken } from "./supa.mjs";
 // the board's scheduling engine is pure ESM (no DOM, no imports) and is
 // SERVER-SHARED here — see the guard comment at the top of schedule.js
-import { computeSchedule, crewDayLoad, addWorkDays, isWorkDay, DEFAULT_SETTINGS } from "../../apps/board/js/schedule.js";
+import { computeSchedule, crewDayLoad, buildLiveOpts, addWorkDays, isWorkDay, DEFAULT_SETTINGS } from "../../apps/board/js/schedule.js";
 
 /* per-caller daily limits (in-memory — one Fly machine, resets on deploy;
    the per-call caps below are the hard backstop) */
@@ -59,12 +59,20 @@ async function lookupCaller(session) {
 /* ---------- availability — the real board load, kept coarse ---------- */
 async function availability(input) {
   const days = Math.min(Math.max(Number(input.days) || 5, 1), 10);
-  const [jobs, crew, settings] = await Promise.all([
-    boardRows("coordination_jobs"), boardRows("crew_members", 100), boardSettings(),
+  const [jobs, crew, entries, settings] = await Promise.all([
+    boardRows("coordination_jobs"), boardRows("crew_members", 100),
+    boardRows("time_entries", 1000).catch(() => []),   // hours feed the LIVE schedule; plan fallback without them
+    boardSettings(),
   ]);
   const active = crew.filter((c) => c.active !== false);
-  try { computeSchedule(jobs, settings); } catch { /* saved dates still work */ }
-  const { load } = crewDayLoad(jobs, settings);
+  // the LIVE schedule — same opts the board runs on, so the phone line quotes
+  // the actuals-pushed dates the owner sees, not the pre-delay plan; an
+  // opts-less recompute here would silently UN-push every delayed job
+  const today = new Date().toISOString().slice(0, 10);
+  let opts;
+  try { opts = buildLiveOpts(jobs, entries, settings, today); } catch { /* plan fallback */ }
+  try { computeSchedule(jobs, settings, opts); } catch { /* saved dates still work */ }
+  const { load } = crewDayLoad(jobs, settings, opts);
   const hpd = Math.max(1, Number(settings.hoursPerDay) || 10);
   const capacity = active.length * hpd;
   const out = [];

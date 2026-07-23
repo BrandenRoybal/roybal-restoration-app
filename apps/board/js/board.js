@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings, setConflictHandler,
 } from "./data.js";
-import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, crewAssignments, workDaysBetween, effCrew, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, layoutSubtasksLive, phaseActuals, buildLiveOpts, workDaysBetween, effCrew, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear, DEFAULT_SETTINGS } from "./schedule.js";
 import { pickJobcode, pickQbUser, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { boardAssistProvider } from "./assistctx.js";
@@ -54,6 +54,7 @@ let entries = [];
 let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
 let conflicts = { byJob: new Map(), overloads: [], load: new Map(), byCrew: new Map() };   // capacity over-allocations
 let critical = new Set();                          // job ids on the critical path
+let phaseHours = new Map();                        // jobId → Map(subId → logged hours) — QB Time + manual, per phase
 let ganttCritical = false;                         // Gantt "Critical path" highlight toggle
 let ganttFocus = null;                             // job id whose PROJECT is focused in critical mode
 let ganttExpanded = new Set();                     // job ids whose phases are expanded on the Gantt
@@ -104,6 +105,15 @@ const crewHours = (crewId, fromISO) => entries
   .filter((e) => entryCrewId(e) === crewId && (!fromISO || (e.date || "") >= fromISO))
   .reduce((s, e) => s + (Number(e.hours) || 0), 0);
 const fmtH = (n) => String(Math.round((Number(n) || 0) * 100) / 100) + "h";
+/* a phased job's phases laid out against REALITY (logged hours + done marks) —
+   the shared lens for the Gantt, cards, crew board, and phase editor.
+   Memoized per job id (calendar cells hammer this); applySchedule clears it. */
+let _liveLayoutCache = new Map();
+function liveLayoutOf(j) {
+  let v = _liveLayoutCache.get(j.id);
+  if (!v) _liveLayoutCache.set(j.id, (v = layoutSubtasksLive(j, j.startDate, settings, phaseHours.get(j.id), todayISO())));
+  return v;
+}
 const daysAgoISO = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 
 /* ============================================================
@@ -160,8 +170,15 @@ async function refresh() {
    recomputeAndPersist additionally saves every job the engine moved. */
 function applySchedule() {
   settings = cachedSettings();
-  const res = computeSchedule(jobs, settings);   // { changed, cyclic }; mutates jobs in place
-  conflicts = findOverAllocations(jobs, settings);  // refresh crew over-allocations (phase-aware)
+  // attribute each phased job's logged hours (QuickBooks Time + manual) to its
+  // phases, then let REAL progress drive the schedule: an unfinished phase
+  // can't end in the past, so delays push targetDate and cascade through every
+  // linked job; the capacity map books only the remaining work.
+  const opts = buildLiveOpts(jobs, entries, settings, todayISO());
+  phaseHours = opts.phaseHours;
+  _liveLayoutCache = new Map();
+  const res = computeSchedule(jobs, settings, opts);   // { changed, cyclic }; mutates jobs in place
+  conflicts = findOverAllocations(jobs, settings, opts);  // refresh crew over-allocations (phase-aware)
   critical = computeCriticalPath(jobs, settings);// refresh critical path
   return res;
 }
@@ -222,7 +239,8 @@ function renderLogin() {
    ============================================================ */
 function matchesFilter(j) {
   if (filterType && j.type !== filterType) return false;
-  if (filterCrew && !(j.crewIds || []).includes(filterCrew)) return false;
+  if (filterCrew && !(j.crewIds || []).includes(filterCrew)
+    && !(j.subtasks || []).some((st) => (st.crewIds || []).includes(filterCrew))) return false;
   if (filterText) {
     const hay = (j.title + " " + (j.customer || "") + " " + (j.address || "")).toLowerCase();
     if (!hay.includes(filterText)) return false;
@@ -525,6 +543,19 @@ function renderCard(j) {
     const txt = j.startDate && j.targetDate ? `${fmtShort(j.startDate)} → ${fmtShort(j.targetDate)}`
       : j.targetDate ? `Due ${fmtShort(j.targetDate)}` : `Start ${fmtShort(j.startDate)}`;
     meta.append(h("span", { class: "chip" + (late ? " is-late" : "") }, "📅 " + txt));
+  }
+  // phased jobs: where the job actually is right now (live phase, %, delay)
+  if ((j.subtasks || []).length && j.startDate && !j.isMilestone) {
+    const L = liveLayoutOf(j);
+    const cur = L.find((r) => !r.done);
+    if (!cur) meta.append(h("span", { class: "chip", title: "Every phase is marked complete" }, "✓ Phases done"));
+    else {
+      const n = L.indexOf(cur) + 1;
+      meta.append(h("span", {
+        class: "chip" + (cur.late ? " is-late" : ""),
+        title: `Current phase (${n}/${L.length}): ${cur.sub.name || "Phase"}${cur.est ? ` — ${Math.round(cur.act * 100) / 100} of ${cur.est}h logged` : ""}${cur.late ? ` — running ${cur.lateDays || "?"} work day${cur.lateDays === 1 ? "" : "s"} behind plan` : ""}`,
+      }, `▸ ${cur.sub.name || "Phase " + n}${cur.est ? ` ${Math.min(999, cur.pct)}%` : ""}${cur.late && cur.lateDays ? ` · +${cur.lateDays}d` : ""}`));
+    }
   }
   // hours: actual vs estimated
   if (act || est) {
@@ -956,14 +987,22 @@ function paintGantt() {
     if (expanded) {
       const subCls = ganttCritical ? (focused(j.id) ? (isRed(j.id) ? " crit" : "") : " dim") : "";
       let prevPhase = null;
-      for (const { sub, start, finish, offFrac, durFrac } of layoutSubtasks(subs, j.startDate, settings)) {
+      for (const row of liveLayoutOf(j)) {
+        const { sub, start, finish, offFrac, durFrac, done, act, est, pct, late, lateDays } = row;
         // fractional sub-day positioning: a 3h tape renders as a short bar partway into its day
         const sLeft = dayDiff(startISO, start) * dayW + (offFrac - Math.floor(offFrac)) * dayW;
         const sW = Math.max(durFrac * dayW - 2, 5);
         const phaseY = headerH + vi * rowH + barMid;
-        const hrs = Number(sub.estimatedHours) ? `  ·  ${sub.estimatedHours}h` : "";
-        const sBar = h("div", { class: "gantt__bar gantt__bar--sub" + subCls, style: `left:${sLeft}px;width:${sW}px;border-left-color:${stageOf(j.stage).color}`,
-          title: `${sub.name || "Phase"}${hrs}\n${fmtShort(start)} – ${fmtShort(finish)}  (${durFrac < 1 ? Math.round(durFrac * 10) / 10 + " day" : Math.round(durFrac * 10) / 10 + " days"})`, onclick: () => openJobModal(j) }, sub.name || "Phase");
+        const hrs = est ? `  ·  ${Math.round(act * 100) / 100}/${est}h` : (act ? `  ·  ${fmtH(act)}` : "");
+        // progress fill mirrors the job bars: orange for logged share, red when over
+        const fillPct = done ? 100 : Math.min(100, Math.max(0, pct));
+        const sFill = fillPct > 0 ? `;background:linear-gradient(to right, ${est && act > est && !done ? "rgba(210,59,46,.22)" : "rgba(242,106,33,.22)"} ${fillPct}%, #fff ${fillPct}%)` : "";
+        const lateTxt = late && !done ? `\n⚠ running ${lateDays || "?"} work day${lateDays === 1 ? "" : "s"} behind plan (planned finish ${fmtShort(row.planFinish)})` : "";
+        const sBar = h("div", { class: "gantt__bar gantt__bar--sub" + subCls + (done ? " is-phdone" : "") + (late && !done ? " is-phlate" : ""),
+          style: `left:${sLeft}px;width:${sW}px;border-left-color:${stageOf(j.stage).color}${sFill}`,
+          title: `${sub.name || "Phase"}${hrs}${est && !done ? ` (${pct}%)` : ""}\n${fmtShort(start)} – ${fmtShort(finish)}  (${durFrac < 1 ? Math.round(durFrac * 10) / 10 + " day" : Math.round(durFrac * 10) / 10 + " days"})${done ? `\n✓ done${sub.completedOn ? " " + fmtShort(sub.completedOn) : ""}` : ""}${lateTxt}`,
+          onclick: () => openJobModal(j) },
+          (done ? "✓ " : "") + (sub.name || "Phase") + (late && !done && lateDays ? `  +${lateDays}d` : ""));
         const sTrack = h("div", { class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""), style: `width:${trackW}px` + (monthMode ? "" : `;--gw:${7 * dayW}px`) }, sBar);
         if (monthMode) for (const b of monthBounds) sTrack.append(h("div", { class: "gantt__mline", style: `left:${b * dayW}px` }));
         if (todayX >= 0) sTrack.append(h("div", { class: "gantt__today", style: `left:${todayX}px` }));
@@ -1022,7 +1061,7 @@ function paintGantt() {
    crew board (magnet board — drag the guys between jobs for a day)
    ============================================================ */
 let crewDay = todayISO();      // the day the crew board is showing
-let crewScope = "day";         // "day" = override just this day | "job" = whole-job roster
+let crewScope = "day";         // "day" = override just this day | "fwd" = from this day to job end | "job" = whole-job roster
 let crewDrag = null;           // { cid, src }  — src = jobId | "avail" | "out"
 let crewTap = null;            // { cid, src }  — tap-to-move selection (mobile)
 
@@ -1040,7 +1079,7 @@ function activeJobsOn(day) {
 function jobSlotOn(j, day, s) {
   const subs = j.subtasks || [];
   if (subs.some((st) => (st.crewIds || []).length) && j.startDate) {
-    const L = layoutSubtasks(subs, j.startDate, s);
+    const L = liveLayoutOf(j);   // reality-aware: a delayed phase is still "active" today
     let act = L.find((x) => day >= x.start && day <= x.finish);
     if (!act) act = [...L].reverse().find((x) => x.start <= day) || L[L.length - 1];
     if (act) return { kind: "phase", target: act.sub, label: act.sub.name || "Phase" };
@@ -1049,9 +1088,12 @@ function jobSlotOn(j, day, s) {
 }
 const slotIds = (slot) => (slot.target.crewIds = slot.target.crewIds || []);
 
-/* ---- per-day crew overrides: job.dayCrew[day] = { add:[ids], remove:[ids] } ---- */
-const baseCrewOn = (j, day) => slotIds(jobSlotOn(j, day, settings)).slice();
+/* ---- per-day crew overrides: job.dayCrew[day] = { add:[ids], remove:[ids] } ----
+   base roster resolves through each member's assignment spans (job.crewSpans)
+   first, so a guy cycled off a long job simply isn't in the base after his day */
+const baseCrewOn = (j, day) => spanCrew(slotIds(jobSlotOn(j, day, settings)).slice(), j.crewSpans, day);
 const effectiveCrewOn = (j, day) => effCrew(baseCrewOn(j, day), (j.dayCrew || {})[day]);
+const onJob = (j, cid) => (j.crewIds || []).includes(cid) || (j.subtasks || []).some((st) => (st.crewIds || []).includes(cid)) || effectiveCrewOn(j, crewDay).includes(cid);
 const dayOvOf = (j, day) => j.dayCrew && j.dayCrew[day];
 const isOverridden = (j, day) => { const d = dayOvOf(j, day); return !!(d && ((d.add || []).length || (d.remove || []).length)); };
 function dayDelta(j, day) { j.dayCrew = j.dayCrew || {}; return (j.dayCrew[day] = j.dayCrew[day] || { add: [], remove: [] }); }
@@ -1085,7 +1127,8 @@ function renderCrewView() {
   const scope = h("div", { class: "cb-scope" }, h("span", { class: "cb-scope__l" }, "Move:"),
     h("div", { class: "vsw" },
       scopeBtn("day", "Just this day", "Reassign for the selected day only — the rest of the job keeps its planned crew"),
-      scopeBtn("job", "Whole job", "Reassign for the job's entire run")));
+      scopeBtn("fwd", "This day on", "Reassign from the selected day through the end of the job — days already worked stay as worked. Use this to cycle guys through a long job."),
+      scopeBtn("job", "Whole job", "Reassign for the job's entire run, start to finish")));
   body.append(h("div", { class: "btoolbar" },
     h("div", { class: "btoolbar__left" }, viewSwitch(), nav, scope),
     h("div", { class: "btools" }, ...filterControls(), ...actionButtons())));
@@ -1128,8 +1171,10 @@ function paintCrew() {
 
   if (!acts.length) wrap.append(h("p", { class: "subtle", style: "padding:14px 4px" }, "No jobs scheduled for this day — use ‹ › to pick another, or assign start/target dates to your jobs."));
   else wrap.append(h("p", { class: "subtle", style: "padding:10px 4px 0" }, crewScope === "day"
-    ? "Moving guys for THIS day only — the rest of each job keeps its planned crew. Drop on “Out today” for a no-show; ↺ resets a day to plan. Switch to “Whole job” to change a job's whole run."
-    : "Moving guys for the job's WHOLE run. Drop on “Out today” for a no-show (always just that day). Switch to “Just this day” for single-day cover."));
+    ? "Moving guys for THIS day only — the rest of each job keeps its planned crew. Drop on “Out today” for a no-show; ↺ resets a day to plan. Switch to “This day on” to cycle guys through a long job."
+    : crewScope === "fwd"
+    ? "Moving guys from THIS day to the END of each job — the days they already worked stay on their record. Drag a guy off a long job and his spot frees up from today forward; drag one on and he joins from today."
+    : "Moving guys for the job's WHOLE run, start to finish. Drop on “Out today” for a no-show (always just that day). Switch to “Just this day” for single-day cover."));
 }
 
 function crewCol(src, title, ids, opts = {}) {
@@ -1190,16 +1235,31 @@ async function crewDropTo(dest) {
   if (src === dest) { paintCrew(); return; }
   const day = crewDay, touched = new Set();
   // pull/push respect the scope toggle: "day" edits a per-day override delta,
-  // "job" edits the job's (or active phase's) whole-run roster.
+  // "fwd" edits assignment spans (this day → job end), "job" edits the job's
+  // (or active phase's) whole-run roster.
   const pull = (jid) => {
     const j = jobs.find((x) => x.id === jid); if (!j) return;
     if (crewScope === "day") { if (effectiveCrewOn(j, day).includes(cid)) { dayPull(j, day, cid); touched.add(j); } }
-    else { const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot); if (ids.includes(cid)) { slot.target.crewIds = ids.filter((x) => x !== cid); touched.add(j); } }
+    else if (crewScope === "fwd") { if (onJob(j, cid)) { spanCrewPull(j, day, cid); touched.add(j); } }
+    else {
+      const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot);
+      const hadSpan = !!(j.crewSpans && j.crewSpans[cid]);
+      if (hadSpan) spanCrewClear(j, cid);
+      if (ids.includes(cid)) { slot.target.crewIds = ids.filter((x) => x !== cid); touched.add(j); }
+      else if (hadSpan) touched.add(j);
+    }
   };
   const push = (jid) => {
     const j = jobs.find((x) => x.id === jid); if (!j) return;
     if (crewScope === "day") { if (!effectiveCrewOn(j, day).includes(cid)) { dayPush(j, day, cid); touched.add(j); } }
-    else { const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot); if (!ids.includes(cid)) { slot.target.crewIds = [...ids, cid]; touched.add(j); } }
+    else if (crewScope === "fwd") { spanCrewPush(j, day, cid, settings, (j.subtasks || []).length ? liveLayoutOf(j) : null); touched.add(j); }
+    else {
+      const slot = jobSlotOn(j, day, settings); const ids = slotIds(slot);
+      const wasOn = ids.includes(cid), hadSpan = !!(j.crewSpans && j.crewSpans[cid]);
+      if (hadSpan) spanCrewClear(j, cid);                       // "whole job" means the whole job
+      if (!wasOn) slot.target.crewIds = [...ids, cid];
+      if (!wasOn || hadSpan) touched.add(j);
+    }
   };
 
   if (src !== "avail" && src !== "out") pull(src);
@@ -1243,8 +1303,11 @@ function openJobModal(existing, newMilestone) {
   };
   if (isNew && newMilestone) { j.scheduleMode = "manual"; j.pinnedStart = todayISO(); }
   j.crewIds = [...(j.crewIds || [])];
+  if (j.crewSpans) j.crewSpans = JSON.parse(JSON.stringify(j.crewSpans));
   j.deps = (j.deps || []).map((d) => ({ ...d }));
-  j.subtasks = (j.subtasks || []).map((st) => ({ ...st }));
+  // copy each phase's crewIds too — the phase crew chips push() into these, and
+  // an aliased array would edit the REAL job before Save (Cancel wouldn't cancel)
+  j.subtasks = (j.subtasks || []).map((st) => ({ ...st, crewIds: [...(st.crewIds || [])] }));
   if (!j.scheduleMode) j.scheduleMode = "auto";
 
   const f = {};
@@ -1264,9 +1327,20 @@ function openJobModal(existing, newMilestone) {
     const lab = h("label", { class: (on ? "on" : "") + (clashHere.has(c.id) ? " clash" : ""), title: clashTitle },
       cb, h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)), c.name,
       clashHere.has(c.id) ? h("span", { class: "clashflag", title: clashTitle }, "⚠") : null);
+    // assignment-span badge: this member only rides the job for these dates
+    // (set by the Crew board's "This day on" moves); ↺ = back to the whole job
+    const spans = j.crewSpans && j.crewSpans[c.id];
+    const onPhases = (j.subtasks || []).some((st) => (st.crewIds || []).includes(c.id));
+    if ((on || onPhases) && spans && spans.length) {
+      const txt = spans.map((sp) => `${sp.from ? fmtShort(sp.from) : "start"}–${sp.to ? fmtShort(sp.to) : "end"}`).join(", ");
+      const reset = h("button", { class: "crewspan__x", type: "button", title: "Put them back on for the whole job" }, "↺");
+      const note = h("span", { class: "crewspan", title: "On this job only for these dates — set from the Crew board's “This day on” moves" }, txt, reset);
+      reset.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); spanCrewClear(j, c.id); note.remove(); });
+      lab.append(note);
+    }
     cb.addEventListener("change", () => {
       if (cb.checked) { if (!j.crewIds.includes(c.id)) j.crewIds.push(c.id); lab.classList.add("on"); }
-      else { j.crewIds = j.crewIds.filter((x) => x !== c.id); lab.classList.remove("on"); }
+      else { j.crewIds = j.crewIds.filter((x) => x !== c.id); spanCrewClear(j, c.id); $(".crewspan", lab)?.remove(); lab.classList.remove("on"); }
       refreshDur();
     });
     crewPick.append(lab);
@@ -1327,8 +1401,20 @@ function openJobModal(existing, newMilestone) {
     if (!j.subtasks.length) {
       phaseWrap.append(h("div", { class: "subtle" }, "No phases. Add phases to break the job into steps (e.g. demo → dry → rebuild → paint) that sequence and roll up to the job's dates."));
     } else {
+      // live progress per phase (QB Time + manual hours attributed in applySchedule)
+      const L = j.startDate ? layoutSubtasksLive(j, j.startDate, settings, phaseHours.get(j.id), todayISO()) : [];
       j.subtasks.forEach((st, i) => {
         st.crewIds = st.crewIds || [];
+        const lv = L[i] || null;
+        const doneCb = h("input", { type: "checkbox", class: "st-donecb", checked: !!st.done,
+          title: st.done ? "Phase complete — untick to reopen it" : "Mark this phase complete (stamps today; the real schedule re-flows from it)" });
+        doneCb.addEventListener("change", () => {
+          if (doneCb.checked) { st.done = true; st.completedOn = st.completedOn || todayISO(); }
+          else { st.done = false; delete st.completedOn; }
+          renderPhases();
+        });
+        const doneDate = st.done ? h("input", { type: "date", class: "st-donedate", value: st.completedOn || todayISO(), title: "Completed on — backdate if it wrapped earlier" }) : null;
+        doneDate?.addEventListener("input", () => { st.completedOn = doneDate.value || todayISO(); });
         const name = h("input", { type: "text", class: "st-name", placeholder: "Phase name", value: st.name || "" });
         name.addEventListener("input", () => { st.name = name.value; });
         const days = h("input", { type: "number", class: "st-num", min: "1", step: "1", placeholder: "auto", value: st.durationDays != null ? st.durationDays : "", title: "work days (leave blank to compute from hours + crew)" });
@@ -1349,15 +1435,25 @@ function openJobModal(existing, newMilestone) {
         }
         const mv = (d) => { const t = j.subtasks[i + d]; j.subtasks[i + d] = j.subtasks[i]; j.subtasks[i] = t; renderPhases(); };
         // hours the field crew has logged against this phase (pushed by the field app)
-        const fieldAct = j.fieldActuals && st.name && j.fieldActuals[st.name] != null ? Number(j.fieldActuals[st.name]) : null;
+        // legacy name-matched rollup from the field app — superseded by the
+        // id/date-attributed engine chip; only shown when that chip is absent
+        // so the row never shows two contradictory hour counts
+        const fieldAct = !(lv && (lv.act > 0 || (lv.est > 0 && !lv.done))) && j.fieldActuals && st.name && j.fieldActuals[st.name] != null ? Number(j.fieldActuals[st.name]) : null;
         const est = Number(st.estimatedHours) || 0;
         const fieldChip = fieldAct != null ? h("span", {
           class: "subtle",
           style: "font-size:11px;font-weight:700;" + (est && fieldAct >= est * 1.1 ? "color:#d23b2e" : (est && fieldAct >= est * 0.8 ? "color:#a07800" : "")),
           title: "Hours logged in the field app's daily construction logs",
         }, `📱 ${fieldAct}h logged`) : null;
-        phaseWrap.append(h("div", { class: "st-block" },
-          h("div", { class: "st-row" }, h("span", { class: "st-i" }, String(i + 1)), name,
+        // live progress chip: hours logged vs estimate + behind-plan warning
+        const progChip = lv && (lv.act > 0 || (lv.est > 0 && !lv.done)) ? h("span", {
+          class: "st-prog" + (lv.done ? " is-done" : lv.late ? " is-late" : ""),
+          title: `${Math.round(lv.act * 100) / 100}h logged${lv.est ? ` of ${lv.est}h` : ""} (QuickBooks Time + manual)` +
+            (lv.late && !lv.done ? ` — running ${lv.lateDays || "?"} work day${lv.lateDays === 1 ? "" : "s"} behind plan` : "") +
+            (lv.done ? " — complete" : ""),
+        }, `⏱ ${Math.round(lv.act * 100) / 100}${lv.est ? "/" + lv.est : ""}h${lv.est && !lv.done ? ` · ${Math.min(999, lv.pct)}%` : ""}${lv.late && !lv.done ? ` · +${lv.lateDays}d late` : ""}`) : null;
+        phaseWrap.append(h("div", { class: "st-block" + (st.done ? " is-done" : "") },
+          h("div", { class: "st-row" }, h("span", { class: "st-i" }, String(i + 1)), doneCb, name, doneDate,
             h("button", { class: "st-btn", type: "button", title: "Move up", disabled: i === 0, onclick: () => mv(-1) }, "↑"),
             h("button", { class: "st-btn", type: "button", title: "Move down", disabled: i === j.subtasks.length - 1, onclick: () => mv(1) }, "↓"),
             h("button", { class: "st-btn st-del", type: "button", title: "Remove phase", onclick: () => { j.subtasks.splice(i, 1); renderPhases(); } }, "✕")),
@@ -1366,7 +1462,7 @@ function openJobModal(existing, newMilestone) {
               h("label", { class: "st-field" }, h("span", {}, "Days"), days),
               h("label", { class: "st-field" }, h("span", {}, "Hours"), hrs),
               h("label", { class: "st-field" }, h("span", {}, "Lag (days)"), lag),
-              fieldChip),
+              progChip, fieldChip),
             activeCrew().length ? crewStrip : h("span", { class: "subtle" }, "no crew"))));
       });
     }
@@ -1538,7 +1634,18 @@ function buildJobHoursSection(job) {
             " ", h("span", { class: "hrow__h" }, fmtH(e.hours))),
           h("div", { class: "hrow__meta" }, [fmtDate(e.date), e.task || e.note].filter(Boolean).join(" · ") || "—")),
         isQb
-          ? h("span", { class: "subtle", title: "Synced from QuickBooks Time", style: "font-size:11px;padding:0 6px" }, "auto")
+          ? h("span", {},
+              h("span", { class: "subtle", title: "Synced from QuickBooks Time", style: "font-size:11px;padding:0 2px" }, "auto"),
+              // phantom cleanup: a timesheet deleted/re-dated in QuickBooks more
+              // than a day back never gets soft-deleted by the nightly pull —
+              // let the office remove it here (a re-sync restores real ones)
+              h("button", {
+                class: "linkx", title: "Remove this QuickBooks row (if it still exists in QuickBooks Time, a re-sync brings it back)", onclick: async () => {
+                  if (!confirm("Remove this QuickBooks Time row from the job?\n\nIf the timesheet still exists in QuickBooks, the next sync restores it — use this to clear phantom rows for deleted/re-dated timesheets.")) return;
+                  entries = entries.filter((x) => x.id !== e.id);
+                  await deleteTimeEntry(e.id); render();
+                },
+              }, "✕"))
           : h("button", {
               class: "linkx", title: "Delete entry", onclick: async () => {
                 if (!confirm("Delete this time entry?")) return;
@@ -1556,15 +1663,21 @@ function buildJobHoursSection(job) {
       const dInp = h("input", { type: "date", value: todayISO() });
       const hInp = h("input", { type: "number", min: "0", step: "0.25", placeholder: "Hrs", class: "hnum" });
       const nInp = h("input", { type: "text", placeholder: "Note (optional)" });
+      // phased jobs: pin the hours to a phase, or let the engine place them
+      // by date / completion marks (same rule QuickBooks Time rows follow)
+      const phSel = (job.subtasks || []).length ? h("select", { title: "Which phase these hours belong to — Auto places them by date and phase completions" },
+        h("option", { value: "" }, "Auto phase"),
+        ...job.subtasks.map((st, idx) => h("option", { value: st.id }, st.name || "Phase " + (idx + 1)))) : null;
       const addBtn = h("button", { class: "btn btn--primary btn--sm" }, "Log");
       addBtn.addEventListener("click", async () => {
         const hours = Number(hInp.value);
         if (!hours || hours <= 0) { toast("Enter hours"); hInp.focus(); return; }
         const entry = { id: uid(), jobId: job.id, crewId: cSel.value, date: dInp.value || todayISO(), hours, note: nInp.value.trim(), enteredBy: currentEmail() };
+        if (phSel && phSel.value) entry.phaseId = phSel.value;
         entries = [...entries, entry];
         await saveTimeEntry(entry); render();
       });
-      addRow = h("div", { class: "haddrow" }, cSel, dInp, hInp, nInp, addBtn);
+      addRow = h("div", { class: "haddrow" }, cSel, phSel, dInp, hInp, nInp, addBtn);
     } else {
       addRow = h("div", { class: "subtle" }, "Add crew (Crew button) to log time.");
     }
@@ -1681,9 +1794,11 @@ function openHoursModal() {
         ...(haveRates ? [h("td", { class: "num" }, r.cost != null ? money(r.cost) : "—")] : []))) :
         [h("tr", {}, h("td", { colspan: haveRates ? 4 : 3, class: "subtle", style: "text-align:center;padding:14px" }, "No hours logged in this range."))])));
 
-    // ----- by job (est vs actual) -----
+    // ----- by job (est vs actual) — the SAME join the cards and the live
+    // schedule use: manual rows + linked QuickBooks rows, hoursFrom respected -----
     const byJob = jobs.map((j) => {
-      const actR = scoped.filter((e) => e.jobId === j.id).reduce((s, e) => s + (Number(e.hours) || 0), 0);
+      const actR = entriesForJob(j.id).filter((e) => inRange(e) && inHoursScope(j, e))
+        .reduce((s, e) => s + (Number(e.hours) || 0), 0);
       return { title: j.title || j.customer || "Untitled", est: Number(j.estimatedHours) || 0, act: actR };
     }).filter((r) => r.act > 0 || r.est > 0).sort((a, b) => b.act - a.act);
 

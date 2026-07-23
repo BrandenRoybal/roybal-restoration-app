@@ -115,6 +115,142 @@ export function layoutSubtasks(subs, startISO, settings) {
   return out;
 }
 
+/* ============================================================
+   phase progress — actual hours vs plan, completion, delays
+   ============================================================ */
+
+/* Attribute a job's logged hours (QuickBooks Time + manual entries) to its
+   sequential phases. Resolution per entry:
+     1. an explicit entry.phaseId always wins (manual log picked a phase)
+     2. phase completion marks partition history: an entry dated on/before a
+        done phase's completedOn (and after the previous one's) belongs to it
+     3. anything after the last mark date-matches the unfinished phases'
+        scheduled windows; a miss lands on the last open phase already started,
+        else the first open phase.
+   Returns Map(subId → hours). Pure — pass the job's entries in. */
+export function phaseActuals(job, jobEntries, settings) {
+  const s = settings || DEFAULT_SETTINGS;
+  const subs = job.subtasks || [];
+  const hours = new Map(subs.map((st) => [st.id, 0]));
+  if (!subs.length || !jobEntries || !jobEntries.length) return hours;
+  const byId = new Map(subs.map((st) => [st.id, st]));
+  const bounds = [];                      // done phases with a date, in sequence order
+  for (const st of subs) if (st.done && st.completedOn) bounds.push({ id: st.id, until: st.completedOn });
+  const win = new Map((job.startDate ? layoutSubtasks(subs, job.startDate, s) : []).map((x) => [x.sub.id, x]));
+  const open = subs.filter((st) => !st.done);
+  for (const e of jobEntries) {
+    const hrs = Number(e.hours) || 0; if (!hrs) continue;
+    let target = e.phaseId && byId.has(e.phaseId) ? e.phaseId : null;
+    const d = String(e.date || "");
+    if (!target && d) for (const b of bounds) if (d <= b.until) { target = b.id; break; }
+    if (!target) {
+      for (const st of open) { const w = win.get(st.id); if (w && d >= w.start && d <= w.finish) { target = st.id; break; } }
+      if (!target) {
+        let lastStarted = null;
+        for (const st of open) { const w = win.get(st.id); if (w && d && w.start <= d) lastStarted = st.id; }
+        target = lastStarted || (open[0] && open[0].id) || subs[subs.length - 1].id;
+      }
+    }
+    hours.set(target, (hours.get(target) || 0) + hrs);
+  }
+  return hours;
+}
+
+/* A job's entries = manual rows (matched by jobId) + QuickBooks Time rows for
+   its linked jobcode. THE one join rule — board.js, actions.js, assistctx.js,
+   and the phone agent must all resolve hours identically or their schedules
+   drift apart. */
+export function entriesOfJob(job, entries) {
+  const jc = job && job.qbJobcodeId;
+  return (entries || []).filter((e) =>
+    e && (e.jobId === job.id || (jc && e.source === "qbtime" && e.qbJobcodeId === jc)));
+}
+/* …and scoped by the job's "count hours from" date (a rebuild sharing its
+   jobcode with the mitigation phase ignores the mitigation hours) */
+export function scopedEntriesOfJob(job, entries) {
+  const from = job && job.hoursFrom;
+  return entriesOfJob(job, entries).filter((e) => !from || String(e.date || "") >= from);
+}
+/* The opts blob that makes the engine run on REALITY: per-phased-job hour
+   attribution + today. Every consumer (board applySchedule, assistant
+   executors, assistant context, phone agent) builds it through here. */
+export function buildLiveOpts(jobs, entries, settings, today) {
+  const s = settings || DEFAULT_SETTINGS;
+  const phaseHours = new Map(jobs
+    .filter((j) => j && (j.subtasks || []).length)
+    .map((j) => [j.id, phaseActuals(j, scopedEntriesOfJob(j, entries), s)]));
+  return { today, phaseHours };
+}
+
+/* Lay a job's phases out against REALITY, not just the plan:
+     · a done phase ends at its completedOn (early finishes pull the chain in,
+       late ones push it out)
+     · an unfinished phase's REMAINING hours (estimate − logged) size what's
+       left, and that work can't be scheduled before `today` — so a phase
+       nobody finished keeps sliding right (and delaying successors) until
+       it's marked done
+     · phases with no hour estimate fall back to their planned length.
+   Same row shape as layoutSubtasks ({sub, start, finish, offFrac, durFrac})
+   plus progress: {done, act, est, pct, late, lateDays, planStart, planFinish}.
+   The last row's finish is the job's real projected completion — feed it to
+   computeSchedule (via opts) and delays cascade into every linked job. */
+export function layoutSubtasksLive(job, startISO, settings, hoursBySub, today) {
+  const s = settings || DEFAULT_SETTINGS;
+  const subs = job.subtasks || [];
+  if (!subs.length || !startISO) return [];
+  const plan = layoutSubtasks(subs, startISO, s);
+  const hpd = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
+  const tIdx = today && today > startISO ? workDaysBetween(startISO, today, s) - 1 : 0;
+  const out = [];
+  let cursor = 0;
+  for (let i = 0; i < subs.length; i++) {
+    const st = subs[i], p = plan[i];
+    const lag = i === 0 ? 0 : Math.max(0, Number(st.lagDays) || 0);
+    if (lag > 0) cursor = Math.ceil(cursor - 1e-9) + lag;
+    const est = Number(st.estimatedHours) || 0;
+    const act = (hoursBySub && hoursBySub.get(st.id)) || 0;
+    let startFrac, endFrac;
+    if (st.done) {
+      const startIdx = Math.floor(cursor + 1e-9);
+      const startDay = addWorkDays(startISO, startIdx, s);
+      startFrac = startIdx;
+      if (st.completedOn && st.completedOn >= startDay) {
+        endFrac = startIdx + workDaysBetween(startDay, st.completedOn, s);   // whole days, inclusive
+      } else if (st.completedOn) {
+        endFrac = startFrac;                                 // completed before it began (skipped)
+      } else {
+        endFrac = startFrac + p.durFrac;                     // legacy done-flag with no date
+      }
+    } else {
+      const crewN = Math.max(1, (st.crewIds || []).length);
+      const pinned = st.durationDays != null && Number(st.durationDays) > 0;
+      // a manual day-pin outranks the hours math (same rule as the plan);
+      // hours still shrink a pinned phase proportionally as work gets logged
+      const remDur = pinned
+        ? p.durFrac * (est > 0 ? Math.max(0, 1 - act / est) : 1)
+        : (est > 0 ? Math.max(0, est - act) / (crewN * hpd) : p.durFrac);
+      startFrac = act > 0 ? cursor : Math.max(cursor, tIdx); // untouched work can't start in the past
+      endFrac = Math.max(startFrac, tIdx) + remDur;          // remaining work runs from today at best
+    }
+    const dur = Math.max(endFrac - startFrac, 0.1);
+    const startIdx = Math.floor(startFrac + 1e-9);
+    const finishIdx = Math.max(startIdx, Math.ceil(startFrac + dur - 1e-9) - 1);
+    const finish = addWorkDays(startISO, finishIdx, s);
+    const late = finish > p.finish;
+    out.push({
+      sub: st,
+      start: addWorkDays(startISO, startIdx, s), finish,
+      offFrac: startFrac, durFrac: dur,
+      done: !!st.done, act, est,
+      pct: st.done ? 100 : (est > 0 ? Math.round((act / est) * 100) : 0),
+      late, lateDays: late ? Math.max(0, workDaysBetween(p.finish, finish, s) - 1) : 0,
+      planStart: p.start, planFinish: p.finish,
+    });
+    cursor = startFrac + dur;
+  }
+  return out;
+}
+
 /* A job is engine-managed only once it opts in (has deps, an explicit mode,
    or a duration override). Legacy jobs with hand-typed dates stay untouched
    until the user engages scheduling on them. */
@@ -129,8 +265,12 @@ function participates(job) {
 
 /* ---- main scheduler: cycle-safe topological forward pass (Kahn) ----
    Mutates job.startDate / job.targetDate in place. Returns:
-     { changed: [jobs whose dates moved], cyclic: [ids in a dependency cycle] } */
-export function computeSchedule(jobs, settings) {
+     { changed: [jobs whose dates moved], cyclic: [ids in a dependency cycle] }
+   opts (optional) = { today, phaseHours: Map(jobId → Map(subId → hours)) } —
+   when given, phased jobs roll up from layoutSubtasksLive instead of the pure
+   plan, so real phase progress/delays drive targetDate and cascade to every
+   linked job. Without opts (e.g. the phone agent) it's the pure plan. */
+export function computeSchedule(jobs, settings, opts) {
   const s = settings || DEFAULT_SETTINGS;
   const byId = new Map(jobs.map((j) => [j.id, j]));
   const validDeps = (j) => (j.deps || []).filter((d) => d && d.predId && d.predId !== j.id && byId.has(d.predId));
@@ -172,7 +312,11 @@ export function computeSchedule(jobs, settings) {
     if (!baseStart) { finishById.set(id, job.targetDate || null); continue; }
     const newStart = addWorkDays(baseStart, 0, s);
     // milestones are zero-duration markers; phased jobs roll up to their last phase
-    const subL = (!job.isMilestone && job.subtasks && job.subtasks.length) ? layoutSubtasks(job.subtasks, newStart, s) : null;
+    const subL = (!job.isMilestone && job.subtasks && job.subtasks.length)
+      ? (opts && opts.today
+        ? layoutSubtasksLive(job, newStart, s, opts.phaseHours && opts.phaseHours.get(job.id), opts.today)
+        : layoutSubtasks(job.subtasks, newStart, s))
+      : null;
     const newFinish = job.isMilestone ? newStart : (subL && subL.length ? subL[subL.length - 1].finish : finishOf(newStart, dur, s));
     finishById.set(id, newFinish);
     if (job.startDate !== newStart || job.targetDate !== newFinish) {
@@ -315,9 +459,103 @@ export function dayCrewPush(job, day, cid, base) {      // onto this job, this d
   dayCrewClean(job, day);
 }
 
-export function crewDayLoad(jobs, settings) {
+/* ---- crew assignment spans: job.crewSpans[cid] = [{ from?, to? }] ----
+   By default a crew member rides a job for its WHOLE run (no entry here).
+   A span list limits them to those date windows so guys can cycle in and
+   out of a long job without rewriting history: `{to}` = on until that day,
+   `{from}` = on from that day, both = a bounded stint. Per-day resolution
+   order everywhere: roster (job/phase crewIds) → span filter → dayCrew
+   delta. Spans are job-level, so they also bound phase rosters. */
+export function spanActive(spans, day) {
+  if (!spans || !spans.length) return true;
+  return spans.some((sp) => (!sp.from || day >= sp.from) && (!sp.to || day <= sp.to));
+}
+export function spanCrew(base, crewSpans, day) {
+  if (!crewSpans) return base || [];
+  return (base || []).filter((cid) => spanActive(crewSpans[cid], day));
+}
+export function spanCrewClear(job, cid) {               // back to the whole-run default
+  if (!job.crewSpans) return;
+  delete job.crewSpans[cid];
+  if (!Object.keys(job.crewSpans).length) delete job.crewSpans;
+}
+
+/* drop cid from every dayCrew `list` entry on/after `day` — a span move
+   supersedes leftover one-day overrides inside its window */
+function scrubDayCrew(job, day, cid, list) {
+  const m = job.dayCrew; if (!m) return;
+  for (const d of Object.keys(m)) {
+    if (d < day) continue;
+    m[d][list] = (m[d][list] || []).filter((x) => x !== cid);
+    dayCrewClean(job, d);
+  }
+}
+const onRosterOf = (job, cid) =>
+  (job.crewIds || []).includes(cid) || (job.subtasks || []).some((st) => (st.crewIds || []).includes(cid));
+
+/* off this job from `day` onward — days already worked stay as worked */
+export function spanCrewPull(job, day, cid) {
+  scrubDayCrew(job, day, cid, "add");
+  if (!onRosterOf(job, cid)) return spanCrewClear(job, cid);   // day-override guest: scrub was enough
+  const prev = addDaysISO(day, -1);
+  const cur = (job.crewSpans || {})[cid];
+  const next = (cur && cur.length ? cur : [{}])                 // no spans yet = whole run
+    .filter((sp) => !sp.from || sp.from <= prev)                // stints starting at/after the cutoff vanish
+    .map((sp) => (!sp.to || sp.to > prev) ? { ...sp, to: prev } : { ...sp });
+  if (!next.length || (job.startDate && next.every((sp) => sp.to < job.startDate))) {
+    // they never actually work this job → clean removal from the roster
+    job.crewIds = (job.crewIds || []).filter((x) => x !== cid);
+    for (const st of (job.subtasks || [])) if (st.crewIds) st.crewIds = st.crewIds.filter((x) => x !== cid);
+    return spanCrewClear(job, cid);
+  }
+  job.crewSpans = job.crewSpans || {};
+  job.crewSpans[cid] = next;
+}
+
+/* on this job from `day` onward. Ensures roster membership (job-level, or
+   every phase still running on/after `day` for phase-staffed jobs) and
+   merges [day → end] into their spans; a fresh mid-job joiner gets
+   `{from: day}` so they are NOT retroactively on earlier days.
+   `rows` (optional) = the phase layout to judge "still running" by — pass the
+   LIVE layout (layoutSubtasksLive) so a behind-schedule job's active phase
+   counts as running even though its PLANNED finish is in the past; defaults
+   to the pure plan for opts-less callers. */
+export function spanCrewPush(job, day, cid, settings, rows) {
+  const s = settings || DEFAULT_SETTINGS;
+  const phases = job.subtasks || [];
+  const phased = phases.some((st) => (st.crewIds || []).length) && job.startDate;
+  const wasOn = onRosterOf(job, cid);
+  if (phased) {
+    for (const { sub, finish } of (rows || layoutSubtasks(phases, job.startDate, s)))
+      if (!finish || finish >= day) { sub.crewIds = sub.crewIds || []; if (!sub.crewIds.includes(cid)) sub.crewIds.push(cid); }
+  } else if (!(job.crewIds || []).includes(cid)) {
+    job.crewIds = [...(job.crewIds || []), cid];
+  }
+  scrubDayCrew(job, day, cid, "remove");
+  const cur = (job.crewSpans || {})[cid];
+  if (!cur || !cur.length) {
+    if (!wasOn && job.startDate && day > job.startDate) {       // joining mid-job, not day one
+      job.crewSpans = job.crewSpans || {};
+      job.crewSpans[cid] = [{ from: day }];
+    }
+    return;
+  }
+  const prev = addDaysISO(day, -1);
+  const before = [];
+  let from = day, sinceStart = false;
+  for (const sp of cur) {
+    if (sp.to && sp.to < prev) before.push({ ...sp });          // clear of the new window
+    else if (!sp.from) sinceStart = true;                       // absorb into [day → end]
+    else if (sp.from < from) from = sp.from;
+  }
+  if (sinceStart) return spanCrewClear(job, cid);               // start → end = whole run again
+  job.crewSpans[cid] = [...before, { from }];
+}
+
+export function crewDayLoad(jobs, settings, opts) {
   const s = settings || DEFAULT_SETTINGS;
   const hpd = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
+  const live = !!(opts && opts.today);
   const load = new Map(), jobsOn = new Map();
   const bump = (cid, day, hrs, jid) => {
     let m = load.get(cid); if (!m) load.set(cid, (m = new Map()));
@@ -327,14 +565,14 @@ export function crewDayLoad(jobs, settings) {
   };
   // distribute totalHours across the days a phase/job touches; per-day crew can
   // differ when a day has an override, so the hours that day re-split among them.
-  const spread = (jobStart, offFrac, durFrac, baseCrew, totalHours, jid, dayOv) => {
+  const spread = (jobStart, offFrac, durFrac, baseCrew, totalHours, jid, dayOv, spans) => {
     const startIdx = Math.floor(offFrac + 1e-9);
     const endIdx = Math.max(startIdx, Math.ceil(offFrac + durFrac - 1e-9) - 1);
     for (let k = startIdx; k <= endIdx; k++) {
       const ov = Math.max(0, Math.min(offFrac + durFrac, k + 1) - Math.max(offFrac, k));
       if (ov <= 0) continue;
       const day = addWorkDays(jobStart, k, s);
-      const eff = effCrew(baseCrew, dayOv && dayOv[day]);
+      const eff = effCrew(spanCrew(baseCrew, spans, day), dayOv && dayOv[day]);
       if (!eff.length) continue;
       const perCrew = (totalHours * (ov / durFrac)) / eff.length;
       for (const cid of eff) bump(cid, day, perCrew, jid);
@@ -345,17 +583,33 @@ export function crewDayLoad(jobs, settings) {
     const dayOv = j.dayCrew || null;
     const phases = j.subtasks || [];
     if (phases.some((st) => (st.crewIds || []).length)) {
-      for (const { sub, offFrac, durFrac } of layoutSubtasks(phases, j.startDate, s)) {
+      const rows = live
+        ? layoutSubtasksLive(j, j.startDate, s, opts.phaseHours && opts.phaseHours.get(j.id), opts.today)
+        : layoutSubtasks(phases, j.startDate, s);
+      // live mode books remaining work from TODAY forward, never onto days
+      // that already happened (an in-progress phase's live window can reach
+      // back to when it started)
+      const tIdx = live && opts.today > j.startDate ? workDaysBetween(j.startDate, opts.today, s) - 1 : 0;
+      for (const row of rows) {
+        const { sub, offFrac, durFrac } = row;
+        if (live && row.done) continue;         // finished phases book no future work
         const base = sub.crewIds || [];
         if (!base.length && !dayOv) continue;   // crewless phase only matters on override days
-        const hrs = Number(sub.estimatedHours) || durFrac * Math.max(1, base.length) * hpd;
-        spread(j.startDate, offFrac, durFrac, base, hrs, j.id, dayOv);
+        const hrs = live
+          ? (row.est > 0
+            ? Math.max(0, row.est - row.act)    // only the REMAINING hours load the crew
+            : durationFracOf(sub, s) * Math.max(1, base.length) * hpd)  // no estimate: the PLAN-length workload, not the slid live window
+          : (Number(sub.estimatedHours) || durFrac * Math.max(1, base.length) * hpd);
+        if (hrs <= 0) continue;
+        const bookOff = live ? Math.max(offFrac, tIdx) : offFrac;
+        const bookDur = Math.max(offFrac + durFrac - bookOff, 0.05);
+        spread(j.startDate, bookOff, bookDur, base, hrs, j.id, dayOv, j.crewSpans || null);
       }
     } else if (j.targetDate && ((j.crewIds || []).length || dayOv)) {
       const span = workDaysBetween(j.startDate, j.targetDate, s);
       const base = j.crewIds || [];
       const hrs = Number(j.estimatedHours) || span * Math.max(1, base.length) * hpd;
-      spread(j.startDate, 0, span, base, hrs, j.id, dayOv);
+      spread(j.startDate, 0, span, base, hrs, j.id, dayOv, j.crewSpans || null);
     }
   }
   return { load, jobsOn };
@@ -368,10 +622,10 @@ export function crewDayLoad(jobs, settings) {
      overloads: [{ crewId, day, hours, pct, jobIds }]    (every over-capacity crew-day)
      load:      Map(crewId -> Map(dayISO -> hours))      (full grid, for the heat-map)
      byCrew:    Map(crewId -> { bookedDays, totHrs, peak, overDays }) */
-export function findOverAllocations(jobs, settings) {
+export function findOverAllocations(jobs, settings, opts) {
   const s = settings || DEFAULT_SETTINGS;
   const cap = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
-  const { load, jobsOn } = crewDayLoad(jobs, s);
+  const { load, jobsOn } = crewDayLoad(jobs, s, opts);
   const byJob = new Map(), overloads = [], byCrew = new Map();
   for (const [cid, days] of load) {
     let bookedDays = 0, totHrs = 0, peak = 0, overDays = 0;
@@ -402,7 +656,7 @@ export function findOverAllocations(jobs, settings) {
    `today` is an ISO "YYYY-MM-DD"; dollars come from job.contractValue /
    job.billedToDate; crew.hourlyRate (optional) drives the labor run-rate.
    ============================================================ */
-export function computeCfoSnapshot(jobs, crew, settings, today, horizonDays = 7) {
+export function computeCfoSnapshot(jobs, crew, settings, today, horizonDays = 7, opts) {
   const s = settings || DEFAULT_SETTINGS;
   const J = Array.isArray(jobs) ? jobs : [];
   const roster = (Array.isArray(crew) ? crew : []).filter((c) => c && c.active !== false);
@@ -429,14 +683,16 @@ export function computeCfoSnapshot(jobs, crew, settings, today, horizonDays = 7)
   endingSoon.sort((a, b) => (a.targetDate < b.targetDate ? -1 : 1));
   milestones.sort((a, b) => (a.date < b.date ? -1 : 1));
 
-  /* Block B — crew allocation this window */
-  const assigns = crewAssignments(J, s);
-  const bookedIds = new Set(
-    assigns.filter((a) => dayDiff(today, a.finish) >= 0 && dayDiff(today, a.start) <= horizonDays).map((a) => a.crewId)
-  );
+  /* Block B — crew allocation this window. Booked/idle come from the LOAD
+     map (with opts: live remaining-work booking, span- and override-aware),
+     so a guy cycled off a job via crewSpans really shows as free. */
+  const over = findOverAllocations(J, s, opts);
+  const bookedIds = new Set();
+  for (const [cid, days] of over.load) {
+    for (const [day] of days) { const d = dayDiff(today, day); if (d >= 0 && d <= horizonDays) { bookedIds.add(cid); break; } }
+  }
   const idle = roster.filter((c) => !bookedIds.has(c.id)).map((c) => ({ id: c.id, name: c.name || "—" }));
   const booked = roster.filter((c) => bookedIds.has(c.id)).map((c) => ({ id: c.id, name: c.name || "—" }));
-  const over = findOverAllocations(J, s);
   const overAllocations = over.overloads
     .filter((o) => { const d = dayDiff(today, o.day); return d >= 0 && d <= horizonDays; })
     .map((o) => ({ ...o, crewName: (roster.find((c) => c.id === o.crewId) || {}).name || o.crewId }));
