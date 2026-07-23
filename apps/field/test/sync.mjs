@@ -16,6 +16,7 @@ Object.defineProperty(globalThis, "navigator", { value: { onLine: true }, config
 
 /* ---- fake Supabase server ---- */
 const serverRows = new Map();
+let onPatch = null;      // test hook: runs while a push PATCH is "in flight"
 let clock = 1;
 const nowIso = () => new Date(1700000000000 + clock++ * 1000).toISOString();
 const resp = (status, body) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
@@ -45,6 +46,7 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   // rev-guarded PATCH — PostgREST semantics: 0 rows when the guard misses
   if (u.pathname === "/rest/v1/field_projects" && method === "PATCH") {
+    if (onPatch) { const f = onPatch; onPatch = null; await f(); }   // simulate an edit landing mid-upload
     const idQ = u.searchParams.get("id") || "";
     const id = idQ.startsWith("eq.") ? idQ.slice(3) : "";
     const revQ = u.searchParams.get("data->>rev");
@@ -80,7 +82,7 @@ globalThis.fetch = async (url, opts = {}) => {
 
 const { Store } = await import("../js/core.js");
 const { signIn, isSignedIn } = await import("../js/supa.js");
-const { syncNow } = await import("../js/sync.js");
+const { syncNow, startSync } = await import("../js/sync.js");
 
 (async () => {
   await signIn("crew@roybalconstruction.com", "pw");
@@ -196,6 +198,67 @@ const { syncNow } = await import("../js/sync.js");
   const local7 = await Store.get("p7");
   ok(local7.receipts.map((x) => x.id).sort().join("") === "R1R2R3", "pull over dirty local merges receipts from both sides");
   ok(serverRows.get("p7").data.receipts.length === 3, "the union pushed back up in the same cycle");
+
+  // ---------- a remote delete must never destroy unsynced local edits ----------
+  await Store.put({ id: "p8", customer: "Hotel", photos: [{ id: "H1", src: "h1" }] });
+  await syncNow();                                    // server rev 1, clean
+  const p8 = await Store.get("p8");
+  p8.notes = "unsynced field notes";
+  await Store.put(p8, { quiet: true });               // dirty
+  serverRows.set("p8", { id: "p8", data: { id: "p8" }, deleted: true, updated_at: nowIso() });  // office deleted the job meanwhile
+  await syncNow();
+  const local8 = await Store.get("p8");
+  ok(!!local8 && local8.notes === "unsynced field notes", "a tombstone does NOT erase a dirty local copy");
+  const srv8 = serverRows.get("p8");
+  ok(srv8 && srv8.deleted === false && srv8.data.notes === "unsynced field notes", "the dirty copy re-creates the job (edit wins over a stale delete)");
+  ok((await Store.backups("p8")).length >= 1, "…and the copy was snapshotted before the tombstone was handled");
+
+  // ---------- an edit typed WHILE a push is in flight survives ----------
+  await Store.put({ id: "p9", customer: "India" });
+  await syncNow();                                    // rev 1, clean
+  const p9 = await Store.get("p9");
+  p9.customer = "India-EDIT";
+  await Store.put(p9, { quiet: true });               // dirty
+  onPatch = async () => {                             // lands during the PATCH round-trip
+    const cur = await Store.get("p9");
+    cur.notes = "typed during upload";
+    await Store.put(cur, { quiet: true });
+  };
+  await syncNow();
+  ok((await Store.get("p9")).notes === "typed during upload", "an edit made mid-push is not reverted (no stale write-back)");
+  await syncNow();                                    // it stayed dirty → next cycle ships it
+  ok((serverRows.get("p9").data.notes || "") === "typed during upload", "…and it reaches the server on the next cycle");
+
+  // ---------- putIf: the conditional write under absorb ----------
+  await Store.put({ id: "p11", customer: "Kilo" }, { quiet: true });
+  const cur11 = await Store.get("p11");
+  ok(!(await Store.putIf({ ...cur11, customer: "STALE" }, "1999-01-01T00:00:00.000Z")), "putIf refuses when the row moved since the read");
+  ok(await Store.putIf({ ...cur11, customer: "FRESH" }, cur11.updatedAt), "putIf lands when updatedAt still matches");
+  ok((await Store.get("p11")).customer === "FRESH", "…and the conditional write took effect");
+
+  // ---------- a job stuck on missing server media goes RED, not green ----------
+  let lastStatus = null;
+  startSync((s) => { lastStatus = s; });              // wires the status callback (fires one un-awaited cycle)
+  await new Promise((r) => setTimeout(r, 60));        // let that cycle finish before driving our own
+  await Store.put({ id: "p10", customer: "Juliet" }, { quiet: true });
+  await syncNow();                                    // rev 1, clean
+  const p10 = await Store.get("p10");
+  p10.customer = "Juliet-LOCAL";
+  await Store.put(p10, { quiet: true });              // dirty
+  const GHOST = "b".repeat(64);                       // referenced by the server copy, absent from the bucket
+  serverRows.set("p10", { id: "p10", deleted: false, updated_at: nowIso(), data: {
+    id: "p10", customer: "Juliet-REMOTE", rev: 5, photos: [{ id: "G", src: `media:${GHOST}:1234` }],
+    updatedAt: new Date(Date.parse(p10.updatedAt) - 60_000).toISOString(),  // older clock → pull skips, push conflicts
+  } });
+  await syncNow(); await syncNow(); await syncNow();  // three blocked cycles
+  ok(!!lastStatus && lastStatus.state === "error" && /waiting on photos/.test(lastStatus.message || ""),
+    "3 cycles blocked on missing media turns the status red instead of lying green");
+  mediaStore.set(GHOST, "data:image/jpeg;base64,tiny");
+  await syncNow();                                    // media exists now → merge lands
+  ok(!!lastStatus && lastStatus.state === "synced", "status recovers once the media resolves and the merge lands");
+  const merged10 = await Store.get("p10");
+  ok(merged10.customer === "Juliet-LOCAL" && (merged10.photos || []).some((x) => x.id === "G"),
+    "…and the merge kept our edit AND their photo");
 
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
   process.exit(failures ? 1 : 0);

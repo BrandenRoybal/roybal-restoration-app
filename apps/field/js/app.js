@@ -18,7 +18,8 @@ import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressS
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
-import { startSync, syncNow, resetSync, onSyncMerge } from "./sync.js";
+import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged } from "./sync.js";
+import { graftProject } from "./graft.js";
 import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine, getUnifiedJobId } from "./spine.js";
 import { generateNarrative, constructionFacts } from "./narrative.js";
@@ -116,6 +117,15 @@ function startSyncUI() {
     if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
     toast(`🔀 ${customer}: merged changes from another device${bits.length ? ` (+${bits.join(", ")})` : ""}. Both copies are kept in Backups.`);
   });
+  // sync rewrote a stored row (merge or clean apply). If that job is open on
+  // screen, graft the fresh copy into the SAME in-memory object the form is
+  // bound to — otherwise the next autosave would write the stale on-screen
+  // fork back over the merged one and quietly re-erase the other device's work.
+  onSyncRowChanged(async (id) => {
+    if (!liveProject || liveProject.id !== id) return;
+    const fresh = await Store.get(id);
+    if (fresh) graftProject(liveProject, fresh);
+  });
   startSync(updateSyncStatus);
 }
 function boot() {
@@ -123,9 +133,14 @@ function boot() {
   route();
 }
 
+/* the project object the current page's inputs are bound to (null on the
+   list/login screens) — sync grafts merged changes into it, see startSyncUI */
+let liveProject = null;
+
 async function route() {
   await flushPending();              // persist any in-flight edit before reloading
   renderTechChip();
+  liveProject = null;
   if (needsLogin()) return renderLogin();
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   window.scrollTo(0, 0);
@@ -134,6 +149,7 @@ async function route() {
   if (parts[0] === "p" && parts[1]) {
     const project = await Store.get(parts[1]);
     if (!project) return go("#/");
+    liveProject = project;
     mountAssist(project);   // 💬 job-aware assistant floats over every job page
     if (parts[2] === "edit") return projectEdit(project);
     if (parts[2] === "narrative") return narrativePage(project);
@@ -896,10 +912,11 @@ function backupsCard(project) {
         btn.disabled = true;
         const current = await Store.get(project.id);
         if (current) await Store.backup(current);
-        // carry the CURRENT rev so the restore pushes as a normal guarded
-        // edit — if another device moved on meanwhile, sync merges instead
-        // of letting an old snapshot clobber it
-        const restored = { ...s.data, rev: (current && current.rev) || s.data.rev || 0 };
+        // sync tracks this row's rev in its own bookkeeping, so the restore
+        // pushes as a normal guarded edit — if another device moved on
+        // meanwhile, sync merges instead of letting an old snapshot clobber it
+        const restored = { ...s.data };
+        delete restored.rev;
         await Store.put(restored);   // fresh updatedAt → re-syncs
         toast("Backup restored.");
         setTimeout(() => location.reload(), 400);
