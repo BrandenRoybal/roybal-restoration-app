@@ -13,7 +13,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Job Board" />
   <link rel="stylesheet" href="../css/app.css" />
-  <link rel="stylesheet" href="css/board.css?v=30" />
+  <link rel="stylesheet" href="css/board.css?v=32" />
 </head>
 <body>
   <header class="tbar">
@@ -31,6 +31,21 @@
     </div>
   </header>
   <main id="view" class="bview"><!-- routed content --></main>
-  <script type="module" src="js/board.js?v=52"></script>
+  <script>
+    // Stale-module guard: right after a deploy, an old service worker can hand
+    // a NEW board.js its OLD cached data.js/schedule.js — the module import
+    // fails and nothing renders. If the view is still empty a beat after load,
+    // force ONE cache-busted reload (by then the fresh SW has taken over).
+    setTimeout(function () {
+      var dead = !document.getElementById("view").firstElementChild;
+      if (dead && !sessionStorage.getItem("boardBootRetry")) {
+        sessionStorage.setItem("boardBootRetry", "1");
+        location.replace(location.pathname + "?boot=" + Date.now());
+      } else if (!dead) {
+        sessionStorage.removeItem("boardBootRetry");
+      }
+    }, 3500);
+  </script>
+  <script type="module" src="js/board.js?v=55"></script>
 </body>
 </html>

@@ -65,6 +65,7 @@ export const plusDays = (iso: string, n: number) => {
 export interface BriefInput {
   projects: Blob[];          // field project blobs, each with _rowUpdated (row updated_at)
   boardJobs: Blob[];         // coordination_jobs data blobs (settings row excluded)
+  boardBaseline?: Blob | null; // board settings.baseline (Gantt snapshot: { jobs: { [id]: {start, finish} } })
   portalWaiting: number | null;
   emailsWaiting?: { count: number; oldest?: string } | null;   // unread job-matched inbound email
   today: string;             // Alaska YYYY-MM-DD
@@ -73,7 +74,7 @@ export interface BriefInput {
 }
 
 /** One SMS-sized morning digest: attention lines + up to 3 questions. */
-export function buildBrief({ projects, boardJobs, portalWaiting, emailsWaiting = null, today, pretty, budgetThreshold = 0.9 }: BriefInput) {
+export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWaiting, emailsWaiting = null, today, pretty, budgetThreshold = 0.9 }: BriefInput) {
   const jobName = (p: Blob) => String(p.customer || p.address || "job");
   const since = (iso: string) => daysBefore(today, iso);
   const lines: string[] = [];
@@ -127,6 +128,16 @@ export function buildBrief({ projects, boardJobs, portalWaiting, emailsWaiting =
   // 📅 board slips + materials not ordered near start
   const late = boardJobs.filter((j) => !j.isMilestone && j.targetDate && j.targetDate < today && (j.stage || "lead") !== "done");
   if (late.length) lines.push(`📅 past target: ${late.slice(0, 3).map((j) => j.title || j.customer || "job").join(", ")}${late.length > 3 ? ` +${late.length - 3}` : ""}`);
+  // 📉 behind baseline — the live schedule re-dates a slipping phased job to
+  // finish >= today (its phases drive targetDate), so it's never "past
+  // target"; the Gantt baseline snapshot is the reference that exposes it
+  const baseJobs = (boardBaseline && (boardBaseline.jobs as Blob)) || null;
+  if (baseJobs) {
+    const slipping = boardJobs.filter((j) => !j.isMilestone && (j.stage || "lead") !== "done" && j.targetDate
+      && baseJobs[j.id]?.finish && String(j.targetDate) > String(baseJobs[j.id].finish) && !late.includes(j));
+    if (slipping.length) lines.push(`📉 behind baseline: ${slipping.slice(0, 3)
+      .map((j) => `${j.title || j.customer || "job"} (→${j.targetDate})`).join(" · ")}${slipping.length > 3 ? ` +${slipping.length - 3}` : ""}`);
+  }
   const noMat = boardJobs.filter((j) => !j.isMilestone && j.materials === "none" && j.startDate &&
     j.startDate >= today && j.startDate <= plusDays(today, 3) && ["scheduled", "in_progress"].includes(j.stage));
   if (noMat.length) lines.push(`🧱 starts soon, materials not ordered: ${noMat.slice(0, 3).map((j) => j.title || j.customer || "job").join(", ")}`);

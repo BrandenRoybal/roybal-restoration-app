@@ -244,7 +244,9 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
     desc:
       "Update ONE existing Job Board job. params: { job: string — the job's title or customer (or its exact id), enough to match exactly one job, " +
       "stage?: 'lead'|'scheduled'|'in_progress'|'on_hold'|'final'|'done', startDate?: 'YYYY-MM-DD' — pins the start and the engine reflows dependent jobs, " +
-      "targetDate?: 'YYYY-MM-DD' — sets the job's duration so it finishes that day, assignedCrew?: string[] — crew member names; REPLACES the whole crew list, " +
+      "targetDate?: 'YYYY-MM-DD' — sets the job's duration so it finishes that day (NOTE: on a job WITH phases the live engine re-derives the finish from " +
+      "phase progress, so a typed targetDate won't stick — manage those via phaseUpdate / phase estimates instead), assignedCrew?: string[] — crew member " +
+      "names; REPLACES the whole crew list (members kept in the list keep any dated assignment windows), " +
       "materialStatus?: 'none'|'ordered'|'received', notes?: string — appended to the job's notes, never overwrites }. Include only the fields being changed.",
   },
   jobCreate: {
@@ -261,15 +263,26 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
   },
   crewSwap: {
     desc:
-      "Move crew from one job to another for ONE day (a per-day override — the rest of each job keeps its planned crew). params: { fromJob: string, " +
-      "toJob: string — each a title or customer matching exactly one job, crewMembers: string[] — names to move, date: 'YYYY-MM-DD' }. " +
-      "For a permanent reassignment use boardWrite's assignedCrew instead.",
+      "Move crew from one job to another. params: { fromJob: string, toJob: string — each a title or customer matching exactly one job, " +
+      "crewMembers: string[] — names to move, date: 'YYYY-MM-DD', scope?: 'day' (default) | 'forward' }. scope 'day' = that ONE day only (a per-day " +
+      "override — the rest of each job keeps its planned crew). scope 'forward' = from that day through the END of each job (cycling a guy off a long " +
+      "job onto another; the days he already worked stay on his record, and remaining work re-sizes for the new crews). " +
+      "For a start-to-finish reassignment use boardWrite's assignedCrew instead.",
   },
   hoursWrite: {
     desc:
       "Log crew hours on a board job's time log. params: { job: string — job title or customer, crewMember: string — the crew member's name, " +
-      "date?: 'YYYY-MM-DD' (omit for today), hours: number, trade?: string — e.g. 'demo'|'framing'|'drying'|'general', notes?: string — what the work was }. " +
-      "The confirmation reports the job's new logged-hours total.",
+      "date?: 'YYYY-MM-DD' (omit for today), hours: number, phase?: string — a phase name on that job to pin the hours to (omit and the engine places " +
+      "them by date and phase completions, same as QuickBooks Time hours), trade?: string — e.g. 'demo'|'framing'|'drying'|'general', notes?: string }. " +
+      "The confirmation reports the job's new logged-hours total (manual + linked QuickBooks Time).",
+  },
+  phaseUpdate: {
+    desc:
+      "Mark a job's phase complete (or reopen it) — THE write that moves the real schedule: logged hours drive each phase's progress, an unfinished " +
+      "phase keeps sliding the job's finish date out day by day, and marking it done stops the slide, re-flows the job's remaining phases from its " +
+      "completion date, and pushes/pulls every linked job. params: { job: string — title or customer matching exactly one job, phase: string — the " +
+      "phase's name, done?: boolean (default true; false reopens), completedOn?: 'YYYY-MM-DD' — backdate if it actually wrapped earlier (default today) }. " +
+      "The confirmation reports the job's new projected finish and how many linked jobs re-flowed.",
   },
   adjusterEmail: {
     desc:
@@ -327,7 +340,7 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
    at most a narrow crew-notify set — never customer sends or board writes. */
 export const ACTIONSETS: Record<string, string[]> = {
   field: ["sendText"],
-  board: ["sendText", "boardWrite", "jobCreate", "crewAvailabilityWrite", "crewSwap", "hoursWrite"],
+  board: ["sendText", "boardWrite", "jobCreate", "crewAvailabilityWrite", "crewSwap", "hoursWrite", "phaseUpdate"],
   admin: ["sendText", "adjusterEmail", "portalReply", "emailSend",
     "estimateWrite", "invoiceCreate", "invoiceStatusUpdate", "changeOrderWrite", "receiptLog"],
 };

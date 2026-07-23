@@ -19,8 +19,9 @@ import {
   saveJob, saveCrewMember, saveTimeEntry, currentEmail,
 } from "./data.js";
 import {
-  computeSchedule, workDaysBetween, layoutSubtasks,
-  effCrew, listDays, dayCrewPull, dayCrewPush,
+  computeSchedule, workDaysBetween, layoutSubtasksLive, phaseActuals,
+  scopedEntriesOfJob, entriesOfJob, buildLiveOpts,
+  effCrew, spanCrew, spanCrewPull, spanCrewPush, listDays, dayCrewPull, dayCrewPush,
 } from "./schedule.js";
 
 const jobName = (j) => String(j.title || j.customer || "Job");
@@ -78,17 +79,29 @@ function jobActiveOn(j, iso) {
   if (t) return iso === t;
   return false;
 }
-/* the roster a day's override applies against: the phase active that day for
-   phase-staffed jobs, otherwise the job's own crew (mirrors board.js jobSlotOn) */
+/* live schedule opts: per-phase logged hours + today, so assistant writes
+   reflow the SAME reality-aware schedule the board shows (shared join +
+   hoursFrom scope live in schedule.js — one rule for every lane) */
+const liveOpts = (jobs, settings) => buildLiveOpts(jobs, cachedEntries(), settings, todayISO());
+/* a phased job's phases laid out against reality — same lens as the board */
+function liveRowsOf(j, settings) {
+  if (!(j.subtasks || []).some((st) => (st.crewIds || []).length || st.name) || !j.startDate) return null;
+  return layoutSubtasksLive(j, j.startDate, settings,
+    phaseActuals(j, scopedEntriesOfJob(j, cachedEntries()), settings), todayISO());
+}
+/* the roster a day's override applies against: the phase REALLY active that
+   day for phase-staffed jobs (live layout — a delayed phase is still active),
+   otherwise the job's own crew; assignment spans filter either way
+   (mirrors board.js jobSlotOn + baseCrewOn) */
 function baseCrewOn(j, day, settings) {
-  const subs = j.subtasks || [];
-  if (subs.some((st) => (st.crewIds || []).length) && j.startDate) {
-    const L = layoutSubtasks(subs, j.startDate, settings);
+  let base = (j.crewIds || []).slice();
+  const L = (j.subtasks || []).some((st) => (st.crewIds || []).length) ? liveRowsOf(j, settings) : null;
+  if (L) {
     let act = L.find((x) => day >= x.start && day <= x.finish);
     if (!act) act = [...L].reverse().find((x) => x.start <= day) || L[L.length - 1];
-    if (act) return (act.sub.crewIds || []).slice();
+    if (act) base = (act.sub.crewIds || []).slice();
   }
-  return (j.crewIds || []).slice();
+  return spanCrew(base, j.crewSpans, day);
 }
 const onJobThatDay = (j, day, cid, settings) =>
   effCrew(baseCrewOn(j, day, settings), (j.dayCrew || {})[day]).includes(cid);
@@ -99,7 +112,8 @@ const snap = (x) => `${x.startDate || ""}|${x.endDate || ""}|${x.targetDate || "
    on the PRIMARY job aborts loudly, secondary reflow conflicts self-heal on
    the next pull (the server copy wins — guarded writes never clobber) */
 async function reflowAndSave(jobs, before, primary, refresh) {
-  try { computeSchedule(jobs, cachedSettings()); } catch (_) { /* saved dates still work */ }
+  const s = cachedSettings();
+  try { computeSchedule(jobs, s, liveOpts(jobs, s)); } catch (_) { /* saved dates still work */ }
   const changed = jobs.filter((x) => x.id === primary.id || before.get(x.id) !== snap(x));
   for (const c of changed) {
     const r = await saveJob(c);
@@ -134,6 +148,13 @@ async function boardWrite(params, refresh) {
     const r = resolveCrewNames(params.assignedCrew);
     if (r.err) return { ok: false, detail: r.err };
     j.crewIds = r.ids;
+    // drop spans only for members leaving the job — a continuing member's
+    // deliberate date window (Crew board "This day on") survives a routine
+    // crew edit; removed members' spans are dead keys
+    if (j.crewSpans) {
+      for (const k of Object.keys(j.crewSpans)) if (!r.ids.includes(k)) delete j.crewSpans[k];
+      if (!Object.keys(j.crewSpans).length) delete j.crewSpans;
+    }
     did.push(`crew → ${r.members.map((c) => c.name).join(", ") || "nobody"}`);
   }
   if (params.notes) {
@@ -275,24 +296,38 @@ async function crewSwap(params, refresh) {
 
   const s = cachedSettings();
   const from = fm.hit, to = tm.hit;
-  // a day-scoped swap only means something while both jobs are running that day
-  if (!jobActiveOn(from, date)) return { ok: false, detail: `${jobName(from)} isn't running on ${date}` };
-  if (!jobActiveOn(to, date)) return { ok: false, detail: `${jobName(to)} isn't running on ${date} — pin its dates first (boardWrite)` };
-  const notOn = r.members.filter((c) => !onJobThatDay(from, date, c.id, s));
+  // "forward" = from this day through the end of each job (assignment spans —
+  // the Crew board's "This day on" scope); default = that ONE day only
+  const forward = params.scope === "forward" || params.scope === "fromDayOn";
+  if (!forward) {
+    // a day-scoped swap only means something while both jobs are running that day
+    if (!jobActiveOn(from, date)) return { ok: false, detail: `${jobName(from)} isn't running on ${date}` };
+    if (!jobActiveOn(to, date)) return { ok: false, detail: `${jobName(to)} isn't running on ${date} — pin its dates first (boardWrite)` };
+  } else if (to.targetDate && to.targetDate < date) {
+    return { ok: false, detail: `${jobName(to)} already ends ${to.targetDate} — nothing left to join from ${date}` };
+  }
+  const notOn = r.members.filter((c) => !onJobThatDay(from, date, c.id, s) && !(forward && (from.crewIds || []).includes(c.id)));
   if (notOn.length)
     return { ok: false, detail: `${notOn.map((c) => c.name).join(", ")} ${notOn.length === 1 ? "isn't" : "aren't"} on ${jobName(from)} that day` };
 
+  const before = new Map(jobs.map((x) => [x.id, snap(x)]));
   for (const c of r.members) {
-    dayCrewPull(from, date, c.id, baseCrewOn(from, date, s));
-    dayCrewPush(to, date, c.id, baseCrewOn(to, date, s));
+    if (forward) {
+      spanCrewPull(from, date, c.id);
+      spanCrewPush(to, date, c.id, s, liveRowsOf(to, s));
+    } else {
+      dayCrewPull(from, date, c.id, baseCrewOn(from, date, s));
+      dayCrewPush(to, date, c.id, baseCrewOn(to, date, s));
+    }
   }
   const r1 = await saveJob(from);
   if (r1 && r1.conflict) return { ok: false, detail: CONFLICT_MSG };
   const r2 = await saveJob(to);
   if (r2 && r2.conflict)
     return { ok: false, detail: `${jobName(from)} updated, but ${jobName(to)} changed on another device — redo the swap` };
-  if (refresh) refresh();
-  return { ok: true, detail: `${r.members.map((c) => c.name).join(", ")} → ${jobName(to)} for ${date} (from ${jobName(from)}; that day only)` };
+  if (forward) await reflowAndSave(jobs, before, from, refresh);   // crew change re-sizes remaining work
+  else if (refresh) refresh();
+  return { ok: true, detail: `${r.members.map((c) => c.name).join(", ")} → ${jobName(to)} ${forward ? `from ${date} through the end (from ${jobName(from)}; their days already worked stay)` : `for ${date} (from ${jobName(from)}; that day only)`}` };
 }
 
 /* ---- hoursWrite: time entry + running job total ---- */
@@ -305,17 +340,55 @@ async function hoursWrite(params) {
   if (cm.err) return { ok: false, detail: cm.err };
   const date = isoOr(params.date) || todayISO();
   const trade = String(params.trade || "").slice(0, 40);
+  // optionally pin the hours to a named phase (else the engine auto-places
+  // them by date + phase completions, same as QuickBooks Time rows)
+  let phaseId = "", phaseName = "";
+  if (params.phase) {
+    const pm = matchOne((jm.hit.subtasks || []).filter((st) => st && st.name), params.phase, (st) => [String(st.name || "")], "phase");
+    if (pm.err) return { ok: false, detail: pm.err };
+    phaseId = pm.hit.id; phaseName = pm.hit.name;
+  }
   await saveTimeEntry({
     id: uid(), jobId: jm.hit.id, crewId: cm.hit.id, date, hours,
     ...(trade ? { trade } : {}),
+    ...(phaseId ? { phaseId } : {}),
     note: String(params.notes ?? params.note ?? "").slice(0, 200), enteredBy: currentEmail(),
   });
-  const total = cachedEntries().filter((e) => e.jobId === jm.hit.id)
+  // the SAME hour join the board cards use (manual + linked QB, hoursFrom scoped)
+  const total = scopedEntriesOfJob(jm.hit, cachedEntries())
     .reduce((a, e) => a + (Number(e.hours) || 0), 0);
   return {
     ok: true,
-    detail: `${hours}h — ${cm.hit.name} on ${jobName(jm.hit)} (${date}${trade ? `, ${trade}` : ""})` +
+    detail: `${hours}h — ${cm.hit.name} on ${jobName(jm.hit)} (${date}${trade ? `, ${trade}` : ""}${phaseName ? `, phase: ${phaseName}` : ""})` +
       ` · job total ${Math.round(total * 10) / 10}h`,
+  };
+}
+
+/* ---- phaseUpdate: mark a phase done / reopen it — THE write that moves the
+   real schedule (a done phase stops sliding; successors and every linked
+   job re-flow from its completion date) ---- */
+async function phaseUpdate(params, refresh) {
+  const jobs = cachedJobs();
+  const m = findJob(jobs, params.job);
+  if (m.err) return { ok: false, detail: m.err };
+  const j = m.hit;
+  const subs = (j.subtasks || []).filter((st) => st && st.name);
+  if (!subs.length) return { ok: false, detail: `${jobName(j)} has no phases` };
+  const pm = matchOne(subs, params.phase, (st) => [String(st.name || "")], "phase");
+  if (pm.err) return { ok: false, detail: pm.err };
+  const st = pm.hit;
+  const done = params.done !== false;
+  if (done && params.completedOn && !isoOr(params.completedOn))
+    return { ok: false, detail: "completedOn must be a YYYY-MM-DD date" };
+  const before = new Map(jobs.map((x) => [x.id, snap(x)]));
+  if (done) { st.done = true; st.completedOn = isoOr(params.completedOn) || todayISO(); }
+  else { st.done = false; delete st.completedOn; }
+  const r = await reflowAndSave(jobs, before, j, refresh);
+  if (r.conflict) return { ok: false, detail: CONFLICT_MSG };
+  return {
+    ok: true,
+    detail: `${jobName(j)}: ${st.name} ${done ? `marked done (${st.completedOn})` : "reopened"} — projected finish now ${j.targetDate || "unset"}` +
+      (r.reflowed > 0 ? ` (+${r.reflowed} linked job${r.reflowed === 1 ? "" : "s"} reflowed)` : ""),
   };
 }
 
@@ -329,6 +402,7 @@ export function runBoardAction(a, refresh) {
     case "crewAvailabilityWrite": return crewAvailabilityWrite(p, refresh);
     case "crewSwap": return crewSwap(p, refresh);
     case "hoursWrite": return hoursWrite(p);
+    case "phaseUpdate": return phaseUpdate(p, refresh);
     // legacy chip names (proposals still sitting in open transcripts)
     case "moveJob": return boardWrite({ job: p.job, startDate: p.newStart }, refresh);
     case "logHours": return hoursWrite(p);
