@@ -31,4 +31,4 @@ export const QBO_CLIENT_ID = "";
 // live only in the gmail-proxy Edge Function's secrets. Register the admin
 // app's URL as an authorized redirect URI AND set it as GMAIL_REDIRECT_URI
 // on the function.
-export const GMAIL_CLIENT_ID = "";
+export const GMAIL_CLIENT_ID = "260466922838-irgha21kjnuvsa1u3kl4ur19nuqkfbv0.apps.googleusercontent.com";
