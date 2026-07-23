@@ -78,6 +78,26 @@ export function buildBrief({ projects, boardJobs, portalWaiting, today, pretty, 
   const lines: string[] = [];
   const questions: string[] = [];
 
+  // 💰 payments QuickBooks recorded since yesterday (the nightly payment
+  // loop stamps method:"QuickBooks" — hand-recorded payments were the
+  // owner's own taps, no need to tell them what they did)
+  const received: { label: string; amt: number; full: boolean }[] = [];
+  for (const p of projects) {
+    for (const inv of p.invoices || []) {
+      for (const pay of inv?.payments || []) {
+        if (pay?.method !== "QuickBooks" || !pay.date) continue;
+        const d = since(pay.date);
+        if (d == null || d > 1 || d < 0) continue;
+        received.push({ label: `${inv.invoiceNo || "invoice"} ${jobName(p)}`, amt: num(pay.amount), full: inv.status === "paid" });
+      }
+    }
+  }
+  if (received.length) {
+    lines.push(`💰 received: ` + received.slice(0, 3)
+      .map((r) => `${r.label} ${money(r.amt)}${r.full ? " — PAID IN FULL" : ""}`).join(" · ") +
+      (received.length > 3 ? ` +${received.length - 3} more` : ""));
+  }
+
   // 💵 overdue invoices (chip-tracked lifecycles only — a hand-typed invoice
   // joins the chase the first time its status is set)
   const overdue: { label: string; days: number; bal: number }[] = [];

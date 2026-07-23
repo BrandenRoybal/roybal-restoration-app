@@ -61,6 +61,20 @@ test("stale jobs become questions, capped at 3 questions total", () => {
   assert.ok(qCount <= 3);
 });
 
+test("payments the loop recorded yesterday/today show as 💰 received", () => {
+  const b = buildBrief({ ...base, projects: [proj({
+    invoices: [
+      { invoiceNo: "INV-1", status: "paid", payments: [{ amount: 5000, date: "2026-07-23", method: "QuickBooks" }] },
+      { invoiceNo: "INV-2", status: "partially_paid", payments: [{ amount: 1200.5, date: "2026-07-22", method: "QuickBooks" }] },
+      { invoiceNo: "INV-3", status: "paid", payments: [{ amount: 900, date: "2026-07-10", method: "QuickBooks" }] },   // old → ignored
+      { invoiceNo: "INV-4", status: "paid", payments: [{ amount: 700, date: "2026-07-23", method: "check" }] },        // hand-recorded → ignored
+    ],
+  })] });
+  assert.match(b.text, /💰 received: INV-1 Henderson \$5,000 — PAID IN FULL/);
+  assert.match(b.text, /INV-2 Henderson \$1,201/);   // brief money() rounds to whole dollars
+  assert.doesNotMatch(b.text, /INV-3|INV-4/);
+});
+
 test("text stays under the 1200-char cap even with many flags", () => {
   const many = Array.from({ length: 40 }, (_, i) => proj({
     customer: "Job" + i,

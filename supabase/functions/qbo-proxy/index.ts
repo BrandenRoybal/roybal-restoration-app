@@ -17,16 +17,27 @@
  *                  + customer + job reference, and stores the returned QBO
  *                  ids back into the project blob (offline-first source of
  *                  truth stays on the device / field_projects sync).
+ *   pullPayments — THE PAYMENT LOOP (cron-only: x-cron-secret, never the
+ *                  browser). Reads the Balance of every pushed invoice from
+ *                  QuickBooks, records new payments on the app's copy
+ *                  (payments[] + previousPayments + status forward to
+ *                  partially_paid/paid — rules in ./payments.ts, pure +
+ *                  unit-tested), and writes the project back REV-GUARDED so
+ *                  a concurrent crew edit is never clobbered (a conflict
+ *                  just retries the next night). One capture_events row per
+ *                  run; the morning brief reads the recorded payments.
  *
  * Secrets: QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_REDIRECT_URI
  * Optional: QBO_BASE_URL (default production; sandbox:
  *           https://sandbox-quickbooks.api.intuit.com)
+ * pullPayments also needs: CRON_SECRET (already set for the other crons)
  *
  * Deploy: supabase functions deploy qbo-proxy
  */
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { applyBalanceToInvoice, trackedInvoices, type Inv } from "./payments.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -251,6 +262,90 @@ serve(async (req) => {
       const result = await qboFetch(realmId, accessToken, "/invoice", { method: "POST", body: JSON.stringify(payload) });
       const q = result.Invoice as { Id: string; DocNumber: string; TotalAmt: number };
       return ok({ qboInvoiceId: String(q.Id), docNumber: q.DocNumber, total: q.TotalAmt, updated: !!payload.Id });
+    }
+
+    // ── pullPayments (cron only) ──────────────────────────────────────────
+    if (action === "pullPayments") {
+      const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
+      if (!cronSecret || req.headers.get("x-cron-secret") !== cronSecret)
+        return err("pullPayments is cron-only", 401);
+
+      const akToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/Anchorage" });
+      const { data: rows, error: readErr } = await supabase
+        .from("field_projects").select("id, data").eq("deleted", false).limit(500);
+      if (readErr) return err(`read field_projects failed: ${readErr.message}`, 500);
+
+      // which invoices are worth asking about, and where they live
+      type Slot = { rowId: string; data: Inv; inv: Inv };
+      const slots: Slot[] = [];
+      for (const row of rows ?? []) {
+        if (!row?.data) continue;
+        for (const inv of trackedInvoices(row.data as Inv)) slots.push({ rowId: row.id as string, data: row.data as Inv, inv });
+      }
+      if (!slots.length) return ok({ checked: 0, updated: 0, payments: [] });
+
+      const { accessToken, realmId } = await getConnection(supabase);
+      const balances = new Map<string, { totalAmt: number; balance: number }>();
+      const ids = [...new Set(slots.map((s) => String(s.inv.qboInvoiceId)))];
+      for (let i = 0; i < ids.length; i += 40) {
+        const chunk = ids.slice(i, i + 40).map((id) => `'${escapeQ(id)}'`).join(",");
+        const res = await qboQuery(realmId, accessToken, `select Id, TotalAmt, Balance from Invoice where Id in (${chunk})`);
+        for (const q of ((res.QueryResponse as { Invoice?: { Id: string; TotalAmt: number; Balance: number }[] })?.Invoice ?? []))
+          balances.set(String(q.Id), { totalAmt: Number(q.TotalAmt) || 0, balance: Number(q.Balance) || 0 });
+        // deleted in QBO → no row comes back; we simply leave the app copy alone
+      }
+
+      // apply per project, then write back rev-guarded (the field sync idiom:
+      // a stale write matches 0 rows and we just try again the next night)
+      const events: { job: string; invoiceNo: string; amount: number; paidInFull: boolean }[] = [];
+      let updated = 0, conflicts = 0;
+      const byRow = new Map<string, Slot[]>();
+      for (const s of slots) byRow.set(s.rowId, [...(byRow.get(s.rowId) ?? []), s]);
+
+      for (const [rowId, rowSlots] of byRow) {
+        const data = rowSlots[0].data;
+        let rowChanged = false;
+        const nextInvoices = (data.invoices as Inv[]).map((inv: Inv) => {
+          const qbo = inv?.qboInvoiceId ? balances.get(String(inv.qboInvoiceId)) : undefined;
+          if (!qbo) return inv;
+          const r = applyBalanceToInvoice(inv, qbo, akToday);
+          if (!r || !r.changed) return inv;
+          rowChanged = true;
+          if (r.event) events.push({
+            job: String(data.customer || data.address || "job"),
+            invoiceNo: String(inv.invoiceNo || inv.qboDocNumber || "invoice"),
+            amount: r.event.amount, paidInFull: r.event.paidInFull,
+          });
+          return r.inv;
+        });
+        if (!rowChanged) continue;
+        const base = Number((data as Inv).rev) || 0;
+        const next = { ...data, invoices: nextInvoices, rev: base + 1, updatedAt: new Date().toISOString() };
+        const guard = base > 0 ? `data->>rev=eq.${base}` : `or=(data->>rev.is.null,data->>rev.eq.0)`;
+        const patch = await fetch(
+          `${Deno.env.get("SUPABASE_URL")}/rest/v1/field_projects?id=eq.${encodeURIComponent(rowId)}&${guard}`, {
+            method: "PATCH",
+            headers: {
+              apikey: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+              Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!}`,
+              "Content-Type": "application/json",
+              Prefer: "return=representation",
+            },
+            body: JSON.stringify({ data: next }),
+          });
+        const landed = patch.ok && ((await patch.json().catch(() => [])) as unknown[]).length > 0;
+        if (landed) updated++; else conflicts++;
+      }
+
+      // audit envelope — same ledger as every other automated organ
+      await supabase.from("capture_events").insert([{
+        source_type: "qbo_payments", form_key: "paymentPull", captured_by: "qbo-payment-loop",
+        status: "extracted", processed_at: new Date().toISOString(),
+        raw_payload: { checked: slots.length, updated, conflicts },
+        result: { payments: events.slice(0, 50) },
+      }]).then(() => {}, () => { /* the sync itself matters more than its receipt */ });
+
+      return ok({ checked: slots.length, updated, conflicts, payments: events });
     }
 
     return err(`Unknown action: ${action}`, 404);
