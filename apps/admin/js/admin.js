@@ -10,6 +10,7 @@ import { isSignedIn, signIn, signOut, currentEmail } from "../../js/supa.js";
 import { startSync, syncNow } from "../../js/sync.js";
 import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
+import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
 import { messagesPanel } from "./messages.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
@@ -46,11 +47,15 @@ function boot() {
   if (isSignedIn()) {
     startSyncUI();
     renderDashboard();
-    // If Intuit just redirected back with an OAuth code, finish the exchange.
-    // QBO callbacks carry a realmId; TSheets (QB Time) callbacks don't.
-    handleQboCallback().then((didQbo) => {
-      if (didQbo) return renderDashboard();
-      handleQbCallback().then((did) => { if (did) renderDashboard(); });
+    // If an OAuth provider just redirected back with a code, finish the
+    // exchange. Google callbacks carry the gm- state prefix; QBO callbacks
+    // carry a realmId; TSheets (QB Time) callbacks have neither.
+    handleGmailCallback().then((didGmail) => {
+      if (didGmail) return renderDashboard();
+      handleQboCallback().then((didQbo) => {
+        if (didQbo) return renderDashboard();
+        handleQbCallback().then((did) => { if (did) renderDashboard(); });
+      });
     });
   } else renderLogin();
 }
@@ -117,7 +122,7 @@ async function renderDashboard() {
     kpi(drying, "Drying in progress"),
     kpi(attention, "Need attention (7-day equip.)", attention > 0)));
 
-  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel(), messagesPanel());
+  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel(), gmailPanel(), messagesPanel());
 
   const search = h("input", { type: "search", placeholder: "Search customer, address, claim #…", value: filterText });
   search.addEventListener("input", () => { filterText = search.value.toLowerCase(); paintTable(); });

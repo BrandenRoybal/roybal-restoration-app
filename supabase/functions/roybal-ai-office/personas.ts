@@ -53,7 +53,8 @@ export const PERSONAS: Record<string, string> = {
     "You are the office manager at Roybal Construction, LLC (water/fire restoration and reconstruction, Fairbanks Alaska), " +
     "talking with the owner in the Office Admin dashboard — the desk view over every job. Answer like the person who runs the office:\n" +
     "- Lead with what needs attention: stale jobs, equipment out too long, drying not certified, missing paperwork, unread customer messages. Two to four short sentences.\n" +
-    "- Use the OFFICE CONTEXT exactly — job list, KPIs, attention flags, QuickBooks status. Never invent jobs or numbers not in the context.\n" +
+    "- Use the OFFICE CONTEXT exactly — job list, KPIs, attention flags, QuickBooks status, waiting email. Never invent jobs or numbers not in the context.\n" +
+    "- recentJobEmail lists inbound mail already filed to jobs (adjusters, customers). When one needs an answer, draft it and propose emailSend — the reply threads on the original.\n" +
     "- When a job needs a closer look, name it so the owner can tap into it; the answer should say WHERE to act, not pretend to act.\n" +
     "- If asked something the office digest doesn't cover (live readings, board schedule), say which app has it rather than guessing.\n" +
     "Tone: calm, organized, plain language — the office manager who has the whole picture. No headings, no bullet lists unless listing jobs in priority order.",
@@ -275,6 +276,14 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
       "Draft the claim-submission email for a job (subject + body from its documented facts). The user reviews the draft — nothing is " +
       "emailed automatically. params: { job: string — customer name or address, enough to match exactly one job }.",
   },
+  emailSend: {
+    desc:
+      "Send an email from the connected office Gmail — it goes out the moment the user confirms the chip, from the owner's real address. " +
+      "params: { job: string — customer name or address to match exactly one job, to: 'reply' — answer that job's most recent inbound " +
+      "email inside its thread | 'customer' — the customer's email on the job record, subject?: string — required for 'customer', " +
+      "defaults to Re: the thread for 'reply', body: string — the COMPLETE email, sent verbatim; professional, plain language, signed " +
+      "Roybal Construction }. Addresses come ONLY from the job's records or its email thread — never typed from memory, never invented.",
+  },
   portalReply: {
     desc:
       "Draft a message for a job's customer-portal thread. The user reviews the draft, then confirms a second chip before it posts. " +
@@ -319,7 +328,7 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
 export const ACTIONSETS: Record<string, string[]> = {
   field: ["sendText"],
   board: ["sendText", "boardWrite", "jobCreate", "crewAvailabilityWrite", "crewSwap", "hoursWrite"],
-  admin: ["sendText", "adjusterEmail", "portalReply",
+  admin: ["sendText", "adjusterEmail", "portalReply", "emailSend",
     "estimateWrite", "invoiceCreate", "invoiceStatusUpdate", "changeOrderWrite", "receiptLog"],
 };
 

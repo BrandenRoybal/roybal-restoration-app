@@ -23,3 +23,12 @@ export const QB_TIME_CLIENT_ID = "3902ee19a693773d69dd4a355e1f8984";
 // live only in the qbo-proxy Edge Function's secrets. Register the admin
 // app's URL as the redirect URI AND set it as QBO_REDIRECT_URI on the function.
 export const QBO_CLIENT_ID = "";
+
+// Gmail OAuth client id — PUBLIC (safe to ship). Enables the email lane:
+// job-matched inbox pull + confirm-chip sends from the office mailbox.
+// Create a Google Cloud OAuth "Web application" client (Gmail API enabled,
+// consent screen Internal) and fill this in; the Client Secret and tokens
+// live only in the gmail-proxy Edge Function's secrets. Register the admin
+// app's URL as an authorized redirect URI AND set it as GMAIL_REDIRECT_URI
+// on the function.
+export const GMAIL_CLIENT_ID = "";

@@ -78,14 +78,20 @@ serve(async (req: Request) => {
 
   try {
     const jwt = await signIn();
-    const [projRows, boardRows, portalWaiting] = await Promise.all([
+    const [projRows, boardRows, portalWaiting, emailRows] = await Promise.all([
       rest(jwt, "field_projects?select=id,data,updated_at&deleted=eq.false&limit=300"),
       rest(jwt, "coordination_jobs?select=id,data&deleted=eq.false&limit=300"),
       fetch(`${SUPABASE_URL}/rest/v1/portal_messages?select=id&direction=eq.in&read_by_office=eq.false`, {
         headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, Prefer: "count=exact", Range: "0-0" },
       }).then((r) => (r.ok ? Number((r.headers.get("content-range") || "").split("/")[1]) || 0 : null))
         .catch(() => null),
+      // job-matched unread email (the lane may not exist yet — degrade to null)
+      rest(jwt, "email_messages?select=received_at&direction=eq.in&read_by_office=eq.false&order=received_at.asc&limit=50")
+        .catch(() => null),
     ]);
+    const emailsWaiting = Array.isArray(emailRows)
+      ? { count: emailRows.length, oldest: emailRows[0] ? String(emailRows[0].received_at || "").slice(0, 10) : undefined }
+      : null;
     const projects: Blob[] = projRows
       .filter((r: Blob) => r?.data)
       .map((r: Blob) => ({ ...r.data, _rowUpdated: r.updated_at }));
@@ -94,7 +100,7 @@ serve(async (req: Request) => {
       .map((r: Blob) => r.data);
 
     const brief = buildBrief({
-      projects, boardJobs, portalWaiting,
+      projects, boardJobs, portalWaiting, emailsWaiting,
       today: akDate(), pretty: akPretty(), budgetThreshold: BUDGET_THRESHOLD,
     });
 
