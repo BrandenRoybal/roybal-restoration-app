@@ -92,9 +92,15 @@ export const Store = {
     });
   },
   /* opts.bump:false keeps the existing updatedAt; opts.quiet:true skips
-     listeners (used by sync when writing rows pulled from the server). */
+     listeners (used by sync when writing rows pulled from the server).
+     A bump is STRICTLY MONOTONIC: an edit in the same millisecond as the
+     previous save still advances updatedAt, so sync's dirty-check
+     (pushed[id] !== updatedAt) can never mistake a fresh edit for clean. */
   async put(project, opts = {}) {
-    if (opts.bump !== false) project.updatedAt = new Date().toISOString();
+    if (opts.bump !== false) {
+      const prev = Date.parse(project.updatedAt) || 0;
+      project.updatedAt = new Date(Math.max(Date.now(), prev + 1)).toISOString();
+    }
     const os = await tx("readwrite");
     return new Promise((res, rej) => {
       const r = os.put(project);

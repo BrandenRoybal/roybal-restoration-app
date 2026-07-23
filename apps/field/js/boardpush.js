@@ -190,21 +190,61 @@ async function fetchBoardRows() {
   return (await res.json()).filter((r) => r && r.id !== "__settings__");
 }
 
-/* ---------- pure: customer-name fallback match ----------
-   The coordinator's board jobs rarely carry the claim # and never the
-   fieldJobId until the first push — without this, a push would create a
-   DUPLICATE tile next to the job they already track. Only an unambiguous
-   single hit counts: active (not done), not a milestone, not already
-   linked to a different field job, customer or title equal (normalized). */
-export function matchCustomerRow(rows, project) {
-  const want = norm(project && project.customer);
-  if (!want) return null;
-  const hits = arr(rows).filter((r) => {
+/* ---------- pure: fuzzy identity matching ----------
+   The coordinator's hand-built tiles rarely say exactly what the field job
+   says: the tile is titled "Smith Rebuild" while the job's customer is
+   "John Smith", or the claim # only lives on one side. Exact-equality
+   matching missed those and every miss CREATED A DUPLICATE tile. */
+
+/* street addresses, normalized hard: "415 Birch Ln." == "415 birch lane" */
+const ADDR_NOISE = /\b(street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|circle|cir|way|place|pl|boulevard|blvd|highway|hwy|suite|ste|apt|unit|north|south|east|west|n|s|e|w)\b/g;
+export const normAddr = (s) => norm(s).replace(/[^a-z0-9 ]/g, " ").replace(ADDR_NOISE, "").replace(/\s+/g, " ").trim();
+
+/* names match on equality OR containment ("smith" ⊂ "john smith" /
+   "smith rebuild") — the contained side needs 5+ chars so "jo" never links */
+export const nameLike = (a, b) => {
+  a = norm(a).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  b = norm(b).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return (a.length >= 5 && b.includes(a)) || (b.length >= 5 && a.includes(b));
+};
+
+/* mitigation tiles (water/fire/mold) and build tiles (remodel/new build/
+   restoration) legitimately coexist for one customer — one claim often has
+   BOTH a mitigation tile and a rebuild tile. Never match across the groups.
+   A tile with no/other type (older hand-built ones) is compatible with both. */
+const MITIGATION_TYPES = new Set(["water", "fire", "mold"]);
+const BUILD_TYPES = new Set(["remodel", "new_build", "restoration"]);
+export const sameWorkGroup = (typeA, typeB) => {
+  const a = String(typeA || ""), b = String(typeB || "");
+  if (!(MITIGATION_TYPES.has(a) || BUILD_TYPES.has(a))) return true;
+  if (!(MITIGATION_TYPES.has(b) || BUILD_TYPES.has(b))) return true;
+  return MITIGATION_TYPES.has(a) === MITIGATION_TYPES.has(b);
+};
+
+/* every live tile this field job COULD be: right work group, not a
+   milestone, not done, not linked to a different field job, and the
+   customer/title name-matches OR the street address matches */
+export function looseCandidates(rows, project) {
+  const pAddr = normAddr(project && project.address);
+  const group = boardTypeFor(project || {});
+  return arr(rows).filter((r) => {
     const d = r && r.data;
     if (!d || d.isMilestone || d.stage === "done") return false;
     if (d.fieldJobId && d.fieldJobId !== project.id) return false;
-    return norm(d.customer) === want || norm(d.title) === want;
+    if (!sameWorkGroup(d.type, group)) return false;
+    if (nameLike(d.customer, project.customer) || nameLike(d.title, project.customer)) return true;
+    const dAddr = normAddr(d.address);
+    return !!pAddr && pAddr.length >= 4 && dAddr === pAddr;
   });
+}
+
+/* Only an UNAMBIGUOUS single hit counts — two lookalikes mean "don't guess"
+   (and the callers then skip tile creation rather than duplicate). */
+export function matchCustomerRow(rows, project) {
+  if (!norm(project && project.customer) && !norm(project && project.address)) return null;
+  const hits = looseCandidates(rows, project);
   return hits.length === 1 ? hits[0] : null;
 }
 
@@ -263,6 +303,119 @@ async function guardedWrite(id, base, next) {
   return { conflict: true, server: existing[0].data };
 }
 
+/* ============================================================
+   Duplicate healing — merge a field-created tile into the tile the
+   coordinator already built, losing NOTHING they built into it.
+   ============================================================ */
+export const STAGE_ORDER = ["lead", "scheduled", "in_progress", "on_hold", "final", "done"];
+const stageIdx = (s) => Math.max(0, STAGE_ORDER.indexOf(String(s)));
+const hasPhaseWork = (d) => arr(d && d.subtasks).some((st) => norm(st.name));
+const isMachineNotes = (s) => /^Pushed from the field app/.test(String(s || "").trim());
+
+/* ---------- pure: merge the duplicate INTO the hand-built tile ----------
+   `keep` is the coordinator's tile — its stage, dates, crew, deps, phases,
+   and settings all survive untouched. The dupe only ever FILLS BLANKS
+   (identity fields, contract value, dates the keeper never set), carries
+   its field link + actuals over, and a phase plan the keeper doesn't have
+   arrives as the standard fieldPlanProposal for the Board to reconcile —
+   the same reconcile path a plan push uses. Stage only ever moves FORWARD. */
+export function mergeBoardTiles(keep, dupe, nowISO) {
+  const out = { ...keep };
+  out.fieldJobId = keep.fieldJobId || dupe.fieldJobId || "";
+  for (const k of ["customer", "address", "phone", "claimNo", "title", "notBefore", "notBeforeLabel", "startDate", "targetDate", "pinnedStart"])
+    if (!norm(out[k]) && norm(dupe[k])) out[k] = dupe[k];
+  for (const k of ["contractValue", "estimatedHours", "billedToDate"])
+    if (!Number(out[k]) && Number(dupe[k])) out[k] = dupe[k];
+  if (!arr(out.crewIds).length && arr(dupe.crewIds).length) out.crewIds = [...dupe.crewIds];
+  if (!arr(out.deps).length && arr(dupe.deps).length) out.deps = arr(dupe.deps).filter((dp) => (dp && dp.predId) !== keep.id);
+  if (out.materials === "none" && dupe.materials && dupe.materials !== "none") out.materials = dupe.materials;
+  if (out.priority === "normal" && dupe.priority && dupe.priority !== "normal") out.priority = dupe.priority;
+  if (stageIdx(dupe.stage) > stageIdx(out.stage)) out.stage = dupe.stage;
+  if (!hasPhaseWork(out) && hasPhaseWork(dupe)) out.subtasks = arr(dupe.subtasks).map((st) => ({ ...st }));
+  else if (hasPhaseWork(out) && hasPhaseWork(dupe) && !out.fieldPlanProposal) {
+    out.fieldPlanProposal = dupe.fieldPlanProposal || {
+      phases: arr(dupe.subtasks).filter((st) => norm(st.name))
+        .map((st) => ({ name: st.name, estimatedHours: st.estimatedHours || "", lagDays: st.lagDays || 0 })),
+      assumptions: [], notBefore: dupe.notBefore || "", notBeforeLabel: dupe.notBeforeLabel || "",
+      from: dupe.fieldJobId || "", at: nowISO,
+    };
+  }
+  if (!out.fieldPlanProposal && dupe.fieldPlanProposal) out.fieldPlanProposal = dupe.fieldPlanProposal;
+  if (!out.fieldActuals && dupe.fieldActuals) out.fieldActuals = dupe.fieldActuals;
+  // human-typed notes on the dupe ride along; the machine boilerplate doesn't
+  if (norm(dupe.notes) && !isMachineNotes(dupe.notes) && !norm(out.notes).includes(norm(dupe.notes)))
+    out.notes = [out.notes, dupe.notes].filter((s) => norm(s)).join("\n");
+  out.updatedAt = nowISO;
+  return out;
+}
+
+/* ---------- pure: find (machine dupe, hand-built keeper) pairs ----------
+   A dupe is a tile the FIELD side created (fieldJobId + the machine notes
+   marker) sitting next to a tile the coordinator built by hand (never
+   field-linked). Pairing uses the same fuzzy identity rules as matching —
+   claim #, name, or address, within the same work group — and refuses to
+   guess: two possible keepers means no merge. */
+export function duplicateTilePairs(rows) {
+  const live = arr(rows).filter((r) => r && r.data && !r.data.isMilestone);
+  const dupes = live.filter((r) => r.data.fieldJobId && isMachineNotes(r.data.notes));
+  const keepers = live.filter((r) => !r.data.fieldJobId && !isMachineNotes(r.data.notes) && r.data.stage !== "done");
+  const pairs = [];
+  const used = new Set();
+  for (const dupe of dupes) {
+    const d = dupe.data;
+    const hits = keepers.filter((k) => {
+      if (used.has(k.id) || !sameWorkGroup(k.data.type, d.type)) return false;
+      const claimA = normClaim(d.claimNo), claimB = normClaim(k.data.claimNo);
+      if (claimA && claimB) return claimA === claimB;
+      if (nameLike(k.data.customer, d.customer) || nameLike(k.data.title, d.customer) ||
+          nameLike(k.data.title, d.title) || nameLike(k.data.customer, d.title)) return true;
+      const a = normAddr(d.address), b = normAddr(k.data.address);
+      return !!a && a.length >= 4 && a === b;
+    });
+    if (hits.length !== 1) continue;
+    used.add(hits[0].id);
+    pairs.push({ keep: hits[0], dupe });
+  }
+  return pairs;
+}
+
+/** Merge field-created duplicate tiles into the coordinator's hand-built
+    ones: survivor gets the union (guarded write), the dupe is tombstoned
+    (restorable — its data stays on the deleted row), dependencies pointing
+    at the dupe are re-pointed, and the spine link follows the survivor.
+    Fail-safe + re-entrancy-guarded; fires from the jobs list on load. */
+let _healing = false;
+export async function healBoardDuplicates(rows) {
+  if (_healing || !ready()) return 0;
+  _healing = true;
+  let merged = 0;
+  try {
+    for (const { keep, dupe } of duplicateTilePairs(rows)) {
+      const nowISO = new Date().toISOString();
+      const union = mergeBoardTiles(keep.data, dupe.data, nowISO);
+      const base = Number(keep.data.rev) || 0;
+      const r = await guardedWrite(keep.id, base, { ...union, rev: base + 1 });
+      if (r.conflict) continue;                        // coordinator mid-edit — next pass
+      await rest(`coordination_jobs?id=eq.${encodeURIComponent(dupe.id)}`, {
+        method: "PATCH", body: JSON.stringify({ deleted: true }),
+      });
+      for (const other of arr(rows)) {
+        if (!other || !other.data || other.id === keep.id || other.id === dupe.id) continue;
+        const deps = arr(other.data.deps);
+        if (!deps.some((dp) => dp && dp.predId === dupe.id)) continue;
+        const nd = deps.map((dp) => (dp && dp.predId === dupe.id ? { ...dp, predId: keep.id } : dp))
+          .filter((dp, i, a) => a.findIndex((x) => x && dp && x.predId === dp.predId) === i);
+        const ob = Number(other.data.rev) || 0;
+        try { await guardedWrite(other.id, ob, { ...other.data, deps: nd, rev: ob + 1 }); } catch (_) {}
+      }
+      if (union.fieldJobId) await linkSpine({ id: union.fieldJobId }, keep.id);
+      merged++;
+    }
+  } catch (_) { /* offline mid-loop — whatever merged stands */ }
+  _healing = false;
+  return merged;
+}
+
 /* Best-effort: record the board link on the unified_jobs spine row. */
 async function linkSpine(project, coordinationJobId) {
   try {
@@ -295,8 +448,17 @@ export async function pushPlanToBoard(project) {
     await linkSpine(project, row.id);
     return { mode, boardJobId: row.id };
   };
-  let out = await attempt(await findBoardRow(project));
-  if (!out) out = await attempt(await findBoardRow(project));   // one retry after a conflict
+  // Refuse to guess between lookalike tiles: creating "a second Smith"
+  // is exactly the duplicate bug this lookup exists to prevent.
+  const lookup = async () => {
+    const rows = await fetchBoardRows();
+    const row = boardRowFor(rows, project);
+    if (!row && looseCandidates(rows, project).length >= 2)
+      throw new Error("Two board tiles look like this job — put the claim # on the right one (or match its name) and try again.");
+    return row;
+  };
+  let out = await attempt(await lookup());
+  if (!out) out = await attempt(await lookup());   // one retry after a conflict
   if (!out) throw new Error("The board job changed while sending — try again.");
   return out;
 }
@@ -452,8 +614,12 @@ export async function ensureBoardTile(project) {
     if (!norm(project.customer) && !norm(project.address)) return { skipped: true };   // still a blank "+ New Job"
     const sig = JSON.stringify([project.customer, project.address, project.phone, project.claimNo, project.contractAmount]);
     if (_tileEnsured.get(project.id) === sig) return { unchanged: true };
-    const row = await findBoardRow(project);
+    const rows = await fetchBoardRows();
+    const row = boardRowFor(rows, project);
     if (!row) {
+      // ≥2 lookalike tiles: never guess, never create a duplicate — a claim #
+      // or an exact name on either side resolves it on a later visit
+      if (looseCandidates(rows, project).length >= 2) return { skipped: true };
       const job = boardJobFromProject(project, null, new Date().toISOString());
       const r = await guardedWrite(job.id, 0, job);
       if (r.conflict) return { skipped: true };

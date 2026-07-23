@@ -6,6 +6,7 @@ import {
   planPhases, boardJobFromProject, mergePlanIntoBoardJob,
   rollupActuals, historyDigest, phasesToSubRows, isoDateOnly, matchCustomerRow,
   boardRowFor, tileCandidates, tilesNeedingFieldFile, fieldSeedFromBoardJob,
+  nameLike, normAddr, sameWorkGroup, looseCandidates, mergeBoardTiles, duplicateTilePairs,
 } from "../js/boardpush.js";
 import { blankSubRow } from "../js/model.js";
 
@@ -245,5 +246,82 @@ const waterJob = boardJobFromProject({ id: "fp-w", customer: "Lima Wet", jobType
 ok("water job lands as the board's Water Mitigation type", waterJob.type === "water");
 ok("water job starts in Leads (no start date)", waterJob.stage === "lead");
 ok("plan-less tile carries no phases or hours", waterJob.subtasks.length === 0 && waterJob.estimatedHours === "");
+
+/* ============================================================
+   Duplicate prevention + healing
+   ============================================================ */
+
+/* ---------- fuzzy identity: the matching that stops duplicates ---------- */
+ok("nameLike: containment links 'Smith' to 'John Smith'", nameLike("Smith", "John Smith"));
+ok("nameLike: tile title 'Hebard Rebuild' links to customer 'Jeff Hebard' via last name", nameLike("Hebard Rebuild", "Hebard"));
+ok("nameLike: punctuation never blocks ('Smith — Kitchen')", nameLike("Smith — Kitchen", "smith kitchen"));
+ok("nameLike: short fragments never link ('Jo')", !nameLike("Jo", "John Smith"));
+ok("normAddr: '415 Birch Ln.' == '415 birch lane'", normAddr("415 Birch Ln.") === normAddr("415 birch lane"));
+ok("normAddr: different numbers stay different", normAddr("415 Birch Ln") !== normAddr("417 Birch Ln"));
+ok("work groups: water never matches remodel", !sameWorkGroup("water", "remodel"));
+ok("work groups: fire matches water (both mitigation)", sameWorkGroup("fire", "water"));
+ok("work groups: unknown/blank tile type is compatible with anything", sameWorkGroup("", "water") && sameWorkGroup("other", "remodel"));
+
+const fuzzyRows = [
+  mkRow("f1", { customer: "Jeff Hebard", title: "Hebard Rebuild", stage: "scheduled", type: "remodel" }),
+  mkRow("f2", { customer: "", title: "Diaz — 12 Spruce Ct", address: "12 Spruce Court", stage: "lead", type: "remodel" }),
+];
+ok("partial-name match finds the hand-built tile", matchCustomerRow(fuzzyRows, { id: "fp-1", customer: "Hebard", jobType: "construction", constructionType: "remodel" })?.id === "f1");
+ok("street-address match finds the tile when names differ", matchCustomerRow(fuzzyRows, { id: "fp-2", customer: "Ana Diaz Family Trust LLC totally different", address: "12 Spruce Ct.", jobType: "construction", constructionType: "remodel" })?.id === "f2");
+ok("a water job never matches a remodel tile (groups fenced)",
+  matchCustomerRow([mkRow("f3", { customer: "Jeff Hebard", stage: "scheduled", type: "remodel" })], { id: "fp-3", customer: "Jeff Hebard", jobType: "restoration" }) === null);
+ok("two lookalikes -> refuse to guess", matchCustomerRow([
+  fuzzyRows[0], mkRow("f4", { customer: "Jeff Hebard", title: "Hebard Garage", stage: "lead", type: "remodel" }),
+], { id: "fp-4", customer: "Hebard", jobType: "construction", constructionType: "remodel" }) === null);
+ok("looseCandidates surfaces every lookalike for the create-guard", looseCandidates([
+  fuzzyRows[0], mkRow("f4", { customer: "Jeff Hebard", title: "Hebard Garage", stage: "lead", type: "remodel" }),
+], { id: "fp-4", customer: "Hebard", jobType: "construction", constructionType: "remodel" }).length === 2);
+
+/* ---------- duplicateTilePairs: find (machine dupe, hand-built keeper) ---------- */
+const hand = mkRow("h1", {
+  id: "h1", customer: "Jeff Hebard", title: "Hebard Rebuild", stage: "in_progress", type: "remodel",
+  crewIds: ["c1", "c2"], startDate: "2026-07-01", targetDate: "2026-08-15", materials: "ordered", priority: "high",
+  subtasks: [{ id: "st1", name: "Framing", durationDays: 3, crewIds: ["c1"] }],
+  deps: [{ predId: "other-job", type: "FS", lagDays: 0 }],
+  notes: "Owner wants cedar trim", contractValue: "", claimNo: "", phone: "", rev: 6,
+});
+const machine = mkRow("m1", {
+  id: "m1", customer: "Hebard", title: "Hebard", stage: "lead", type: "remodel",
+  crewIds: [], subtasks: [{ id: "st9", name: "Demo", estimatedHours: 16, lagDays: 0, crewIds: [] }],
+  notes: "Pushed from the field app — WO 44", fieldJobId: "fp-9", claimNo: "CL-88", phone: "907-555-0101",
+  contractValue: 48000, fieldActuals: { Demo: 12 }, rev: 1,
+});
+const pairs = duplicateTilePairs([hand, machine]);
+ok("pairs a machine tile with its hand-built twin", pairs.length === 1 && pairs[0].keep.id === "h1" && pairs[0].dupe.id === "m1");
+ok("no pairing when the keeper is done", duplicateTilePairs([mkRow("h2", { ...hand.data, stage: "done" }), machine]).length === 0);
+ok("no pairing across work groups", duplicateTilePairs([mkRow("h3", { ...hand.data, type: "water" }), machine]).length === 0);
+ok("two possible keepers -> refuse to guess", duplicateTilePairs([
+  hand, mkRow("h4", { ...hand.data, id: "h4", title: "Hebard Garage" }), machine,
+]).length === 0);
+ok("two hand-built tiles alone never pair", duplicateTilePairs([hand, mkRow("h5", { ...hand.data, id: "h5" })]).length === 0);
+ok("claim # mismatch on both sides blocks a name match", duplicateTilePairs([
+  mkRow("h6", { ...hand.data, claimNo: "CL-1" }), mkRow("m2", { ...machine.data, claimNo: "CL-2" }),
+]).length === 0);
+
+/* ---------- mergeBoardTiles: nothing the coordinator built is lost ---------- */
+const mergedTile = mergeBoardTiles(hand.data, machine.data, NOW_ISO);
+ok("keeper's stage/dates/crew/materials/priority survive untouched",
+  mergedTile.stage === "in_progress" && mergedTile.startDate === "2026-07-01" && mergedTile.targetDate === "2026-08-15" &&
+  mergedTile.crewIds.join(",") === "c1,c2" && mergedTile.materials === "ordered" && mergedTile.priority === "high");
+ok("keeper's phases and deps survive untouched",
+  mergedTile.subtasks.length === 1 && mergedTile.subtasks[0].name === "Framing" && mergedTile.deps[0].predId === "other-job");
+ok("keeper's notes survive; machine boilerplate is not appended",
+  /cedar trim/.test(mergedTile.notes) && !/Pushed from the field app/.test(mergedTile.notes));
+ok("field link, claim #, phone and contract value fill the keeper's blanks",
+  mergedTile.fieldJobId === "fp-9" && mergedTile.claimNo === "CL-88" && mergedTile.phone === "907-555-0101" && mergedTile.contractValue === 48000);
+ok("field actuals carry over", mergedTile.fieldActuals && mergedTile.fieldActuals.Demo === 12);
+ok("the dupe's phase plan arrives as the standard proposal (never overwrites)",
+  mergedTile.fieldPlanProposal && mergedTile.fieldPlanProposal.phases[0].name === "Demo" && mergedTile.fieldPlanProposal.from === "fp-9");
+ok("stage only moves forward — a further-along dupe advances the keeper",
+  mergeBoardTiles({ ...hand.data, stage: "lead" }, { ...machine.data, stage: "scheduled" }, NOW_ISO).stage === "scheduled");
+const emptyKeeper = mergeBoardTiles({ id: "h9", stage: "scheduled", type: "remodel", crewIds: [], subtasks: [], notes: "", materials: "none", priority: "normal" }, machine.data, NOW_ISO);
+ok("a phase-less keeper takes the dupe's phases directly", emptyKeeper.subtasks.length === 1 && emptyKeeper.subtasks[0].name === "Demo");
+ok("human notes typed on the dupe ride along", /WO 55 gate code 1234/.test(
+  mergeBoardTiles(hand.data, { ...machine.data, notes: "WO 55 gate code 1234" }, NOW_ISO).notes));
 
 console.log(`\n${pass} board-bridge checks passed.`);

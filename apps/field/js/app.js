@@ -30,7 +30,7 @@ import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
-import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs } from "./boardpush.js";
+import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates } from "./boardpush.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -437,6 +437,11 @@ async function projectList() {
     const changed = stageSig(rows) !== stageSig(_boardRows);
     _boardRows = rows;
     if (changed && paintLive) paintLive(rows);
+    // A field-created tile sitting next to the tile the coordinator already
+    // built merges into it (nothing they built is lost, the dupe retires)
+    const healed = await healBoardDuplicates(rows);
+    if (healed) toast(healed === 1 ? "Merged a duplicate Job Board tile into your existing one."
+      : `Merged ${healed} duplicate Job Board tiles into your existing ones.`);
     // Phase 6: board tiles that reached Scheduled / In Progress with no job
     // file get one now (idempotent — deterministic ids, tombstones honored)
     const n = await adoptBoardJobs(rows, projects);
