@@ -111,17 +111,48 @@ export const Store = {
     });
   },
 
+  /* conditional put: only lands if the stored row's updatedAt still matches
+     what the caller read (get+put in ONE transaction, so a concurrent save
+     can't slip between them). Quiet by design — sync-engine use only.
+     Returns true when the write landed, false when the row moved. */
+  async putIf(project, expectedUpdatedAt) {
+    const os = await tx("readwrite");
+    return new Promise((res, rej) => {
+      const g = os.get(project.id);
+      g.onsuccess = () => {
+        const cur = g.result;
+        if ((cur ? cur.updatedAt : undefined) !== expectedUpdatedAt) return res(false);
+        const r = os.put(project);
+        r.onsuccess = () => res(true);
+        r.onerror = () => rej(r.error);
+      };
+      g.onerror = () => rej(g.error);
+    });
+  },
+
   /* ---------- on-device backups ----------
-     Snapshotted automatically right before cloud sync overwrites a local
-     job with a copy from another device — the safety net against a stale
-     copy clobbering newer work. Newest first, last 2 per job, this device
-     only (never synced). Restorable from the job page. */
+     Snapshotted automatically right before cloud sync merges or replaces a
+     local job with a copy from another device — the safety net under the
+     merge engine. Newest first, last 10 per job, this device only (never
+     synced), restorable from the job page. Snapshots hold the job AS STORED
+     ON DEVICE — full inline photos — so they can run multi-MB; under quota
+     pressure this sheds a job's older snapshots, and a snapshot that still
+     can't be written is skipped rather than ever blocking a sync cycle. */
   async backup(project) {
     if (!project || !project.id) return;
-    const row = (await reqProm((await tx("readonly", BACKUPS)).get(project.id))) || { id: project.id, snaps: [] };
-    row.snaps.unshift({ takenAt: new Date().toISOString(), data: project });
-    row.snaps = row.snaps.slice(0, 2);
-    await reqProm((await tx("readwrite", BACKUPS)).put(row));
+    try {
+      const row = (await reqProm((await tx("readonly", BACKUPS)).get(project.id))) || { id: project.id, snaps: [] };
+      row.snaps.unshift({ takenAt: new Date().toISOString(), data: project });
+      row.snaps = row.snaps.slice(0, 10);
+      try {
+        await reqProm((await tx("readwrite", BACKUPS)).put(row));
+      } catch {
+        row.snaps = row.snaps.slice(0, 2);         // quota: keep the 2 newest
+        await reqProm((await tx("readwrite", BACKUPS)).put(row));
+      }
+    } catch (e) {
+      try { console.warn("backup snapshot skipped:", e); } catch {}
+    }
   },
   async backups(id) {
     const row = await reqProm((await tx("readonly", BACKUPS)).get(id));

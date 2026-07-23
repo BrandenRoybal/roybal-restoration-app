@@ -93,6 +93,38 @@ export async function upsertRows(rows) {
   return res.json();
 }
 
+/** Optimistic-concurrency write for one project row — the board's
+    data->>rev guard (data.js guardedJobWrite), ported to field_projects.
+    The PATCH only lands if the server still holds the rev this device
+    started from; otherwise { conflict, server } comes back and the caller
+    MERGES instead of clobbering. Legacy rows (no rev yet) match base 0. */
+export async function guardedUpsertRow(id, base, data) {
+  const eid = encodeURIComponent(id);
+  const guard = base > 0 ? `data->>rev=eq.${base}` : `or=(data->>rev.is.null,data->>rev.eq.0)`;
+  const res = await api(`${TABLE}?id=eq.${eid}&${guard}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ data, deleted: false }),
+  });
+  if (!res.ok) throw new Error("Push failed (" + res.status + ")");
+  const rows = await res.json();
+  if (rows.length) return { ok: true };
+  // 0 rows: either the row doesn't exist yet (new job) or it moved (conflict)
+  const chk = await api(`${TABLE}?id=eq.${eid}&select=id,data`, { method: "GET" });
+  if (!chk.ok) throw new Error("Push check failed (" + chk.status + ")");
+  const existing = await chk.json();
+  if (!existing.length) {
+    const ins = await api(TABLE, {
+      method: "POST", headers: { Prefer: "return=representation" },
+      body: JSON.stringify([{ id, data, deleted: false }]),
+    });
+    if (ins.ok) return { ok: true };
+    if (ins.status === 409) return { conflict: true, server: null };
+    throw new Error("Push insert failed (" + ins.status + ")");
+  }
+  return { conflict: true, server: existing[0].data };
+}
+
 /* ---------- media storage (field-media bucket) ----------
    Sync offloads big data-URL strings (photos, plan pages, sketches) to
    the private field-media bucket, content-addressed by sha256, so the
