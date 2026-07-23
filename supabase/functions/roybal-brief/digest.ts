@@ -66,13 +66,14 @@ export interface BriefInput {
   projects: Blob[];          // field project blobs, each with _rowUpdated (row updated_at)
   boardJobs: Blob[];         // coordination_jobs data blobs (settings row excluded)
   portalWaiting: number | null;
+  emailsWaiting?: { count: number; oldest?: string } | null;   // unread job-matched inbound email
   today: string;             // Alaska YYYY-MM-DD
   pretty: string;            // "Wed, Jul 23"
   budgetThreshold?: number;
 }
 
 /** One SMS-sized morning digest: attention lines + up to 3 questions. */
-export function buildBrief({ projects, boardJobs, portalWaiting, today, pretty, budgetThreshold = 0.9 }: BriefInput) {
+export function buildBrief({ projects, boardJobs, portalWaiting, emailsWaiting = null, today, pretty, budgetThreshold = 0.9 }: BriefInput) {
   const jobName = (p: Blob) => String(p.customer || p.address || "job");
   const since = (iso: string) => daysBefore(today, iso);
   const lines: string[] = [];
@@ -132,6 +133,12 @@ export function buildBrief({ projects, boardJobs, portalWaiting, today, pretty, 
 
   // 📨 customers waiting
   if (portalWaiting && portalWaiting > 0) lines.push(`📨 ${portalWaiting} customer portal message${portalWaiting === 1 ? "" : "s"} waiting`);
+
+  // 📧 job email waiting for an answer (only job-matched mail ever enters)
+  if (emailsWaiting && emailsWaiting.count > 0) {
+    lines.push(`📧 ${emailsWaiting.count} job email${emailsWaiting.count === 1 ? "" : "s"} waiting` +
+      (emailsWaiting.oldest ? ` — oldest ${emailsWaiting.oldest}` : ""));
+  }
 
   // ❓ proactive questions — what looks MISSING, asked instead of assumed
   for (const p of projects) {

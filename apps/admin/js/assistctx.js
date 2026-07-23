@@ -18,6 +18,7 @@ import { draftAdjusterEmail, draftPortalMessage } from "../../js/officeai.js";
 import { fetchPortalThread, portalDigest, threadForAi, sendOfficeReply } from "../../js/portal.js";
 import { budgetStatus } from "../../js/fincalc.js";
 import { runFinanceAction } from "./finactions.js";
+import { fetchUnreadEmails, fetchJobEmails, gmailSend, markEmailRead } from "../../js/gmail.js";
 
 /* mirrors admin.js jobAttention(): drying equipment on site ≥7 days */
 const equipOut7 = (p) => (p.dryingLogs || []).some((d) =>
@@ -66,6 +67,29 @@ async function portalUnread() {
   } catch (_) { return null; }
 }
 
+/* unread JOB-MATCHED inbound email (the 15-min Gmail pull files it).
+   null = email lane unreachable/not connected — never "no email". */
+async function emailWaiting(projects) {
+  if (!isSignedIn()) return null;
+  try {
+    const unread = await fetchUnreadEmails(25);
+    const nameOf = (jobId) => {
+      const p = projects.find((x) => x.id === jobId);
+      return p ? (p.customer || p.address || "job") : "unmatched";
+    };
+    return {
+      count: unread.length,
+      recent: unread.slice(0, 8).map((m) => ({
+        job: nameOf(m.job_id),
+        from: m.from_addr,
+        subject: String(m.subject || "").slice(0, 120),
+        when: String(m.received_at || "").slice(0, 10),
+        snippet: String(m.body_text || "").slice(0, 240),
+      })),
+    };
+  } catch (_) { return null; }
+}
+
 export async function buildAdminContext() {
   const projects = await Store.all().catch(() => []);
   const rows = projects.map(jobRow);
@@ -73,7 +97,7 @@ export async function buildAdminContext() {
   const stale = rows.filter((r) => !r.updated || daysSince(r.updated) > 14);
   const equipFlags = rows.filter((r) => r.equipmentOut7Days);
   const budgetFlags = rows.filter((r) => r.overBudget);
-  const [qbo, unread] = await Promise.all([quickbooks(), portalUnread()]);
+  const [qbo, unread, mail] = await Promise.all([quickbooks(), portalUnread(), emailWaiting(projects)]);
   return {
     today: todayISO(),
     kpis: {
@@ -83,14 +107,17 @@ export async function buildAdminContext() {
       equipmentOut7Days: equipFlags.length,
       overBudget: budgetFlags.length,
       staleOver14Days: stale.length,
+      ...(mail ? { emailsWaiting: mail.count } : {}),
     },
     needsAttention: [
       ...equipFlags.map((r) => r.customer + " (equipment out 7+ days)"),
       ...budgetFlags.map((r) => r.customer + ` (costs at ${r.budgetPct}% of budget)`),
+      ...(mail && mail.count ? [`${mail.count} job email${mail.count === 1 ? "" : "s"} waiting for an answer`] : []),
     ],
     staleJobs: stale.slice(0, 15).map((r) => r.customer + (r.updated ? ` (last ${r.updated})` : " (never updated)")),
     quickbooks: qbo,                      // null = status unavailable right now
     portalMessagesWaiting: unread,        // null = portal unreachable right now
+    recentJobEmail: mail ? mail.recent : null,   // inbound mail already filed to jobs
     jobs: rows.sort((a, b) => (a.updated < b.updated ? 1 : -1)).slice(0, 50),
   };
 }
@@ -152,6 +179,42 @@ async function portalPostChip(params) {
   return { ok: true, detail: "posted to the portal thread" };
 }
 
+/* ---- emailSend: the email lane's outbound chip ----
+   Addresses are RESOLVED FROM RECORDS, never taken from the model:
+   'reply' answers the job's newest inbound email inside its Gmail thread;
+   'customer' uses the email on the job header. Anything else is refused. */
+async function emailSendChip(params) {
+  const m = await findProject(params.job);
+  if (m.err) return { ok: false, detail: m.err };
+  const p = m.hit;
+  const body = String(params.body || "").trim();
+  if (!body) return { ok: false, detail: "empty email body" };
+  const mode = String(params.to || "");
+
+  if (mode === "reply") {
+    const thread = await fetchJobEmails(p.id, 20).catch(() => []);
+    const orig = thread.find((e) => e.direction === "in");
+    if (!orig) return { ok: false, detail: `no inbound email on file for ${p.customer || "that job"} — nothing to reply to` };
+    const subject = String(params.subject || "").trim() ||
+      (/^re:/i.test(orig.subject || "") ? orig.subject : "Re: " + (orig.subject || "your message"));
+    const r = await gmailSend({
+      to: orig.from_addr, subject, body, jobId: p.id,
+      threadId: orig.thread_id || undefined, inReplyTo: orig.message_id_header || undefined,
+    });
+    markEmailRead(orig.id).catch(() => {});
+    return { ok: true, detail: `📧 replied to ${orig.from_addr} on “${(orig.subject || "").slice(0, 60)}” — in your Gmail Sent folder (id ${r.gmailId || "?"})` };
+  }
+  if (mode === "customer") {
+    const to = String(p.email || "").trim();
+    if (!to) return { ok: false, detail: `${p.customer || "that job"} has no customer email on file — add it to the job header first` };
+    const subject = String(params.subject || "").trim();
+    if (!subject) return { ok: false, detail: "subject required for a new email" };
+    await gmailSend({ to, subject, body, jobId: p.id });
+    return { ok: true, detail: `📧 sent to ${to} — “${subject.slice(0, 60)}”` };
+  }
+  return { ok: false, detail: "to must be 'reply' or 'customer' — addresses only come from the job's records" };
+}
+
 function runAdminAction(a) {
   const p = (a && a.params) || {};
   switch (a && a.type) {
@@ -159,6 +222,7 @@ function runAdminAction(a) {
     case "adjusterEmail": return adjusterEmailChip(p);
     case "portalReply": return portalReplyChip(p);
     case "portalPost": return portalPostChip(p);
+    case "emailSend": return emailSendChip(p);
     default:
       return runFinanceAction(a) ?? { ok: false, detail: "not available in the office admin" };
   }

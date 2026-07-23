@@ -75,6 +75,13 @@ test("payments the loop recorded yesterday/today show as 💰 received", () => {
   assert.doesNotMatch(b.text, /INV-3|INV-4/);
 });
 
+test("job email waiting shows with the oldest date; null lane stays silent", () => {
+  const b = buildBrief({ ...base, projects: [proj({})], emailsWaiting: { count: 3, oldest: "2026-07-21" } });
+  assert.match(b.text, /📧 3 job emails waiting — oldest 2026-07-21/);
+  const quiet = buildBrief({ ...base, projects: [proj({})], emailsWaiting: null });
+  assert.doesNotMatch(quiet.text, /📧/);
+});
+
 test("text stays under the 1200-char cap even with many flags", () => {
   const many = Array.from({ length: 40 }, (_, i) => proj({
     customer: "Job" + i,

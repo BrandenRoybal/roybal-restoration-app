@@ -84,6 +84,7 @@ const ACTION_ICONS = {
   sendText: "💬", moveJob: "📅", logHours: "⏱️", adjusterEmail: "✉️", portalReply: "🧡", portalPost: "📨",
   boardWrite: "📋", jobCreate: "➕", crewAvailabilityWrite: "🏖️", crewSwap: "🔄", hoursWrite: "⏱️",
   estimateWrite: "🧮", invoiceCreate: "🧾", invoiceStatusUpdate: "💵", changeOrderWrite: "🔁", receiptLog: "🛒",
+  emailSend: "📧",
 };
 function actionPreview(a) {
   const p = a.params || {};
@@ -131,6 +132,11 @@ function actionPreview(a) {
       return "$" + String(p.amount ?? "?") + " — " + String(p.vendor || "?") + " on " + String(p.job || "?") +
         (p.category ? " (" + p.category + ")" : "");
     case "adjusterEmail": return "drafts the adjuster email for " + String(p.job || "?");
+    case "emailSend":
+      return (p.to === "reply" ? "replies in " + String(p.job || "?") + "’s email thread"
+        : "emails " + String(p.job || "?") + "’s customer") +
+        (p.subject ? " — “" + String(p.subject).slice(0, 60) + "”" : "") +
+        " · “" + String(p.body || "").slice(0, 120) + (String(p.body || "").length > 120 ? "…" : "") + "”";
     case "portalReply": return "drafts a " + (p.mode === "status" ? "status update" : "reply") + " for " + String(p.job || "?") + "’s portal";
     case "portalPost": return "“" + String(p.message || "").slice(0, 160) + "”";
     default: return "";
