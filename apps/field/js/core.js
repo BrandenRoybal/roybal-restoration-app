@@ -112,15 +112,16 @@ export const Store = {
   },
 
   /* ---------- on-device backups ----------
-     Snapshotted automatically right before cloud sync overwrites a local
-     job with a copy from another device — the safety net against a stale
-     copy clobbering newer work. Newest first, last 2 per job, this device
-     only (never synced). Restorable from the job page. */
+     Snapshotted automatically right before cloud sync merges or replaces a
+     local job with a copy from another device — the safety net under the
+     merge engine. Newest first, last 10 per job (blobs are slim — media
+     lives in the bucket), this device only (never synced). Restorable from
+     the job page. */
   async backup(project) {
     if (!project || !project.id) return;
     const row = (await reqProm((await tx("readonly", BACKUPS)).get(project.id))) || { id: project.id, snaps: [] };
     row.snaps.unshift({ takenAt: new Date().toISOString(), data: project });
-    row.snaps = row.snaps.slice(0, 2);
+    row.snaps = row.snaps.slice(0, 10);
     await reqProm((await tx("readwrite", BACKUPS)).put(row));
   },
   async backups(id) {

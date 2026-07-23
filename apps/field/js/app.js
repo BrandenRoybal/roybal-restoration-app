@@ -18,7 +18,7 @@ import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressS
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
-import { startSync, syncNow, resetSync } from "./sync.js";
+import { startSync, syncNow, resetSync, onSyncMerge } from "./sync.js";
 import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine, getUnifiedJobId } from "./spine.js";
 import { generateNarrative, constructionFacts } from "./narrative.js";
@@ -109,6 +109,13 @@ let syncStarted = false;
 function startSyncUI() {
   if (syncStarted) { syncNow(); return; }
   syncStarted = true;
+  // two devices edited the same job → the engine merged; tell the human
+  onSyncMerge(({ customer, added, filledForms }) => {
+    const bits = [];
+    if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
+    if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
+    toast(`🔀 ${customer}: merged changes from another device${bits.length ? ` (+${bits.join(", ")})` : ""}. Both copies are kept in Backups.`);
+  });
   startSync(updateSyncStatus);
 }
 function boot() {
@@ -889,7 +896,11 @@ function backupsCard(project) {
         btn.disabled = true;
         const current = await Store.get(project.id);
         if (current) await Store.backup(current);
-        await Store.put(s.data);   // fresh updatedAt → this version wins and re-syncs everywhere
+        // carry the CURRENT rev so the restore pushes as a normal guarded
+        // edit — if another device moved on meanwhile, sync merges instead
+        // of letting an old snapshot clobber it
+        const restored = { ...s.data, rev: (current && current.rev) || s.data.rev || 0 };
+        await Store.put(restored);   // fresh updatedAt → re-syncs
         toast("Backup restored.");
         setTimeout(() => location.reload(), 400);
       });

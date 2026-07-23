@@ -43,7 +43,31 @@ globalThis.fetch = async (url, opts = {}) => {
     });
     return resp(201, out);
   }
+  // rev-guarded PATCH — PostgREST semantics: 0 rows when the guard misses
+  if (u.pathname === "/rest/v1/field_projects" && method === "PATCH") {
+    const idQ = u.searchParams.get("id") || "";
+    const id = idQ.startsWith("eq.") ? idQ.slice(3) : "";
+    const revQ = u.searchParams.get("data->>rev");
+    const orQ = u.searchParams.get("or");
+    const row = serverRows.get(id);
+    let match = false;
+    if (row) {
+      const rowRev = Number(row.data && row.data.rev) || 0;
+      if (revQ && revQ.startsWith("eq.")) match = rowRev === Number(revQ.slice(3));
+      else if (orQ) match = rowRev === 0;
+    }
+    if (!match) return resp(200, []);
+    row.data = body.data;
+    row.deleted = false;
+    row.updated_at = nowIso();
+    return resp(200, [row]);
+  }
   if (u.pathname === "/rest/v1/field_projects" && method === "GET") {
+    const idQ = u.searchParams.get("id");
+    if (idQ && idQ.startsWith("eq.")) {                       // the guarded-write's conflict check
+      const row = serverRows.get(idQ.slice(3));
+      return resp(200, row ? [{ id: row.id, data: row.data }] : []);
+    }
     const raw = u.searchParams.get("updated_at");
     const since = raw && raw.startsWith("gt.") ? raw.slice(3) : "";
     const rows = [...serverRows.values()]
@@ -129,6 +153,49 @@ const { syncNow } = await import("../js/sync.js");
   await syncNow();
   const p5done = await Store.get("p5");
   ok(p5done.customer === "Echo-NEW" && p5done.photos[0].src === BIG, "the row re-inflates and applies once the media is downloadable");
+
+  // ============================================================
+  // TWO-DEVICE MERGE — the hardening this suite exists to prove
+  // ============================================================
+
+  // ---------- push-conflict merge: a stale writer no longer erases work ----------
+  await Store.put({ id: "p6", customer: "Foxtrot", photos: [{ id: "A", src: "small-a" }] });
+  await syncNow();                                    // server rev 1, this device clean
+  // ANOTHER device (which synced rev 1) adds photo B and pushes rev 2
+  const mine6 = await Store.get("p6");
+  serverRows.set("p6", { id: "p6", deleted: false, updated_at: nowIso(), data: {
+    id: "p6", customer: "Foxtrot", rev: 2, photos: [{ id: "A", src: "small-a" }, { id: "B", src: "small-b" }],
+    updatedAt: new Date(Date.parse(mine6.updatedAt) - 60_000).toISOString(),   // their clock even ran EARLIER
+  } });
+  // meanwhile THIS device (still on rev 1) adds photo C
+  const p6 = await Store.get("p6");
+  p6.photos.push({ id: "C", src: "small-c" });
+  await Store.put(p6, { quiet: true });               // quiet: drive syncNow by hand below
+  await syncNow();                                    // pull ties/skips (their updatedAt older), push conflicts → merge
+  await syncNow();                                    // second pass pushes the union
+  const local6 = await Store.get("p6");
+  ok(local6.photos.map((x) => x.id).sort().join("") === "ABC", "push conflict merges BOTH devices' photos locally");
+  const server6 = serverRows.get("p6").data;
+  ok(server6.photos.map((x) => x.id).sort().join("") === "ABC", "…and the pushed union carries all three to the server");
+  ok(Number(server6.rev) === 3, "merged union lands as the next rev (no clobber, no fork)");
+  ok((await Store.backups("p6")).length >= 1, "the pre-merge local copy was snapshotted first");
+
+  // ---------- pull merge: dirty local + newer remote = union, not replace ----------
+  await Store.put({ id: "p7", customer: "Golf", receipts: [{ id: "R1", amount: 40 }] });
+  await syncNow();                                    // server rev 1, clean
+  const p7 = await Store.get("p7");
+  p7.receipts.push({ id: "R2", amount: 60 });
+  await Store.put(p7, { quiet: true });               // dirty local edit
+  // a LEGACY device (old app version, unguarded push) overwrote the row with
+  // its own newer-clock copy that lacks R2 but adds R3 — rev untouched
+  serverRows.set("p7", { id: "p7", deleted: false, updated_at: nowIso(), data: {
+    id: "p7", customer: "Golf", rev: 1, receipts: [{ id: "R1", amount: 40 }, { id: "R3", amount: 25 }],
+    updatedAt: new Date(Date.now() + 9e5).toISOString(),
+  } });
+  await syncNow();                                    // pull-first: merge, then push the union
+  const local7 = await Store.get("p7");
+  ok(local7.receipts.map((x) => x.id).sort().join("") === "R1R2R3", "pull over dirty local merges receipts from both sides");
+  ok(serverRows.get("p7").data.receipts.length === 3, "the union pushed back up in the same cycle");
 
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
   process.exit(failures ? 1 : 0);

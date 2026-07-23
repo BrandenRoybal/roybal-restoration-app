@@ -1,20 +1,26 @@
 /* ============================================================
    Roybal Field Forms — offline-first sync engine
    Local IndexedDB stays the source of truth; this pushes local
-   changes up and pulls others' changes down. Last edit wins,
-   with two protections:
+   changes up and pulls others' changes down. Concurrent edits
+   MERGE instead of clobbering:
+   - every push is rev-guarded (the board's data->>rev pattern):
+     a device that started from a stale copy gets a CONFLICT back,
+     merges the server's copy into its own (merge.js — photos,
+     logs, readings, receipts union by id; a filled form beats an
+     empty slot), and pushes the union. Crew work can no longer be
+     silently erased by whoever's clock ran latest;
+   - a pull that lands on top of UNSYNCED local edits merges the
+     same way instead of replacing;
    - big media (photos, plan pages, sketches) is offloaded to the
      field-media storage bucket on push and re-inflated on pull,
-     so job rows stay far under the 5MB row cap and photo-heavy
-     jobs never silently stop backing up (media.js);
-   - before a pulled row overwrites a local job, the local copy is
-     snapshotted to the on-device backups store (restorable from
-     the job page) — a stale copy from another device can no
-     longer permanently destroy newer work.
+     so job rows stay far under the 5MB row cap (media.js);
+   - before any merge or overwrite, the local copy is snapshotted
+     to the on-device backups store (restorable from the job page).
    ============================================================ */
 import { Store, onProjectSaved, onProjectDeleted } from "./core.js";
-import { isSignedIn, upsertRows, fetchSince, uploadMedia, downloadMedia } from "./supa.js";
+import { isSignedIn, upsertRows, guardedUpsertRow, fetchSince, uploadMedia, downloadMedia } from "./supa.js";
 import { deflateProject, inflateProject } from "./media.js";
+import { mergeProjects } from "./merge.js";
 
 const K_CURSOR = "roybal-sync-cursor";
 const K_PUSHED = "roybal-sync-pushed";     // { projectId: updatedAt last pushed }
@@ -27,7 +33,26 @@ let pushed = load(K_PUSHED, {});
 let deletes = new Set(load(K_DELETES, []));
 let mediaPushed = new Set(load(K_MEDIA, []));
 let statusCb = () => {};
-let syncing = false, started = false, skipped = 0, pushTimer = null;
+let mergeCb = () => {};                    // fires after a two-device merge (app shows a toast)
+let syncing = false, started = false, skipped = 0, pushTimer = null, needsAnotherPass = false;
+
+/** Register a listener for "changes from another device were merged in". */
+export function onSyncMerge(fn) { mergeCb = fn || (() => {}); }
+
+/* merge the server's copy into ours, adopt the server's rev, and leave the
+   union locally as an UNSYNCED edit — the next pass pushes it guarded on the
+   rev we just adopted. Both inputs must be INFLATED (real media, no markers). */
+async function absorb(local, serverFull, why) {
+  await Store.backup(local);                       // our side, restorable
+  const { merged, added, filledForms } = mergeProjects(local, serverFull);
+  merged.id = local.id;
+  merged.rev = Number(serverFull.rev) || 0;
+  merged.updatedAt = new Date().toISOString();     // marks it dirty → re-pushes
+  await Store.put(merged, { quiet: true, bump: false });
+  needsAnotherPass = true;
+  try { mergeCb({ id: local.id, customer: merged.customer || merged.address || "job", added, filledForms, why }); } catch { /* toast is a bonus */ }
+  return merged;
+}
 
 function load(k, fallback) { try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch { return fallback; } }
 const savePushed = () => localStorage.setItem(K_PUSHED, JSON.stringify(pushed));
@@ -39,7 +64,7 @@ function bumpCursor(ts) { if (ts && ts > cursor) { cursor = ts; saveCursor(); } 
 function setStatus(state, extra = {}) { statusCb({ state, pending: pendingCount(), skipped, ...extra }); }
 function pendingCount() { return deletes.size; }   // approximate; recomputed on demand
 
-/* ---------- push local changes ---------- */
+/* ---------- push local changes (rev-guarded) ---------- */
 async function push() {
   const all = await Store.all();
   let skippedNow = 0, lastErr = null;
@@ -52,10 +77,25 @@ async function push() {
         await uploadMedia(m.hash, m.text);
         mediaPushed.add(m.hash); saveMediaPushed();
       }
-      const json = JSON.stringify(slim);
-      if (json.length > MAX_ROW) { skippedNow++; continue; } // huge even without media — surfaced in status
-      await upsertRows([{ id: p.id, data: slim, deleted: false }]);
-      pushed[p.id] = p.updatedAt; savePushed();
+      const base = Number(p.rev) || 0;
+      const next = { ...slim, rev: base + 1 };
+      const json = JSON.stringify(next);
+      if (json.length > MAX_ROW) { skippedNow++; continue; } // huge even without media — surfaced LOUD in status
+      const r = await guardedUpsertRow(p.id, base, next);
+      if (r.ok) {
+        await Store.put({ ...p, rev: base + 1 }, { quiet: true, bump: false }); // server accepted this rev
+        pushed[p.id] = p.updatedAt; savePushed();
+        continue;
+      }
+      // conflict: another device moved the row since we last synced.
+      // NEVER clobber, NEVER drop — merge their copy into ours and let the
+      // next pass push the union guarded on the rev we just adopted.
+      if (!r.server) continue;                         // insert race — pull will bring their row
+      let serverFull, missing;
+      try { ({ project: serverFull, missing } = await inflateProject(r.server, downloadMedia)); }
+      catch { lastErr = new Error("merge media fetch failed"); continue; }
+      if (missing > 0) continue;                       // their media still propagating — retry next cycle
+      await absorb(p, serverFull, "push-conflict");
     } catch (e) {
       lastErr = e;   // one failing job (network blip mid-cycle) must not stall the rest
     }
@@ -87,7 +127,7 @@ async function pull() {
     const remote = row.data;
     if (!remote || !remote.id) { bumpCursor(row.updated_at); continue; }
     const local = await Store.get(row.id);
-    // local wins ties: only a STRICTLY newer remote may replace local work
+    // local wins ties: only a STRICTLY newer remote may touch local work
     if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bumpCursor(row.updated_at); continue; }
     let full, missing;
     try {
@@ -101,9 +141,15 @@ async function pull() {
     // it (that stranded photos on desktop until a full re-pull). Leave the cursor
     // put and retry this row next cycle; it resolves once the downloads succeed.
     if (missing > 0 && local) break;
-    if (local) await Store.backup(local);   // safety net: the outgoing copy stays restorable on-device
-    await Store.put(full, { quiet: true, bump: false });
-    pushed[row.id] = remote.updatedAt;               // local now matches server
+    const localDirty = local && pushed[row.id] !== local.updatedAt;   // unsynced edits on this device
+    if (localDirty) {
+      // both sides moved — merge, never replace (backs up our copy first)
+      await absorb(local, full, "pull-merge");
+    } else {
+      if (local) await Store.backup(local); // safety net: the outgoing copy stays restorable on-device
+      await Store.put(full, { quiet: true, bump: false });
+      pushed[row.id] = remote.updatedAt;             // local now matches server
+    }
     bumpCursor(row.updated_at);
   }
   savePushed();
@@ -115,13 +161,22 @@ export async function syncNow() {
   if (typeof navigator !== "undefined" && navigator.onLine === false) { setStatus("offline"); return; }
   syncing = true; setStatus("syncing");
   try {
-    await push();
+    // PULL FIRST: absorb (and merge) everyone else's changes before asserting
+    // ours — a device coming back from the field folds the office's edits in,
+    // then pushes the union. Also shields rollout: a not-yet-updated device
+    // still pushing unguarded rows gets merged here instead of overwritten by
+    // our next guarded push. (Trade-off: a just-deleted job can transiently
+    // reappear locally for one cycle; the next pull removes it.)
     await pull();
-    setStatus("synced", { lastSync: Date.now() });
+    await push();
+    // a too-large job is DATA NOT BACKED UP — show red, not a quiet counter
+    if (skipped > 0) setStatus("error", { message: `${skipped} job(s) too large to back up — remove some inline attachments` });
+    else setStatus("synced", { lastSync: Date.now() });
   } catch (e) {
     setStatus("error", { message: String(e && e.message || e) });
   } finally {
     syncing = false;
+    if (needsAnotherPass) { needsAnotherPass = false; schedulePush(); }  // push freshly merged unions
   }
 }
 
