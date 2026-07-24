@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#21527e" />
+  <title>Roybal — Job Board</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="../assets/icon-16.png" />
+  <link rel="apple-touch-icon" href="../assets/icon-180.png" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Job Board" />
+  <link rel="stylesheet" href="../css/app.css" />
+  <link rel="stylesheet" href="css/board.css?v=32" />
+</head>
+<body>
+  <header class="tbar">
+    <div class="tbar__brand">
+      <img src="../assets/emblem-mark.svg" alt="" class="tbar__logo" />
+      <div>
+        <strong>Roybal Construction</strong>
+        <span>Job Board</span>
+      </div>
+    </div>
+    <div class="tbar__right">
+      <span id="syncDot" title="">●</span>
+      <span id="acctEmail" class="tbar__acct"></span>
+      <button id="signOutBtn" class="btn btn--ghost btn--sm" hidden>Sign out</button>
+    </div>
+  </header>
+  <main id="view" class="bview"><!-- routed content --></main>
+  <script>
+    // Stale-module guard: right after a deploy, an old service worker can hand
+    // a NEW board.js its OLD cached data.js/schedule.js — the module import
+    // fails and nothing renders. If the view is still empty a beat after load,
+    // force ONE cache-busted reload (by then the fresh SW has taken over).
+    setTimeout(function () {
+      var dead = !document.getElementById("view").firstElementChild;
+      if (dead && !sessionStorage.getItem("boardBootRetry")) {
+        sessionStorage.setItem("boardBootRetry", "1");
+        location.replace(location.pathname + "?boot=" + Date.now());
+      } else if (!dead) {
+        sessionStorage.removeItem("boardBootRetry");
+      }
+    }, 3500);
+  </script>
+  <script type="module" src="js/board.js?v=55"></script>
+</body>
+</html>

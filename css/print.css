@@ -1,0 +1,245 @@
+/* ============================================================
+   Roybal Field Forms — print / "Save as PDF" layout
+   Turns the active form into a clean letter-size document that
+   mirrors the paper packet. Applied only when printing.
+   ============================================================ */
+@page { size: letter; margin: 0.5in 0.5in 0.55in; }
+
+/* hide all app chrome */
+.topbar, .sticky-actions, .toast, .app-only, .qb-tag,
+.btn, .row-add, .rowdel, .saved-pill, .sketch__tools, .sig-actions, .sig-tabs,
+details > summary { display: none !important; }
+
+.print-only { display: block !important; }
+
+body { background: #fff !important; font-size: 11.5pt; color: #000; }
+.view { max-width: none !important; margin: 0 !important; padding: 0 !important; }
+
+/* the sheet */
+.sheet { width: 100%; }
+section.sheet + section.sheet { page-break-before: always; }
+
+/* uploaded signed document — fills the whole printed page (replaces a generated
+   form). The sheet is a full-page flex column; the image scales up or down to
+   fill it (object-fit: contain keeps the whole document visible, never cropped). */
+section.sheet--doc { width: 100%; height: 9.85in; display: flex; flex-direction: column; page-break-inside: avoid; }
+section.sheet--doc .docpage-full {
+  flex: 1 1 auto; min-height: 0; width: 100%; height: 100%;
+  object-fit: contain; object-position: center; max-width: 100%; max-height: none; margin: 0;
+}
+section.sheet--doc .sheet-foot { flex: 0 0 auto; margin-top: 6px; }
+
+/* ---------- letterhead ---------- */
+.sheet-head {
+  display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px;
+  border-bottom: 2.5px solid #0f1b2d; padding-bottom: 6px; margin-bottom: 12px;
+}
+/* original text header (ROYBAL orange + CONSTRUCTION, LLC black via spans) */
+.sheet-head__body { flex: 1 1 auto; display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.sheet-head__name { font-size: 13pt; font-weight: 800; letter-spacing: .3px; }
+.sheet-head__tag { font-size: 7.5pt; color: #44556b; }
+.sheet-head__addr { font-size: 7.5pt; color: #44556b; text-align: right; line-height: 1.4; white-space: nowrap; }
+.sheet-head__title { flex-basis: 100%; text-align: center; margin-top: 8px; }
+.sheet-head__title h2 { font-size: 15pt; margin: 4px 0 1px; color: #0f1b2d; letter-spacing: .5px; border: 0; }
+.sheet-head__sub { font-size: 8.5pt; color: #5b6b80; }
+.narrative-preparedfor { text-align: center; font-size: 8.5pt; color: #5b6b80; font-style: italic; margin: 0 0 6px; }
+/* narrative (AI cover) body — match the form font sizes on the PDF */
+.narrative-body p, .narrative-body li, .narrative-body .nb-p, .narrative-body .nb-ul { font-size: 11.5pt !important; line-height: 1.5; }
+.narrative-body .nb-note { font-size: 10.5pt !important; }
+.narrative-body h3, .narrative-body .nb-h3 { font-size: 13pt !important; }
+
+/* ---------- footer ---------- */
+.sheet-foot {
+  margin-top: 14px; padding-top: 5px; border-top: 1px solid #c4ccd8;
+  font-size: 7.5pt; color: #5b6b80; text-align: left;
+}
+
+/* ---------- section headings ---------- */
+.sheet h2 {
+  font-size: 10.5pt; text-transform: uppercase; letter-spacing: .6px;
+  color: #0f1b2d; background: #eef2f7; padding: 3px 6px; margin: 12px 0 6px;
+  border-left: 3px solid #f26a21; break-after: avoid;
+}
+.sheet .subtle, .sheet p.subtle { display: none; }
+
+/* ---------- fields ---------- */
+.field { margin-bottom: 6px; break-inside: avoid; }
+.field > label {
+  display: block; font-size: 8pt; text-transform: uppercase; letter-spacing: .4px;
+  color: #5b6b80; margin-bottom: 0; font-weight: 700;
+}
+.field .hint { display: none; }
+input, select, textarea {
+  width: 100%; border: 0 !important; border-bottom: 1px solid #9aa7b8 !important;
+  border-radius: 0 !important; background: transparent !important;
+  padding: 1px 2px !important; min-height: 0 !important; font-size: 11pt !important;
+  color: #000 !important; -webkit-appearance: none; appearance: none;
+  font-family: inherit;
+}
+/* The on-screen textarea is .app-only (hidden on print). Its .ta-print mirror
+   is a plain div that flows to the full text at the print font/width — a
+   <textarea> can't auto-size in CSS, so it clipped. */
+.ta-print {
+  display: block; border: 1px solid #c4ccd8; border-radius: 2px;
+  min-height: 34px; padding: 3px 5px; margin-top: 1px;
+  font-size: 11pt !important; line-height: 1.35; color: #000;
+  white-space: pre-wrap; overflow-wrap: break-word; break-inside: avoid;
+}
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px 16px; }
+
+/* ---------- segmented controls: show only selected ---------- */
+.seg { display: inline-flex; gap: 6px; }
+.seg button { display: none !important; }
+.seg button.active {
+  display: inline-block !important; border: 1.5px solid #0f1b2d !important;
+  background: #fff !important; color: #0f1b2d !important; font-weight: 700;
+  padding: 1px 10px !important; border-radius: 4px; font-size: 9.5pt;
+}
+
+/* ---------- checkboxes (scope / reasons) ---------- */
+.check { display: flex; gap: 6px; padding: 2px 0; break-inside: avoid; }
+.check input { width: 11px !important; height: 11px !important; border: 1px solid #333 !important; }
+.check label { font-size: 10.5pt; }
+
+/* ---------- data tables ---------- */
+.tablewrap { overflow: visible !important; border: 0 !important; }
+table.grid { width: 100%; min-width: 0 !important; border-collapse: collapse; font-size: 9.5pt; }
+table.grid th, table.grid td { border: 0.6px solid #6b7892 !important; padding: 1px 2px !important; }
+table.grid th { background: #0f1b2d !important; color: #fff !important; font-size: 8pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+table.grid thead { display: table-header-group; }
+table.grid tr { break-inside: avoid; }
+table.grid td input { text-align: center; font-size: 9.5pt !important; border: 0 !important; }
+/* free-text cells print the FULL wrapped text via the print-only div.
+   overflow-wrap (NOT word-break) so the column can never be squeezed
+   narrower than a whole word — word-break lets table layout crush these
+   columns to one letter per line. min-width floors the column outright. */
+table.grid th.thleft { text-align: left; }
+table.grid td.tdta { text-align: left; vertical-align: top; min-width: 1in; }
+.cell-print { font-size: 9.5pt; line-height: 1.3; padding: 2px 4px; white-space: pre-wrap; overflow-wrap: break-word; text-align: left; }
+/* empty date/time inputs otherwise print a wide mm/dd/yyyy + icon that
+   steals the width the text columns need */
+table.grid input::-webkit-calendar-picker-indicator { display: none !important; }
+/* on paper the page width wins: drop the on-screen min-widths and cap the
+   intrinsically-wide date/time controls so wide tables fit the sheet */
+table.grid td input { min-width: 0 !important; }
+table.grid input[type="date"] { width: 0.8in !important; }
+table.grid input[type="datetime-local"] { width: 1.05in !important; font-size: 8pt !important; }
+table.grid input[type="time"] { width: 0.55in !important; }
+table.grid td select { min-width: 0.62in; font-size: 8.5pt !important; }
+table.grid td.calc { background: #eef6ff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+table.grid td input.calc { background: #eef6ff !important; }
+
+/* Invoice charges print like an Xactimate estimate: wide description,
+   left-aligned; shaded room/section rows; hidden delete column handled
+   by .app-only */
+table.grid--inv td.invdesc input { text-align: left; }
+/* the print-only description div wraps the FULL text — no clipping on paper */
+table.grid--inv td.invdesc { text-align: left; vertical-align: top; }
+.invdesc-print { font-size: 9.5pt; line-height: 1.3; padding: 2px 4px; white-space: pre-wrap; overflow-wrap: break-word; }
+table.grid--inv th.invdesc { text-align: left; }
+table.grid--inv td.lineno { font-size: 7.5pt; color: #5a6b7f; }
+table.grid--inv tr.invsec td { background: #e8edf4 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-size: 9pt !important; }
+
+/* ---------- totals ---------- */
+.totals { margin-top: 6px; max-width: 320px; margin-left: auto; break-inside: avoid; }
+.totals .trow { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 10pt; }
+.totals .trow input { width: 100px; text-align: right; }
+.totals .trow.rcv { font-weight: 700; border-bottom: 1px solid #0f1b2d; }
+
+/* Recap by Room */
+.invrecap { margin-top: 8px; max-width: 380px; margin-left: auto; break-inside: avoid; }
+.invrecap__title { font-weight: 700; font-size: 10.5pt; margin-bottom: 2px; }
+.invrecap__row { display: flex; gap: 8px; padding: 1px 0; border-bottom: 0.5px solid #c4ccd8; font-size: 10pt; }
+.invrecap__row span:first-child { flex: 1; }
+.invrecap__amt { min-width: 80px; text-align: right; }
+.invrecap__pct { min-width: 55px; text-align: right; }
+.invrecap__row--total { font-weight: 700; border-bottom: 0; }
+.totals .trow.grand { font-size: 12pt; font-weight: 800; border-top: 1.5px solid #0f1b2d; border-bottom: 0; }
+
+/* ---------- terms / statements ---------- */
+.termrow { display: grid; grid-template-columns: 100px 1fr; gap: 8px; padding: 2px 0; font-size: 10.5pt; border: 0; break-inside: avoid; }
+.termrow__k { font-weight: 700; }
+.certstmt { border: 1px solid #c4ccd8; padding: 6px 8px; font-size: 10.5pt; background: #fff; }
+.remit { border: 1px solid #c4ccd8; padding: 6px 8px; font-size: 10.5pt; }
+
+/* ---------- signatures ---------- */
+.sigblock { break-inside: avoid; margin-bottom: 10px; }
+.sigblock > label { font-size: 8.5pt; text-transform: uppercase; letter-spacing: .4px; color: #5b6b80; font-weight: 700; }
+.sigpad { border: 0 !important; border-bottom: 1.5px solid #0f1b2d !important; border-radius: 0 !important; height: 70px; }
+.sigpad canvas { height: 70px !important; }
+.sigpad__hint { display: none !important; }
+.sigpad__line { display: none; }
+.sig-preview { max-height: 260px; border: 1px solid #c4ccd8; }
+.uploadbox { border: 0; padding: 0; }
+.uploadbox img { max-height: 320px; }
+
+/* photos */
+.thumbs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.thumb img { width: 100%; height: auto; border: 1px solid #c4ccd8; border-radius: 0; }
+.thumb button { display: none; }
+
+/* moisture drying-trend chart */
+.mchart-wrap { border: 1px solid #6b7892; border-radius: 6px; padding: 6px; break-inside: avoid; }
+.mchart { width: 100%; height: auto; }
+.mchart__legend { display: flex; flex-wrap: wrap; gap: 2px 8px; margin-top: 4px; font-size: 7.5pt; }
+.mchart__leg { display: inline-flex; align-items: center; gap: 3px; }
+.mchart__leg i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.chart-empty { display: none; }
+
+.maptitle { font-weight: 800; font-size: 11.5pt; margin: 4px 0 2px; }
+
+/* sketch + floor plan — the canvas is a replaced element; scale it to FIT a
+   bounded box (max 7.5in wide x 6.5in tall) while preserving its intrinsic
+   aspect ratio, so markers/equipment icons stay round AND the map no longer
+   balloons to a full page. The .sketch shrinks to the canvas (fit-content) and
+   the bg fills that same box, so they stay aligned. */
+.sketch {
+  border: 1px solid #6b7892 !important; position: relative;
+  width: fit-content; max-width: 100%; margin: 6px auto;
+}
+.sketch__bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+.sketch canvas {
+  position: relative; display: block;
+  aspect-ratio: auto !important;            /* use the canvas's intrinsic aspect */
+  width: auto !important; height: auto !important;
+  max-width: 7.5in; max-height: 6.5in;
+}
+
+/* contents inventory */
+table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover; border: 0.5px solid #6b7892; }
+.csub { font-size: 7.5pt; color: #5b6b80; }
+
+/* box labels — 2 per row, clean cut-out cards */
+.boxlabels { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25in; }
+.boxlabel { border: 1.5px solid #0f1b2d; border-radius: 6px; padding: 10px; break-inside: avoid; min-height: 2.6in; }
+.boxlabel__top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.boxlabel__qr { width: 1in; height: 1in; flex: 0 0 auto; }
+.boxlabel__qr svg { width: 100%; height: 100%; display: block; }
+.boxlabel__co { font-size: 9pt; font-weight: 800; color: #0f1b2d; letter-spacing: .5px; }
+.boxlabel__no { font-size: 30pt; font-weight: 800; color: #f26a21; margin: 4px 0 8px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.boxlabel__meta { width: 100%; font-size: 9pt; border-collapse: collapse; }
+.boxlabel__meta td { border-bottom: 0.5px solid #c4ccd8; padding: 3px 2px; }
+.boxlabel__meta td:first-child { color: #5b6b80; width: 38%; text-transform: uppercase; font-size: 7pt; }
+
+/* job photos — inline-block, NOT grid: Chrome ignores break-inside:avoid on grid
+   items, so photos were splitting across page breaks. Inline-block cards honor
+   the avoid, so a photo that won't fit drops whole to the next page.
+   (font-size:0 kills the inline-block whitespace gap; .photocap restores it.) */
+.photogrid { display: block; font-size: 0; }
+.photocard {
+  display: inline-block; width: 49%; vertical-align: top; box-sizing: border-box;
+  margin: 0 0 8px; border: 0.6px solid #6b7892; border-radius: 0; overflow: hidden;
+  break-inside: avoid; page-break-inside: avoid;
+}
+.photocard:nth-child(odd) { margin-right: 2%; }
+.photocard img { width: 100%; height: auto; max-height: 2.6in; object-fit: cover; break-inside: avoid; page-break-inside: avoid; }
+.photoedit { display: none !important; }
+.photocap { font-size: 8.5pt; padding: 2px 4px; }
+.photometa { color: #5b6b80; }
+
+.note, .divider { display: none; }
+hr.divider { display: none; }
+details { display: block; }
+details summary { display: none; }
