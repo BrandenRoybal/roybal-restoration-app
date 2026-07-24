@@ -36,6 +36,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { buildBrief, invoiceTotals, reminderEmail, type Blob } from "./digest.ts";
+import { buildWeekly } from "./weekly.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -78,6 +79,43 @@ serve(async (req: Request) => {
 
   try {
     const jwt = await signIn();
+
+    // ---------- weekly mode: "what the AI did" (cron, Sundays) ----------
+    const mode = String((await req.clone().json().catch(() => ({})))?.mode || "");
+    if (mode === "weekly") {
+      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+      const count = (path: string) =>
+        fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+          headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, Prefer: "count=exact", Range: "0-0" },
+        }).then((r) => (r.ok ? Number((r.headers.get("content-range") || "").split("/")[1]) || 0 : 0)).catch(() => 0);
+      const [events, emailsFiled, emailsSent] = await Promise.all([
+        rest(jwt, `capture_events?select=source_type,captured_by,result&processed_at=gte.${encodeURIComponent(weekAgo)}&limit=1000`).catch(() => []),
+        count(`email_messages?select=id&direction=eq.in&received_at=gte.${encodeURIComponent(weekAgo)}`),
+        count(`email_messages?select=id&direction=eq.out&received_at=gte.${encodeURIComponent(weekAgo)}`),
+      ]);
+      const fmt = (d: Date) => d.toLocaleDateString("en-US", { timeZone: "America/Anchorage", month: "short", day: "numeric" });
+      const weekLabel = `${fmt(new Date(Date.now() - 6 * 86400000))} – ${fmt(new Date())}`;
+      const weekly = buildWeekly({ events: events as Blob[], emailsFiled, emailsSent, weekLabel });
+      const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+        method: "POST",
+        headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sendSms", to: OWNER_CELL, body: weekly.text, kind: "brief", captured_by: "weekly-report" }),
+      });
+      const sd = await send.json().catch(() => ({}));
+      await fetch(`${SUPABASE_URL}/rest/v1/capture_events`, {
+        method: "POST",
+        headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+        body: JSON.stringify([{
+          source_type: "weekly_report", form_key: "weeklyReport", captured_by: "weekly-report",
+          status: "extracted", processed_at: new Date().toISOString(),
+          raw_payload: { items: weekly.items, chars: weekly.text.length },
+          result: { sent: send.ok && sd.ok !== false },
+        }]),
+      }).catch(() => {});
+      if (!(send.ok && sd.ok !== false)) return json({ ok: false, error: `notify failed: ${String(sd.error || send.status)}` }, 502);
+      return json({ ok: true, mode: "weekly", items: weekly.items, chars: weekly.text.length });
+    }
+
     const [projRows, boardRows, portalWaiting, emailRows] = await Promise.all([
       rest(jwt, "field_projects?select=id,data,updated_at&deleted=eq.false&limit=300"),
       rest(jwt, "coordination_jobs?select=id,data&deleted=eq.false&limit=300"),
