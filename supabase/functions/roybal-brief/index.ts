@@ -35,7 +35,7 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { buildBrief, type Blob } from "./digest.ts";
+import { buildBrief, invoiceTotals, reminderEmail, type Blob } from "./digest.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -104,8 +104,61 @@ serve(async (req: Request) => {
     const boardBaseline: Blob | null =
       (boardRows.find((r: Blob) => r?.id === "__settings__")?.data?.baseline as Blob) || null;
 
+    // ---------- approve-by-text proposals (max 2) ----------
+    // The brief may PROPOSE (an insert changes nothing until the owner texts
+    // YES — migration 210's RLS lets the read-only machine user do exactly
+    // this and nothing else). v1 proposes overdue-invoice reminder emails for
+    // jobs with a customer email on file, skipping invoices already proposed
+    // or reminded within 7 days.
+    const proposals: { code: number; label: string }[] = [];
+    try {
+      const today = akDate();
+      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+      const recent = await rest(jwt,
+        `pending_actions?kind=eq.emailSend&created_at=gte.${encodeURIComponent(weekAgo)}&select=code,status,params,expires_at&limit=100`)
+        .catch(() => []) as Blob[];
+      const alreadyKeys = new Set(recent
+        .filter((a) => a.status === "pending" || a.status === "approved" || a.status === "executed")
+        .map((a) => String(a.params?.invoiceKey || "")));
+      const usedCodes = new Set(recent.filter((a) => a.status === "pending").map((a) => Number(a.code)));
+      let nextCode = 11;
+      const takeCode = () => { while (usedCodes.has(nextCode)) nextCode++; usedCodes.add(nextCode); return nextCode; };
+
+      const candidates: { p: Blob; inv: Blob; days: number }[] = [];
+      for (const p of projects) {
+        if (!String(p.email || "").includes("@")) continue;
+        for (const inv of p.invoices || []) {
+          if (!["sent", "viewed", "partially_paid"].includes(inv?.status)) continue;
+          if (!inv.dueDate || inv.dueDate >= today) continue;
+          const key = `${p.id}:${inv.invoiceNo || inv.id || ""}`;
+          if (alreadyKeys.has(key)) continue;
+          candidates.push({ p, inv, days: Math.floor((Date.parse(today) - Date.parse(inv.dueDate)) / 86400000) });
+        }
+      }
+      candidates.sort((a, b) => b.days - a.days);
+      for (const c of candidates.slice(0, 2)) {
+        const balance = invoiceTotals(c.inv).total;
+        if (!(balance > 0)) continue;
+        const mail = reminderEmail(c.p, c.inv, balance);
+        const code = takeCode();
+        const label = `email the ${c.inv.invoiceNo || "overdue invoice"} reminder to ${c.p.customer || c.p.address || "the customer"}`;
+        const ins = await fetch(`${SUPABASE_URL}/rest/v1/pending_actions`, {
+          method: "POST",
+          headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+          body: JSON.stringify([{
+            code, kind: "emailSend", label, job_id: c.p.id, proposed_by: "morning-brief",
+            params: {
+              to: String(c.p.email).trim(), subject: mail.subject, body: mail.body,
+              jobId: c.p.id, invoiceKey: `${c.p.id}:${c.inv.invoiceNo || c.inv.id || ""}`,
+            },
+          }]),
+        });
+        if (ins.ok) proposals.push({ code, label });
+      }
+    } catch (e) { console.error("proposals skipped:", (e as Error).message); }
+
     const brief = buildBrief({
-      projects, boardJobs, boardBaseline, portalWaiting, emailsWaiting,
+      projects, boardJobs, boardBaseline, portalWaiting, emailsWaiting, proposals,
       today: akDate(), pretty: akPretty(), budgetThreshold: BUDGET_THRESHOLD,
     });
 

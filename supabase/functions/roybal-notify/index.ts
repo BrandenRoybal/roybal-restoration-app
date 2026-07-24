@@ -36,6 +36,7 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { parseApproval, matchProposal, replyText } from "./approve.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -216,6 +217,99 @@ async function twilioSignatureValid(req: Request, params: URLSearchParams): Prom
   return false;
 }
 
+/* ---------- approve-by-text ----------
+   A YES/NO from the OWNER'S cell acts on pending_actions proposals (the
+   morning brief creates them — see roybal-brief + migration 210). Everything
+   here runs AFTER the Twilio signature check, with the service role:
+   approval state only ever changes on this verified path. Returns true when
+   the text was an approval keyword (handled + replied), false otherwise. */
+async function handleApproval(
+  from: string, text: string,
+  admin: (path: string, opts?: RequestInit) => Promise<Response>,
+): Promise<boolean> {
+  const owner = toE164(Deno.env.get("OWNER_CELL") ?? SMS_FORWARD_TO ?? "");
+  if (!owner || toE164(from) !== owner) return false;
+  const p = parseApproval(text);
+  if (!p.yes && !p.no) return false;
+
+  const say = async (msg: string) => {
+    try {
+      const r = await twilioPost(owner, msg);
+      await admin("sms_messages", {
+        method: "POST",
+        body: JSON.stringify([{
+          direction: "outbound", to_number: owner, from_number: TWILIO_FROM,
+          body: clip(msg), kind: "approval",
+          status: r.ok ? (r.body.status ?? "sent") : "failed",
+          twilio_sid: r.ok ? (r.body.sid ?? null) : null,
+        }]),
+      });
+    } catch (e) { console.error("approval reply failed", e); }
+  };
+
+  const nowIso = new Date().toISOString();
+  const live = await admin(
+    `pending_actions?status=eq.pending&expires_at=gt.${encodeURIComponent(nowIso)}&order=created_at.desc&limit=20`,
+    { method: "GET" });
+  const rows = live.ok ? ((await live.json()) as Record<string, unknown>[]) : [];
+  const m = matchProposal(rows, p.code);
+  if (!m.hit) { await say(replyText(m.reason as "none-open")!); return true; }
+  const act = m.hit as Record<string, unknown>;
+
+  if (p.no) {
+    await admin(`pending_actions?id=eq.${act.id}&status=eq.pending`, {
+      method: "PATCH", body: JSON.stringify({ status: "declined" }),
+    });
+    await say(replyText("cancelled", act)!);
+    return true;
+  }
+
+  // approve first (guarded on still-pending — a double YES can't fire twice)…
+  const appr = await admin(`pending_actions?id=eq.${act.id}&status=eq.pending`, {
+    method: "PATCH", headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ status: "approved" }),
+  });
+  const landed = appr.ok && ((await appr.json().catch(() => [])) as unknown[]).length > 0;
+  if (!landed) { await say(replyText("none-open")!); return true; }
+
+  // …then execute by kind. The executor re-verifies the approved row itself.
+  try {
+    const params = (act.params ?? {}) as Record<string, unknown>;
+    if (act.kind === "emailSend") {
+      const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
+      const r = await fetch(`${SUPABASE_URL}/functions/v1/gmail-proxy`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json", "x-cron-secret": cronSecret,
+          apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}`,
+        },
+        body: JSON.stringify({ action: "sendEmail", pendingActionId: act.id, ...params }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body.ok === false) throw new Error(String(body.error || `email send failed (${r.status})`));
+    } else if (act.kind === "sendText") {
+      const to = toE164(params.to);
+      if (!to) throw new Error("no valid recipient number on the proposal");
+      const r = await twilioPost(to, String(params.message ?? ""));
+      if (!r.ok) throw new Error(String(r.body.message ?? `twilio ${r.status}`));
+      await admin(`pending_actions?id=eq.${act.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result: { sid: r.body.sid ?? "" } }),
+      });
+    } else {
+      throw new Error(`unknown action kind "${act.kind}"`);
+    }
+    await say(replyText("done", act)!);
+  } catch (e) {
+    await admin(`pending_actions?id=eq.${act.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "failed", result: { error: String((e as Error).message).slice(0, 300) } }),
+    }).catch(() => {});
+    await say(replyText("failed", act, (e as Error).message)!);
+  }
+  return true;
+}
+
 /* Log the reply, optionally forward it to the office, answer empty TwiML
    (empty <Response> = receive without auto-replying to the customer). */
 async function handleInbound(req: Request): Promise<Response> {
@@ -258,6 +352,15 @@ async function handleInbound(req: Request): Promise<Response> {
     }]),
   });
   if (!ins.ok) console.error("inbound log insert failed", ins.status, await ins.text().catch(() => ""));
+
+  // approve-by-text: a YES/NO from the owner's cell acts on a proposal and
+  // gets its own confirmation text — no need to also forward it
+  try {
+    if (await handleApproval(from, text, admin)) {
+      return new Response('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+        { headers: { "Content-Type": "text/xml" } });
+    }
+  } catch (e) { console.error("approval handling failed", e); }
 
   // best-effort forward — never back to the sender (a one-hop echo guard),
   // never past the monthly cap, and a failure still ACKs Twilio with TwiML
