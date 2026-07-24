@@ -51,6 +51,27 @@ export function budgetStatus(p: Blob, threshold = 0.9) {
 
 export const money = (n: number) => "$" + Math.abs(Math.round(n)).toLocaleString("en-US");
 
+/* ---------- approve-by-text: the reminder email a YES will send ----------
+   Deterministic template — no LLM. Addresses come only from the job record;
+   the pending_actions row carries this verbatim, and the owner's YES sends
+   it through the email lane (gmail-proxy verifies the approved row). */
+export function reminderEmail(job: Blob, inv: Blob, balance: number): { subject: string; body: string } {
+  const name = String(job.customer || "").split(/\s+/)[0] || "there";
+  const no = String(inv.invoiceNo || "your invoice");
+  return {
+    subject: `Payment reminder — invoice ${no}${job.customer ? ` (${job.customer})` : ""}`,
+    body:
+      `Hi ${name},\n\n` +
+      `A friendly reminder that invoice ${no}` +
+      (inv.dueDate ? ` (due ${inv.dueDate})` : "") +
+      ` has an outstanding balance of ${money(balance)}.\n\n` +
+      `If payment is already on its way, thank you — please disregard this note. ` +
+      `Otherwise, we'd appreciate payment at your earliest convenience. Reply to this email ` +
+      `or call us with any questions.\n\n` +
+      `Thank you,\nRoybal Construction, LLC\n(907) 371-9868`,
+  };
+}
+
 /* date helpers take "today" (YYYY-MM-DD) so tests are deterministic */
 export const daysBefore = (todayISO: string, iso: string) => {
   const a = Date.parse(String(iso).slice(0, 10) + "T00:00:00");
@@ -68,13 +89,14 @@ export interface BriefInput {
   boardBaseline?: Blob | null; // board settings.baseline (Gantt snapshot: { jobs: { [id]: {start, finish} } })
   portalWaiting: number | null;
   emailsWaiting?: { count: number; oldest?: string } | null;   // unread job-matched inbound email
+  proposals?: { code: number; label: string }[] | null;        // approve-by-text: pending_actions this brief offers
   today: string;             // Alaska YYYY-MM-DD
   pretty: string;            // "Wed, Jul 23"
   budgetThreshold?: number;
 }
 
 /** One SMS-sized morning digest: attention lines + up to 3 questions. */
-export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWaiting, emailsWaiting = null, today, pretty, budgetThreshold = 0.9 }: BriefInput) {
+export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWaiting, emailsWaiting = null, proposals = null, today, pretty, budgetThreshold = 0.9 }: BriefInput) {
   const jobName = (p: Blob) => String(p.customer || p.address || "job");
   const since = (iso: string) => daysBefore(today, iso);
   const lines: string[] = [];
@@ -164,10 +186,14 @@ export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWa
     questions.push(`${jobName(p)} untouched ${since(String(p._rowUpdated).slice(0, 10))}d — on hold, or done and unclosed?`);
   }
 
+  // 💬 approve-by-text: things a single YES reply will do (max 2 —
+  // must match roybal-notify/approve.ts's proposalLine format)
+  const offers = (proposals || []).slice(0, 2).map((a) => `💬 Reply YES ${a.code} — ${a.label}`);
+
   const head = `☀️ Roybal brief — ${pretty}`;
-  if (!lines.length && !questions.length) {
+  if (!lines.length && !questions.length && !offers.length) {
     return { text: `${head}\nAll quiet: ${projects.length} jobs on file, nothing needs you this morning.`, flags: 0 };
   }
   const q = questions.slice(0, 3).map((s) => `❓ ${s}`);
-  return { text: [head, ...lines, ...q].join("\n").slice(0, 1200), flags: lines.length + q.length };
+  return { text: [head, ...lines, ...q, ...offers].join("\n").slice(0, 1200), flags: lines.length + q.length + offers.length };
 }

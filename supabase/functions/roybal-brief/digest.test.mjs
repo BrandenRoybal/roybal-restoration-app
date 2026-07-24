@@ -1,7 +1,7 @@
 /* Morning-brief digest — pure-logic tests (no Deno, no network).
    Run: node --experimental-strip-types supabase/functions/roybal-brief/digest.test.mjs */
 import assert from "node:assert/strict";
-import { buildBrief, budgetStatus, daysBefore } from "./digest.ts";
+import { buildBrief, budgetStatus, daysBefore, reminderEmail } from "./digest.ts";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -80,6 +80,26 @@ test("job email waiting shows with the oldest date; null lane stays silent", () 
   assert.match(b.text, /📧 3 job emails waiting — oldest 2026-07-21/);
   const quiet = buildBrief({ ...base, projects: [proj({})], emailsWaiting: null });
   assert.doesNotMatch(quiet.text, /📧/);
+});
+
+test("approve-by-text proposals render as YES lines, capped at 2", () => {
+  const b = buildBrief({ ...base, projects: [proj({})], proposals: [
+    { code: 11, label: "email the INV-4 reminder to Hebard" },
+    { code: 12, label: "email the INV-2 reminder to Swift" },
+    { code: 13, label: "never shown" },
+  ] });
+  assert.match(b.text, /💬 Reply YES 11 — email the INV-4 reminder to Hebard/);
+  assert.match(b.text, /💬 Reply YES 12/);
+  assert.doesNotMatch(b.text, /YES 13/);
+});
+
+test("reminder email is complete, polite, and carries the real numbers", () => {
+  const { subject, body } = reminderEmail(
+    { customer: "Jeff Hebard" }, { invoiceNo: "INV-4", dueDate: "2026-07-01" }, 5210.4);
+  assert.match(subject, /INV-4/);
+  assert.match(body, /Hi Jeff,/);
+  assert.match(body, /\$5,210/);
+  assert.match(body, /Roybal Construction/);
 });
 
 test("text stays under the 1200-char cap even with many flags", () => {

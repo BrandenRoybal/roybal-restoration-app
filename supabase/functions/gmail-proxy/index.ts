@@ -245,11 +245,28 @@ serve(async (req) => {
       return ok({ scanned: msgIds.length, filed, skipped });
     }
 
-    // ── sendEmail (signed-in office user ONLY) ────────────────────────────
+    // ── sendEmail (signed-in office user, OR an owner-approved text action) ──
     if (action === "sendEmail") {
-      const caller = await callerEmail(req);
-      if (!caller) return err("Sign in to send email", 401);
-      if (isMachine(caller)) return err("machine users cannot send email", 403);
+      // approve-by-text path: the roybal-notify webhook (which just verified
+      // the owner's YES against a Twilio-signed inbound) calls with the cron
+      // secret + the pending_actions row id. We RE-VERIFY that row is
+      // approved-and-unexecuted before anything sends — two layers deep.
+      const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
+      const pendingId = String(body.pendingActionId || "");
+      const viaApproval = !!cronSecret && req.headers.get("x-cron-secret") === cronSecret && !!pendingId;
+      let caller: string;
+      if (viaApproval) {
+        const { data: pa } = await supabase.from("pending_actions")
+          .select("id, kind, status").eq("id", pendingId).single();
+        if (!pa || pa.status !== "approved" || pa.kind !== "emailSend")
+          return err("no approved pending action to execute", 403);
+        caller = "approve-by-text";
+      } else {
+        const who = await callerEmail(req);
+        if (!who) return err("Sign in to send email", 401);
+        if (isMachine(who)) return err("machine users cannot send email", 403);
+        caller = who;
+      }
 
       const to = String(body.to || "").trim();
       const subject = String(body.subject || "").trim();
@@ -290,6 +307,14 @@ serve(async (req) => {
         raw_payload: { to, subject: (subject || "Re:").slice(0, 200), jobId, chars: text.length },
         result: { gmailId: sent.id, threadId: sent.threadId },
       }]).then(() => {}, () => {});
+
+      // consume the approval — a second YES for the same code can never re-send
+      if (viaApproval) {
+        await supabase.from("pending_actions").update({
+          status: "executed", executed_at: new Date().toISOString(),
+          result: { gmailId: sent.id, threadId: sent.threadId },
+        }).eq("id", pendingId).eq("status", "approved");
+      }
 
       return ok({ gmailId: sent.id, threadId: sent.threadId });
     }

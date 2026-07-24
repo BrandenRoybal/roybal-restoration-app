@@ -84,7 +84,7 @@ const ACTION_ICONS = {
   sendText: "💬", moveJob: "📅", logHours: "⏱️", adjusterEmail: "✉️", portalReply: "🧡", portalPost: "📨",
   boardWrite: "📋", jobCreate: "➕", crewAvailabilityWrite: "🏖️", crewSwap: "🔄", hoursWrite: "⏱️",
   estimateWrite: "🧮", invoiceCreate: "🧾", invoiceStatusUpdate: "💵", changeOrderWrite: "🔁", receiptLog: "🛒",
-  emailSend: "📧",
+  emailSend: "📧", docRequest: "📎", portalPhotoShare: "🖼️",
 };
 function actionPreview(a) {
   const p = a.params || {};
@@ -139,6 +139,12 @@ function actionPreview(a) {
         " · “" + String(p.body || "").slice(0, 120) + (String(p.body || "").length > 120 ? "…" : "") + "”";
     case "portalReply": return "drafts a " + (p.mode === "status" ? "status update" : "reply") + " for " + String(p.job || "?") + "’s portal";
     case "portalPost": return "“" + String(p.message || "").slice(0, 160) + "”";
+    case "docRequest":
+      return "texts " + String(p.job || "?") + "’s customer (number from the job record) asking for " +
+        String(p.items || "?").slice(0, 100) + (String(p.items || "").length > 100 ? "…" : "");
+    case "portalPhotoShare":
+      return "shares the newest " + Math.max(1, Math.min(20, Number(p.count) || 5)) +
+        " photos to " + String(p.job || "?") + "’s customer portal";
     default: return "";
   }
 }
