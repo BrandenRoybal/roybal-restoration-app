@@ -500,6 +500,29 @@ async function createProject() {
 /* ============================================================
    Project home — tiles for each form
    ============================================================ */
+/* per-device fold memory for the job-home collapsible cards — the summary
+   line always stays visible; only the detail body tucks away */
+const foldKey = (k) => "roybal-fold-" + k;
+function isFolded(k, dflt) {
+  try { const v = localStorage.getItem(foldKey(k)); return v === null ? dflt : v === "1"; } catch (_) { return dflt; }
+}
+function setFolded(k, on) {
+  try { localStorage.setItem(foldKey(k), on ? "1" : "0"); } catch (_) { /* ignore */ }
+}
+/* wire a header row + body into a tap-to-fold pair; k persists the choice */
+function foldable(head, body, k, dflt) {
+  const chev = h("span", { class: "subtle", style: "font-weight:600;flex:none" });
+  head.append(chev);
+  head.style.cursor = "pointer";
+  const paint = () => {
+    const f = isFolded(k, dflt);
+    body.style.display = f ? "none" : "";
+    chev.textContent = f ? "▸" : "▾";
+  };
+  head.addEventListener("click", () => { setFolded(k, !isFolded(k, dflt)); paint(); });
+  paint();
+}
+
 /* Read-only completeness panel — pure checklist logic, no AI, no cost.
    Reads the already-loaded project; re-renders whenever the job home does. */
 function completenessPanel(project) {
@@ -510,18 +533,24 @@ function completenessPanel(project) {
     style: "border:1px solid #e2e6ec;border-left:4px solid " + toneColor +
            ";border-radius:12px;padding:12px 14px;margin:4px 0 16px;background:#fff",
   });
-  wrap.append(h("div", { style: "display:flex;align-items:center;gap:8px" },
+  const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
     h("span", { style: "font-size:18px" }, m.icon),
     h("span", { style: "font-weight:700;color:" + toneColor }, m.summary),
-    h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" }, m.progress)));
+    h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" }, m.progress));
+  wrap.append(head);
+  const body = h("div");
   for (const g of m.groups) {
     const hard = g.tone === "hard";
-    wrap.append(h("div", {
+    body.append(h("div", {
       style: "margin-top:10px;font-weight:600;font-size:13px;color:" + (hard ? "#b3261e" : "#5b6470"),
     }, g.title));
     const ul = h("ul", { style: "margin:4px 0 0;padding-left:20px;font-size:14px" + (hard ? "" : ";color:#5b6470") });
     g.items.forEach((t) => ul.append(h("li", { style: "margin:2px 0" }, t)));
-    wrap.append(ul);
+    body.append(ul);
+  }
+  if (m.groups.length) {
+    wrap.append(body);
+    foldable(head, body, "completeness", false);   // summary always shows; checklist tucks away
   }
   return wrap;
 }
@@ -929,11 +958,16 @@ function backupsCard(project) {
       return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
         h("span", { class: "subtle", style: "font-size:13px" }, desc), btn);
     });
-    box.append(h("div", { class: "card app-only" },
+    const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
       h("div", { style: "font-weight:700" }, "⏪ Backups on this device"),
+      h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" },
+        `${snaps.length} snapshot${snaps.length === 1 ? "" : "s"}`));
+    const bodyBox = h("div", {},
       h("p", { class: "subtle", style: "margin:6px 0 2px;font-size:13px" },
         "Saved automatically right before cloud sync replaced this job with a version from another device. Restore if work went missing."),
-      ...rows));
+      ...rows);
+    foldable(head, bodyBox, "backups", true);   // rarely needed — starts tucked away
+    box.append(h("div", { class: "card app-only" }, head, bodyBox));
   }).catch(() => {});
   return box;
 }
