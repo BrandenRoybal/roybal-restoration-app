@@ -289,6 +289,19 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
       "Draft the claim-submission email for a job (subject + body from its documented facts). The user reviews the draft — nothing is " +
       "emailed automatically. params: { job: string — customer name or address, enough to match exactly one job }.",
   },
+  docRequest: {
+    desc:
+      "Text the job's customer asking for a specific document or photos (signed authorization, insurance letter, photos of the damage…). " +
+      "params: { job: string — customer name or address to match exactly one job, items: string — what to ask for, in plain words, " +
+      "note?: string — optional extra context }. The message is composed politely and sent as SMS to the phone number ON THE JOB RECORD — " +
+      "never an invented number. Customer texts respect quiet hours (8am–8pm Alaska).",
+  },
+  portalPhotoShare: {
+    desc:
+      "Share the job's newest photos to its customer portal page and republish it. params: { job: string — customer name or address to " +
+      "match exactly one job, count?: number — how many of the newest photos to add (default 5, max 20) }. Requires the job's Client " +
+      "Portal to already be enabled; the confirmation reports how many photos the portal now shows.",
+  },
   emailSend: {
     desc:
       "Send an email from the connected office Gmail — it goes out the moment the user confirms the chip, from the owner's real address. " +
@@ -341,7 +354,7 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
 export const ACTIONSETS: Record<string, string[]> = {
   field: ["sendText"],
   board: ["sendText", "boardWrite", "jobCreate", "crewAvailabilityWrite", "crewSwap", "hoursWrite", "phaseUpdate"],
-  admin: ["sendText", "adjusterEmail", "portalReply", "emailSend",
+  admin: ["sendText", "adjusterEmail", "portalReply", "emailSend", "docRequest", "portalPhotoShare",
     "estimateWrite", "invoiceCreate", "invoiceStatusUpdate", "changeOrderWrite", "receiptLog"],
 };
 

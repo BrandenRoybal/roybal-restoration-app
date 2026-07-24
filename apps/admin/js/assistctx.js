@@ -14,8 +14,9 @@ import { Store, daysSince, todayISO } from "../../js/core.js";
 import { rest, isSignedIn } from "../../js/supa.js";
 import { qboStatus } from "../../js/qbo.js";
 import { assistSend } from "../../js/sms.js";
+import { COMPANY } from "../../js/model.js";
 import { draftAdjusterEmail, draftPortalMessage } from "../../js/officeai.js";
-import { fetchPortalThread, portalDigest, threadForAi, sendOfficeReply } from "../../js/portal.js";
+import { fetchPortalThread, portalDigest, threadForAi, sendOfficeReply, publishPortal } from "../../js/portal.js";
 import { budgetStatus } from "../../js/fincalc.js";
 import { runFinanceAction } from "./finactions.js";
 import { fetchUnreadEmails, fetchJobEmails, gmailSend, markEmailRead } from "../../js/gmail.js";
@@ -215,6 +216,59 @@ async function emailSendChip(params) {
   return { ok: false, detail: "to must be 'reply' or 'customer' — addresses only come from the job's records" };
 }
 
+/* ---- docRequest: text the customer asking for documents / photos ----
+   The phone number comes ONLY from the job header — a job with no phone
+   on file refuses rather than letting the model supply one. The send
+   rides assistSend, so company-number quiet hours still apply. */
+async function docRequestChip(params) {
+  const m = await findProject(params.job);
+  if (m.err) return { ok: false, detail: m.err };
+  const p = m.hit;
+  const phone = String(p.phone || "").trim();
+  if (!phone) return { ok: false, detail: `${p.customer || "that job"} has no phone number on file — add it to the job header first` };
+  const items = String(params.items || "").trim();
+  if (!items) return { ok: false, detail: "what should I ask for? items came back empty" };
+  const first = String(p.customer || "").trim().split(/\s+/)[0] || "";
+  const note = String(params.note || "").trim();
+  const message =
+    `Hi${first ? " " + first : ""}, this is ${COMPANY.name} about ${p.address || "your project"}. ` +
+    `When you get a chance, could you send us: ${items}?` + (note ? " " + note : "") +
+    ` You can reply to this text with photos, or call ${COMPANY.phone}. Thank you!`;
+  return assistSend({ to: phone, message, by: "office" });
+}
+
+/* ---- portalPhotoShare: put the newest job photos on the customer portal ----
+   Marks photo IDs as shared and republishes; what the customer actually
+   sees stays governed by portalProjection()'s curated slice. */
+async function portalPhotoShareChip(params) {
+  const m = await findProject(params.job);
+  if (m.err) return { ok: false, detail: m.err };
+  const p = m.hit;
+  const share = p.portalShare;
+  if (!share || !share.id || !share.enabled) {
+    return { ok: false, detail: `${p.customer || "that job"}'s Client Portal isn't enabled — turn it on from the job's portal panel first` };
+  }
+  const photos = (p.photos || []).filter((ph) => ph && ph.id && ph.src);
+  if (!photos.length) return { ok: false, detail: `no photos on ${p.customer || "that job"} yet` };
+  const count = Math.max(1, Math.min(20, Number(params.count) || 5));
+  const newest = photos
+    .map((ph, i) => ({ ph, key: String(ph.ts || ""), i }))
+    .sort((a, b) => b.key.localeCompare(a.key) || b.i - a.i)   // no-timestamp ties: later in the array = newer
+    .slice(0, count).map((x) => x.ph);
+  const ids = new Set(Array.isArray(share.sharedPhotoIds) ? share.sharedPhotoIds : []);
+  const before = ids.size;
+  newest.forEach((ph) => ids.add(ph.id));
+  share.sharedPhotoIds = [...ids];
+  await Store.put(p);
+  await publishPortal(p);
+  const added = ids.size - before;
+  return {
+    ok: true,
+    detail: (added ? `added ${added} photo${added === 1 ? "" : "s"}` : "those photos were already shared") +
+      ` — ${p.customer || "the customer"}'s portal now shows ${ids.size} photo${ids.size === 1 ? "" : "s"}`,
+  };
+}
+
 function runAdminAction(a) {
   const p = (a && a.params) || {};
   switch (a && a.type) {
@@ -223,6 +277,8 @@ function runAdminAction(a) {
     case "portalReply": return portalReplyChip(p);
     case "portalPost": return portalPostChip(p);
     case "emailSend": return emailSendChip(p);
+    case "docRequest": return docRequestChip(p);
+    case "portalPhotoShare": return portalPhotoShareChip(p);
     default:
       return runFinanceAction(a) ?? { ok: false, detail: "not available in the office admin" };
   }
