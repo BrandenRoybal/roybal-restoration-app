@@ -268,8 +268,13 @@ async function fetchPhasedBoardJobs(
 // left unstamped.
 // ---------------------------------------------------------------------------
 
-/** Phase suggestions per job per run — see the slice in enrichJobcode. */
+/* How many phase suggestions may be in flight at once. The brief offers a
+   couple a morning and each expires in a day, so proposing faster than the
+   owner can answer just burns the queue: the first backfill raised 14 and
+   twelve would have evaporated unseen (and then gone quiet for 30 days,
+   because an unanswered ask still counts as asked). Trickle instead. */
 const MAX_PROPOSALS_PER_JOB = 2;
+const MAX_LIVE_PROPOSALS = 3;
 
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";
 // Pinned to Haiku on purpose — deliberately NOT inheriting the project-wide
@@ -477,7 +482,13 @@ async function enrichJobcode(
     }
 
     // ---- propose a phase for work nothing covers ----
-    if (propose && left.length) {
+    // Nothing new while a queue is already waiting on the owner.
+    const { count: liveCount } = await supabase
+      .from("pending_actions")
+      .select("id", { count: "exact", head: true })
+      .eq("kind", "boardEdit")
+      .eq("status", "pending");
+    if (propose && left.length && (liveCount ?? 0) < MAX_LIVE_PROPOSALS) {
       const clusters = clusterUnmatched(
         left.map((r) => ({
           id: r.id, hours: Number(r.data?.hours) || 0,
