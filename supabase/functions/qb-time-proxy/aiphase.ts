@@ -11,9 +11,12 @@
    spend cap, and the ai_usage ledger. Unit tests: aiphase.test.mjs.
    ============================================================ */
 
-import type { Subtask } from "./phasematch.ts";
+import { workText, type Subtask } from "./phasematch.ts";
 
-export type AiEntry = { id: string; hours?: number; date?: string; note?: string; task?: string; service?: string };
+export type AiEntry = {
+  id: string; hours?: number; date?: string;
+  note?: string; task?: string; service?: string; jobcodeName?: string;
+};
 export type AiAssignment = { entryId: string; phaseId: string; confidence: number };
 
 /** Below this the model is guessing — leave the entry unstamped and let the
@@ -63,7 +66,9 @@ export function buildUserContent(entries: AiEntry[], phases: Subtask[]): string 
     .filter((st) => st && st.id && String(st.name || "").trim())
     .map((st) => `- ${st.id} = ${String(st.name).trim()}${st.done ? " (already finished)" : ""}`);
   const entryLines = entries.map((e, i) => {
-    const said = [e.note, e.task].filter(Boolean).join(" / ") || "(no note)";
+    // workText, never the raw task — task falls back to the jobcode name, and
+    // the job's own name is not a description of the work.
+    const said = workText(e) || "(no note)";
     const svc = e.service ? ` [service: ${e.service}]` : "";
     const hrs = e.hours != null ? ` (${e.hours}h)` : "";
     return `${i + 1}. ${e.date || ""}${hrs} "${said}"${svc}`;

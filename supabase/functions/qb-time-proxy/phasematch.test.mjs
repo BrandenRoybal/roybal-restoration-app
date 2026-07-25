@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   tokensOf, serviceLeaf, isRoleService, matchPhase,
   entryFingerprint, reconcileRows, phasedJobForDate, MIN_SCORE,
-  dominantConcept, coveredConcepts, clusterUnmatched, jobLabel, isOpenForMatching,
+  dominantConcept, coveredConcepts, clusterUnmatched, jobLabel, isOpenForMatching, workText,
 } from "./phasematch.ts";
 
 let pass = 0;
@@ -308,6 +308,26 @@ test("phasedJobForDate: hoursFrom scopes shared jobcodes (rebuild vs mitigation)
   assert.equal(phasedJobForDate([mit, rebuild, phasedOld], "2026-06-15")?.id, "old",
     "before the rebuild's hoursFrom, the unscoped phased job wins");
   assert.equal(phasedJobForDate([mit], "2026-07-10"), null, "no phased candidates → null");
+});
+
+/* ---------- workText: what the crew actually said ---------- */
+
+test("workText ignores the jobcode-name fallback in `task`", () => {
+  // qbRowsFrom sets task = notes || jobcodeName, so a note-less entry carries
+  // the JOB'S name there. Reading it as a description made the model confidently
+  // classify blank entries (80 of them in the first live backfill).
+  assert.equal(workText({ note: "", task: "3018 Nate Circle", jobcodeName: "3018 Nate Circle" }), "");
+  assert.equal(workText({ note: "", task: "3018 NATE CIRCLE", jobcodeName: "3018 Nate Circle" }), "");
+  assert.equal(workText({ note: "hung drywall", task: "hung drywall" }), "hung drywall");   // no doubling
+  assert.equal(workText({ note: "", task: "Punch out unit 4", jobcodeName: "3018 Nate Circle" }), "Punch out unit 4");
+  assert.equal(workText({}), "");
+});
+
+test("a note-less entry matches nothing, whatever its task says", () => {
+  const m = matchPhase(
+    { note: "", task: "Drywall Job — Smith", jobcodeName: "Drywall Job — Smith" },
+    [P("w", "Drywall"), P("d", "Demo")]);
+  assert.equal(m, null, "the job's own name must never decide a phase");
 });
 
 /* ---------- clustering → phase proposals ---------- */

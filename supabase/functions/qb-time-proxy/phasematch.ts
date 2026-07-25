@@ -22,8 +22,22 @@
    ============================================================ */
 
 export type Subtask = { id: string; name?: string; done?: boolean };
-export type EntryText = { service?: string; note?: string; task?: string };
+export type EntryText = { service?: string; note?: string; task?: string; jobcodeName?: string };
 export type PhaseMatch = { phaseId: string; by: "service" | "note"; score: number };
+
+/* What the crew actually SAID about the hour — and nothing else.
+   `task` is a display field that falls back to the jobcode name at ingest
+   (qbRowsFrom: `ts.notes || jc?.name`), so on a note-less entry it holds the
+   JOB'S OWN NAME. Reading that as a description is how "" became a confident
+   phase assignment: the model was handed "3018 Nate Circle" and asked what
+   work it described. An entry with nothing to say must return "". */
+export function workText(e: EntryText): string {
+  const note = String(e?.note ?? "").trim();
+  const task = String(e?.task ?? "").trim();
+  const jobName = String(e?.jobcodeName ?? "").trim();
+  const taskIsLabel = !task || task === note || (!!jobName && task.toLowerCase() === jobName.toLowerCase());
+  return [note, taskIsLabel ? "" : task].filter(Boolean).join(" ");
+}
 
 /* ---------- text → tokens ---------- */
 
@@ -194,8 +208,7 @@ export function matchPhase(entry: EntryText, subtasks: Subtask[]): PhaseMatch | 
   const phases = (subtasks || []).filter((st) => st && st.id && String(st.name || "").trim());
   if (!phases.length) return null;
 
-  const noteText = [entry.note, entry.task].filter(Boolean).join(" ");
-  const noteTokens = tokensOf(noteText);
+  const noteTokens = tokensOf(workText(entry));
   const svcTokens = isRoleService(entry.service || "") ? [] : tokensOf(serviceLeaf(entry.service || ""));
 
   const scored = phases.map((st) => {

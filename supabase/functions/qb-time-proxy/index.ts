@@ -268,6 +268,9 @@ async function fetchPhasedBoardJobs(
 // left unstamped.
 // ---------------------------------------------------------------------------
 
+/** Phase suggestions per job per run — see the slice in enrichJobcode. */
+const MAX_PROPOSALS_PER_JOB = 2;
+
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";
 // Pinned to Haiku on purpose — deliberately NOT inheriting the project-wide
 // LLM_MODEL, which the office assistant may point at Opus. Phase matching is
@@ -407,10 +410,13 @@ async function enrichJobcode(
 
     // ---- AI pass (only entries that actually said something) ----
     if (useAi) {
-      // Skip anything the model already looked at and passed on (marked with a
-      // scoreless "ai" stamp) — each entry costs at most one call, ever.
+      // Only entries that actually described work. workText excludes the
+      // jobcode-name fallback in `task`, so a note-less row is correctly
+      // silent — asking the model to classify "3018 Nate Circle" produced
+      // confident nonsense. Also skip anything it already looked at and
+      // passed on: each entry costs at most one call, ever.
       const speakers = jobRows
-        .filter((r) => String(r.data?.note || r.data?.task || "").trim())
+        .filter((r) => workText(r.data as Record<string, string>).length > 0)
         .filter((r) => (r.data?.phaseMatch as { by?: string } | undefined)?.by !== "ai")
         .slice(0, MAX_BATCH);
       if (speakers.length) {
@@ -428,6 +434,7 @@ async function enrichJobcode(
             date: String(r.data?.date || ""),
             note: String(r.data?.note || ""),
             task: String(r.data?.task || ""),
+            jobcodeName: String(r.data?.jobcodeName || ""),
             service: String(r.data?.service || ""),
           }));
           try {
@@ -498,7 +505,12 @@ async function enrichJobcode(
               return `${p?.rowId || ""}::${String(p?.phase?.name || "").toLowerCase()}`;
             })
         );
-        const fresh = clusters.filter((c) => !asked.has(`${job.id}::${c.name.toLowerCase()}`));
+        // The brief can only offer a couple a morning and a proposal expires in
+        // a day, so raising 14 at once (the first backfill did) just burns 12 of
+        // them. Biggest first, a few at a time; the rest come back tomorrow.
+        const fresh = clusters
+          .filter((c) => !asked.has(`${job.id}::${c.name.toLowerCase()}`))
+          .slice(0, MAX_PROPOSALS_PER_JOB);
         if (fresh.length) {
           const codes = await takeCodes(supabase, fresh.length);
           const inserts = fresh.map((c, i) => ({
