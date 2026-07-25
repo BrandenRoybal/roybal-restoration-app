@@ -76,8 +76,12 @@ const CONCEPTS: Record<string, string[]> = {
   mitigation: ["mitigation", "dry", "drying", "dried", "dehu", "dehumidifier", "fan", "airmover", "extraction", "extract", "extracted", "water", "flood", "moisture", "reading", "containment"],
   framing: ["frame", "framed", "framing", "stud", "wall", "blocking", "furring", "subfloor", "joist", "beam", "header", "sheathing"],
   insulation: ["insulation", "insulate", "insulated", "batt", "foam", "vapor", "barrier", "poly"],
-  drywall: ["drywall", "sheetrock", "rock", "hang", "hung", "tape", "taped", "taping", "mud", "mudded", "mudding", "texture", "textured", "skim", "gypsum", "board"],
-  paint: ["paint", "painted", "painting", "prime", "primed", "primer", "stain", "stained", "spray", "sprayed", "roll", "rolled"],
+  // NOT "hang"/"hung" — you hang doors and cabinets too, and a phase named
+  // "Hang doors" would then own this entire vocabulary (it did: a
+  // "Drywall / Mud / Tape" service item landed on Hang doors). Same for the
+  // bare word "board", which shows up in cement board, board-up, baseboard.
+  drywall: ["drywall", "sheetrock", "rock", "tape", "taped", "taping", "mud", "mudded", "mudding", "texture", "textured", "skim", "gypsum"],
+  paint: ["paint", "painted", "painting", "prime", "primed", "primer", "stain", "stained", "spray", "sprayed", "roll", "rolled", "coat"],
   flooring: ["floor", "flooring", "lvp", "vinyl", "carpet", "tile", "tiled", "grout", "grouted", "laminate", "hardwood", "underlayment"],
   trim: ["trim", "trimmed", "casing", "baseboard", "base", "door", "doors", "hardware", "millwork", "shelving", "closet", "sill", "windowsill", "blind", "cover"],
   cabinets: ["cabinet", "cabinets", "countertop", "counter", "vanity"],
@@ -85,9 +89,12 @@ const CONCEPTS: Record<string, string[]> = {
   electrical: ["electrical", "electrician", "wire", "wired", "wiring", "outlet", "switch", "panel", "light", "lighting", "breaker"],
   hvac: ["hvac", "duct", "furnace", "boiler", "heat", "heater", "vent", "ventilation"],
   roofing: ["roof", "roofing", "shingle", "flashing", "fascia", "soffit", "gutter"],
-  siding: ["siding", "exterior", "wrap", "housewrap", "window", "windows"],
+  // NOT "window" — windows are trim/interior work far more often than siding,
+  // and it made "Trim and Window sills" own the siding vocabulary.
+  siding: ["siding", "exterior", "wrap", "housewrap"],
   concrete: ["concrete", "slab", "pour", "poured", "form", "formed", "footing", "foundation", "rebar"],
-  punch: ["punch", "punchlist", "touchup", "touch", "adjust", "adjusted", "fix", "fixed", "fixing", "final", "walkthrough", "walk", "thru", "walkthru", "detail", "silicone", "caulk", "caulked", "caulking"],
+  // NOT "final" — "final coat" is paint and "final clean" is cleanup.
+  punch: ["punch", "punchlist", "touchup", "touch", "adjust", "adjusted", "fix", "fixed", "fixing", "walkthrough", "walk", "thru", "walkthru", "detail", "silicone", "caulk", "caulked", "caulking"],
   cleanup: ["clean", "cleaned", "cleanup", "cleaning", "sweep", "swept", "trash", "debris"],
   materials: ["material", "materials", "expediting", "expedite", "pickup", "supplies", "shopping", "order", "ordered", "lumber", "delivery", "delivered"],
   inspection: ["inspection", "inspect", "permit", "walkthrough", "walk", "estimate", "measure", "measured", "scope", "scoped"],
@@ -201,15 +208,28 @@ export function matchPhase(entry: EntryText, subtasks: Subtask[]): PhaseMatch | 
     };
   });
 
-  // the note is what the crew actually did — it outranks the service item
-  for (const by of ["note", "service"] as const) {
+  const pick = (by: "note" | "service") => {
     const ranked = [...scored].sort((a, b) => b[by] - a[by]);
     const best = ranked[0], second = ranked[1];
-    if (best && best[by] >= MIN_SCORE && (!second || best[by] - second[by] >= MIN_LEAD)) {
-      return { phaseId: best.id, by, score: best[by] };
-    }
-  }
-  return null;
+    return best && best[by] >= MIN_SCORE && (!second || best[by] - second[by] >= MIN_LEAD)
+      ? { phaseId: best.id, by, score: best[by] } : null;
+  };
+
+  // The note is what the crew actually did, so it goes first.
+  const byNote = pick("note");
+  if (byNote) return byNote;
+
+  // The service item is a BILLING category, not a statement about the hour —
+  // a crew prepping for paint can be booked to "Drywall / Mud / Tape". So it
+  // only speaks when the note named no work at all ("misc", "", "on site").
+  // Note the test is whether the note described SOMETHING, not whether it
+  // matched one of THESE phases: "Fixing kitchen framing" on a job with no
+  // framing phase is a reason to abstain, not a reason to believe the billing
+  // code. (Observed: that note, and "Prep for paint trim and doors", were both
+  // pushed onto the wrong phase by a drywall service item.)
+  const noteSpoke = conceptsOf(noteTokens).size > 0 || scored.some((s) => s.note > 0);
+  if (noteSpoke) return null;
+  return pick("service");
 }
 
 /* ============================================================

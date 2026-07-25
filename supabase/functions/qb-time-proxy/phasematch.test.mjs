@@ -94,6 +94,43 @@ test("no phases / nameless phases → null", () => {
   assert.equal(matchPhase({ note: "demo day" }, [{ id: "x", name: "" }]), null);
 });
 
+/* ---------- regressions from the first live backfill (65 real entries) ---------- */
+
+test("'Hang doors' does not own the drywall vocabulary", () => {
+  // shipped bug: "hang" lived in the drywall concept, so a Drywall/Mud/Tape
+  // service item scored 3 against "Hang doors" and stamped painting hours to it
+  const m = matchPhase({ note: "", service: "Drywall / Mud / Tape" },
+    [P("d", "Hang doors"), P("t", "Trim and Window sills")]);
+  assert.equal(m, null);
+});
+
+test("'Trim and Window sills' does not own the siding vocabulary", () => {
+  const m = matchPhase({ note: "", service: "Labor (In-House):Labor - Siding / Exterior" },
+    [P("t", "Trim and Window sills"), P("d", "Hang doors")]);
+  assert.equal(m, null);
+});
+
+test("a billing service item never overrides a note that said something", () => {
+  const phases = [P("d", "Hang doors"), P("w", "Drywall - Mud, Tape, Paint.")];
+  // real entries: the note names paint/framing, the QuickBooks service says drywall
+  assert.equal(matchPhase({ note: "Prep for paint trim and doors 101", service: "Drywall / Mud / Tape" }, phases), null);
+  assert.equal(matchPhase({ note: "Fixing kitchen framing", service: "Labor (In-House):Labor - Drywall / Taping" }, phases), null);
+  assert.equal(matchPhase({ note: "Final coat unit 202&203", service: "Drywall / Mud / Tape" }, phases), null);
+});
+
+test("the service item still speaks when the note is silent or generic", () => {
+  const phases = [P("d", "Demo"), P("m", "Materials & ordering")];
+  assert.equal(matchPhase({ note: "", service: "Labor - Expediting Materials" }, phases)?.phaseId, "m");
+  assert.equal(matchPhase({ note: "misc", service: "Labor - Expediting Materials" }, phases)?.phaseId, "m");
+});
+
+test("real notes that DID land right still land right", () => {
+  const remodel = [P("c", "Install Cabinets"), P("w", "Drywall - Mud, Tape, Paint."), P("t", "Trim and Window sills")];
+  assert.equal(matchPhase({ note: "Cabinet install unit 102" }, remodel)?.phaseId, "c");
+  assert.equal(matchPhase({ note: "Hanging sheetrock and fire tape at sourdough" }, remodel)?.phaseId, "w");
+  assert.equal(matchPhase({ note: "Sanding and puddy the new trim" }, remodel)?.phaseId, "t");
+});
+
 test("weak single-vote evidence stays below the bar", () => {
   // one concept vote (score 1) must not stamp — date fallback is safer
   const m = matchPhase({ note: "fixed stuff" }, REMODEL);
