@@ -57,11 +57,25 @@ export function onSyncMerge(fn) { mergeCb = fn || (() => {}); }
 export function onSyncRowChanged(fn) { rowCb = fn || (() => {}); }
 const rowChanged = (id) => { try { rowCb(id); } catch { /* refresh is a bonus */ } };
 
+/* content equality ignoring the sync-volatile top-level fields (rev lives in
+   bookkeeping; updatedAt is a clock stamp, not content). How absorb spots a
+   SELF-ECHO merge: the union holds nothing the server doesn't already have. */
+function sameContent(a, b) {
+  const strip = ({ rev, updatedAt, ...content }) => content;
+  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+}
+
 /* merge the server's copy into ours, adopt the server's rev, and leave the
    union locally as an UNSYNCED edit — the next pass pushes it guarded on the
    rev we just adopted. Both inputs must be INFLATED (real media, no markers).
    Re-reads the freshest local copy and lands the union with a conditional put,
-   so an edit typed while merge media was downloading is merged, not lost. */
+   so an edit typed while merge media was downloading is merged, not lost.
+   SELF-ECHO GUARD: when the union adds NOTHING over the server's copy, adopt
+   it as CLEAN instead of bumping updatedAt and re-pushing a contentless
+   rev+1. Without this, a tab whose bookkeeping went stale (a second open tab,
+   another device) re-dirtied the row on every 45 s cycle and two such tabs
+   fed each other rev bumps forever — 6k pointless row rewrites in one day
+   (Jul 2026 disk-IO incident). */
 async function absorb(localRef, serverFull, why) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const local = (await Store.get(localRef.id)) || localRef;
@@ -69,12 +83,22 @@ async function absorb(localRef, serverFull, why) {
     const { merged, added, filledForms } = mergeProjects(local, serverFull);
     merged.id = localRef.id;
     delete merged.rev;                             // revs live in sync bookkeeping, not the blob
+    if (sameContent(merged, serverFull)) {
+      // nothing to assert over the server — take its copy and go clean
+      merged.updatedAt = serverFull.updatedAt || local.updatedAt;
+      if (!(await Store.putIf(merged, local.updatedAt))) continue;   // an edit just landed — redo against it
+      revs[localRef.id] = Number(serverFull.rev) || 0; saveRevs();
+      pushed[localRef.id] = merged.updatedAt; savePushed();          // stored row now matches server → not dirty
+      mediaWait.delete(localRef.id);
+      rowChanged(localRef.id);
+      return merged;
+    }
     merged.updatedAt = new Date().toISOString();   // marks it dirty → re-pushes
     if (!(await Store.putIf(merged, local.updatedAt))) continue;   // an edit just landed — redo against it
     revs[localRef.id] = Number(serverFull.rev) || 0; saveRevs();
     mediaWait.delete(localRef.id);
     needsAnotherPass = true;
-    if (added || filledForms) {                    // a self-echo merge recovers nothing — no toast for those
+    if (added || filledForms) {                    // a merge that recovered nothing gets no toast
       try { mergeCb({ id: localRef.id, customer: merged.customer || merged.address || "job", added, filledForms, why }); } catch { /* toast is a bonus */ }
     }
     rowChanged(localRef.id);
