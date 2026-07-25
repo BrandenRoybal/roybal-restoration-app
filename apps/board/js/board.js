@@ -1610,6 +1610,11 @@ function buildJobHoursSection(job) {
   const wrap = h("div", { class: "hsec" });
 
   const QBTAG = "margin-left:6px;font-size:10px;font-weight:800;color:#fff;background:var(--orange,#f26a21);border-radius:5px;padding:1px 5px;vertical-align:middle";
+  const PHCHIP = "margin-left:6px;font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px;white-space:nowrap";
+  const PHSEL = "width:auto;max-width:140px;min-height:0;padding:2px 5px;font-size:11px;border-radius:6px";
+  // how an entry's phase was decided (stamped at QuickBooks ingest). ✋ manual is
+  // the owner's own pick; the rest are the matcher's guesses.
+  const PHBY = { manual: "✋ manual", service: "⚙️ service", note: "📝 note", ai: "🤖 AI" };
 
   function render() {
     clear(wrap);
@@ -1626,15 +1631,58 @@ function buildJobHoursSection(job) {
       const isQb = e.source === "qbtime";
       const who = isQb ? (e.employee || "QuickBooks") : crewName(e.crewId);
       const color = isQb ? "var(--orange,#f26a21)" : (crewById(e.crewId)?.color || "#7a8aa0");
+
+      // Only phases the engine can actually key on: phaseActuals looks the id
+      // up in a Map, so an id-less phase can never receive hours (and an
+      // option with no value reports its LABEL as .value — that would store a
+      // phase name as a phaseId and wedge the row shut).
+      const phases = (job.subtasks || []).filter((st) => st && st.id);
+      const ph = e.phaseId ? phases.find((st) => st.id === e.phaseId) : null;
+      // A phaseId pointing at a deleted phase is dead weight: the engine
+      // ignores it, but every server re-match pass skips a row that HAS an id.
+      // Clear it as we render so the row rejoins the matcher.
+      if (e.phaseId && !ph) { delete e.phaseId; delete e.phaseMatch; saveTimeEntry(e); }
+
+      // provenance chip — a row with no stamp shows nothing, because
+      // phaseActuals is date-matching it and claiming otherwise would lie.
+      // "Auto · ✋ manual" is the one exception worth showing: it means the
+      // owner deliberately unpinned this row, and that decision is permanent.
+      const by = Object.prototype.hasOwnProperty.call(PHBY, e.phaseMatch?.by) ? PHBY[e.phaseMatch.by] : "";
+      const unpinned = !e.phaseId && e.phaseMatch?.by === "manual";
+      const phChip = (ph || unpinned)
+        ? h("span", { style: PHCHIP, title: ph ? `Phase stamped on this entry (${by || "no source"})` : "Left to date matching on purpose" },
+            ph ? (ph.name || "Phase") : "Auto", by ? " · " + by : null)
+        : null;
+
+      // QuickBooks rows are otherwise read-only — let the office correct a bad
+      // matcher guess. by:"manual" is a LOCK in both directions: qb-time-proxy
+      // re-asserts it on every pull and every re-match pass skips the row, so
+      // a pick — and an explicit un-pick — survives every future sync.
+      const reSel = (isQb && phases.length) ? h("select", {
+        style: PHSEL, title: "Which phase these QuickBooks hours count toward — Auto places them by date and phase completions",
+      },
+        h("option", { value: "", selected: !ph }, "Auto phase"),
+        ...phases.map((st, idx) => h("option", { value: st.id, selected: ph && ph.id === st.id }, st.name || "Phase " + (idx + 1)))) : null;
+      if (reSel) reSel.addEventListener("change", async () => {
+        // Note both branches stamp manual. Deleting phaseMatch too would make
+        // "Auto" a wish rather than an instruction — tonight's matcher would
+        // just re-pin the row the owner had just cleared.
+        if (reSel.value) e.phaseId = reSel.value;
+        else delete e.phaseId;
+        e.phaseMatch = { by: "manual" };
+        await saveTimeEntry(e); render();
+      });
+
       return h("div", { class: "hrow" },
         h("span", { class: "crewchip", style: `background:${color}`, title: who }, initials(who)),
         h("div", { class: "hrow__main" },
           h("div", {}, h("strong", {}, who),
             isQb ? h("span", { style: QBTAG, title: "From QuickBooks Time" }, "QB") : null,
             " ", h("span", { class: "hrow__h" }, fmtH(e.hours))),
-          h("div", { class: "hrow__meta" }, [fmtDate(e.date), e.task || e.note].filter(Boolean).join(" · ") || "—")),
+          h("div", { class: "hrow__meta" }, [fmtDate(e.date), e.task || e.note].filter(Boolean).join(" · ") || "—", phChip)),
         isQb
-          ? h("span", {},
+          ? h("span", { style: "display:flex;align-items:center;gap:4px" },
+              reSel,
               h("span", { class: "subtle", title: "Synced from QuickBooks Time", style: "font-size:11px;padding:0 2px" }, "auto"),
               // phantom cleanup: a timesheet deleted/re-dated in QuickBooks more
               // than a day back never gets soft-deleted by the nightly pull —

@@ -36,7 +36,7 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { parseApproval, matchProposal, replyText } from "./approve.ts";
+import { parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard } from "./approve.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -296,6 +296,50 @@ async function handleApproval(
         method: "PATCH",
         body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result: { sid: r.body.sid ?? "" } }),
       });
+    } else if (act.kind === "boardEdit") {
+      // qb-time proposes a phase for hours it already saw logged; a YES writes
+      // it to the board. Rev-guarded like every other board write.
+      const { rowId, phase } = validateBoardEdit(params);
+      const got = await admin(
+        `coordination_jobs?id=eq.${encodeURIComponent(rowId)}&select=id,data,deleted`, { method: "GET" });
+      // A lookup that never landed is not a missing job — saying "no longer on
+      // the board" would send the owner hunting for a job that's sitting there.
+      if (!got.ok) throw new Error("couldn't reach the board just now — text YES again in a minute");
+      const row = ((await got.json().catch(() => [])) as Record<string, unknown>[])[0];
+      if (!row || row.deleted) throw new Error("that job is no longer on the board");
+      const data = (row.data ?? {}) as Record<string, unknown>;
+      // Refuse to give an unphased job its FIRST phase. schedule.js treats any
+      // job with subtasks as engine-managed, so one text would re-derive a
+      // hand-dated job's whole timeline from a single phase and cascade the new
+      // dates into everything downstream. That's a board decision, not an SMS.
+      if (!Array.isArray(data.subtasks) || !data.subtasks.length) {
+        throw new Error("that job has no phases yet — add the first one on the board");
+      }
+
+      const stamp = (result: Record<string, unknown>) =>
+        admin(`pending_actions?id=eq.${act.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result }),
+        });
+
+      const nextSubtasks = buildNextSubtasks(data.subtasks as Record<string, unknown>[], phase);
+      if (!nextSubtasks) {
+        // already there (added by hand while this sat) — the owner's intent is
+        // satisfied, so this is done, not failed
+        await stamp({ rowId, skipped: "phase already exists" });
+      } else {
+        const base = Number(data.rev) || 0;
+        const next = { ...data, subtasks: nextSubtasks, rev: base + 1, updatedAt: new Date().toISOString() };
+        const patch = await admin(`coordination_jobs?id=eq.${encodeURIComponent(rowId)}&${revGuard(base)}`, {
+          method: "PATCH", headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ data: next }),
+        });
+        // 0 rows back = someone edited the job first; refusing beats clobbering
+        // them, and tomorrow's pull re-proposes the same phase
+        const wrote = patch.ok && ((await patch.json().catch(() => [])) as unknown[]).length > 0;
+        if (!wrote) throw new Error("the board job changed while this was pending — nothing was added");
+        await stamp({ rowId, rev: base + 1, phaseId: phase.id ?? null });
+      }
     } else {
       throw new Error(`unknown action kind "${act.kind}"`);
     }

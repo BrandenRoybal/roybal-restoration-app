@@ -236,6 +236,44 @@ const { syncNow, startSync } = await import("../js/sync.js");
   ok(await Store.putIf({ ...cur11, customer: "FRESH" }, cur11.updatedAt), "putIf lands when updatedAt still matches");
   ok((await Store.get("p11")).customer === "FRESH", "…and the conditional write took effect");
 
+  // ---------- self-echo conflict: a contentless union must NOT re-push ----------
+  // (a tab with stale bookkeeping used to bump updatedAt on every no-op merge;
+  //  two such tabs fed each other rev+1 every 45 s forever — Jul 2026 incident)
+  await Store.put({ id: "p12", customer: "Lima", photos: [{ id: "L1", src: "small-l" }] });
+  await syncNow();                                    // server rev 1, clean
+  // another tab already pushed the SAME content as rev 2 (a pure echo)…
+  const mine12 = await Store.get("p12");
+  serverRows.set("p12", { id: "p12", deleted: false, updated_at: nowIso(),
+    data: { ...JSON.parse(JSON.stringify(mine12)), rev: 2 } });
+  // …while THIS tab still thinks it's on rev 1 and re-saves identical content
+  await Store.put(mine12, { quiet: true });           // dirty again, content unchanged
+  await syncNow();                                    // push conflicts → absorb sees a self-echo
+  await syncNow();                                    // old code re-pushed a contentless rev 3 here
+  ok(Number(serverRows.get("p12").data.rev) === 2, "a self-echo conflict does not push a contentless rev");
+  const local12 = await Store.get("p12");
+  ok(local12.updatedAt === serverRows.get("p12").data.updatedAt, "…the server copy is adopted in place (no dirty bump)");
+  ok(local12.customer === "Lima" && local12.photos[0].src === "small-l", "…and the content survives untouched");
+  await syncNow();
+  ok(Number(serverRows.get("p12").data.rev) === 2, "…and the row stays clean on later cycles (echo loop is dead)");
+
+  // ---------- self-echo pull: identical newer remote over a dirty local ----------
+  await Store.put({ id: "p13", customer: "Mike", receipts: [{ id: "M1", amount: 10 }] });
+  await syncNow();                                    // server rev 1, clean
+  const p13 = await Store.get("p13");
+  p13.notes = "same everywhere";
+  await Store.put(p13, { quiet: true });              // dirty local edit
+  // another tab already pushed EXACTLY this content as rev 2 with a newer stamp
+  serverRows.set("p13", { id: "p13", deleted: false, updated_at: nowIso(), data: {
+    ...JSON.parse(JSON.stringify(p13)), rev: 2,
+    updatedAt: new Date(Date.parse(p13.updatedAt) + 60_000).toISOString(),
+  } });
+  await syncNow();                                    // pull-merge → absorb sees a self-echo
+  await syncNow();                                    // old code re-pushed a contentless rev 3 here
+  ok(Number(serverRows.get("p13").data.rev) === 2, "an identical newer remote over a dirty local pushes nothing back");
+  const local13 = await Store.get("p13");
+  ok(local13.notes === "same everywhere" && local13.updatedAt === serverRows.get("p13").data.updatedAt,
+    "…and it is adopted in place as clean");
+
   // ---------- a job stuck on missing server media goes RED, not green ----------
   let lastStatus = null;
   startSync((s) => { lastStatus = s; });              // wires the status callback (fires one un-awaited cycle)
