@@ -16,6 +16,7 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { matchPhase, reconcileRows, phasedJobForDate, type BoardJobLite } from "./phasematch.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -181,7 +182,8 @@ function qbRowsFrom(
   jobcodeId: string,
   fieldProjectId: string | null,
   idByTs: Map<string, string>,
-  serviceFieldId: string | null
+  serviceFieldId: string | null,
+  boardJobs: BoardJobLite[] | null = null
 ) {
   const nowIso = new Date().toISOString();
   return timesheets.map((ts) => {
@@ -190,6 +192,15 @@ function qbRowsFrom(
     const jc = jobcodes[String(ts.jobcode_id)];
     const id = idByTs.get(String(ts.id)) ?? crypto.randomUUID();
     const service = serviceFieldId ? (ts.customfields?.[serviceFieldId] || "") : "";
+    // Content-aware phase stamp: match the crew's service item + note against
+    // the linked board job's phases (hoursFrom-scoped when a jobcode backs
+    // several jobs). The board's phaseActuals honors an explicit phaseId over
+    // its date fallback, so a stamp here flows through everything. NO
+    // timestamp inside phaseMatch — the stamp must be deterministic so the
+    // unchanged-row skip in reconcileRows can do its job. A manual stamp is
+    // re-asserted later by reconcileRows regardless of what we compute here.
+    const pj = boardJobs && boardJobs.length ? phasedJobForDate(boardJobs, ts.date) : null;
+    const m = pj ? matchPhase({ service, note: ts.notes || "" }, pj.subtasks || []) : null;
     return {
       id,
       deleted: false,
@@ -213,9 +224,32 @@ function qbRowsFrom(
         enteredBy: "quickbooks-time",
         createdAt: nowIso,
         updatedAt: nowIso,
+        ...(m ? { phaseId: m.phaseId, phaseMatch: { by: m.by, score: m.score } } : {}),
       },
     };
   });
+}
+
+/** Board jobs (with phases) linked to a jobcode — the matcher's phase source.
+    Light rows only; callers may also prebuild these from an existing
+    coordination_jobs read (pullAllLinked does). */
+async function fetchPhasedBoardJobs(
+  supabase: ReturnType<typeof createClient>,
+  jobcodeId: string
+): Promise<BoardJobLite[]> {
+  const { data } = await supabase
+    .from("coordination_jobs")
+    .select("id, data")
+    .eq("deleted", false)
+    .filter("data->>qbJobcodeId", "eq", jobcodeId);
+  return ((data ?? []) as { id: string; data: Record<string, unknown> }[])
+    .map((r) => ({
+      id: r.id,
+      qbJobcodeId: jobcodeId,
+      hoursFrom: (r.data?.hoursFrom as string) || "",
+      subtasks: (r.data?.subtasks as BoardJobLite["subtasks"]) || [],
+    }))
+    .filter((j) => (j.subtasks || []).length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +261,9 @@ async function pullOneDay(
   accessToken: string,
   jobcodeId: string,
   date: string,
-  fieldProjectId: string | null
-): Promise<{ pulled: number; removed: number }> {
+  fieldProjectId: string | null,
+  boardJobs: BoardJobLite[] | null = null
+): Promise<{ pulled: number; written: number; skipped: number; removed: number }> {
   const qs = new URLSearchParams({
     jobcode_ids: jobcodeId,
     start_date: date,
@@ -267,10 +302,18 @@ async function pullOneDay(
   }
 
   const seen = new Set<string>(timesheets.map((ts) => String(ts.id)));
-  const rows = qbRowsFrom(timesheets, users, jobcodes, jobcodeId, fieldProjectId, idByTs, serviceFieldId);
+  if (boardJobs === null) boardJobs = await fetchPhasedBoardJobs(supabase, jobcodeId);
+  const rows = qbRowsFrom(timesheets, users, jobcodes, jobcodeId, fieldProjectId, idByTs, serviceFieldId, boardJobs);
 
-  if (rows.length > 0) {
-    const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
+  // Only write what actually changed: preserves original createdAt and any
+  // manual phase assignment, and stops the nightly re-pull from rewriting
+  // every unchanged row (it used to — pure DB churn).
+  const existingById = new Map<string, Record<string, unknown>>();
+  for (const r of (existing ?? []) as { id: string; data: Record<string, unknown> }[]) existingById.set(r.id, r.data);
+  const { toWrite, skipped } = reconcileRows(rows, existingById);
+
+  if (toWrite.length > 0) {
+    const { error } = await supabase.from("time_entries").upsert(toWrite, { onConflict: "id" });
     if (error) throw new Error(`time_entries upsert failed: ${error.message}`);
   }
 
@@ -281,7 +324,7 @@ async function pullOneDay(
     await supabase.from("time_entries").update({ deleted: true }).in("id", staleIds);
   }
 
-  return { pulled: rows.length, removed: staleIds.length };
+  return { pulled: rows.length, written: toWrite.length, skipped, removed: staleIds.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -296,8 +339,9 @@ async function pullRange(
   jobcodeId: string,
   startDate: string,
   endDate: string,
-  fieldProjectId: string | null
-): Promise<{ pulled: number; pages: number }> {
+  fieldProjectId: string | null,
+  boardJobs: BoardJobLite[] | null = null
+): Promise<{ pulled: number; written: number; skipped: number; pages: number }> {
   const all: QbTimesheet[] = [];
   const users: Record<string, { first_name: string; last_name: string }> = {};
   const jobcodes: Record<string, { name: string }> = {};
@@ -345,12 +389,20 @@ async function pullRange(
     if (r.data?.qbTimesheetId) idByTs.set(String(r.data.qbTimesheetId), r.id);
   }
 
-  const rows = qbRowsFrom(all, users, jobcodes, jobcodeId, fieldProjectId, idByTs, serviceFieldId);
-  if (rows.length > 0) {
-    const { error } = await supabase.from("time_entries").upsert(rows, { onConflict: "id" });
+  if (boardJobs === null) boardJobs = await fetchPhasedBoardJobs(supabase, jobcodeId);
+  const rows = qbRowsFrom(all, users, jobcodes, jobcodeId, fieldProjectId, idByTs, serviceFieldId, boardJobs);
+
+  // Same reconcile as pullOneDay: preserve createdAt + manual phase stamps,
+  // skip rows whose content didn't change.
+  const existingById = new Map<string, Record<string, unknown>>();
+  for (const r of (existing ?? []) as { id: string; data: Record<string, unknown> }[]) existingById.set(r.id, r.data);
+  const { toWrite, skipped } = reconcileRows(rows, existingById);
+
+  if (toWrite.length > 0) {
+    const { error } = await supabase.from("time_entries").upsert(toWrite, { onConflict: "id" });
     if (error) throw new Error(`time_entries upsert failed: ${error.message}`);
   }
-  return { pulled: rows.length, pages: page - 1 };
+  return { pulled: rows.length, written: toWrite.length, skipped, pages: page - 1 };
 }
 
 // ---------------------------------------------------------------------------
@@ -596,8 +648,8 @@ serve(async (req) => {
 
     try {
       const accessToken = await getValidToken(supabase);
-      const { pulled, removed } = await pullOneDay(supabase, accessToken, jobcodeId, date, fieldProjectId);
-      return ok({ pulled, removed, date, jobcodeId });
+      const { pulled, written, skipped, removed } = await pullOneDay(supabase, accessToken, jobcodeId, date, fieldProjectId);
+      return ok({ pulled, written, skipped, removed, date, jobcodeId });
     } catch (e) {
       return err(e instanceof Error ? e.message : "pullDay failed");
     }
@@ -616,8 +668,8 @@ serve(async (req) => {
 
     try {
       const accessToken = await getValidToken(supabase);
-      const { pulled, pages } = await pullRange(supabase, accessToken, jobcodeId, startDate, endDate, fieldProjectId);
-      return ok({ pulled, pages, startDate, endDate, jobcodeId });
+      const { pulled, written, skipped, pages } = await pullRange(supabase, accessToken, jobcodeId, startDate, endDate, fieldProjectId);
+      return ok({ pulled, written, skipped, pages, startDate, endDate, jobcodeId });
     } catch (e) {
       return err(e instanceof Error ? e.message : "pullRange failed");
     }
@@ -655,26 +707,43 @@ serve(async (req) => {
         if (jc && !byJobcode.has(jc)) byJobcode.set(jc, j.id);
       }
 
+      // Phased board jobs per jobcode, built from the read we already did —
+      // the matcher's phase source (see qbRowsFrom).
+      const phasedByJobcode = new Map<string, BoardJobLite[]>();
+      for (const j of (cjs ?? []) as { id: string; data: Record<string, unknown> }[]) {
+        const jc = j.data?.qbJobcodeId as string | undefined;
+        const subtasks = (j.data?.subtasks as BoardJobLite["subtasks"]) || [];
+        if (!jc || !subtasks.length) continue;
+        const list = phasedByJobcode.get(jc) || [];
+        list.push({ id: j.id, qbJobcodeId: jc, hoursFrom: (j.data?.hoursFrom as string) || "", subtasks });
+        phasedByJobcode.set(jc, list);
+      }
+
       const linked = [...byJobcode.entries()].map(([jobcodeId, projId]) => ({ jobcodeId, projId }));
       if (linked.length === 0) return ok({ jobcodes: 0, totalPulled: 0, totalRemoved: 0, results: [] });
 
       const accessToken = await getValidToken(supabase);
       let totalPulled = 0;
+      let totalWritten = 0;
+      let totalSkipped = 0;
       let totalRemoved = 0;
       const results: unknown[] = [];
       for (const { jobcodeId, projId } of linked) {
         for (const d of dates) {
           try {
-            const { pulled, removed } = await pullOneDay(supabase, accessToken, jobcodeId, d, projId);
+            const { pulled, written, skipped, removed } =
+              await pullOneDay(supabase, accessToken, jobcodeId, d, projId, phasedByJobcode.get(jobcodeId) ?? []);
             totalPulled += pulled;
+            totalWritten += written;
+            totalSkipped += skipped;
             totalRemoved += removed;
-            results.push({ jobcodeId, date: d, pulled, removed });
+            results.push({ jobcodeId, date: d, pulled, written, skipped, removed });
           } catch (e) {
             results.push({ jobcodeId, date: d, error: e instanceof Error ? e.message : String(e) });
           }
         }
       }
-      return ok({ jobcodes: linked.length, totalPulled, totalRemoved, results });
+      return ok({ jobcodes: linked.length, totalPulled, totalWritten, totalSkipped, totalRemoved, results });
     } catch (e) {
       return err(e instanceof Error ? e.message : "pullAllLinked failed");
     }
