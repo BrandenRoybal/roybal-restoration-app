@@ -269,7 +269,11 @@ async function fetchPhasedBoardJobs(
 // ---------------------------------------------------------------------------
 
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";
-const LLM_MODEL = Deno.env.get("LLM_MODEL") ?? "claude-haiku-4-5";
+// Pinned to Haiku on purpose — deliberately NOT inheriting the project-wide
+// LLM_MODEL, which the office assistant may point at Opus. Phase matching is
+// high-frequency, low-stakes, and abstention is always safe, so the cheap
+// model is the right one. Override with PHASE_LLM_MODEL if that ever changes.
+const LLM_MODEL = Deno.env.get("PHASE_LLM_MODEL") ?? "claude-haiku-4-5";
 const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const LLM_PRICES: Record<string, { in: number; out: number }> = {
   "claude-haiku-4-5": { in: 1.0, out: 5.0 },
