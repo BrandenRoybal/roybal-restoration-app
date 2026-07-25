@@ -93,6 +93,30 @@ const CONCEPTS: Record<string, string[]> = {
   inspection: ["inspection", "inspect", "permit", "walkthrough", "walk", "estimate", "measure", "measured", "scope", "scoped"],
 };
 
+/* The phase name to propose when a concept has hours but no phase owns it.
+   Keys must exist in CONCEPTS; anything without a label is never proposed
+   (too vague to name a phase after — e.g. "inspection"). */
+const PHASE_LABELS: Record<string, string> = {
+  demo: "Demo & tear-out",
+  mitigation: "Dry-out & mitigation",
+  framing: "Framing",
+  insulation: "Insulation",
+  drywall: "Drywall",
+  paint: "Paint",
+  flooring: "Flooring",
+  trim: "Trim & doors",
+  cabinets: "Cabinets & countertops",
+  plumbing: "Plumbing",
+  electrical: "Electrical",
+  hvac: "Mechanical / HVAC",
+  roofing: "Roofing",
+  siding: "Siding & exterior",
+  concrete: "Concrete",
+  punch: "Punch list",
+  cleanup: "Final clean",
+  materials: "Materials & expediting",
+};
+
 /* word → concepts that own it (built once) */
 const CONCEPT_OF: Map<string, string[]> = (() => {
   const m = new Map<string, string[]>();
@@ -112,6 +136,25 @@ const conceptsOf = (tokens: string[]): Set<string> => {
   for (const t of tokens) for (const c of CONCEPT_OF.get(t) || []) out.add(c);
   return out;
 };
+
+/** votes per concept across a text's distinct words (the clustering signal) */
+export function conceptVotes(text: string): Map<string, number> {
+  const out = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const t of tokensOf(text)) {
+    if (seen.has(t)) continue;
+    seen.add(t);
+    for (const c of CONCEPT_OF.get(t) || []) out.set(c, (out.get(c) || 0) + 1);
+  }
+  return out;
+}
+
+/** the single concept a note is most about, or null when it says nothing */
+export function dominantConcept(text: string): string | null {
+  let best: string | null = null, bestN = 0;
+  for (const [c, n] of conceptVotes(text)) if (n > bestN) { bestN = n; best = c; }
+  return best;
+}
 
 /* ---------- scoring ----------
    Per distinct entry word: a direct phase-name token hit = 2 pts; else a
@@ -176,6 +219,11 @@ export function matchPhase(entry: EntryText, subtasks: Subtask[]): PhaseMatch | 
    · keep the original createdAt (a re-pull is not a creation)
    · a manual phase assignment (phaseMatch.by === "manual") is owner
      truth — never overwritten by matcher or re-pull
+   · an attribution the row already earned SURVIVES a pull that
+     matched nothing. Without this the nightly re-pull wipes every
+     AI stamp (the free matcher failed on those rows by definition)
+     and we pay Haiku to re-earn the same answer every night — and
+     an AI "looked at this and passed" marker would be lost too.
    · rows whose content is unchanged are SKIPPED entirely (the
      nightly re-pull used to rewrite every row every day)
    ============================================================ */
@@ -205,9 +253,17 @@ export function reconcileRows(
     if (prev) {
       if (prev.createdAt) row.data.createdAt = prev.createdAt;   // re-pull ≠ re-creation
       const pm = prev.phaseMatch as { by?: string } | undefined;
-      if (pm?.by === "manual" && prev.phaseId) {                 // owner's call sticks forever
-        row.data.phaseId = prev.phaseId;
+      if (pm?.by === "manual") {
+        // The owner's call sticks forever — INCLUDING a deliberate unpin
+        // (manual with no phaseId, set by the board's "Auto phase"). Without
+        // the delete, tonight's matcher would quietly re-pin what they cleared.
+        if (prev.phaseId) row.data.phaseId = prev.phaseId;
+        else delete row.data.phaseId;
         row.data.phaseMatch = prev.phaseMatch;
+      } else if (!row.data.phaseId && (prev.phaseId || pm)) {
+        // this pull's matcher found nothing — keep what the row already earned
+        if (prev.phaseId) row.data.phaseId = prev.phaseId;
+        if (pm) row.data.phaseMatch = prev.phaseMatch;
       }
       if (entryFingerprint(row.data) === entryFingerprint(prev)) { skipped++; continue; }
     }
@@ -225,7 +281,75 @@ export function reconcileRows(
    at or before the date (no hoursFrom = matches any date).
    ============================================================ */
 
-export type BoardJobLite = { id: string; qbJobcodeId?: string; hoursFrom?: string; subtasks?: Subtask[] };
+export type BoardJobLite = {
+  id: string; qbJobcodeId?: string; hoursFrom?: string; subtasks?: Subtask[];
+  title?: string; customer?: string; rev?: number;
+};
+
+/** what to call a board job in an owner-facing line */
+export const jobLabel = (j: BoardJobLite): string =>
+  String(j?.title || j?.customer || "job").trim() || "job";
+
+/* ============================================================
+   Cluster the leftovers — "this crew keeps logging work no phase
+   covers". Feeds the approve-by-text proposal (the owner adds the
+   phase with one YES; we never touch the board unasked, because a
+   phase reshapes the schedule).
+   ============================================================ */
+
+export type UnmatchedEntry = { id: string; hours?: number; note?: string; task?: string; date?: string };
+
+/* The owner touched this entry's phase by hand — pinned it to a phase, or
+   deliberately unpinned it back to the date fallback. Either way no automated
+   pass may touch it again. THE guard every re-match path must honor. */
+export const isOwnerPinned = (data: Record<string, unknown> | undefined): boolean =>
+  (data?.phaseMatch as { by?: string } | undefined)?.by === "manual";
+
+/** Is this entry still up for automated attribution? */
+export const isOpenForMatching = (data: Record<string, unknown> | undefined): boolean =>
+  !data?.phaseId && !isOwnerPinned(data);
+export type PhaseProposal = { concept: string; name: string; hours: number; entryIds: string[] };
+
+/** Concepts already covered by a phase — never propose one of these again. */
+export function coveredConcepts(phases: Subtask[]): Set<string> {
+  const out = new Set<string>();
+  for (const st of phases || []) {
+    if (!st || !st.name) continue;
+    for (const c of conceptsOf(tokensOf(String(st.name)))) out.add(c);
+  }
+  return out;
+}
+
+/** Group unstamped entries by what they're about; a group clears the bar at
+    2+ entries or 3+ hours. Returns biggest-first; never proposes a concept a
+    phase already covers, or one with no sensible phase name. */
+export function clusterUnmatched(
+  entries: UnmatchedEntry[],
+  phases: Subtask[],
+  opts: { minEntries?: number; minHours?: number } = {}
+): PhaseProposal[] {
+  const minEntries = opts.minEntries ?? 2;
+  const minHours = opts.minHours ?? 3;
+  const covered = coveredConcepts(phases);
+  const groups = new Map<string, { hours: number; entryIds: string[] }>();
+
+  for (const e of entries || []) {
+    if (!e || !e.id) continue;
+    const c = dominantConcept([e.note, e.task].filter(Boolean).join(" "));
+    if (!c || covered.has(c) || !PHASE_LABELS[c]) continue;
+    const g = groups.get(c) || { hours: 0, entryIds: [] };
+    g.hours += Number(e.hours) || 0;
+    g.entryIds.push(e.id);
+    groups.set(c, g);
+  }
+
+  const out: PhaseProposal[] = [];
+  for (const [concept, g] of groups) {
+    if (g.entryIds.length < minEntries && g.hours < minHours) continue;
+    out.push({ concept, name: PHASE_LABELS[concept], hours: Math.round(g.hours * 100) / 100, entryIds: g.entryIds });
+  }
+  return out.sort((a, b) => b.hours - a.hours || b.entryIds.length - a.entryIds.length);
+}
 
 export function phasedJobForDate(candidates: BoardJobLite[], date: string): BoardJobLite | null {
   let best: BoardJobLite | null = null;

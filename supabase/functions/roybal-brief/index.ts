@@ -158,7 +158,12 @@ serve(async (req: Request) => {
       const alreadyKeys = new Set(recent
         .filter((a) => a.status === "pending" || a.status === "approved" || a.status === "executed")
         .map((a) => String(a.params?.invoiceKey || "")));
-      const usedCodes = new Set(recent.filter((a) => a.status === "pending").map((a) => Number(a.code)));
+      // Codes must be unique across every LIVE proposal, not just this kind —
+      // qb-time proposes board phases into the same queue and the owner
+      // answers them all with one number.
+      const livePending = await rest(jwt,
+        `pending_actions?status=eq.pending&select=code&limit=200`).catch(() => []) as Blob[];
+      const usedCodes = new Set(livePending.map((a) => Number(a.code)));
       let nextCode = 11;
       const takeCode = () => { while (usedCodes.has(nextCode)) nextCode++; usedCodes.add(nextCode); return nextCode; };
 
@@ -194,6 +199,23 @@ serve(async (req: Request) => {
         if (ins.ok) proposals.push({ code, label });
       }
     } catch (e) { console.error("proposals skipped:", (e as Error).message); }
+
+    // Other proposers share this queue — the nightly QB Time pull (an hour
+    // before this brief) suggests board phases for work no phase covers.
+    // Surface whatever is still open, or the owner never sees it and it
+    // expires unanswered. Ours go first: money outranks bookkeeping.
+    try {
+      const nowIso = new Date().toISOString();
+      const open = await rest(jwt,
+        `pending_actions?status=eq.pending&expires_at=gt.${encodeURIComponent(nowIso)}` +
+        `&proposed_by=neq.morning-brief&select=code,label&order=created_at.desc&limit=5`)
+        .catch(() => []) as Blob[];
+      for (const a of open) {
+        const code = Number(a.code);
+        if (!code || proposals.some((p) => p.code === code)) continue;
+        proposals.push({ code, label: String(a.label || "") });
+      }
+    } catch (e) { console.error("outside proposals skipped:", (e as Error).message); }
 
     const brief = buildBrief({
       projects, boardJobs, boardBaseline, portalWaiting, emailsWaiting, proposals,

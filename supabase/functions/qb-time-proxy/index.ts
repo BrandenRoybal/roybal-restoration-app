@@ -16,7 +16,11 @@
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { matchPhase, reconcileRows, phasedJobForDate, type BoardJobLite } from "./phasematch.ts";
+import {
+  matchPhase, reconcileRows, phasedJobForDate, clusterUnmatched, jobLabel, isOpenForMatching,
+  type BoardJobLite, type Subtask,
+} from "./phasematch.ts";
+import { buildRequestBody, applyAiMatches, MAX_BATCH, type AiEntry } from "./aiphase.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -233,6 +237,17 @@ function qbRowsFrom(
 /** Board jobs (with phases) linked to a jobcode — the matcher's phase source.
     Light rows only; callers may also prebuild these from an existing
     coordination_jobs read (pullAllLinked does). */
+function boardJobLite(id: string, data: Record<string, unknown>, jobcodeId: string): BoardJobLite {
+  return {
+    id,
+    qbJobcodeId: jobcodeId,
+    hoursFrom: (data?.hoursFrom as string) || "",
+    subtasks: (data?.subtasks as Subtask[]) || [],
+    title: (data?.title as string) || "",
+    customer: (data?.customer as string) || "",
+  };
+}
+
 async function fetchPhasedBoardJobs(
   supabase: ReturnType<typeof createClient>,
   jobcodeId: string
@@ -243,13 +258,272 @@ async function fetchPhasedBoardJobs(
     .eq("deleted", false)
     .filter("data->>qbJobcodeId", "eq", jobcodeId);
   return ((data ?? []) as { id: string; data: Record<string, unknown> }[])
-    .map((r) => ({
-      id: r.id,
-      qbJobcodeId: jobcodeId,
-      hoursFrom: (r.data?.hoursFrom as string) || "",
-      subtasks: (r.data?.subtasks as BoardJobLite["subtasks"]) || [],
-    }))
+    .map((r) => boardJobLite(r.id, r.data, jobcodeId))
     .filter((j) => (j.subtasks || []).length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// AI fallback + phase proposals — the paid pass, run ONCE per jobcode per
+// night (not per day-pull), over whatever the free deterministic matcher
+// left unstamped.
+// ---------------------------------------------------------------------------
+
+const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";
+const LLM_MODEL = Deno.env.get("LLM_MODEL") ?? "claude-haiku-4-5";
+const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
+const LLM_PRICES: Record<string, { in: number; out: number }> = {
+  "claude-haiku-4-5": { in: 1.0, out: 5.0 },
+  "claude-sonnet-4-6": { in: 3.0, out: 15.0 },
+  "claude-opus-4-8": { in: 5.0, out: 25.0 },
+};
+const LLM_PRICE_IN = Number(Deno.env.get("LLM_PRICE_IN") ?? (LLM_PRICES[LLM_MODEL]?.in ?? 1.0));
+const LLM_PRICE_OUT = Number(Deno.env.get("LLM_PRICE_OUT") ?? (LLM_PRICES[LLM_MODEL]?.out ?? 5.0));
+
+/** Month-to-date AI spend across every lane (same ledger the field app bills to). */
+async function monthSpend(supabase: ReturnType<typeof createClient>): Promise<number> {
+  const month = new Date().toISOString().slice(0, 7);
+  const { data } = await supabase
+    .from("ai_usage")
+    .select("cost_usd")
+    .eq("billing_month", month)
+    .limit(5000);
+  return ((data ?? []) as { cost_usd: number }[]).reduce((t, r) => t + (Number(r.cost_usd) || 0), 0);
+}
+
+type EntryRow = { id: string; data: Record<string, unknown> };
+
+/** One batched forced-tool call. Returns validated assignments + token usage. */
+async function aiAssignPhases(entries: AiEntry[], phases: Subtask[]) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": LLM_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(buildRequestBody(LLM_MODEL, entries, phases)),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`anthropic ${res.status}: ${text.slice(0, 300)}`);
+  const data = JSON.parse(text) as {
+    content?: { type: string; name?: string; input?: unknown }[];
+    usage?: { input_tokens?: number; output_tokens?: number };
+    stop_reason?: string;
+  };
+  const inTok = Number(data.usage?.input_tokens) || 0;
+  const outTok = Number(data.usage?.output_tokens) || 0;
+  // A truncated tool call yields half a JSON object — drop the batch rather
+  // than stamp a partial one (the entries just stay on the date fallback).
+  const block = data.stop_reason === "max_tokens"
+    ? null
+    : (data.content ?? []).find((b) => b.type === "tool_use" && b.name === "assign");
+  return { assignments: block ? applyAiMatches(block.input, entries, phases) : [], inTok, outTok };
+}
+
+/** Codes the owner texts back ("YES 14") must be unique across every LIVE
+    proposal, not just this kind — the brief hands out 11+ for its own. */
+async function takeCodes(supabase: ReturnType<typeof createClient>, n: number): Promise<number[]> {
+  const { data } = await supabase.from("pending_actions").select("code").eq("status", "pending").limit(200);
+  const used = new Set(((data ?? []) as { code: number }[]).map((r) => Number(r.code)));
+  const out: number[] = [];
+  let next = 11;
+  while (out.length < n) {
+    while (used.has(next)) next++;
+    used.add(next);
+    out.push(next++);
+  }
+  return out;
+}
+
+/** AI-stamp what the matcher couldn't, then propose phases for what's STILL
+    unexplained. Returns counters; never throws into the pull path. */
+async function enrichJobcode(
+  supabase: ReturnType<typeof createClient>,
+  jobcodeId: string,
+  boardJobs: BoardJobLite[],
+  opts: { ai?: boolean; propose?: boolean } = {}
+): Promise<{ stamped: number; aiStamped: number; proposed: number; capped: boolean; spent: number }> {
+  const useAi = opts.ai !== false && !!LLM_API_KEY;
+  const propose = opts.propose !== false;
+  let stamped = 0, aiStamped = 0, proposed = 0, capped = false, spent = 0;
+  if (!boardJobs.length) return { stamped, aiStamped, proposed, capped, spent };
+
+  const { data: rows } = await supabase
+    .from("time_entries")
+    .select("id, data")
+    .eq("deleted", false)
+    .filter("data->>qbJobcodeId", "eq", jobcodeId)
+    .limit(2000);
+
+  // Unstamped, and not something the owner already decided by hand.
+  const open = ((rows ?? []) as EntryRow[]).filter((r) => isOpenForMatching(r.data));
+  if (!open.length) return { stamped, aiStamped, proposed, capped, spent };
+
+  // Group by the board job whose hours window owns each entry's date.
+  const byJob = new Map<string, { job: BoardJobLite; rows: EntryRow[] }>();
+  for (const r of open) {
+    const j = phasedJobForDate(boardJobs, String(r.data?.date || ""));
+    if (!j) continue;
+    const g = byJob.get(j.id) || { job: j, rows: [] };
+    g.rows.push(r);
+    byJob.set(j.id, g);
+  }
+
+  for (const { job, rows: jobRows0 } of byJob.values()) {
+    const phases = (job.subtasks || []).filter((st) => st && st.id && String(st.name || "").trim());
+    if (!phases.length) continue;
+    let jobRows = jobRows0;
+
+    // ---- free re-match first ----
+    // The phase list is not static: the owner adds one (often by approving a
+    // proposal made right here). Ingest only matched the rows it pulled that
+    // day, so without this the very entries a new phase was created FOR would
+    // never attach to it — and the phase would sit at 0 logged hours forever.
+    const redo: { id: string; deleted: boolean; data: Record<string, unknown> }[] = [];
+    for (const r of jobRows) {
+      const m = matchPhase(
+        { service: String(r.data?.service || ""), note: String(r.data?.note || ""), task: String(r.data?.task || "") },
+        phases
+      );
+      if (!m) continue;
+      redo.push({
+        id: r.id, deleted: false,
+        data: { ...r.data, phaseId: m.phaseId, phaseMatch: { by: m.by, score: m.score } },
+      });
+    }
+    if (redo.length) {
+      const { error } = await supabase.from("time_entries").upsert(redo, { onConflict: "id" });
+      if (!error) {
+        stamped += redo.length;
+        const done = new Set(redo.map((w) => w.id));
+        jobRows = jobRows.filter((r) => !done.has(r.id));
+      }
+    }
+    let left = jobRows;
+
+    // ---- AI pass (only entries that actually said something) ----
+    if (useAi) {
+      // Skip anything the model already looked at and passed on (marked with a
+      // scoreless "ai" stamp) — each entry costs at most one call, ever.
+      const speakers = jobRows
+        .filter((r) => String(r.data?.note || r.data?.task || "").trim())
+        .filter((r) => (r.data?.phaseMatch as { by?: string } | undefined)?.by !== "ai")
+        .slice(0, MAX_BATCH);
+      if (speakers.length) {
+        spent = await monthSpend(supabase);
+        if (SPEND_CAP_USD > 0 && spent >= SPEND_CAP_USD) {
+          capped = true;
+          await supabase.from("ai_usage").insert({
+            provider: "none", capped: true, cost_usd: 0,
+            form_key: "qbtime_phase", note: "monthly spend cap reached",
+          });
+        } else {
+          const batch: AiEntry[] = speakers.map((r) => ({
+            id: r.id,
+            hours: Number(r.data?.hours) || 0,
+            date: String(r.data?.date || ""),
+            note: String(r.data?.note || ""),
+            task: String(r.data?.task || ""),
+            service: String(r.data?.service || ""),
+          }));
+          try {
+            const { assignments, inTok, outTok } = await aiAssignPhases(batch, phases);
+            const cost = (inTok / 1e6) * LLM_PRICE_IN + (outTok / 1e6) * LLM_PRICE_OUT;
+            await supabase.from("ai_usage").insert({
+              provider: "anthropic", llm_model: LLM_MODEL,
+              input_tokens: inTok, output_tokens: outTok,
+              llm_cost_usd: cost, cost_usd: cost, capped: false,
+              form_key: "qbtime_phase", note: `phase match — ${batch.length} entries`,
+            });
+            const byId = new Map(jobRows.map((r) => [r.id, r]));
+            const chosen = new Map(assignments.map((a) => [a.entryId, a]));
+            // Write BOTH outcomes: a match, and a "looked at it, no phase fits"
+            // marker. The marker is what stops us re-asking (and re-paying) for
+            // the same vague note every night.
+            const writes = speakers.map((r) => {
+              const a = chosen.get(r.id);
+              return {
+                id: r.id, deleted: false,
+                data: a
+                  ? { ...r.data, phaseId: a.phaseId, phaseMatch: { by: "ai", score: a.confidence } }
+                  : { ...r.data, phaseMatch: { by: "ai", score: 0 } },
+              };
+            });
+            if (writes.length) {
+              const { error } = await supabase.from("time_entries").upsert(writes, { onConflict: "id" });
+              if (!error) {
+                aiStamped += chosen.size;
+                left = left.filter((r) => !chosen.has(r.id));
+              }
+            }
+          } catch (e) {
+            // A model hiccup must never break the nightly pull — the entries
+            // simply stay on the board's date fallback until tomorrow.
+            console.error(`ai phase match failed for ${jobcodeId}:`, e instanceof Error ? e.message : e);
+          }
+        }
+      }
+    }
+
+    // ---- propose a phase for work nothing covers ----
+    if (propose && left.length) {
+      const clusters = clusterUnmatched(
+        left.map((r) => ({
+          id: r.id, hours: Number(r.data?.hours) || 0,
+          note: String(r.data?.note || ""), task: String(r.data?.task || ""),
+        })),
+        phases
+      );
+      if (clusters.length) {
+        // Don't nag: a boardEdit raised for this job+phase in the last 30 days
+        // counts as asked — including one the owner ignored or declined.
+        // EXCEPT a failed one: the owner said yes and it lost a rev race, so
+        // that question deserves asking again tomorrow.
+        const since = new Date(Date.now() - 30 * 86400000).toISOString();
+        const { data: recent } = await supabase
+          .from("pending_actions")
+          .select("params, status, created_at")
+          .eq("kind", "boardEdit")
+          .gte("created_at", since)
+          .limit(200);
+        const asked = new Set(
+          ((recent ?? []) as { params: Record<string, unknown>; status: string }[])
+            .filter((r) => r.status !== "failed")
+            .map((r) => {
+              const p = r.params as { rowId?: string; phase?: { name?: string } };
+              return `${p?.rowId || ""}::${String(p?.phase?.name || "").toLowerCase()}`;
+            })
+        );
+        const fresh = clusters.filter((c) => !asked.has(`${job.id}::${c.name.toLowerCase()}`));
+        if (fresh.length) {
+          const codes = await takeCodes(supabase, fresh.length);
+          const inserts = fresh.map((c, i) => ({
+            code: codes[i],
+            kind: "boardEdit",
+            label: `add phase "${c.name}" to ${jobLabel(job)} (${c.hours}h logged)`,
+            job_id: job.id,
+            proposed_by: "qb-time",
+            params: {
+              op: "addPhase",
+              rowId: job.id,
+              phase: {
+                id: crypto.randomUUID(),
+                name: c.name,
+                durationDays: null,
+                lagDays: 0,
+                estimatedHours: c.hours,
+                crewIds: [],
+              },
+              entryIds: c.entryIds,
+            },
+          }));
+          const { error } = await supabase.from("pending_actions").insert(inserts);
+          if (!error) proposed += inserts.length;
+        }
+      }
+    }
+  }
+  return { stamped, aiStamped, proposed, capped, spent };
 }
 
 // ---------------------------------------------------------------------------
@@ -727,6 +1001,8 @@ serve(async (req) => {
       let totalWritten = 0;
       let totalSkipped = 0;
       let totalRemoved = 0;
+      let totalAiStamped = 0;
+      let totalProposed = 0;
       const results: unknown[] = [];
       for (const { jobcodeId, projId } of linked) {
         for (const d of dates) {
@@ -742,10 +1018,79 @@ serve(async (req) => {
             results.push({ jobcodeId, date: d, error: e instanceof Error ? e.message : String(e) });
           }
         }
+        // Once per jobcode, AFTER its days landed: the paid AI pass over what
+        // the free matcher missed, then phase proposals for what nothing
+        // covers. Isolated so a model/ledger problem can't fail the pull.
+        const phased = phasedByJobcode.get(jobcodeId) ?? [];
+        if (phased.length) {
+          try {
+            const { stamped, aiStamped, proposed } = await enrichJobcode(supabase, jobcodeId, phased);
+            totalWritten += stamped;
+            totalAiStamped += aiStamped;
+            totalProposed += proposed;
+          } catch (e) {
+            results.push({ jobcodeId, enrichError: e instanceof Error ? e.message : String(e) });
+          }
+        }
       }
-      return ok({ jobcodes: linked.length, totalPulled, totalWritten, totalSkipped, totalRemoved, results });
+      return ok({
+        jobcodes: linked.length, totalPulled, totalWritten, totalSkipped, totalRemoved,
+        totalAiStamped, totalProposed, results,
+      });
     } catch (e) {
       return err(e instanceof Error ? e.message : "pullAllLinked failed");
+    }
+  }
+
+  // ── rematchAll (one-time backfill) ────────────────────────────────────────
+  // Re-attribute HISTORICAL entries now that matching exists: deterministic
+  // pass over every unstamped entry of every phased job, then (opt-in) the AI
+  // pass and phase proposals. Manual stamps are never touched. Safe to re-run.
+  //   { action:"rematchAll", ai?:false, propose?:false, jobcodeId?:"…" }
+  if (action === "rematchAll") {
+    const cronSecret = Deno.env.get("CRON_SECRET");
+    const provided = (body.cronSecret as string) ?? req.headers.get("x-cron-secret") ?? "";
+    const isCron = !!cronSecret && provided === cronSecret;
+    if (!isCron && !(await requireUser(supabase, req))) return err("Not authorized", 401);
+
+    const onlyJobcode = (body.jobcodeId as string) || "";
+    const useAi = body.ai === true;              // costs money — opt in explicitly
+    const propose = body.propose !== false;
+
+    try {
+      const { data: cjs } = await supabase
+        .from("coordination_jobs")
+        .select("id, data")
+        .eq("deleted", false);
+
+      const phasedByJobcode = new Map<string, BoardJobLite[]>();
+      for (const j of (cjs ?? []) as { id: string; data: Record<string, unknown> }[]) {
+        const jc = j.data?.qbJobcodeId as string | undefined;
+        if (!jc || (onlyJobcode && jc !== onlyJobcode)) continue;
+        const lite = boardJobLite(j.id, j.data, jc);
+        if (!(lite.subtasks || []).length) continue;
+        phasedByJobcode.set(jc, [...(phasedByJobcode.get(jc) ?? []), lite]);
+      }
+      if (phasedByJobcode.size === 0) return ok({ jobcodes: 0, stamped: 0, aiStamped: 0, proposed: 0, results: [] });
+
+      let stamped = 0, aiStamped = 0, proposed = 0;
+      const results: unknown[] = [];
+      for (const [jobcodeId, jobs] of phasedByJobcode) {
+        try {
+          // enrichJobcode already re-matches everything still open (free pass),
+          // then optionally spends on the tail and proposes missing phases.
+          const enriched = await enrichJobcode(supabase, jobcodeId, jobs, { ai: useAi, propose });
+          stamped += enriched.stamped;
+          aiStamped += enriched.aiStamped;
+          proposed += enriched.proposed;
+          results.push({ jobcodeId, ...enriched });
+        } catch (e) {
+          results.push({ jobcodeId, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      return ok({ jobcodes: phasedByJobcode.size, stamped, aiStamped, proposed, results });
+    } catch (e) {
+      return err(e instanceof Error ? e.message : "rematchAll failed");
     }
   }
 
