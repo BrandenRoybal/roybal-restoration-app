@@ -11,6 +11,7 @@ import {
   listDays, dayCrewPull, dayCrewPush,
   spanActive, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear,
   phaseActuals, layoutSubtasksLive,
+  parseHHMM, entryBlock, timelineWindow, packLanes, timelineTicks, timelinePct, idleGaps, fmtSpan,
 } from "../js/schedule.js";
 
 const S = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 10, holidays: [] };
@@ -496,6 +497,136 @@ test("computeCfoSnapshot(opts): a spanned-off member shows idle, not booked", ()
   const snap = computeCfoSnapshot([j], crew, S, "2026-06-16", 7, { today: "2026-06-16", phaseHours: new Map() });
   assert.deepEqual(snap.crew.booked.map((c) => c.id), ["a"]);
   assert.deepEqual(snap.crew.idle.map((c) => c.id), ["b"]);
+});
+
+group("day timeline");
+const H = (hh, mm = 0) => hh * 60 + mm;
+test("parseHHMM: reads the clock QuickBooks stamps, rejects the rest", () => {
+  assert.equal(parseHHMM("07:30"), H(7, 30));
+  assert.equal(parseHHMM("7:30"), H(7, 30));       // qb-time-proxy pads, the manual logger may not
+  assert.equal(parseHHMM("00:00"), 0);
+  assert.equal(parseHHMM("23:59"), H(23, 59));
+  assert.equal(parseHHMM("24:00"), null);          // out of range
+  assert.equal(parseHHMM("7:60"), null);
+  assert.equal(parseHHMM(""), null);
+  assert.equal(parseHHMM(undefined), null);
+  assert.equal(parseHHMM("7am"), null);
+});
+test("entryBlock: normal start + finish", () => {
+  const b = entryBlock({ start: "07:30", finish: "16:00", hours: 8.5 });
+  assert.equal(b.start, H(7, 30));
+  assert.equal(b.end, H(16));
+  assert.equal(b.clipped, false);
+  assert.equal(b.hours, 8.5);
+});
+test("entryBlock: no start is unplaceable — the board lists it as untimed", () => {
+  assert.equal(entryBlock({ hours: 6 }), null);
+  assert.equal(entryBlock({ finish: "16:00", hours: 6 }), null);
+  assert.equal(entryBlock(null), null);
+});
+test("entryBlock: a missing finish runs the logged hours forward from start", () => {
+  const b = entryBlock({ start: "08:00", hours: 4 });
+  assert.equal(b.end, H(12));
+  assert.equal(b.hours, 4);
+});
+test("entryBlock: a shift past midnight clips to 24:00 and says so", () => {
+  const b = entryBlock({ start: "22:00", finish: "02:00" });   // no hours to run forward
+  assert.equal(b.end, 1440);
+  assert.equal(b.clipped, true);
+  const withHours = entryBlock({ start: "20:00", finish: "01:00", hours: 5 });
+  assert.equal(withHours.end, 1440);               // 20:00 + 5h = 25:00 → clipped
+  assert.equal(withHours.clipped, true);
+});
+test("entryBlock: a zero-length row still gets a visible bar", () => {
+  const b = entryBlock({ start: "09:00", finish: "09:00", hours: 0 });
+  assert.equal(b.end - b.start, 15);
+  assert.equal(b.hours, 0.25);                     // derived, since the row logged none
+});
+test("timelineWindow: defaults to 7a–5p and only ever widens", () => {
+  assert.deepEqual(timelineWindow([]), { startMin: H(7), endMin: H(17) });
+  // a 9–3 day must NOT shrink the window — the empty morning is information
+  assert.deepEqual(timelineWindow([{ start: H(9), end: H(15) }]), { startMin: H(7), endMin: H(17) });
+  // an early start snaps out to the whole hour below it
+  assert.deepEqual(timelineWindow([{ start: H(5, 45), end: H(18, 10) }]), { startMin: H(5), endMin: H(19) });
+});
+test("timelineWindow: a clipped midnight block doesn't push past 24:00", () => {
+  const w = timelineWindow([{ start: H(22), end: 1440 }]);
+  assert.equal(w.endMin, 1440);
+  assert.equal(w.startMin, H(7));
+});
+test("packLanes: two jobs at the same hour get two lanes", () => {
+  const { blocks, lanes } = packLanes([
+    { id: "b", start: H(9), end: H(13) },
+    { id: "a", start: H(8), end: H(12) },
+  ]);
+  assert.equal(lanes, 2);
+  assert.deepEqual(blocks.map((b) => b.id), ["a", "b"]);       // sorted by start
+  assert.deepEqual(blocks.map((b) => b.lane), [0, 1]);
+});
+test("packLanes: back-to-back work reuses the same lane", () => {
+  const { blocks, lanes } = packLanes([
+    { id: "a", start: H(8), end: H(12) },
+    { id: "b", start: H(12), end: H(16) },         // starts exactly when a ends
+    { id: "c", start: H(16), end: H(17) },
+  ]);
+  assert.equal(lanes, 1);
+  assert.deepEqual(blocks.map((b) => b.lane), [0, 0, 0]);
+});
+test("packLanes: three-deep overlap, then the lanes free up again", () => {
+  const { blocks, lanes } = packLanes([
+    { id: "a", start: H(8), end: H(11) },
+    { id: "b", start: H(9), end: H(10) },
+    { id: "c", start: H(9, 30), end: H(10, 30) },
+    { id: "d", start: H(12), end: H(13) },         // everything above has ended
+  ]);
+  assert.equal(lanes, 3);
+  assert.equal(blocks.find((b) => b.id === "d").lane, 0);
+});
+test("packLanes: leaves the caller's blocks alone", () => {
+  const src = [{ id: "a", start: H(8), end: H(12) }];
+  packLanes(src);
+  assert.equal(src[0].lane, undefined);
+  assert.deepEqual(packLanes([]), { blocks: [], lanes: 1 });
+});
+test("idleGaps: the hole between two jobs is drive time, and it's reported", () => {
+  const gaps = idleGaps([
+    { start: H(7), end: H(11, 30) },
+    { start: H(12, 30), end: H(16) },
+  ]);
+  assert.deepEqual(gaps, [{ start: H(11, 30), end: H(12, 30) }]);
+});
+test("idleGaps: overlapping work is merged first — two jobs at once is not a gap", () => {
+  assert.deepEqual(idleGaps([
+    { start: H(6, 30), end: H(15) },
+    { start: H(13), end: H(17, 30) },     // overlaps the first
+  ]), []);
+});
+test("idleGaps: a short breather doesn't count", () => {
+  assert.deepEqual(idleGaps([{ start: H(8), end: H(10) }, { start: H(10, 10), end: H(12) }]), []);
+  assert.equal(idleGaps([{ start: H(8), end: H(10) }, { start: H(10, 20), end: H(12) }]).length, 1);
+  assert.equal(idleGaps([{ start: H(8), end: H(10) }, { start: H(10, 10), end: H(12) }], 5).length, 1);
+});
+test("idleGaps: one block or none has no gaps", () => {
+  assert.deepEqual(idleGaps([{ start: H(8), end: H(16) }]), []);
+  assert.deepEqual(idleGaps([]), []);
+});
+test("fmtSpan: reads the way a person says it", () => {
+  assert.equal(fmtSpan(70), "1h 10m");
+  assert.equal(fmtSpan(120), "2h");
+  assert.equal(fmtSpan(35), "35m");
+  assert.equal(fmtSpan(0), "0m");
+});
+test("timelineTicks: whole hours across the window, both ends included", () => {
+  assert.deepEqual(timelineTicks({ startMin: H(7), endMin: H(10) }), [H(7), H(8), H(9), H(10)]);
+  assert.deepEqual(timelineTicks({ startMin: H(7, 30), endMin: H(9) }), [H(8), H(9)]);
+});
+test("timelinePct: positions within the window and clamps outside it", () => {
+  const w = { startMin: H(8), endMin: H(18) };     // 10-hour window
+  assert.equal(timelinePct(H(8), w), 0);
+  assert.equal(timelinePct(H(13), w), 50);
+  assert.equal(timelinePct(H(18), w), 100);
+  assert.equal(timelinePct(H(6), w), 0);           // clamped, not negative
+  assert.equal(timelinePct(H(20), w), 100);
 });
 
 group("defaults");

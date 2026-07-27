@@ -206,16 +206,111 @@ table.rtable .num.under { color: var(--green); }
 .cal__grid.cal--week .cal__cell { min-height: 250px; max-height: none; }
 .cal__grid.cal--week .cala { width: 19px; height: 19px; font-size: 8.5px; }
 
-/* day mode — single wide column */
-.cal__grid.cal--day { grid-template-columns: 1fr; }
-.cal__grid.cal--day .cal__cell { min-height: 60vh; max-height: none; }
-.cal__grid.cal--day .cal__job { white-space: normal; font-size: 13px; padding: 5px 9px; }
-.cal__grid.cal--day .cal__crew { gap: 4px; }
-.cal__grid.cal--day .cala { width: 24px; height: 24px; font-size: 9.5px; }
+/* day mode — an hour-by-hour timeline: a lane per crew member, bars where
+   they were on a job (drawn from the clock times QuickBooks Time sends) */
+.dayt { --blkh: 34px; --namew: 168px; --ghostw: 0px; background: #fff; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.dayt__sum {
+  display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center;
+  padding: 9px 12px; border-bottom: 1px solid var(--line); background: #f4f6fa;
+  font-size: 12.5px; color: var(--muted);
+}
+.dayt__sum strong { color: var(--navy); font-size: 14px; }
+.dayt__warn { color: var(--orange-dark); }
+.dayt__warn strong { color: var(--orange-dark); }
+
+/* the gutter is what gives the 12a tick label and a midnight-clipped bar room
+   to land inside the card — the tracks' 100% stops at the gutter's edge */
+.dayt__head, .dayt__row { padding-right: 22px; }
+.dayt__head { display: flex; align-items: flex-end; border-bottom: 1px solid var(--line); background: #fff; position: sticky; top: 0; z-index: 3; }
+.dayt__name--hd {
+  font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--muted); padding: 6px 10px; align-items: flex-end;
+}
+.dayt__axis { position: relative; flex: 1 1 auto; height: 26px; }
+.dayt__tick {
+  position: absolute; bottom: 4px; transform: translateX(-50%); white-space: nowrap;
+  font-size: 10.5px; font-weight: 700; color: var(--muted);
+}
+
+.dayt__row { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
+.dayt__row:last-child { border-bottom: 0; }
+.dayt__row--quiet { background: #fafbfd; }
+.dayt__name { flex: 0 0 var(--namew); display: flex; align-items: center; gap: 7px; padding: 7px 10px; min-width: 0; }
+.dayt__name .cala { width: 24px; height: 24px; font-size: 9.5px; }
+.dayt__who { min-width: 0; }
+.dayt__nm { font-size: 12.5px; font-weight: 700; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dayt__hrs { font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.dayt__qb {
+  margin-left: 5px; font-size: 9px; font-weight: 800; color: #fff; background: #8a98ab;
+  border-radius: 4px; padding: 0 4px; vertical-align: middle;
+}
+.dayt__untimed { border: 1px dashed var(--line); border-radius: 5px; padding: 0 4px; cursor: help; }
+
+.dayt__track {
+  position: relative; flex: 1 1 auto; margin: 6px 0;
+  min-height: calc(var(--lanes, 1) * (var(--blkh) + 3px) - 3px);
+}
+.dayt__grid { position: absolute; top: -6px; bottom: -6px; width: 1px; background: var(--line); }
+.dayt__now { position: absolute; top: -6px; bottom: -6px; width: 2px; background: var(--orange); z-index: 2; }
+.dayt__now::before {
+  content: ""; position: absolute; top: -3px; left: -3px; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--orange);
+}
+/* off the clock between two jobs — drive time, lunch, waiting on materials */
+.dayt__gap {
+  position: absolute; top: 0; bottom: 0; border-radius: 4px; box-sizing: border-box;
+  border: 1px dashed #cbd5e2; overflow: hidden;
+  background: repeating-linear-gradient(135deg, #eef2f7 0 4px, #f8fafc 4px 8px);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; color: #90a0b4; white-space: nowrap;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.dayt__blk {
+  position: absolute; height: var(--blkh); border-radius: 5px; overflow: hidden; cursor: pointer;
+  display: flex; flex-direction: column; justify-content: center; gap: 1px; padding: 0 6px; min-width: 0;
+  color: #fff; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35);
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.dayt__blk:hover { filter: brightness(1.08); }
+.dayt__blk__top { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+/* on a narrow bar the job name gives way first — the clock span is the thing
+   you can't reconstruct by looking at where the bar sits */
+.dayt__blk__t { flex: 1 1 auto; min-width: 0; font-size: 11.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dayt__blk__h { flex: 0 0 auto; font-size: 10.5px; font-weight: 600; opacity: .85; white-space: nowrap; margin-left: auto; }
+.dayt__blk__n { font-size: 10px; opacity: .88; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* which colour is which job, and how the day split across them */
+.dayt__legend { display: flex; flex-wrap: wrap; gap: 5px 14px; padding: 9px 12px; border-top: 1px solid var(--line); background: #f4f6fa; }
+.dayt__leg { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink); }
+.dayt__leg--go { cursor: pointer; }
+.dayt__leg--go:hover { color: var(--orange-dark); }
+.dayt__leg i { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.dayt__leg b { color: var(--muted); font-weight: 700; }
+/* a shift that ran past midnight — the bar stops at the edge, the notch says so */
+.dayt__blk--clip { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.dayt__blk--clip::after {
+  content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 4px;
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .7) 0 2px, transparent 2px 4px);
+}
+.dayt__blk--unlinked { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35), inset 0 0 0 2px rgba(0, 0, 0, .12); }
+/* fixed on EVERY row (0 wide when the day has no ghosts at all) so each
+   track spans the same pixels and the hour grid lines up down the card */
+.dayt__ghost {
+  flex: 0 0 var(--ghostw); box-sizing: border-box; align-self: center; padding: 0 10px;
+  font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dayt__empty { padding: 34px 14px; text-align: center; color: var(--muted); font-size: 13px; }
 
 @media (max-width: 700px) {
   .cal__cell { min-height: 64px; }
   .cal__job { font-size: 10.5px; }
+  .dayt { --namew: 108px; --blkh: 30px; }
+  .dayt__blk__h { display: none; }
+  .dayt__blk__n { font-size: 9px; }
+  .dayt__ghost { display: none; }
+  /* an hour is ~12px wide on a phone — label every other tick so the ruler
+     stays readable. The gridlines still mark every hour. */
+  .dayt__tick:nth-of-type(even) { display: none; }
 }
 
 /* ---------- gantt timeline ---------- */
@@ -261,6 +356,12 @@ table.rtable .num.under { color: var(--green); }
   /* calendar: reveal every chip, avoid splitting day cells */
   .cal__cell { max-height: none !important; overflow: visible !important; break-inside: avoid; }
   .cal__job { white-space: normal !important; }
+
+  /* day timeline: keep a crew member's bars on one page; the "now" line is a
+     screen affordance and means nothing on paper */
+  .dayt__row { break-inside: avoid; }
+  .dayt__head { position: static; }
+  .dayt__now { display: none !important; }
 
   /* board: expand columns so nothing is clipped */
   .bboard { overflow: visible !important; flex-wrap: wrap; }

@@ -11,7 +11,7 @@ import {
   saveCrewMember, deleteCrewMember, saveTimeEntry, deleteTimeEntry, pendingCount,
   cachedSettings, saveSettings, setConflictHandler,
 } from "./data.js";
-import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, layoutSubtasksLive, phaseActuals, buildLiveOpts, workDaysBetween, effCrew, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear, DEFAULT_SETTINGS } from "./schedule.js";
+import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, layoutSubtasksLive, phaseActuals, buildLiveOpts, workDaysBetween, effCrew, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear, entryBlock, timelineWindow, packLanes, timelineTicks, timelinePct, idleGaps, fmtSpan, DEFAULT_SETTINGS } from "./schedule.js";
 import { pickJobcode, pickQbUser, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { boardAssistProvider } from "./assistctx.js";
@@ -45,6 +45,9 @@ const PRIORITIES = [
   { id: "high",   label: "High" },
 ];
 const CREW_COLORS = ["#f26a21", "#1c5fb0", "#1f9d55", "#8a6fb0", "#d4520f", "#2f8f8f", "#4a7fb5", "#c2487a", "#5b6b80", "#7a8aa0"];
+/* Day-view job tints. The whole read of that view is "every colour change in a
+   row is a drive", so these must stay separable side by side — no two greens. */
+const JOB_TINTS = ["#1c5fb0", "#2f8f8f", "#d4520f", "#8a6fb0", "#1f9d55", "#c2487a", "#b07a1c", "#4a7fb5", "#7a5b8f", "#5b6b80"];
 
 /* ---------- state ---------- */
 const view = $("#view");
@@ -251,6 +254,7 @@ function matchesFilter(j) {
 function render() {
   if (currentView === "crew") return renderCrewView();
   if (currentView === "calendar") return renderCalendarView();
+  if (currentView === "day") return renderDayView();
   if (currentView === "gantt") return renderGanttView();
   renderBoardView();
 }
@@ -288,6 +292,7 @@ function sortKey(j) {
 function repaint() {
   if (currentView === "crew") return paintCrew();
   if (currentView === "calendar") return paintCalendar();
+  if (currentView === "day") return paintDay();
   if (currentView === "gantt") return paintGantt();
   paintColumns();
 }
@@ -297,7 +302,7 @@ function viewSwitch() {
     class: "vsw__b" + (currentView === id ? " on" : ""),
     onclick: () => { if (currentView !== id) { currentView = id; render(); } },
   }, label);
-  return h("div", { class: "vsw" }, mk("board", "Board"), mk("crew", "Crew"), mk("calendar", "Calendar"), mk("gantt", "Gantt"));
+  return h("div", { class: "vsw" }, mk("board", "Board"), mk("crew", "Crew"), mk("calendar", "Calendar"), mk("day", "Day"), mk("gantt", "Gantt"));
 }
 
 function filterControls() {
@@ -426,6 +431,7 @@ function updatePrintHeader() {
   if (!hdr) return;
   let title = "Job Board";
   if (currentView === "calendar") title = "Calendar — " + monthLabel();
+  else if (currentView === "day") title = "Crew day — " + calLabel1();
   else if (currentView === "gantt") title = "Timeline" + (ganttZoom !== "day" ? ` (${ganttZoom})` : "");
   hdr.replaceChildren(h("h2", {}, "Roybal Construction — " + title), h("div", { class: "sub" }, printSub()));
 }
@@ -706,8 +712,7 @@ function paintCalendar() {
   const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
   if (calMode === "day") {
-    const iso = calRef;
-    wrap.append(h("div", { class: "cal__grid cal--day" }, calDayCell(iso, { dayLabel: "" })));
+    paintDayTimeline(wrap, calRef);
   } else if (calMode === "week") {
     const start = weekStart(calRef);
     const head = h("div", { class: "cal__head cal--week" }, ...DOW.map((dn, i) => {
@@ -737,6 +742,253 @@ function paintCalendar() {
       h("div", { class: "calunsched__row" }, ...unsched.map((j) =>
         h("span", { class: "cal__job cal__job--chip", style: `border-left-color:${stageOf(j.stage).color}`, onclick: () => openJobModal(j) },
           j.title || j.customer || "Job")))));
+  }
+}
+
+/* ============================================================
+   day timeline — one day, hour by hour
+   QuickBooks Time stamps a real clock-in and clock-out on every row
+   it pulls, so the Day view draws what the crew ACTUALLY did: a lane
+   per person, bars where they were on a job. Rows that carry no clock
+   times (most hand-logged ones) are listed below rather than given an
+   invented position, and anyone scheduled today who logged nothing at
+   all still gets a row — the empty row is the point.
+   ============================================================ */
+
+/* The Day view proper — its own tab, sharing `calRef` with the calendar so
+   stepping to a day in one and switching lands you on the same day. The
+   calendar's Day mode paints the identical timeline, so the mode that used to
+   be an empty box now answers the same question. */
+function renderDayView() {
+  const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
+  const nav = h("div", { class: "calnav" },
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftDay(-1) }, "‹"),
+    h("strong", { class: "calnav__label" }, calLabel1()),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftDay(1) }, "›"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: () => shiftDay(0, todayISO()) }, "Today"));
+  body.append(h("div", { class: "btoolbar" },
+    h("div", { class: "btoolbar__left" }, viewSwitch(), nav),
+    h("div", { class: "btools" }, ...filterControls(), ...actionButtons())));
+  body.append(h("div", { class: "calwrap" }));
+  paintDay();
+}
+const calLabel1 = () => new Date(calRef + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+function shiftDay(delta, set) {
+  calRef = set || toISO(addDays(new Date(calRef + "T00:00:00"), delta));
+  const lbl = $(".calnav__label", view); if (lbl) lbl.textContent = calLabel1();
+  paintDay();
+}
+function paintDay() {
+  const wrap = $(".calwrap", view);
+  if (!wrap) return renderDayView();
+  clear(wrap);
+  paintDayTimeline(wrap, calRef);
+}
+
+/* Reverse of entriesForJob: which board job a time entry belongs to. Manual
+   rows carry jobId; QuickBooks rows carry a jobcode, which can back several
+   jobs of the same loss — the one whose "count hours from" date this entry is
+   on or after owns it (the rule qb-time-proxy's phasedJobForDate uses). */
+function jobForEntry(e) {
+  if (e.jobId) { const j = jobs.find((x) => x.id === e.jobId); if (j) return j; }
+  if (e.source === "qbtime" && e.qbJobcodeId) {
+    let best = null;
+    for (const j of jobs) {
+      if (j.qbJobcodeId !== e.qbJobcodeId || !inHoursScope(j, e)) continue;
+      if (!best || (j.hoursFrom || "") > (best.hoursFrom || "")) best = j;
+    }
+    return best;
+  }
+  return null;
+}
+
+/* minutes past midnight → "7a" / "12:30p". 1440 is tomorrow's midnight. */
+function minLabel(m) {
+  if (m >= 1440) return "12a";
+  const hh = Math.floor(m / 60), mm = m % 60;
+  return (((hh + 11) % 12) + 1) + (mm ? ":" + String(mm).padStart(2, "0") : "") + (hh < 12 ? "a" : "p");
+}
+const nowMinutes = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+
+/* Every crew row for the day, keyed by crew member. A QuickBooks row whose
+   user was never linked to the roster still earns a row under the name
+   QuickBooks sent — unlinked hours are a real gap, not a reason to hide time. */
+function dayRowsFor(iso) {
+  const visible = new Set(jobs.filter(matchesFilter).map((j) => j.id));
+  const rows = new Map();
+  const rowFor = (key, name, color, crewId) => {
+    let r = rows.get(key);
+    if (!r) rows.set(key, (r = { key, name, color, crewId, blocks: [], untimed: [], planned: new Set(), hours: 0 }));
+    return r;
+  };
+
+  for (const e of entries) {
+    if ((e.date || "") !== iso) continue;
+    const job = jobForEntry(e);
+    // an entry on a filtered-out job is out of view; one with no board job at
+    // all only survives while no filter is narrowing the day
+    if (job ? !visible.has(job.id) : (filterText || filterCrew || filterType)) continue;
+    const cid = entryCrewId(e);
+    const c = cid ? crewById(cid) : null;
+    if (filterCrew && cid !== filterCrew) continue;
+    const r = c
+      ? rowFor(c.id, c.name, c.color || "#7a8aa0", c.id)
+      : rowFor("qb:" + (e.employee || "?"), e.employee || "Unknown", "#8a98ab", null);
+    const label = job ? (job.title || job.customer || "Job") : (e.jobcodeName || e.task || "Unlinked hours");
+    const b = entryBlock(e);
+    const item = { entry: e, job, label, key: job ? job.id : "?" + label, note: e.task || e.note || "", hours: Number(e.hours) || 0 };
+    if (b) { r.blocks.push({ ...b, ...item }); } else { r.untimed.push(item); }
+    r.hours += Number(e.hours) || 0;
+  }
+
+  // anyone the schedule put on a job today gets a row even with nothing logged
+  for (const j of jobs.filter(matchesFilter)) {
+    if (j.isMilestone || !jobActiveOn(j, iso)) continue;
+    for (const cid of effectiveCrewOn(j, iso)) {
+      const c = crewById(cid);
+      if (!c || isOut(c, iso)) continue;
+      if (filterCrew && cid !== filterCrew) continue;
+      rowFor(c.id, c.name, c.color || "#7a8aa0", c.id).planned.add(j.id);
+    }
+  }
+
+  // on the clock first, longest day at the top; the empty rows sink
+  return [...rows.values()].sort((a, b) => b.hours - a.hours || (a.name || "").localeCompare(b.name || ""));
+}
+
+function paintDayTimeline(wrap, iso) {
+  const rows = dayRowsFor(iso);
+  const win = timelineWindow(rows.flatMap((r) => r.blocks));
+  const ticks = timelineTicks(win);
+  const isToday = iso === todayISO();
+
+  const totalHours = rows.reduce((s, r) => s + r.hours, 0);
+  const onClock = rows.filter((r) => r.blocks.length || r.untimed.length).length;
+  const items = rows.flatMap((r) => [...r.blocks, ...r.untimed]);
+  const jobIds = new Set(items.map((x) => x.job && x.job.id).filter(Boolean));
+  const idle = rows.filter((r) => !r.blocks.length && !r.untimed.length).length;
+  const unlinked = rows.filter((r) => !r.crewId).length;
+
+  /* Colour by JOB, not by stage — the point of the view is that a colour
+     change inside one person's row is a drive to another site, and two jobs
+     sitting at the same stage would otherwise look identical. Assigned over
+     the day's jobs in a stable order, so the legend below reads with it. */
+  const tintOf = new Map([...new Set(items.map((x) => x.key))].sort()
+    .map((k, i) => [k, JOB_TINTS[i % JOB_TINTS.length]]));
+  const hoursByKey = new Map();
+  for (const x of items) hoursByKey.set(x.key, (hoursByKey.get(x.key) || 0) + x.hours);
+
+  // scheduled today with nothing logged against that job. Resolved up front
+  // because the ghost column's width has to be the SAME on every row —
+  // a track that's 200px narrower puts its 11am somewhere else, and two bars
+  // you can't compare by eye defeat the whole view.
+  const ghostsOf = new Map(rows.map((r) => {
+    const logged = new Set(r.blocks.concat(r.untimed).map((x) => x.job && x.job.id).filter(Boolean));
+    return [r, [...r.planned].filter((id) => !logged.has(id)).map((id) => jobs.find((j) => j.id === id)).filter(Boolean)];
+  }));
+  const anyGhost = [...ghostsOf.values()].some((g) => g.length);
+
+  const t = h("div", { class: "dayt", style: anyGhost ? "--ghostw:200px" : "" });
+
+  t.append(h("div", { class: "dayt__sum" },
+    h("span", {}, h("strong", {}, fmtH(totalHours)), " logged"),
+    h("span", {}, h("strong", {}, String(onClock)), " on the clock"),
+    h("span", {}, h("strong", {}, String(jobIds.size)), " job" + (jobIds.size === 1 ? "" : "s")),
+    idle ? h("span", { class: "dayt__warn", title: "Scheduled today with no hours logged against any job" },
+      h("strong", {}, String(idle)), " scheduled, nothing logged") : null,
+    unlinked ? h("span", { class: "dayt__warn", title: "QuickBooks users not yet linked to a crew member — open the Roster to link them" },
+      h("strong", {}, String(unlinked)), " unlinked in QuickBooks") : null));
+
+  // ruler: whole-hour ticks across the same window the bars are drawn in
+  const axis = h("div", { class: "dayt__axis" });
+  for (const m of ticks) axis.append(h("span", { class: "dayt__tick", style: `left:${timelinePct(m, win)}%` }, minLabel(m)));
+  // the head carries the same ghost-width spacer, so the ruler sits over the
+  // tracks rather than 200px to the right of them
+  t.append(h("div", { class: "dayt__head" }, h("div", { class: "dayt__name dayt__name--hd" }, "Crew"), axis, h("div", { class: "dayt__ghost" })));
+
+  if (!rows.length) {
+    t.append(h("div", { class: "dayt__empty" },
+      isToday ? "Nobody on the clock yet today." : "No hours logged and nobody scheduled on this day."));
+    wrap.append(t);
+    return;
+  }
+
+  for (const r of rows) {
+    const { blocks, lanes } = packLanes(r.blocks);
+    const track = h("div", { class: "dayt__track", style: `--lanes:${lanes}` });
+    for (const m of ticks) track.append(h("div", { class: "dayt__grid", style: `left:${timelinePct(m, win)}%` }));
+    if (isToday) {
+      const n = nowMinutes();
+      if (n >= win.startMin && n <= win.endMin) track.append(h("div", { class: "dayt__now", style: `left:${timelinePct(n, win)}%`, title: "Now — " + minLabel(n) }));
+    }
+    // idle stretches first, so the bars paint over them
+    for (const g of idleGaps(r.blocks)) {
+      const gl = timelinePct(g.start, win), gr = timelinePct(g.end, win);
+      const mins = g.end - g.start;
+      track.append(h("div", {
+        class: "dayt__gap", style: `left:${gl}%;width:${Math.max(gr - gl, 0.4)}%`,
+        title: `Off the clock ${minLabel(g.start)}–${minLabel(g.end)} · ${fmtSpan(mins)}\nDrive time, lunch, or waiting on materials`,
+      }, mins >= 45 ? fmtSpan(mins) : ""));
+    }
+    for (const b of blocks) {
+      const left = timelinePct(b.start, win), right = timelinePct(b.end, win);
+      const span = minLabel(b.start) + "–" + (b.clipped ? "midnight" : minLabel(b.end));
+      track.append(h("div", {
+        class: "dayt__blk" + (b.clipped ? " dayt__blk--clip" : "") + (b.job ? "" : " dayt__blk--unlinked"),
+        style: `left:${left}%;width:${Math.max(right - left, 0.8)}%;top:calc(${b.lane} * (var(--blkh) + 3px));background:${tintOf.get(b.key)}`,
+        title: `${b.label}\n${span} · ${fmtH(b.hours)}` + (b.note ? "\n" + b.note : "") + (b.job ? "" : "\nNot linked to a board job"),
+        onclick: () => { if (b.job) openJobModal(b.job); },
+      },
+        h("div", { class: "dayt__blk__top" },
+          h("span", { class: "dayt__blk__t" }, b.label), h("span", { class: "dayt__blk__h" }, span)),
+        // the crew's own words for what they were doing — the actual answer to
+        // "what was he on at 10am", straight off the timesheet note
+        b.note ? h("div", { class: "dayt__blk__n" }, b.note) : null));
+    }
+
+    const ghosts = ghostsOf.get(r) || [];
+
+    t.append(h("div", { class: "dayt__row" + (r.blocks.length ? "" : " dayt__row--quiet") },
+      h("div", { class: "dayt__name" },
+        h("span", { class: "cala", style: `background:${r.color}`, title: r.name }, initials(r.name)),
+        h("div", { class: "dayt__who" },
+          h("div", { class: "dayt__nm" }, r.name, r.crewId ? null : h("span", { class: "dayt__qb", title: "QuickBooks user with no crew member linked" }, "QB")),
+          h("div", { class: "dayt__hrs" }, r.hours ? fmtH(r.hours) : "—",
+            r.untimed.length ? h("span", { class: "dayt__untimed", title: r.untimed.map((x) => `${x.label} · ${fmtH(x.hours)}`).join("\n") }, `+${r.untimed.length} no clock`) : null))),
+      track,
+      h("div", { class: "dayt__ghost", title: ghosts.length ? "On the schedule today with no hours logged against it" : "" },
+        ghosts.length ? "◷ " + ghosts.map((j) => j.title || j.customer || "Job").join(", ") : "")));
+  }
+
+  // which colour is which job, and how the day's hours split across them
+  if (tintOf.size) {
+    const byHours = [...tintOf.keys()].sort((a, b) => (hoursByKey.get(b) || 0) - (hoursByKey.get(a) || 0));
+    const nameOfKey = (k) => (items.find((x) => x.key === k) || {}).label || "Job";
+    t.append(h("div", { class: "dayt__legend" }, ...byHours.map((k) => {
+      const job = (items.find((x) => x.key === k) || {}).job;
+      return h("span", {
+        class: "dayt__leg" + (job ? " dayt__leg--go" : ""),
+        onclick: () => { if (job) openJobModal(job); },
+      }, h("i", { style: `background:${tintOf.get(k)}` }), nameOfKey(k),
+        h("b", {}, fmtH(hoursByKey.get(k) || 0)));
+    })));
+  }
+
+  wrap.append(t);
+
+  // hand-logged rows have no clock times to draw — list them so the day's
+  // totals still reconcile against what the grid shows
+  const untimed = rows.flatMap((r) => r.untimed.map((x) => ({ ...x, who: r.name })));
+  if (untimed.length) {
+    wrap.append(h("div", { class: "calunsched" },
+      h("div", {}, h("strong", {}, `Logged without clock times (${untimed.length}) `),
+        h("span", { class: "subtle" }, "— hours with no start/finish can't be placed on the hour grid")),
+      h("div", { class: "calunsched__row" }, ...untimed.map((x) =>
+        h("span", {
+          class: "cal__job cal__job--chip", style: `border-left-color:${tintOf.get(x.key)}`,
+          title: x.note || "", onclick: () => { if (x.job) openJobModal(x.job); },
+        }, `${x.who} · ${fmtH(x.hours)} · ${x.label}`)))));
   }
 }
 
