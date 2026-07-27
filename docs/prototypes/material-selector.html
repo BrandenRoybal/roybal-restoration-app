@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#21527e" />
+<meta name="robots" content="noindex" />
+<title>Roybal Construction — Your Selections (prototype)</title>
+<style>
+/* Tokens copied from apps/portal/css/portal.css so this reads as the same app. */
+:root{
+  --navy:#16395a; --navy-2:#1e4a72; --brand:#f26a21; --brand-dark:#d4520f;
+  --ink:#18202c; --ink-2:#3b4656; --muted:#6a7585;
+  --line:#e6e9ef; --line-strong:#d4dae3; --bg:#f3f4f6; --panel:#fff;
+  --green:#1f9d55; --gold:#b8860b;
+  --header-grad:linear-gradient(135deg,#21527e 0%,#1a4569 52%,#123450 100%);
+  --shadow:0 4px 16px rgba(16,24,40,.08);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg);color:var(--ink);line-height:1.5;font-size:16px;-webkit-text-size-adjust:100%;
+  display:flex;flex-direction:column;min-height:100vh}
+button{font:inherit}
+
+.top{background:var(--header-grad);color:#fff;padding:calc(env(safe-area-inset-top) + 14px) 16px 14px}
+.top__inner{max-width:760px;margin:0 auto;display:flex;align-items:center;gap:13px}
+.mark{width:42px;height:42px;border-radius:11px;background:#fff;flex:0 0 auto;display:flex;
+  align-items:center;justify-content:center;font-weight:900;color:var(--brand);font-size:19px;letter-spacing:-1px}
+.top strong{display:block;font-size:15.5px;letter-spacing:.2px}
+.top span{font-size:12.5px;color:rgba(255,255,255,.82)}
+
+.wrap{flex:1;max-width:760px;width:100%;margin:0 auto;padding:18px 16px 130px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;
+  margin-bottom:14px;box-shadow:var(--shadow)}
+.sectitle{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:0 0 12px}
+.muted{color:var(--muted)}
+.small{font-size:13.5px}
+
+/* ---------- hero / progress ---------- */
+.hero h1{font-size:22px;margin:0 0 3px;letter-spacing:-.2px}
+.hero .addr{color:var(--muted);font-size:14px;margin:0 0 16px}
+.prog{display:flex;align-items:center;gap:14px}
+.ring{--pct:33;flex:0 0 auto;width:58px;height:58px;border-radius:50%;
+  background:conic-gradient(var(--brand) calc(var(--pct)*1%),var(--line) 0);
+  display:flex;align-items:center;justify-content:center;transition:--pct .4s}
+.ring i{width:44px;height:44px;border-radius:50%;background:#fff;display:flex;align-items:center;
+  justify-content:center;font-style:normal;font-weight:800;font-size:14px;color:var(--navy)}
+.prog__txt strong{display:block;font-size:16px}
+.prog__txt span{font-size:13.5px;color:var(--muted)}
+
+/* ---------- the two big front doors ---------- */
+.doors{display:grid;gap:10px;grid-template-columns:1fr;margin-top:16px}
+@media(min-width:560px){.doors{grid-template-columns:1fr 1fr}}
+.door{text-align:left;border:1.5px solid var(--line-strong);background:#fff;border-radius:14px;
+  padding:14px 15px;cursor:pointer;display:flex;gap:12px;align-items:flex-start;transition:.15s}
+.door:hover{border-color:var(--brand);box-shadow:0 0 0 3px rgba(242,106,33,.1)}
+.door em{font-style:normal;font-size:21px;line-height:1;flex:0 0 auto;margin-top:1px}
+.door b{display:block;font-size:15px;margin-bottom:2px}
+.door span{font-size:13px;color:var(--muted);line-height:1.4;display:block}
+.door--primary{background:#fff8f4;border-color:var(--brand)}
+
+/* ---------- scope explainer ---------- */
+.why{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}
+.why summary{cursor:pointer;font-size:13.5px;color:var(--navy-2);font-weight:600;list-style:none}
+.why summary::-webkit-details-marker{display:none}
+.why summary::before{content:"▸ ";color:var(--muted)}
+.why[open] summary::before{content:"▾ "}
+.why ul{margin:10px 0 0;padding-left:18px;font-size:13px;color:var(--ink-2);line-height:1.7}
+.why code{background:#eef1f5;border-radius:4px;padding:1px 5px;font-size:11.5px;color:var(--navy)}
+
+/* ---------- room chips ---------- */
+.chips{display:flex;gap:8px;overflow-x:auto;padding:2px 0 12px;-webkit-overflow-scrolling:touch}
+.chip{flex:0 0 auto;border:1px solid var(--line-strong);background:#fff;border-radius:999px;
+  padding:7px 15px;font-size:14px;cursor:pointer;color:var(--ink-2);white-space:nowrap}
+.chip--on{background:var(--navy);border-color:var(--navy);color:#fff;font-weight:600}
+
+/* ---------- selection rows ---------- */
+.row{width:100%;text-align:left;background:#fff;border:1px solid var(--line);border-radius:14px;
+  padding:13px;margin-bottom:10px;cursor:pointer;display:flex;gap:13px;align-items:center;
+  box-shadow:var(--shadow);transition:.15s}
+.row:hover{border-color:var(--brand)}
+.row__sw{flex:0 0 auto;width:56px;height:56px;border-radius:11px;border:1px solid var(--line-strong);
+  background-size:cover;background-position:center}
+.row__b{flex:1;min-width:0}
+.row__t{font-weight:700;font-size:15.5px;margin-bottom:1px}
+.row__d{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row__pick{font-size:13.5px;margin-top:3px;display:flex;align-items:center;gap:5px}
+.row__pick b{font-weight:600}
+.tick{color:var(--green);font-weight:900}
+.need{color:var(--brand);font-weight:700}
+.row__x{flex:0 0 auto;color:var(--line-strong);font-size:20px}
+.plus{font-size:12.5px;font-weight:700;color:var(--gold);background:#fdf6e3;border-radius:6px;padding:1px 7px}
+
+/* ---------- chooser ---------- */
+.back{background:none;border:none;color:var(--navy-2);font-size:14.5px;cursor:pointer;padding:0 0 12px;font-weight:600}
+.was{display:flex;gap:14px;align-items:center;background:#eef1f5;border-radius:13px;padding:13px;margin-bottom:18px}
+.was__sw{width:64px;height:64px;border-radius:10px;flex:0 0 auto;background-size:cover;border:1px solid var(--line-strong)}
+.was__t{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
+.was__d{font-size:14.5px;font-weight:600;margin-top:2px}
+.was__q{font-size:12.5px;color:var(--muted);margin-top:2px}
+
+.grp{margin-bottom:20px}
+.grp__h{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:4px}
+.grp__h b{font-size:15px}
+.grp__h span{font-size:12.5px;color:var(--muted)}
+.grp__s{font-size:13px;color:var(--muted);margin:0 0 11px}
+
+.opts{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+.opt{position:relative;text-align:left;border:1.5px solid var(--line);background:#fff;border-radius:13px;
+  padding:0;overflow:hidden;cursor:pointer;transition:.15s}
+.opt:hover{border-color:var(--brand)}
+.opt--on{border-color:var(--brand);box-shadow:0 0 0 3px rgba(242,106,33,.16)}
+.opt__sw{height:82px;background-size:cover;background-position:center;border-bottom:1px solid var(--line)}
+.opt__b{padding:9px 11px 11px}
+.opt__n{font-size:13.5px;font-weight:700;line-height:1.3}
+.opt__m{font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.35}
+.opt__p{font-size:13px;font-weight:800;margin-top:6px}
+.opt__p--free{color:var(--green)}
+.opt__p--up{color:var(--gold)}
+.tag{position:absolute;top:8px;left:8px;background:var(--brand);color:#fff;font-size:10.5px;
+  font-weight:800;text-transform:uppercase;letter-spacing:.4px;padding:3px 8px;border-radius:999px}
+.tag--stock{background:rgba(15,27,45,.82);left:auto;right:8px;text-transform:none;letter-spacing:0;font-weight:600}
+.opt--wide{grid-column:1/-1;display:flex;gap:0}
+.opt--wide .opt__sw{height:auto;width:110px;flex:0 0 auto;border-bottom:none;border-right:1px solid var(--line)}
+.opt--wide .opt__b{flex:1;padding:13px 14px}
+
+/* paint swatches */
+.opts--paint{grid-template-columns:repeat(auto-fill,minmax(104px,1fr))}
+.opts--paint .opt__sw{height:70px;border-bottom:none}
+.opts--paint .opt__b{padding:8px 9px 10px}
+.lrv{font-size:10.5px;color:var(--muted);margin-top:3px}
+
+.askline{margin-top:6px;font-size:13.5px}
+.askline button{background:none;border:none;color:var(--navy-2);font-weight:600;cursor:pointer;padding:0;text-decoration:underline}
+
+/* ---------- sticky total ---------- */
+.bar{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--line);
+  box-shadow:0 -4px 18px rgba(16,24,40,.09);padding:12px 16px calc(12px + env(safe-area-inset-bottom));z-index:30}
+.bar__in{max-width:760px;margin:0 auto;display:flex;align-items:center;gap:14px}
+.bar__t{flex:1;min-width:0}
+.bar__t b{display:block;font-size:18px;letter-spacing:-.2px}
+.bar__t span{font-size:12.5px;color:var(--muted);display:block;line-height:1.35}
+.btn{flex:0 0 auto;background:var(--brand);color:#fff;font-weight:700;font-size:15px;border:none;
+  border-radius:12px;padding:12px 20px;cursor:pointer}
+.btn:active{background:var(--brand-dark)}
+.btn:disabled{opacity:.45;cursor:default}
+.btn--ghost{background:#fff;color:var(--navy-2);border:1.5px solid var(--line-strong)}
+
+/* ---------- quiz modal ---------- */
+.modal{position:fixed;inset:0;background:rgba(8,12,18,.55);display:flex;align-items:flex-end;
+  justify-content:center;z-index:60;padding:0}
+@media(min-width:560px){.modal{align-items:center;padding:20px}}
+.sheet{background:#fff;width:100%;max-width:520px;border-radius:18px 18px 0 0;padding:22px 20px
+  calc(22px + env(safe-area-inset-bottom));max-height:92vh;overflow-y:auto}
+@media(min-width:560px){.sheet{border-radius:18px;padding-bottom:22px}}
+.sheet h2{margin:0 0 4px;font-size:19px}
+.sheet p.sub{margin:0 0 18px;color:var(--muted);font-size:14px}
+.qopts{display:grid;gap:9px;margin-bottom:6px}
+.qopt{text-align:left;border:1.5px solid var(--line-strong);background:#fff;border-radius:12px;
+  padding:13px 15px;cursor:pointer;font-size:15px}
+.qopt:hover{border-color:var(--brand);background:#fff8f4}
+.qopt small{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
+.qdots{display:flex;gap:5px;justify-content:center;margin-top:16px}
+.qdots i{width:6px;height:6px;border-radius:50%;background:var(--line-strong)}
+.qdots i.on{background:var(--brand)}
+
+/* ---------- summary ---------- */
+.tot{background:var(--navy);color:#fff;border-radius:14px;padding:18px;margin-bottom:16px}
+.tot span{font-size:13px;color:rgba(255,255,255,.78);display:block}
+.tot b{font-size:30px;letter-spacing:-.6px;display:block;margin-top:2px}
+.tot em{font-style:normal;font-size:13px;color:rgba(255,255,255,.78);display:block;margin-top:6px;line-height:1.45}
+.li{border-bottom:1px solid var(--line);padding:13px 0}
+.li:last-child{border-bottom:none}
+.li__h{display:flex;justify-content:space-between;gap:12px;font-size:14.5px}
+.li__h b{font-weight:700}
+.li__m{font-size:12.5px;color:var(--muted);margin-top:4px;line-height:1.55}
+.li__m i{font-style:normal;color:var(--ink-2)}
+.note{background:#f0f7f2;border:1px solid #cfe6d8;border-radius:12px;padding:13px 15px;
+  font-size:13.5px;color:#1d5334;margin-bottom:14px;line-height:1.5}
+.note b{color:#12401f}
+.warn{background:#fdf6e3;border:1px solid #ecdcb0;color:#6b5312}
+.sigpad{border:1.5px dashed var(--line-strong);border-radius:12px;height:110px;display:flex;
+  align-items:center;justify-content:center;color:var(--muted);font-size:14px;margin:6px 0 14px;
+  background:repeating-linear-gradient(45deg,#fafbfc,#fafbfc 8px,#fff 8px,#fff 16px)}
+.foot{text-align:center;color:var(--muted);font-size:12.5px;padding:16px}
+.protobar{background:#132538;color:#cfe0f0;font-size:12px;text-align:center;padding:7px 14px;line-height:1.45}
+.protobar b{color:#ffb787}
+</style>
+</head>
+<body>
+
+<div class="protobar"><b>PROTOTYPE</b> — clickable mock of the customer material selector. Data is illustrative; paint colors are real Sherwin-Williams values pulled from their public color API.</div>
+
+<header class="top">
+  <div class="top__inner">
+    <div class="mark">R</div>
+    <div>
+      <strong>Roybal Construction</strong>
+      <span>Your project · 1247 Chena Ridge Rd</span>
+    </div>
+  </div>
+</header>
+
+<main id="app" class="wrap"></main>
+<div id="bar"></div>
+<div id="modal"></div>
+
+<footer class="foot">Questions? Call <a href="tel:+19073719868">907-371-9868</a></footer>
+
+<script>
+/* ============================================================
+   Prototype state. Mirrors the shape the real feature would use:
+   one selection per put-back line group on the reconstruction
+   estimate, each carrying its LKQ baseline and its alternates.
+   `loaded` = full Xactimate-style loaded unit price (labor +
+   material + equipment), which is what the credit-line math needs.
+   ============================================================ */
+
+const sw = (css) => css; // readability helper for swatch backgrounds
+
+const WOOD = (a,b) => `repeating-linear-gradient(92deg, ${a} 0 14px, ${b} 14px 15px, ${a} 15px 46px, ${b} 46px 47px)`;
+const TILE = (a,b) => `repeating-linear-gradient(0deg,${a} 0 26px,${b} 26px 28px),repeating-linear-gradient(90deg,${a} 0 26px,${b} 26px 28px)`;
+const CARPET = (a,b) => `radial-gradient(circle at 3px 3px, ${b} 1px, transparent 1.4px) 0 0/7px 7px, ${a}`;
+const STONE = (a,b,c) => `radial-gradient(ellipse at 20% 30%, ${b} 0 9%, transparent 12%),radial-gradient(ellipse at 70% 60%, ${c} 0 7%, transparent 10%),radial-gradient(ellipse at 45% 85%, ${b} 0 6%, transparent 9%),${a}`;
+const FLAT = (a) => a;
+
+const SELECTIONS = [
+  {
+    id:'kitfloor', room:'Kitchen', title:'Kitchen flooring',
+    was:{ sw:WOOD('#c8a877','#a98a5c'), desc:'Glue-down laminate, oak look', qty:'218 SF removed to subfloor' },
+    line:{ code:'FCW-LAMAV', label:'Laminate — average grade', qty:218, unit:'SF', loaded:6.42 },
+    match:{ id:'m', name:'TrafficMaster Gunstock Oak', meta:'Laminate 7mm · Home Depot Fairbanks', sw:WOOD('#c8a877','#a98a5c'), loaded:6.42, stock:'In stock' },
+    same:[
+      { id:'s1', name:'Lakeshore Pecan', meta:'Laminate 7mm · Home Depot', sw:WOOD('#d0b184','#b08f61'), loaded:6.42, stock:'In stock' },
+      { id:'s2', name:'Glenwood Ash', meta:'Laminate 7mm · Lowe\'s', sw:WOOD('#cfc4b0','#aa9f8c'), loaded:6.38, stock:'In stock' },
+      { id:'s3', name:'Barnwood Grey', meta:'Laminate 7mm · Home Depot', sw:WOOD('#b9b3ac','#98928b'), loaded:6.44, stock:'Order — 5 days' }
+    ],
+    up:[
+      { id:'u1', name:'LifeProof Sterling Oak', meta:'Rigid-core vinyl plank, waterproof · Home Depot', sw:WOOD('#bda078','#9b7f56'), loaded:9.18, stock:'In stock', why:'Waterproof core — the usual pick after a water loss.' },
+      { id:'u2', name:'Pergo Extreme Wide Plank', meta:'Rigid-core vinyl, 20 mil wear · Lowe\'s', sw:WOOD('#a98a63','#8a6f4b'), loaded:11.40, stock:'In stock' },
+      { id:'u3', name:'Engineered Hickory 5"', meta:'Real wood veneer · special order', sw:WOOD('#b98a55','#966d3f'), loaded:14.85, stock:'Order — 3 weeks' }
+    ]
+  },
+  {
+    id:'kitcab', room:'Kitchen', title:'Lower cabinets',
+    was:{ sw:FLAT('#8a6a4a'), desc:'Oak-front frameless, medium stain', qty:'14 LF removed (water damaged)' },
+    line:{ code:'CAB-LOWAV', label:'Lower cabinets — average grade', qty:14, unit:'LF', loaded:262.00 },
+    match:{ id:'m', name:'Hampton Bay Medium Oak', meta:'Stock cabinet · Home Depot Fairbanks', sw:FLAT('#8a6a4a'), loaded:262.00, stock:'In stock' },
+    same:[
+      { id:'s1', name:'Hampton Bay Java', meta:'Stock cabinet · Home Depot', sw:FLAT('#4a3324'), loaded:262.00, stock:'In stock' },
+      { id:'s2', name:'Diamond NOW White Shaker', meta:'Stock cabinet · Lowe\'s', sw:FLAT('#eceae4'), loaded:258.00, stock:'In stock' }
+    ],
+    up:[
+      { id:'u1', name:'Diamond NOW Arcadia Shaker', meta:'Soft-close doors & drawers · Lowe\'s', sw:FLAT('#e6e3db'), loaded:341.00, stock:'In stock', why:'Same footprint, soft-close hardware.' },
+      { id:'u2', name:'Semi-custom maple shaker', meta:'Built to your sizes · 4–6 week lead', sw:FLAT('#d8c7a8'), loaded:498.00, stock:'Order — 5 weeks' }
+    ]
+  },
+  {
+    id:'kittop', room:'Kitchen', title:'Countertops',
+    was:{ sw:FLAT('#d9d2c4'), desc:'Post-form laminate, beige speckle', qty:'26 SF removed with cabinets' },
+    line:{ code:'CNT-LAMAV', label:'Countertop — laminate, average', qty:26, unit:'SF', loaded:38.20 },
+    match:{ id:'m', name:'Wilsonart Beige Pampas', meta:'Post-form laminate · Home Depot', sw:FLAT('#d9d2c4'), loaded:38.20, stock:'In stock' },
+    same:[
+      { id:'s1', name:'Wilsonart Typhoon Ice', meta:'Post-form laminate · Home Depot', sw:STONE('#e0ddd6','#c3bfb6','#a9a49a'), loaded:38.20, stock:'In stock' },
+      { id:'s2', name:'VT Dimensions Midnight', meta:'Post-form laminate · Lowe\'s', sw:FLAT('#3d3f42'), loaded:37.60, stock:'Order — 6 days' }
+    ],
+    up:[
+      { id:'u1', name:'Quartz — Calacatta Idillio', meta:'Templated & installed · special order', sw:STONE('#f2f0ec','#d5d2cb','#b9b5ad'), loaded:96.50, stock:'Order — 3 weeks', why:'Most-picked upgrade. Seamless, no laminate seam at the sink.' },
+      { id:'u2', name:'Butcher block — birch', meta:'Home Depot Fairbanks', sw:WOOD('#d7b184','#bd9563'), loaded:61.00, stock:'In stock' }
+    ]
+  },
+  {
+    id:'kitpaint', room:'Kitchen', title:'Wall color', paint:true,
+    was:{ sw:FLAT('#ded8cc'), desc:'Warm off-white, eggshell', qty:'428 SF walls + ceiling' },
+    line:{ code:'PNT-WALAV', label:'Paint walls — two coats', qty:428, unit:'SF', loaded:1.68 },
+    match:{ id:'m', name:'Agreeable Gray', code:'SW 7029', hex:'#d1cbc1', lrv:60.4, fam:'Neutral', strip:'243-C1', loaded:1.68 },
+    same:[
+      { id:'p1', name:'Repose Gray', code:'SW 7015', hex:'#ccc9c0', lrv:58.2, fam:'Neutral', strip:'244-C1', loaded:1.68 },
+      { id:'p2', name:'Accessible Beige', code:'SW 7036', hex:'#d1c7b8', lrv:57.7, fam:'Neutral', strip:'249-C1', loaded:1.68 },
+      { id:'p3', name:'Shoji White', code:'SW 7042', hex:'#e6dfd3', lrv:74.3, fam:'Neutral', strip:'254-C4', loaded:1.68 },
+      { id:'p4', name:'Drift of Mist', code:'SW 9166', hex:'#dcd8d0', lrv:69.1, fam:'Neutral', strip:'238-C2', loaded:1.68 },
+      { id:'p5', name:'Alabaster', code:'SW 7008', hex:'#edeae0', lrv:82.2, fam:'White', strip:'255-C2', loaded:1.68 },
+      { id:'p6', name:'Sea Salt', code:'SW 6204', hex:'#cdd2ca', lrv:63.2, fam:'Green', strip:'217-C1', loaded:1.68 },
+      { id:'p7', name:'Pure White', code:'SW 7005', hex:'#edece6', lrv:84.0, fam:'White', strip:'255-C1', loaded:1.68 },
+      { id:'p8', name:'Naval', code:'SW 6244', hex:'#2f3d4c', lrv:4.5, fam:'Neutral', strip:'253-C6', loaded:1.68 }
+    ],
+    up:[]
+  },
+  {
+    id:'kittex', room:'Kitchen', title:'Wall texture',
+    was:{ sw:`radial-gradient(circle at 30% 40%, #cfc9bd 0 3px, transparent 4px), radial-gradient(circle at 70% 65%, #cfc9bd 0 4px, transparent 5px), #ded8cc`, desc:'Knockdown, medium', qty:'428 SF to re-texture' },
+    line:{ code:'DRY-TEXKD', label:'Texture — knockdown', qty:428, unit:'SF', loaded:0.94 },
+    match:{ id:'m', name:'Knockdown — medium', meta:'Matches the rest of the house', sw:`radial-gradient(circle at 30% 40%, #cfc9bd 0 3px, transparent 4px), radial-gradient(circle at 70% 65%, #cfc9bd 0 4px, transparent 5px), #ded8cc`, loaded:0.94, stock:'—' },
+    same:[
+      { id:'s1', name:'Orange peel', meta:'Finer stipple', sw:`radial-gradient(circle at 25% 30%, #d3cdc2 0 1.5px, transparent 2px) 0 0/9px 9px, #ded8cc`, loaded:0.92, stock:'—' },
+      { id:'s2', name:'Smooth (level 5)', meta:'No texture', sw:FLAT('#ded8cc'), loaded:1.31, stock:'—' }
+    ],
+    up:[]
+  },
+  {
+    id:'bathvan', room:'Hall Bath', title:'Vanity',
+    was:{ sw:FLAT('#7b5c3e'), desc:'36" oak vanity, cultured marble top', qty:'1 EA removed' },
+    line:{ code:'CAB-VAN36', label:'Vanity 36" with top — average', qty:1, unit:'EA', loaded:842.00 },
+    match:{ id:'m', name:'Glacier Bay 36" Oak', meta:'With cultured marble top · Home Depot', sw:FLAT('#7b5c3e'), loaded:842.00, stock:'In stock' },
+    same:[
+      { id:'s1', name:'Glacier Bay 36" White', meta:'With cultured marble top · Home Depot', sw:FLAT('#f0eee9'), loaded:842.00, stock:'In stock' },
+      { id:'s2', name:'Style Selections 36" Espresso', meta:'With cultured marble top · Lowe\'s', sw:FLAT('#4b3527'), loaded:836.00, stock:'In stock' }
+    ],
+    up:[
+      { id:'u1', name:'Home Decorators 36" Shaker', meta:'Soft-close, quartz top · Home Depot', sw:FLAT('#e8e5de'), loaded:1104.00, stock:'In stock', why:'Quartz top instead of cultured marble.' },
+      { id:'u2', name:'48" double-drawer vanity', meta:'Quartz top · special order', sw:FLAT('#cbb18d'), loaded:1490.00, stock:'Order — 3 weeks', note:'Wider than what was removed — needs a plumbing check first.' }
+    ]
+  },
+  {
+    id:'bathfloor', room:'Hall Bath', title:'Bath flooring',
+    was:{ sw:TILE('#cfc7ba','#b3aa9c'), desc:'12×12 vinyl tile, tan', qty:'42 SF removed to subfloor' },
+    line:{ code:'FCV-TILAV', label:'Vinyl tile — average grade', qty:42, unit:'SF', loaded:5.10 },
+    match:{ id:'m', name:'TrafficMaster Tan Stone 12×12', meta:'Vinyl tile · Home Depot', sw:TILE('#cfc7ba','#b3aa9c'), loaded:5.10, stock:'In stock' },
+    same:[
+      { id:'s1', name:'Slate Grey 12×12', meta:'Vinyl tile · Home Depot', sw:TILE('#b6b4b0','#9a9895'), loaded:5.10, stock:'In stock' }
+    ],
+    up:[
+      { id:'u1', name:'Porcelain tile 12×24', meta:'Set in thinset · Lowe\'s', sw:TILE('#ddd8d0','#c0bab0'), loaded:14.60, stock:'In stock', why:'Real tile. Note this changes the labor, not just the material.' }
+    ]
+  },
+  {
+    id:'basetrim', room:'Whole house', title:'Baseboard & door casing',
+    was:{ sw:FLAT('#f2f0ea'), desc:'3¼" colonial base, painted white', qty:'186 LF base + 6 door openings' },
+    line:{ code:'FNC-BASE3', label:'Baseboard 3¼" — paint grade', qty:186, unit:'LF', loaded:5.86 },
+    match:{ id:'m', name:'3¼" Colonial — paint grade', meta:'Primed MDF · Home Depot Fairbanks', sw:FLAT('#f2f0ea'), loaded:5.86, stock:'In stock' },
+    same:[
+      { id:'s1', name:'3¼" Ranch — paint grade', meta:'Primed MDF · Lowe\'s', sw:FLAT('#efeee9'), loaded:5.80, stock:'In stock' }
+    ],
+    up:[
+      { id:'u1', name:'5¼" Colonial — paint grade', meta:'Taller profile · Home Depot', sw:FLAT('#f4f2ed'), loaded:8.10, stock:'In stock', why:'Taller baseboard, same install.' }
+    ]
+  },
+  {
+    id:'doors', room:'Whole house', title:'Interior doors',
+    was:{ sw:FLAT('#efece5'), desc:'6-panel hollow core, painted', qty:'6 doors pulled' },
+    line:{ code:'FNC-DRHC6', label:'Interior door — hollow core, 6-panel', qty:6, unit:'EA', loaded:296.00 },
+    match:{ id:'m', name:'6-panel hollow core, primed', meta:'Home Depot Fairbanks', sw:FLAT('#efece5'), loaded:296.00, stock:'In stock' },
+    same:[
+      { id:'s1', name:'2-panel shaker hollow core', meta:'Home Depot', sw:FLAT('#f1efe9'), loaded:298.00, stock:'In stock' }
+    ],
+    up:[
+      { id:'u1', name:'2-panel solid core', meta:'Heavier, quieter · Lowe\'s', sw:FLAT('#eceae3'), loaded:441.00, stock:'Order — 8 days', why:'Solid core cuts sound between rooms.' }
+    ]
+  }
+];
+
+const OP_PCT = 0.20;                 // overhead & profit applied to the upgrade delta
+const DEADLINE = 'August 15';
+const ROOMS = ['All', ...new Set(SELECTIONS.map(s=>s.room))];
+
+let picks = {};          // id -> option id ('m' = match what was there)
+let room  = 'All';
+let view  = { name:'sheet' };
+
+/* ---------- helpers ---------- */
+const money = n => '$' + n.toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});
+const money2 = n => '$' + n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const allOpts = s => [s.match, ...s.same, ...s.up];
+const optOf = s => allOpts(s).find(o=>o.id===(picks[s.id]||null)) || null;
+const swOf = o => o.hex ? o.hex : o.sw;
+
+/* Delta is the net of two COMPLETE loaded line items, then O&P.
+   This is the Xactimate credit-line method, not a material-only diff.
+   Anything offered in the equal-grade tier is $0 to the customer by
+   definition — we absorb pennies of catalog drift rather than put a
+   $5 line on a bill next to the words "same price". */
+const isSame = (s,o) => s.same.some(x=>x.id===o.id);
+function delta(s){
+  const o = optOf(s); if(!o || isSame(s,o)) return 0;
+  const raw = (o.loaded - s.match.loaded) * s.line.qty;
+  return raw <= 0 ? 0 : raw * (1 + OP_PCT);
+}
+const total = () => SELECTIONS.reduce((a,s)=>a+delta(s),0);
+const done  = () => SELECTIONS.filter(s=>picks[s.id]).length;
+
+function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstElementChild; }
+
+/* ============================================================
+   VIEW: the selection sheet
+   ============================================================ */
+function renderSheet(){
+  const app = document.getElementById('app');
+  const list = SELECTIONS.filter(s=> room==='All' || s.room===room);
+  const n = done(), N = SELECTIONS.length;
+
+  app.innerHTML = `
+  <section class="card hero">
+    <h1>Your selections</h1>
+    <p class="addr">Claim 24-118047 · Roybal Construction</p>
+    <div class="prog">
+      <div class="ring" style="--pct:${Math.round(n/N*100)}"><i>${n}/${N}</i></div>
+      <div class="prog__txt">
+        <strong>${n===N?'All set — ready to review':`${N-n} ${N-n===1?'choice':'choices'} left`}</strong>
+        <span>${n===N?`You can still change anything until ${DEADLINE}.`:`Takes about 5 minutes. Change anything until ${DEADLINE}.`}</span>
+      </div>
+    </div>
+
+    ${n===0?`
+    <div class="doors">
+      <button class="door door--primary" id="matchall">
+        <em>✓</em><div><b>Match everything we took out</b>
+        <span>One tap. Nothing extra on your bill — insurance covers it all.</span></div>
+      </button>
+      <button class="door" id="quiz">
+        <em>✨</em><div><b>Help me choose</b>
+        <span>Three quick questions, then we'll pre-pick every room for you.</span></div>
+      </button>
+    </div>`:''}
+
+    <details class="why">
+      <summary>Where this list came from</summary>
+      <ul>
+        <li>Built automatically from your approved reconstruction estimate — every tear-out has a put-back line, and every put-back line that a person can see got a choice.</li>
+        <li>Kitchen <code>FCW-LAMAV</code> 218 SF · <code>CAB-LOWAV</code> 14 LF · <code>CNT-LAMAV</code> 26 SF · <code>PNT-WALAV</code> 428 SF · <code>DRY-TEXKD</code> 428 SF</li>
+        <li>Hall Bath <code>CAB-VAN36</code> 1 EA · <code>FCV-TILAV</code> 42 SF</li>
+        <li>Whole house <code>FNC-BASE3</code> 186 LF · <code>FNC-DRHC6</code> 6 EA</li>
+        <li class="muted">Insulation, drywall, and subfloor are in the scope too — those aren't choices, so they're not listed here.</li>
+      </ul>
+    </details>
+  </section>
+
+  <div class="chips">${ROOMS.map(r=>`<button class="chip ${r===room?'chip--on':''}" data-room="${r}">${r}</button>`).join('')}</div>
+
+  ${list.map(s=>{
+    const o = optOf(s), d = delta(s);
+    return `<button class="row" data-open="${s.id}">
+      <div class="row__sw" style="background:${o?swOf(o):s.was.sw}"></div>
+      <div class="row__b">
+        <div class="row__t">${s.title}</div>
+        <div class="row__d">${s.room} · ${s.was.qty}</div>
+        <div class="row__pick">${o
+          ? `<span class="tick">✓</span><b>${o.code?o.code+' '+o.name:o.name}</b>${d>0?`<span class="plus">+${money(d)}</span>`:''}`
+          : `<span class="need">Choose →</span>`}</div>
+      </div>
+      <div class="row__x">›</div>
+    </button>`;
+  }).join('')}
+  `;
+
+  app.querySelectorAll('[data-room]').forEach(b=>b.onclick=()=>{room=b.dataset.room;render()});
+  app.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>{view={name:'chooser',id:b.dataset.open};window.scrollTo(0,0);render()});
+  const ma = app.querySelector('#matchall');
+  if(ma) ma.onclick = ()=>{ SELECTIONS.forEach(s=>picks[s.id]='m'); render(); };
+  const qz = app.querySelector('#quiz');
+  if(qz) qz.onclick = ()=>startQuiz();
+}
+
+/* ============================================================
+   VIEW: one selection
+   ============================================================ */
+function renderChooser(){
+  const s = SELECTIONS.find(x=>x.id===view.id);
+  const app = document.getElementById('app');
+  const cur = picks[s.id];
+
+  const card = (o, kind) => {
+    const d = kind==='same' ? 0 : ((o.loaded - s.match.loaded) * s.line.qty) * (1+OP_PCT);
+    const price = kind==='match' ? 'Covered by insurance'
+                : d<=0.5 ? 'No extra cost'
+                : '+' + money(d) + ' on your bill';
+    const cls = kind==='match'||d<=0.5 ? 'opt__p--free' : 'opt__p--up';
+    return `<button class="opt ${cur===o.id?'opt--on':''} ${kind==='match'?'opt--wide':''}" data-pick="${o.id}">
+      ${kind==='match'?`<span class="tag">Recommended</span>`:''}
+      ${o.stock && o.stock!=='—' && kind!=='match'?`<span class="tag tag--stock">${o.stock}</span>`:''}
+      <div class="opt__sw" style="background:${swOf(o)}"></div>
+      <div class="opt__b">
+        <div class="opt__n">${o.code?`${o.name} <span class="muted">${o.code}</span>`:o.name}</div>
+        <div class="opt__m">${o.meta || (o.fam?`${o.fam} · fan deck ${o.strip}`:'')}</div>
+        ${o.lrv!==undefined?`<div class="lrv">LRV ${o.lrv} — ${o.lrv>70?'bright':o.lrv>45?'mid-tone':'deep'}</div>`:''}
+        <div class="opt__p ${cls}">${price}</div>
+        ${o.why?`<div class="opt__m" style="margin-top:6px">${o.why}</div>`:''}
+        ${o.note?`<div class="opt__m" style="margin-top:6px;color:var(--gold)">⚠ ${o.note}</div>`:''}
+      </div>
+    </button>`;
+  };
+
+  app.innerHTML = `
+  <button class="back" id="back">‹ All selections</button>
+  <section class="card">
+    <p class="sectitle" style="margin-bottom:8px">${s.room}</p>
+    <h1 style="font-size:21px;margin:0 0 14px">${s.title}</h1>
+
+    <div class="was">
+      <div class="was__sw" style="background:${s.was.sw}"></div>
+      <div>
+        <div class="was__t">What we took out</div>
+        <div class="was__d">${s.was.desc}</div>
+        <div class="was__q">${s.was.qty} · estimate line <code style="font-size:11px">${s.line.code}</code></div>
+      </div>
+    </div>
+
+    <div class="grp">
+      <div class="grp__h"><b>Put back what was there</b></div>
+      <p class="grp__s">The closest match we can buy today. Your insurance pays for this.</p>
+      <div class="opts">${card(s.match,'match')}</div>
+    </div>
+
+    ${s.same.length?`
+    <div class="grp">
+      <div class="grp__h"><b>${s.paint?'Pick a different color':'A different look, same price'}</b><span>${s.same.length} option${s.same.length>1?'s':''}</span></div>
+      <p class="grp__s">${s.paint?'Any of these repaints at no extra cost — the labor is the same.':'Still fully covered. Nothing extra on your bill.'}</p>
+      <div class="opts ${s.paint?'opts--paint':''}">${s.same.map(o=>card(o,'same')).join('')}</div>
+    </div>`:''}
+
+    ${s.up.length?`
+    <div class="grp">
+      <div class="grp__h"><b>Upgrade</b><span>you pay the difference</span></div>
+      <p class="grp__s">We credit back what insurance allowed for the original, and you cover the gap. Shown with overhead &amp; profit included — no sales tax in Fairbanks.</p>
+      <div class="opts">${s.up.map(o=>card(o,'up')).join('')}</div>
+    </div>`:''}
+
+    <div class="askline">
+      <button id="ask">Ask us about this →</button>
+    </div>
+  </section>`;
+
+  app.querySelector('#back').onclick = ()=>{view={name:'sheet'};window.scrollTo(0,0);render()};
+  app.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>{
+    picks[s.id]=b.dataset.pick;
+    const i = SELECTIONS.indexOf(s), next = SELECTIONS.slice(i+1).find(x=>!picks[x.id]);
+    view = next ? {name:'chooser',id:next.id} : {name:'sheet'};
+    window.scrollTo(0,0); render();
+  });
+  app.querySelector('#ask').onclick = ()=>askModal(s);
+}
+
+/* ============================================================
+   VIEW: summary + sign
+   ============================================================ */
+function renderSummary(){
+  const app = document.getElementById('app');
+  const ups = SELECTIONS.filter(s=>delta(s)>0.5);
+  const t = total();
+
+  app.innerHTML = `
+  <button class="back" id="back">‹ Back to selections</button>
+  <section class="card">
+    <h1 style="font-size:21px;margin:0 0 4px">Review your choices</h1>
+    <p class="muted small" style="margin:0 0 16px">Claim 24-118047 · 1247 Chena Ridge Rd</p>
+
+    <div class="tot">
+      <span>Your out-of-pocket</span>
+      <b>${money(t)}</b>
+      <em>${t===0
+        ? 'Everything you picked is covered by your insurance claim. Nothing extra is owed.'
+        : `Insurance covers the rest of the work. This is only the difference for the ${ups.length} upgrade${ups.length>1?'s':''} you chose.`}</em>
+    </div>
+
+    ${t>0?`<div class="note warn"><b>When this is due:</b> we collect the upgrade amount when we place the material order, not at the end. It can't come out of your mortgage escrow — escrow is tied to the insurance scope.</div>`:''}
+
+    <p class="sectitle">Every room</p>
+    ${SELECTIONS.map(s=>{
+      const o=optOf(s), d=delta(s);
+      if(!o) return `<div class="li"><div class="li__h"><span>${s.title}</span><b class="need">Not chosen</b></div></div>`;
+      const raw=(o.loaded-s.match.loaded)*s.line.qty;
+      return `<div class="li">
+        <div class="li__h"><span><b>${s.title}</b> <span class="muted">· ${s.room}</span></span>
+          <b class="${d>0.5?'':'muted'}">${d>0.5?'+'+money(d):'covered'}</b></div>
+        <div class="li__m">${o.code?o.code+' ':''}${o.name}${d>0.5?`
+          <br><i>Credit for ${s.match.name}</i> −${money2(s.match.loaded*s.line.qty)}
+          <br><i>${o.name}</i> +${money2(o.loaded*s.line.qty)}
+          <br><i>Overhead &amp; profit 20%</i> +${money2(raw*OP_PCT)}`:''}</div>
+      </div>`;
+    }).join('')}
+
+    <div class="note" style="margin-top:18px"><b>You can still change your mind.</b> Anything here can be swapped until ${DEADLINE} — that's when we place the material order. For most jobs this size, one to three changes along the way is completely normal.</div>
+
+    <p class="sectitle" style="margin-top:20px">Sign to confirm</p>
+    <p class="small muted" style="margin:0 0 8px">This confirms your selections and authorizes the upgrade amount above as a change order. It does not change your insurance claim.</p>
+    <div class="sigpad">Sign here</div>
+    <button class="btn" style="width:100%" id="sign">Sign &amp; confirm selections</button>
+  </section>`;
+
+  app.querySelector('#back').onclick=()=>{view={name:'sheet'};window.scrollTo(0,0);render()};
+  app.querySelector('#sign').onclick=()=>{view={name:'signed'};window.scrollTo(0,0);render()};
+}
+
+function renderSigned(){
+  const t = total();
+  document.getElementById('app').innerHTML = `
+  <section class="card" style="text-align:center;padding:36px 22px">
+    <div style="font-size:44px;line-height:1">✅</div>
+    <h1 style="font-size:21px;margin:10px 0 6px">You're all set</h1>
+    <p class="muted" style="margin:0 0 18px;font-size:14.5px">
+      Branden and the crew have your selections. We'll order materials and send you a photo when they land at the shop.</p>
+    <div class="note" style="text-align:left">
+      <b>What happens next</b><br>
+      1. We place the material order and send you an invoice for ${money(t)}.<br>
+      2. Anything on back-order, we'll text you before we substitute — never after.<br>
+      3. Your selection sheet stays in this portal for your records.
+    </div>
+    <button class="btn btn--ghost" style="width:100%;margin-top:14px" id="again">Back to my selections</button>
+  </section>`;
+  document.getElementById('again').onclick=()=>{view={name:'sheet'};render()};
+}
+
+/* ============================================================
+   Sticky total bar
+   ============================================================ */
+function renderBar(){
+  const bar = document.getElementById('bar');
+  if(view.name==='signed'){ bar.innerHTML=''; return; }
+  const n=done(), N=SELECTIONS.length, t=total();
+  bar.innerHTML = `<div class="bar"><div class="bar__in">
+    <div class="bar__t">
+      <b>${t===0?'No extra cost':money(t)}</b>
+      <span>${t===0?(n===0?'Nothing chosen yet':'Everything you picked is covered'):'Your share for upgrades · insurance covers the rest'}</span>
+    </div>
+    <button class="btn" id="next" ${n<N?'disabled':''}>${n<N?`${N-n} left`:'Review &amp; sign'}</button>
+  </div></div>`;
+  const b=bar.querySelector('#next');
+  if(b && n===N) b.onclick=()=>{view={name:'summary'};window.scrollTo(0,0);render()};
+}
+
+/* ============================================================
+   The 30-second needs-based quiz. Deliberately 3 questions about
+   NEEDS, not attributes — novices choose better when they state a
+   need and the system proposes (Randall/Terwiesch/Ulrich 2007).
+   ============================================================ */
+const QUIZ = [
+  { q:'Who lives with this floor?', sub:'So we know how tough it needs to be.',
+    a:[{t:'Kids and pets',s:'Scratches and spills happen',v:'tough'},
+       {t:'Just adults',s:'Normal wear',v:'normal'},
+       {t:'It\'s a rental',s:'Durable and easy to replace',v:'rental'}] },
+  { q:'What feels like home?', sub:'Pick whichever one you\'d rather walk into.',
+    a:[{t:'Warm and traditional',s:'Wood tones, softer whites',v:'warm'},
+       {t:'Light and simple',s:'Greys, clean lines',v:'light'},
+       {t:'Keep it exactly like it was',s:'Don\'t change anything',v:'same'}] },
+  { q:'About the budget', sub:'You can change this later — nothing is locked in.',
+    a:[{t:'Stay with what insurance covers',s:'No money out of pocket',v:'none'},
+       {t:'A little extra where it counts',s:'Upgrade one or two things',v:'some'},
+       {t:'Do it right, I\'ll pay the difference',s:'Show me the good stuff',v:'all'}] }
+];
+let quizStep=0, quizAns=[];
+
+function startQuiz(){ quizStep=0; quizAns=[]; renderQuiz(); }
+function renderQuiz(){
+  const m=document.getElementById('modal');
+  if(quizStep>=QUIZ.length){ applyQuiz(); return; }
+  const q=QUIZ[quizStep];
+  m.innerHTML=`<div class="modal"><div class="sheet">
+    <h2>${q.q}</h2><p class="sub">${q.sub}</p>
+    <div class="qopts">${q.a.map((o,i)=>`<button class="qopt" data-i="${i}">${o.t}<small>${o.s}</small></button>`).join('')}</div>
+    <div class="qdots">${QUIZ.map((_,i)=>`<i class="${i<=quizStep?'on':''}"></i>`).join('')}</div>
+  </div></div>`;
+  m.querySelectorAll('[data-i]').forEach(b=>b.onclick=()=>{
+    quizAns[quizStep]=q.a[+b.dataset.i].v; quizStep++; renderQuiz();
+  });
+}
+function applyQuiz(){
+  const [use,style,budget]=quizAns;
+  SELECTIONS.forEach(s=>{
+    let pick='m';
+    if(budget!=='none' && s.up.length){
+      // "some" takes only the recommended upgrade; "all" takes the best one.
+      if(budget==='all') pick=s.up[s.up.length-1].id;
+      else if(s.up[0].why) pick=s.up[0].id;
+    }
+    if(use==='tough' && s.up.length && s.up[0].why && budget!=='none') pick=s.up[0].id;
+    if(style==='light' && s.same.length){
+      const light=s.same.find(o=>/white|grey|gray|ash|mist|alabaster|shaker/i.test(o.name));
+      if(light && pick==='m') pick=light.id;
+    }
+    if(style==='same') pick='m';
+    picks[s.id]=pick;
+  });
+  const t=total();
+  document.getElementById('modal').innerHTML=`<div class="modal"><div class="sheet">
+    <h2>Here's what we'd pick</h2>
+    <p class="sub">We pre-selected all ${SELECTIONS.length} choices based on your answers.
+      ${t>0?`That comes to <b>${money(t)}</b> out of pocket.`:`Everything stays covered by insurance — <b>no extra cost</b>.`}
+      Look them over and change anything you want.</p>
+    <button class="btn" style="width:100%" id="ok">Review my selections</button>
+    <button class="btn btn--ghost" style="width:100%;margin-top:9px" id="reset">Start over — just match what was there</button>
+  </div></div>`;
+  document.getElementById('ok').onclick=()=>{document.getElementById('modal').innerHTML='';render()};
+  document.getElementById('reset').onclick=()=>{SELECTIONS.forEach(s=>picks[s.id]='m');document.getElementById('modal').innerHTML='';render()};
+}
+
+/* Inline question — hands off to the concierge thread that already exists. */
+function askModal(s){
+  const m=document.getElementById('modal');
+  m.innerHTML=`<div class="modal"><div class="sheet">
+    <h2>Ask about ${s.title.toLowerCase()}</h2>
+    <p class="sub">Goes straight to the same message thread as the rest of your project. If it's about price, dates, or your claim, a real person answers.</p>
+    <div class="qopts">
+      <button class="qopt" data-q="0">Which one holds up best with a dog?</button>
+      <button class="qopt" data-q="1">What did the insurance actually allow for this?</button>
+      <button class="qopt" data-q="2">Can I see a sample before I decide?</button>
+    </div>
+    <button class="btn btn--ghost" style="width:100%;margin-top:12px" id="close">Close</button>
+  </div></div>`;
+  m.querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>{
+    const a=[
+      `The rigid-core vinyl (LifeProof Sterling Oak) is the one to beat for pets — the wear layer is 12 mil and the core doesn't swell if a bowl tips over. It's ${money((s.up[0]?((s.up[0].loaded-s.match.loaded)*s.line.qty*1.2):0))} more than what insurance allowed.`,
+      `Your claim allowed <b>${money2(s.match.loaded)} per ${s.line.unit}</b> for ${s.line.label.toLowerCase()}, ${s.line.qty} ${s.line.unit} — that's ${money(s.match.loaded*s.line.qty)} including labor. Anything at or under that costs you nothing.`,
+      `Yes — Home Depot Fairbanks does $3 samples and credits them back on the order. I've asked Branden to grab the top two and drop them by. He'll text you.`
+    ][+b.dataset.q];
+    m.querySelector('.sheet').innerHTML=`<h2>Roybal</h2>
+      <p style="font-size:15px;line-height:1.55;margin:6px 0 18px">${a}</p>
+      <button class="btn" style="width:100%" id="close2">Got it</button>`;
+    m.querySelector('#close2').onclick=()=>{m.innerHTML=''};
+  });
+  m.querySelector('#close').onclick=()=>{m.innerHTML=''};
+}
+
+/* ---------- router ---------- */
+function render(){
+  ({sheet:renderSheet,chooser:renderChooser,summary:renderSummary,signed:renderSigned})[view.name]();
+  renderBar();
+}
+render();
+</script>
+</body>
+</html>
