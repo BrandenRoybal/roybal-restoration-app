@@ -645,6 +645,122 @@ export function findOverAllocations(jobs, settings, opts) {
 }
 
 /* ============================================================
+   Day timeline — the hour-by-hour geometry behind the calendar's
+   Day view. QuickBooks Time already stamps a wall-clock start and
+   finish on every row it pulls (qb-time-proxy's hhmm), so the day
+   can be drawn from what the crew ACTUALLY did rather than from
+   the plan. Pure math only: parse the clock, fit a window, pack
+   overlaps into lanes. The board owns crew/job resolution.
+   ============================================================ */
+
+/* "07:30" / "7:30" → 450 minutes past midnight. null when the row carries no
+   usable clock time — manual entries usually don't, and a null here is what
+   tells the board to list the row separately instead of inventing a position. */
+export function parseHHMM(v) {
+  const m = /^\s*(\d{1,2}):([0-5]\d)\s*$/.exec(String(v ?? ""));
+  if (!m) return null;
+  const hh = Number(m[1]);
+  return hh > 23 ? null : hh * 60 + Number(m[2]);
+}
+
+const MIN_BLOCK = 15;    // a bar thinner than this reads as a glitch, not a shift
+
+/* One time entry → a positioned block, or null when it can't be placed.
+   Four shapes come out of QuickBooks and the manual logger:
+     start + finish        → the normal case
+     finish BEFORE start   → the shift crossed midnight; clip to 24:00 and say
+                             so, rather than stretching the axis into tomorrow
+     no finish, or one that never moved → run `hours` forward from start
+     no start              → unplaceable (null); the caller lists it as untimed */
+export function entryBlock(e) {
+  if (!e) return null;
+  const start = parseHHMM(e.start);
+  if (start == null) return null;
+  const hours = Number(e.hours) || 0;
+  const finish = parseHHMM(e.finish);
+  let end, clipped = false;
+  if (finish != null && finish > start) end = finish;
+  else if (finish != null && finish < start) { end = 1440; clipped = true; }
+  else end = hours > 0 ? start + Math.round(hours * 60) : start + MIN_BLOCK;
+  if (end > 1440) { end = 1440; clipped = true; }
+  if (end - start < MIN_BLOCK) end = Math.min(1440, start + MIN_BLOCK);
+  return { start, end, clipped, hours: hours || Math.round(((end - start) / 60) * 100) / 100 };
+}
+
+const DEFAULT_WINDOW = { startMin: 7 * 60, endMin: 17 * 60 };   // 7a–5p
+
+/* The hour window the day is drawn across: a default work day, WIDENED (never
+   narrowed) to hold every block, snapped out to whole hours so the ruler reads
+   in even ticks. An empty day still gets the default window — the grid should
+   be there before the hours are. */
+export function timelineWindow(blocks, opts = {}) {
+  const base = opts.base || DEFAULT_WINDOW;
+  let startMin = base.startMin, endMin = base.endMin;
+  for (const b of blocks || []) {
+    if (!b) continue;
+    if (b.start < startMin) startMin = Math.floor(b.start / 60) * 60;
+    if (b.end > endMin) endMin = Math.ceil(b.end / 60) * 60;
+  }
+  startMin = Math.max(0, Math.min(startMin, 1440 - 60));
+  endMin = Math.min(1440, Math.max(endMin, startMin + 60));
+  return { startMin, endMin };
+}
+
+/* Two jobs at the same hour must read as two bars, not one. Give each block the
+   lowest lane whose previous block has already ended (classic interval
+   graph colouring — greedy is optimal here because we sort by start).
+   Returns new objects; the caller's blocks are untouched. */
+export function packLanes(blocks) {
+  const sorted = [...(blocks || [])].sort((a, b) => a.start - b.start || a.end - b.end);
+  const laneEnds = [];
+  const out = sorted.map((b) => {
+    let lane = laneEnds.findIndex((end) => end <= b.start);
+    if (lane < 0) { lane = laneEnds.length; laneEnds.push(0); }
+    laneEnds[lane] = b.end;
+    return { ...b, lane };
+  });
+  return { blocks: out, lanes: Math.max(1, laneEnds.length) };
+}
+
+/* The idle stretches between a person's blocks — the drive time, the lunch,
+   the waiting on materials. Overlapping work is merged first (two jobs at
+   once is not a gap), then any hole at least `minGap` wide is reported. This
+   is the windshield time a day of bars otherwise hides. */
+export function idleGaps(blocks, minGap = 20) {
+  const sorted = [...(blocks || [])].sort((a, b) => a.start - b.start);
+  const out = [];
+  let cur = null;
+  for (const b of sorted) {
+    if (!cur) { cur = { start: b.start, end: b.end }; continue; }
+    if (b.start <= cur.end) { cur.end = Math.max(cur.end, b.end); continue; }
+    if (b.start - cur.end >= minGap) out.push({ start: cur.end, end: b.start });
+    cur = { start: b.start, end: b.end };
+  }
+  return out;
+}
+
+/* A minute count as a person would say it: "1h 10m", "2h", "35m". */
+export function fmtSpan(min) {
+  const m = Math.max(0, Math.round(min));
+  const hh = Math.floor(m / 60), mm = m % 60;
+  return hh ? (mm ? `${hh}h ${mm}m` : `${hh}h`) : `${mm}m`;
+}
+
+/* Whole-hour tick marks across a window, for the ruler above the tracks. */
+export function timelineTicks(win) {
+  const out = [];
+  for (let m = Math.ceil(win.startMin / 60) * 60; m <= win.endMin; m += 60) out.push(m);
+  return out;
+}
+
+/* Where a minute falls in the window, 0–100. Clamped: a clipped block should
+   stop at the edge, not bleed past it. */
+export function timelinePct(min, win) {
+  const span = Math.max(1, win.endMin - win.startMin);
+  return Math.max(0, Math.min(100, ((min - win.startMin) / span) * 100));
+}
+
+/* ============================================================
    CFO snapshot — the one read the daily CFO report renders.
    Pure + read-only: assumes dates are already resolved (caller runs
    computeSchedule first) and never mutates jobs. Returns the four
