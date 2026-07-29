@@ -349,8 +349,20 @@ export function newInvoice() {
     attachments: [],   // supporting docs: [{ label, pages: [dataURL…] }]
   };
 }
+/* Line items carry a stable id. The editor splices new lines into the MIDDLE
+   of inv.items (forms.js "+ line"), so array position is not an identity —
+   anything that references a line from outside the array (a customer
+   selection, a change order) must key on this id, never on the index. */
 export function blankLineItem() {
-  return { room: "", desc: "", qty: "", unit: "", price: "" };
+  return { id: uid(), room: "", desc: "", qty: "", unit: "", price: "" };
+}
+
+/* Backfill ids on line items saved before they had one. Safe to call on every
+   load: it only fills blanks and never renumbers an existing id. */
+export function ensureLineItemIds(items) {
+  if (!Array.isArray(items)) return items;
+  for (const it of items) if (it && !it.id) it.id = uid();
+  return items;
 }
 
 /* Reconstruction estimate — same shape as an invoice (shared editor/AI
