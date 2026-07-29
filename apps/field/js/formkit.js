@@ -5,7 +5,7 @@
    ============================================================ */
 import { h, autosave, fileToDataURL, signaturePad, money, toast } from "./core.js";
 import { fileToDocPages } from "./pdf.js";
-import { COMPANY } from "./model.js";
+import { COMPANY, ensureLineItemIds } from "./model.js";
 
 /* save context (set once per form render) */
 let CTX = { project: null, pill: null };
@@ -229,6 +229,10 @@ export function taCell(obj, key, opts = {}) {
 
 /* ---------- editable line-items table with live totals ---------- */
 export function lineItems(items, blankFn, opts = {}) {
+  // Lines saved before they carried an id get one the first time the job is
+  // opened in an editor, so anything referencing a line from outside the
+  // array (a customer selection) can key on identity rather than position.
+  ensureLineItemIds(items);
   const wrap = h("div");
   const totalsBox = h("div", { class: "totals" });
   const tbody = h("tbody");
