@@ -468,7 +468,7 @@ async function projectList() {
   body.append(installHint());
 }
 
-const APP_VERSION = "v35";   // fallback only; the label below shows the LIVE service-worker cache version
+const APP_VERSION = "v36";   // fallback only; the label below shows the LIVE service-worker cache version
 
 function installHint() {
   const ver = h("div", { style: "text-align:center;color:var(--muted);font-size:11px;margin-top:14px" },

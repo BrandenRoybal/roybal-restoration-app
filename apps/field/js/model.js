@@ -413,6 +413,7 @@ export function newPortalShare() {
     sharedPhotoIds: [],        // which project.photos are shown to the customer
     publishedAt: "",           // last publish to the portal
     notifyOnStatus: true,      // auto-post a nudge to the thread when status advances
+    selectionsSource: null,    // {file, importedAt, decisions, ...} once an estimate is imported
     lastNotifiedStatus: "",    // the milestone the customer was last notified of
   };
 }
