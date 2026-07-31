@@ -19,6 +19,8 @@ import {
   newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge } from "./portal.js";
+import { selectionSheetFromXlsx } from "./xactimate.js";
+import { publishSelections } from "./selections.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
@@ -2970,6 +2972,85 @@ export function portalShareForm(project) {
     publishBtn.disabled = false; publishBtn.textContent = t;
   });
 
+  /* ---------- customer selections ----------
+     Import the Xactimate "Export to Excel" of the approved reconstruction
+     estimate. xactimate.js works out which put-back lines are actually a
+     customer choice; nothing is published until the office sees the count
+     and presses the button. */
+  const selBox = h("div", { style: "margin-top:14px" });
+  let pendingSheet = null, pendingFile = "";
+
+  const pickFile = h("input", { type: "file", accept: ".xlsx", style: "display:none" });
+  pickFile.addEventListener("change", async () => {
+    const f = pickFile.files && pickFile.files[0];
+    pickFile.value = "";
+    if (!f) return;
+    try {
+      const sheet = await selectionSheetFromXlsx(await f.arrayBuffer());
+      pendingSheet = sheet; pendingFile = f.name;
+      toast(`Read ${sheet.totals.lineCount} line items — ${sheet.totals.selectionCount} customer decisions.`);
+    } catch (e) {
+      pendingSheet = null; pendingFile = "";
+      toast("Couldn't read that file: " + (e && e.message ? e.message : e));
+    }
+    paintSelections();
+  });
+
+  function paintSelections() {
+    selBox.replaceChildren();
+    const src = s.selectionsSource;
+    const kids = [
+      sectionTitle("Customer selections"),
+      h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 8px" },
+        "Import the Xactimate estimate (Reports → Export to Excel). We work out which choices the customer gets to make — flooring, cabinets, paint, fixtures — and leave scope like demo and drywall out of it."),
+    ];
+
+    if (pendingSheet) {
+      const t = pendingSheet.totals;
+      const pub = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "Publish selections");
+      const cancel = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Cancel");
+      cancel.addEventListener("click", () => { pendingSheet = null; pendingFile = ""; paintSelections(); });
+      pub.addEventListener("click", async () => {
+        pub.disabled = cancel.disabled = true; pub.textContent = "Publishing…";
+        try {
+          const out = await publishSelections(project, pendingSheet, { file: pendingFile });
+          s.selectionsSource = out.source;
+          pendingSheet = null; pendingFile = "";
+          commit();
+          let msg = `Published ${out.published} decisions.`;
+          if (out.removed.length) msg += ` ${out.removed.length} no longer in the estimate were removed.`;
+          if (out.repriced.length) msg += ` ⚠ ${out.repriced.length} the customer already answered changed price — re-check those.`;
+          toast(msg);
+        } catch (e) {
+          toast("Publish failed: " + (e && e.message ? e.message : e));
+        }
+        pub.disabled = cancel.disabled = false; pub.textContent = "Publish selections";
+        paintSelections();
+      });
+      kids.push(
+        h("div", { class: "note", style: "margin:0 0 8px" },
+          h("strong", {}, pendingFile),
+          h("div", { style: "font-size:12.5px;margin-top:3px" },
+            `${t.selectionCount} decisions across ${pendingSheet.rooms.length} rooms · ` +
+            `${money(t.selectionValue)} of customer-visible finishes out of ${money(t.estimateValue)} · ` +
+            `${t.lineCount} line items read`),
+          h("div", { class: "subtle", style: "font-size:11.5px;margin-top:4px" },
+            "Nothing is shared until you publish.")),
+        h("div", { style: "display:flex;gap:8px" }, pub, cancel));
+    } else {
+      const btn = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" },
+        src ? "Re-import estimate" : "Choose estimate file…");
+      btn.addEventListener("click", () => pickFile.click());
+      if (src) {
+        kids.push(h("p", { style: "font-size:12.5px;margin:0 0 8px" },
+          `${src.decisions} decisions published from ${src.file || "an estimate"}` +
+          (src.importedAt ? " on " + fmtDate(src.importedAt.slice(0, 10)) : "") + "."));
+      }
+      kids.push(btn);
+    }
+    selBox.append(...kids, pickFile);
+  }
+
   // ---------- customer <-> office message thread ----------
   // The portal_jobs row id equals portalShare.id (the publish upsert key), so
   // the office reads/writes the same thread the customer reaches via the gateway.
@@ -3066,9 +3147,10 @@ export function portalShareForm(project) {
         photoWrap,
         h("div", { style: "margin-top:12px" }, publishBtn),
         linkBox,
+        selBox,
         threadBox) : null,
     );
-    paintPhotos(); paintLink(); paintThread();
+    paintPhotos(); paintLink(); paintSelections(); paintThread();
   }
   paint();
 
