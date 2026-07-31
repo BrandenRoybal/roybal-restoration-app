@@ -84,6 +84,24 @@ const voicemail = (lead: string) =>
   `<Record maxLength="120" playBeep="true"/>` +
   `<Say>Thanks — we'll be in touch soon. Goodbye.</Say><Hangup/>`;
 
+/* Business hours = the same 8am–8pm America/Anchorage window the SMS
+   quiet-hours use (SMS_QUIET_START/END are project-wide secrets), so
+   "office hours" means one thing across the whole phone/text lane. */
+const BIZ_START = qhNum(Deno.env.get("SMS_QUIET_START"), 8);
+const BIZ_END = qhNum(Deno.env.get("SMS_QUIET_END"), 20);
+function qhNum(v: string | undefined, dflt: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 24 ? n : dflt;
+}
+function greeting(): string {
+  const hr = Number(new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Anchorage", hour: "numeric", hourCycle: "h23",
+  }).format(new Date()));
+  return hr >= BIZ_START && hr < BIZ_END
+    ? "Thanks for calling Roybal Construction. This is the office assistant — the crew is out on jobs right now. How can I help?"
+    : "Thanks for calling Roybal Construction. This is the after hours assistant — how can I help?";
+}
+
 /* The AI receptionist TwiML. Deepgram STT with the trade vocabulary the
    transcriber would otherwise mangle; the greeting plays instantly while
    the WebSocket connects, so the caller never hears dead air. */
@@ -92,7 +110,7 @@ function relayTwiml(): string {
   return (
     `<Connect action="${esc(SUPABASE_URL)}/functions/v1/roybal-voice/action">` +
     `<ConversationRelay url="${esc(AGENT_WSS)}" ` +
-    `welcomeGreeting="Thanks for calling Roybal Construction. This is the after hours assistant — how can I help?" ` +
+    `welcomeGreeting="${esc(greeting())}" ` +
     `transcriptionProvider="Deepgram" speechModel="nova-3-general" ` +
     `hints="water damage, flood, burst pipe, water heater, sewage, mitigation, restoration, drywall, Fairbanks, North Pole, claim, adjuster, remodel">` +
     `<Parameter name="token" value="${esc(RELAY_TOKEN)}"/>` +
