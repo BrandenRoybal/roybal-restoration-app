@@ -19,6 +19,15 @@
  *   messages — { token } -> { ok, messages:[{id,from,body,at,channel}] }
  *              (also marks outbound messages as seen by the customer)
  *   send     — { token, body } -> { ok, message:{id,from,body,at} }
+ *   selections        — { token } -> { ok, selections:[…], total, answered, remaining, complete }
+ *                       The customer's decision sheet, published by the office from
+ *                       the approved estimate. Projected through selections.ts's
+ *                       allow-list: our loaded prices and the Xactimate Cat/Sel
+ *                       codes are on the row and never cross this boundary.
+ *   respondSelection  — { token, selectionId, choice:'match'|'change', note? } -> the sheet
+ *   submitSelections  — { token } -> the sheet + submittedAt. Stamps the job and
+ *                       posts a note to the thread so a finished sheet lands where
+ *                       the office already watches for customer activity.
  *   ask      — { token, body } -> { ok, posted, answered, handoff, reply }
  *              The customer concierge: posts the question, then answers it
  *              instantly from the customer-safe slice + thread, or hands off
@@ -33,6 +42,7 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { customerSheet, validateResponse, submissionMessage } from "./selections.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -78,7 +88,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 async function jobByToken(token: string) {
   const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,customer_name,property_address,status,milestones,photos,documents&limit=1`;
+    `&select=id,customer_name,property_address,status,milestones,photos,documents,selections_submitted_at&limit=1`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
@@ -190,6 +200,95 @@ async function insertMessage(m: Record<string, unknown>) {
   });
   if (!ins.ok) throw new Error(`insert failed (${ins.status})`);
   return (await ins.json())[0] || {};
+}
+
+/* ---------- customer selections ----------
+   The office publishes a sheet of decisions (portal_selections) off the
+   approved estimate. The customer may read their own sheet and answer each
+   decision — keep what was there, or ask to change it. Every query is
+   pinned to the portal_job_id resolved from the token, and everything the
+   customer sees goes through customerSelection()'s allow-list, so our cost
+   basis and the Xactimate codes never cross the boundary. */
+
+async function selectionsFor(jobId: string) {
+  const q = `portal_selections?portal_job_id=eq.${jobId}` +
+    `&select=selection_id,sort_order,type,label,scope,room,rooms,title,descr,qty,unit,items,` +
+    `customer_choice,customer_note,responded_at&order=sort_order.asc`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) throw new Error(`selections read failed (${res.status})`);
+  return customerSheet(await res.json());
+}
+
+async function selections(token: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  // submittedAt has to ride along, or a customer who already sent their
+  // choices comes back after a reload to a sheet that looks unsent.
+  return { ...(await selectionsFor(row.id)), submittedAt: row.selections_submitted_at || null };
+}
+
+/* one decision answered */
+async function respondSelection(token: string, selectionId: unknown, choice: unknown, note: unknown) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const v = validateResponse(selectionId, choice, note);
+  const row = await jobByToken(token);
+  if (!row) return null;
+  await floodGuard(row.id);
+
+  // Scoped to this job AND this decision — a token can never touch another job's sheet.
+  const q = `portal_selections?portal_job_id=eq.${row.id}&selection_id=eq.${encodeURIComponent(v.id)}`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, {
+    method: "PATCH",
+    headers: { ...svc, "Content-Type": "application/json", Prefer: "return=representation" },
+    body: JSON.stringify({
+      customer_choice: v.choice,
+      customer_note: v.note,
+      responded_at: new Date().toISOString(),
+    }),
+  });
+  if (!res.ok) throw new Error(`save failed (${res.status})`);
+  const saved = await res.json();
+  if (!Array.isArray(saved) || !saved.length) throw new Error("bad_selection");
+
+  /* Changing an answer after sending un-sends the sheet: the office was told
+     one thing and the customer now means another, so it needs re-sending
+     rather than quietly diverging. The design leans on people being free to
+     change their mind, so this path has to be a normal one, not an error. */
+  if (row.selections_submitted_at) {
+    await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
+      method: "PATCH",
+      headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify({ selections_submitted_at: null }),
+    }).catch(() => { /* the answer is saved either way */ });
+  }
+  return { ...(await selectionsFor(row.id)), submittedAt: null };
+}
+
+/* the customer is done — stamp the job and tell the office on the thread,
+   so a finished sheet shows up where they already look for customer activity */
+async function submitSelections(token: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  await floodGuard(row.id);
+  const sheet = await selectionsFor(row.id);
+  if (!sheet.total) throw new Error("nothing_to_submit");
+  if (!sheet.complete) throw new Error("incomplete");
+
+  const at = new Date().toISOString();
+  await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
+    method: "PATCH",
+    headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ selections_submitted_at: at }),
+  }).catch(() => { /* the answers are saved; the stamp is bookkeeping */ });
+
+  await insertMessage({
+    portal_job_id: row.id, direction: "in", channel: "portal", author: "customer",
+    body: submissionMessage(sheet), read_by_office: false, read_by_customer: true,
+  }).catch(() => { /* same — never fail a submit because the notice didn't post */ });
+
+  return { ...sheet, submittedAt: at };
 }
 
 /* month-to-date AI spend across the account (service role) */
@@ -374,6 +473,9 @@ serve(async (req: Request) => {
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));
     else if (action === "ask") result = await ask(token, String(body.body ?? ""));
+    else if (action === "selections") result = await selections(token);
+    else if (action === "respondSelection") result = await respondSelection(token, body.selectionId, body.choice, body.note);
+    else if (action === "submitSelections") result = await submitSelections(token);
     else return json({ ok: false, error: "Unknown action" }, 400);
 
     if (result === null) return json({ ok: false, error: "not_found" }, 404);

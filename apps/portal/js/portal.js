@@ -41,6 +41,10 @@ async function callGateway(payload) {
 const fetchView = (token) => callGateway({ action: "view", token });
 const fetchThread = (token) => callGateway({ action: "messages", token });
 const askConcierge = (token, body) => callGateway({ action: "ask", token, body });
+const fetchSelections = (token) => callGateway({ action: "selections", token });
+const respondSelection = (token, selectionId, choice, note) =>
+  callGateway({ action: "respondSelection", token, selectionId, choice, note });
+const submitSelections = (token) => callGateway({ action: "submitSelections", token });
 
 function message(icon, title, sub) {
   app.replaceChildren(h("div", { class: "msg" },
@@ -122,6 +126,125 @@ function threadCard(token) {
   return card;
 }
 
+/* ---------- selections ----------
+   What we're putting back, room by room, with one decision to make on each:
+   keep it, or say you'd like something different. There is no product
+   catalog yet, so this deliberately does not pretend to be a shop — the
+   honest job is to show people their own rooms and make it easy to raise a
+   hand, which is the moment the conversation actually starts. */
+function selectionsCard(token, sheet) {
+  const card = h("div", { class: "card" });
+  let state = sheet;
+  let busy = false;
+  // Sticky once true: changing an answer after sending clears submittedAt on
+  // the server, and the button should then read "updated" rather than
+  // pretending this is the first time.
+  let everSubmitted = !!sheet.submittedAt;
+
+  async function answer(sel, choice, note) {
+    if (busy) return;
+    busy = true; paint();
+    try { state = await respondSelection(token, sel.id, choice, note || ""); }
+    catch { /* keep the last good sheet; the row simply stays unanswered */ }
+    busy = false; paint();
+  }
+
+  async function matchAll() {
+    if (busy) return;
+    busy = true; paint();
+    for (const s of state.selections.filter((x) => !x.choice)) {
+      try { state = await respondSelection(token, s.id, "match", ""); } catch { /* keep going */ }
+    }
+    busy = false; paint();
+  }
+
+  async function submit() {
+    if (busy) return;
+    busy = true; paint();
+    try { state = { ...(await submitSelections(token)) }; everSubmitted = true; }
+    catch { /* leave the sheet as-is; they can try again */ }
+    busy = false; paint();
+  }
+
+  function row(sel) {
+    const chosen = sel.choice;
+    const where = sel.scope === "room" ? sel.room
+      : sel.rooms.length > 3 ? `${sel.rooms.length} rooms` : sel.rooms.join(", ");
+    const amount = sel.qty ? `${sel.qty} ${sel.unit}` : "";
+
+    const keep = h("button", {
+      class: "selbtn" + (chosen === "match" ? " selbtn--on" : ""),
+      type: "button", disabled: busy, onclick: () => answer(sel, "match"),
+    }, chosen === "match" ? "✓ Keeping this" : "Keep it");
+
+    const change = h("button", {
+      class: "selbtn" + (chosen === "change" ? " selbtn--want" : ""),
+      type: "button", disabled: busy, onclick: () => answer(sel, "change", sel.note),
+    }, chosen === "change" ? "✎ Let's talk about it" : "I'd like something different");
+
+    const noteBox = chosen === "change" ? (() => {
+      const ta = h("textarea", {
+        class: "selnote", rows: "2", placeholder: "Anything you have in mind? (optional)",
+        maxlength: "500",
+      });
+      ta.value = sel.note || "";
+      ta.addEventListener("change", () => answer(sel, "change", ta.value));
+      return ta;
+    })() : null;
+
+    return h("div", { class: "selrow" + (chosen ? " selrow--done" : "") },
+      h("div", { class: "selrow__head" },
+        h("div", {},
+          h("div", { class: "selrow__t" }, sel.title),
+          h("div", { class: "selrow__d" },
+            [sel.what, amount, sel.scope !== "room" && where ? where : ""].filter(Boolean).join(" · "))),
+      ),
+      sel.alsoIncludes.length
+        ? h("div", { class: "selrow__also" }, "Includes " + sel.alsoIncludes.join(", ").toLowerCase())
+        : null,
+      h("div", { class: "selrow__btns" }, keep, change),
+      noteBox);
+  }
+
+  function paint() {
+    const done = state.answered, total = state.total;
+    const pct = total ? Math.round((done / total) * 100) : 0;
+
+    const head = h("div", { class: "selhead" },
+      h("div", { class: "ring", style: `--pct:${pct}` }, h("i", {}, `${done}/${total}`)),
+      h("div", {},
+        h("strong", {}, state.submittedAt ? "Thank you — we have your choices"
+          : everSubmitted && state.complete ? "You've changed something — send it over"
+            : state.complete ? "All set — ready to send"
+              : `${state.remaining} ${state.remaining === 1 ? "choice" : "choices"} left`),
+        h("span", {}, state.submittedAt
+          ? "You can still change any of these — just send them again if you do."
+          : "Nothing here costs you anything. Keeping what was there is covered by your insurance.")));
+
+    const kids = [h("p", { class: "sectitle" }, "Your selections"), head];
+
+    if (!state.submittedAt && done === 0 && total > 1) {
+      kids.push(h("button", { class: "selall", type: "button", disabled: busy, onclick: matchAll },
+        h("b", {}, "Put everything back the way it was"),
+        h("span", {}, "One tap. Nothing extra on your bill.")));
+    }
+
+    kids.push(h("div", { class: "sellist" }, ...state.selections.map(row)));
+
+    if (!state.submittedAt) {
+      kids.push(h("button", {
+        class: "selsubmit", type: "button", disabled: busy || !state.complete, onclick: submit,
+      }, busy ? "Saving…"
+        : !state.complete ? `${state.remaining} left to answer`
+          : everSubmitted ? "Send my updated choices" : "Send my choices"));
+    }
+    card.replaceChildren(...kids.filter(Boolean));
+  }
+
+  paint();
+  return card;
+}
+
 function render(data, token) {
   const job = data.job || {};
   const badge = job.status
@@ -152,8 +275,13 @@ function render(data, token) {
     ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Photos"), h("div", { class: "gallery" }, ...photos))
     : null;
 
+  // Selections sit above the photos: they're the only thing on this page the
+  // customer has to act on, and they're time-bound by the material order.
+  const selections = data.selections && data.selections.total
+    ? selectionsCard(token, data.selections) : null;
+
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[hero, timeline, gallery, threadCard(token)].filter(Boolean));
+  app.replaceChildren(...[hero, timeline, selections, gallery, threadCard(token)].filter(Boolean));
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";
@@ -173,7 +301,14 @@ function openLightbox(src, alt) {
   const token = tokenFromUrl();
   if (!token) return message("🔗", "Link not found", "Open the project link we sent you to view your job status.");
   try {
-    render(await fetchView(token), token);
+    // The status page must render even if the selections sheet fails or the
+    // office hasn't published one — it is an addition to this page, not a
+    // dependency of it.
+    const [view, sheet] = await Promise.all([
+      fetchView(token),
+      fetchSelections(token).catch(() => null),
+    ]);
+    render({ ...view, selections: sheet }, token);
   } catch (e) {
     if (e.status === 404) message("🔒", "This link isn't active", "It may have expired or been turned off. Call us at 907-371-9868 and we'll send a fresh one.");
     else message("⚠️", "Couldn't load your project", "Please try again in a moment, or call us at 907-371-9868.");
