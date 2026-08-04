@@ -103,6 +103,23 @@ export function selectionSummary(sheet) {
   };
 }
 
+/* PURE: decide whether a best-effort step failed, and say so in words the
+   office can act on. Returns null when it went through.
+
+   This exists because of a real bug: supa.js's rest() RESOLVES for 4xx and
+   5xx as well as 2xx, so `await rest(...).catch(...)` can never fire. A
+   publish reported "39 decisions published" while the job row recorded
+   nothing. "Did it throw" is the wrong question; "is it ok" is the right one. */
+export function stepWarning(label, res, err) {
+  if (err) return `${label} (${(err && err.message) || err})`;
+  if (!res) return `${label} (no response)`;
+  if (res.ok) return null;
+  const hint = res.status === 404 ? " — was the job published to the portal first?"
+    : res.status === 401 || res.status === 403 ? " — you may need to sign in again"
+      : "";
+  return `${label} (HTTP ${res.status}${hint})`;
+}
+
 /* ---------- persistence ---------- */
 
 export async function fetchSelections(portalJobId) {
@@ -130,7 +147,27 @@ export async function publishSelections(project, sheet, meta = {}) {
   const next = selectionRows(portalJobId, sheet);
   if (!next.length) throw new Error("That estimate produced no customer decisions.");
 
-  const existing = await fetchSelections(portalJobId).catch(() => []);
+  /* Everything after the upsert is best-effort: the decisions ARE published
+     and failing the whole call would be a lie. But best-effort must not mean
+     silent — `rest()` resolves for 4xx/5xx as well as 2xx, so a bare .catch()
+     on it can never fire and hides real failures. Each step reports instead. */
+  const warnings = [];
+  const tryStep = async (label, fn) => {
+    let res = null, err = null;
+    try { res = await fn(); } catch (e) { err = e; }
+    const w = stepWarning(label, res, err);
+    if (w) { warnings.push(w); return null; }
+    return res;
+  };
+
+  let existing = [];
+  try {
+    existing = await fetchSelections(portalJobId);
+  } catch (e) {
+    // Proceeding is safe — the upsert never writes the chosen_* columns, so a
+    // customer's answers survive. But we may miss removals, so say so.
+    warnings.push(`Couldn't read the existing sheet, so nothing was removed (${(e && e.message) || e})`);
+  }
   const { rows, removed, repriced } = mergeSelectionRows(next, existing);
 
   const res = await rest("portal_selections", {
@@ -141,10 +178,13 @@ export async function publishSelections(project, sheet, meta = {}) {
   if (!res.ok) throw new Error("Publish failed (" + res.status + "): " + (await res.text().catch(() => "")));
 
   // Drop decisions the revised estimate no longer contains.
+  let removedOk = true;
   if (removed.length) {
     const list = removed.map((r) => `"${r.selection_id}"`).join(",");
-    await rest(`portal_selections?portal_job_id=eq.${portalJobId}&selection_id=in.(${list})`, { method: "DELETE" })
-      .catch(() => { /* the upsert already landed; a stale row is not worth failing the publish */ });
+    const del = await tryStep(
+      `${removed.length} decision(s) no longer in the estimate could not be removed — the customer may still see them`,
+      () => rest(`portal_selections?portal_job_id=eq.${portalJobId}&selection_id=in.(${list})`, { method: "DELETE" }));
+    removedOk = !!del;
   }
 
   const summary = selectionSummary(sheet);
@@ -153,11 +193,13 @@ export async function publishSelections(project, sheet, meta = {}) {
     importedAt: new Date().toISOString(),
     ...summary,
   };
-  await rest(`portal_jobs?id=eq.${portalJobId}`, {
-    method: "PATCH",
-    headers: { Prefer: "return=minimal" },
-    body: JSON.stringify({ selections_source: source, selections_published_at: source.importedAt }),
-  }).catch(() => { /* selections are published; the stamp is cosmetic */ });
+  const stamped = await tryStep(
+    "The decisions published, but this panel couldn't record the import",
+    () => rest(`portal_jobs?id=eq.${portalJobId}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ selections_source: source, selections_published_at: source.importedAt }),
+    }));
 
-  return { published: rows.length, removed, repriced, source, summary };
+  return { published: rows.length, removed, repriced, source, summary, warnings, stamped: !!stamped, removedOk };
 }

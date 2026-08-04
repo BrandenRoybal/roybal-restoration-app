@@ -3,7 +3,7 @@
    decisions in place, never silently drop what they already chose.
    Run: node apps/field/test/selections.test.mjs */
 import assert from "node:assert";
-import { selectionRows, mergeSelectionRows, selectionSummary } from "../js/selections.js";
+import { selectionRows, mergeSelectionRows, selectionSummary, stepWarning, publishSelections } from "../js/selections.js";
 import { buildSelectionSheet, normalizeLines } from "../js/xactimate.js";
 
 let pass = 0;
@@ -125,5 +125,50 @@ ok("and the two reconcile to the estimate",
   Math.round((sum.selectionValue + sum.scopeValue) * 100) === Math.round(sum.estimateValue * 100));
 eq("reports how many lines were read", sum.lineCount, 3);
 eq("an empty sheet summarises to zeroes", selectionSummary({}).decisions, 0);
+
+/* ============================================================
+   4. publishSelections must not swallow a half-failure
+   The original bug: `rest()` resolves for 4xx as well as 2xx, so a bare
+   .catch() on it could never fire and the stamp failed silently — the office
+   saw "Published 39 decisions" while the job row recorded nothing.
+   ============================================================ */
+console.log("\n stepWarning — a half-failed publish must not look like a clean one");
+
+/* The bug this encodes: supa.js's rest() RESOLVES for 4xx/5xx, so a bare
+   `.catch()` on it never fires. A 404 stamp was swallowed and the office was
+   told "Published 39 decisions" while the job row recorded nothing. */
+eq("a 2xx is silent", stepWarning("Stamp failed", { ok: true, status: 204 }, null), null);
+
+ok("a NON-OK response is reported even though it never threw",
+  stepWarning("Stamp failed", { ok: false, status: 404 }, null) !== null);
+ok("a 404 suggests the likely cause",
+  /published to the portal first/.test(stepWarning("Stamp failed", { ok: false, status: 404 }, null)));
+ok("a 401 suggests re-auth instead",
+  /sign in again/.test(stepWarning("Stamp failed", { ok: false, status: 401 }, null)));
+ok("a 500 carries the status without a misleading hint", (() => {
+  const w = stepWarning("Stamp failed", { ok: false, status: 500 }, null);
+  return /HTTP 500/.test(w) && !/portal first|sign in/.test(w);
+})());
+ok("a thrown error is reported too",
+  /boom/.test(stepWarning("Stamp failed", null, new Error("boom"))));
+ok("no response at all is reported rather than assumed fine",
+  stepWarning("Stamp failed", null, null) !== null);
+ok("the label always leads, so the office reads what broke first",
+  stepWarning("Couldn't record the import", { ok: false, status: 404 }, null)
+    .startsWith("Couldn't record the import"));
+
+console.log("\n publishSelections — guards");
+
+const guard = async (project, sh) => {
+  try { await publishSelections(project, sh, {}); return "did not throw"; }
+  catch (e) { return e.message; }
+};
+eq("refuses when the portal is switched off",
+  await guard({ portalShare: { id: "job-1", enabled: false } }, sheet),
+  "Turn the customer portal on for this job first.");
+eq("refuses an estimate that produced no decisions",
+  await guard({ portalShare: { id: "job-1", enabled: true, shareToken: "a".repeat(32) } },
+    { selections: [], totals: {} }),
+  "That estimate produced no customer decisions.");
 
 console.log(`\n${pass} assertions passed`);

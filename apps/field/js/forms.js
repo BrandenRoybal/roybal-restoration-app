@@ -2899,6 +2899,19 @@ export function portalShareForm(project) {
   function paintLink() {
     linkBox.replaceChildren();
     if (!s.enabled || !s.shareToken) return;
+
+    /* The token is minted the moment the portal is switched on, but the row it
+       resolves against is only created by "Publish to portal". Handing over a
+       copyable link in that gap sends the customer to "This link isn't
+       active" — so until the job is published there is nothing to copy. */
+    if (!s.publishedAt) {
+      linkBox.append(
+        sectionTitle("Customer link"),
+        h("p", { class: "subtle", style: "font-size:12.5px;margin:2px 0 0" },
+          "The link appears here once you tap “Publish to portal” above. It won't work before then — the customer would just see “This link isn't active.”"));
+      return;
+    }
+
     const url = portalShareLink(s.shareToken);
     const field2 = h("input", { value: url, readOnly: true, style: "flex:1;font-size:13px" });
     const copy = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Copy");
@@ -2909,8 +2922,7 @@ export function portalShareForm(project) {
     linkBox.append(
       sectionTitle("Customer link"),
       h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
-        s.publishedAt ? "Last published " + fmtDate(s.publishedAt.slice(0, 10)) + " " + s.publishedAt.slice(11, 16)
-                      : "Not published yet — tap “Publish to portal”, then share this link."),
+        "Last published " + fmtDate(s.publishedAt.slice(0, 10)) + " " + s.publishedAt.slice(11, 16)),
       h("div", { style: "display:flex;gap:8px;align-items:center" }, field2, copy),
       h("p", { class: "subtle", style: "font-size:11px;margin:6px 0 0" },
         "Texting this link to the customer arrives in a later step; for now copy + send it yourself. The link opens once the portal app is live."));
@@ -2978,7 +2990,7 @@ export function portalShareForm(project) {
      customer choice; nothing is published until the office sees the count
      and presses the button. */
   const selBox = h("div", { style: "margin-top:14px" });
-  let pendingSheet = null, pendingFile = "";
+  let pendingSheet = null, pendingFile = "", lastWarnings = [];
 
   const pickFile = h("input", { type: "file", accept: ".xlsx", style: "display:none" });
   pickFile.addEventListener("change", async () => {
@@ -3014,12 +3026,16 @@ export function portalShareForm(project) {
         pub.disabled = cancel.disabled = true; pub.textContent = "Publishing…";
         try {
           const out = await publishSelections(project, pendingSheet, { file: pendingFile });
-          s.selectionsSource = out.source;
+          // Only claim the import locally if the server actually recorded it —
+          // otherwise this panel would show a publish the job row doesn't have.
+          if (out.stamped) s.selectionsSource = out.source;
+          lastWarnings = out.warnings || [];
           pendingSheet = null; pendingFile = "";
           commit();
           let msg = `Published ${out.published} decisions.`;
-          if (out.removed.length) msg += ` ${out.removed.length} no longer in the estimate were removed.`;
+          if (out.removed.length && out.removedOk) msg += ` ${out.removed.length} no longer in the estimate were removed.`;
           if (out.repriced.length) msg += ` ⚠ ${out.repriced.length} the customer already answered changed price — re-check those.`;
+          if (lastWarnings.length) msg += ` ⚠ ${lastWarnings.length} problem${lastWarnings.length > 1 ? "s" : ""} — see below.`;
           toast(msg);
         } catch (e) {
           toast("Publish failed: " + (e && e.message ? e.message : e));
@@ -3048,6 +3064,18 @@ export function portalShareForm(project) {
       }
       kids.push(btn);
     }
+
+    // A publish that half-worked has to say so — the alternative is the office
+    // believing a sheet is live when the job row never recorded it.
+    if (lastWarnings.length) {
+      kids.push(h("div", { class: "note", style: "margin-top:10px;border-color:#ecdcb0;background:#fdf6e3" },
+        h("strong", {}, "⚠ The decisions published, but not everything went through"),
+        h("ul", { style: "margin:6px 0 0;padding-left:18px;font-size:12.5px;line-height:1.5" },
+          ...lastWarnings.map((w) => h("li", {}, w))),
+        h("div", { class: "subtle", style: "font-size:11.5px;margin-top:6px" },
+          "Re-importing the same file is safe — it updates in place and keeps the customer's answers.")));
+    }
+
     selBox.append(...kids, pickFile);
   }
 
