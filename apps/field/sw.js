@@ -3,13 +3,13 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v129";
+const CACHE = "roybal-field-v130";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
   "css/app.css", "css/print.css",
   "js/app.js", "js/core.js", "js/model.js", "js/formkit.js", "js/forms.js",
-  "js/pdf.js", "js/qr.js", "js/config.js", "js/supa.js", "js/sync.js", "js/media.js",
+  "js/pdf.js", "js/qr.js", "js/config.js", "js/supa.js", "js/sync.js", "js/media.js", "js/merge.js", "js/graft.js", "js/fincalc.js",
   // AI backbone (Steps A–E): completeness panel, job spine, voice capture, tech identity
   "js/completeness.js", "js/spine.js", "js/ai.js", "js/voice.js", "js/tech.js", "js/narrative.js",
   "js/qbtime.js",
@@ -20,6 +20,8 @@ const CORE = [
   // Customer selections: forms.js statically imports xactimate.js (which imports
   // xlsx.js) and selections.js, so all three are part of the module graph
   "js/xlsx.js", "js/xactimate.js", "js/selections.js",
+  // Photo export/offload: forms.js statically imports photoexport.js → zip.js
+  "js/zip.js", "js/photoexport.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];

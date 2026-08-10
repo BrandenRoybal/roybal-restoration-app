@@ -51,12 +51,15 @@ globalThis.fetch = async (url, opts = {}) => {
     const id = idQ.startsWith("eq.") ? idQ.slice(3) : "";
     const revQ = u.searchParams.get("data->>rev");
     const orQ = u.searchParams.get("or");
+    const delQ = u.searchParams.get("deleted");               // deleted=eq.false / eq.true filters
     const row = serverRows.get(id);
     let match = false;
-    if (row) {
+    const delOk = !delQ || (delQ === "eq.false" ? !row?.deleted : delQ === "eq.true" ? !!row?.deleted : true);
+    if (row && delOk) {
       const rowRev = Number(row.data && row.data.rev) || 0;
       if (revQ && revQ.startsWith("eq.")) match = rowRev === Number(revQ.slice(3));
       else if (orQ) match = rowRev === 0;
+      else match = true;                                      // no rev guard (reviveRow) — filter-only PATCH
     }
     if (!match) return resp(200, []);
     row.data = body.data;
@@ -66,9 +69,9 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (u.pathname === "/rest/v1/field_projects" && method === "GET") {
     const idQ = u.searchParams.get("id");
-    if (idQ && idQ.startsWith("eq.")) {                       // the guarded-write's conflict check
+    if (idQ && idQ.startsWith("eq.")) {                       // conflict check / staleness check
       const row = serverRows.get(idQ.slice(3));
-      return resp(200, row ? [{ id: row.id, data: row.data }] : []);
+      return resp(200, row ? [{ id: row.id, data: row.data, deleted: row.deleted, updated_at: row.updated_at }] : []);
     }
     const raw = u.searchParams.get("updated_at");
     const since = raw && raw.startsWith("gt.") ? raw.slice(3) : "";
@@ -82,7 +85,7 @@ globalThis.fetch = async (url, opts = {}) => {
 
 const { Store } = await import("../js/core.js");
 const { signIn, isSignedIn } = await import("../js/supa.js");
-const { syncNow, startSync } = await import("../js/sync.js");
+const { syncNow, startSync, resetSync } = await import("../js/sync.js");
 
 (async () => {
   await signIn("crew@roybalconstruction.com", "pw");
@@ -297,6 +300,124 @@ const { syncNow, startSync } = await import("../js/sync.js");
   const merged10 = await Store.get("p10");
   ok(merged10.customer === "Juliet-LOCAL" && (merged10.photos || []).some((x) => x.id === "G"),
     "…and the merge kept our edit AND their photo");
+
+  // ============================================================
+  // DELETES THAT STICK + RECOVERABLE TOMBSTONES (Aug 2026 fixes)
+  // ============================================================
+
+  // ---------- a delete ships the job's content inside the tombstone ----------
+  await Store.put({ id: "t1", customer: "Trash Me", photos: [{ id: "T1", src: "small-t" }] }, { quiet: true });
+  await syncNow();                                    // on the server, clean
+  const t1 = await Store.get("t1");
+  await Store.backup(t1);                             // what deleteProject does before Store.del
+  await Store.del("t1");                              // delete listener queues the tombstone
+  await syncNow();
+  const srvT1 = serverRows.get("t1");
+  ok(srvT1 && srvT1.deleted === true, "deleting a job tombstones the server row");
+  ok(srvT1.data && srvT1.data.customer === "Trash Me" && srvT1.data.photos[0].id === "T1",
+    "…and the tombstone preserves the job's content (server-side recovery exists)");
+
+  // ---------- blank scaffolds stay deleted: the resurrection loop is dead ----------
+  // Eight repeat-tap blanks kept coming back: a device with reset bookkeeping
+  // (sign-out, evicted localStorage) treated every row as unsynced work, so
+  // every pulled tombstone was ignored and every blank re-pushed at base 0.
+  await Store.put({ id: "b1", customer: "", address: "", photos: [], dryingLogs: [] }, { quiet: true });
+  await syncNow();                                    // pushed, clean
+  serverRows.set("b1", { id: "b1", data: { id: "b1" }, deleted: true, updated_at: nowIso() });  // office deletes it
+  resetSync();                                        // sign-out: bookkeeping gone, every row now looks dirty
+  await syncNow();
+  ok(!(await Store.get("b1")), "a deleted blank scaffold does NOT survive a stale-bookkeeping pull");
+  ok(serverRows.get("b1").deleted === true, "…and is not pushed back to the server (delete finally sticks)");
+
+  // push path: tombstone is BEHIND the cursor, so only push sees it
+  await Store.put({ id: "b2", customer: "", photos: [] }, { quiet: true });   // never synced
+  serverRows.set("b2", { id: "b2", data: { id: "b2" }, deleted: true, updated_at: "1970-01-01T00:00:00.000Z" });
+  await syncNow();
+  ok(!(await Store.get("b2")), "pushing a blank against a tombstone drops the blank instead of reviving it");
+  ok(serverRows.get("b2").deleted === true, "…the deleted row stays deleted");
+
+  // ---------- a copy identical to the tombstone's content is not revived ----------
+  await Store.put({ id: "t2", customer: "Kept In Trash", receipts: [{ id: "R9", amount: 12 }] }, { quiet: true });
+  await syncNow();
+  const t2 = await Store.get("t2");
+  await Store.backup(t2);
+  await Store.del("t2");
+  await syncNow();                                    // tombstone (with content) on the server
+  ok(serverRows.get("t2").deleted === true && serverRows.get("t2").data.customer === "Kept In Trash",
+    "tombstone carries the content");
+  const copy = JSON.parse(JSON.stringify(serverRows.get("t2").data));
+  delete copy.rev;
+  await Store.put(copy, { quiet: true });             // the job re-appears locally, dirty, same content
+  await syncNow();
+  ok(!(await Store.get("t2")), "a dirty copy holding NOTHING beyond the tombstone's content accepts the delete");
+  ok(serverRows.get("t2").deleted === true, "…no resurrection push");
+
+  // ---------- but REAL unsynced work still revives the job (existing promise) ----------
+  await Store.put({ id: "t4", customer: "Revive Me" }, { quiet: true });
+  await syncNow();
+  const t4 = await Store.get("t4");
+  t4.receipts = [{ id: "RN", amount: 99 }];           // work the tombstone does NOT have
+  await Store.put(t4, { quiet: true });               // dirty
+  serverRows.set("t4", { id: "t4", data: { id: "t4" }, deleted: true, updated_at: nowIso() });
+  await syncNow();
+  const srvT4 = serverRows.get("t4");
+  ok(srvT4.deleted === false && srvT4.data.receipts && srvT4.data.receipts[0].id === "RN",
+    "unsynced real work still revives a deleted job WITH the work");
+  ok(!!(await Store.get("t4")), "…and the local copy stays");
+
+  // ---------- a pending delete survives sign-out ----------
+  await Store.put({ id: "t3", customer: "Deleted Offline" }, { quiet: true });
+  await syncNow();
+  await Store.del("t3");                              // queued, not yet pushed
+  resetSync();                                        // sign-out used to wipe the queue → silent un-delete
+  await syncNow();
+  ok(serverRows.get("t3").deleted === true, "a delete made before sign-out still lands after sign-in");
+  ok(!(await Store.get("t3")), "…and a copy re-pulled mid-cycle is dropped, not left to revive the job");
+
+  // ---------- key order differs device vs jsonb — the delete still sticks ----------
+  // Postgres jsonb reorders object keys; without canonicalization the
+  // content-equality check false-negatives for the device that CREATED the
+  // row, and deleted jobs resurrect from it forever (the original incident).
+  await Store.put({ id: "t5", customer: "Order Test", receipts: [{ id: "R5", amount: 5 }] }, { quiet: true });
+  await syncNow();
+  const t5 = await Store.get("t5");
+  await Store.backup(t5);
+  await Store.del("t5");
+  await syncNow();                                    // tombstone carries the content
+  const shuffled = { receipts: t5.receipts, customer: t5.customer, id: "t5", createdAt: t5.createdAt, updatedAt: t5.updatedAt };
+  await Store.put(shuffled, { quiet: true });         // same content, different key insertion order
+  await syncNow();
+  ok(!(await Store.get("t5")), "a content-equal copy with DIFFERENT key order still accepts the delete (jsonb reorders keys)");
+  ok(serverRows.get("t5").deleted === true, "…and does not resurrect the job");
+
+  // ---------- a STALE queued delete is dropped instead of killing fresh work ----------
+  await Store.put({ id: "t6", customer: "Keep Me" }, { quiet: true });
+  await syncNow();
+  await Store.del("t6");                              // queued now (survives sign-out)
+  // meanwhile another device pushes newer work on the same job
+  serverRows.set("t6", { id: "t6", deleted: false, updated_at: nowIso(), data: {
+    id: "t6", customer: "Keep Me", notes: "fresh crew work", rev: 5,
+    updatedAt: new Date(Date.now() + 60_000).toISOString(),
+  } });
+  await syncNow();
+  ok(serverRows.get("t6").deleted === false, "a queued delete older than fresh server work is dropped, not pushed");
+  const t6 = await Store.get("t6");
+  ok(!!t6 && t6.notes === "fresh crew work", "…and the fresh copy lives on locally");
+
+  // ============================================================
+  // ONE STUCK PHOTO JOB NO LONGER BLOCKS EVERY JOB BEHIND IT
+  // ============================================================
+  const GHOST2 = "c".repeat(64);
+  serverRows.set("mA", { id: "mA", data: { id: "mA", customer: "Stuck", photos: [{ id: "S1", src: `media:${GHOST2}:99` }], updatedAt: new Date().toISOString() }, deleted: false, updated_at: nowIso() });
+  serverRows.set("mB", { id: "mB", data: { id: "mB", customer: "Behind", updatedAt: new Date().toISOString() }, deleted: false, updated_at: nowIso() });
+  await syncNow();
+  ok(!(await Store.get("mA")), "a row with unreachable media is NOT stored half-broken (no marker garbage on fresh devices)");
+  const mB = await Store.get("mB");
+  ok(!!mB && mB.customer === "Behind", "…while the row BEHIND it still syncs in the same cycle");
+  mediaStore.set(GHOST2, "data:image/jpeg;base64,ok");
+  await syncNow();
+  const mA = await Store.get("mA");
+  ok(!!mA && mA.photos[0].src === "data:image/jpeg;base64,ok", "the stuck row lands intact once its media is reachable");
 
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
   process.exit(failures ? 1 : 0);
