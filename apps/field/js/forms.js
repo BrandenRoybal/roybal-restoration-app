@@ -1913,6 +1913,91 @@ const PHOTO_SIZES = {
   small:  { label: "Smallest — best for many photos", maxDim: 700,  quality: 0.5 },
 };
 
+/* Full-screen photo viewer — tap any gallery photo (or "View full-res" on an
+   offloaded one) to open; move between photos with a swipe, the ‹ › buttons,
+   a tap on the image, or arrow keys — no need to close between photos. Esc,
+   ✕, or a tap on the dark backdrop exits. Offloaded photos show their preview
+   instantly and swap to full-res as soon as it downloads; neighbors prefetch
+   so swiping feels instant. */
+function openLightbox(project, startIndex) {
+  const photos = project.photos || [];
+  if (!photos.length) return;
+  let i = Math.max(0, Math.min(startIndex, photos.length - 1));
+  const fullCache = new Map();               // photo.id -> full-res (this viewing only)
+  let seq = 0;                               // ignore fetches the user already swiped past
+
+  const img = h("img", { class: "lightbox__img", alt: "" });
+  const count = h("span", { class: "lightbox__count" });
+  const loading = h("span", { class: "lightbox__loading" });
+  const cap = h("div", { class: "lightbox__cap" });
+  const closeBtn = h("button", { type: "button", class: "lightbox__close", title: "Close (Esc)" }, "✕");
+  const prevBtn = h("button", { type: "button", class: "lightbox__nav lightbox__nav--prev", title: "Previous photo" }, "‹");
+  const nextBtn = h("button", { type: "button", class: "lightbox__nav lightbox__nav--next", title: "Next photo" }, "›");
+  const ov = h("div", { class: "lightbox app-only" },
+    h("div", { class: "lightbox__top" }, count, loading, closeBtn),
+    prevBtn, nextBtn, img, cap);
+
+  async function fullFor(p) {
+    if (fullCache.has(p.id)) return fullCache.get(p.id);
+    const full = await photoFullSrc(p);
+    if (full) fullCache.set(p.id, full);
+    return full;
+  }
+  const wrap = (n) => ((n % photos.length) + photos.length) % photos.length;
+  function show(idx) {
+    i = wrap(idx);
+    const p = photos[i];
+    const mine = ++seq;
+    img.src = fullCache.get(p.id) || p.src || "";
+    count.textContent = `${i + 1} / ${photos.length}`;
+    cap.replaceChildren(
+      [p.stage ? p.stage.toUpperCase() : "", p.room, p.caption].filter(Boolean).join(" · ") || "—",
+      h("span", { class: "photometa" }, fmtDate((p.ts || "").slice(0, 10))));
+    loading.textContent = "";
+    if (p.cloud && !fullCache.has(p.id)) {
+      loading.textContent = "Fetching full-res…";
+      fullFor(p).then((full) => {
+        if (seq !== mine) return;
+        loading.textContent = full ? "" : "preview only — full-res not reachable";
+        if (full) img.src = full;
+      }).catch(() => { if (seq === mine) loading.textContent = "preview only — full-res not reachable"; });
+    }
+    for (const n of [i + 1, i - 1]) {        // warm the neighbors
+      const q = photos[wrap(n)];
+      if (q && q.cloud && !fullCache.has(q.id)) fullFor(q).catch(() => {});
+    }
+  }
+  function close() {
+    window.removeEventListener("keydown", onKey);
+    document.body.style.overflow = prevOverflow;
+    ov.remove();
+  }
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); show(i + 1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); show(i - 1); }
+  };
+  closeBtn.addEventListener("click", close);
+  prevBtn.addEventListener("click", (e) => { e.stopPropagation(); show(i - 1); });
+  nextBtn.addEventListener("click", (e) => { e.stopPropagation(); show(i + 1); });
+  img.addEventListener("click", () => show(i + 1));      // tap the photo = next
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+  // swipe left/right (also works as a mouse drag)
+  let swipe = null;
+  ov.addEventListener("pointerdown", (e) => { swipe = { x: e.clientX, y: e.clientY }; });
+  ov.addEventListener("pointerup", (e) => {
+    if (!swipe) return;
+    const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
+    swipe = null;
+    if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.5) show(i + (dx < 0 ? 1 : -1));
+  });
+  window.addEventListener("keydown", onKey);
+  const prevOverflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";   // the page behind must not scroll
+  document.body.append(ov);
+  show(i);
+}
+
 export function photosForm(project) {
   if (!Array.isArray(project.photos)) project.photos = [];
   if (!PHOTO_SIZES[project.photoSize]) project.photoSize = "medium";
@@ -1988,24 +2073,18 @@ export function photosForm(project) {
     }
     refreshers.set(p.id, refresh);
     refresh();
-    const imgEl = h("img", { alt: p.caption || "" });
+    const imgEl = h("img", {
+      alt: p.caption || "",
+      class: "photocard__img",
+      title: "Tap to view full screen",
+      onclick: () => openLightbox(project, project.photos.indexOf(p)),
+    });
     applySize(imgEl, p);
-    /* offloaded photo: only a small preview is inline — tap to pull full-res */
+    /* offloaded photo: full-res lives in the cloud — the viewer fetches it */
     const cloudTag = !p.cloud ? null : h("button", {
       type: "button", class: "btn btn--ghost btn--sm app-only",
-      title: "Full resolution is stored in the cloud — tap to view it here",
-      onclick: async (e) => {
-        const btn = e.currentTarget;
-        btn.disabled = true; btn.textContent = "☁ Loading…";
-        try {
-          const full = await photoFullSrc(p);
-          if (full) { imgEl.src = full; btn.remove(); return; }
-          toast("Full-res copy isn't reachable right now — check the connection");
-        } catch (err) {
-          toast("Couldn't fetch the photo: " + (err && err.message || err));
-        }
-        btn.disabled = false; btn.textContent = "☁ View full-res";
-      },
+      title: "Full resolution is stored in the cloud — view it full screen",
+      onclick: () => openLightbox(project, project.photos.indexOf(p)),
     }, "☁ View full-res");
     return h("div", { class: "photocard" },
       imgEl,

@@ -340,6 +340,36 @@ function setInput(el, val) {
     "Start reconstruction card gone once linked");
   window.localStorage.setItem("roybal-mode", "restoration");
 
+  // 12. Job Photos: full-screen viewer (open / navigate without closing / exit)
+  const photoProj = await Store.get(id);
+  photoProj.photos = [
+    { id: "L1", src: "data:image/jpeg;base64,AAA", caption: "First shot", room: "Kitchen", stage: "during", ts: "2026-08-01T10:00:00Z" },
+    { id: "L2", src: "data:image/jpeg;base64,BBB", caption: "Second shot", room: "Hall", stage: "after", ts: "2026-08-02T10:00:00Z" },
+  ];
+  await Store.put(photoProj, { quiet: true });
+  await nav(`#/p/${id}/f/photos`);
+  await tick(40);
+  const galleryImg = view().querySelector(".photocard .photocard__img");
+  ok(!!galleryImg, "photo gallery renders tappable images");
+  galleryImg.click();
+  await tick();
+  let lb = window.document.querySelector(".lightbox");
+  ok(!!lb, "tapping a photo opens the full-screen viewer");
+  ok(/1 \/ 2/.test(lb.textContent) && /First shot/.test(lb.textContent), "viewer shows photo 1 of 2 with its caption");
+  lb.querySelector(".lightbox__nav--next").click();
+  await tick();
+  ok(/2 \/ 2/.test(lb.textContent) && /Second shot/.test(lb.textContent), "next arrow moves to photo 2 without closing");
+  window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft" }));
+  await tick();
+  ok(/1 \/ 2/.test(window.document.querySelector(".lightbox").textContent), "arrow keys page between photos");
+  lb.querySelector(".lightbox__img").click();
+  await tick();
+  ok(/2 \/ 2/.test(window.document.querySelector(".lightbox").textContent), "tapping the photo itself advances");
+  window.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }));
+  await tick();
+  ok(!window.document.querySelector(".lightbox"), "Esc closes the viewer");
+  ok(window.document.body.style.overflow !== "hidden", "page scrolling restored after close");
+
   console.log("\n" + (failures ? `FAILED: ${failures} check(s)` : "ALL CHECKS PASSED"));
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error("THREW:", e); process.exit(1); });
