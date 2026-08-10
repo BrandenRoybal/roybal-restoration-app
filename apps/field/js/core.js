@@ -136,6 +136,25 @@ export const Store = {
     });
   },
 
+  /* conditional delete: only removes the row if its updatedAt still matches
+     what the caller last read — an edit that landed in between keeps the row
+     (get+delete in ONE transaction). Quiet by design — sync-engine use only.
+     Returns true when the delete landed, false when the row moved. */
+  async delIf(id, expectedUpdatedAt) {
+    const os = await tx("readwrite");
+    return new Promise((res, rej) => {
+      const g = os.get(id);
+      g.onsuccess = () => {
+        const cur = g.result;
+        if ((cur ? cur.updatedAt : undefined) !== expectedUpdatedAt) return res(false);
+        const r = os.delete(id);
+        r.onsuccess = () => res(true);
+        r.onerror = () => rej(r.error);
+      };
+      g.onerror = () => rej(g.error);
+    });
+  },
+
   /* ---------- on-device backups ----------
      Snapshotted automatically right before cloud sync merges or replaces a
      local job with a copy from another device — the safety net under the

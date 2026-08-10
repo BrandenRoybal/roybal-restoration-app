@@ -35,7 +35,7 @@ export function portalProjection(project) {
   const sharedIds = new Set(arr(share.sharedPhotoIds));
   const photos = arr(p.photos)
     .filter((ph) => ph && ph.src && sharedIds.has(ph.id))
-    .map((ph) => ({ id: ph.id, src: ph.src, caption: ph.caption || "", stage: ph.stage || "" }));
+    .map((ph) => ({ id: ph.id, src: ph.src, cloud: ph.cloud || "", caption: ph.caption || "", stage: ph.stage || "" }));
   return {
     customer_name: p.customer || "",
     property_address: p.address || "",
@@ -66,7 +66,9 @@ export async function publishPortal(project) {
   const proj = portalProjection(project);
   const photos = [];
   for (const ph of proj.photos) {
-    photos.push({ mediaHash: await sha256Hex(ph.src), caption: ph.caption, stage: ph.stage });
+    // an offloaded photo's bucket hash IS its full-res object — hashing the
+    // inline src would point the portal at a 480px thumb that isn't uploaded
+    photos.push({ mediaHash: ph.cloud || await sha256Hex(ph.src), caption: ph.caption, stage: ph.stage });
   }
   const row = {
     id: share.id,

@@ -186,6 +186,29 @@ export function newPhoto() {
   return { id: uid(), src: "", caption: "", room: "", stage: "during", ts: new Date().toISOString() };
 }
 
+/* ---------- blank-scaffold detection (sync uses this) ----------
+   A project that holds NO field work — indistinguishable from a fresh
+   "+ New Job" scaffold. Sync lets a server delete reclaim a blank copy even
+   when its bookkeeping says "dirty" (repeat-tap junk must stay deletable);
+   ANY real content — one letter of a name, one photo, one log row — keeps
+   the full never-lose-work protection. Conservative on purpose: unknown or
+   prefilled values count as content. */
+const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "updatedAt", "archivedAt", "jobType", "photoSize"]);
+function emptyDeep(v) {
+  if (v == null || v === "" || v === false) return true;
+  if (Array.isArray(v)) return v.length === 0;   // any element at all is content
+  if (typeof v === "object") {
+    // `id` is identity, not content — an opened-but-untouched form slot is a
+    // factory blank of {id + empty fields} and must still read as blank
+    return Object.entries(v).every(([k, x]) => k === "id" || emptyDeep(x));
+  }
+  return false;   // numbers (even 0) and non-empty strings are content
+}
+export function isBlankProject(p) {
+  if (!p || typeof p !== "object") return false;
+  return Object.entries(p).every(([k, v]) => BLANK_IGNORED.has(k) || emptyDeep(v));
+}
+
 /* ---------- Contents (personal property) ---------- */
 export const CONDITIONS = ["New", "Good", "Fair", "Poor", "Damaged", "Destroyed"];
 export const DISPOSITIONS = [

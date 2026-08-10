@@ -36,7 +36,7 @@ async function inflateRaw(bytes) {
    We trust the central directory over local headers, then seek to the local
    header only to learn where the compressed bytes actually start (its extra
    field length routinely differs from the central copy). */
-function zipIndex(buf) {
+export function zipIndex(buf) {   // exported: zip.test.mjs round-trips the zip.js writer through this reader
   // End of Central Directory: scan back from the tail, past any comment.
   let eocd = -1;
   for (let i = buf.length - 22; i >= 0 && i > buf.length - 22 - 0xffff; i--) {
@@ -63,7 +63,7 @@ function zipIndex(buf) {
   return entries;
 }
 
-async function zipRead(buf, entries, name) {
+export async function zipRead(buf, entries, name) {
   const e = entries.get(name);
   if (!e) return null;
   if (u32(buf, e.localOff) !== 0x04034b50) throw new Error("corrupt local header for " + name);

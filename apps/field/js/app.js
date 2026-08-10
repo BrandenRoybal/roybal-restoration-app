@@ -3,7 +3,7 @@
    ============================================================ */
 import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow } from "./core.js";
 import {
-  formByKey, formCount, newProject, formsFor, jobType,
+  formByKey, formCount, newProject, isBlankProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
   newInvoice, newReconEstimate, newPortalShare, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
@@ -61,7 +61,12 @@ const FACTORY = {
 
 /* ---------- router ---------- */
 let backTarget = "#/";
-function go(hash) { location.hash = hash; }
+/* opts.replace: navigate WITHOUT leaving a history entry — used after #/new so
+   the back button can never land on #/new again (each landing minted a job) */
+function go(hash, opts = {}) {
+  if (opts.replace) location.replace(hash);
+  else location.hash = hash;
+}
 backBtn.addEventListener("click", () => go(backTarget));
 
 window.addEventListener("hashchange", route);
@@ -129,6 +134,8 @@ function startSyncUI() {
   startSync(updateSyncStatus);
 }
 function boot() {
+  // ask the browser to shield IndexedDB (jobs + backups) from storage eviction
+  try { navigator.storage?.persist?.().catch(() => {}); } catch { /* best-effort */ }
   if (SYNC_ENABLED && isSignedIn()) startSyncUI();
   route();
 }
@@ -490,11 +497,31 @@ function installHint() {
     ver);
 }
 
+/* Guard the #/new route HARD. On a laggy tablet every extra tap used to mint
+   another blank job, and Back from the edit page landed on #/new and minted one
+   more — that's where the batches of empty jobs came from (Jul 31 2026: eight
+   in two minutes). Now: one create in flight at a time, an untouched blank
+   scaffold is REUSED instead of duplicated, and the #/new history entry is
+   replaced so the back button skips it. */
+let creatingJob = false;
 async function createProject() {
-  const p = newProject();
-  p.jobType = activeMode();   // the home-screen toggle decides what "+ New Job" starts
-  await Store.put(p);
-  go(`#/p/${p.id}/edit`);
+  if (creatingJob) return;
+  creatingJob = true;
+  try {
+    // instant feedback — scanning for a reusable blank reads the whole store,
+    // which can take a beat on a photo-heavy tablet; a silent screen reads as
+    // "the tap didn't work" and invites more taps
+    clear(view).append(h("p", { class: "subtle", style: "margin:24px" }, "Opening new job…"));
+    const mode = activeMode();   // the home-screen toggle decides what "+ New Job" starts
+    const existing = (await Store.all()).find((p) => !p.archivedAt && p.jobType === mode && isBlankProject(p));
+    if (existing) { go(`#/p/${existing.id}/edit`, { replace: true }); return; }
+    const p = newProject();
+    p.jobType = mode;
+    await Store.put(p);
+    go(`#/p/${p.id}/edit`, { replace: true });
+  } finally {
+    creatingJob = false;
+  }
 }
 
 /* ============================================================
@@ -2188,6 +2215,9 @@ function projectEdit(project) {
 
 async function deleteProject(project) {
   if (!confirm("Delete this entire job and all its forms? This cannot be undone.")) return;
+  // snapshot FIRST — the deleting device keeps a restorable copy, and sync
+  // ships this snapshot inside the tombstone so the server keeps one too
+  await Store.backup(project);
   await Store.del(project.id);
   toast("Job deleted");
   go("#/");

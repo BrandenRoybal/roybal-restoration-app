@@ -12,8 +12,15 @@
    - a pull that lands on top of UNSYNCED local edits merges the
      same way instead of replacing;
    - a remote DELETE never destroys unsynced local edits: the
-     dirty copy survives (backed up first) and re-pushes, so the
-     job resurrects with the work intact;
+     dirty copy survives (backed up first) and the push path
+     deliberately revives the job with the work intact — UNLESS
+     the local copy is a blank scaffold or adds nothing over what
+     the tombstone preserved, in which case the delete wins (so
+     repeat-tap junk jobs stay deletable instead of resurrecting
+     from every device that ever held them);
+   - a delete pushes the job's last-known content INSIDE the
+     tombstone (media offloaded as usual), so a deleted job is
+     recoverable from the server, not only from a device;
    - the row's rev lives in sync-owned bookkeeping (K_REVS), never
      in the project blob: a successful push writes NOTHING back to
      the local row (an edit made while the push was in flight can't
@@ -26,9 +33,10 @@
      to the on-device backups store (restorable from the job page).
    ============================================================ */
 import { Store, onProjectSaved, onProjectDeleted } from "./core.js";
-import { isSignedIn, upsertRows, guardedUpsertRow, fetchSince, uploadMedia, downloadMedia } from "./supa.js";
+import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSince, uploadMedia, downloadMedia } from "./supa.js";
 import { deflateProject, inflateProject } from "./media.js";
 import { mergeProjects } from "./merge.js";
+import { isBlankProject } from "./model.js";
 
 const K_CURSOR = "roybal-sync-cursor";
 const K_PUSHED = "roybal-sync-pushed";     // { projectId: updatedAt last pushed }
@@ -41,7 +49,7 @@ const STALL_CYCLES = 3;                    // media-missing retries before the s
 let cursor = localStorage.getItem(K_CURSOR) || "";
 let pushed = load(K_PUSHED, {});
 let revs = load(K_REVS, {});
-let deletes = new Set(load(K_DELETES, []));
+let deletes = loadDeletes();               // Map: projectId -> ISO time the delete was queued
 let mediaPushed = new Set(load(K_MEDIA, []));
 let mediaWait = new Map();                 // projectId -> consecutive cycles blocked on missing bucket media
 let statusCb = () => {};
@@ -59,10 +67,23 @@ const rowChanged = (id) => { try { rowCb(id); } catch { /* refresh is a bonus */
 
 /* content equality ignoring the sync-volatile top-level fields (rev lives in
    bookkeeping; updatedAt is a clock stamp, not content). How absorb spots a
-   SELF-ECHO merge: the union holds nothing the server doesn't already have. */
+   SELF-ECHO merge: the union holds nothing the server doesn't already have.
+   KEY ORDER IS CANONICALIZED: Postgres jsonb reorders object keys, so a
+   server round-trip of byte-identical content stringifies differently from
+   the device's insertion-ordered copy — without sorting, every comparison
+   here false-negatives for the device that CREATED the row. */
+function canon(v) {
+  if (Array.isArray(v)) return v.map(canon);
+  if (v && typeof v === "object") {
+    const o = {};
+    for (const k of Object.keys(v).sort()) o[k] = canon(v[k]);
+    return o;
+  }
+  return v;
+}
 function sameContent(a, b) {
   const strip = ({ rev, updatedAt, ...content }) => content;
-  return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
+  return JSON.stringify(canon(strip(a))) === JSON.stringify(canon(strip(b)));
 }
 
 /* merge the server's copy into ours, adopt the server's rev, and leave the
@@ -108,9 +129,16 @@ async function absorb(localRef, serverFull, why) {
 }
 
 function load(k, fallback) { try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch { return fallback; } }
+/* pending deletes were once a bare id array — migrate to {id: queuedAtISO}
+   (a queue entry with no timestamp still tombstones unconditionally) */
+function loadDeletes() {
+  const raw = load(K_DELETES, {});
+  if (Array.isArray(raw)) return new Map(raw.map((id) => [id, ""]));
+  return new Map(Object.entries(raw));
+}
 const savePushed = () => localStorage.setItem(K_PUSHED, JSON.stringify(pushed));
 const saveRevs = () => localStorage.setItem(K_REVS, JSON.stringify(revs));
-const saveDeletes = () => localStorage.setItem(K_DELETES, JSON.stringify([...deletes]));
+const saveDeletes = () => localStorage.setItem(K_DELETES, JSON.stringify(Object.fromEntries(deletes)));
 const saveCursor = () => localStorage.setItem(K_CURSOR, cursor);
 const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-3000)));
 function bumpCursor(ts) { if (ts && ts > cursor) { cursor = ts; saveCursor(); } }
@@ -126,6 +154,15 @@ async function downloadRemembered(hash) {
   return text;
 }
 
+/* upload any media object not yet known to be in the bucket (content-addressed) */
+async function uploadNewMedia(media) {
+  for (const m of media) {
+    if (mediaPushed.has(m.hash)) continue;           // already in the bucket
+    await uploadMedia(m.hash, m.text);
+    mediaPushed.add(m.hash); saveMediaPushed();
+  }
+}
+
 /* ---------- push local changes (rev-guarded) ---------- */
 async function push() {
   const all = await Store.all();
@@ -134,11 +171,7 @@ async function push() {
     if (pushed[p.id] === p.updatedAt) continue;        // already up to date
     try {
       const { slim, media } = await deflateProject(p);
-      for (const m of media) {
-        if (mediaPushed.has(m.hash)) continue;         // content-addressed — already in the bucket
-        await uploadMedia(m.hash, m.text);
-        mediaPushed.add(m.hash); saveMediaPushed();
-      }
+      await uploadNewMedia(media);
       const base = Number(revs[p.id] ?? p.rev) || 0;   // p.rev: legacy fallback for rows pulled before K_REVS
       const next = { ...slim, rev: base + 1 };
       const json = JSON.stringify(next);
@@ -154,9 +187,8 @@ async function push() {
         mediaWait.delete(p.id);
         continue;
       }
-      // conflict: another device moved the row since we last synced.
-      // NEVER clobber, NEVER drop — merge their copy into ours and let the
-      // next pass push the union guarded on the rev we just adopted.
+      // conflict: another device moved (or deleted) the row since we last
+      // synced. NEVER clobber, NEVER drop — merge their copy into ours.
       if (!r.server) continue;                         // insert race — pull will bring their row
       let serverFull, missing;
       const localMedia = new Map(media.map((m) => [m.hash, m.text]));  // their row may reference OUR photos — reuse, don't re-download
@@ -166,17 +198,96 @@ async function push() {
         mediaWait.set(p.id, (mediaWait.get(p.id) || 0) + 1);   // …but surface it if it never resolves
         continue;
       }
+      if (r.serverDeleted) {
+        // the job was deleted on the server while this device held a copy it
+        // believes is unsynced (often just reset bookkeeping after a sign-out).
+        // The delete wins unless we hold REAL work the tombstone doesn't keep.
+        // Decide on a FRESH read — `p` is a snapshot from the top of the loop,
+        // minutes old on a photo-heavy cycle, and the user may have started
+        // filling this very job in since (the reused-blank flow steers them
+        // into exactly these rows).
+        const cur = await Store.get(p.id);
+        if (!cur) {                                    // already gone locally — settle bookkeeping
+          delete pushed[p.id]; delete revs[p.id]; savePushed(); saveRevs();
+          mediaWait.delete(p.id);
+          continue;
+        }
+        const { merged } = mergeProjects(cur, serverFull);
+        merged.id = p.id;
+        delete merged.rev;
+        if (isBlankProject(cur) || sameContent(merged, serverFull)) {
+          // a repeat-tap blank scaffold, or content the tombstone already
+          // preserves — accept the delete instead of resurrecting junk
+          await Store.backup(cur);                     // still restorable on-device
+          if (!(await Store.delIf(p.id, cur.updatedAt))) continue;  // an edit just landed — re-decide next cycle
+          delete pushed[p.id]; delete revs[p.id]; savePushed(); saveRevs();
+          mediaWait.delete(p.id);
+          rowChanged(p.id);
+          continue;
+        }
+        // we DO hold work the tombstone lacks — revive the job with the union,
+        // EXPLICITLY and GUARDED on the row still being deleted (two devices
+        // reviving at once: the second sees 0 rows, stays dirty, and merges
+        // against the first's copy next cycle instead of clobbering it)
+        merged.updatedAt = new Date().toISOString();
+        if (!(await Store.putIf(merged, cur.updatedAt))) continue;   // an edit just landed — retry next cycle
+        const { slim: reviveSlim, media: reviveMedia } = await deflateProject(merged);
+        await uploadNewMedia(reviveMedia);
+        const nextRev = (Number(r.server && r.server.rev) || 0) + 1;
+        const revived = await reviveRow(p.id, { ...reviveSlim, rev: nextRev });
+        if (!revived.ok) continue;                     // someone beat us to it — stay dirty, merge next cycle
+        revs[p.id] = nextRev; saveRevs();
+        pushed[p.id] = merged.updatedAt; savePushed();
+        mediaWait.delete(p.id);
+        rowChanged(p.id);
+        continue;
+      }
       await absorb(p, serverFull, "push-conflict");
     } catch (e) {
       lastErr = e;   // one failing job (network blip mid-cycle) must not stall the rest
     }
   }
   skipped = skippedNow;
-  for (const id of [...deletes]) {
+  for (const [id, queuedAt] of [...deletes]) {
     try {
-      await upsertRows([{ id, data: { id }, deleted: true }]);
+      // STALENESS GUARD: a queued delete can now outlive a sign-out, so it may
+      // fire long after it was tapped. If the server copy moved AFTER the
+      // delete was queued, the crew kept working on the job — drop the stale
+      // delete instead of tombstoning fresh work.
+      if (queuedAt) {
+        const srv = await fetchRow(id);
+        if (srv && !srv.deleted && String((srv.data && srv.data.updatedAt) || "") > queuedAt) {
+          deletes.delete(id); saveDeletes();
+          continue;                          // the job lives on; pull keeps it
+        }
+      }
+      // ship the job's last-known content INSIDE the tombstone (media already
+      // offloaded to the bucket) — a deleted job stays recoverable from the
+      // server instead of only from whichever device still holds a copy
+      let data = { id };
+      try {
+        const snaps = await Store.backups(id);
+        const snap = snaps.length ? snaps[0].data : null;
+        if (snap && snap.id === id) {
+          const { slim, media } = await deflateProject(snap);
+          await uploadNewMedia(media);
+          const { rev, ...content } = slim;
+          if (JSON.stringify(content).length <= MAX_ROW) data = content;
+        }
+      } catch { /* a bare tombstone still beats blocking the delete */ }
+      await upsertRows([{ id, data, deleted: true }]);
       deletes.delete(id); delete pushed[id]; delete revs[id];
       saveDeletes(); savePushed(); saveRevs();
+      // the pull earlier in THIS cycle may have re-stored the job (cursor
+      // reset, or its row changed server-side after the local delete). The
+      // user deleted it — drop the ghost, or it reads as "dirty work" next
+      // cycle and revives the job we just tombstoned. Conditional: an edit
+      // typed since the ghost was read keeps the row (it re-pushes as work).
+      const ghost = await Store.get(id);
+      if (ghost) {
+        await Store.backup(ghost);
+        if (await Store.delIf(id, ghost.updatedAt)) rowChanged(id);
+      }
     } catch (e) { lastErr = e; }
   }
   if (lastErr) throw lastErr;
@@ -189,31 +300,46 @@ async function push() {
 /* ---------- pull others' changes ---------- */
 async function pull() {
   const rows = await fetchSince(cursor);
+  // A row stuck waiting on bucket media must not stall everything behind it
+  // (one 187-photo job used to block every other job's sync). Later rows still
+  // apply, but the cursor FREEZES at the first stuck row so it is refetched
+  // next cycle — already-applied later rows then fall out of the tie guard.
+  let stuckOnMedia = false;
+  const bump = (ts) => { if (!stuckOnMedia) bumpCursor(ts); };
   for (const row of rows) {
     if (row.deleted) {
       const local = await Store.get(row.id);
-      if (local && pushed[row.id] !== local.updatedAt) {
+      if (local && pushed[row.id] !== local.updatedAt && !isBlankProject(local)) {
         // this device holds UNSYNCED work on the job — a tombstone must not
-        // eat it. Keep the dirty copy (snapshotted anyway); push re-creates
-        // the job, so an edit wins over a stale delete.
+        // eat it. Keep the dirty copy (snapshotted anyway); the push path
+        // decides whether to revive the job with the work or let the delete
+        // stand. A dirty-but-BLANK scaffold falls through: repeat-tap junk
+        // must stay deletable.
         await Store.backup(local);
         revs[row.id] = 0; saveRevs();      // tombstone rows carry no rev — re-assert from base 0
-        bumpCursor(row.updated_at);
+        bump(row.updated_at);
         continue;
       }
-      if (local) await Store.backup(local);  // clean delete — keep a restorable snapshot
-      await Store.del(row.id, { quiet: true });
+      if (local) {
+        await Store.backup(local);           // delete — keep a restorable snapshot
+        if (!(await Store.delIf(row.id, local.updatedAt))) {
+          // an edit landed while we were backing up — treat it as dirty work
+          revs[row.id] = 0; saveRevs();
+          bump(row.updated_at);
+          continue;
+        }
+      }
       delete pushed[row.id]; delete revs[row.id]; saveRevs();
       mediaWait.delete(row.id);
       rowChanged(row.id);
-      bumpCursor(row.updated_at);
+      bump(row.updated_at);
       continue;
     }
     const remote = row.data;
-    if (!remote || !remote.id) { bumpCursor(row.updated_at); continue; }
+    if (!remote || !remote.id) { bump(row.updated_at); continue; }
     const local = await Store.get(row.id);
     // local wins ties: only a STRICTLY newer remote may touch local work
-    if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bumpCursor(row.updated_at); continue; }
+    if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bump(row.updated_at); continue; }
     let full, missing;
     try {
       ({ project: full, missing } = await inflateProject(remote, downloadRemembered));
@@ -222,12 +348,15 @@ async function pull() {
     }
     // Some referenced media (photos, plan pages) came back empty — a transient
     // auth gap, or objects still propagating just after another device uploaded
-    // them. NEVER overwrite a good local copy with blank markers and advance past
-    // it (that stranded photos on desktop until a full re-pull). Leave the cursor
-    // put and retry this row next cycle; it resolves once the downloads succeed.
-    if (missing > 0 && local) {
-      mediaWait.set(row.id, (mediaWait.get(row.id) || 0) + 1);   // goes red if it never resolves
-      break;
+    // them. NEVER store a copy with marker strings where photos should be (a
+    // fresh device used to save one and go clean — its photos rendered as
+    // garbage until the job changed again), and never advance the cursor past
+    // the row. Other rows keep syncing; this one retries next cycle and turns
+    // the status red if it never resolves.
+    if (missing > 0) {
+      mediaWait.set(row.id, (mediaWait.get(row.id) || 0) + 1);
+      stuckOnMedia = true;
+      continue;
     }
     const localDirty = local && pushed[row.id] !== local.updatedAt;   // unsynced edits on this device
     if (localDirty) {
@@ -242,7 +371,7 @@ async function pull() {
       mediaWait.delete(row.id);
       rowChanged(row.id);
     }
-    bumpCursor(row.updated_at);
+    bump(row.updated_at);
   }
   savePushed();
 }
@@ -288,7 +417,7 @@ export function startSync(onStatus) {
   started = true;
 
   onProjectSaved(() => schedulePush());
-  onProjectDeleted((id) => { deletes.add(id); saveDeletes(); schedulePush(); });
+  onProjectDeleted((id) => { deletes.set(id, new Date().toISOString()); saveDeletes(); schedulePush(); });
 
   if (typeof window !== "undefined") {
     window.addEventListener("online", syncNow);
@@ -298,12 +427,14 @@ export function startSync(onStatus) {
   syncNow();
 }
 
-/* clear sync bookkeeping on sign-out (local job data is kept) */
+/* clear sync bookkeeping on sign-out (local job data is kept). PENDING DELETES
+   are kept too: a delete is user intent, not derived bookkeeping — signing out
+   before the tombstone pushed must not silently un-delete the job. */
 export function resetSync() {
-  cursor = ""; pushed = {}; revs = {}; deletes = new Set(); mediaPushed = new Set(); mediaWait = new Map(); skipped = 0;
+  cursor = ""; pushed = {}; revs = {}; mediaPushed = new Set(); mediaWait = new Map(); skipped = 0;
+  deletes = loadDeletes();                   // kept on disk; reload so memory matches
   localStorage.removeItem(K_CURSOR);
   localStorage.removeItem(K_PUSHED);
   localStorage.removeItem(K_REVS);
-  localStorage.removeItem(K_DELETES);
   localStorage.removeItem(K_MEDIA);
 }

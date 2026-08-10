@@ -101,7 +101,12 @@ export async function upsertRows(rows) {
 export async function guardedUpsertRow(id, base, data) {
   const eid = encodeURIComponent(id);
   const guard = base > 0 ? `data->>rev=eq.${base}` : `or=(data->>rev.is.null,data->>rev.eq.0)`;
-  const res = await api(`${TABLE}?id=eq.${eid}&${guard}`, {
+  // deleted=eq.false: a routine push must NEVER silently revive a tombstone.
+  // (A tombstone's data carries no rev, so it used to match the base-0 guard —
+  // that's how deleted junk jobs kept resurrecting.) A push against a deleted
+  // row falls through to the conflict check below, and the CALLER decides
+  // whether the delete wins or the job is deliberately revived with its work.
+  const res = await api(`${TABLE}?id=eq.${eid}&deleted=eq.false&${guard}`, {
     method: "PATCH",
     headers: { Prefer: "return=representation" },
     body: JSON.stringify({ data, deleted: false }),
@@ -109,8 +114,8 @@ export async function guardedUpsertRow(id, base, data) {
   if (!res.ok) throw new Error("Push failed (" + res.status + ")");
   const rows = await res.json();
   if (rows.length) return { ok: true };
-  // 0 rows: either the row doesn't exist yet (new job) or it moved (conflict)
-  const chk = await api(`${TABLE}?id=eq.${eid}&select=id,data`, { method: "GET" });
+  // 0 rows: the row doesn't exist yet (new job), moved (conflict), or is deleted
+  const chk = await api(`${TABLE}?id=eq.${eid}&select=id,data,deleted`, { method: "GET" });
   if (!chk.ok) throw new Error("Push check failed (" + chk.status + ")");
   const existing = await chk.json();
   if (!existing.length) {
@@ -122,7 +127,30 @@ export async function guardedUpsertRow(id, base, data) {
     if (ins.status === 409) return { conflict: true, server: null };
     throw new Error("Push insert failed (" + ins.status + ")");
   }
-  return { conflict: true, server: existing[0].data };
+  return { conflict: true, server: existing[0].data, serverDeleted: !!existing[0].deleted };
+}
+
+/** Deliberately flip a DELETED row back alive — the only sanctioned way to
+    revive a tombstone. Guarded on deleted=eq.true: if another device already
+    revived (or otherwise moved) the row, this matches 0 rows and the caller
+    merges against the live copy instead of clobbering it. */
+export async function reviveRow(id, data) {
+  const res = await api(`${TABLE}?id=eq.${encodeURIComponent(id)}&deleted=eq.true`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ data, deleted: false }),
+  });
+  if (!res.ok) throw new Error("Revive failed (" + res.status + ")");
+  const rows = await res.json();
+  return { ok: rows.length > 0 };
+}
+
+/** Fetch one row (or null) — the tombstone push checks staleness with this. */
+export async function fetchRow(id) {
+  const res = await api(`${TABLE}?id=eq.${encodeURIComponent(id)}&select=id,data,deleted,updated_at`, { method: "GET" });
+  if (!res.ok) throw new Error("Row check failed (" + res.status + ")");
+  const rows = await res.json();
+  return rows[0] || null;
 }
 
 /* ---------- media storage (field-media bucket) ----------
@@ -143,6 +171,17 @@ export async function uploadMedia(hash, text) {
   let res = await send();
   if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
   if (!res.ok && res.status !== 409) throw new Error("Media upload failed (" + res.status + ")");
+}
+
+/** Cheap existence check (HEAD) — the photo-offload flow verifies a bucket
+    copy exists before it drops the inline original. */
+export async function mediaExists(hash) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${hash}`;
+  const send = () => fetch(url, { method: "HEAD", headers: { ...authHeaders() } });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  return res.ok;
 }
 
 /** Download a media string; null when it no longer exists on the server. */

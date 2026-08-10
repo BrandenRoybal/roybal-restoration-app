@@ -2,7 +2,8 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
+import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
+import { exportPhotosZip, archivePhotos, archivableCount, photoFullSrc } from "./photoexport.js";
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
@@ -1920,18 +1921,25 @@ export function photosForm(project) {
   const refreshers = new Map();               // photo.id -> refresh that card in place
   const sizeCache = new Map();                // `${photo.id}:${tier}` -> shrunk dataURL (in-memory only)
 
-  /* Point an <img> at the version for the current size tier. Shows the master
-     immediately, then swaps in the shrunk copy once encoded (cached per tier). */
+  /* Point an <img> at the version for the current size tier. Shows what's
+     inline immediately; a cloud-offloaded photo re-fetches its full-res in
+     the background (when online) so the gallery AND the printed Photo Report
+     keep real quality instead of the 480px preview. Cached per tier,
+     in-memory only. */
   async function applySize(imgEl, p) {
     const tier = project.photoSize;
-    if (!p.src || tier === "full") { imgEl.src = p.src || ""; return; }
     const key = p.id + ":" + tier;
     if (sizeCache.has(key)) { imgEl.src = sizeCache.get(key); return; }
-    imgEl.src = p.src;
+    imgEl.src = p.src || "";
+    let master = p.src || "";
+    if (p.cloud && navigator.onLine !== false) {
+      try { master = (await photoFullSrc(p)) || master; } catch { /* offline blip — keep the preview */ }
+    }
+    if (!master) return;
     const t = PHOTO_SIZES[tier];
-    const small = await shrinkDataURL(p.src, t.maxDim, t.quality);
-    sizeCache.set(key, small);
-    if (project.photoSize === tier) imgEl.src = small;   // tier may have changed while encoding
+    const out = tier === "full" ? master : await shrinkDataURL(master, t.maxDim, t.quality);
+    sizeCache.set(key, out);
+    if (project.photoSize === tier) imgEl.src = out;   // tier may have changed while encoding
   }
 
   function movePhoto(from, to) {
@@ -1982,8 +1990,26 @@ export function photosForm(project) {
     refresh();
     const imgEl = h("img", { alt: p.caption || "" });
     applySize(imgEl, p);
+    /* offloaded photo: only a small preview is inline — tap to pull full-res */
+    const cloudTag = !p.cloud ? null : h("button", {
+      type: "button", class: "btn btn--ghost btn--sm app-only",
+      title: "Full resolution is stored in the cloud — tap to view it here",
+      onclick: async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true; btn.textContent = "☁ Loading…";
+        try {
+          const full = await photoFullSrc(p);
+          if (full) { imgEl.src = full; btn.remove(); return; }
+          toast("Full-res copy isn't reachable right now — check the connection");
+        } catch (err) {
+          toast("Couldn't fetch the photo: " + (err && err.message || err));
+        }
+        btn.disabled = false; btn.textContent = "☁ View full-res";
+      },
+    }, "☁ View full-res");
     return h("div", { class: "photocard" },
       imgEl,
+      cloudTag,
       printCap,
       h("div", { class: "app-only photoedit" }, tools, room, stage, cap),
       aiLine);
@@ -2054,13 +2080,60 @@ export function photosForm(project) {
   const sizeRow = h("label", { class: "app-only photosize" },
     h("span", {}, "Photo size for email:"), sizeSel);
 
+  /* ---------- get the photos OUT: zip download + cloud offload ---------- */
+  const zipBtn = h("button", { type: "button", class: "btn btn--sm", style: "margin-left:8px" }, "⬇ Download all (.zip)");
+  zipBtn.addEventListener("click", async () => {
+    if (!(project.photos || []).length) return toast("No photos on this job yet");
+    zipBtn.disabled = true;
+    try {
+      const { parts, count, missing, previews } = await exportPhotosZip(project, (n, total) => {
+        zipBtn.textContent = `⬇ Packing ${n}/${total}…`;
+      });
+      const safe = ((project.customer || "").trim() || "job").replace(/[\\/:*?"<>|]+/g, "");
+      downloadFile(`${safe} photos.zip`, new Blob(parts, { type: "application/zip" }), "application/zip");
+      const bits = [];
+      if (missing) bits.push(`${missing} unavailable`);
+      if (previews) bits.push(`${previews} preview-only — retry online for the originals`);
+      toast(bits.length ? `Downloaded ${count} photos (${bits.join("; ")} — see photo-index.csv)` : `Downloaded ${count} photos`, 5000);
+    } catch (e) {
+      toast("Download failed: " + (e && e.message || e), 4000);
+    }
+    zipBtn.disabled = false;
+    zipBtn.textContent = "⬇ Download all (.zip)";
+  });
+
+  const cloudBtn = h("button", { type: "button", class: "btn btn--sm", style: "margin-left:8px" }, "☁ Move photos to cloud");
+  cloudBtn.addEventListener("click", async () => {
+    const n = archivableCount(project);
+    if (!n) return toast("This job's photos are already slim — nothing to move");
+    if (navigator.onLine === false) return toast("Moving photos needs internet — try again when online");
+    if (!confirm(`Move ${n} photo${n === 1 ? "" : "s"} to cloud storage?\n\nThe job keeps a small preview of each photo and gets MUCH faster to sync. Full resolution stays saved in the cloud — the gallery, printed report, and “Download all” fetch the originals whenever you're online.`)) return;
+    cloudBtn.disabled = true;
+    try {
+      const { moved, freed } = await archivePhotos(project, (i, total) => {
+        cloudBtn.textContent = `☁ Moving ${i}/${total}…`;
+      });
+      // save THIS project directly — the user may have navigated to another
+      // form mid-move, and commit() would autosave whatever page is open now
+      await Store.put(project);
+      paint();
+      toast(`Moved ${moved} photo${moved === 1 ? "" : "s"} to the cloud — this job is now ~${(freed / 1e6).toFixed(1)} MB lighter on every device`, 4500);
+    } catch (e) {
+      await Store.put(project);   // photos moved before the failure are safely offloaded — keep them
+      paint();
+      toast("Cloud move stopped: " + (e && e.message || e) + ". Nothing was lost — tap again to continue.", 4500);
+    }
+    cloudBtn.disabled = false;
+    cloudBtn.textContent = "☁ Move photos to cloud";
+  });
+
   paint();
   paintAiBtn();
 
   return sheet("PHOTO REPORT", "Job Site Documentation", "Photo Report",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
-    h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, sizeRow, input),
+    h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, zipBtn, cloudBtn, sizeRow, input),
     grid);
 }
 

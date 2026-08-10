@@ -93,6 +93,7 @@ export function convertToConstruction(rest) {
   p.photos = photos.picked.map((ph) => ({
     id: uid(),
     src: ph.src,
+    ...(ph.cloud ? { cloud: ph.cloud } : {}),   // keep the full-res bucket link on offloaded photos
     room: ph.room || "",
     stage: "before",
     caption: ["Mitigation" + (ph.stage ? " (" + ph.stage + ")" : ""), ph.caption || ""]
