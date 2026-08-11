@@ -1,12 +1,22 @@
 /* isBlankProject — the guard that lets deletes reclaim repeat-tap scaffolds
    while ANY real content keeps the never-lose-work protection.
    Run: node test/blank.test.mjs */
-import { newProject, newPhoto, isBlankProject } from "../js/model.js";
+import { newProject, newPhoto, isBlankProject, setAuthor } from "../js/model.js";
 
 let failures = 0;
 const ok = (c, m) => { console.log((c ? "  ✓ " : "  ✗ ") + m); if (!c) failures++; };
 
 ok(isBlankProject(newProject()), "a fresh + New Job scaffold is blank");
+
+// Phase 1: a signed-in device stamps createdBy/by on fresh captures. Blank
+// detection must still treat a stamped-but-empty scaffold as blank (so repeat-
+// tap reclaim keeps working per person), while one real capture still counts.
+setAuthor("tech@roybalconstruction.com");
+ok(isBlankProject(newProject()), "a fresh scaffold stamped with an author is still blank");
+const stamped = newProject();
+stamped.photos.push(newPhoto());
+ok(!isBlankProject(stamped), "one authored photo makes a scaffold non-blank");
+setAuthor("");
 
 const cons = newProject();
 cons.jobType = "construction";

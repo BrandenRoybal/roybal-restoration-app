@@ -92,6 +92,7 @@ export function convertToConstruction(rest) {
   const photos = pickPhotos(r.photos);
   p.photos = photos.picked.map((ph) => ({
     id: uid(),
+    ...(ph.by ? { by: ph.by } : {}),            // attribution follows the photographer, not the converter
     src: ph.src,
     ...(ph.cloud ? { cloud: ph.cloud } : {}),   // keep the full-res bucket link on offloaded photos
     room: ph.room || "",

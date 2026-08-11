@@ -1,6 +1,8 @@
 /* Sync engine test — drives push/pull/merge against a fake Supabase.
    Run: node test/sync.mjs */
 import "fake-indexeddb/auto";
+import { mergeProjects } from "../js/merge.js";   // the fake server's merge == the SQL merge (proven equivalent)
+import { SYNC_VIA_RPC } from "../js/config.js";
 
 let failures = 0;
 const ok = (c, m) => { console.log((c ? "  ✓ " : "  ✗ ") + m); if (!c) failures++; };
@@ -35,6 +37,77 @@ globalThis.fetch = async (url, opts = {}) => {
   const body = opts.body ? JSON.parse(opts.body) : null;
   if (u.pathname === "/auth/v1/token") {
     return resp(200, { access_token: "tok", refresh_token: "ref", expires_in: 3600, user: { email: body.email } });
+  }
+  /* ---- sync RPCs: the server-side merge authority (migrations 217/218).
+     Mirrors the SQL exactly, including the "strictly newer than both inputs
+     and never behind the server clock" merge stamp. ---- */
+  const mergeStamp = (a, b) =>
+    new Date(Math.max(Math.max(Date.parse(a) || 0, Date.parse(b) || 0) + 1, Date.now())).toISOString();
+  // a real request/response crosses the wire as JSON: neither side may hold a
+  // reference into the other's objects (the client mutates what it receives)
+  const wire = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
+  // jsonb compares by value, not key order — mirror that when detecting a self-echo
+  const canonKeys = (v) => Array.isArray(v) ? v.map(canonKeys)
+    : (v && typeof v === "object")
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonKeys(v[k])]))
+      : v;
+  if (u.pathname === "/rest/v1/rpc/push_project" && method === "POST") {
+    if (onPatch) { const f = onPatch; onPatch = null; await f(); }   // an edit lands mid-push
+    const id = body.p_id, base = Number(body.p_base_rev) || 0;
+    const incoming = wire(body.p_data); delete incoming.rev;
+    const row = serverRows.get(id);
+    if (!row) {
+      serverRows.set(id, { id, data: { ...incoming, rev: 1 }, deleted: false, updated_at: nowIso() });
+      return resp(200, { status: "insert", rev: 1 });
+    }
+    const curRev = Number(row.data && row.data.rev) || 0;
+    if (row.deleted) return resp(200, { status: "deleted", rev: curRev, data: wire(row.data) });
+    if (curRev === base) {
+      row.data = { ...incoming, rev: curRev + 1 };
+      row.deleted = false; row.updated_at = nowIso();
+      return resp(200, { status: "applied", rev: curRev + 1 });
+    }
+    const { merged } = mergeProjects(incoming, row.data);
+    const strip = ({ rev, updatedAt, ...rest }) => JSON.stringify(canonKeys(rest));
+    if (strip(merged) === strip(row.data)) {          // self-echo: write nothing
+      return resp(200, { status: "current", rev: curRev, data: wire(row.data) });
+    }
+    merged.rev = curRev + 1;
+    merged.updatedAt = mergeStamp(incoming.updatedAt, row.data.updatedAt);
+    row.data = merged; row.deleted = false; row.updated_at = nowIso();
+    return resp(200, { status: "merged", rev: merged.rev, data: wire(merged) });
+  }
+  if (u.pathname === "/rest/v1/rpc/tombstone_project" && method === "POST") {
+    const id = body.p_id, row = serverRows.get(id);
+    const incoming = body.p_data ? wire(body.p_data) : null;
+    if (incoming) delete incoming.rev;
+    if (!row) {
+      serverRows.set(id, { id, data: incoming || { id }, deleted: true, updated_at: nowIso() });
+      return resp(200, { status: "tombstoned", created: true });
+    }
+    if (row.deleted) return resp(200, { status: "already_deleted" });
+    // jsonb measures canonical text (keys sorted), not insertion order
+    const len = (v) => JSON.stringify(canonKeys(v || {})).length;
+    const keepRicher = incoming && len(incoming) >= len(row.data);
+    const kept = keepRicher ? incoming : row.data;    // (do not shadow `body`)
+    // HIGH-WATER REV (migration 220): the tombstone carries the highest rev the
+    // row ever held, so a later revive can never re-issue a rev a stale device
+    // is still holding
+    const hw = Math.max(Number(row.data && row.data.rev) || 0,
+                        Number(kept && kept.rev) || 0);
+    row.data = { ...kept, rev: hw };
+    row.deleted = true; row.updated_at = nowIso();
+    return resp(200, { status: "tombstoned", rev: hw });
+  }
+  if (u.pathname === "/rest/v1/rpc/revive_project" && method === "POST") {
+    const id = body.p_id, row = serverRows.get(id);
+    const incoming = wire(body.p_data); delete incoming.rev;
+    if (!row) return resp(200, { status: "missing" });
+    const curRev = Number(row.data && row.data.rev) || 0;
+    if (!row.deleted) return resp(200, { status: "conflict", rev: curRev, data: wire(row.data) });
+    row.data = { ...incoming, rev: curRev + 1 };
+    row.deleted = false; row.updated_at = nowIso();
+    return resp(200, { status: "revived", rev: curRev + 1 });
   }
   if (u.pathname === "/rest/v1/field_projects" && method === "POST") {
     const out = body.map((r) => {
@@ -418,6 +491,97 @@ const { syncNow, startSync, resetSync } = await import("../js/sync.js");
   await syncNow();
   const mA = await Store.get("mA");
   ok(!!mA && mA.photos[0].src === "data:image/jpeg;base64,ok", "the stuck row lands intact once its media is reachable");
+
+  // ============================================================
+  // SERVER-SIDE MERGE PATH (Phase 2b) — the twins of the tests above.
+  // These describe RPC-path behavior; the legacy path reaches the same
+  // guarantees through absorb() and is covered by the tests above.
+  // ============================================================
+  if (SYNC_VIA_RPC) {
+
+  // ---------- an edit typed DURING a server merge must not be destroyed ----------
+  // The server builds its union from the snapshot taken at the top of push().
+  // Anything typed after that snapshot cannot be in the union, so adopting it
+  // wholesale would erase the edit AND mark the row clean so it never re-pushes.
+  await Store.put({ id: "sm1", customer: "Merge-Mid", photos: [{ id: "S1", src: "small-1" }] });
+  await syncNow();                                    // rev 1, clean
+  {
+    const mine = await Store.get("sm1");
+    // another device commits rev 2 with an OLDER clock, so our pull tie-guard
+    // skips it and this device never learns rev 2 → its next push is stale
+    serverRows.set("sm1", { id: "sm1", deleted: false, updated_at: nowIso(), data: {
+      id: "sm1", customer: "Merge-Mid", rev: 2,
+      photos: [{ id: "S1", src: "small-1" }, { id: "S2", src: "small-2" }],
+      updatedAt: new Date(Date.parse(mine.updatedAt) - 60_000).toISOString(),
+    } });
+    mine.address = "1 Local St";
+    await Store.put(mine, { quiet: true });           // dirty
+    onPatch = async () => {                           // the tech types while the RPC is in flight
+      const cur = await Store.get("sm1");
+      cur.notes = "typed during merge";
+      await Store.put(cur, { quiet: true });
+    };
+    await syncNow();
+    const after = await Store.get("sm1");
+    ok(after.notes === "typed during merge", "an edit typed during a server merge is not destroyed");
+    await syncNow();                                  // stayed dirty → re-merges and ships
+    const srv = serverRows.get("sm1").data;
+    ok((srv.notes || "") === "typed during merge", "…and it reaches the server on the next cycle");
+    ok(srv.photos.map((x) => x.id).sort().join("") === "S1S2", "…with the other device's photo still there");
+  }
+
+  // ---------- an unrecognised status must never delete the local job ----------
+  // Field builds lag the server; a future status reaching an old build used to
+  // fall through into the tombstone branch and delete live work.
+  await Store.put({ id: "sm2", customer: "Unknown-Status" });
+  await syncNow();
+  {
+    // re-dirty WITHOUT changing content, so the tombstone branch's
+    // "adds nothing over the server" test would hold — that is the shape that
+    // reaches Store.delIf and destroys the job if an unknown status is treated
+    // as 'deleted'.
+    const before = await Store.get("sm2");
+    await Store.put(before, { quiet: true });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {
+      if (String(url).endsWith("/rpc/push_project") && JSON.parse(opts.body).p_id === "sm2") {
+        return resp(200, { status: "some_future_status", rev: 9,
+          data: { id: "sm2", customer: "Unknown-Status", updatedAt: before.updatedAt } });
+      }
+      return realFetch(url, opts);
+    };
+    await syncNow();
+    globalThis.fetch = realFetch;
+    const still = await Store.get("sm2");
+    ok(!!still && still.customer === "Unknown-Status", "an unknown push status leaves the local job intact (never deletes)");
+  }
+
+  // ---------- a throwing (non-404) media fetch must go red, not green ----------
+  let lastStatus2 = null;
+  startSync((s) => { lastStatus2 = s; });
+  await Store.put({ id: "sm3", customer: "Boom" }, { quiet: true });
+  await syncNow();
+  {
+    const mine = await Store.get("sm3");
+    const BOOM = "c".repeat(64);
+    serverRows.set("sm3", { id: "sm3", deleted: false, updated_at: nowIso(), data: {
+      id: "sm3", customer: "Boom-REMOTE", rev: 7, photos: [{ id: "X", src: `media:${BOOM}:99` }],
+      updatedAt: new Date(Date.parse(mine.updatedAt) - 60_000).toISOString(),
+    } });
+    mine.customer = "Boom-LOCAL";
+    await Store.put(mine, { quiet: true });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => {         // bucket 500, not a 404
+      if (String(url).includes(`/field-media/${BOOM}`)) return resp(500, {});
+      return realFetch(url, opts);
+    };
+    await syncNow();
+    globalThis.fetch = realFetch;
+    ok(!!lastStatus2 && lastStatus2.state === "error",
+      "a failing (non-404) media fetch during a server merge reports red, not a silent green");
+  }
+
+  }   // end SYNC_VIA_RPC-only cases
 
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
   process.exit(failures ? 1 : 0);

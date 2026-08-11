@@ -71,7 +71,21 @@ takes under five minutes, demonstrated once.
 
 *Note: the Awthentis recovery (iPad / Aug 6 backup) comes before everything, including this.*
 
-## Phase 1 — Individual logins and roles (~2–4 days of work)
+## Phase 1 — Individual logins and roles ✅ SHIPPED 2026-08-10 (migration 216)
+
+*Applied to production after a 3-lens adversarial review that caught a **critical
+privilege-escalation hole** (is_admin() was self-grantable: open signup trusted the role in
+signup metadata, and `authenticated` could PATCH its own `profiles.role`). Both paths closed in
+216 — signups always land as `tech`, and role-column writes are revoked from app clients so role
+changes happen only via SQL. Verified live by dropping to the `authenticated` role with simulated
+tech/admin JWTs: tech cannot self-promote (403 on the role column) and cannot hard-delete (RLS
+filters to 0 rows); admin can. Authorship stamping verified: authenticated write → writer's uid,
+service/automation write → NULL (honest system marker, never an inherited human). App side:
+factories stamp `by`/`createdBy`, blank-scaffold reuse re-stamps the adopting tech, full test
+suite green. **Operator to-do before rollout: disable public signups (invite-only) in the
+dashboard** — see the header of [216_individual_logins.sql](../supabase/migrations/216_individual_logins.sql).
+Residual (a self-signup `tech` still reads/writes all job data via legacy USING(true) policies)
+is unchanged from before and closes in Phase 3.*
 
 *Goal: attribution and revocability. Behavior of the app otherwise unchanged.*
 
@@ -91,7 +105,65 @@ takes under five minutes, demonstrated once.
 **Rollback:** shared login keeps working throughout; flip back anytime.
 **Done when:** every device signs in as a person, and every new push carries `updated_by`.
 
-## Phase 2 — Server-side write authority (~1 week of work) ⭐ the clobber-killer
+## Phase 2 — Server-side write authority ⭐ the clobber-killer
+
+**Phase 2a SHIPPED 2026-08-10 (migration 217) — server mechanism, additive.**
+`push_project(id, base_rev, data, build)` RPC is live: SECURITY DEFINER, insert / CAS-apply /
+stale-merge / return-tombstone, callable only by authenticated users. The `merge.js` union rules
+are ported to SQL (`merge_project_blobs`) and **proven byte-equivalent to the JS by 2033
+randomized differential cases across 3 seeds** — the parity harness is in the PR. Verified live
+(rolled back) as an authenticated tech: insert→rev1, applied honours element deletions, stale
+base merges to a union, deleted row returns its tombstone without reviving; attribution stamps
+the real caller through the definer boundary. Additive: nothing calls it yet and direct table
+writes stay open, so old clients are unaffected.
+
+**Phase 2b BUILT 2026-08-10 (migration 218 + client cutover) — awaiting deploy + the operator gate.**
+- `tombstone_project` / `revive_project` RPCs so delete and revive go through the same door;
+  `app_settings.min_field_build` gate (inert at 0) on all three RPCs; the role fence lives in
+  one shared `_sync_guard`.
+- `push_project` gained two fixes found by testing the client against it: a **self-echo
+  short-circuit** (`status: 'current'` — when the union adds nothing, write *nothing*, so a
+  stale-bookkeeping re-save no longer rewrites a 3 MB row) and a **clock-skew-safe merged
+  timestamp** (strictly newer than both inputs *and* not behind the server clock — field
+  tablets run skewed clocks, and a merged blob that isn't strictly newer is silently skipped by
+  every other device's pull tie-guard).
+- Client: `apps/field/js/sync.js` pushes through the RPCs behind a `SYNC_VIA_RPC` kill switch;
+  `adoptServerMerge()` adopts a server-committed union **clean** (no bump, no re-push).
+  Critically, when media hasn't propagated it deliberately does *not* adopt the new rev —
+  otherwise the next push would look up-to-date and wholesale-overwrite the very photo it was
+  waiting for. Both paths pass the full 57-assertion sync suite.
+- Verified against prod: all three RPC signatures resolve over real HTTP with the exact
+  parameter names the client sends, and the response shape is the bare object the client parses
+  (`.status`/`.rev`/`.data`). Role gate, build gate, tombstone/revive/conflict semantics all
+  proven with rolled-back transactions.
+
+Adversarial review of the cutover found **two more criticals**, both fixed and both now covered
+by regression tests that were mutation-checked (each fails when its fix is reverted):
+- `adoptServerMerge` compared the row against a copy it had just re-read, so the guard could
+  never fail — an edit typed while the push was in flight was overwritten by a union that
+  couldn't contain it, *and* the row was marked clean so it never re-pushed. It now guards
+  against the snapshot the push was actually built from.
+- **`rev` restarted at 1 after a delete/revive** (the tombstone dropped it), so the server
+  re-issued numbers stale devices still held and would answer their push with a wholesale
+  "applied". Reproduced against production. Migration 220 makes the tombstone carry a
+  high-water rev and backfills the 27 existing tombstones (live rows were already at rev 1550).
+Also fixed: the build tag now reports the build that is *running* rather than the newest one
+*installed* (the service worker caches the new build before an open page reloads, so a stale
+tablet would have claimed the new build and sailed through the gate); server merges reuse the
+device's own photo bytes instead of re-downloading them over cell data; an unrecognised push
+status fails closed instead of falling into the delete path; and a failing media fetch turns
+the status red instead of reporting a silent green.
+
+**Remaining in Phase 2b — the operator gate (migration 219, written, NOT applied):**
+`219_revoke_direct_field_writes.sql` revokes direct INSERT/UPDATE/DELETE so the RPCs are the
+only door. It is deliberately unapplied: it needs (1) the RPC build deployed and confirmed on
+every device, (2) the build floor armed for a day first so stragglers get "update the app"
+instead of a silent failure, (3) a quiet window. Its header carries the checklist and the
+one-line rollback. Board's `coordination_jobs` gets its own RPC later.
+
+Original Phase 2 design notes below.
+
+### Original plan
 
 *Goal: a stale or buggy client can no longer destroy anything, even in the blob model.*
 
@@ -158,6 +230,31 @@ add/add/delete-attempt test shows union behavior with tech-proof deletes.
 - Field-level conflict prompts for the rare same-row simultaneous edit.
 
 ---
+
+## What can run unattended, and what cannot
+
+Most of this plan is buildable without supervision, because two natural gates already protect
+production: **app code only reaches the crew's devices when a PR is merged** (deploy runs on
+push to `main`), and **database changes are applied additively** — new tables, new functions,
+dual-writes — none of which alter existing behavior until something calls them.
+
+Safe to run unattended: writing migrations and applying the additive ones, building and
+verifying RPCs against prod with rolled-back transactions, the whole Phase 3 scaffolding
+(tables, dual-write, backfill scripts, per-section read flips), tests, and adversarial review
+loops.
+
+Needs a human, and should not be automated:
+- **Migration 219** (revoking direct writes) and any equivalent door-closing step — it is
+  business-stopping if applied before every device is on the new build, and no amount of
+  server-side testing can tell me what a truck's iPad is actually running.
+- **Merging the PRs**, which is what actually deploys to the crew.
+- **Real-device soak** between phases. The failure mode of this whole project is "a tech loses
+  a day of work"; a browser preview with seeded data cannot stand in for a real photo taken on
+  a real iPad that has been offline since Tuesday.
+- **The role-visibility decision in Phase 3** — should a tech see every job, or only their
+  own? That is a business call, not an engineering one, and the RLS policies encode whichever
+  answer is right.
+- **Disabling public sign-ups** (still pending, dashboard-only).
 
 ## Risk register
 

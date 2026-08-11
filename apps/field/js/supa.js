@@ -2,7 +2,7 @@
    Roybal Field Forms — minimal Supabase client (auth + REST)
    No SDK: just fetch calls, to keep the app dependency-free.
    ============================================================ */
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_KEY, BUILD } from "./config.js";
 
 const SESSION_KEY = "roybal-session";
 const TABLE = "field_projects";
@@ -79,6 +79,49 @@ async function api(path, opts = {}) {
   }
   return res;
 }
+
+/* ---------- app build tag (server min-build gate) ----------
+   BUILD is compiled into this bundle, so it states what code is RUNNING.
+   Reading CacheStorage instead would report the newest INSTALLED build: the
+   service worker opens the new cache during install while an already-open
+   page keeps executing its loaded modules (field tablets stay open for days),
+   so a stale page would claim the new build and defeat the gate. */
+export const appBuild = () => BUILD;
+
+/* ---------- sync RPCs (the one authoritative write path) ----------
+   Server-side CAS-or-merge: a device that started from a stale copy can no
+   longer overwrite anyone — the SERVER unions the two copies (migrations
+   217/218). Every call carries the build tag so the server can refuse writes
+   from a pre-cutover build once the operator arms the gate. */
+async function rpc(fn, args) {
+  const res = await api(`rpc/${fn}`, { method: "POST", body: JSON.stringify({ ...args, p_build: BUILD }) });
+  if (res.ok) return res.json();
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON error body */ }
+  const err = new Error((body && body.message) || `${fn} failed (${res.status})`);
+  err.status = res.status;
+  err.code = body && body.code;
+  err.needsUpdate = err.code === "P0002";   // this build is older than the server floor
+  throw err;
+}
+
+/** Push one project. → { status: insert|applied|merged|deleted, rev, data? }
+    'merged'  — the server already COMMITTED the union at `rev`; adopt it
+                clean (no updatedAt bump, no re-push).
+    'deleted' — the row is a tombstone and nothing was written; the caller
+                decides revive-vs-respect. */
+export const pushProject = (id, base, data) =>
+  rpc("push_project", { p_id: id, p_base_rev: base, p_data: data });
+
+/** Soft-delete, carrying the job's last-known content inside the tombstone. */
+export const tombstoneProject = (id, data) =>
+  rpc("tombstone_project", { p_id: id, p_data: data || null });
+
+/** Deliberately flip a tombstone back alive. → { status: revived|conflict|missing }
+    'conflict' means another device already revived it (its live copy is
+    returned) — merge against that instead of clobbering. */
+export const reviveProject = (id, data) =>
+  rpc("revive_project", { p_id: id, p_data: data });
 
 /* ---------- data ---------- */
 /** Upsert an array of { id, data, deleted } rows. Returns server rows. */

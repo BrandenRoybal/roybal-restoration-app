@@ -28,6 +28,19 @@ test("id clash: the newer blob's version of an element wins", () => {
   assert.equal(added, 0);
 });
 
+test("Phase 1: element authorship (by) survives union and id-clash", () => {
+  const office = { id: "j", updatedAt: T1, contents: [{ id: "C1", name: "sofa", by: "amy@x" }] };
+  const crew = { id: "j", updatedAt: T2, contents: [{ id: "C2", name: "lamp", by: "bob@x" }] };
+  const { merged } = mergeProjects(office, crew);
+  const byId = Object.fromEntries(merged.contents.map((c) => [c.id, c.by]));
+  assert.equal(byId.C1, "amy@x");   // unioned-in element keeps its photographer
+  assert.equal(byId.C2, "bob@x");
+  // id clash: newer editor's copy (and its attribution) wins
+  const a = { updatedAt: T1, contents: [{ id: "C1", name: "sofa", by: "amy@x" }] };
+  const b = { updatedAt: T2, contents: [{ id: "C1", name: "sofa (edited)", by: "bob@x" }] };
+  assert.equal(mergeProjects(a, b).merged.contents[0].by, "bob@x");
+});
+
 test("argument order doesn't matter — updatedAt decides who's newer", () => {
   const a = { updatedAt: T2, customer: "New name", photos: [] };
   const b = { updatedAt: T1, customer: "Old name", photos: [{ id: "P" }] };
