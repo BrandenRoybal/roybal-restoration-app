@@ -154,7 +154,30 @@ device's own photo bytes instead of re-downloading them over cell data; an unrec
 status fails closed instead of falling into the delete path; and a failing media fetch turns
 the status red instead of reporting a silent green.
 
-**Remaining in Phase 2b — the operator gate (migration 219, written, NOT applied):**
+**✅ 219 APPLIED 2026-08-11 — the door is closed.** Direct INSERT/UPDATE/DELETE on
+`field_projects` is revoked from the app roles; the RPCs are now the only way a job can be
+written. SELECT is retained (sync pull reads the table). `service_role` is untouched, so the
+edge functions (qbo payment writeback) are unaffected.
+
+Verified as a real tech, rolled back: read still works; direct insert, update and delete are all
+refused; `push_project` / `tombstone_project` / `revive_project` all still work end to end.
+
+Migration **226** went in first, because 219's own precondition — "confirm every device is on the
+RPC build" — had no way to be checked: a device on a pre-RPC build never calls these functions,
+so it is invisible until 219 breaks its sync. `sync_clients` now records who syncs and from
+which build, and the `sync_fleet` view compares that against the roster. Anyone showing
+"never synced through the RPC" a day from now is a device still on an old build.
+
+*The build floor (`min_field_build`) stays at 0 deliberately.* Builds below v133 don't call the
+RPC at all, so the revoke already stops them; arming the floor at v135 would only break
+perfectly good v133/v134 clients. It stays available for a future forced cutover.
+
+**If a device does get stuck:** its work is safe in local storage — saves just stop reaching the
+server and the sync status turns red. Reopening the app takes the new build and it recovers.
+Instant rollback if needed:
+`grant insert, update, delete on public.field_projects to authenticated;`
+
+**Superseded — the original gate text:**
 `219_revoke_direct_field_writes.sql` revokes direct INSERT/UPDATE/DELETE so the RPCs are the
 only door. It is deliberately unapplied: it needs (1) the RPC build deployed and confirmed on
 every device, (2) the build floor armed for a day first so stragglers get "update the app"
