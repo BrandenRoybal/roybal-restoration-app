@@ -401,6 +401,13 @@ function setRowField(formKey, group, row, chip) {
   row[chip.target.field] = chip.value;
 }
 
+/* id for an element the AI creates without a factory — pure, no imports, so
+   ai.js stays Node-testable and browser-safe */
+const chipUid = () =>
+  (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : "id-" + Date.now().toString(16) + "-" + Math.random().toString(16).slice(2, 10);
+
 export function applyChips(formKey, instance, project, chips, mk = {}) {
   const list = arr(chips).filter((c) => c && c.confirmed !== false && c.target);
   let applied = 0;
@@ -409,7 +416,10 @@ export function applyChips(formKey, instance, project, chips, mk = {}) {
     const byIndex = new Map();
     for (const c of list) {
       const idx = (c.target.meta && c.target.meta.index) ?? 0;
-      if (!byIndex.has(idx)) byIndex.set(idx, (mk && mk.photo) ? mk.photo() : { stage: "", room: "", caption: "" });
+      // An element with no id is invisible to the merge union (merge.js keys
+      // on id), so a two-device merge would silently drop an AI-applied photo
+      // — and it can never become a row either. Always mint one.
+      if (!byIndex.has(idx)) byIndex.set(idx, (mk && mk.photo) ? mk.photo() : { id: chipUid(), stage: "", room: "", caption: "" });
       byIndex.get(idx)[c.target.field] = c.value;
       applied++;
     }
