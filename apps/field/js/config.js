@@ -16,6 +16,14 @@ export const SYNC_ENABLED = !!SUPABASE_URL;
 // 219 revokes them and makes the RPC the only door).
 export const SYNC_VIA_RPC = true;
 
+// The build THIS code is. Baked in, not read from CacheStorage: the service
+// worker installs a new cache before an open page reloads, so a tablet parked
+// on a form runs old JS while the newest cache key already says otherwise —
+// which would let exactly the stale devices the server's min-build gate exists
+// to catch sail straight through it. Bump in lockstep with sw.js CACHE
+// (build.test.mjs fails the suite if the two drift).
+export const BUILD = "v132";
+
 // QuickBooks Time OAuth client id — PUBLIC (safe to ship). The Client Secret
 // and tokens live only in the qb-time-proxy Edge Function's secrets. Fill this
 // from your Intuit Developer app to enable the admin "Connect" button. The

@@ -2,7 +2,7 @@
    Roybal Field Forms — minimal Supabase client (auth + REST)
    No SDK: just fetch calls, to keep the app dependency-free.
    ============================================================ */
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_KEY, BUILD } from "./config.js";
 
 const SESSION_KEY = "roybal-session";
 const TABLE = "field_projects";
@@ -81,21 +81,12 @@ async function api(path, opts = {}) {
 }
 
 /* ---------- app build tag (server min-build gate) ----------
-   The LIVE service-worker cache version is the only honest statement of what
-   code this device is running — a stale cached PWA is exactly what the gate
-   exists to catch, so a hardcoded constant would defeat it. Unknown stays ""
-   and the server treats an unknown build as "don't block". */
-let buildTag = "";
-(async () => {
-  try {
-    if (typeof caches !== "undefined" && caches.keys) {
-      const keys = await caches.keys();
-      const nums = keys.map((k) => (k.match(/^roybal-field-v(\d+)/) || [])[1]).filter(Boolean).map(Number);
-      if (nums.length) buildTag = "v" + Math.max(...nums);
-    }
-  } catch { /* best-effort */ }
-})();
-export const appBuild = () => buildTag;
+   BUILD is compiled into this bundle, so it states what code is RUNNING.
+   Reading CacheStorage instead would report the newest INSTALLED build: the
+   service worker opens the new cache during install while an already-open
+   page keeps executing its loaded modules (field tablets stay open for days),
+   so a stale page would claim the new build and defeat the gate. */
+export const appBuild = () => BUILD;
 
 /* ---------- sync RPCs (the one authoritative write path) ----------
    Server-side CAS-or-merge: a device that started from a stale copy can no
@@ -103,7 +94,7 @@ export const appBuild = () => buildTag;
    217/218). Every call carries the build tag so the server can refuse writes
    from a pre-cutover build once the operator arms the gate. */
 async function rpc(fn, args) {
-  const res = await api(`rpc/${fn}`, { method: "POST", body: JSON.stringify({ ...args, p_build: buildTag || null }) });
+  const res = await api(`rpc/${fn}`, { method: "POST", body: JSON.stringify({ ...args, p_build: BUILD }) });
   if (res.ok) return res.json();
   let body = null;
   try { body = await res.json(); } catch { /* non-JSON error body */ }

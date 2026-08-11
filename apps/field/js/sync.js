@@ -37,7 +37,7 @@ import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSin
          pushProject, tombstoneProject, reviveProject } from "./supa.js";
 import { SYNC_VIA_RPC } from "./config.js";
 import { deflateProject, inflateProject } from "./media.js";
-import { mergeProjects, ID_COLLECTIONS } from "./merge.js";
+import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "./merge.js";
 import { isBlankProject } from "./model.js";
 
 const K_CURSOR = "roybal-sync-cursor";
@@ -117,7 +117,10 @@ async function absorb(localRef, serverFull, why) {
       rowChanged(localRef.id);
       return merged;
     }
-    merged.updatedAt = new Date().toISOString();   // marks it dirty → re-pushes
+    // strictly newer than BOTH sides and never behind this clock: a server
+    // merge stamps on the SERVER clock, which can be ahead of a skewed tablet,
+    // and a regressive stamp is silently skipped by everyone's pull tie-guard
+    merged.updatedAt = laterThan(local.updatedAt, serverFull.updatedAt);   // marks it dirty → re-pushes
     if (!(await Store.putIf(merged, local.updatedAt))) continue;   // an edit just landed — redo against it
     revs[localRef.id] = Number(serverFull.rev) || 0; saveRevs();
     mediaWait.delete(localRef.id);
@@ -138,13 +141,13 @@ async function absorb(localRef, serverFull, why) {
    re-push. Bumping here would re-dirty a row that already matches the server,
    and two devices would feed each other rev bumps forever (the Jul 2026
    disk-IO incident). Returns true when the union landed locally. */
-async function adoptServerMerge(localRef, res) {
+async function adoptServerMerge(localRef, res, fetchMedia) {
   const id = localRef.id;
   let full, missing;
   try {
-    ({ project: full, missing } = await inflateProject(res.data, downloadRemembered));
+    ({ project: full, missing } = await inflateProject(res.data, fetchMedia || downloadRemembered));
   } catch {
-    return false;                                  // network blip — retry next cycle
+    return "media-fetch-failed";                   // caller raises it: green status would be a lie
   }
   if (missing > 0) {
     // Another device's photos are still propagating, so we cannot store this
@@ -154,37 +157,57 @@ async function adoptServerMerge(localRef, res) {
     // old base means the next cycle re-merges (a no-op on the server, which
     // returns 'current') until the bucket catches up.
     mediaWait.set(id, (mediaWait.get(id) || 0) + 1);
-    return false;
+    return "media-missing";
   }
   const local = (await Store.get(id)) || localRef;
   await Store.backup(local);                       // our side stays restorable
-  const recovered = countRecovered(local, full);
+  const { added, filledForms } = countRecovered(local, full);
   full.id = id;
   delete full.rev;                                 // revs live in sync bookkeeping
-  if (!(await Store.putIf(full, local.updatedAt))) return false;  // an edit landed — next cycle merges it
+  // CAS on the SNAPSHOT this push was built from, not on the row we just read:
+  // the union the server built cannot contain anything typed after that
+  // snapshot (deflate + media upload + round-trip can take minutes on a
+  // photo-heavy cycle). If the row moved, refuse to overwrite — the row stays
+  // dirty and next cycle merges the newer local copy in.
+  if (!(await Store.putIf(full, localRef.updatedAt))) return "raced";
   revs[id] = Number(res.rev) || 0; saveRevs();
   pushed[id] = full.updatedAt; savePushed();       // clean: the stored row matches the server
   mediaWait.delete(id);
-  if (recovered) {
-    try { mergeCb({ id, customer: full.customer || full.address || "job", added: recovered, filledForms: 0, why: "server-merge" }); }
+  if (added || filledForms) {
+    try { mergeCb({ id, customer: full.customer || full.address || "job", added, filledForms, why: "server-merge" }); }
     catch { /* toast is a bonus */ }
   }
   rowChanged(id);
   return true;
 }
 
-/* How many id-keyed elements the server's union holds that this device didn't.
-   The server merge returns no stats, so the "recovered N items" toast count is
-   derived here instead. */
+/* What the server's union holds that this device didn't. The server merge
+   returns no stats, so the "recovered N items / M forms" toast is derived
+   here — and it must cover the same ground mergeProjects reported, or a
+   signed work auth arriving from the office lands with no signal at all. */
+const emptyish = (v) => v == null || v === "" ||
+  (Array.isArray(v) && v.length === 0) ||
+  (typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0);
 function countRecovered(local, merged) {
-  let n = 0;
+  let added = 0, filledForms = 0;
   for (const key of ID_COLLECTIONS) {
     const mine = new Set((Array.isArray(local[key]) ? local[key] : []).map((x) => x && x.id).filter(Boolean));
     for (const el of (Array.isArray(merged[key]) ? merged[key] : [])) {
-      if (el && el.id && !mine.has(el.id)) n++;
+      if (el && el.id && !mine.has(el.id)) added++;
     }
   }
-  return n;
+  const myRooms = new Set(Array.isArray(local.rooms) ? local.rooms : []);
+  for (const r of (Array.isArray(merged.rooms) ? merged.rooms : [])) if (!myRooms.has(r)) added++;
+  for (const key of FORM_SLOTS) {
+    if (emptyish(local[key]) && !emptyish(merged[key])) filledForms++;
+  }
+  return { added, filledForms };
+}
+
+/* an ISO stamp strictly newer than both inputs and never behind this clock */
+function laterThan(a, b) {
+  const floor = Math.max(Date.parse(a) || 0, Date.parse(b) || 0);
+  return new Date(Math.max(Date.now(), floor + 1)).toISOString();
 }
 
 function load(k, fallback) { try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch { return fallback; } }
@@ -233,8 +256,12 @@ async function push() {
       await uploadNewMedia(media);
       const base = Number(revs[p.id] ?? p.rev) || 0;   // p.rev: legacy fallback for rows pulled before K_REVS
       const next = { ...slim, rev: base + 1 };
-      const json = JSON.stringify(next);
-      if (json.length > MAX_ROW) { skippedNow++; continue; } // huge even without media — surfaced LOUD in status
+      // measure what actually goes on the wire for the active path
+      if (JSON.stringify(SYNC_VIA_RPC ? slim : next).length > MAX_ROW) { skippedNow++; continue; } // huge even without media — surfaced LOUD in status
+      // the server's copy references OUR photos too — reuse the bytes we just
+      // deflated instead of pulling them back down over cell data
+      const localMedia = new Map(media.map((m) => [m.hash, m.text]));
+      const resolveMedia = (h) => (localMedia.has(h) ? localMedia.get(h) : downloadRemembered(h));
       // SERVER-AUTHORITATIVE PUSH (migrations 217/218): the server does the
       // CAS and, on a stale base, the MERGE itself — a device that started
       // from an old copy can no longer overwrite anyone, even if its own
@@ -257,10 +284,20 @@ async function push() {
           // 'merged'  — the server committed the union; adopt it clean.
           // 'current' — our push added nothing the server lacked (self-echo);
           //             it wrote nothing, so adopt its copy and go clean.
-          await adoptServerMerge(p, res);
+          const why = await adoptServerMerge(p, res, resolveMedia);
+          if (why === "media-fetch-failed") lastErr = new Error("merge media fetch failed");
+          if (why !== true) needsAnotherPass = true;   // retry in 1.5s, not 45s
           continue;
         }
-        serverBlob = res.data;                         // 'deleted': tombstone, nothing written
+        // FAIL CLOSED. Anything we do not recognise must not fall into the
+        // tombstone branch below — that path can DELETE the local job. A
+        // future server status reaching an older build would otherwise erase
+        // live work.
+        if (res.status !== "deleted" || !res.data) {
+          lastErr = new Error("push_project: unexpected status " + (res && res.status));
+          continue;
+        }
+        serverBlob = res.data;                         // tombstone, nothing written
         serverIsDeleted = true;
       } else {
         const r = await guardedUpsertRow(p.id, base, next);
@@ -277,8 +314,7 @@ async function push() {
         serverIsDeleted = !!r.serverDeleted;
       }
       let serverFull, missing;
-      const localMedia = new Map(media.map((m) => [m.hash, m.text]));  // their row may reference OUR photos — reuse, don't re-download
-      try { ({ project: serverFull, missing } = await inflateProject(serverBlob, (h) => localMedia.has(h) ? localMedia.get(h) : downloadRemembered(h))); }
+      try { ({ project: serverFull, missing } = await inflateProject(serverBlob, resolveMedia)); }
       catch { lastErr = new Error("merge media fetch failed"); continue; }
       if (missing > 0) {                               // their media still propagating — retry next cycle
         mediaWait.set(p.id, (mediaWait.get(p.id) || 0) + 1);   // …but surface it if it never resolves
@@ -315,7 +351,7 @@ async function push() {
         // EXPLICITLY and GUARDED on the row still being deleted (two devices
         // reviving at once: the second sees 0 rows, stays dirty, and merges
         // against the first's copy next cycle instead of clobbering it)
-        merged.updatedAt = new Date().toISOString();
+        merged.updatedAt = laterThan(cur.updatedAt, serverFull.updatedAt);
         if (!(await Store.putIf(merged, cur.updatedAt))) continue;   // an edit just landed — retry next cycle
         const { slim: reviveSlim, media: reviveMedia } = await deflateProject(merged);
         await uploadNewMedia(reviveMedia);
@@ -491,13 +527,18 @@ export async function syncNow() {
     // both of these mean DATA NOT BACKED UP — show red, not a quiet counter
     const stalled = [...mediaWait.values()].filter((n) => n >= STALL_CYCLES).length;
     const problems = [];
-    if (updateRequired) problems.push("this app is out of date — close and reopen it to update, then sync");
     if (skipped > 0) problems.push(`${skipped} job(s) too large to back up — remove some inline attachments`);
     if (stalled > 0) problems.push(`${stalled} job(s) waiting on photos another device hasn't finished uploading`);
     if (problems.length) setStatus("error", { message: problems.join("; ") });
     else setStatus("synced", { lastSync: Date.now() });
   } catch (e) {
-    setStatus("error", { message: String(e && e.message || e) });
+    // push() rethrows the cycle's last error, so a build rejection lands here
+    setStatus("error", {
+      needsUpdate: updateRequired,
+      message: updateRequired
+        ? "This app is out of date — close and reopen it to update, then sync."
+        : String((e && e.message) || e),
+    });
   } finally {
     syncing = false;
     if (needsAnotherPass) { needsAnotherPass = false; schedulePush(); }  // push freshly merged unions

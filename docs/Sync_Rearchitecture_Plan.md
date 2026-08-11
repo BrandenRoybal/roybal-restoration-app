@@ -137,6 +137,23 @@ writes stay open, so old clients are unaffected.
   (`.status`/`.rev`/`.data`). Role gate, build gate, tombstone/revive/conflict semantics all
   proven with rolled-back transactions.
 
+Adversarial review of the cutover found **two more criticals**, both fixed and both now covered
+by regression tests that were mutation-checked (each fails when its fix is reverted):
+- `adoptServerMerge` compared the row against a copy it had just re-read, so the guard could
+  never fail — an edit typed while the push was in flight was overwritten by a union that
+  couldn't contain it, *and* the row was marked clean so it never re-pushed. It now guards
+  against the snapshot the push was actually built from.
+- **`rev` restarted at 1 after a delete/revive** (the tombstone dropped it), so the server
+  re-issued numbers stale devices still held and would answer their push with a wholesale
+  "applied". Reproduced against production. Migration 220 makes the tombstone carry a
+  high-water rev and backfills the 27 existing tombstones (live rows were already at rev 1550).
+Also fixed: the build tag now reports the build that is *running* rather than the newest one
+*installed* (the service worker caches the new build before an open page reloads, so a stale
+tablet would have claimed the new build and sailed through the gate); server merges reuse the
+device's own photo bytes instead of re-downloading them over cell data; an unrecognised push
+status fails closed instead of falling into the delete path; and a failing media fetch turns
+the status red instead of reporting a silent green.
+
 **Remaining in Phase 2b — the operator gate (migration 219, written, NOT applied):**
 `219_revoke_direct_field_writes.sql` revokes direct INSERT/UPDATE/DELETE so the RPCs are the
 only door. It is deliberately unapplied: it needs (1) the RPC build deployed and confirmed on
