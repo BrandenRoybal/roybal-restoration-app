@@ -24,7 +24,7 @@ export function jobRows(jobs, crew, entries, settings, opts) {
   const nameById = new Map((crew || []).map((c) => [c.id, c.name || "—"]));
   const today = (opts && opts.today) || todayISO();
   return (jobs || [])
-    .filter((j) => j && !j.isMilestone)
+    .filter((j) => j && !j.isMilestone && !j.archived)
     .sort((a, b) => String(b.startDate || "") < String(a.startDate || "") ? -1 : 1)
     .slice(0, 50)
     .map((j) => {
@@ -74,8 +74,9 @@ export function jobRows(jobs, crew, entries, settings, opts) {
 
 export function buildBoardContext() {
   // fresh throwaway copies — computeSchedule mutates derived dates in place,
-  // and cachedJobs() re-parses localStorage per call, so board state is safe
-  const jobs = cachedJobs();
+  // and cachedJobs() re-parses localStorage per call, so board state is safe.
+  // Archived jobs stay out: they're a record, not schedule input.
+  const jobs = cachedJobs().filter((j) => !j.archived);
   const crew = cachedCrew();
   const entries = cachedEntries();
   const settings = cachedSettings();
