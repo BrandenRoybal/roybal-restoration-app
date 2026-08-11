@@ -210,9 +210,40 @@ deletes are a reversible flag) does not depend on who may flag. Restricting the 
 is a real behavior change for the crew — the blank-scaffold cleanup flow depends on it — so it
 ships **with** the UI that hides the button, not before.
 
-**3.1 remaining:** client dual-write (insert the row *and* keep the blob entry), then flip
-reads, then per-row sync, then drop photos from the blob. Then repeat for moistureMaps,
-invoices, contents, and the rest.
+**3.1b dual-write SHIPPED (migrations 222–224), additive.** The rows are maintained
+**server-side**, as a projection of every blob write, rather than by the client. The app is
+offline-first — a capture-time row insert simply fails on a truck with no signal — and deriving
+the rows in the same transaction as the blob means they cannot drift, covers every writer
+(RPCs, the legacy direct PATCH, edge functions), and needed no client change at all.
+
+Adversarial review then found a **mass-delete in the guard I had claimed was safe**, plus five
+more real defects — all fixed in 224 and re-verified:
+- **Absent `photos` key wiped every row for that job.** `jsonb_typeof(NULL)` is NULL, so
+  `false OR NULL` is NULL, which plpgsql does not treat as true — the guard fell straight
+  through and the sweep deleted everything. My own test had covered a malformed *value* but not
+  a *missing key*, and 15 of 40 blobs have no photos key (reviving a bare tombstone writes one).
+- **Cross-job row theft**: keyed on photo id alone, two blobs listing the same photo made the
+  row ping-pong, leaving the losing job with no photos and no tombstone. Re-keyed to
+  `(job_id, id)` — the real identity.
+- **Deletion was not durable**: the projection resurrected anything the blob still listed, so an
+  admin's purge undid itself. Added `purged_at`, which the projection will not touch.
+- **Swallowed failures were not self-healing** (the trigger only fires when photos change, and a
+  finished job never writes again) — added `repair_field_photos()` and a nightly sweep.
+- **The drift view was blind** to the very divergence it existed to catch (matched on photo id
+  without job id) and false-positived on tombstoned jobs. Both arms are now job-aware.
+- **Attribution**: an unattributable photo was credited to whoever's push carried it. Now NULL.
+
+Also fixed a **pre-existing client bug** the review surfaced: AI-applied photos were pushed with
+no `id`, which makes them invisible to the merge union — a two-device merge would silently drop
+them. They now always get one.
+
+*Known and accepted:* because the rows mirror the blob, anyone who can write the blob can cause
+row writes — so `field_photos`' stricter crew-only policy is only as strong as the blob's. The
+real fix is migration 219 (revoking direct blob writes), still operator-gated.
+
+**3.1 remaining:** flip reads to the rows (the first crew-visible change — run the drift view
+first), then per-row sync, then drop photos from the blob, which is where the write-amplification
+win actually lands. Then repeat for moistureMaps, invoices, contents.
 
 ### Original plan
 
