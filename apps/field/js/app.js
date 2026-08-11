@@ -21,6 +21,7 @@ import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
 import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged } from "./sync.js";
 import { graftProject } from "./graft.js";
+import { mergeProjects } from "./merge.js";
 import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine, getUnifiedJobId } from "./spine.js";
 import { generateNarrative, constructionFacts } from "./narrative.js";
@@ -966,7 +967,22 @@ function boardCard(project) {
 /* ---------- on-device backups card ----------
    Sync snapshots the local copy of a job right before a pulled version
    overwrites it (Store.backup). If snapshots exist, the job page offers
-   one-tap restore — the undo for a stale copy clobbering newer work. */
+   one-tap restore — the undo for a stale copy clobbering newer work.
+
+   RESTORE ADDS BACK, IT DOES NOT REPLACE. This used to overwrite the job with
+   the snapshot, and a comment here claimed the rev guard made that safe. It
+   did not: the guard only merges when this device is BEHIND the server. A
+   device that has just synced is UP TO DATE, so its push takes the wholesale
+   path — and a tech restoring an old snapshot would erase everything the
+   office had added since (measured: an added photo, an invoice, and a
+   corrected customer name, all gone in one tap).
+
+   The card's whole purpose is "restore if work went missing", which a UNION
+   serves exactly: anything in the snapshot that the current copy lacks comes
+   back, and nothing anyone else did is touched. That also makes the button
+   idempotent — tapping it repeatedly in the field changes nothing after the
+   first time. Reverting a bad edit is a different job, and belongs to the
+   admin-side history (blob_history), which can revert wholesale on purpose. */
 function backupsCard(project) {
   const box = h("div");
   Store.backups(project.id).then((snaps) => {
@@ -978,18 +994,25 @@ function backupsCard(project) {
         `${(d.dryingLogs || []).length} drying logs, ${(d.constructionLogs || []).length} field reports`;
       const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
       btn.addEventListener("click", async () => {
-        if (!confirm(`Replace the current copy of this job with the backup from ${when}?\n\nThe current copy is saved as a backup first, so you can switch back.`)) return;
+        if (!confirm(`Bring back anything missing from the ${when} backup?\n\nNothing on the job is removed — this only adds back what the backup has and the current copy doesn't. The current copy is saved as a backup first either way.`)) return;
         btn.disabled = true;
         const current = await Store.get(project.id);
         if (current) await Store.backup(current);
-        // sync tracks this row's rev in its own bookkeeping, so the restore
-        // pushes as a normal guarded edit — if another device moved on
-        // meanwhile, sync merges instead of letting an old snapshot clobber it
-        const restored = { ...s.data };
-        delete restored.rev;
-        await Store.put(restored);   // fresh updatedAt → re-syncs
-        toast("Backup restored.");
-        setTimeout(() => location.reload(), 400);
+        const snap = { ...s.data };
+        delete snap.rev;
+        // UNION, never replace: the current copy is the newer side, so its
+        // scalars win and the snapshot only contributes what went missing.
+        const { merged, added, filledForms } = current
+          ? mergeProjects(current, snap)
+          : { merged: snap, added: 0, filledForms: 0 };
+        merged.id = project.id;
+        delete merged.rev;
+        await Store.put(merged);     // fresh updatedAt → re-syncs
+        const bits = [];
+        if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
+        if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
+        toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
+        setTimeout(() => location.reload(), 600);
       });
       return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
         h("span", { class: "subtle", style: "font-size:13px" }, desc), btn);
@@ -1000,7 +1023,7 @@ function backupsCard(project) {
         `${snaps.length} snapshot${snaps.length === 1 ? "" : "s"}`));
     const bodyBox = h("div", {},
       h("p", { class: "subtle", style: "margin:6px 0 2px;font-size:13px" },
-        "Saved automatically right before cloud sync replaced this job with a version from another device. Restore if work went missing."),
+        "Saved automatically right before cloud sync replaced this job with a version from another device. Restoring only ADDS BACK what's missing — it never removes anyone else's work, so it's safe to tap."),
       ...rows);
     foldable(head, bodyBox, "backups", true);   // rarely needed — starts tucked away
     box.append(h("div", { class: "card app-only" }, head, bodyBox));
