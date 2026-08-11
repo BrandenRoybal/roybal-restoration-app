@@ -241,9 +241,55 @@ them. They now always get one.
 row writes — so `field_photos`' stricter crew-only policy is only as strong as the blob's. The
 real fix is migration 219 (revoking direct blob writes), still operator-gated.
 
-**3.1 remaining:** flip reads to the rows (the first crew-visible change — run the drift view
-first), then per-row sync, then drop photos from the blob, which is where the write-amplification
-win actually lands. Then repeat for moistureMaps, invoices, contents.
+**3.1c a deleted photo can actually come back — SHIPPED (migration 225).** 221–224 made deletion
+*reversible in principle* (the row keeps the image, who removed it and when) but nothing could
+put one back, so the promise was half true. `field_photos_deleted` shows what is in the bin;
+`restore_photo(job, photo)` puts one back — admin-only, idempotent, and it stamps a strictly
+newer `updatedAt` so the restored photo actually reaches the devices instead of sitting on the
+server. Verified end to end: tech deletes → recorded with who/what → tech cannot restore →
+admin sees it and restores → photo is back in the job and the row is live again.
+
+> ### ⚠️ Measurement that changes the rest of this phase
+> The write-amplification that justified moving photos to rows is **not caused by the blob
+> architecture**. It is one constant. `media.js` offloads any data URL longer than
+> `MEDIA_MIN = 60,000` chars to the bucket, leaving a ~77-byte marker — but the 187 inline
+> thumbnails measure **7.2 KB to 35.9 KB each**, so *not one of them is ever offloaded*. They
+> are 2,984 kB of the 4.9 MB total.
+>
+> Lowering the threshold to ~8 KB would offload 184 of them and reclaim **2,962 kB — about 97%
+> of the inline bulk and ~60% of all blob bytes — from a one-line change**, with no new sync
+> lane, no read flip, and no client rewrite.
+>
+> That does not make Phase 3 pointless: the rows are what deliver per-photo authorship,
+> reversible deletion, and admin-only purge, which are the things actually asked for, and those
+> are now shipped. But it does mean the *remaining* steps (per-row sync, flipping reads, dropping
+> photos from the blob) are a large, sync-touching investment whose main remaining payoff — the
+> IO win — is available far more cheaply.
+>
+> **DONE 2026-08-11 (build v135), the surgical version.** `MEDIA_MIN` is now **8,000** for
+> photos, sketches and scanned pages, while signatures keep the old 60,000 bar via a
+> **field-aware threshold** — the walk carries the owning key down, so a `sig*` field is judged
+> differently. Signatures are the legal artefact on a work authorisation or certificate and
+> there is no reason to make one depend on a second object resolving before its job will store.
+>
+> Measured on a realistic job in the test suite: the record shrinks **87%** (219,824 → 27,840
+> chars) and every offloaded image round-trips byte-exact. Across live data this moves 216 of
+> 219 inline images — 4,139 kB of the 4,877 kB total — out of the job records, leaving ~738 kB.
+>
+> The existing offload machinery does the rest: images upload content-addressed (identical
+> photos upload once), and a job whose images have not propagated yet is *refused rather than
+> stored broken*, with the status going red — behaviour that was already there and tested.
+> `media.test.mjs` was not in the CI suite; it is now.
+>
+> Rollout is self-paced: each job sheds its images the next time it is saved. A job nobody
+> touches keeps its old shape and costs nothing, since it is not being rewritten either.
+
+**Phase 3 — recommended stopping point.** With the images out of the job records, the write
+amplification that motivated rows-not-blobs is gone (~18 kB per job, down from up to 3.2 MB),
+and the things actually asked for — per-photo authorship, reversible deletion, admin-only
+restore — are shipped. The remaining steps (per-row sync, flipping reads, dropping photos from
+the blob, then repeating for moistureMaps/invoices/contents) are weeks of sync-engine surgery
+for a payoff that is now largely collected. Revisit only if a real problem appears.
 
 ### Original plan
 

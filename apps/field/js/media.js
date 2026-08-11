@@ -23,22 +23,42 @@
    Pure helpers, no DOM/localStorage — Node-testable.
    ============================================================ */
 
-export const MEDIA_MIN = 60_000;   // chars; photos are ~200KB–3MB, signatures ~10–30KB stay inline
+/* THRESHOLDS — measured, not guessed. The offload was originally gated at
+   60,000 chars on the assumption that photos are 200KB–3MB. They are not: the
+   app stores display-sized thumbnails, and every inline image in the live data
+   measured 7.2–35.9 KB. So NOTHING was ever offloaded, and 85% of every job
+   record was images — meaning one photo capture rewrote megabytes.
+   Photos, sketches and scanned pages now offload from 8KB up. Signatures keep
+   the old threshold: they are small, they are the legal artefact on a work
+   authorisation or certificate, and there is no reason to make one depend on a
+   second object resolving before its job will store. */
+export const MEDIA_MIN = 8_000;        // photos, sketches, plan/scan pages
+export const SIGNATURE_MIN = 60_000;   // hand-drawn signatures stay inline
 export const MARKER_RE = /^media:([0-9a-f]{64}):(\d+)$/;
 
 export const isMediaMarker = (v) => typeof v === "string" && MARKER_RE.test(v);
-const isBigMedia = (v) => typeof v === "string" && v.length > MEDIA_MIN && v.startsWith("data:");
+/* the field a string sits in decides its threshold (sigTech, sigOwner,
+   signature, …) — the walk below carries the owning key down */
+const isSignatureField = (key) => /^sig/i.test(String(key || ""));
+export const thresholdFor = (key) => (isSignatureField(key) ? SIGNATURE_MIN : MEDIA_MIN);
+const isBigMedia = (v, key) =>
+  typeof v === "string" && v.startsWith("data:") && v.length > thresholdFor(key);
 
 export async function sha256Hex(text) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/* every distinct offloadable string in the tree */
-export function findMedia(node, out = new Set()) {
-  if (typeof node === "string") { if (isBigMedia(node)) out.add(node); return out; }
-  if (Array.isArray(node)) { for (const v of node) findMedia(v, out); return out; }
-  if (node && typeof node === "object") { for (const v of Object.values(node)) findMedia(v, out); return out; }
+/* every distinct offloadable string in the tree. `key` is the field the value
+   sits under, carried down so a signature can keep its own threshold; array
+   elements inherit the array's key (uploadedPages: [str, …]). */
+export function findMedia(node, out = new Set(), key = "") {
+  if (typeof node === "string") { if (isBigMedia(node, key)) out.add(node); return out; }
+  if (Array.isArray(node)) { for (const v of node) findMedia(v, out, key); return out; }
+  if (node && typeof node === "object") {
+    for (const [k, v] of Object.entries(node)) findMedia(v, out, k);
+    return out;
+  }
   return out;
 }
 
