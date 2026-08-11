@@ -25,6 +25,9 @@ import {
 } from "./schedule.js";
 
 const jobName = (j) => String(j.title || j.customer || "Job");
+/* the assistant works the live board only — archived jobs are a record, not a
+   target for chips, and must not join the engine reflow */
+const activeJobs = () => cachedJobs().filter((j) => !j.archived);
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const isoOr = (v) => (ISO.test(String(v || "")) ? String(v) : "");
 
@@ -126,7 +129,7 @@ const CONFLICT_MSG = "the board changed on another device — reopen the job and
 
 /* ---- boardWrite: stage / dates / crew / materials / note on one job ---- */
 async function boardWrite(params, refresh) {
-  const jobs = cachedJobs();                        // fresh throwaway copies (last-synced revs)
+  const jobs = activeJobs();                        // fresh throwaway copies (last-synced revs)
   const m = findJob(jobs, params.job);
   if (m.err) return { ok: false, detail: m.err };
   const j = m.hit;
@@ -217,7 +220,7 @@ async function jobCreate(params, refresh) {
   if (start && target) j.durationDays = workDaysBetween(start, target, cachedSettings());
 
   if (start) {                                      // dated → let the engine place it + reflow
-    const jobs = [...cachedJobs(), j];
+    const jobs = [...activeJobs(), j];
     const before = new Map(jobs.map((x) => [x.id, snap(x)]));
     const r = await reflowAndSave(jobs, before, j, refresh);
     if (r.conflict) return { ok: false, detail: CONFLICT_MSG };
@@ -245,7 +248,7 @@ async function crewAvailabilityWrite(params, refresh) {
   if (!days.length) return { ok: false, detail: "startDate and endDate must be YYYY-MM-DD dates (up to ~3 months)" };
 
   const settings = cachedSettings();
-  const jobs = cachedJobs();
+  const jobs = activeJobs();
   const mark = new Map(jobs.map((x) => [x.id, JSON.stringify(x.dayCrew || null)]));
   const set = new Set(c.outDays || []);
   let slotDays = 0;
@@ -284,7 +287,7 @@ async function crewAvailabilityWrite(params, refresh) {
 async function crewSwap(params, refresh) {
   const date = isoOr(params.date);
   if (!date) return { ok: false, detail: "date must be a YYYY-MM-DD date" };
-  const jobs = cachedJobs();
+  const jobs = activeJobs();
   const fm = findJob(jobs, params.fromJob);
   if (fm.err) return { ok: false, detail: fm.err };
   const tm = findJob(jobs, params.toJob);
@@ -334,7 +337,7 @@ async function crewSwap(params, refresh) {
 async function hoursWrite(params) {
   const hours = Number(params.hours);
   if (!(hours > 0 && hours <= 24)) return { ok: false, detail: "hours must be between 0 and 24" };
-  const jm = findJob(cachedJobs(), params.job);
+  const jm = findJob(activeJobs(), params.job);
   if (jm.err) return { ok: false, detail: jm.err };
   const cm = findCrew(cachedCrew(), params.crewMember ?? params.crew);
   if (cm.err) return { ok: false, detail: cm.err };
@@ -368,7 +371,7 @@ async function hoursWrite(params) {
    real schedule (a done phase stops sliding; successors and every linked
    job re-flow from its completion date) ---- */
 async function phaseUpdate(params, refresh) {
-  const jobs = cachedJobs();
+  const jobs = activeJobs();
   const m = findJob(jobs, params.job);
   if (m.err) return { ok: false, detail: m.err };
   const j = m.hit;
