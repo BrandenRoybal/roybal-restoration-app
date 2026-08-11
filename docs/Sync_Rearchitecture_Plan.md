@@ -105,7 +105,31 @@ is unchanged from before and closes in Phase 3.*
 **Rollback:** shared login keeps working throughout; flip back anytime.
 **Done when:** every device signs in as a person, and every new push carries `updated_by`.
 
-## Phase 2 — Server-side write authority (~1 week of work) ⭐ the clobber-killer
+## Phase 2 — Server-side write authority ⭐ the clobber-killer
+
+**Phase 2a SHIPPED 2026-08-10 (migration 217) — server mechanism, additive.**
+`push_project(id, base_rev, data, build)` RPC is live: SECURITY DEFINER, insert / CAS-apply /
+stale-merge / return-tombstone, callable only by authenticated users. The `merge.js` union rules
+are ported to SQL (`merge_project_blobs`) and **proven byte-equivalent to the JS by 2033
+randomized differential cases across 3 seeds** — the parity harness is in the PR. Verified live
+(rolled back) as an authenticated tech: insert→rev1, applied honours element deletions, stale
+base merges to a union, deleted row returns its tombstone without reviving; attribution stamps
+the real caller through the definer boundary. Additive: nothing calls it yet and direct table
+writes stay open, so old clients are unaffected.
+
+**Phase 2b (remaining) — cut over + close the door:**
+- Wire `apps/field/js/sync.js` push path to `push_project` (map insert/applied/merged/deleted to
+  the existing bookkeeping; adopt the returned merged blob via `putIf`, inflating media markers).
+- Add `revive`/`tombstone` RPCs so delete/revive also go through the single door.
+- Add the `min_app_version` gate (the `build` arg is already plumbed, inert) to refuse writes
+  from pre-cutover builds.
+- Once fleet telemetry shows all devices on the RPC, **revoke direct INSERT/UPDATE on
+  field_projects from authenticated** — the RPC becomes the only writer. (Board's
+  `coordination_jobs` gets its own RPC.)
+
+Original Phase 2 design notes below.
+
+### Original plan
 
 *Goal: a stale or buggy client can no longer destroy anything, even in the blob model.*
 
