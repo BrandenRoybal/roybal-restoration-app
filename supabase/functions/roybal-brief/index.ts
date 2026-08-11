@@ -134,7 +134,7 @@ serve(async (req: Request) => {
       .filter((r: Blob) => r?.data)
       .map((r: Blob) => ({ ...r.data, _rowUpdated: r.updated_at }));
     const boardJobs: Blob[] = boardRows
-      .filter((r: Blob) => r?.data && r.id !== "__settings__")
+      .filter((r: Blob) => r?.data && r.id !== "__settings__" && !r.data.archived)
       .map((r: Blob) => r.data);
     // the board's baseline snapshot (Gantt "Baseline") rides the settings row —
     // it's the reference that catches phased jobs the live engine keeps

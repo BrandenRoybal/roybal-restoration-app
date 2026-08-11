@@ -28,12 +28,14 @@ function callerBudget(digits) {
 
 const last10 = (p) => String(p || "").replace(/[^\d]/g, "").slice(-10);
 
-/* board tables store the object in a {id, data, deleted} envelope */
+/* board tables store the object in a {id, data, deleted} envelope; archived
+   jobs (data.archived) are filed-away record — the phone lane quotes the live
+   board only, so they never enter availability or the schedule engine */
 async function boardRows(table, limit = 300) {
   const res = await rest(`${table}?select=id,data,deleted&limit=${limit}`, { method: "GET" });
   if (!res.ok) throw new Error(`${table} read failed (${res.status})`);
   return (await res.json())
-    .filter((r) => r && !r.deleted && r.id !== "__settings__" && r.data)
+    .filter((r) => r && !r.deleted && r.id !== "__settings__" && r.data && !r.data.archived)
     .map((r) => r.data);
 }
 
