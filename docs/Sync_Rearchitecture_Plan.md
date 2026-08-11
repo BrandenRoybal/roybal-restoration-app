@@ -266,15 +266,30 @@ admin sees it and restores → photo is back in the job and the row is live agai
 > photos from the blob) are a large, sync-touching investment whose main remaining payoff — the
 > IO win — is available far more cheaply.
 >
-> Not done unilaterally, because it is a real trade: signatures (10–30 KB) would also start
-> offloading, so every one becomes a bucket object that must resolve before a job row will
-> store. The existing missing-media machinery handles that (the row is refused rather than
-> stored broken, and the status goes red), but it is a behavior change to the sync path, and the
-> 60 KB threshold looks deliberately chosen to keep signatures inline. A field-aware threshold
-> (aggressive for `photos[].src`, unchanged for signatures) is the surgical version.
+> **DONE 2026-08-11 (build v135), the surgical version.** `MEDIA_MIN` is now **8,000** for
+> photos, sketches and scanned pages, while signatures keep the old 60,000 bar via a
+> **field-aware threshold** — the walk carries the owning key down, so a `sig*` field is judged
+> differently. Signatures are the legal artefact on a work authorisation or certificate and
+> there is no reason to make one depend on a second object resolving before its job will store.
+>
+> Measured on a realistic job in the test suite: the record shrinks **87%** (219,824 → 27,840
+> chars) and every offloaded image round-trips byte-exact. Across live data this moves 216 of
+> 219 inline images — 4,139 kB of the 4,877 kB total — out of the job records, leaving ~738 kB.
+>
+> The existing offload machinery does the rest: images upload content-addressed (identical
+> photos upload once), and a job whose images have not propagated yet is *refused rather than
+> stored broken*, with the status going red — behaviour that was already there and tested.
+> `media.test.mjs` was not in the CI suite; it is now.
+>
+> Rollout is self-paced: each job sheds its images the next time it is saved. A job nobody
+> touches keeps its old shape and costs nothing, since it is not being rewritten either.
 
-**3.1 remaining (recommend re-scoping — see above):** per-row sync, flipping reads, and dropping
-photos from the blob. Then moistureMaps, invoices, contents.
+**Phase 3 — recommended stopping point.** With the images out of the job records, the write
+amplification that motivated rows-not-blobs is gone (~18 kB per job, down from up to 3.2 MB),
+and the things actually asked for — per-photo authorship, reversible deletion, admin-only
+restore — are shipped. The remaining steps (per-row sync, flipping reads, dropping photos from
+the blob, then repeating for moistureMaps/invoices/contents) are weeks of sync-engine surgery
+for a payoff that is now largely collected. Revisit only if a real problem appears.
 
 ### Original plan
 

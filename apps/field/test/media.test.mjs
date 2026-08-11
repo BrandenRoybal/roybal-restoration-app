@@ -83,4 +83,49 @@ ok("findMedia collects only big data URLs", findMedia(job).size === 2);
 ok("findMarkers collects only markers", findMarkers(slim).size === 2 && findMarkers(job).size === 0);
 ok("replaceStrings deep-copies", replaceStrings(job, new Map()) !== job);
 
+/* ---------- the thresholds that decide what leaves the job record ----------
+   The offload was gated at 60,000 chars on the assumption that photos are
+   200KB–3MB. Measured on live data they are 7.2–35.9 KB, so NOTHING was ever
+   offloaded and 85% of every job record was images — one photo capture
+   rewrote megabytes. Photos now leave from 8KB; signatures keep the old bar. */
+const dataUrl = (n, tag = "x") => "data:image/jpeg;base64," + tag.repeat(Math.ceil(n / tag.length)).slice(0, n);
+
+{
+  const realistic = {
+    id: "sizes",
+    photos: [
+      { id: "a", src: dataUrl(16_342, "a") },   // the measured AVERAGE inline photo
+      { id: "b", src: dataUrl(7_199,  "b") },   // the measured SMALLEST — stays inline
+      { id: "c", src: dataUrl(35_907, "c") },   // the measured LARGEST
+    ],
+    moistureMaps: [{ id: "m", sketch: dataUrl(30_000, "s") }],       // drawings leave too
+    supportDocs: [{ id: "d", uploadedPages: [dataUrl(40_000, "p")] }],
+    certDrying: {
+      sigTech:  dataUrl(20_000, "t"),           // a real signature — must STAY
+      sigOwner: dataUrl(70_000, "o"),           // absurdly large — still offloads
+    },
+  };
+  const { slim, media } = await deflateProject(realistic);
+
+  ok("a typical 16KB photo now leaves the job record", isMediaMarker(slim.photos[0].src));
+  ok("the largest thumbnail leaves too", isMediaMarker(slim.photos[2].src));
+  ok("a 7KB thumbnail stays inline (not worth a round trip)", slim.photos[1].src === realistic.photos[1].src);
+  ok("moisture-map sketches leave", isMediaMarker(slim.moistureMaps[0].sketch));
+  ok("scanned document pages leave", isMediaMarker(slim.supportDocs[0].uploadedPages[0]));
+  ok("a 20KB signature STAYS inline (legal artefact, no second object to resolve)",
+     slim.certDrying.sigTech === realistic.certDrying.sigTech);
+  ok("a signature over the old 60KB bar still offloads", isMediaMarker(slim.certDrying.sigOwner));
+  ok("offloaded exactly the five that should go", media.length === 5);
+
+  const before = JSON.stringify(realistic).length, after = JSON.stringify(slim).length;
+  ok(`job record shrinks ${Math.round(100 - (after / before) * 100)}% (${before} → ${after} chars)`,
+     after < before * 0.25);
+
+  // and it all comes back
+  const bucket2 = new Map(media.map((m) => [m.hash, m.text]));
+  const round = await inflateProject(slim, async (h) => bucket2.get(h) ?? null);
+  ok("every offloaded image round-trips exactly", JSON.stringify(round.project) === JSON.stringify(realistic));
+  ok("nothing missing on the round trip", round.missing === 0);
+}
+
 console.log(`\n${pass} media-offload checks passed.`);
