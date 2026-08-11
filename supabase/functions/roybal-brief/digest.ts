@@ -85,7 +85,7 @@ export const plusDays = (iso: string, n: number) => {
 
 export interface BriefInput {
   projects: Blob[];          // field project blobs, each with _rowUpdated (row updated_at)
-  boardJobs: Blob[];         // coordination_jobs data blobs (settings row excluded)
+  boardJobs: Blob[];         // coordination_jobs data blobs (settings + archived rows excluded)
   boardBaseline?: Blob | null; // board settings.baseline (Gantt snapshot: { jobs: { [id]: {start, finish} } })
   portalWaiting: number | null;
   emailsWaiting?: { count: number; oldest?: string } | null;   // unread job-matched inbound email
@@ -97,6 +97,9 @@ export interface BriefInput {
 
 /** One SMS-sized morning digest: attention lines + up to 3 questions. */
 export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWaiting, emailsWaiting = null, proposals = null, today, pretty, budgetThreshold = 0.9 }: BriefInput) {
+  // archived board jobs are filed-away record, not schedule — a done job the
+  // owner already put in the drawer must never resurface as "past target"
+  boardJobs = boardJobs.filter((j) => !j.archived);
   const jobName = (p: Blob) => String(p.customer || p.address || "job");
   const since = (iso: string) => daysBefore(today, iso);
   const lines: string[] = [];

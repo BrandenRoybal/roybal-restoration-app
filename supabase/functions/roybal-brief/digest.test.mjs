@@ -46,9 +46,11 @@ test("board slips + materials near start + portal count", () => {
     { title: "Smith — remodel", stage: "scheduled", startDate: "2026-07-25", materials: "none" },
     { title: "Done job", stage: "done", targetDate: "2026-01-01" },                 // done → ignored
     { title: "Far out", stage: "scheduled", startDate: "2026-08-20", materials: "none" }, // >3d → ignored
+    { title: "Filed job", stage: "in_progress", targetDate: "2026-07-01", archived: true, archivedAt: "2026-07-22" }, // archived → filed away, ignored
+    { title: "Filed start", stage: "scheduled", startDate: "2026-07-25", materials: "none", archived: true }, // archived → ignored even near start
   ] });
   assert.match(b.text, /📅 past target: Doe — water/);
-  assert.doesNotMatch(b.text, /Done job|Far out/);
+  assert.doesNotMatch(b.text, /Done job|Far out|Filed job|Filed start/);
   assert.match(b.text, /🧱 starts soon, materials not ordered: Smith — remodel/);
   assert.match(b.text, /📨 2 customer portal messages waiting/);
 });

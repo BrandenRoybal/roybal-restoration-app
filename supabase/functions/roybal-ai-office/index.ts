@@ -1288,7 +1288,9 @@ async function toolJobLookup(input: Record<string, unknown>, jwt: string) {
 }
 
 /* board tables store the object in a `data` jsonb envelope ({id, data,
-   deleted}) — unwrap, skip deleted rows and the reserved settings row */
+   deleted}) — unwrap, skip deleted rows and the reserved settings row.
+   Archived jobs (data.archived) DO pass through here: hoursLookup needs them
+   to label historical hours; list-facing tools filter them at their edge. */
 async function boardRows(table: string, jwt: string, limit = 300): Promise<Array<Record<string, unknown>>> {
   const res = await db(`${table}?select=id,data,deleted&limit=${limit}`, jwt, { method: "GET" });
   if (!res.ok) throw new Error(`${table} read failed (${res.status})`);
@@ -1301,7 +1303,9 @@ async function toolBoardRead(input: Record<string, unknown>, jwt: string) {
   const [jobs, crew] = await Promise.all([boardRows("coordination_jobs", jwt), boardRows("crew_members", jwt, 100)]);
   const nameById = new Map(crew.map((c) => [c.id, c.name || "—"]));
   const rows = jobs
-    .filter((j) => !j.isMilestone && (input.include_done ? true : j.stage !== "done"))
+    // archived = filed off the board — excluded even with include_done, which
+    // means "done but still on the board", matching the board's own views
+    .filter((j) => !j.archived && !j.isMilestone && (input.include_done ? true : j.stage !== "done"))
     .map((j) => ({
       title: j.title || j.customer || "Job",
       customer: j.customer || "",
