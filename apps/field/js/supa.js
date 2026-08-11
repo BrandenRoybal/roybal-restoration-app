@@ -80,6 +80,58 @@ async function api(path, opts = {}) {
   return res;
 }
 
+/* ---------- app build tag (server min-build gate) ----------
+   The LIVE service-worker cache version is the only honest statement of what
+   code this device is running — a stale cached PWA is exactly what the gate
+   exists to catch, so a hardcoded constant would defeat it. Unknown stays ""
+   and the server treats an unknown build as "don't block". */
+let buildTag = "";
+(async () => {
+  try {
+    if (typeof caches !== "undefined" && caches.keys) {
+      const keys = await caches.keys();
+      const nums = keys.map((k) => (k.match(/^roybal-field-v(\d+)/) || [])[1]).filter(Boolean).map(Number);
+      if (nums.length) buildTag = "v" + Math.max(...nums);
+    }
+  } catch { /* best-effort */ }
+})();
+export const appBuild = () => buildTag;
+
+/* ---------- sync RPCs (the one authoritative write path) ----------
+   Server-side CAS-or-merge: a device that started from a stale copy can no
+   longer overwrite anyone — the SERVER unions the two copies (migrations
+   217/218). Every call carries the build tag so the server can refuse writes
+   from a pre-cutover build once the operator arms the gate. */
+async function rpc(fn, args) {
+  const res = await api(`rpc/${fn}`, { method: "POST", body: JSON.stringify({ ...args, p_build: buildTag || null }) });
+  if (res.ok) return res.json();
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON error body */ }
+  const err = new Error((body && body.message) || `${fn} failed (${res.status})`);
+  err.status = res.status;
+  err.code = body && body.code;
+  err.needsUpdate = err.code === "P0002";   // this build is older than the server floor
+  throw err;
+}
+
+/** Push one project. → { status: insert|applied|merged|deleted, rev, data? }
+    'merged'  — the server already COMMITTED the union at `rev`; adopt it
+                clean (no updatedAt bump, no re-push).
+    'deleted' — the row is a tombstone and nothing was written; the caller
+                decides revive-vs-respect. */
+export const pushProject = (id, base, data) =>
+  rpc("push_project", { p_id: id, p_base_rev: base, p_data: data });
+
+/** Soft-delete, carrying the job's last-known content inside the tombstone. */
+export const tombstoneProject = (id, data) =>
+  rpc("tombstone_project", { p_id: id, p_data: data || null });
+
+/** Deliberately flip a tombstone back alive. → { status: revived|conflict|missing }
+    'conflict' means another device already revived it (its live copy is
+    returned) — merge against that instead of clobbering. */
+export const reviveProject = (id, data) =>
+  rpc("revive_project", { p_id: id, p_data: data });
+
 /* ---------- data ---------- */
 /** Upsert an array of { id, data, deleted } rows. Returns server rows. */
 export async function upsertRows(rows) {

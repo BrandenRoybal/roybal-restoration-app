@@ -117,15 +117,32 @@ base merges to a union, deleted row returns its tombstone without reviving; attr
 the real caller through the definer boundary. Additive: nothing calls it yet and direct table
 writes stay open, so old clients are unaffected.
 
-**Phase 2b (remaining) — cut over + close the door:**
-- Wire `apps/field/js/sync.js` push path to `push_project` (map insert/applied/merged/deleted to
-  the existing bookkeeping; adopt the returned merged blob via `putIf`, inflating media markers).
-- Add `revive`/`tombstone` RPCs so delete/revive also go through the single door.
-- Add the `min_app_version` gate (the `build` arg is already plumbed, inert) to refuse writes
-  from pre-cutover builds.
-- Once fleet telemetry shows all devices on the RPC, **revoke direct INSERT/UPDATE on
-  field_projects from authenticated** — the RPC becomes the only writer. (Board's
-  `coordination_jobs` gets its own RPC.)
+**Phase 2b BUILT 2026-08-10 (migration 218 + client cutover) — awaiting deploy + the operator gate.**
+- `tombstone_project` / `revive_project` RPCs so delete and revive go through the same door;
+  `app_settings.min_field_build` gate (inert at 0) on all three RPCs; the role fence lives in
+  one shared `_sync_guard`.
+- `push_project` gained two fixes found by testing the client against it: a **self-echo
+  short-circuit** (`status: 'current'` — when the union adds nothing, write *nothing*, so a
+  stale-bookkeeping re-save no longer rewrites a 3 MB row) and a **clock-skew-safe merged
+  timestamp** (strictly newer than both inputs *and* not behind the server clock — field
+  tablets run skewed clocks, and a merged blob that isn't strictly newer is silently skipped by
+  every other device's pull tie-guard).
+- Client: `apps/field/js/sync.js` pushes through the RPCs behind a `SYNC_VIA_RPC` kill switch;
+  `adoptServerMerge()` adopts a server-committed union **clean** (no bump, no re-push).
+  Critically, when media hasn't propagated it deliberately does *not* adopt the new rev —
+  otherwise the next push would look up-to-date and wholesale-overwrite the very photo it was
+  waiting for. Both paths pass the full 57-assertion sync suite.
+- Verified against prod: all three RPC signatures resolve over real HTTP with the exact
+  parameter names the client sends, and the response shape is the bare object the client parses
+  (`.status`/`.rev`/`.data`). Role gate, build gate, tombstone/revive/conflict semantics all
+  proven with rolled-back transactions.
+
+**Remaining in Phase 2b — the operator gate (migration 219, written, NOT applied):**
+`219_revoke_direct_field_writes.sql` revokes direct INSERT/UPDATE/DELETE so the RPCs are the
+only door. It is deliberately unapplied: it needs (1) the RPC build deployed and confirmed on
+every device, (2) the build floor armed for a day first so stragglers get "update the app"
+instead of a silent failure, (3) a quiet window. Its header carries the checklist and the
+one-line rollback. Board's `coordination_jobs` gets its own RPC later.
 
 Original Phase 2 design notes below.
 
@@ -196,6 +213,31 @@ add/add/delete-attempt test shows union behavior with tech-proof deletes.
 - Field-level conflict prompts for the rare same-row simultaneous edit.
 
 ---
+
+## What can run unattended, and what cannot
+
+Most of this plan is buildable without supervision, because two natural gates already protect
+production: **app code only reaches the crew's devices when a PR is merged** (deploy runs on
+push to `main`), and **database changes are applied additively** — new tables, new functions,
+dual-writes — none of which alter existing behavior until something calls them.
+
+Safe to run unattended: writing migrations and applying the additive ones, building and
+verifying RPCs against prod with rolled-back transactions, the whole Phase 3 scaffolding
+(tables, dual-write, backfill scripts, per-section read flips), tests, and adversarial review
+loops.
+
+Needs a human, and should not be automated:
+- **Migration 219** (revoking direct writes) and any equivalent door-closing step — it is
+  business-stopping if applied before every device is on the new build, and no amount of
+  server-side testing can tell me what a truck's iPad is actually running.
+- **Merging the PRs**, which is what actually deploys to the crew.
+- **Real-device soak** between phases. The failure mode of this whole project is "a tech loses
+  a day of work"; a browser preview with seeded data cannot stand in for a real photo taken on
+  a real iPad that has been offline since Tuesday.
+- **The role-visibility decision in Phase 3** — should a tech see every job, or only their
+  own? That is a business call, not an engineering one, and the RLS policies encode whichever
+  answer is right.
+- **Disabling public sign-ups** (still pending, dashboard-only).
 
 ## Risk register
 

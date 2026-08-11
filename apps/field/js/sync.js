@@ -33,9 +33,11 @@
      to the on-device backups store (restorable from the job page).
    ============================================================ */
 import { Store, onProjectSaved, onProjectDeleted } from "./core.js";
-import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSince, uploadMedia, downloadMedia } from "./supa.js";
+import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSince, uploadMedia, downloadMedia,
+         pushProject, tombstoneProject, reviveProject } from "./supa.js";
+import { SYNC_VIA_RPC } from "./config.js";
 import { deflateProject, inflateProject } from "./media.js";
-import { mergeProjects } from "./merge.js";
+import { mergeProjects, ID_COLLECTIONS } from "./merge.js";
 import { isBlankProject } from "./model.js";
 
 const K_CURSOR = "roybal-sync-cursor";
@@ -56,6 +58,7 @@ let statusCb = () => {};
 let mergeCb = () => {};                    // fires after a two-device merge (app shows a toast)
 let rowCb = () => {};                      // fires when sync changes a stored row (app refreshes open pages)
 let syncing = false, started = false, skipped = 0, pushTimer = null, needsAnotherPass = false;
+let updateRequired = false;   // server refused this build (P0002) — the app must be updated
 
 /** Register a listener for "changes from another device were merged in". */
 export function onSyncMerge(fn) { mergeCb = fn || (() => {}); }
@@ -128,6 +131,62 @@ async function absorb(localRef, serverFull, why) {
   return null;   // constant editing beat us 4 times — row stays dirty, next cycle retries
 }
 
+/* ---------- adopt a union the SERVER already committed (RPC path) ----------
+   push_project returns status 'merged' AFTER storing the union at the returned
+   rev. Unlike absorb() — which merges locally and still owes a push — there is
+   nothing left to assert, so the row is adopted CLEAN: no updatedAt bump, no
+   re-push. Bumping here would re-dirty a row that already matches the server,
+   and two devices would feed each other rev bumps forever (the Jul 2026
+   disk-IO incident). Returns true when the union landed locally. */
+async function adoptServerMerge(localRef, res) {
+  const id = localRef.id;
+  let full, missing;
+  try {
+    ({ project: full, missing } = await inflateProject(res.data, downloadRemembered));
+  } catch {
+    return false;                                  // network blip — retry next cycle
+  }
+  if (missing > 0) {
+    // Another device's photos are still propagating, so we cannot store this
+    // union yet. Deliberately do NOT adopt the new rev: if we did, the next
+    // push would look up to date and wholesale-overwrite the server's copy
+    // with ours — erasing the very photo we are waiting for. Staying on the
+    // old base means the next cycle re-merges (a no-op on the server, which
+    // returns 'current') until the bucket catches up.
+    mediaWait.set(id, (mediaWait.get(id) || 0) + 1);
+    return false;
+  }
+  const local = (await Store.get(id)) || localRef;
+  await Store.backup(local);                       // our side stays restorable
+  const recovered = countRecovered(local, full);
+  full.id = id;
+  delete full.rev;                                 // revs live in sync bookkeeping
+  if (!(await Store.putIf(full, local.updatedAt))) return false;  // an edit landed — next cycle merges it
+  revs[id] = Number(res.rev) || 0; saveRevs();
+  pushed[id] = full.updatedAt; savePushed();       // clean: the stored row matches the server
+  mediaWait.delete(id);
+  if (recovered) {
+    try { mergeCb({ id, customer: full.customer || full.address || "job", added: recovered, filledForms: 0, why: "server-merge" }); }
+    catch { /* toast is a bonus */ }
+  }
+  rowChanged(id);
+  return true;
+}
+
+/* How many id-keyed elements the server's union holds that this device didn't.
+   The server merge returns no stats, so the "recovered N items" toast count is
+   derived here instead. */
+function countRecovered(local, merged) {
+  let n = 0;
+  for (const key of ID_COLLECTIONS) {
+    const mine = new Set((Array.isArray(local[key]) ? local[key] : []).map((x) => x && x.id).filter(Boolean));
+    for (const el of (Array.isArray(merged[key]) ? merged[key] : [])) {
+      if (el && el.id && !mine.has(el.id)) n++;
+    }
+  }
+  return n;
+}
+
 function load(k, fallback) { try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch { return fallback; } }
 /* pending deletes were once a bare id array — migrate to {id: queuedAtISO}
    (a queue entry with no timestamp still tombstones unconditionally) */
@@ -143,7 +202,7 @@ const saveCursor = () => localStorage.setItem(K_CURSOR, cursor);
 const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-3000)));
 function bumpCursor(ts) { if (ts && ts > cursor) { cursor = ts; saveCursor(); } }
 
-function setStatus(state, extra = {}) { statusCb({ state, pending: pendingCount(), skipped, ...extra }); }
+function setStatus(state, extra = {}) { statusCb({ state, pending: pendingCount(), skipped, updateRequired, ...extra }); }
 function pendingCount() { return deletes.size; }   // approximate; recomputed on demand
 
 /* a media object we just downloaded provably exists in the bucket — remember
@@ -176,29 +235,56 @@ async function push() {
       const next = { ...slim, rev: base + 1 };
       const json = JSON.stringify(next);
       if (json.length > MAX_ROW) { skippedNow++; continue; } // huge even without media — surfaced LOUD in status
-      const r = await guardedUpsertRow(p.id, base, next);
-      if (r.ok) {
-        // NOTE: nothing is written back to the local row. The new rev goes to
-        // sync bookkeeping only — an edit the user typed while this push was
-        // in flight stays in the store untouched (still dirty vs pushed[],
-        // so it goes up next cycle on the rev we just recorded).
-        revs[p.id] = base + 1; saveRevs();
-        pushed[p.id] = p.updatedAt; savePushed();
-        mediaWait.delete(p.id);
-        continue;
+      // SERVER-AUTHORITATIVE PUSH (migrations 217/218): the server does the
+      // CAS and, on a stale base, the MERGE itself — a device that started
+      // from an old copy can no longer overwrite anyone, even if its own
+      // merge logic is stale or buggy. Legacy path stays behind the kill
+      // switch until direct writes are revoked (219).
+      let serverBlob = null, serverIsDeleted = false;
+      if (SYNC_VIA_RPC) {
+        const res = await pushProject(p.id, base, slim);
+        if (res.status === "insert" || res.status === "applied") {
+          // NOTE: nothing is written back to the local row. The new rev goes to
+          // sync bookkeeping only — an edit the user typed while this push was
+          // in flight stays in the store untouched (still dirty vs pushed[],
+          // so it goes up next cycle on the rev we just recorded).
+          revs[p.id] = Number(res.rev) || base + 1; saveRevs();
+          pushed[p.id] = p.updatedAt; savePushed();
+          mediaWait.delete(p.id);
+          continue;
+        }
+        if (res.status === "merged" || res.status === "current") {
+          // 'merged'  — the server committed the union; adopt it clean.
+          // 'current' — our push added nothing the server lacked (self-echo);
+          //             it wrote nothing, so adopt its copy and go clean.
+          await adoptServerMerge(p, res);
+          continue;
+        }
+        serverBlob = res.data;                         // 'deleted': tombstone, nothing written
+        serverIsDeleted = true;
+      } else {
+        const r = await guardedUpsertRow(p.id, base, next);
+        if (r.ok) {
+          revs[p.id] = base + 1; saveRevs();
+          pushed[p.id] = p.updatedAt; savePushed();
+          mediaWait.delete(p.id);
+          continue;
+        }
+        // conflict: another device moved (or deleted) the row since we last
+        // synced. NEVER clobber, NEVER drop — merge their copy into ours.
+        if (!r.server) continue;                       // insert race — pull will bring their row
+        serverBlob = r.server;
+        serverIsDeleted = !!r.serverDeleted;
       }
-      // conflict: another device moved (or deleted) the row since we last
-      // synced. NEVER clobber, NEVER drop — merge their copy into ours.
-      if (!r.server) continue;                         // insert race — pull will bring their row
       let serverFull, missing;
       const localMedia = new Map(media.map((m) => [m.hash, m.text]));  // their row may reference OUR photos — reuse, don't re-download
-      try { ({ project: serverFull, missing } = await inflateProject(r.server, (h) => localMedia.has(h) ? localMedia.get(h) : downloadRemembered(h))); }
+      try { ({ project: serverFull, missing } = await inflateProject(serverBlob, (h) => localMedia.has(h) ? localMedia.get(h) : downloadRemembered(h))); }
       catch { lastErr = new Error("merge media fetch failed"); continue; }
       if (missing > 0) {                               // their media still propagating — retry next cycle
         mediaWait.set(p.id, (mediaWait.get(p.id) || 0) + 1);   // …but surface it if it never resolves
         continue;
       }
-      if (r.serverDeleted) {
+      if (serverIsDeleted) {
         // the job was deleted on the server while this device held a copy it
         // believes is unsynced (often just reset bookkeeping after a sign-out).
         // The delete wins unless we hold REAL work the tombstone doesn't keep.
@@ -233,10 +319,17 @@ async function push() {
         if (!(await Store.putIf(merged, cur.updatedAt))) continue;   // an edit just landed — retry next cycle
         const { slim: reviveSlim, media: reviveMedia } = await deflateProject(merged);
         await uploadNewMedia(reviveMedia);
-        const nextRev = (Number(r.server && r.server.rev) || 0) + 1;
-        const revived = await reviveRow(p.id, { ...reviveSlim, rev: nextRev });
-        if (!revived.ok) continue;                     // someone beat us to it — stay dirty, merge next cycle
-        revs[p.id] = nextRev; saveRevs();
+        const nextRev = (Number(serverBlob && serverBlob.rev) || 0) + 1;
+        let revivedRev = nextRev;
+        if (SYNC_VIA_RPC) {
+          const rr = await reviveProject(p.id, reviveSlim);
+          if (rr.status !== "revived") continue;       // someone beat us to it — merge next cycle
+          revivedRev = Number(rr.rev) || nextRev;
+        } else {
+          const revived = await reviveRow(p.id, { ...reviveSlim, rev: nextRev });
+          if (!revived.ok) continue;                   // someone beat us to it — stay dirty, merge next cycle
+        }
+        revs[p.id] = revivedRev; saveRevs();
         pushed[p.id] = merged.updatedAt; savePushed();
         mediaWait.delete(p.id);
         rowChanged(p.id);
@@ -244,6 +337,10 @@ async function push() {
       }
       await absorb(p, serverFull, "push-conflict");
     } catch (e) {
+      // This build is older than the floor the server accepts — the device is
+      // running stale cached code. Nothing it retries will help, so say so
+      // plainly instead of showing a generic "sync issue" forever.
+      if (e && e.needsUpdate) updateRequired = true;
       lastErr = e;   // one failing job (network blip mid-cycle) must not stall the rest
     }
   }
@@ -264,7 +361,7 @@ async function push() {
       // ship the job's last-known content INSIDE the tombstone (media already
       // offloaded to the bucket) — a deleted job stays recoverable from the
       // server instead of only from whichever device still holds a copy
-      let data = { id };
+      let data = null;                       // null → the server keeps the copy it already holds
       try {
         const snaps = await Store.backups(id);
         const snap = snaps.length ? snaps[0].data : null;
@@ -275,7 +372,8 @@ async function push() {
           if (JSON.stringify(content).length <= MAX_ROW) data = content;
         }
       } catch { /* a bare tombstone still beats blocking the delete */ }
-      await upsertRows([{ id, data, deleted: true }]);
+      if (SYNC_VIA_RPC) await tombstoneProject(id, data);
+      else await upsertRows([{ id, data: data || { id }, deleted: true }]);
       deletes.delete(id); delete pushed[id]; delete revs[id];
       saveDeletes(); savePushed(); saveRevs();
       // the pull earlier in THIS cycle may have re-stored the job (cursor
@@ -380,7 +478,7 @@ async function pull() {
 export async function syncNow() {
   if (!isSignedIn() || syncing) return;
   if (typeof navigator !== "undefined" && navigator.onLine === false) { setStatus("offline"); return; }
-  syncing = true; setStatus("syncing");
+  syncing = true; updateRequired = false; setStatus("syncing");
   try {
     // PULL FIRST: absorb (and merge) everyone else's changes before asserting
     // ours — a device coming back from the field folds the office's edits in,
@@ -393,6 +491,7 @@ export async function syncNow() {
     // both of these mean DATA NOT BACKED UP — show red, not a quiet counter
     const stalled = [...mediaWait.values()].filter((n) => n >= STALL_CYCLES).length;
     const problems = [];
+    if (updateRequired) problems.push("this app is out of date — close and reopen it to update, then sync");
     if (skipped > 0) problems.push(`${skipped} job(s) too large to back up — remove some inline attachments`);
     if (stalled > 0) problems.push(`${stalled} job(s) waiting on photos another device hasn't finished uploading`);
     if (problems.length) setStatus("error", { message: problems.join("; ") });

@@ -8,6 +8,14 @@ export const SUPABASE_URL = "https://djpgvcvhvgrzgaziruze.supabase.co";
 export const SUPABASE_KEY = "sb_publishable_67P68AjuAtK5z649liJg1w_ZPhh_Ud4";
 export const SYNC_ENABLED = !!SUPABASE_URL;
 
+// Push through the server-side merge RPC (migrations 217/218) instead of
+// writing field_projects directly. The server then unions two devices' copies
+// itself, so a stale or buggy client cannot overwrite anyone's work. Kill
+// switch: set false to fall back to the legacy rev-guarded PATCH + local
+// merge (only meaningful while direct writes are still granted — migration
+// 219 revokes them and makes the RPC the only door).
+export const SYNC_VIA_RPC = true;
+
 // QuickBooks Time OAuth client id — PUBLIC (safe to ship). The Client Secret
 // and tokens live only in the qb-time-proxy Edge Function's secrets. Fill this
 // from your Intuit Developer app to enable the admin "Connect" button. The

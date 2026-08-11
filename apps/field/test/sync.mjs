@@ -1,6 +1,7 @@
 /* Sync engine test — drives push/pull/merge against a fake Supabase.
    Run: node test/sync.mjs */
 import "fake-indexeddb/auto";
+import { mergeProjects } from "../js/merge.js";   // the fake server's merge == the SQL merge (proven equivalent)
 
 let failures = 0;
 const ok = (c, m) => { console.log((c ? "  ✓ " : "  ✗ ") + m); if (!c) failures++; };
@@ -35,6 +36,69 @@ globalThis.fetch = async (url, opts = {}) => {
   const body = opts.body ? JSON.parse(opts.body) : null;
   if (u.pathname === "/auth/v1/token") {
     return resp(200, { access_token: "tok", refresh_token: "ref", expires_in: 3600, user: { email: body.email } });
+  }
+  /* ---- sync RPCs: the server-side merge authority (migrations 217/218).
+     Mirrors the SQL exactly, including the "strictly newer than both inputs
+     and never behind the server clock" merge stamp. ---- */
+  const mergeStamp = (a, b) =>
+    new Date(Math.max(Math.max(Date.parse(a) || 0, Date.parse(b) || 0) + 1, Date.now())).toISOString();
+  // a real request/response crosses the wire as JSON: neither side may hold a
+  // reference into the other's objects (the client mutates what it receives)
+  const wire = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
+  // jsonb compares by value, not key order — mirror that when detecting a self-echo
+  const canonKeys = (v) => Array.isArray(v) ? v.map(canonKeys)
+    : (v && typeof v === "object")
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonKeys(v[k])]))
+      : v;
+  if (u.pathname === "/rest/v1/rpc/push_project" && method === "POST") {
+    if (onPatch) { const f = onPatch; onPatch = null; await f(); }   // an edit lands mid-push
+    const id = body.p_id, base = Number(body.p_base_rev) || 0;
+    const incoming = wire(body.p_data); delete incoming.rev;
+    const row = serverRows.get(id);
+    if (!row) {
+      serverRows.set(id, { id, data: { ...incoming, rev: 1 }, deleted: false, updated_at: nowIso() });
+      return resp(200, { status: "insert", rev: 1 });
+    }
+    const curRev = Number(row.data && row.data.rev) || 0;
+    if (row.deleted) return resp(200, { status: "deleted", rev: curRev, data: wire(row.data) });
+    if (curRev === base) {
+      row.data = { ...incoming, rev: curRev + 1 };
+      row.deleted = false; row.updated_at = nowIso();
+      return resp(200, { status: "applied", rev: curRev + 1 });
+    }
+    const { merged } = mergeProjects(incoming, row.data);
+    const strip = ({ rev, updatedAt, ...rest }) => JSON.stringify(canonKeys(rest));
+    if (strip(merged) === strip(row.data)) {          // self-echo: write nothing
+      return resp(200, { status: "current", rev: curRev, data: wire(row.data) });
+    }
+    merged.rev = curRev + 1;
+    merged.updatedAt = mergeStamp(incoming.updatedAt, row.data.updatedAt);
+    row.data = merged; row.deleted = false; row.updated_at = nowIso();
+    return resp(200, { status: "merged", rev: merged.rev, data: wire(merged) });
+  }
+  if (u.pathname === "/rest/v1/rpc/tombstone_project" && method === "POST") {
+    const id = body.p_id, row = serverRows.get(id);
+    const incoming = body.p_data ? wire(body.p_data) : null;
+    if (incoming) delete incoming.rev;
+    if (!row) {
+      serverRows.set(id, { id, data: incoming || { id }, deleted: true, updated_at: nowIso() });
+      return resp(200, { status: "tombstoned", created: true });
+    }
+    if (row.deleted) return resp(200, { status: "already_deleted" });
+    const keepRicher = incoming && JSON.stringify(incoming).length >= JSON.stringify(row.data || {}).length;
+    row.data = keepRicher ? incoming : row.data;
+    row.deleted = true; row.updated_at = nowIso();
+    return resp(200, { status: "tombstoned" });
+  }
+  if (u.pathname === "/rest/v1/rpc/revive_project" && method === "POST") {
+    const id = body.p_id, row = serverRows.get(id);
+    const incoming = wire(body.p_data); delete incoming.rev;
+    if (!row) return resp(200, { status: "missing" });
+    const curRev = Number(row.data && row.data.rev) || 0;
+    if (!row.deleted) return resp(200, { status: "conflict", rev: curRev, data: wire(row.data) });
+    row.data = { ...incoming, rev: curRev + 1 };
+    row.deleted = false; row.updated_at = nowIso();
+    return resp(200, { status: "revived", rev: curRev + 1 });
   }
   if (u.pathname === "/rest/v1/field_projects" && method === "POST") {
     const out = body.map((r) => {
