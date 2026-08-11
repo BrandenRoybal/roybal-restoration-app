@@ -183,7 +183,38 @@ Original Phase 2 design notes below.
 **Done when:** a deliberately stale test device pushing an old blob loses nothing — the server
 merges it — and a pre-Phase-2 build is refused.
 
-## Phase 3 — Rows for the real data (~2–3 weeks, section by section)
+## Phase 3 — Rows for the real data (in progress)
+
+**Section order confirmed by measurement, not guesswork.** Live blob composition:
+photos **68.6%** (3.3 MB / 450 items), moistureMaps 17.5%, invoices 5.9%, contents 2.3%,
+everything else under 1.5%. Photos dominate because 187 of them still carry a full inline
+thumbnail beside their bucket link so the app works with no signal — so one photo capture
+rewrites a multi-megabyte blob today.
+
+**3.1 photos — table + backfill SHIPPED 2026-08-11 (migration 221), additive.**
+`field_photos`: one row per photo with real columns, per-row authorship (`created_by` never
+rewritten, `updated_by` moves on real change), and reversible soft delete (`deleted_at` /
+`deleted_by`). Backfilled all 450 photos from live blobs keyed on their existing ids —
+**450 → 450, zero missing, zero extra, zero content mismatches** — so dual-write is idempotent
+and a row and its blob entry always mean the same photo. RLS verified as real users: crew
+read/write, AI accounts read-only, hard delete admin-only, soft delete records who and is
+reversible. Nothing reads these rows yet.
+
+*Note on direct row writes:* Phase 2 forced job writes through an RPC because a whole-blob
+write clobbers whatever another device changed. That does not apply per row — two devices
+adding photos touch different rows, so the union is automatic, which is the point of this
+phase. Same-row last-write-wins matches what `merge.js` already did on an id clash.
+
+*Delete policy deliberately unchanged for now:* the recoverability win (nothing is erased;
+deletes are a reversible flag) does not depend on who may flag. Restricting the flag to admins
+is a real behavior change for the crew — the blank-scaffold cleanup flow depends on it — so it
+ships **with** the UI that hides the button, not before.
+
+**3.1 remaining:** client dual-write (insert the row *and* keep the blob entry), then flip
+reads, then per-row sync, then drop photos from the blob. Then repeat for moistureMaps,
+invoices, contents, and the rest.
+
+### Original plan
 
 *Goal: eliminate the blob as the unit of saving for high-value data.*
 
