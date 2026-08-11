@@ -25,11 +25,11 @@
 --          from blob_history where replaced_at > now() - interval '7 days'
 --         group by 1;                       -- (once build telemetry lands)
 --      Simplest reliable check: open the app on each device and read the
---      "build vNNN" label at the bottom of the menu. All must be >= 132,
---      the build that shipped SYNC_VIA_RPC (sw.js CACHE roybal-field-v132).
+--      "build vNNN" label at the bottom of the menu. All must be >= 133,
+--      the build that shipped SYNC_VIA_RPC (sw.js CACHE roybal-field-v133).
 --   2. Arm the build floor FIRST and watch for a day — it produces a clear
 --      "update the app" error instead of a silent failure:
---        update app_settings set value = to_jsonb(132) where key = 'min_field_build';
+--        update app_settings set value = to_jsonb(133) where key = 'min_field_build';
 --   3. Confirm no non-service-role writer remains:
 --        grep -rn "field_projects" apps/ supabase/functions/ | grep -iE "patch|post|upsert"
 --   4. Apply during a quiet window (evening), not mid-job.
