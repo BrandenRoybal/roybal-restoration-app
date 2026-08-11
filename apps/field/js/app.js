@@ -12,6 +12,7 @@ import {
   blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
   BOX_DESTINATIONS, POROUS_CATEGORIES, dispositionShort, dispositionLabel, depreciation,
+  setAuthor, author,
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
@@ -110,6 +111,7 @@ if (location.search.includes("diag")) {
 /* ---------- auth gate ---------- */
 const OFFLINE_KEY = "roybal-offline";
 const isOfflineMode = () => localStorage.getItem(OFFLINE_KEY) === "1";
+setAuthor(currentEmail());   // stamp authorship before any router/factory can run (boot() refreshes it)
 const needsLogin = () => SYNC_ENABLED && !isSignedIn() && !isOfflineMode();
 let syncStarted = false;
 function startSyncUI() {
@@ -136,6 +138,7 @@ function startSyncUI() {
 function boot() {
   // ask the browser to shield IndexedDB (jobs + backups) from storage eviction
   try { navigator.storage?.persist?.().catch(() => {}); } catch { /* best-effort */ }
+  setAuthor(currentEmail());   // stamp new captures with who's signed in ("" offline)
   if (SYNC_ENABLED && isSignedIn()) startSyncUI();
   route();
 }
@@ -229,6 +232,7 @@ function renderLogin() {
     err.hidden = true; btn.disabled = true; btn.textContent = "Signing in…";
     try {
       await signIn(email.value, pass.value);
+      setAuthor(currentEmail());
       localStorage.removeItem(OFFLINE_KEY);
       startSyncUI();
       go("#/"); route();
@@ -244,7 +248,7 @@ function renderLogin() {
     h("div", { style: "max-width:380px;margin:8vh auto 0;text-align:center" },
       h("img", { src: "assets/emblem-mark.svg", alt: "", style: "width:84px;height:84px;border-radius:18px;background:#fff;padding:12px" }),
       h("h1", { style: "margin:14px 0 2px" }, "Roybal Field Forms"),
-      h("p", { class: "subtle" }, "Sign in with your shared crew account to sync jobs across devices."),
+      h("p", { class: "subtle" }, "Sign in with your crew account to sync jobs across devices."),
       h("div", { class: "card", style: "text-align:left;margin-top:14px" },
         err,
         field("Email", email), field("Password", pass), btn),
@@ -271,7 +275,7 @@ function accountRow() {
 }
 function doSignOut() {
   if (!confirm("Sign out? Jobs stay saved on this device.")) return;
-  signOut(); resetSync(); syncStarted = false;
+  signOut(); setAuthor(""); resetSync(); syncStarted = false;
   localStorage.removeItem(OFFLINE_KEY);
   route();
 }
@@ -514,7 +518,12 @@ async function createProject() {
     clear(view).append(h("p", { class: "subtle", style: "margin:24px" }, "Opening new job…"));
     const mode = activeMode();   // the home-screen toggle decides what "+ New Job" starts
     const existing = (await Store.all()).find((p) => !p.archivedAt && p.jobType === mode && isBlankProject(p));
-    if (existing) { go(`#/p/${existing.id}/edit`, { replace: true }); return; }
+    if (existing) {
+      // a blank left by another tech (or an offline session) is being adopted —
+      // re-stamp so the job is attributed to whoever is actually starting it
+      if (existing.createdBy !== author()) { existing.createdBy = author(); await Store.put(existing); }
+      go(`#/p/${existing.id}/edit`, { replace: true }); return;
+    }
     const p = newProject();
     p.jobType = mode;
     await Store.put(p);

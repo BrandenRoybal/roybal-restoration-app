@@ -71,7 +71,21 @@ takes under five minutes, demonstrated once.
 
 *Note: the Awthentis recovery (iPad / Aug 6 backup) comes before everything, including this.*
 
-## Phase 1 — Individual logins and roles (~2–4 days of work)
+## Phase 1 — Individual logins and roles ✅ SHIPPED 2026-08-10 (migration 216)
+
+*Applied to production after a 3-lens adversarial review that caught a **critical
+privilege-escalation hole** (is_admin() was self-grantable: open signup trusted the role in
+signup metadata, and `authenticated` could PATCH its own `profiles.role`). Both paths closed in
+216 — signups always land as `tech`, and role-column writes are revoked from app clients so role
+changes happen only via SQL. Verified live by dropping to the `authenticated` role with simulated
+tech/admin JWTs: tech cannot self-promote (403 on the role column) and cannot hard-delete (RLS
+filters to 0 rows); admin can. Authorship stamping verified: authenticated write → writer's uid,
+service/automation write → NULL (honest system marker, never an inherited human). App side:
+factories stamp `by`/`createdBy`, blank-scaffold reuse re-stamps the adopting tech, full test
+suite green. **Operator to-do before rollout: disable public signups (invite-only) in the
+dashboard** — see the header of [216_individual_logins.sql](../supabase/migrations/216_individual_logins.sql).
+Residual (a self-signup `tech` still reads/writes all job data via legacy USING(true) policies)
+is unchanged from before and closes in Phase 3.*
 
 *Goal: attribution and revocability. Behavior of the app otherwise unchanged.*
 

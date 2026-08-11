@@ -117,9 +117,18 @@ export const CONSTRUCTION_TYPES = [
 ];
 export const constructionTypeLabel = (v) => CONSTRUCTION_TYPES.find((t) => t.value === v)?.label || "";
 
+/* ---------- authorship (Phase 1: individual logins) ----------
+   Set once at boot / sign-in from the session email; factories stamp it so
+   every capture carries who created it. Empty while offline or signed out —
+   an empty `by` merges as ordinary content and never blocks anything. */
+let AUTHOR = "";
+export function setAuthor(email) { AUTHOR = String(email || "").trim(); }
+export const author = () => AUTHOR;
+
 export function newProject() {
   return {
     id: uid(),
+    createdBy: AUTHOR,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     archivedAt: "",      // set when filed away from the home list — never deleted, keeps syncing
@@ -183,7 +192,7 @@ export function newProject() {
 }
 
 export function newPhoto() {
-  return { id: uid(), src: "", caption: "", room: "", stage: "during", ts: new Date().toISOString() };
+  return { id: uid(), by: AUTHOR, src: "", caption: "", room: "", stage: "during", ts: new Date().toISOString() };
 }
 
 /* ---------- blank-scaffold detection (sync uses this) ----------
@@ -193,7 +202,7 @@ export function newPhoto() {
    ANY real content — one letter of a name, one photo, one log row — keeps
    the full never-lose-work protection. Conservative on purpose: unknown or
    prefilled values count as content. */
-const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "updatedAt", "archivedAt", "jobType", "photoSize"]);
+const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "createdBy", "updatedAt", "archivedAt", "jobType", "photoSize"]);
 function emptyDeep(v) {
   if (v == null || v === "" || v === false) return true;
   if (Array.isArray(v)) return v.length === 0;   // any element at all is content
@@ -230,7 +239,7 @@ export const POROUS_CATEGORIES = ["Clothing", "Bedding / Linens", "Documents", "
 
 export function newContentsItem() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     name: "", qty: "1", category: "", room: "", boxId: "",
     noBox: false, destination: "",   // large/loose items ship unboxed with their own destination
     condition: "", disposition: "salvageable",
@@ -263,7 +272,7 @@ export function depreciation(item) {
   return { rcv, rate, acv, dep: rcv - acv };
 }
 export function newBox(n) {
-  return { id: uid(), label: "Box " + n, room: "", destination: "Storage", packedBy: "", packedDate: todayISO(),
+  return { id: uid(), by: AUTHOR, label: "Box " + n, room: "", destination: "Storage", packedBy: "", packedDate: todayISO(),
     aiContents: "" };   // AI-listed contents from a box snapshot (editable text)
 }
 
@@ -279,7 +288,7 @@ export function formCount(project, key) {
 /* Factory builders for multi-instance forms */
 export function newMoistureMap() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     label: "", material: "", dryGoal: "", meter: "",
     ambientTemp: "", ambientRH: "", equipmentOnSite: "", technician: "",
     sketch: "",                                  // flattened composite (bg + drawing) for print
@@ -300,7 +309,7 @@ export function blankReadingRow() {
 
 export function newDryingLog() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     dryoutStart: "", dryoutFinish: "", techSupervisor: "",
     equipment: [ blankEquipRow() ],
     readings: [ blankPsychroRow() ],
@@ -321,7 +330,7 @@ export function blankPsychroRow() {
 
 export function newConstructionLog() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     date: todayISO(),
     rows: [],                                    // legacy work-log rows (form no longer collects them)
     notes: "", issues: "", materials: "", photos: [],
@@ -343,7 +352,7 @@ export function newLaborLog() {
 
 export function newChangeOrder() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     coNo: "", coDate: todayISO(),
     reasons: {},                 // checkbox map
     description: "",
@@ -356,7 +365,7 @@ export function newChangeOrder() {
 }
 export function newInvoice() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     invoiceNo: "", invoiceDate: todayISO(), dueDate: "", terms: "Due on receipt",
     lossSummary: "",
     items: [ blankLineItem() ],
@@ -447,7 +456,7 @@ export function newPortalShare() {
    invoice, rebuild scope and assistant can cite it. */
 export function newSupportDoc() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     title: "", docType: "", mode: "upload", uploadedPages: [], aiDigest: "",
   };
 }
@@ -597,7 +606,7 @@ export function blankSubRow() {
 
 export function newInspection() {
   return {
-    id: uid(), createdAt: new Date().toISOString(),
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
     type: "", scheduled: "", inspector: "", result: "",
     corrections: "", reinspection: "", notes: "",
   };
