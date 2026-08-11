@@ -110,6 +110,18 @@
 .crewpick .crewspan__x { border: 0; background: none; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; color: var(--orange); }
 .crewpick .crewspan__x:hover { transform: scale(1.15); }
 
+/* archive (filed-away completed jobs) */
+.bcol__sweep { border: 0; background: none; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; width: auto; min-height: auto; opacity: .5; }
+.bcol__sweep:hover { opacity: 1; transform: scale(1.12); }
+.archsearch { width: 100%; }
+.archlist { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.archrow { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.archrow__main { flex: 1; min-width: 0; cursor: pointer; }
+.archrow__title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.archrow__title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archrow__meta { font-size: 12.5px; margin-top: 2px; }
+.archrow__act { display: flex; gap: 6px; flex-shrink: 0; }
+
 /* crew roster list */
 .crewlist { display: flex; flex-direction: column; gap: 8px; }
 .crewrow { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }

@@ -52,6 +52,7 @@ const JOB_TINTS = ["#1c5fb0", "#2f8f8f", "#d4520f", "#8a6fb0", "#1f9d55", "#c248
 /* ---------- state ---------- */
 const view = $("#view");
 let jobs = [];
+let archivedJobs = [];   // filed-away completed jobs — kept on record, off every view
 let crew = [];
 let entries = [];
 let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
@@ -73,6 +74,14 @@ let calMode = "month";                                   // "month" | "week" | "
 let calRef = todayISO();                                  // reference day for week / day modes
 let ganttZoom = "day";                  // "day" | "week"
 
+/* archived jobs stay in the shared cache/table (it's the record) but out of the
+   working set: the views, the schedule engine, and the crew-load math all run
+   on `jobs` alone, so filing a job away is what takes it off the whiteboard */
+function splitJobs(all) {
+  archivedJobs = all.filter((j) => j.archived);
+  return all.filter((j) => !j.archived);
+}
+
 /* ---------- lookups ---------- */
 const stageOf = (id) => STAGES.find((s) => s.id === id) || STAGES[0];
 const typeOf = (id) => TYPES.find((t) => t.id === id) || TYPES[TYPES.length - 1];
@@ -84,9 +93,11 @@ const crewName = (id) => crewById(id)?.name || "—";
 /* hours / labor.
    A job's entries = its manual rows (matched by jobId) PLUS any QuickBooks Time
    rows for the QB jobcode it's linked to (matched by qbJobcodeId — the real
-   join key the QB pull writes). */
+   join key the QB pull writes). Archived jobs still resolve — their logged
+   history is the whole point of keeping them. */
+const jobById = (id) => jobs.find((j) => j.id === id) || archivedJobs.find((j) => j.id === id);
 const entriesForJob = (jobId) => {
-  const job = jobs.find((j) => j.id === jobId);
+  const job = jobById(jobId);
   const jc = job && job.qbJobcodeId;
   return entries.filter((e) =>
     e.jobId === jobId || (jc && e.source === "qbtime" && e.qbJobcodeId === jc));
@@ -96,7 +107,7 @@ const entriesForJob = (jobId) => {
    don't count toward THIS job (mirrors the field app's Labor Log start date). */
 const inHoursScope = (job, e) => !(job && job.hoursFrom) || String(e.date || "") >= job.hoursFrom;
 const actualHours = (jobId) => {
-  const job = jobs.find((j) => j.id === jobId);
+  const job = jobById(jobId);
   return entriesForJob(jobId).filter((e) => inHoursScope(job, e)).reduce((s, e) => s + (Number(e.hours) || 0), 0);
 };
 /* Which crew member an entry belongs to. Manual rows carry crewId; QB rows carry
@@ -123,7 +134,7 @@ const daysAgoISO = (n) => { const d = new Date(); d.setDate(d.getDate() - n); re
    boot / auth
    ============================================================ */
 function boot() {
-  if (!SYNC_ENABLED) { jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries(); applySchedule(); render(); return; }
+  if (!SYNC_ENABLED) { jobs = splitJobs(cachedJobs()); crew = cachedCrew(); entries = cachedEntries(); applySchedule(); render(); return; }
   if (isSignedIn()) startUI();
   else renderLogin();
 }
@@ -137,7 +148,7 @@ async function startUI() {
     toast(`⚠ “${(serverJob && (serverJob.title || serverJob.customer)) || "A job"}” was changed on another device — your edit wasn't saved. Loaded the latest.`, 7000);
     refresh();
   });
-  jobs = cachedJobs(); crew = cachedCrew(); entries = cachedEntries();
+  jobs = splitJobs(cachedJobs()); crew = cachedCrew(); entries = cachedEntries();
   applySchedule();
   render();              // instant from cache
   // 💬 dispatcher assistant — floats on document.body, so the wholesale
@@ -159,7 +170,7 @@ async function refresh() {
   setSync("syncing");
   try {
     const r = await pull();
-    jobs = r.jobs; crew = r.crew; entries = r.entries || [];
+    jobs = splitJobs(r.jobs); crew = r.crew; entries = r.entries || [];
     applySchedule();
     setSync(pendingCount() ? "error" : "synced");
     if (!modalOpen) render();
@@ -324,6 +335,8 @@ function actionButtons() {
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHelpModal, title: "How to use the Job Board" }, "❓ Help"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openScheduleSettings, title: "Work calendar & hours per day" }, "🗓 Calendar"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openHoursModal }, "⏱ Hours"),
+    h("button", { class: "btn btn--ghost btn--sm", onclick: openArchiveModal, title: "Completed jobs filed off the board — browse, reopen, or restore them" },
+      "🗄 Archive" + (archivedJobs.length ? ` (${archivedJobs.length})` : "")),
     h("button", { class: "btn btn--ghost btn--sm", onclick: openCrewModal, title: "Add or edit crew members" }, "Roster"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "↻ Refresh"),
     h("button", { class: "btn btn--ghost btn--sm", onclick: exportPDF, title: "Print / save as PDF" }, "🖨 PDF"),
@@ -490,10 +503,24 @@ function renderColumn(st, colJobs) {
     moveJob(id, st.id);
   });
 
+  // Complete column: one-click sweep into the archive — clears the whiteboard
+  // without deleting anything
+  const sweep = st.id === "done" && colJobs.length ? h("button", {
+    class: "bcol__sweep", title: "Archive everything in Complete — off the board, kept on record under 🗄 Archive",
+    onclick: async () => {
+      const n = colJobs.length;
+      if (!confirm(`Archive ${n === 1 ? "this completed job" : `all ${n} completed jobs`}?\n\nThey come off the board, calendar, and timeline, but stay on record — open 🗄 Archive any time to look one up or put it back.`)) return;
+      for (const j of colJobs) await archiveJob(j);
+      render();
+      toast(`${n} job${n === 1 ? "" : "s"} archived — see 🗄 Archive`);
+    },
+  }, "🗄") : null;
+
   return h("div", { class: "bcol" },
     h("div", { class: "bcol__head" },
       h("span", { class: "bcol__dot", style: `background:${st.color}` }),
       h("span", { class: "bcol__name" }, st.label),
+      sweep,
       h("span", { class: "bcol__count" }, String(colJobs.length))),
     bodyEl);
 }
@@ -610,6 +637,29 @@ async function moveJob(id, stageId) {
   if (!j || (j.stage || "lead") === stageId) return;
   j.stage = stageId;
   render();
+  setSync("syncing");
+  await saveJob(j);
+  setSync(pendingCount() ? "error" : "synced");
+}
+
+/* ---------- archive (file a finished job off the board, keep the record) ----------
+   The flag rides the job blob, so it syncs like any other edit. Dates freeze
+   exactly as saved: the engine never sees archived jobs, and a dependent whose
+   predecessor is filed away just keeps the dates it already has. */
+async function archiveJob(j) {
+  j.archived = true;
+  j.archivedAt = todayISO();
+  jobs = jobs.filter((x) => x.id !== j.id);
+  archivedJobs = [...archivedJobs.filter((x) => x.id !== j.id), j];
+  setSync("syncing");
+  await saveJob(j);
+  setSync(pendingCount() ? "error" : "synced");
+}
+async function unarchiveJob(j) {
+  delete j.archived;
+  delete j.archivedAt;
+  archivedJobs = archivedJobs.filter((x) => x.id !== j.id);
+  jobs = [...jobs.filter((x) => x.id !== j.id), j];
   setSync("syncing");
   await saveJob(j);
   setSync(pendingCount() ? "error" : "synced");
@@ -791,10 +841,10 @@ function paintDay() {
    jobs of the same loss — the one whose "count hours from" date this entry is
    on or after owns it (the rule qb-time-proxy's phasedJobForDate uses). */
 function jobForEntry(e) {
-  if (e.jobId) { const j = jobs.find((x) => x.id === e.jobId); if (j) return j; }
+  if (e.jobId) { const j = jobById(e.jobId); if (j) return j; }
   if (e.source === "qbtime" && e.qbJobcodeId) {
     let best = null;
-    for (const j of jobs) {
+    for (const j of [...jobs, ...archivedJobs]) {
       if (j.qbJobcodeId !== e.qbJobcodeId || !inHoursScope(j, e)) continue;
       if (!best || (j.hoursFrom || "") > (best.hoursFrom || "")) best = j;
     }
@@ -815,7 +865,9 @@ const nowMinutes = () => { const d = new Date(); return d.getHours() * 60 + d.ge
    user was never linked to the roster still earns a row under the name
    QuickBooks sent — unlinked hours are a real gap, not a reason to hide time. */
 function dayRowsFor(iso) {
-  const visible = new Set(jobs.filter(matchesFilter).map((j) => j.id));
+  // archived jobs count as visible: a past day's timeline is a record, and the
+  // hours worked on a since-filed job still belong on it
+  const visible = new Set([...jobs, ...archivedJobs].filter(matchesFilter).map((j) => j.id));
   const rows = new Map();
   const rowFor = (key, name, color, crewId) => {
     let r = rows.get(key);
@@ -1827,6 +1879,17 @@ function openJobModal(existing, newMilestone) {
     });
     // j.deps / j.scheduleMode / j.durationDays are mutated live by the Schedule section
     saveBtn.disabled = true;
+    if (j.archived) {
+      // editing the record only — an archived job stays out of the working set,
+      // so no schedule re-flow and no cascade
+      archivedJobs = [...archivedJobs.filter((x) => x.id !== j.id), j];
+      closeModal();
+      setSync("syncing");
+      await saveJob(j);
+      setSync(pendingCount() ? "error" : "synced");
+      toast("Saved");
+      return;
+    }
     jobs = [...jobs.filter((x) => x.id !== j.id), j];
     const { changed } = applySchedule();        // resolve j's dates + cascade dependents
     closeModal();                                // re-renders the board with final dates
@@ -1843,11 +1906,32 @@ function openJobModal(existing, newMilestone) {
     del.addEventListener("click", async () => {
       if (!confirm("Delete this job from the board?")) return;
       jobs = jobs.filter((x) => x.id !== j.id);
+      archivedJobs = archivedJobs.filter((x) => x.id !== j.id);
       closeModal(); render();
       setSync("syncing"); await deleteJob(j.id); setSync(pendingCount() ? "error" : "synced");
       toast("Job deleted");
     });
     foot.append(del);
+    if (j.archived) {
+      const restore = h("button", { class: "btn btn--ghost" }, "↩ Restore to board");
+      restore.addEventListener("click", async () => {
+        closeModal();
+        await unarchiveJob(existing);   // the real job object, not the modal's working copy
+        render();
+        toast("Back on the board — " + stageOf(existing.stage).label);
+      });
+      foot.append(restore);
+    } else {
+      const arch = h("button", { class: "btn btn--ghost", title: "Take it off the board, calendar, and timeline — kept on record under 🗄 Archive" }, "🗄 Archive");
+      arch.addEventListener("click", async () => {
+        if (!confirm("Archive this job?\n\nIt comes off the board, calendar, and timeline, but stays on record — open 🗄 Archive any time to look it up or put it back.")) return;
+        closeModal();
+        await archiveJob(existing);     // the real job object, not the modal's working copy
+        render();
+        toast("Archived — see 🗄 Archive");
+      });
+      foot.append(arch);
+    }
   }
   foot.append(h("button", { class: "btn btn--ghost", onclick: closeModal }, "Cancel"), saveBtn);
 
@@ -1988,7 +2072,7 @@ function buildJobHoursSection(job) {
       const linkBtn = h("button", { class: "btn btn--ghost btn--sm" }, linked ? "Change" : "Link QuickBooks job");
       linkBtn.addEventListener("click", async () => {
         const p = await pickJobcode(job);
-        if (p) { await saveJob(job); jobs = cachedJobs(); render(); }
+        if (p) { await saveJob(job); jobs = splitJobs(cachedJobs()); render(); }
       });
       const controls = [
         linked
@@ -2036,6 +2120,62 @@ function buildJobHoursSection(job) {
 
   render();
   return wrap;
+}
+
+/* ============================================================
+   archive browser (toolbar → 🗄 Archive)
+   Completed jobs filed off the board. Everything is kept — dates,
+   crew, notes, logged hours — so a job can be looked up years
+   later or put straight back on the board.
+   ============================================================ */
+function openArchiveModal() {
+  const body = h("div", { class: "bmodal__body" });
+  const sub = h("p", { class: "subtle", style: "margin-top:0" });
+  const search = h("input", { type: "search", class: "archsearch", placeholder: "Search archived jobs — name, customer, address…" });
+  const list = h("div", { class: "archlist" });
+
+  function paint() {
+    sub.textContent = archivedJobs.length
+      ? `${archivedJobs.length} job${archivedJobs.length === 1 ? "" : "s"} on record. Click one to open it, or ↩ Restore to put it back on the board in its old stage.`
+      : "Jobs you archive land here — off the board, calendar, and timeline, but never gone.";
+    clear(list);
+    const q = (search.value || "").trim().toLowerCase();
+    const rows = archivedJobs
+      .filter((j) => !q || (j.title + " " + (j.customer || "") + " " + (j.address || "")).toLowerCase().includes(q))
+      .sort((a, b) => (b.archivedAt || "").localeCompare(a.archivedAt || "") || (a.title || "").localeCompare(b.title || ""));
+    if (!rows.length) {
+      list.append(h("div", { class: "subtle", style: "padding:14px 2px" },
+        archivedJobs.length ? "No archived jobs match your search."
+          : "Nothing archived yet. Open a finished job and hit 🗄 Archive — or sweep the whole Complete column with the 🗄 on its header."));
+      return;
+    }
+    for (const j of rows) {
+      const ty = typeOf(j.type);
+      const act = actualHours(j.id);
+      const span = j.startDate && j.targetDate ? `${fmtDate(j.startDate)} → ${fmtDate(j.targetDate)}`
+        : (j.startDate || j.targetDate) ? fmtDate(j.startDate || j.targetDate) : "";
+      const meta = [j.customer, j.address, span, act ? fmtH(act) + " logged" : "",
+        j.archivedAt ? "archived " + fmtDate(j.archivedAt) : ""].filter(Boolean).join("  ·  ");
+      list.append(h("div", { class: "archrow" },
+        h("div", { class: "archrow__main", onclick: () => openJobModal(j) },
+          h("div", { class: "archrow__title" },
+            j.isMilestone ? h("span", { class: "ms-diamond" }, "◆") : h("span", { class: "btype", style: `background:${ty.color}` }, ty.label),
+            h("strong", {}, j.title || j.customer || "Job")),
+          h("div", { class: "archrow__meta subtle" }, meta || "—")),
+        h("div", { class: "archrow__act" },
+          h("button", { class: "btn btn--ghost btn--sm", onclick: () => openJobModal(j) }, "Open"),
+          h("button", {
+            class: "btn btn--ghost btn--sm", title: "Put it back on the board in its old stage",
+            onclick: async () => { await unarchiveJob(j); paint(); toast("Back on the board — " + stageOf(j.stage).label); },
+          }, "↩ Restore"))));
+    }
+  }
+
+  search.addEventListener("input", paint);
+  body.append(sub, search, list);
+  paint();
+  openModal("🗄 Archive", body, h("div", { class: "bmodal__foot" },
+    h("button", { class: "btn btn--primary", onclick: closeModal }, "Done")));
 }
 
 /* ============================================================
@@ -2096,10 +2236,11 @@ function openHoursModal() {
 
     // ----- by job (est vs actual) — the SAME join the cards and the live
     // schedule use: manual rows + linked QuickBooks rows, hoursFrom respected -----
-    const byJob = jobs.map((j) => {
+    const byJob = [...jobs, ...archivedJobs].map((j) => {
       const actR = entriesForJob(j.id).filter((e) => inRange(e) && inHoursScope(j, e))
         .reduce((s, e) => s + (Number(e.hours) || 0), 0);
-      return { title: j.title || j.customer || "Untitled", est: Number(j.estimatedHours) || 0, act: actR };
+      // archived jobs stay in the report (their hours are still real history)
+      return { title: (j.title || j.customer || "Untitled") + (j.archived ? " · 🗄 archived" : ""), est: Number(j.estimatedHours) || 0, act: actR };
     }).filter((r) => r.act > 0 || r.est > 0).sort((a, b) => b.act - a.act);
 
     const jobTable = h("table", { class: "rtable" },
@@ -2253,7 +2394,8 @@ function openHelpModal() {
           li(h("strong", {}, "+ New Job"), " (top-right) opens the editor. Fill in the name, type, address, phone, dates, crew, and notes, then ", h("strong", {}, "Create"), "."),
           li("Click any card, calendar chip, or Gantt bar to reopen and edit it."),
           li(h("strong", {}, "Drag a card"), " between columns to move it through the pipeline, or drag a Gantt bar to reschedule."),
-          li("Set ", h("strong", {}, "Priority"), " to High to float a job to the top of its column; ", h("strong", {}, "Materials"), " tracks whether parts are ordered or in."))),
+          li("Set ", h("strong", {}, "Priority"), " to High to float a job to the top of its column; ", h("strong", {}, "Materials"), " tracks whether parts are ordered or in."),
+          li(h("strong", {}, "🗄 Archive"), " a finished job from its editor — or sweep the whole Complete column with the 🗄 on its header. Archived jobs come off every view but keep everything: open ", h("strong", {}, "🗄 Archive"), " (toolbar) to look one up, reopen it, or restore it to the board."))),
 
       sec("Scheduling",
         h("p", { class: "help__p" }, "In the editor's Schedule section each job is either ", h("strong", {}, "Auto"), " or ", h("strong", {}, "Manual"), ":"),
