@@ -1,0 +1,259 @@
+---
+/* Homepage. Keeps the old page's emphasis — emergency restoration first,
+   construction second, about third — because that ordering is what the site
+   currently ranks and converts on. The old H1 was
+   "Water, Fire & Mold Damage Restoration in Fairbanks | Roybal Construction",
+   a title tag pasted into a heading; it's rewritten here as a real headline
+   while keeping the same keywords in the same order. */
+import Base from "../layouts/Base.astro";
+import CtaBand from "../components/CtaBand.astro";
+import {
+  BUSINESS,
+  RESTORATION_SERVICES,
+  CONSTRUCTION_SERVICES,
+  SERVICE_AREAS,
+  FAIRBANKS_NEIGHBORHOODS,
+} from "../data/site";
+
+/** "Fairbanks, North Pole, Fox & Ester" — always in step with SERVICE_AREAS. */
+const names = SERVICE_AREAS.map((a) => a.name);
+const areaLine = names.length > 1
+  ? `${names.slice(0, -1).join(", ")} & ${names[names.length - 1]}`
+  : names[0];
+
+const steps = [
+  { n: "1", t: "Call us, any hour", d: "We answer 24/7. You talk to someone who can dispatch, not an answering service." },
+  { n: "2", t: "On site in under 60 minutes", d: "We arrive fast, stop the damage spreading, and make the property safe." },
+  { n: "3", t: "Documented for insurance", d: "Moisture readings, photos, and scope written the way adjusters expect them." },
+  { n: "4", t: "Rebuilt start to finish", d: "Mitigation and reconstruction under one contract. No handoff, no second bid." },
+];
+---
+
+<Base
+  title="Water, Fire &amp; Mold Damage Restoration in Fairbanks | Roybal Construction"
+  description="Roybal Construction, LLC offers construction and restoration services in Fairbanks, AK. 24/7 emergency response, insurance-ready documentation, and full reconstruction. Contact us today!"
+>
+  <section class="home-hero">
+    <div class="wrap">
+      <span class="eyebrow">Fairbanks, Alaska · Licensed &amp; insured</span>
+      <h1>24/7 water, fire &amp; mold damage restoration in Fairbanks</h1>
+      <p class="lede home-hero__lede">
+        Emergency response in under 60 minutes. Professional mitigation, insurance-ready
+        documentation, and complete reconstruction handled start to finish.
+      </p>
+      <div class="home-hero__cta">
+        <a class="btn btn--primary" href={BUSINESS.phoneHref}>Call now — {BUSINESS.phone}</a>
+        <a class="btn btn--ghost" href="/contact-us">Get a free estimate</a>
+      </div>
+      {/* Derived, not typed. Hardcoding this list is how Fort Wainwright
+          survived on the homepage after it was removed everywhere else. */}
+      <p class="home-hero__note">Serving {areaLine}</p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <span class="eyebrow">Emergency restoration</span>
+      <h2>When water, fire, or mold hits your property</h2>
+      <p class="lede">
+        Fast response and proper mitigation are what keep a bad day from becoming a
+        total loss. We handle the emergency, the paperwork, and the rebuild.
+      </p>
+      <div class="grid grid--4" style="margin-top:2rem">
+        {RESTORATION_SERVICES.map((s) => (
+          <a class="card" href={s.path}>
+            <h3>{s.name}</h3>
+            <p>{s.blurb}</p>
+            <span class="card__more">Learn more →</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--navy">
+    <div class="wrap">
+      <span class="eyebrow">How it works</span>
+      <h2>What happens after you call</h2>
+      <ol class="steps">
+        {steps.map((s) => (
+          <li class="step">
+            <span class="step__n">{s.n}</span>
+            <h3>{s.t}</h3>
+            <p>{s.d}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <span class="eyebrow">Construction services</span>
+      <h2>Remodeling, roofing, decks &amp; new builds</h2>
+      <p class="lede">
+        The same crew that restores damaged property builds new ones. Residential and
+        commercial, from a single room to the whole structure.
+      </p>
+      <div class="grid grid--3" style="margin-top:2rem">
+        {CONSTRUCTION_SERVICES.map((s) => (
+          <a class="card" href={s.path}>
+            <h3>{s.name}</h3>
+            <p>{s.blurb}</p>
+            <span class="card__more">Learn more →</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--muted">
+    <div class="wrap about-grid">
+      <div>
+        <span class="eyebrow">About us</span>
+        <h2>Locally owned, built for the Alaskan climate</h2>
+        <p>
+          Founded on the principles of integrity and community, Roybal Construction, LLC is a
+          locally owned and operated business committed to enhancing the Fairbanks area. We
+          understand the unique challenges posed by the Alaskan climate and are dedicated to
+          providing solutions tailored to our local environment.
+        </p>
+        <p>
+          What sets us apart is our customer-first approach. We prioritize clear communication
+          and ensure that you're informed throughout every step of the process. Our team is
+          licensed, insured, and passionate about delivering high-quality work that stands the
+          test of time.
+        </p>
+        <a class="btn btn--outline" href="/about-roybal-construction-llc">More about Roybal Construction</a>
+      </div>
+      <ul class="facts">
+        <li><strong>24/7</strong><span>Emergency response</span></li>
+        <li><strong>&lt;60 min</strong><span>Typical arrival on site</span></li>
+        <li><strong>20+ yrs</strong><span>Trade experience</span></li>
+        <li><strong>One contract</strong><span>Mitigation through rebuild</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section--tight areas">
+    <div class="wrap">
+      <h2 class="areas__h">Areas we serve</h2>
+      <p class="areas__list">
+        {SERVICE_AREAS.map((a, i) => (
+          <>
+            {a.page ? <a href={`/general-contractor-in-${a.slug}`}>{a.name}</a> : <span>{a.name}</span>}
+            {i < SERVICE_AREAS.length - 1 ? <span aria-hidden="true"> · </span> : null}
+          </>
+        ))}
+      </p>
+      {/* The trailing punctuation sits inside the last item — a newline
+          between the link and the period renders as a stray space. */}
+      <p class="areas__hoods">
+        In Fairbanks we work throughout the city, including{" "}
+        {FAIRBANKS_NEIGHBORHOODS.map((n, i) => (
+          <><a href={`/general-contractor-in-${n.slug}`}>{n.name}</a>{i < FAIRBANKS_NEIGHBORHOODS.length - 1 ? " and " : "."}</>
+        ))}
+      </p>
+    </div>
+  </section>
+
+  <CtaBand
+    heading="Ready to start your next project?"
+    body="Contact Roybal Construction, LLC for a free estimate — or call now if it's an emergency."
+  />
+</Base>
+
+<style>
+  /* Real Roybal job site, not stock. NOTE: the source file is only ~711px
+     wide — fine behind this gradient, but a high-res replacement would be a
+     visible upgrade. Flagged in CONTENT-REVIEW.md. */
+  .home-hero {
+    background:
+      linear-gradient(100deg, rgb(15 27 45 / 97%) 45%, rgb(15 27 45 / 72%)),
+      url("/images/f4629a15-general-contractor-in-fairbanks-4.jpg") center / cover;
+    background-color: var(--navy-900);
+    color: var(--slate-300);
+    padding: clamp(3.5rem, 9vw, 7rem) 0 clamp(3rem, 7vw, 5rem);
+  }
+  .home-hero h1 { color: var(--white); max-width: 18ch; }
+  .home-hero__lede { color: var(--slate-300); margin-top: 1rem; }
+  .home-hero__cta { display: flex; flex-wrap: wrap; gap: 0.8rem; margin-top: 1.9rem; }
+  .home-hero__note {
+    margin: 1.3rem 0 0;
+    font-size: 0.88rem;
+    color: var(--slate-400);
+  }
+
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: 1.5rem;
+    list-style: none;
+    margin: 2rem 0 0;
+    padding: 0;
+    counter-reset: step;
+  }
+  .step {
+    border-top: 3px solid var(--orange);
+    padding-top: 1.1rem;
+  }
+  .step__n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem; height: 2rem;
+    border-radius: 50%;
+    background: var(--orange);
+    color: var(--white);
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin-bottom: 0.7rem;
+  }
+  .step h3 { font-size: var(--step-1); margin-bottom: 0.35rem; }
+  .step p { color: var(--slate-400); font-size: 0.95rem; margin: 0; }
+
+  .about-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: clamp(2rem, 5vw, 4rem);
+    align-items: start;
+  }
+  @media (max-width: 860px) {
+    .about-grid { grid-template-columns: 1fr; }
+  }
+  .about-grid .btn { margin-top: 0.6rem; }
+
+  .facts {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 1px;
+    background: var(--slate-200);
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .facts li {
+    background: var(--white);
+    padding: 1.15rem 1.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .facts strong {
+    color: var(--orange-dark);
+    font-size: var(--step-2);
+    line-height: 1.1;
+  }
+  .facts span { color: var(--slate-500); font-size: 0.9rem; }
+
+  .areas { background: var(--slate-50); border-top: 1px solid var(--slate-200); }
+  .areas__h { font-size: var(--step-1); margin-bottom: 0.5rem; }
+  .areas__list { margin: 0; color: var(--slate-500); line-height: 2; }
+  .areas__list a { color: var(--orange-dark); text-decoration: none; }
+  .areas__list a:hover { text-decoration: underline; }
+  .areas__hoods { margin: 0.35rem 0 0; font-size: 0.92rem; color: var(--slate-500); }
+  .areas__hoods a { color: var(--orange-dark); text-decoration: none; }
+  .areas__hoods a:hover { text-decoration: underline; }
+</style>

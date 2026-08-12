@@ -1,0 +1,234 @@
+---
+/* Replaces the two forms.marketing360.com embeds.
+
+   Submits to the roybal-lead edge function, which writes a coordination_jobs
+   row in exactly the shape the phone agent's createLead uses — so a web lead
+   and a phone lead land as the same kind of card on the job board and reuse
+   the alerting that's already wired up.
+
+   Progressive enhancement: the form is a real <form> with a real action, so
+   it still posts if the inline script fails. The script only upgrades it to
+   an inline success message instead of a page navigation. */
+import { BUSINESS, SERVICES } from "../data/site";
+
+interface Props {
+  /** Pre-selects the service dropdown when embedded on a service page. */
+  service?: string;
+  compact?: boolean;
+}
+const { service = "", compact = false } = Astro.props;
+
+const endpoint = import.meta.env.PUBLIC_LEAD_ENDPOINT ?? "";
+---
+
+<form
+  class:list={["qf", compact && "qf--compact"]}
+  method="post"
+  action={endpoint}
+  data-lead-form
+  novalidate
+>
+  <div class="qf__row">
+    <div class="qf__field">
+      <label for="qf-name">Your name <span aria-hidden="true">*</span></label>
+      <input id="qf-name" name="name" type="text" required autocomplete="name" maxlength="80" />
+    </div>
+    <div class="qf__field">
+      <label for="qf-phone">Phone <span aria-hidden="true">*</span></label>
+      <input id="qf-phone" name="phone" type="tel" required autocomplete="tel" maxlength="25" />
+    </div>
+  </div>
+
+  <div class="qf__row">
+    <div class="qf__field">
+      <label for="qf-email">Email</label>
+      <input id="qf-email" name="email" type="email" autocomplete="email" maxlength="120" />
+    </div>
+    <div class="qf__field">
+      <label for="qf-service">What do you need?</label>
+      <select id="qf-service" name="service">
+        <option value="">Select a service…</option>
+        {SERVICES.map((s) => (
+          <option value={s.name} selected={s.name === service}>{s.name}</option>
+        ))}
+        <option value="Other">Something else</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="qf__field">
+    <label for="qf-address">Property address</label>
+    <input id="qf-address" name="address" type="text" autocomplete="street-address" maxlength="160" />
+  </div>
+
+  <div class="qf__field">
+    <label for="qf-message">Tell us about the project</label>
+    <textarea id="qf-message" name="message" rows="4" maxlength="1500"></textarea>
+  </div>
+
+  <fieldset class="qf__urgency">
+    <legend>Is this an emergency?</legend>
+    <label><input type="radio" name="urgency" value="normal" checked /> No — planning a project</label>
+    <label><input type="radio" name="urgency" value="emergency" /> Yes — active damage right now</label>
+  </fieldset>
+
+  {/* Honeypot: hidden from people, irresistible to bots. A filled value is
+      rejected server-side. Not display:none — some bots skip those. */}
+  <div class="qf__hp" aria-hidden="true">
+    <label for="qf-company">Company (leave blank)</label>
+    <input id="qf-company" name="company" type="text" tabindex="-1" autocomplete="off" />
+  </div>
+
+  <button class="btn btn--primary qf__submit" type="submit">Request my free estimate</button>
+
+  <p class="qf__note">
+    We answer 24/7. If this is an active emergency, calling
+    <a href={BUSINESS.phoneHref}>{BUSINESS.phone}</a> is fastest.
+  </p>
+
+  <p class="qf__status" data-lead-status role="status" aria-live="polite"></p>
+</form>
+
+<script>
+  // Upgrade to async submit. Without JS the form still posts normally.
+  document.querySelectorAll<HTMLFormElement>("form[data-lead-form]").forEach((form) => {
+    const status = form.querySelector<HTMLElement>("[data-lead-status]");
+    const button = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+
+    form.addEventListener("submit", async (e) => {
+      if (!form.action) return; // no endpoint configured — let it post normally
+      e.preventDefault();
+
+      if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+      }
+
+      const original = button?.textContent ?? "";
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Sending…";
+      }
+      if (status) {
+        status.textContent = "";
+        status.className = "qf__status";
+      }
+
+      try {
+        const res = await fetch(form.action, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.fromEntries(new FormData(form))),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || `Request failed (${res.status})`);
+
+        form.reset();
+        if (status) {
+          status.className = "qf__status qf__status--ok";
+          status.textContent = "Thanks — we've got it. We'll be in touch shortly.";
+        }
+      } catch (err) {
+        if (status) {
+          status.className = "qf__status qf__status--err";
+          status.textContent =
+            "That didn't go through. Please call (907) 371-9868 and we'll take care of you.";
+        }
+        console.error("lead submit failed", err);
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      }
+    });
+  });
+</script>
+
+<style>
+  .qf {
+    display: grid;
+    gap: 1.1rem;
+    background: var(--white);
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius-lg);
+    padding: clamp(1.25rem, 3vw, 2rem);
+    box-shadow: var(--shadow);
+  }
+  .qf__row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.1rem;
+  }
+  @media (max-width: 620px) {
+    .qf__row { grid-template-columns: 1fr; }
+  }
+
+  .qf__field { display: flex; flex-direction: column; gap: 0.35rem; }
+  .qf__field label,
+  .qf__urgency legend {
+    font-size: 0.86rem;
+    font-weight: 700;
+    color: var(--navy-800);
+  }
+  .qf__field label span { color: var(--orange-dark); }
+
+  .qf input,
+  .qf select,
+  .qf textarea {
+    font: inherit;
+    color: var(--ink);
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--slate-300);
+    border-radius: var(--radius);
+    background: var(--white);
+    width: 100%;
+    min-height: 46px;
+  }
+  .qf textarea { resize: vertical; min-height: 110px; }
+  .qf input:focus-visible,
+  .qf select:focus-visible,
+  .qf textarea:focus-visible { border-color: var(--orange); }
+
+  .qf__urgency {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1.25rem;
+  }
+  .qf__urgency legend { margin-bottom: 0.35rem; }
+  .qf__urgency label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.94rem;
+    font-weight: 400;
+    color: var(--body);
+  }
+  .qf__urgency input { width: auto; min-height: 0; }
+
+  /* Off-screen rather than hidden, so bots still see and fill it. */
+  .qf__hp {
+    position: absolute;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+
+  .qf__submit { width: 100%; }
+
+  .qf__note {
+    margin: 0;
+    font-size: 0.86rem;
+    color: var(--slate-500);
+    text-align: center;
+  }
+
+  .qf__status { margin: 0; font-size: 0.94rem; font-weight: 600; }
+  .qf__status:empty { display: none; }
+  .qf__status--ok { color: var(--success); }
+  .qf__status--err { color: var(--danger); }
+</style>

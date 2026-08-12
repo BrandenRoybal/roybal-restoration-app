@@ -1,0 +1,33 @@
+---
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import QuoteForm from "../components/QuoteForm.astro";
+import { BUSINESS } from "../data/site";
+---
+
+<Base
+  title="Give Feedback — Roybal Construction, LLC"
+  description="Tell Roybal Construction, LLC how we did. Your feedback goes straight to the owner."
+>
+  <PageHero
+    heading="Give Feedback"
+    lede="We value your feedback — good or bad, it goes straight to the owner."
+  />
+
+  <section class="section">
+    <div class="wrap narrow">
+      <p>
+        If something didn't go the way it should have, we want to know while we can still do
+        something about it. Fill this out, or call <a href={BUSINESS.phoneHref}>{BUSINESS.phone}</a>
+        and ask for Branden.
+      </p>
+      <div style="margin-top:1.5rem">
+        <QuoteForm compact />
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .narrow { max-width: 46rem; }
+</style>

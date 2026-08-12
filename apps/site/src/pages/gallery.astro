@@ -1,0 +1,73 @@
+---
+/* ⚠️ NEEDS REVIEW — these 18 photos came across from the old site with no
+   captions and generic filenames (gallery1.jpg…). Branden has flagged the
+   gallery as stale.
+
+   Two things to fix when the real photos land:
+     1. Alt text. Right now every image is decorative-empty, which is honest
+        but contributes nothing. "Kitchen remodel in Hamilton Acres — custom
+        cabinetry" is worth real search traffic on image search.
+     2. Grouping by project rather than a flat wall of thumbnails, so each
+        one can link to the service page it demonstrates. */
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import CtaBand from "../components/CtaBand.astro";
+
+const photos = [
+  "bec6bd14-gallery1.jpg", "cd486074-gallery2.jpg", "b5c1ff29-gallery3.jpg",
+  "0c4abb7e-gallery4.jpg", "b1c15ebe-gallery5.jpg", "00ffbb06-gallery6.jpg",
+  "41c2cde1-gallery7.jpg", "bd628c35-gallery8.jpg", "4a7f28b7-gallery9.jpg",
+  "af60a69b-gallery10.jpg", "7998a7af-gallery11.jpg", "6787c64f-gallery12.jpg",
+  "aabbaa52-gallery13.jpg", "b5f9ef99-gallery14.jpg", "c37de888-gallery15.jpg",
+  "3f61e995-gallery16.jpg", "25f7454f-gallery17.jpg", "c590ba7a-gallery18.jpg",
+];
+---
+
+<Base
+  title="Project Gallery — Roybal Construction, Fairbanks AK"
+  description="See recent work from Roybal Construction, LLC in Fairbanks, Alaska — decks, kitchens, remodels, new construction, and restoration projects."
+>
+  <PageHero heading="Gallery" lede="Some of our work around Fairbanks." />
+
+  <section class="section">
+    <div class="wrap">
+      <ul class="gal">
+        {photos.map((p, i) => (
+          <li>
+            <img
+              src={`/images/${p}`}
+              alt=""
+              loading={i < 6 ? "eager" : "lazy"}
+              decoding="async"
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
+  </section>
+
+  <CtaBand heading="Want something like this?" />
+</Base>
+
+<style>
+  .gal {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+    gap: 1rem;
+  }
+  .gal li {
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--slate-100);
+  }
+  .gal img {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    transition: transform 0.3s;
+  }
+  .gal li:hover img { transform: scale(1.03); }
+</style>

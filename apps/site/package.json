@@ -1,0 +1,19 @@
+{
+  "name": "@roybal/site",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Public marketing site — www.roybalconstruction.com",
+  "scripts": {
+    "dev": "astro dev --port 4330",
+    "build": "astro build && node scripts/postbuild.mjs && node scripts/check-parity.mjs",
+    "preview": "astro preview --port 4330",
+    "check": "astro check",
+    "parity": "node scripts/check-parity.mjs",
+    "check-live": "node scripts/check-live.mjs"
+  },
+  "dependencies": {
+    "astro": "^5.14.1",
+    "@astrojs/sitemap": "^3.6.0"
+  }
+}

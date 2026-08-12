@@ -22,6 +22,12 @@
  *
  * Secrets:  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM (+1XXXXXXXXXX)
  *           SMS_MONTHLY_CAP (optional, default 500 messages / month)
+ *           SMS_RESERVE     (optional, default 150 — the tail of the monthly
+ *                            cap held for PROTECTED_KINDS. Public lanes
+ *                            (webOwner/webLead, reachable by any stranger on
+ *                            the website) are refused once the balance drops
+ *                            this low, so they can never silence the phone
+ *                            receptionist's alerts or approve-by-text.)
  *           SMS_FORWARD_TO  (optional — US number that inbound texts forward to)
  *           SMS_QUIET_START / SMS_QUIET_END (optional, default 8 / 20 — the
  *           Alaska-time window customer-facing texts may send in)
@@ -46,9 +52,16 @@ const TWILIO_AUTH = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const TWILIO_FROM = Deno.env.get("TWILIO_FROM") ?? "";
 const SMS_FORWARD_TO = Deno.env.get("SMS_FORWARD_TO") ?? "";
 // A non-numeric SMS_MONTHLY_CAP secret (e.g. "500 texts") must NOT silently
-// disable the cap — fall back to the 500 default when it isn't a finite number.
-const CAP_RAW = Number(Deno.env.get("SMS_MONTHLY_CAP") ?? "500");
-const SMS_MONTHLY_CAP = Number.isFinite(CAP_RAW) ? CAP_RAW : 500;
+// disable the cap — fall back to the 500 default when it isn't a finite
+// number. A BLANK secret is the same trap: Deno hands back "" and Number("")
+// is 0, which would disable the cap entirely. envNum (below) treats blank as
+// unset; this line is kept in sync with it.
+const SMS_MONTHLY_CAP = (() => {
+  const raw = (Deno.env.get("SMS_MONTHLY_CAP") ?? "").trim();
+  if (!raw) return 500;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 500;
+})();
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -61,10 +74,24 @@ const json = (b: unknown, s = 200) =>
 /* ---------- Supabase REST via the caller's token (RLS applies for user
    JWTs; /inbound passes the service-role key AFTER the Twilio signature
    check, since Twilio has no user session) ---------- */
+/* ⚠️ New-format Supabase API keys (`sb_secret_…`, `sb_publishable_…`) are NOT
+   JWTs. Sending one in Authorization while `apikey` is the legacy anon JWT
+   makes PostgREST try to parse the bearer as a JWT, fail, and return 401 —
+   which surfaced here as `send-count read failed (401)` from monthCount(),
+   thrown BEFORE the sms_messages insert, so nothing was logged and the caller
+   saw an opaque 400.
+
+   That is not hypothetical: this project's SUPABASE_SERVICE_ROLE_KEY is now an
+   `sb_secret_…` key, so every service-role caller of this function was silently
+   unable to send. Pair a new-format token with itself; JWT callers (the phone
+   agent's machine session, the field app's user JWT) are unaffected. */
+const isNewFormatKey = (t: string) => /^sb_(secret|publishable)_/.test(t);
+
 function db(path: string, token: string, opts: RequestInit = {}, apikey = ANON_KEY) {
+  const key = isNewFormatKey(token) ? token : apikey;
   return fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...opts,
-    headers: { apikey, Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opts.headers || {}) },
+    headers: { apikey: key, Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opts.headers || {}) },
   });
 }
 
@@ -95,7 +122,46 @@ const clip = (t: string, n = 1600) => Array.from(t).slice(0, n).join("");
    quiet-hours-guarded by default until it's deliberately exempted. */
 /* phoneOwner = the phone receptionist's owner alerts — a 2am new-loss
    call MUST reach the owner's cell, so it is quiet-hours exempt. */
-const CREW_KINDS = new Set(["fieldReport", "forward", "assistCrew", "phoneOwner", "brief"]);
+const CREW_KINDS = new Set([
+  "fieldReport", "forward", "assistCrew", "phoneOwner", "brief",
+  // Website lead alerts. A 2am flooding basement should buzz the owner's
+  // phone — that is the whole point of a 24/7 restoration business.
+  "webOwner", "webLead",
+]);
+
+/* ---------- the monthly reserve ----------
+   SMS_MONTHLY_CAP is ONE shared budget across every lane in the business.
+   Before this, a runaway on any lane could spend the last message and
+   silently take out the ones the company actually runs on: the phone
+   receptionist's owner alerts, inbound forwarding, the morning brief, and
+   approve-by-text.
+
+   So the PUBLIC lanes — the two an anonymous stranger on the website can
+   reach — are refused once the remaining balance drops to SMS_RESERVE.
+   Everything else keeps sending down to zero.
+
+   The split is by who can trigger it, not by importance. A crew member
+   texting a customer "on our way" is authenticated and must not be refused
+   because the website had a busy afternoon; only webOwner (the AI chat) and
+   webLead (the quote form) are reachable without a login. */
+const PROTECTED_KINDS = new Set([
+  "phoneOwner", "forward", "brief", "assistCrew", "fieldReport",
+  // field app + board customer messaging (authenticated callers)
+  "onOurWay", "assist", "text", "portal", "reminder",
+]);
+const PUBLIC_KINDS = new Set(["webOwner", "webLead"]);
+
+/* A BLANK secret must not disable the cap. Deno returns "" for a secret set to
+   an empty value, and Number("") === 0 — which would make `used >= 0` true
+   forever, refusing everything, or with the cap at 0 disable it entirely.
+   Treat blank exactly like unset. */
+const envNum = (name: string, dflt: number) => {
+  const raw = (Deno.env.get(name) ?? "").trim();
+  if (!raw) return dflt;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : dflt;
+};
+const SMS_RESERVE = envNum("SMS_RESERVE", 150);
 const qh = (v: string | undefined, dflt: number) => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 && n <= 24 ? n : dflt;
@@ -161,6 +227,16 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
   const used = await monthCount(jwt);
   if (SMS_MONTHLY_CAP > 0 && used >= SMS_MONTHLY_CAP)
     throw new Error(`sms_cap_reached: ${used} of ${SMS_MONTHLY_CAP} texts this month — raise SMS_MONTHLY_CAP if intended.`);
+
+  // …and the reserve floor: a public lane may not spend the last SMS_RESERVE
+  // messages that the phone lane and approve-by-text depend on.
+  // ⚠️ Refusal is an explicit allowlist. Adding a new PUBLIC lane means adding
+  // it to PUBLIC_KINDS — otherwise it sends down to zero like an internal one.
+  if (SMS_MONTHLY_CAP > 0 && PUBLIC_KINDS.has(kind) && used >= SMS_MONTHLY_CAP - SMS_RESERVE)
+    throw new Error(
+      `sms_reserve_reached: ${used} of ${SMS_MONTHLY_CAP} used — the last ${SMS_RESERVE} are held for ` +
+      `the phone lane. Kind '${kind}' is refused until next month or until SMS_MONTHLY_CAP is raised.`,
+    );
 
   // RLS-gated insert BEFORE the paid call — unauthenticated callers stop here
   const ins = await db("sms_messages", jwt, {

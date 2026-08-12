@@ -1,0 +1,493 @@
+---
+/* The AI receptionist panel.
+
+   Phase 1: the visitor types, and the receptionist SPEAKS its replies using
+   the browser's own speechSynthesis. No microphone yet — that is Phase 2 —
+   and no audio ever leaves the device either way.
+
+   The whole thing is a progressive enhancement over the quote form. Every
+   failure path — capped, rate-limited, kill-switched, Anthropic down, no
+   JavaScript, no speech support — lands the visitor on the form and the phone
+   number that already convert leads today. There is no state in which this
+   panel failing costs a lead.
+
+   No framework, no dependency: same vanilla <script> + scoped <style> idiom
+   as QuoteForm.astro. */
+import { BUSINESS } from "../data/site";
+
+interface Props {
+  /** Preselects the topic when embedded on a service page. */
+  service?: string;
+}
+const { service = "" } = Astro.props;
+const endpoint = import.meta.env.PUBLIC_WEB_AGENT_ENDPOINT ?? "";
+---
+
+{/* data-phone: an Astro <script> is bundled separately and cannot read
+    frontmatter, so the number reaches the script through the DOM. Hardcoding
+    it in the script is how it drifted the last time this number changed.
+    (This comment sits OUTSIDE the expression below — `{cond && ( … )}` takes
+    exactly one root node, and a comment plus an element is two.) */}
+{endpoint && (
+  <div class="rcp" data-rcp data-endpoint={endpoint} data-service={service} data-phone={BUSINESS.phone}>
+    <button class="rcp__pill" type="button" data-rcp-open aria-expanded="false" aria-controls="rcp-panel">
+      <span class="rcp__pillDot" aria-hidden="true"></span>
+      <span class="rcp__pillText">Questions? Chat with us</span>
+    </button>
+
+    <section class="rcp__panel" id="rcp-panel" hidden aria-label="Chat with Roybal Construction">
+      <header class="rcp__head">
+        <div>
+          <p class="rcp__title">Roybal Construction</p>
+          <p class="rcp__sub" data-rcp-notice>AI assistant — not a quote or a contract.</p>
+        </div>
+        <div class="rcp__headBtns">
+          <button class="rcp__icon" type="button" data-rcp-mute aria-pressed="false" title="Mute the voice">
+            <span data-rcp-muteIcon aria-hidden="true">🔊</span>
+            <span class="visually-hidden">Mute the voice</span>
+          </button>
+          <button class="rcp__icon" type="button" data-rcp-close title="Close">
+            <span aria-hidden="true">✕</span><span class="visually-hidden">Close chat</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="rcp__log" data-rcp-log role="log" aria-live="polite" aria-atomic="false"></div>
+
+      <div class="rcp__callout" data-rcp-call hidden>
+        <p>This sounds urgent.</p>
+        <a class="btn btn--primary" data-rcp-callLink href={BUSINESS.phoneHref}>Call now — {BUSINESS.phone}</a>
+      </div>
+
+      <form class="rcp__form" data-rcp-form>
+        <label class="visually-hidden" for="rcp-input">Your message</label>
+        <input id="rcp-input" data-rcp-input type="text" maxlength="400" autocomplete="off"
+               placeholder="What's going on at the property?" />
+        <button class="rcp__send" type="submit" data-rcp-send>
+          <span aria-hidden="true">→</span><span class="visually-hidden">Send</span>
+        </button>
+      </form>
+
+      {/* Replaces the panel body whenever the lane degrades. Never empty-ends
+          a conversation: the visitor always has a form and a phone number. */}
+      <div class="rcp__fallback" data-rcp-fallback hidden>
+        <p data-rcp-fallbackMsg>Let's get your details another way.</p>
+        <a class="btn btn--primary" href="/contact-us">Get a free estimate</a>
+        <a class="btn btn--outline" href={BUSINESS.phoneHref}>Call {BUSINESS.phone}</a>
+      </div>
+    </section>
+  </div>
+)}
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-rcp]");
+  if (root) {
+    const ENDPOINT = root.dataset.endpoint!;
+    const SERVICE = root.dataset.service || "";
+    const PHONE = root.dataset.phone || "";
+    const $ = <T extends HTMLElement>(k: string) => root.querySelector<T>(`[data-rcp-${k}]`)!;
+
+    const panel = root.querySelector<HTMLElement>(".rcp__panel")!;
+    const openBtn = $("open") as HTMLButtonElement;
+    const log = $("log");
+    const form = $("form") as HTMLFormElement;
+    const input = $("input") as HTMLInputElement;
+    const sendBtn = $("send") as HTMLButtonElement;
+    const fallback = $("fallback");
+    const fallbackMsg = $("fallbackMsg");
+    const callout = $("call");
+    const callLink = $("callLink") as HTMLAnchorElement;
+    const muteBtn = $("mute") as HTMLButtonElement;
+    const muteIcon = $("muteIcon");
+
+    const loadedAt = Date.now();
+    let sid = "", token = "", sig = "", turn = 0, busy = false, started = false;
+    let hist: { r: "u" | "a"; t: string }[] = [];
+    let muted = localStorage.getItem("rcp-muted") === "1";
+
+    /* ---------- speech out ----------
+       Chrome truncates utterances past ~15s, so speak sentence by sentence.
+       Voices load asynchronously; picking before `voiceschanged` gets you the
+       default robot instead of the good one. */
+    const synth = window.speechSynthesis;
+    let voice: SpeechSynthesisVoice | null = null;
+    function pickVoice() {
+      if (!synth) return;
+      const all = synth.getVoices().filter((v) => v.lang.startsWith("en"));
+      voice =
+        all.find((v) => /Samantha|Ava|Jenny|Aria|Google US English/i.test(v.name)) ??
+        all.find((v) => v.localService) ?? all[0] ?? null;
+    }
+    if (synth) { pickVoice(); synth.addEventListener("voiceschanged", pickVoice); }
+
+    /* iOS Safari only unlocks speechSynthesis inside a real user gesture, and
+       every speak() here happens after a network await — so on iPhone the
+       receptionist was simply silent. Speaking one empty utterance during the
+       click that opens the panel unlocks it for the rest of the session.
+       Fairbanks homeowners in a flooding basement are overwhelmingly on
+       phones, so this is not a rounding error. */
+    let unlocked = false;
+    function unlockSpeech() {
+      if (unlocked || !synth) return;
+      unlocked = true;
+      try {
+        const u = new SpeechSynthesisUtterance("");
+        u.volume = 0;
+        synth.speak(u);
+      } catch { /* nothing to do; speech is a nicety */ }
+    }
+
+    function speak(text: string) {
+      if (!synth || muted || !text) return;
+      try {
+        synth.cancel();
+        for (const part of text.match(/[^.!?]+[.!?]*/g) ?? [text]) {
+          const u = new SpeechSynthesisUtterance(part.trim());
+          if (voice) u.voice = voice;
+          u.rate = 1.02;
+          synth.speak(u);
+        }
+      } catch { /* speech is a nicety; never let it break the chat */ }
+    }
+
+    function setMuted(v: boolean) {
+      muted = v;
+      localStorage.setItem("rcp-muted", v ? "1" : "0");
+      muteBtn.setAttribute("aria-pressed", String(v));
+      muteIcon.textContent = v ? "🔇" : "🔊";
+      if (v && synth) synth.cancel();
+    }
+    setMuted(muted);
+    muteBtn.addEventListener("click", () => setMuted(!muted));
+
+    /* ---------- rendering ---------- */
+    function bubble(who: "u" | "a", text: string) {
+      const el = document.createElement("div");
+      el.className = `rcp__msg rcp__msg--${who}`;
+      el.textContent = text;
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+      return el;
+    }
+    function typing() {
+      const el = bubble("a", "…");
+      el.classList.add("rcp__msg--typing");
+      return el;
+    }
+    function degrade(msg?: string) {
+      if (msg) fallbackMsg.textContent = msg;
+      form.hidden = true;
+      fallback.hidden = false;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function post(payload: Record<string, unknown>) {
+      const res = await fetch(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return res.json();
+    }
+
+    /* ---------- open ---------- */
+    async function start() {
+      if (started) return;
+      started = true;
+      panel.hidden = false;
+      openBtn.setAttribute("aria-expanded", "true");
+      root.classList.add("rcp--open");
+      const t = typing();
+      try {
+        const d = await post({
+          action: "start",
+          t: Date.now() - loadedAt,
+          company: "",
+          path: location.pathname,
+          service: SERVICE,
+        });
+        t.remove();
+        if (!d?.ok || d.mode !== "chat") return degrade();
+        sid = d.sid; token = d.token; turn = d.turn ?? 0; sig = d.sig ?? "";
+        bubble("a", d.greeting);
+        hist.push({ r: "a", t: d.greeting });
+        speak(d.greeting);
+        input.focus();
+      } catch {
+        t.remove();
+        started = false;   // let them try again
+        degrade("We couldn't start the chat just now.");
+      }
+    }
+
+    /* Reopening must work. `started` guards against double-starting a
+       session, not against ever opening the panel twice — latching it on
+       close left the pill looking live while doing nothing. */
+    openBtn.addEventListener("click", () => {
+      unlockSpeech();               // must run inside the gesture, not after an await
+      if (!panel.hidden) return close();
+      if (sid) { panel.hidden = false; root.classList.add("rcp--open"); openBtn.setAttribute("aria-expanded", "true"); input.focus(); }
+      else start();
+    });
+    function close() {
+      panel.hidden = true;
+      root.classList.remove("rcp--open");
+      openBtn.setAttribute("aria-expanded", "false");
+      if (synth) synth.cancel();
+    }
+    $("close").addEventListener("click", close);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !panel.hidden) close(); });
+
+    /* ---------- a turn ---------- */
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text || busy) return;
+      unlockSpeech();               // submit is a gesture too — covers iOS keyboard "Go"
+
+      busy = true;
+      sendBtn.disabled = true;
+      input.value = "";
+      const sent = bubble("u", text);
+      const t = typing();
+
+      try {
+        const d = await post({ action: "turn", sid, token, turn, sig, hist, text });
+        t.remove();
+        hist.push({ r: "u", t: text });
+
+        if (!d?.ok) return degrade();
+
+        if (d.callNow) {
+          callLink.href = `tel:${d.callNow.tel}`;
+          callLink.textContent = d.callNow.label;
+          callout.hidden = false;
+        }
+
+        if (d.mode !== "chat") {
+          if (d.reply) { bubble("a", d.reply); speak(d.reply); }
+          return degrade();
+        }
+
+        bubble("a", d.reply);
+        hist.push({ r: "a", t: d.reply });
+        sig = d.sig; turn = d.turn;
+        speak(d.reply);
+
+        if (d.lead) {
+          const done = document.createElement("p");
+          done.className = "rcp__done";
+          done.textContent = "✓ Sent to Branden — he'll call you shortly.";
+          log.appendChild(done);
+          log.scrollTop = log.scrollHeight;
+        }
+      } catch {
+        /* A dropped request must not eat what they typed or leave the message
+           looking delivered. Put the text back, mark the bubble failed, and
+           let them try again — a flaky moment on a phone in a wet basement is
+           the most likely failure there is, and it must not end the
+           conversation. */
+        t.remove();
+        sent.classList.add("rcp__msg--failed");
+        sent.title = "Not delivered — tap send to try again";
+        input.value = text;
+        bubble("a", `That didn't go through — try again, or call ${PHONE}.`);
+      } finally {
+        busy = false;
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    });
+  }
+</script>
+
+<style>
+  .rcp {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 120;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.6rem;
+  }
+
+  .rcp__pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.7rem 1.15rem;
+    min-height: 48px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--orange);
+    color: var(--white);
+    font: inherit;
+    font-weight: 700;
+    font-size: 0.94rem;
+    cursor: pointer;
+    box-shadow: var(--shadow-lg);
+  }
+  .rcp__pill:hover { background: var(--orange-dark); }
+  .rcp__pillDot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--white);
+  }
+  .rcp--open .rcp__pillText { display: none; }
+  .rcp--open .rcp__pill { padding: 0.7rem 0.9rem; }
+
+  /* An explicit `display` beats the UA's `[hidden] { display: none }`, so
+     every element toggled by the `hidden` attribute needs this. Without it the
+     panel, the emergency callout, and the fallback all render at once. */
+  .rcp [hidden] { display: none !important; }
+
+  .rcp__panel {
+    display: flex;
+    flex-direction: column;
+    width: min(23rem, calc(100vw - 2rem));
+    max-height: min(32rem, calc(100vh - 6rem));
+    background: var(--white);
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+  }
+
+  .rcp__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.8rem 1rem;
+    background: var(--navy-900);
+    color: var(--white);
+  }
+  .rcp__title { margin: 0; font-weight: 700; font-size: 0.98rem; }
+  .rcp__sub { margin: 0.1rem 0 0; font-size: 0.72rem; color: var(--slate-400); }
+  .rcp__headBtns { display: flex; gap: 0.2rem; }
+  .rcp__icon {
+    background: transparent;
+    border: 0;
+    color: var(--slate-300);
+    font-size: 0.95rem;
+    cursor: pointer;
+    padding: 0.35rem 0.45rem;
+    border-radius: 6px;
+    line-height: 1;
+  }
+  .rcp__icon:hover { background: rgb(255 255 255 / 12%); color: var(--white); }
+
+  .rcp__log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    background: var(--slate-50);
+    min-height: 9rem;
+  }
+
+  /* ⚠️ :global() is required, not stylistic.
+     Astro scopes a component's CSS by stamping a data-astro-cid-* attribute
+     onto the elements IN THE TEMPLATE. Message bubbles are created at runtime
+     with document.createElement, so they never get that attribute and a
+     scoped `.rcp__msg` selector silently matches nothing — the chat renders
+     as unstyled text. Scoping stays on `.rcp__log`, which IS in the template. */
+  .rcp__log :global(.rcp__msg) {
+    max-width: 85%;
+    padding: 0.6rem 0.85rem;
+    border-radius: 14px;
+    font-size: 0.93rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+  .rcp__log :global(.rcp__msg--a) {
+    align-self: flex-start;
+    background: var(--white);
+    border: 1px solid var(--slate-200);
+    color: var(--navy-800);
+    border-bottom-left-radius: 4px;
+  }
+  .rcp__log :global(.rcp__msg--u) {
+    align-self: flex-end;
+    background: var(--navy-700);
+    color: var(--white);
+    border-bottom-right-radius: 4px;
+  }
+  .rcp__log :global(.rcp__msg--typing) {
+    color: var(--slate-400);
+    letter-spacing: 0.15em;
+  }
+  /* An undelivered message must not look delivered. */
+  .rcp__log :global(.rcp__msg--failed) {
+    opacity: 0.55;
+    border: 1px dashed var(--danger);
+  }
+
+  .rcp__log :global(.rcp__done) {
+    align-self: center;
+    margin: 0.2rem 0 0;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--success);
+  }
+
+  .rcp__callout {
+    padding: 0.85rem 1rem;
+    background: #fff4ec;
+    border-top: 1px solid var(--slate-200);
+    display: grid;
+    gap: 0.5rem;
+  }
+  .rcp__callout p { margin: 0; font-weight: 700; color: var(--navy-900); font-size: 0.9rem; }
+  .rcp__callout .btn { width: 100%; min-height: 44px; }
+
+  .rcp__form {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border-top: 1px solid var(--slate-200);
+    background: var(--white);
+  }
+  .rcp__form input {
+    flex: 1;
+    font: inherit;
+    font-size: 0.94rem;
+    padding: 0.6rem 0.8rem;
+    min-height: 44px;
+    border: 1px solid var(--slate-300);
+    border-radius: var(--radius);
+    color: var(--ink);
+  }
+  .rcp__send {
+    flex-shrink: 0;
+    width: 44px; height: 44px;
+    border: 0;
+    border-radius: var(--radius);
+    background: var(--orange);
+    color: var(--white);
+    font-size: 1.15rem;
+    cursor: pointer;
+  }
+  .rcp__send:hover:not(:disabled) { background: var(--orange-dark); }
+  .rcp__send:disabled { opacity: 0.55; cursor: default; }
+
+  .rcp__fallback {
+    display: grid;
+    gap: 0.55rem;
+    padding: 1rem;
+    border-top: 1px solid var(--slate-200);
+    background: var(--white);
+  }
+  .rcp__fallback p { margin: 0 0 0.2rem; font-size: 0.92rem; color: var(--slate-600); }
+  .rcp__fallback .btn { width: 100%; min-height: 44px; }
+
+  @media (max-width: 480px) {
+    .rcp { right: 0.75rem; bottom: 0.75rem; left: 0.75rem; align-items: stretch; }
+    .rcp__pill { justify-content: center; }
+    .rcp__panel { width: 100%; max-height: calc(100vh - 7rem); }
+  }
+</style>

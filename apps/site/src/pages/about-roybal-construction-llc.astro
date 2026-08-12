@@ -1,0 +1,59 @@
+---
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import CtaBand from "../components/CtaBand.astro";
+import { BUSINESS } from "../data/site";
+
+const site = BUSINESS.url;
+const schema = [
+  {
+    "@type": "AboutPage",
+    url: `${site}/about-roybal-construction-llc`,
+    mainEntity: { "@id": `${site}/#business` },
+  },
+];
+---
+
+<Base
+  title="About Roybal Construction, LLC in Fairbanks — Learn More"
+  description="Discover Roybal Construction, LLC in Fairbanks, AK. Locally owned, with 20+ years of experience and IICRC water restoration training. Request your free estimate today!"
+  schema={schema}
+>
+  <PageHero
+    heading="About Roybal Construction, LLC"
+    lede="A locally owned Fairbanks contractor handling emergency restoration and full reconstruction under one roof."
+    image="/images/f4629a15-general-contractor-in-fairbanks-4.jpg"
+  />
+
+  <section class="section">
+    <div class="wrap prose">
+      <h2>Who we are</h2>
+      <p>
+        Roybal Construction is a locally owned Fairbanks restoration contractor specializing in
+        24/7 water, fire, and mold damage response. We provide rapid emergency mitigation,
+        insurance-ready documentation, and complete reconstruction services — managing your
+        project from initial damage assessment through final repair.
+      </p>
+      <p>
+        With over 20 years of construction experience and IICRC water restoration training, we
+        understand how Alaska homes are built and how to restore them properly after frozen pipe
+        bursts, sewer backups, roof leaks, and fire damage.
+      </p>
+      <p>
+        We are licensed, insured, and committed to clear communication and quality workmanship.
+        When damage happens, we respond quickly and handle the entire process — so you don't have
+        to manage multiple contractors.
+      </p>
+
+      <h2>Why homeowners call us back</h2>
+      <ul>
+        <li><strong>One contract, start to finish.</strong> Mitigation and reconstruction from the same crew — no handoff, no second bid, no gap where the job stalls.</li>
+        <li><strong>Documentation adjusters accept.</strong> Moisture readings, photo logs, and scope written the way insurance carriers expect to receive them.</li>
+        <li><strong>Built for this climate.</strong> Frozen pipe bursts, ice dams, and permafrost movement are not edge cases here. They're most of the work.</li>
+        <li><strong>You always know what's happening.</strong> Clear communication throughout — the thing our reviews mention most.</li>
+      </ul>
+    </div>
+  </section>
+
+  <CtaBand />
+</Base>

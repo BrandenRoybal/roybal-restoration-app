@@ -1,0 +1,19 @@
+# Cloudflare Pages redirect rules. Same format as Netlify, so this stays
+# portable if the host changes.
+#
+# EMPTY ON PURPOSE — and it should stay that way.
+#
+# All 36 URLs the site ranks for resolve at their original paths (that is what
+# `npm run build` verifies via scripts/check-parity.mjs). Nothing has moved, so
+# nothing needs redirecting.
+#
+# Add a line here ONLY when a ranking URL genuinely has to change, and always
+# as a permanent 301 so the old page's authority transfers:
+#
+#   /general-contractor-in-college   /general-contractor-in-fairbanks   301
+#
+# Never 302 a page that ranks — a temporary redirect tells Google to keep
+# indexing the old URL, so you get neither page ranking properly.
+#
+# Cloudflare Pages caps this file at 2,000 rules and 100 dynamic (splat/
+# placeholder) rules. Nowhere near either.

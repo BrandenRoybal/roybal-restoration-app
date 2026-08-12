@@ -1,0 +1,191 @@
+---
+/* ============================================================
+   Base layout — the SEO contract for every page.
+
+   The old Marketing 360 template shipped four defects on all 36
+   pages. Each is fixed structurally here, so no page can
+   reintroduce one:
+
+     1. No JSON-LD anywhere        → LocalBusiness graph below,
+                                     plus per-page `schema` slot
+     2. No canonical tag           → emitted from Astro.url
+     3. An empty <h1> before the
+        real one, i.e. two H1s     → layout never renders an h1;
+                                     each page renders exactly one
+     4. Brand name twice in the
+        title, e.g. "… in Fairbanks
+        - Get a Quote - Roybal
+        Construction, LLC"         → `title` is used verbatim,
+                                     suffix added only if absent
+   ============================================================ */
+import { BUSINESS, SERVICES, SERVICE_AREAS, FAIRBANKS_NEIGHBORHOODS } from "../data/site";
+import Header from "../components/Header.astro";
+import Footer from "../components/Footer.astro";
+import Receptionist from "../components/Receptionist.astro";
+import "../styles/brand.css";
+
+interface Props {
+  /** Full <title>. Written per page; no brand suffix is appended if it already names the company. */
+  title: string;
+  description: string;
+  /** Override only when a page must point its canonical elsewhere (e.g. paginated duplicates). */
+  canonical?: string;
+  image?: string;
+  /** Set on pages that should not be indexed (thank-you pages, etc.). */
+  noindex?: boolean;
+  /** Extra JSON-LD objects for this page — Service, BlogPosting, FAQPage, BreadcrumbList. */
+  schema?: object[];
+}
+
+const {
+  title,
+  description,
+  canonical,
+  image = "/images/og-default.jpg",
+  noindex = false,
+  schema = [],
+} = Astro.props;
+
+const site = BUSINESS.url;
+// build.format:'file' emits contact-us.html, and Astro.url.pathname reflects
+// the FILE, not the URL a visitor uses. Canonicals must name the extensionless
+// path the site actually ranks for — pointing them at .html would tell Google
+// the ranking URL is a duplicate of one nobody links to.
+const path = Astro.url.pathname
+  .replace(/index\.html$/, "")
+  .replace(/\.html$/, "")
+  .replace(/\/$/, "");
+const canonicalUrl = canonical ?? `${site}${path}`;
+const ogImage = image.startsWith("http") ? image : `${site}${image}`;
+
+const pageTitle = /roybal construction/i.test(title)
+  ? title
+  : `${title} | ${BUSINESS.name}`;
+
+/* ---------- The LocalBusiness graph ----------
+   Emitted once per page with @id so every other node can reference the same
+   business rather than redeclaring it. GeneralContractor is the narrowest
+   schema.org type that covers both the restoration and the remodel work. */
+const addr = BUSINESS.address;
+const businessSchema = {
+  "@type": ["GeneralContractor", "LocalBusiness"],
+  "@id": `${site}/#business`,
+  name: BUSINESS.name,
+  legalName: BUSINESS.legalName,
+  url: site,
+  telephone: BUSINESS.phoneE164,
+  email: BUSINESS.email,
+  priceRange: BUSINESS.priceRange,
+  foundingDate: BUSINESS.foundingDate,
+  image: `${site}/images/logo-full.png`,
+  logo: `${site}/images/logo-full.png`,
+  address: {
+    "@type": "PostalAddress",
+    streetAddress: addr.street,
+    addressLocality: addr.city,
+    addressRegion: addr.region,
+    postalCode: addr.postalCode,
+    addressCountry: addr.country,
+  },
+  geo: {
+    "@type": "GeoCoordinates",
+    latitude: BUSINESS.geo.latitude,
+    longitude: BUSINESS.geo.longitude,
+  },
+  openingHoursSpecification: BUSINESS.hours.map((h) => ({
+    "@type": "OpeningHoursSpecification",
+    dayOfWeek: h.days,
+    opens: h.opens,
+    closes: h.closes,
+  })),
+  // Towns are Cities in Alaska; College and Hamilton Acres are neighbourhoods
+  // inside Fairbanks, so they're modelled as Places contained in Fairbanks.
+  // Claiming a neighbourhood is a city is the kind of small inaccuracy Google
+  // reconciles against its own place graph and quietly discounts.
+  areaServed: [
+    ...SERVICE_AREAS.map((a) => ({
+      "@type": "City",
+      name: a.name,
+      containedInPlace: { "@type": "State", name: addr.regionName },
+    })),
+    ...FAIRBANKS_NEIGHBORHOODS.map((n) => ({
+      "@type": "Place",
+      name: n.name,
+      containedInPlace: {
+        "@type": "City",
+        name: addr.city,
+        containedInPlace: { "@type": "State", name: addr.regionName },
+      },
+    })),
+  ],
+  sameAs: BUSINESS.social,
+  hasOfferCatalog: {
+    "@type": "OfferCatalog",
+    name: "Construction and Restoration Services",
+    itemListElement: SERVICES.map((s) => ({
+      "@type": "Offer",
+      itemOffered: { "@type": "Service", name: s.name, url: `${site}${s.path}` },
+    })),
+  },
+};
+
+const websiteSchema = {
+  "@type": "WebSite",
+  "@id": `${site}/#website`,
+  url: site,
+  name: BUSINESS.name,
+  publisher: { "@id": `${site}/#business` },
+};
+
+const graph = { "@context": "https://schema.org", "@graph": [businessSchema, websiteSchema, ...schema] };
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonicalUrl} />
+    {noindex && <meta name="robots" content="noindex, follow" />}
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={BUSINESS.name} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:image" content={ogImage} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
+    <meta name="theme-color" content="#0f1b2d" />
+    <meta name="format-detection" content="telephone=yes" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/images/icon-180.png" />
+
+    {/* Carried over from the Marketing 360 site so Search Console
+        verification survives the cutover. Do not remove. */}
+    <meta name="google-site-verification" content="sSMew_T29JeU5astPd2n4YNAu0BgweRxTp6KciYD06c" />
+
+    {/* set:html on the <script> itself — interpolating the tag as a string
+        instead would escape every quote and emit inert text, not markup. */}
+    <script type="application/ld+json" set:html={JSON.stringify(graph)} />
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+    <Header />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+    {/* Renders nothing at all unless PUBLIC_WEB_AGENT_ENDPOINT is set, so an
+        unset env var is a clean no-op rather than a broken panel. */}
+    <Receptionist />
+  </body>
+</html>

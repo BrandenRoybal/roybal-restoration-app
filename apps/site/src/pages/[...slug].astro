@@ -1,0 +1,89 @@
+---
+/* Service pages. Routed from each entry's `path` frontmatter rather than its
+   filename, so the URLs the site ranks for are stated explicitly in content
+   and can never drift when a file is renamed.
+
+   Astro gives static routes precedence over this catch-all, so /contact-us
+   and friends still resolve to their own files. */
+import { getCollection, render } from "astro:content";
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import CtaBand from "../components/CtaBand.astro";
+import { BUSINESS, SERVICES } from "../data/site";
+
+export async function getStaticPaths() {
+  const services = await getCollection("services");
+  return services.map((entry) => ({
+    params: { slug: entry.data.path.replace(/^\//, "") },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const d = entry.data;
+
+const isRestoration = d.path.startsWith("/restoration-services");
+const crumbs = isRestoration && d.path !== "/restoration-services"
+  ? [{ name: "Restoration Services", href: "/restoration-services" }]
+  : [];
+
+const site = BUSINESS.url;
+const schema = [
+  {
+    "@type": "Service",
+    "@id": `${site}${d.path}#service`,
+    name: d.heading,
+    description: d.description,
+    serviceType: d.heading,
+    provider: { "@id": `${site}/#business` },
+    areaServed: { "@type": "City", name: "Fairbanks", containedInPlace: { "@type": "State", name: "Alaska" } },
+    url: `${site}${d.path}`,
+  },
+  {
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: site },
+      ...crumbs.map((c, i) => ({ "@type": "ListItem", position: i + 2, name: c.name, item: `${site}${c.href}` })),
+      { "@type": "ListItem", position: crumbs.length + 2, name: d.heading, item: `${site}${d.path}` },
+    ],
+  },
+];
+
+/* Sibling services for internal linking — the strongest, cheapest on-page
+   signal a contractor site has, and something the old site did only through
+   its nav. */
+const related = SERVICES.filter((s) => s.path !== d.path)
+  .filter((s) => (isRestoration ? s.group === "restoration" : s.group === "construction"))
+  .slice(0, 6);
+---
+
+<Base title={d.title} description={d.description} schema={schema} image={d.image}>
+  <PageHero heading={d.heading} lede={d.description} image={d.image} crumbs={crumbs} />
+
+  <section class="section">
+    <div class="wrap prose">
+      <Content />
+    </div>
+  </section>
+
+  {related.length > 0 && (
+    <section class="section section--muted">
+      <div class="wrap">
+        <span class="eyebrow">More from Roybal</span>
+        <h2>Related services</h2>
+        <div class="grid grid--3" style="margin-top:1.6rem">
+          {related.map((s) => (
+            <a class="card" href={s.path}>
+              <h3>{s.name}</h3>
+              <p>{s.blurb}</p>
+              <span class="card__more">Learn more →</span>
+            </a>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
+
+  <CtaBand />
+</Base>

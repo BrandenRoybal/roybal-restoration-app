@@ -1,0 +1,120 @@
+---
+/* Location pages.
+
+   ⚠️ These were the weakest pages on the old site — 359–431 words of copy
+   that differed only by swapping the town name. Google treats near-identical
+   location pages as doorway pages and either ignores or penalises them.
+   Before adding towns from SERVICE_AREAS, each new page needs genuinely
+   local content: named neighbourhoods, real projects, local conditions.
+   See .site-archive/MIGRATION-NOTES.md.
+
+   Two of these three pages are NEIGHBOURHOODS of Fairbanks (College, Hamilton
+   Acres), not towns. They keep their URLs because they rank, but their markup
+   must say what they actually are — a Place inside Fairbanks, not a City
+   beside it. */
+import { getCollection, render } from "astro:content";
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import CtaBand from "../components/CtaBand.astro";
+import { BUSINESS, SERVICES, FAIRBANKS_NEIGHBORHOODS } from "../data/site";
+
+export async function getStaticPaths() {
+  const locations = await getCollection("locations");
+  return locations.map((entry) => ({
+    params: { loc: entry.data.path.replace("/general-contractor-in-", "") },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const d = entry.data;
+const town = d.heading.replace(/^General Contractor in\s*/i, "").trim();
+
+const isNeighborhood = FAIRBANKS_NEIGHBORHOODS.some(
+  (n) => n.name.toLowerCase() === town.toLowerCase()
+);
+
+const site = BUSINESS.url;
+const areaServed = isNeighborhood
+  ? {
+      "@type": "Place",
+      name: town,
+      containedInPlace: {
+        "@type": "City",
+        name: "Fairbanks",
+        containedInPlace: { "@type": "State", name: "Alaska" },
+      },
+    }
+  : {
+      "@type": "City",
+      name: town,
+      containedInPlace: { "@type": "State", name: "Alaska" },
+    };
+
+const schema = [
+  {
+    "@type": "Service",
+    name: `General Contractor in ${town}`,
+    description: d.description,
+    provider: { "@id": `${site}/#business` },
+    areaServed,
+    url: `${site}${d.path}`,
+  },
+  {
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: site },
+      { "@type": "ListItem", position: 2, name: d.heading, item: `${site}${d.path}` },
+    ],
+  },
+];
+---
+
+<Base title={d.title} description={d.description} schema={schema} image={d.image}>
+  <PageHero
+    heading={d.heading}
+    lede={d.description}
+    image={d.image}
+    crumbs={isNeighborhood ? [{ name: "Fairbanks", href: "/general-contractor-in-fairbanks" }] : []}
+  />
+
+  <section class="section">
+    <div class="wrap prose">
+      {isNeighborhood && (
+        <p class="hoodNote">
+          {town} is a neighborhood of <a href="/general-contractor-in-fairbanks">Fairbanks</a>,
+          and it's a short drive from our shop on Royal Road — so we're there
+          often and can usually get someone out same-day.
+        </p>
+      )}
+      <Content />
+    </div>
+  </section>
+
+  <section class="section section--muted">
+    <div class="wrap">
+      <span class="eyebrow">In {town}</span>
+      <h2>What we do here</h2>
+      <div class="grid grid--3" style="margin-top:1.6rem">
+        {SERVICES.map((s) => (
+          <a class="card" href={s.path}>
+            <h3>{s.name}</h3>
+            <p>{s.blurb}</p>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <CtaBand heading={`Working on something in ${town}?`} />
+</Base>
+
+<style>
+  .hoodNote {
+    border-left: 3px solid var(--orange);
+    padding: 0.15rem 0 0.15rem 1rem;
+    margin-bottom: 1.6rem;
+    color: var(--slate-600);
+  }
+</style>

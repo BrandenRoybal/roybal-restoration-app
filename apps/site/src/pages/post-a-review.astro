@@ -1,0 +1,60 @@
+---
+/* ⚠️ REVIEW_LINKS.google needs Branden's Google Business Profile review URL.
+   Get it from the GBP dashboard → "Ask for reviews" → copy link. Until it's
+   set, the Google button falls back to a Maps search for the business. */
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import { BUSINESS } from "../data/site";
+
+const REVIEW_LINKS = {
+  google: "https://www.google.com/maps/search/?api=1&query=Roybal+Construction+LLC+Fairbanks+AK",
+  facebook: "https://www.facebook.com/profile.php?id=100092349127530&sk=reviews",
+};
+---
+
+<Base
+  title="Post a Review — Roybal Construction, LLC"
+  description="Worked with Roybal Construction in Fairbanks? Share your experience on Google or Facebook — it helps other Alaskan homeowners find us."
+>
+  <PageHero
+    heading="Post a Review"
+    lede="If we did right by you, saying so publicly is the single most helpful thing you can do for a local business."
+  />
+
+  <section class="section">
+    <div class="wrap narrow">
+      <p class="lede">Pick whichever platform is easiest for you:</p>
+
+      <div class="grid grid--2" style="margin-top:1.75rem">
+        <a class="card platform" href={REVIEW_LINKS.google} rel="noopener">
+          <h3>Review us on Google</h3>
+          <p>The one that helps most — it's what shows up when neighbours search for a contractor.</p>
+          <span class="card__more">Leave a Google review →</span>
+        </a>
+        <a class="card platform" href={REVIEW_LINKS.facebook} rel="noopener">
+          <h3>Review us on Facebook</h3>
+          <p>Already on Facebook? Leave a recommendation on our page.</p>
+          <span class="card__more">Leave a Facebook review →</span>
+        </a>
+      </div>
+
+      <p class="aside">
+        Something go wrong instead? We'd rather hear it directly —
+        <a href="/give-feedback">tell us what happened</a> or call
+        <a href={BUSINESS.phoneHref}>{BUSINESS.phone}</a>. We'll make it right.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .narrow { max-width: 56rem; }
+  .platform h3 { font-size: var(--step-1); }
+  .aside {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--slate-200);
+    color: var(--slate-500);
+    font-size: 0.95rem;
+  }
+</style>

@@ -1,0 +1,65 @@
+---
+/* Named blog.astro, not blog/index.astro, because build.format:'file' must
+   emit blog.html — served at /blog with no trailing slash, exactly as the
+   old site did. */
+import { getCollection } from "astro:content";
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import CtaBand from "../components/CtaBand.astro";
+import { BUSINESS } from "../data/site";
+
+const posts = (await getCollection("blog")).sort((a, b) => {
+  const at = a.data.publishDate?.getTime() ?? 0;
+  const bt = b.data.publishDate?.getTime() ?? 0;
+  return bt - at;
+});
+
+const site = BUSINESS.url;
+const schema = [
+  {
+    "@type": "Blog",
+    "@id": `${site}/blog#blog`,
+    name: `${BUSINESS.shortName} Blog`,
+    url: `${site}/blog`,
+    publisher: { "@id": `${site}/#business` },
+  },
+];
+---
+
+<Base
+  title="Construction &amp; Restoration Blog | Fairbanks, AK"
+  description="Practical advice on remodeling, restoration, decks, painting, and winter prep from Roybal Construction in Fairbanks, Alaska."
+  schema={schema}
+>
+  <PageHero
+    heading="Blog"
+    lede="Practical advice on building, remodeling, and restoring property in the Alaskan climate."
+  />
+
+  <section class="section">
+    <div class="wrap">
+      <div class="grid grid--3">
+        {posts.map((p) => (
+          <a class="card postcard" href={p.data.path}>
+            {p.data.image && <img class="postcard__img" src={p.data.image} alt="" loading="lazy" width="400" height="240" />}
+            <h3>{p.data.heading}</h3>
+            <p>{p.data.description}</p>
+            <span class="card__more">Read more →</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <CtaBand />
+</Base>
+
+<style>
+  .postcard { padding: 0; overflow: hidden; }
+  .postcard h3,
+  .postcard p,
+  .postcard .card__more { padding-inline: 1.35rem; }
+  .postcard h3 { margin-top: 1.1rem; font-size: var(--step-1); }
+  .postcard .card__more { display: block; padding-bottom: 1.35rem; }
+  .postcard__img { width: 100%; aspect-ratio: 5 / 3; object-fit: cover; }
+</style>
