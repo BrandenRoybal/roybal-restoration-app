@@ -16,3 +16,17 @@ web-build/
 .vercel
 supabase/.temp/
 .claude/
+apps/site/.env
+
+# Astro build cache (apps/site)
+.astro/
+
+# .site-archive: keep the metadata the build needs (content.json, raw/,
+# manifest) but not the 16 MB of images — they are byte-identical to
+# apps/site/public/images/, which IS committed and is what the site serves.
+# See .site-archive/README.md.
+.site-archive/images/*
+!.site-archive/images/manifest.json
+
+# local agent tooling scratch (hook logs, voice config) — machine-specific
+.agents/
