@@ -791,6 +791,15 @@ serve(async (req) => {
   }
 
   // ── getStatus ─────────────────────────────────────────────────────────────
+  /* ⚠️ "Connected" used to mean nothing more than "a token row exists" — it
+     selected expires_at and never looked at it. So the admin panel showed a
+     green ● Connected for 19 days while every call that actually needed the
+     token 400'd on a failed refresh, and the only visible symptom was a stale
+     "updated" date nobody had reason to distrust.
+
+     A status that cannot report failure is worse than no status: it actively
+     tells you to look elsewhere. This one proves the token works by USING it,
+     which is the only honest answer to "are we connected?". */
   if (action === "getStatus") {
     const { data, error } = await supabase
       .from("qb_time_tokens")
@@ -799,8 +808,33 @@ serve(async (req) => {
       .limit(1)
       .single();
 
-    if (error || !data) return ok({ connected: false });
-    return ok({ connected: true, realmId: data.realm_id, updatedAt: data.updated_at });
+    if (error || !data) return ok({ connected: false, reason: "never_connected" });
+
+    const expiresAt = new Date(data.expires_at).getTime();
+    const expired = !(expiresAt > Date.now());
+
+    // Exercise the credential. getAccessToken refreshes when needed, so a
+    // success here means the link genuinely works right now, and a failure
+    // names the reason instead of hiding it.
+    let healthy = false;
+    let reason: string | null = null;
+    try {
+      await getValidToken(supabase);
+      healthy = true;
+    } catch (e) {
+      reason = String((e as Error)?.message ?? e).slice(0, 200);
+    }
+
+    return ok({
+      connected: healthy,
+      needsReconnect: !healthy,
+      // kept so the panel can still show when the link was last refreshed
+      realmId: data.realm_id,
+      updatedAt: data.updated_at,
+      expiresAt: data.expires_at,
+      accessTokenExpired: expired,
+      reason,
+    });
   }
 
   // ── disconnect ────────────────────────────────────────────────────────────
