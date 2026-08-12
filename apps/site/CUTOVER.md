@@ -279,11 +279,25 @@ take down systems the crew and customers use daily.
 | TXT | `@` | `v=spf1 include:_spf.createsend.com include:_spf.google.com ~all` | keep |
 | TXT | `@` | `google-site-verification=TZSrekgUL4A7NiQfaKgKC2Xs9W1bGIRqIU6OwhZefC0` | keep |
 | TXT | `_dmarc` | `v=DMARC1; p=none;` | keep |
+| TXT | `cm._domainkey` | `k=rsa; p=MIGf…` (Campaign Monitor DKIM) | keep |
 
 **`app` and `portal` must be DNS-only (grey cloud), not proxied.** GitHub Pages
 and Vercel terminate TLS themselves; proxying them through Cloudflare invites
 certificate errors and redirect loops. `app` serves the field, admin, and board
 apps the crew uses; `portal` serves customers.
+
+**Thirteen records.** The `cm._domainkey` entry is Campaign Monitor's DKIM key
+— it pairs with `_spf.createsend.com` in the SPF record, and losing it makes
+marketing email start failing DKIM and landing in spam. It was NOT found by
+the `dig` sweep that produced this table (that probed a fixed list of subdomain
+names); Cloudflare's zone scan found it. Trust the scan over a probe.
+
+**Set every record to DNS only (grey cloud) for the nameserver move.** Not just
+`app` and `portal` — the apex and `www` too. They still point at Madwire, and
+proxying them puts Cloudflare's cache and an unverified SSL mode in front of a
+server that performs its own apex→www redirect, which is how redirect loops
+happen. The move should change nothing for visitors; grey-clouding everything
+guarantees that. Proxying gets turned on deliberately when the Worker is bound.
 
 **The five MX records and the SPF TXT are the business's email.** Miss one and
 mail stops — far worse than any website problem. Do not flip nameservers until
