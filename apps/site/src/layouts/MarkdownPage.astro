@@ -1,0 +1,21 @@
+---
+/* Adapter so plain .md files under src/pages can use Base, which takes props
+   rather than the `frontmatter` object Astro hands a markdown layout. */
+import Base from "./Base.astro";
+import PageHero from "../components/PageHero.astro";
+
+const { frontmatter } = Astro.props;
+---
+
+<Base
+  title={frontmatter.title}
+  description={frontmatter.description}
+  noindex={frontmatter.noindex ?? false}
+>
+  <PageHero heading={frontmatter.heading ?? frontmatter.title} />
+  <section class="section">
+    <div class="wrap prose">
+      <slot />
+    </div>
+  </section>
+</Base>

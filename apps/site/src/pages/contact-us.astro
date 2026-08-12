@@ -1,0 +1,91 @@
+---
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import QuoteForm from "../components/QuoteForm.astro";
+import { BUSINESS } from "../data/site";
+
+const a = BUSINESS.address;
+const site = BUSINESS.url;
+const mapQuery = encodeURIComponent(`${a.street}, ${a.city}, ${a.region} ${a.postalCode}`);
+
+const schema = [
+  {
+    "@type": "ContactPage",
+    url: `${site}/contact-us`,
+    mainEntity: { "@id": `${site}/#business` },
+  },
+];
+---
+
+<Base
+  title="Contact Roybal Construction in Fairbanks, AK — Free Estimates"
+  description="Get in touch with Roybal Construction, LLC in Fairbanks, AK. Call (907) 371-9868 for 24/7 emergency restoration, or request a free estimate online."
+  schema={schema}
+>
+  <PageHero
+    heading="Contact Us"
+    lede="Tell us what you're dealing with. We'll get back to you fast — and if it's an emergency, call and we'll answer."
+  />
+
+  <section class="section">
+    <div class="wrap contact">
+      <div>
+        <h2>Request a free estimate</h2>
+        <p>
+          Fill this out and it goes straight to our team. For active water, fire, or mold
+          damage, calling is always faster.
+        </p>
+        <QuoteForm />
+      </div>
+
+      <aside class="contact__aside">
+        <div class="card">
+          <h3>Call us</h3>
+          <p class="contact__big"><a href={BUSINESS.phoneHref}>{BUSINESS.phone}</a></p>
+          <p class="contact__em">{BUSINESS.emergencyLabel}</p>
+        </div>
+
+        <div class="card">
+          <h3>Visit or write</h3>
+          <address>
+            <a href={`https://www.google.com/maps/search/?api=1&query=${mapQuery}`} rel="noopener">
+              {a.street}<br />{a.city}, {a.region} {a.postalCode}
+            </a>
+            <br /><br />
+            <a href={`mailto:${BUSINESS.email}`}>{BUSINESS.email}</a>
+          </address>
+        </div>
+
+        <div class="card">
+          <h3>Office hours</h3>
+          <p>{BUSINESS.hoursLabel}</p>
+          <p class="contact__em">Emergency restoration dispatch runs 24/7, including weekends and holidays.</p>
+        </div>
+      </aside>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .contact {
+    display: grid;
+    grid-template-columns: 1.55fr 1fr;
+    gap: clamp(1.75rem, 4vw, 3.5rem);
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .contact { grid-template-columns: 1fr; }
+  }
+  .contact > div > h2 { margin-bottom: 0.4rem; }
+  .contact > div > p { margin-bottom: 1.5rem; max-width: 52ch; }
+
+  .contact__aside { display: grid; gap: 1rem; }
+  .contact__aside h3 { font-size: var(--step-1); margin-bottom: 0.5rem; }
+  .contact__aside address { font-style: normal; line-height: 1.6; }
+
+  .contact__big { font-size: var(--step-2); font-weight: 700; margin: 0 0 0.3rem; }
+  .contact__big a { color: var(--orange-dark); text-decoration: none; }
+  .contact__big a:hover { text-decoration: underline; }
+
+  .contact__em { color: var(--slate-500); font-size: 0.9rem; margin: 0; }
+</style>

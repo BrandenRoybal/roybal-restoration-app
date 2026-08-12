@@ -1,0 +1,54 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+import PageHero from "../../components/PageHero.astro";
+import CtaBand from "../../components/CtaBand.astro";
+import { BUSINESS } from "../../data/site";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("blog");
+  return posts.map((entry) => ({
+    params: { slug: entry.data.path.replace("/blog/", "") },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const d = entry.data;
+
+const site = BUSINESS.url;
+const schema = [
+  {
+    "@type": "BlogPosting",
+    headline: d.heading,
+    description: d.description,
+    url: `${site}${d.path}`,
+    mainEntityOfPage: { "@type": "WebPage", "@id": `${site}${d.path}` },
+    ...(d.image ? { image: `${site}${d.image}` } : {}),
+    ...(d.publishDate ? { datePublished: d.publishDate.toISOString() } : {}),
+    author: { "@id": `${site}/#business` },
+    publisher: { "@id": `${site}/#business` },
+  },
+  {
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: site },
+      { "@type": "ListItem", position: 2, name: "Blog", item: `${site}/blog` },
+      { "@type": "ListItem", position: 3, name: d.heading, item: `${site}${d.path}` },
+    ],
+  },
+];
+---
+
+<Base title={d.title} description={d.description} schema={schema} image={d.image}>
+  <PageHero heading={d.heading} image={d.image} crumbs={[{ name: "Blog", href: "/blog" }]} />
+
+  <section class="section">
+    <div class="wrap prose">
+      <Content />
+    </div>
+  </section>
+
+  <CtaBand />
+</Base>

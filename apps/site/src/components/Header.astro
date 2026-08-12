@@ -1,0 +1,348 @@
+---
+/* Site header. The nav mirrors the old Marketing 360 menu so returning
+   visitors and internal links find the same structure — the dropdowns are
+   plain <details> elements, which work without JavaScript and stay keyboard
+   and screen-reader accessible by default. */
+import {
+  BUSINESS,
+  RESTORATION_SERVICES,
+  CONSTRUCTION_SERVICES,
+  SERVICE_AREAS,
+  FAIRBANKS_NEIGHBORHOODS,
+} from "../data/site";
+
+const areas = SERVICE_AREAS.filter((a) => a.page);
+const hoods = FAIRBANKS_NEIGHBORHOODS.filter((n) => n.page);
+const path = Astro.url.pathname.replace(/\/$/, "");
+const isCurrent = (href: string) => path === href;
+---
+
+<header class="hdr">
+  <div class="hdr__bar">
+    <div class="wrap hdr__barInner">
+      <span class="hdr__emergency">{BUSINESS.emergencyLabel}</span>
+      <a class="hdr__tel" href={BUSINESS.phoneHref}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
+          ><path d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1A17 17 0 0 1 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1l-2.3 2.2z"
+        ></path></svg>
+        {BUSINESS.phone}
+      </a>
+    </div>
+  </div>
+
+  <div class="wrap hdr__main">
+    <a class="hdr__brand" href="/">
+      <img src="/images/emblem-mark.svg" alt="" width="40" height="40" />
+      <span class="hdr__brandText">
+        <strong>Roybal Construction</strong>
+        <em>Fairbanks, Alaska</em>
+      </span>
+    </a>
+
+    <input type="checkbox" id="navToggle" class="visually-hidden hdr__navToggle" />
+    <label for="navToggle" class="hdr__burger">
+      <span aria-hidden="true"></span>
+      <span class="visually-hidden">Menu</span>
+    </label>
+
+    <nav class="hdr__nav" aria-label="Main">
+      <ul class="hdr__menu">
+        <li><a href="/" aria-current={isCurrent("") ? "page" : undefined}>Home</a></li>
+        <li>
+          <a href="/about-roybal-construction-llc" aria-current={isCurrent("/about-roybal-construction-llc") ? "page" : undefined}>About</a>
+        </li>
+
+        <li class="hdr__has">
+          <details>
+            <summary>Restoration</summary>
+            <ul class="hdr__sub">
+              <li><a href="/restoration-services">All Restoration Services</a></li>
+              {RESTORATION_SERVICES.map((s) => (
+                <li><a href={s.path}>{s.name}</a></li>
+              ))}
+            </ul>
+          </details>
+        </li>
+
+        <li class="hdr__has">
+          <details>
+            <summary>Construction</summary>
+            <ul class="hdr__sub">
+              {CONSTRUCTION_SERVICES.map((s) => (
+                <li><a href={s.path}>{s.name}</a></li>
+              ))}
+              <li><a href="/new-construction-services-in-fairbanks/custom-design-and-build">Custom Design &amp; Build</a></li>
+            </ul>
+          </details>
+        </li>
+
+        <li class="hdr__has">
+          <details>
+            <summary>Areas We Serve</summary>
+            <ul class="hdr__sub">
+              {areas.map((a) => (
+                <li><a href={`/general-contractor-in-${a.slug}`}>{a.name}</a></li>
+              ))}
+              {SERVICE_AREAS.filter((a) => !a.page).map((a) => (
+                <li><span class="hdr__subPlain">{a.name}</span></li>
+              ))}
+              {hoods.length > 0 && (
+                <>
+                  <li class="hdr__subHead">Fairbanks neighborhoods</li>
+                  {hoods.map((n) => (
+                    <li><a href={`/general-contractor-in-${n.slug}`}>{n.name}</a></li>
+                  ))}
+                </>
+              )}
+            </ul>
+          </details>
+        </li>
+
+        <li class="hdr__has">
+          <details>
+            <summary>More</summary>
+            <ul class="hdr__sub">
+              <li><a href="/read-reviews">Read Reviews</a></li>
+              <li><a href="/post-a-review">Post a Review</a></li>
+              <li><a href="/gallery">Gallery</a></li>
+              <li><a href="/blog">Blog</a></li>
+            </ul>
+          </details>
+        </li>
+
+        <li><a href="/contact-us" aria-current={isCurrent("/contact-us") ? "page" : undefined}>Contact</a></li>
+        <li class="hdr__cta"><a class="btn btn--primary" href="/contact-us">Get a Quote</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<style>
+  .hdr {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--white);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .hdr__bar {
+    background: var(--navy-900);
+    color: var(--slate-300);
+    font-size: 0.85rem;
+  }
+  .hdr__barInner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 38px;
+  }
+  .hdr__emergency { font-weight: 600; letter-spacing: 0.01em; }
+  .hdr__emergency::before {
+    content: "";
+    display: inline-block;
+    width: 7px; height: 7px;
+    margin-right: 0.5rem;
+    border-radius: 50%;
+    background: var(--orange);
+    vertical-align: middle;
+  }
+  .hdr__tel {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--white);
+    font-weight: 700;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .hdr__tel:hover { color: var(--orange); }
+
+  /* On a narrow phone the two-line "24/7 emergency restoration response"
+     squeezes the number it is meant to support. The number wins. */
+  @media (max-width: 460px) {
+    .hdr__emergency { font-size: 0.78rem; }
+    .hdr__emergency::before { margin-right: 0.35rem; }
+    .hdr__barInner { gap: 0.6rem; }
+  }
+  @media (max-width: 380px) {
+    .hdr__emergency { display: none; }
+    .hdr__barInner { justify-content: flex-end; }
+  }
+
+  .hdr__main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding-block: 0.7rem;
+  }
+
+  .hdr__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.65rem;
+    text-decoration: none;
+    flex-shrink: 0;
+  }
+  .hdr__brandText { display: flex; flex-direction: column; line-height: 1.15; }
+  .hdr__brandText strong {
+    color: var(--navy-900);
+    font-size: 1.06rem;
+    letter-spacing: -0.015em;
+  }
+  .hdr__brandText em {
+    font-style: normal;
+    font-size: 0.73rem;
+    color: var(--slate-500);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .hdr__menu {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .hdr__menu > li > a,
+  .hdr__menu summary {
+    display: block;
+    padding: 0.55rem 0.7rem;
+    border-radius: var(--radius);
+    color: var(--navy-800);
+    font-size: 0.94rem;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .hdr__menu > li > a:hover,
+  .hdr__menu summary:hover { background: var(--slate-100); color: var(--navy-900); }
+  .hdr__menu > li > a[aria-current="page"] { color: var(--orange-dark); }
+
+  .hdr__cta a { padding: 0.6rem 1.1rem; min-height: 42px; }
+
+  /* Dropdowns — <details> so they work with zero JS. */
+  .hdr__has details { position: relative; }
+  .hdr__has summary {
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .hdr__has summary::-webkit-details-marker { display: none; }
+  .hdr__has summary::after {
+    content: "";
+    width: 5px; height: 5px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(45deg) translateY(-1px);
+  }
+  .hdr__has details[open] summary { background: var(--slate-100); }
+
+  .hdr__sub {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    min-width: 15rem;
+    background: var(--white);
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    list-style: none;
+    margin: 0;
+    padding: 0.4rem;
+  }
+  .hdr__sub a {
+    display: block;
+    padding: 0.5rem 0.7rem;
+    border-radius: 6px;
+    color: var(--navy-800);
+    font-size: 0.9rem;
+    text-decoration: none;
+  }
+  .hdr__sub a:hover { background: var(--slate-100); color: var(--orange-dark); }
+
+  /* Towns we serve that don't have their own page yet still belong in the
+     menu — a visitor in North Pole should see their town named. */
+  .hdr__subPlain {
+    display: block;
+    padding: 0.5rem 0.7rem;
+    color: var(--slate-500);
+    font-size: 0.9rem;
+  }
+  .hdr__subHead {
+    padding: 0.6rem 0.7rem 0.25rem;
+    margin-top: 0.3rem;
+    border-top: 1px solid var(--slate-200);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--slate-400);
+  }
+
+  .hdr__burger { display: none; }
+
+  @media (max-width: 1080px) {
+    .hdr__burger {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 46px; height: 46px;
+      border: 1px solid var(--slate-300);
+      border-radius: var(--radius);
+      cursor: pointer;
+    }
+    .hdr__burger > span[aria-hidden] {
+      position: relative;
+      width: 20px; height: 2px;
+      background: var(--navy-900);
+    }
+    .hdr__burger > span[aria-hidden]::before,
+    .hdr__burger > span[aria-hidden]::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      width: 20px; height: 2px;
+      background: var(--navy-900);
+    }
+    .hdr__burger > span[aria-hidden]::before { top: -6px; }
+    .hdr__burger > span[aria-hidden]::after { top: 6px; }
+
+    .hdr__nav {
+      display: none;
+      flex-basis: 100%;
+      order: 3;
+    }
+    .hdr__navToggle:checked ~ .hdr__nav { display: block; }
+    /* Keyboard users must be able to reach the toggle. */
+    .hdr__navToggle:focus-visible ~ .hdr__burger { outline: 3px solid var(--orange); outline-offset: 2px; }
+
+    .hdr__main { flex-wrap: wrap; }
+    .hdr__menu {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0;
+      padding: 0.5rem 0 0.8rem;
+    }
+    .hdr__menu > li > a,
+    .hdr__menu summary { padding: 0.75rem 0.6rem; }
+    .hdr__menu > li + li { border-top: 1px solid var(--slate-100); }
+    .hdr__sub {
+      position: static;
+      box-shadow: none;
+      border: 0;
+      border-left: 2px solid var(--slate-200);
+      border-radius: 0;
+      margin: 0 0 0.4rem 0.6rem;
+      min-width: 0;
+    }
+    .hdr__cta { padding-top: 0.7rem; }
+    .hdr__cta a { width: 100%; }
+  }
+</style>

@@ -1,0 +1,83 @@
+---
+/* NOTE ON REVIEW SCHEMA — deliberately absent.
+   It is tempting to mark these up as Review/aggregateRating, but Google has
+   disallowed "self-serving" review rich results (a business publishing
+   reviews about itself) since 2019. Adding it earns no stars and risks a
+   structured-data manual action. Star ratings should come from the Google
+   Business Profile instead, which is also where these reviews should be
+   collected going forward — see /post-a-review. */
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import CtaBand from "../components/CtaBand.astro";
+
+// ⚠️ NEEDS REVIEW — carried over from the old site. Branden has newer reviews.
+const reviews = [
+  {
+    quote:
+      "Branden and his crew did an amazing job building our deck and a couple of other small projects we added on at the last minute. Great communication, promptness, custom work, attention to detail, and quality — and just a great experience overall. The crew was respectful and included us in issues as they came up and they always made the effort to clean up after themselves. Exceeded our expectations on all levels and highly recommend this business!",
+    by: "Pat T.",
+  },
+  {
+    quote:
+      "Branden said he could custom build and install new cabinets and our island. I was skeptical at first but have had him do projects for me in the past so I let him run with it. I am so glad we did! He knocked it out of the park and made us better cabinets than we could have bought. Such good quality and will definitely stand the test of time with three teenage boys! Thank you Branden for the quick and amazing work.",
+    by: "Shorty W.",
+  },
+  {
+    quote:
+      "Overall outstanding work; outstanding guy. I love his work, top quality, and I would hire him again.",
+    by: "Greg H.",
+  },
+  {
+    quote: "He did a great job and the best thing about him is the communication.",
+    by: "Chad H.",
+  },
+];
+---
+
+<Base
+  title="Roybal Construction Reviews — Fairbanks, AK Contractor"
+  description="Read what Fairbanks homeowners say about working with Roybal Construction, LLC — deck builds, custom cabinetry, remodeling, and restoration."
+>
+  <PageHero
+    heading="Read Reviews"
+    lede="What our customers say about working with us."
+  />
+
+  <section class="section">
+    <div class="wrap">
+      <div class="grid grid--2">
+        {reviews.map((r) => (
+          <figure class="card review">
+            <blockquote>{r.quote}</blockquote>
+            <figcaption>— {r.by}</figcaption>
+          </figure>
+        ))}
+      </div>
+
+      <p class="review__more">
+        <a class="btn btn--outline" href="/post-a-review">Worked with us? Leave a review →</a>
+      </p>
+    </div>
+  </section>
+
+  <CtaBand />
+</Base>
+
+<style>
+  .review { display: flex; flex-direction: column; gap: 0.9rem; }
+  .review blockquote {
+    margin: 0;
+    font-size: 1.02rem;
+    line-height: 1.65;
+    color: var(--slate-700);
+  }
+  .review blockquote::before { content: "\201C"; }
+  .review blockquote::after { content: "\201D"; }
+  .review figcaption {
+    font-weight: 700;
+    color: var(--navy-900);
+    font-size: 0.92rem;
+    margin-top: auto;
+  }
+  .review__more { margin-top: 2rem; text-align: center; }
+</style>

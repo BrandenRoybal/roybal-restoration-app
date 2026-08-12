@@ -1,0 +1,52 @@
+/**
+ * Cloudflare Workers config for the public marketing site
+ * (www.roybalconstruction.com).
+ *
+ * This is an ASSETS-ONLY Worker: there is no server code, no `main` entry —
+ * just the static files Astro builds. Cloudflare serves them from its edge.
+ *
+ * Cloudflare has been folding Pages into Workers, so the dashboard's "Workers"
+ * flow is the current one. It is why the setup wizard asks for a *deploy*
+ * command as well as a build command:
+ *
+ *   Build command:   npm run site:build
+ *   Deploy command:  npx wrangler deploy      ← reads this file
+ *
+ * ⚠️ `name` must match the Cloudflare project name. If you named the project
+ * something else in the dashboard, change it here rather than there — the
+ * dashboard name is what the *.workers.dev URL is derived from.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "roybal-site",
+  "compatibility_date": "2026-08-12",
+
+  "assets": {
+    "directory": "./apps/site/dist",
+
+    /**
+     * ⚠️ THE SETTING THAT PROTECTS THE RANKINGS.
+     *
+     * The 36 URLs this site ranks for are extensionless with NO trailing
+     * slash (/contact-us, not /contact-us/). The build emits flat files
+     * (contact-us.html) so those paths stay byte-identical.
+     *
+     * "auto-trailing-slash" serves /contact-us from contact-us.html directly,
+     * with no redirect, and sends /contact-us/ to /contact-us. That is what we
+     * want. "none" would 404 every extensionless path — i.e. the entire site.
+     *
+     * Set explicitly rather than left to the default, because a change in the
+     * default here would silently put a 301 on all 36 ranking URLs.
+     * `npm run site:check-live -- <url>` verifies this against a real
+     * deployment; run it on the *.workers.dev URL BEFORE touching DNS.
+     */
+    "html_handling": "auto-trailing-slash",
+
+    /** Serves the built 404.html for unknown paths, with a real 404 status. */
+    "not_found_handling": "404-page"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

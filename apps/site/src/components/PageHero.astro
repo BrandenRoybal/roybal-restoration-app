@@ -1,0 +1,78 @@
+---
+/* The one and only <h1> on an interior page. The old template emitted an
+   empty h1 above the real one on all 36 pages; centralising it here makes
+   that impossible to reintroduce. */
+import { BUSINESS } from "../data/site";
+
+interface Props {
+  heading: string;
+  lede?: string;
+  image?: string;
+  /** Breadcrumb trail, nearest ancestor last. Home is prepended automatically. */
+  crumbs?: { name: string; href: string }[];
+}
+const { heading, lede, image, crumbs = [] } = Astro.props;
+---
+
+<section class:list={["hero", image && "hero--img"]} style={image ? `--hero-img:url('${image}')` : undefined}>
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/">Home</a></li>
+        {crumbs.map((c) => (
+          <li><a href={c.href}>{c.name}</a></li>
+        ))}
+        <li aria-current="page">{heading}</li>
+      </ol>
+    </nav>
+
+    <h1>{heading}</h1>
+    {lede && <p class="lede hero__lede">{lede}</p>}
+
+    <div class="hero__cta">
+      <a class="btn btn--primary" href="/contact-us">Get a Free Estimate</a>
+      <a class="btn btn--ghost" href={BUSINESS.phoneHref}>Call {BUSINESS.phone}</a>
+    </div>
+  </div>
+</section>
+
+<style>
+  .hero {
+    background: var(--navy-900);
+    color: var(--slate-300);
+    padding: clamp(2rem, 5vw, 3.5rem) 0 clamp(2.2rem, 5vw, 3.5rem);
+    position: relative;
+    isolation: isolate;
+  }
+  .hero--img::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background-image: linear-gradient(105deg, rgb(15 27 45 / 96%) 42%, rgb(15 27 45 / 68%)), var(--hero-img);
+    background-size: cover;
+    background-position: center;
+  }
+  .hero h1 { color: var(--white); max-width: 20ch; }
+  .hero__lede { color: var(--slate-300); margin-top: 0.9rem; }
+  .hero__cta { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.6rem; }
+
+  .crumbs { margin-bottom: 1.1rem; font-size: 0.85rem; }
+  .crumbs ol {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .crumbs li + li::before {
+    content: "›";
+    margin-right: 0.4rem;
+    color: var(--slate-500);
+  }
+  .crumbs a { color: var(--slate-400); text-decoration: none; }
+  .crumbs a:hover { color: var(--orange); text-decoration: underline; }
+  .crumbs [aria-current="page"] { color: var(--slate-300); }
+</style>

@@ -1,0 +1,161 @@
+---
+/* Footer. Carries the full NAP in visible text — Google cross-checks the
+   markup in Base.astro against what a human can actually read, and a
+   mismatch between them costs local ranking. Keep the two in sync by
+   editing data/site.ts, never by hardcoding here. */
+import {
+  BUSINESS,
+  RESTORATION_SERVICES,
+  CONSTRUCTION_SERVICES,
+  SERVICE_AREAS,
+  FAIRBANKS_NEIGHBORHOODS,
+} from "../data/site";
+
+const a = BUSINESS.address;
+const year = new Date().getFullYear();
+const mapQuery = encodeURIComponent(`${a.street}, ${a.city}, ${a.region} ${a.postalCode}`);
+---
+
+<footer class="ftr">
+  <div class="wrap ftr__grid">
+    <div class="ftr__col ftr__col--brand">
+      <img src="/images/emblem-mark.svg" alt="" width="44" height="44" />
+      <p class="ftr__name">{BUSINESS.name}</p>
+      <p class="ftr__blurb">
+        Locally owned general contractor serving Fairbanks and the North Star Borough —
+        restoration, remodeling, and new construction built for the Alaskan climate.
+      </p>
+      <a class="btn btn--primary" href={BUSINESS.phoneHref}>Call {BUSINESS.phone}</a>
+    </div>
+
+    <div class="ftr__col">
+      <h2 class="ftr__h">Restoration</h2>
+      <ul>
+        {RESTORATION_SERVICES.map((s) => <li><a href={s.path}>{s.name}</a></li>)}
+        <li><a href="/restoration-services">All Restoration Services</a></li>
+      </ul>
+    </div>
+
+    <div class="ftr__col">
+      <h2 class="ftr__h">Construction</h2>
+      <ul>
+        {CONSTRUCTION_SERVICES.map((s) => <li><a href={s.path}>{s.name}</a></li>)}
+      </ul>
+    </div>
+
+    <div class="ftr__col">
+      <h2 class="ftr__h">Contact</h2>
+      <address class="ftr__addr">
+        <a href={`https://www.google.com/maps/search/?api=1&query=${mapQuery}`} rel="noopener">
+          {a.street}<br />{a.city}, {a.region} {a.postalCode}
+        </a>
+        <a href={BUSINESS.phoneHref} class="ftr__tel">{BUSINESS.phone}</a>
+        <a href={`mailto:${BUSINESS.email}`}>{BUSINESS.email}</a>
+      </address>
+      <p class="ftr__hours">
+        {BUSINESS.hoursLabel}<br />
+        <strong>{BUSINESS.emergencyLabel}</strong>
+      </p>
+
+      <h2 class="ftr__h ftr__h--sp">Areas We Serve</h2>
+      <p class="ftr__areas">
+        {SERVICE_AREAS.map((area, i) => (
+          <>
+            {area.page ? <a href={`/general-contractor-in-${area.slug}`}>{area.name}</a> : <span>{area.name}</span>}
+            {i < SERVICE_AREAS.length - 1 ? <span aria-hidden="true"> · </span> : null}
+          </>
+        ))}
+      </p>
+      <p class="ftr__hoods">
+        Fairbanks neighborhoods including{" "}
+        {FAIRBANKS_NEIGHBORHOODS.map((n, i) => (
+          <>{n.page ? <a href={`/general-contractor-in-${n.slug}`}>{n.name}</a> : <span>{n.name}</span>}{i < FAIRBANKS_NEIGHBORHOODS.length - 1 ? " and " : "."}</>
+        ))}
+      </p>
+    </div>
+  </div>
+
+  <div class="ftr__bottom">
+    <div class="wrap ftr__bottomInner">
+      <p>&copy; {year} {BUSINESS.name}. Licensed &amp; insured.</p>
+      <nav aria-label="Footer">
+        <a href="/gallery">Gallery</a>
+        <a href="/blog">Blog</a>
+        <a href="/read-reviews">Reviews</a>
+        <a href="/contact-us">Contact</a>
+        <a href="/privacy-policy">Privacy Policy</a>
+      </nav>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .ftr {
+    background: var(--navy-900);
+    color: var(--slate-400);
+    font-size: 0.93rem;
+    margin-top: 0;
+  }
+  .ftr__grid {
+    display: grid;
+    gap: 2.5rem;
+    grid-template-columns: 1.4fr 1fr 1fr 1.25fr;
+    padding: clamp(2.5rem, 5vw, 4rem) 0 2.5rem;
+  }
+  @media (max-width: 980px) {
+    .ftr__grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); }
+  }
+
+  .ftr__name {
+    color: var(--white);
+    font-weight: 700;
+    font-size: 1.05rem;
+    margin: 0.7rem 0 0.4rem;
+  }
+  .ftr__blurb { max-width: 34ch; margin-bottom: 1.2rem; }
+
+  .ftr__h {
+    color: var(--white);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    margin: 0 0 0.9rem;
+  }
+  .ftr__h--sp { margin-top: 1.6rem; }
+
+  .ftr__col ul { list-style: none; margin: 0; padding: 0; }
+  .ftr__col li { margin-bottom: 0.45rem; }
+
+  .ftr a { color: var(--slate-400); text-decoration: none; }
+  .ftr a:hover { color: var(--orange); text-decoration: underline; }
+
+  .ftr__addr {
+    font-style: normal;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  .ftr__tel { color: var(--white) !important; font-weight: 700; font-size: 1.05rem; }
+  .ftr__tel:hover { color: var(--orange) !important; }
+
+  .ftr__hours { margin: 0; line-height: 1.7; }
+  .ftr__hours strong { color: var(--orange); }
+
+  .ftr__areas { line-height: 2; margin: 0; }
+  .ftr__hoods { margin: 0.5rem 0 0; font-size: 0.88rem; color: var(--slate-500); }
+
+  .ftr__bottom { border-top: 1px solid rgb(255 255 255 / 10%); }
+  .ftr__bottomInner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    padding-block: 1.25rem;
+    font-size: 0.86rem;
+  }
+  .ftr__bottomInner p { margin: 0; }
+  .ftr__bottomInner nav { display: flex; flex-wrap: wrap; gap: 1.2rem; }
+</style>

@@ -1,0 +1,51 @@
+---
+/* The old version of this page asked "How was your experience? Good / Bad"
+   and routed accordingly — happy customers to the public review sites,
+   unhappy ones to a private form. That pattern is review gating, which
+   Google's review policies prohibit and which can get a Business Profile's
+   reviews suppressed.
+
+   The URL is in the live sitemap, so it must keep resolving. It now
+   canonicalises to /post-a-review rather than 301ing, so any inbound link
+   equity lands on the page that replaced it. */
+import Base from "../layouts/Base.astro";
+import PageHero from "../components/PageHero.astro";
+import { BUSINESS } from "../data/site";
+---
+
+<Base
+  title="Leave a Review — Roybal Construction, LLC"
+  description="Share your experience with Roybal Construction, LLC in Fairbanks, AK."
+  canonical={`${BUSINESS.url}/post-a-review`}
+>
+  <PageHero
+    heading="Leave a Review"
+    lede="However it went, we want to hear about it."
+  />
+
+  <section class="section">
+    <div class="wrap narrow">
+      <div class="grid grid--2">
+        <a class="card" href="/post-a-review">
+          <h3>Share it publicly</h3>
+          <p>Post a review on Google or Facebook so other Fairbanks homeowners can find us.</p>
+          <span class="card__more">Post a review →</span>
+        </a>
+        <a class="card" href="/give-feedback">
+          <h3>Tell us privately</h3>
+          <p>Something we should fix? Send it straight to us and we'll take care of it.</p>
+          <span class="card__more">Give feedback →</span>
+        </a>
+      </div>
+
+      <p class="aside">
+        Prefer to talk? Call <a href={BUSINESS.phoneHref}>{BUSINESS.phone}</a>.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .narrow { max-width: 56rem; }
+  .aside { margin-top: 2rem; color: var(--slate-500); }
+</style>

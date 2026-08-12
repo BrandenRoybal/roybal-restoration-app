@@ -1,0 +1,36 @@
+# Cloudflare Pages reads this file from the build output root.
+# Netlify uses the same format, so it is portable if the host ever changes.
+#
+# Deliberately NO Content-Security-Policy. Astro inlines small scripts
+# (the quote form and the receptionist ship as inline <script type="module">),
+# so a script-src policy without per-build hashes would silently break lead
+# capture — the one thing on this site that must never break. Revisit only
+# with a build step that emits the hashes.
+
+/*
+  # Don't let a browser guess a file's type from its contents.
+  X-Content-Type-Options: nosniff
+  # Nobody should be framing a contractor's site; this is the modern
+  # replacement for X-Frame-Options and is understood by every current browser.
+  Content-Security-Policy: frame-ancestors 'none'
+  # Send the full URL to our own origin, only the bare origin cross-site —
+  # so Google Analytics still attributes referrals without leaking paths.
+  Referrer-Policy: strict-origin-when-cross-origin
+  # The site asks for none of these. Saying so stops an injected script asking.
+  Permissions-Policy: geolocation=(), camera=(), payment=(), usb=()
+  # HTTPS only. 1 year, no preload: preload is a one-way door that is painful
+  # to reverse, and this gets the security benefit without that commitment.
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+# Astro fingerprints these filenames, so the content at a given URL can never
+# change. Cache them hard.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Photos change rarely but are not fingerprinted — a day, then revalidate.
+/images/*
+  Cache-Control: public, max-age=86400, must-revalidate
+
+# HTML must revalidate every time, or a content fix takes a day to appear.
+/*.html
+  Cache-Control: public, max-age=0, must-revalidate
