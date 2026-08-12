@@ -63,7 +63,9 @@ export function qbPanel() {
       h("strong", {}, "QuickBooks Time"),
       status && status.connected
         ? h("span", { class: "qb-ok" }, "● Connected")
-        : h("span", { class: "qb-off" }, "○ Not connected")));
+        : status && status.needsReconnect
+          ? h("span", { class: "qb-off" }, "▲ Needs reconnect")
+          : h("span", { class: "qb-off" }, "○ Not connected")));
 
     if (!QB_TIME_CLIENT_ID) {
       box.append(h("p", { class: "subtle" }, "Add QB_TIME_CLIENT_ID to config.js to enable connecting."));
@@ -90,7 +92,18 @@ export function qbPanel() {
     } else {
       const connect = h("button", { class: "btn btn--primary btn--sm" }, "Connect QuickBooks Time");
       connect.addEventListener("click", () => { location.href = buildAuthUrl(); });
-      box.append(h("p", { class: "subtle" }, "Connect once so job hours flow into the daily construction logs."), connect);
+      /* When a token exists but no longer works, say so and say WHY. The old
+         panel showed a green "Connected" in exactly this state, which is how
+         19 days of missing hours went unnoticed. */
+      box.append(
+        status && status.needsReconnect
+          ? h("p", { class: "subtle" },
+              "QuickBooks rejected the saved credentials" +
+              (status.updatedAt ? " (last refreshed " + new Date(status.updatedAt).toLocaleDateString() + ")" : "") +
+              ". Hours have not been syncing. Reconnect to fix it." +
+              (status.reason ? " — " + status.reason : ""))
+          : h("p", { class: "subtle" }, "Connect once so job hours flow into the daily construction logs."),
+        connect);
     }
   }
 
