@@ -303,6 +303,41 @@ guarantees that. Proxying gets turned on deliberately when the Worker is bound.
 mail stops — far worse than any website problem. Do not flip nameservers until
 you have counted all five.
 
+### ⚠️ DNSSEC MUST BE DISABLED FIRST — this one can black out the whole domain
+
+Verified 2026-08-12: DNSSEC **is enabled**. The `.com` registry holds a DS record
+for this domain:
+
+```
+DS  24292 8 2 A07F093628041FBBE58E688C8DA2B1C0F1CDEFAF89A9F913AB05D440 8E7183F1
+```
+
+That record tells every validating resolver "answers for this domain are signed
+by Wix's key". Move the nameservers to Cloudflare while it is still published
+and those resolvers — Google 8.8.8.8, Cloudflare 1.1.1.1, Quad9, most ISPs —
+get answers signed by the wrong key and **refuse to resolve the domain at all.**
+
+Not just the website: email, `app`, and `portal` go with it, for an
+unpredictable subset of people depending on which resolver they use. There is
+no fast rollback; the DS record's TTL is **86400s (24 hours)**, so recovery
+means waiting out the same cache either way.
+
+Cloudflare's setup page lists this under "Recommended". For this domain it is
+mandatory.
+
+Order:
+
+1. **Wix → Domains → DNSSEC → turn OFF.** This asks the registry to drop the DS.
+2. Poll until this returns **nothing**:
+   ```bash
+   dig +short DS roybalconstruction.com @a.gtld-servers.net
+   ```
+3. **Then wait out the 24h TTL** before switching nameservers. The registry
+   dropping the record does not evict it from resolvers that already cached it.
+4. Only then do the nameserver change below.
+5. Re-enable DNSSEC afterwards from Cloudflare's side if wanted — free, a real
+   improvement, and safe once Cloudflare is authoritative. Never during the move.
+
 ### Steps
 
 1. **Cloudflare → Add a site** → `roybalconstruction.com` → Free plan.
