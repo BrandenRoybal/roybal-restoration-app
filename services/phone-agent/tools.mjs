@@ -10,7 +10,7 @@
    lead and a couple of texts.
    ============================================================ */
 import { rest, insertRow } from "./supa.mjs";
-import { SUPABASE_URL, SUPABASE_ANON_KEY, OWNER_CELL } from "./config.mjs";
+import { SUPABASE_URL, SUPABASE_ANON_KEY, ALERT_CELLS } from "./config.mjs";
 import { accessToken } from "./supa.mjs";
 // the board's scheduling engine is pure ESM (no DOM, no imports) and is
 // SERVER-SHARED here — see the guard comment at the top of schedule.js
@@ -119,24 +119,45 @@ async function createLead(input, session) {
   return { ok: true, leadId: id };
 }
 
-/* ---------- textOwner — company-number SMS, quiet-hours exempt ---------- */
+/* ---------- textOwner — company-number SMS, quiet-hours exempt ----------
+   One tool call fans out to every ALERT_CELLS recipient (owner + any extras
+   like the project manager). Each send is isolated: one bad number cannot
+   stop the others, and the model is never told who the recipients are. */
+async function sendAlert(to, message) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken()}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "sendSms", to, body: `📞 ${message}`,
+        kind: "phoneOwner", captured_by: "phone-agent",
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) return { ok: false, error: String(data.error || `send failed (${res.status})`).slice(0, 140) };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e).slice(0, 140) };
+  }
+}
+
 async function textOwner(input, session) {
-  if (!OWNER_CELL) return { error: "owner cell not configured" };
+  if (!ALERT_CELLS.length) return { error: "owner cell not configured" };
   if (session.textsSent >= 2) return { error: "already texted the owner twice this call" };
   const budget = callerBudget(last10(session.from));
   if (budget.texts >= 2) return { error: "owner already alerted about this number today" };
   const message = String(input.message || "").slice(0, 300).trim();
   if (!message) return { error: "empty message" };
-  const res = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${accessToken()}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "sendSms", to: OWNER_CELL, body: `📞 ${message}`,
-      kind: "phoneOwner", captured_by: "phone-agent",
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) return { error: String(data.error || `send failed (${res.status})`).slice(0, 140) };
+
+  const results = await Promise.all(ALERT_CELLS.map((to) => sendAlert(to, message)));
+  const failed = results.filter((r) => !r.ok);
+  /* Nothing got through: leave the budget untouched so the model may retry,
+     exactly as the single-recipient lane behaved. */
+  if (failed.length === results.length) return { error: failed[0].error };
+  /* Partial delivery still counts as ONE alert — charging the caps per
+     recipient would halve how many alerts a call is allowed the moment a
+     second person is added, and a retry would double-text whoever did get it. */
+  if (failed.length) console.error(`owner alert: ${failed.length}/${results.length} recipients failed`, failed[0].error);
   session.textsSent++; budget.texts++;
   return { ok: true };
 }

@@ -12,6 +12,7 @@ process.env.MACHINE_PASSWORD = "pw";
 process.env.LLM_API_KEY = "key";
 process.env.PHONE_RELAY_TOKEN = "sesame";
 process.env.OWNER_CELL = "907-555-0000";
+process.env.ALERT_CELLS = "907-555-0001, , not-a-number, 907-555-0000"; // extra PM + blank/malformed/duplicate
 
 /* ---------- fetch stub ---------- */
 const LOG = [];
@@ -183,6 +184,53 @@ test("textOwner rides roybal-notify with the quiet-hours-exempt kind", async () 
   assert.ok(sms);
   assert.match(sms.body, /"kind":"phoneOwner"/);
   assert.match(sms.body, /New water loss/);
+  c.close();
+});
+
+test("one textOwner call alerts every ALERT_CELLS recipient, once each", async () => {
+  LOG.length = 0;
+  anthropicScript = [
+    toolReply("Letting them know. ", "textOwner", { message: "New water loss — Pat 907-555-1234" }),
+    textReply("They've been alerted."),
+  ];
+  const c = call({ from: "+19075556666" });
+  await c.setup(); await sleep(150);
+  c.prompt("tell the office");
+  await c.waitFor((m) => m.type === "text" && m.last === true);
+
+  const sends = LOG.filter((e) => e.url.includes("roybal-notify"));
+  const to = sends.map((e) => JSON.parse(e.body).to);
+  // owner first, then the PM — blank/malformed dropped, the duplicate of
+  // OWNER_CELL collapsed, so nobody is texted twice
+  assert.deepEqual(to, ["907-555-0000", "907-555-0001"]);
+  for (const e of sends) assert.match(e.body, /"kind":"phoneOwner"/);
+  c.close();
+});
+
+test("the 2-per-call cap counts tool calls, not messages", async () => {
+  LOG.length = 0;
+  // tools are offered on rounds 0-1 only (brain.mjs), so the third alert
+  // needs a second caller turn
+  anthropicScript = [
+    toolReply("One. ", "textOwner", { message: "first alert" }),
+    toolReply("Two. ", "textOwner", { message: "second alert" }),
+    textReply("Both sent."),
+    toolReply("Again. ", "textOwner", { message: "third alert" }),
+    textReply("All set."),
+  ];
+  const c = call({ from: "+19075554444" });
+  await c.setup(); await sleep(150);
+  c.prompt("text them twice");
+  await c.waitFor((m) => m.type === "text" && m.last === true);
+
+  const mark = c.out.length;
+  c.prompt("one more text please");
+  await c.waitFor((m, i) => i >= mark && m.type === "text" && m.last === true);
+
+  // 2 allowed calls x 2 recipients = 4 sends; the third call is refused
+  assert.equal(LOG.filter((e) => e.url.includes("roybal-notify")).length, 4);
+  const lastResult = LOG.filter((e) => e.url.includes("anthropic")).at(-1);
+  assert.ok(lastResult.body.includes("twice this call"), "model told the third alert was refused");
   c.close();
 });
 

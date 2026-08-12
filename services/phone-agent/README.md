@@ -99,6 +99,20 @@ that once more?", which callers experience as deafness. How to confirm and fix:
 
 Callers are protected meanwhile: the first LLM failure gets an honest
 apology + retry, a second consecutive failure hands the call to voicemail.
+- **Who gets the lead-alert texts:** `OWNER_CELL` (one number) plus the
+  optional comma-separated `ALERT_CELLS` — extra people, e.g. a project
+  manager, who should see every new lead:
+  ```sh
+  fly secrets set -a roybal-phone ALERT_CELLS="9075550001,9075550002"
+  ```
+  Read ONLY by this agent's `textOwner`, so being on the list grants
+  visibility and nothing else — it does not ring on calls (that's
+  `roybal-voice` dialing `OWNER_CELL`), does not receive the morning brief,
+  and does NOT grant approve-by-text authority (`roybal-notify` gates YES/NO
+  on `OWNER_CELL` alone). Malformed or duplicate entries are dropped rather
+  than blanking the lane. Each recipient is a separate SMS against the
+  `SMS_MONTHLY_CAP` of 500; the per-call and per-caller-per-day limits still
+  count tool CALLS (2), not messages.
 - Kill switch: remove the Twilio voice webhook (calls ring straight through
   as before), or `fly scale count 0 -a roybal-phone` (callers then get
   voicemail via the edge function's failure path).

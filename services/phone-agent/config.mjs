@@ -24,6 +24,27 @@ export const OWNER_CELL = env("OWNER_CELL");
 export const OWNER_NAME = env("OWNER_NAME", "Branden");
 export const PORT = num("PORT", 8080);
 
+/* Who receives the receptionist's owner texts (kind `phoneOwner`).
+   OWNER_CELL stays a SINGLE number on purpose — elsewhere in the system it
+   means "the owner" with authority attached: roybal-voice DIALS it, and
+   roybal-notify gates approve-by-text on it. ALERT_CELLS is an optional
+   comma-separated list of extra people (a project manager who should see new
+   leads); it is read ONLY here, so being on it grants visibility and nothing
+   else. Malformed entries are dropped rather than silently blanking the lane,
+   and the owner is always first. */
+const last10Digits = (p) => String(p || "").replace(/[^\d]/g, "").slice(-10);
+export const ALERT_CELLS = (() => {
+  const seen = new Set();
+  return [OWNER_CELL, ...env("ALERT_CELLS").split(",")]
+    .map((s) => s.trim())
+    .filter((s) => {
+      const d = last10Digits(s);
+      if (d.length !== 10 || seen.has(d)) return false;
+      seen.add(d);
+      return true;
+    });
+})();
+
 /* Cost governance — the phone lane rides the SAME monthly AI cap as every
    other AI feature, plus its own minutes cap. */
 export const SPEND_CAP_USD = num("SPEND_CAP_USD", 50);
