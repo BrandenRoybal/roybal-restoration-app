@@ -126,16 +126,23 @@ above.
 ### Back to AT&T voicemail
 
 ```
-*61*<original AT&T voicemail number>#
+*61*12142269138#
 ```
 
-**Known gap:** the original `*#61#` target was not captured before the change
-on 2026-08-12. If you need an exact restore, AT&T support can reset voicemail
-routing on the line — ask for "restore call forward no reply to voicemail."
+**`+1 214-226-9138` is the AT&T voicemail deposit number for this specific
+line**, captured from `*#61#` before the 2026-08-12 change. It is not a
+universal AT&T number — each line gets its own, which is why it is written
+down here. This single command restores the pre-change behaviour exactly.
 
-`#61#` deactivates conditional forwarding, but on AT&T that may leave
-unanswered calls simply ringing out with **no voicemail at all**, since
-voicemail *is* the forwarding target. Prefer the explicit restore.
+Do **not** revert with `#61#`. That deactivates conditional forwarding, and
+since voicemail *is* the forwarding target on AT&T, it can leave unanswered
+calls ringing out with **no voicemail at all**. Always repoint explicitly.
+
+For the record, the full pre-change state (`*#61#`, 2026-08-12) was: **Voice**
+call forwarding when unanswered → `+12142269138`, Enabled. Every other class —
+Data, Fax, SMS, Sync Data Circuit, Async Data Circuit, Packet Access, Pad
+Access — Disabled. Only the Voice line matters; the rest are GSM-era service
+classes this line has never used, and they should stay disabled.
 
 Check current state at any time:
 
