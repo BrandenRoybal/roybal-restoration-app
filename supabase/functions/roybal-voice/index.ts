@@ -9,7 +9,7 @@
  * no user session; auth is X-Twilio-Signature exactly like roybal-notify's
  * /inbound):
  *   POST /            incoming call → <Dial answerOnBridge> the owner's
- *                     cell (timeout DIAL_TIMEOUT, default 15s) with a
+ *                     cell (timeout DIAL_TIMEOUT, default 10s) with a
  *                     press-any-key SCREEN on the callee leg, action=
  *                     /screen. OWNER_CELL unset → straight to the relay.
  *                     A call that a carrier ALREADY forwarded (To listed in
@@ -59,14 +59,17 @@ const TWILIO_AUTH = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const AGENT_WSS = Deno.env.get("PHONE_AGENT_WSS") ?? "";
 const RELAY_TOKEN = Deno.env.get("PHONE_RELAY_TOKEN") ?? "";
 const OWNER_CELL = Deno.env.get("OWNER_CELL") ?? "";
-/* BOTH dial timeouts must stay BELOW the no-answer timer on the owner's own
-   cell carrier (AT&T's default is ~20s). The owner's line conditionally
-   forwards unanswered calls here, so a <Dial> that rings LONGER than the
-   carrier waits gets forwarded straight back into this function — the caller
-   meets the receptionist a second time, on a second billed call. Ringing for
-   less time is merely suboptimal; ringing for more is a loop. */
-const DIAL_TIMEOUT = Math.min(Math.max(Number(Deno.env.get("DIAL_TIMEOUT") ?? "15") || 15, 5), 30);
-const ESCALATE_TIMEOUT = Math.min(Math.max(Number(Deno.env.get("ESCALATE_TIMEOUT") ?? "15") || 15, 5), 30);
+/* BOTH dial timeouts must stay STRICTLY BELOW the no-answer timer on the
+   owner's own cell carrier — AT&T, set to 15s on 2026-08-12. That line
+   conditionally forwards unanswered calls into this very function, so a
+   <Dial> that rings as long as the carrier waits is a RACE: when the carrier
+   wins, it forwards our own call back here and the caller meets the
+   receptionist a second time, on a second billed call. Ringing for less time
+   is merely suboptimal; ringing for as long or longer is a loop.
+   10s leaves 5s of margin. Retune BOTH if the carrier timer ever changes —
+   see docs/Phone_Forwarding_Runbook.md. */
+const DIAL_TIMEOUT = Math.min(Math.max(Number(Deno.env.get("DIAL_TIMEOUT") ?? "10") || 10, 5), 30);
+const ESCALATE_TIMEOUT = Math.min(Math.max(Number(Deno.env.get("ESCALATE_TIMEOUT") ?? "10") || 10, 5), 30);
 
 /* Numbers whose ONLY job is to be a carrier-forwarding target — every call
    they receive is by definition one the owner already missed. Comma-separated

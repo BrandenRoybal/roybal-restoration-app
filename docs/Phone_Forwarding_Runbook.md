@@ -72,7 +72,7 @@ Two new optional secrets on the `roybal-voice` function:
 | Secret | Value | Effect |
 |---|---|---|
 | `FORWARD_ONLY_TO` | `+18663452290` | Calls arriving on this number skip the owner dial and go straight to the receptionist |
-| `ESCALATE_TIMEOUT` | `15` (default) | Replaces a hardcoded 25s — see the loop warning below |
+| `ESCALATE_TIMEOUT` | `10` (default) | Replaces a hardcoded 25s — see the loop warning below |
 
 With `FORWARD_ONLY_TO` set, the caller hears the AI **~1–2s after AT&T hands
 the call over**, exactly like voicemail used to pick up.
@@ -83,20 +83,25 @@ checked because neither is reliable alone: `To` is always present but only
 meaningful for a dedicated forwarding target, and `ForwardedFrom` is general
 but plenty of carriers strip it.
 
-> ### ⚠️ Both dial timeouts must stay UNDER AT&T's no-answer timer
+> ### ⚠️ Both dial timeouts must stay STRICTLY UNDER AT&T's no-answer timer
+>
+> **Current settings: AT&T timer 15s · `DIAL_TIMEOUT` 10s · `ESCALATE_TIMEOUT`
+> 10s. Five seconds of margin. Change one, re-check the others.**
 >
 > `roybal-voice` dials `OWNER_CELL` in two places: the initial screen
-> (`DIAL_TIMEOUT`, 15s) and the AI's escalate handoff (`ESCALATE_TIMEOUT`,
-> now 15s, previously a hardcoded **25s**).
+> (`DIAL_TIMEOUT`) and the AI's escalate handoff (`ESCALATE_TIMEOUT`,
+> previously a hardcoded **25s**).
 >
-> The cell that Twilio is dialling is the same cell that conditionally
-> forwards to Twilio. If Twilio rings **longer** than AT&T waits, AT&T
-> forwards Twilio's own call back into `roybal-voice` and the caller meets the
-> receptionist a second time, on a second billed call. At 25s versus AT&T's
-> ~20s, the old escalate path did exactly that.
+> The cell Twilio is dialling is the same cell that conditionally forwards to
+> Twilio. If Twilio rings as long as or longer than AT&T waits, AT&T forwards
+> Twilio's own call back into `roybal-voice` and the caller meets the
+> receptionist a second time, on a second billed call — right after they asked
+> for a human. At a hardcoded 25s against AT&T's then-default ~20s, the old
+> escalate path did exactly that.
 >
-> **If you shorten AT&T's timer (below), re-check both.** A 10s AT&T timer
-> with a 15s `DIAL_TIMEOUT` re-opens the loop.
+> Equal values are a **race, not a margin**. When AT&T's timer dropped to 15s
+> on 2026-08-12, both dials were also at 15s; they went to 10s in the same
+> change for this reason.
 
 ---
 
@@ -104,20 +109,21 @@ but plenty of carriers strip it.
 
 Total caller wait = **AT&T's no-answer timer** + ~1–2s of Twilio handoff.
 
-AT&T's default is ~20s (about 4–5 rings). To shorten it, set the timer in the
-same code — valid values are 5 to 30 seconds in 5-second steps:
+AT&T's default is ~20s (about 4–5 rings). **Set to 15s on 2026-08-12**, giving
+a caller ~17s before the receptionist speaks. To change it, set the timer in
+the same code — valid values are 5 to 30 seconds in 5-second steps:
 
 ```
 **61*18663452290**15#
 ```
 
-That gives ~15s on the handset, receptionist at ~16s. If that syntax errors on
-your device, the fully-qualified GSM form is `**61*18663452290*11*15#`.
+If that syntax errors on your device, the fully-qualified GSM form is
+`**61*18663452290*11*15#`.
 
 Trade-off: less time to dig the phone out of a pocket, versus less time before
-the caller gives up. 15s is a reasonable floor. Do not go below 10s — and if
-you do, drop `DIAL_TIMEOUT` and `ESCALATE_TIMEOUT` to match, per the warning
-above.
+the caller gives up. 15s is a reasonable floor — below that the handset
+realistically cannot be answered, and `DIAL_TIMEOUT`/`ESCALATE_TIMEOUT` are
+clamped to a 5s minimum, so a 10s carrier timer leaves no usable margin at all.
 
 ---
 
