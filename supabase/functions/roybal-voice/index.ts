@@ -171,7 +171,7 @@ serve(async (req: Request) => {
   if (path === "") {
     // A forwarded call has ALREADY rung the owner's handset for the carrier's
     // full no-answer timer. Dialling it again adds DIAL_TIMEOUT seconds of
-    // ringback to a caller who has waited ~20s to get here — and rings a phone
+    // ringback to a caller who has waited 15s to get here — and rings a phone
     // that just demonstrably went unanswered. Go straight to the receptionist,
     // which is what the caller thought voicemail was going to be.
     if (!OWNER_CELL || alreadyRang(params)) return twiml(relayTwiml());
