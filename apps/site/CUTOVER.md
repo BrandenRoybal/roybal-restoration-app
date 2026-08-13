@@ -268,10 +268,33 @@ Wix blocks the nameserver change; Cloudflare demands it first. Going
 Wix → Cloudflare Registrar directly is a deadlock. An intermediate registrar is
 mandatory.
 
-**Chosen route: transfer to Porkbun**, then delegate to Cloudflare. Prerequisites
-are already satisfied — DNSSEC is off (verified: no DS at the registry, and none
-cached at 8.8.8.8 / 1.1.1.1 / 9.9.9.9), and the domain is far past the 60-day age
-floor.
+**Chosen route: transfer to Porkbun**, then delegate to Cloudflare.
+
+### 🔒 BLOCKED UNTIL 2026-10-11 — the address change armed a transfer lock
+
+Wix reports the domain *"is currently locked and can't be transferred to another
+domain provider. It will be available for transfer on Oct 11, 2026."*
+
+Sixty days before Oct 11 is **Aug 12** — the day the registrant contact was
+updated to the Royal Rd address. That is step 0 of this runbook. **Doing step 0
+correctly is what blocked step 7.** ICANN's Transfer Policy requires a 60-day
+inter-registrar lock after any change to registrant information.
+
+**It cannot be lifted.** Registrars may offer an opt-out *before* a registrant
+change, but ICANN bars them from removing it once running: registrars "may not
+allow registrants to opt out of the 60-day inter-registrar transfer lock during
+the 60-day lock." Do not waste time on Wix support — it is not their rule.
+
+The escape hatch is priced out: Cloudflare's partial (CNAME) zone setup would
+keep DNS at Wix while still using Cloudflare, but it is "only available to
+customers on a Business or Enterprise plan" — $200+/month.
+
+**So the launch does not wait for this.** See step 6c: the site ships on
+Cloudflare Pages over the existing Wix DNS, and only the Madwire cancellation
+slips to October. DNSSEC is already off, which stays true and is one less thing
+to do then.
+
+**On or after 2026-10-11:**
 
 1. **Wix → Domains → `…` → Transfer away from Wix.** Unlock the domain and
    request the authorization (EPP) code. It is emailed to the registrant address.
@@ -279,6 +302,8 @@ floor.
    transfer adds a year, so `2030-03-31` becomes `2031-03-31`).
 3. **Approve the transfer from the Wix side** if offered. Otherwise it waits out
    the mandatory 5-day ICANN window.
+4. **Do not change the registrant contact again before then** — it would restart
+   the 60-day clock.
 
 ### ⚠️ The one dangerous moment is the instant the transfer completes
 
@@ -310,6 +335,108 @@ Fix while DNS is still at Wix: edit the `www` CNAME value to
 `roybalconstruction.com` (chains to the apex A record at Madwire). Edit in
 place — deleting and re-adding as an A record leaves a window with no record
 at all.
+
+That restores the *old* Madwire site. Step 6c then repoints the same record at
+the new one.
+
+## 6c. Interim launch — Cloudflare Pages over Wix DNS
+
+Ship the new site on `www` now, without the transfer. **Pages, not a Worker:**
+Workers Custom Domains require an active Cloudflare zone, but Pages issues a
+certificate for a custom domain reached by a plain CNAME from an external DNS
+provider. That works for **subdomains only** — "if you are deploying to an apex
+domain, then you will need to add your site as a Cloudflare zone and configure
+your nameservers." `www` is a subdomain, so `www` can move today. The apex
+cannot, which is why Madwire stays until October.
+
+Nothing in the repo needs to change. The build already emits Pages-native
+`_headers` and `_redirects` into `dist/`, and `astro.config.mjs` sets
+`build.format: "file"` with `trailingSlash: "never"`, so paths stay
+extensionless. Verified 2026-08-13: Pages serves `/contact-us` from
+`contact-us.html` at **200 with no redirect** — the same behavior the Worker
+gets from `html_handling: "auto-trailing-slash"`.
+
+The root `wrangler.jsonc` can stay exactly as it is. It has no
+`pages_build_output_dir`, so a Pages Git build ignores it (warning only) — the
+Worker config survives untouched for October.
+
+### Create the project
+
+**Workers & Pages → Create → Pages → Connect to Git.**
+
+| Setting | Value |
+|---|---|
+| Project name | `roybal-site-pages` — the Worker already owns `roybal-site` |
+| Production branch | `main` |
+| Build command | `npm run site:build` |
+| Build output directory | `apps/site/dist` |
+| Root directory | *leave blank* — the repo root |
+
+Name it something other than `roybal-site`. A Worker of that name already
+exists from the staging deploy, and Cloudflare has been merging the two
+namespaces. The `*.pages.dev` hostname derives from this name.
+
+**Environment variables** — Production *and* Preview:
+
+```
+NODE_VERSION               = 22
+PUBLIC_LEAD_ENDPOINT       = https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-lead
+PUBLIC_WEB_AGENT_ENDPOINT  = https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-web-agent
+```
+
+⚠️ `apps/site/.env` is gitignored, so Cloudflare never sees it. Both values are
+read at **build** time (`import.meta.env` in `QuoteForm.astro` and
+`Receptionist.astro`). Miss them and the build still succeeds — but the quote
+form posts nowhere and the receptionist renders nothing at all. Silent.
+
+### Prove it on `*.pages.dev` BEFORE touching `www`
+
+```bash
+npm run site:check-live -- https://roybal-site-pages.pages.dev
+```
+
+Must print `✓ Every ranking URL answers 200 with no redirect. Safe to cut over.`
+This is the gate. Pages' path handling is host configuration, invisible locally,
+and it is the one thing that could put a 301 on all 36 ranking URLs.
+
+Also add the Pages origin to the two edge functions, or the form and the
+receptionist will be blocked by CORS from the new host:
+
+```bash
+supabase secrets set LEAD_ALLOW_ORIGIN=https://roybal-site-pages.pages.dev,https://www.roybalconstruction.com
+supabase secrets set WEB_AGENT_ALLOW_ORIGIN=https://roybal-site-pages.pages.dev,https://www.roybalconstruction.com
+```
+
+Drop the `pages.dev` entry from both once `www` is serving, so a staging URL
+can't drive the paid AI lane. Same cleanup the `workers.dev` URL needs.
+
+### Point `www` at it — dashboard first, DNS second
+
+**Order matters and the failure is misleading.** Cloudflare: "manually adding a
+custom CNAME record pointing to your Cloudflare Pages site without first
+associating the domain in the Cloudflare Pages dashboard will result in your
+domain failing to resolve … and display a 522 error." A 522 reads like a broken
+deployment; it is only a missing association.
+
+1. **Pages → the project → Custom domains → Set up a custom domain** →
+   `www.roybalconstruction.com`. Cloudflare will say it cannot find the domain
+   in your account and offer the CNAME target instead. That is expected — the
+   zone is not delegated.
+2. **Then** in Wix DNS, edit the `www` CNAME value to the `*.pages.dev`
+   hostname. Edit in place; do not delete and re-add.
+3. Wait for the certificate to issue (minutes, occasionally an hour).
+4. Re-run the checker against the real host:
+   ```bash
+   npm run site:check-live -- https://www.roybalconstruction.com
+   ```
+
+### What is still on Madwire after 6c
+
+Only the apex. `roybalconstruction.com` keeps its `A` record at `34.95.85.224`,
+whose server performs the apex→`www` 301. **Do not cancel Marketing 360 yet** —
+bare `roybalconstruction.com` is on business cards and the Google Business
+Profile, and nothing else is serving that redirect until the zone is on
+Cloudflare in October and step 7's redirect rule replaces it.
 
 ## 7. The switch — move DNS to Cloudflare
 
