@@ -62,31 +62,31 @@ re-verification, no citation sweep, no ranking wobble.
 Once GBP shows the Royal Rd address live, pull the real lat/long from the
 listing and replace the approximate coordinates in `src/data/site.ts`.
 
-### Getting the AI receptionist onto the 907
+### The AI receptionist and the 907 — SOLVED, do not port
 
-The receptionist currently answers the toll-free `(866) 345-2290`, which is a
-Twilio number. The website publishes the 907 regardless, because that number
-already rings you today — so there is no dependency and nothing is broken
-while you decide.
+**Resolved 2026-08-12 by conditional call forwarding, and this is the right
+answer.** The AT&T line's no-answer forward was changed from voicemail to
+`(866) 345-2290`. So a caller rings Branden's phone first, he answers if he
+can, and the AI picks up instead of voicemail if he doesn't.
 
-**Port the 907 into Twilio** and the AI answers it directly. Usually $1–15
-one-time; schedule the cutover and don't cancel the losing carrier until the
-port completes.
+**Do NOT port `907-371-9868` into Twilio.** An earlier version of this runbook
+recommended it. That was wrong, for two reasons:
 
-**Do not forward 907 → 866 instead.** Three reasons:
+1. `OWNER_CELL` **is** `9073719868` — verified against the stored secret digest.
+   The phone receptionist dials `OWNER_CELL` to escalate, and lead alerts text
+   *to* it. Make the AI's inbound line the same number and it dials and texts
+   itself: Twilio refuses a same-number send and escalation has nowhere to go.
+2. It is the phone in Branden's pocket. Porting it hands every personal call to
+   the AI.
 
-- `TWILIO_FROM` is one number for voice *and* SMS, so a customer who dialled
-  the 907 would get texts back from a number they don't recognise.
-- Depending on the carrier, forwarding presents the *forwarding* line to
-  Twilio rather than the real caller. `services/phone-agent` keys `createLead`,
-  `lookupCaller`, and its per-caller rate limits on `session.from` — so the
-  receptionist could lose the callback number and collapse every caller into
-  one rate-limit bucket. That's a functional break, not a cosmetic one.
-- It's a config on another carrier's system that can silently stop working.
+If a dedicated AI line is ever wanted, **buy a new 907 number in Twilio** rather
+than porting this one — local area code preserved, `OWNER_CELL` stays distinct,
+personal line stays personal.
 
-Keep the 866 afterwards as a spare — it's already provisioned, and it's a
-ready-made tracking number if you ever want to measure one ad channel without
-touching the published NAP.
+**Worth testing once:** call the 907 and let it ring through to the AI, then ask
+it to reach the owner. The AI escalates by dialing `OWNER_CELL` — which is the
+same line that just forwarded — so confirm that path terminates cleanly instead
+of looping back into the AI.
 
 ## 1. Confirm the content is right
 
@@ -178,7 +178,7 @@ URLs stops resolving. It must print:
 ✓ All archived URLs resolve at identical paths.
 ```
 
-## 6. Set up Cloudflare Pages and test on its temporary URL
+## 6. Set up Cloudflare Workers and test on its temporary URL
 
 ### ⚠️ Push the code first
 
@@ -251,61 +251,130 @@ on one.
 security headers, and a redirects file that is deliberately empty because
 nothing has moved.
 
-## 7. The switch — TWO records, not one
+## 7. The switch — move DNS to Cloudflare
 
-⚠️ **The apex is not just an A record — it is also doing a job.** Today:
+Workers Custom Domains require the domain to be an active Cloudflare zone
+("you cannot create a Custom Domain … on a zone you do not own" —
+developers.cloudflare.com/workers/configuration/routing/custom-domains). So the
+nameservers move from Wix to Cloudflare. Pages would have allowed a plain CNAME
+from Wix for `www`, but this site is deployed as a Worker.
+
+### ⚠️ THE COMPLETE ZONE, captured 2026-08-12 BEFORE any change
+
+Cloudflare scans and imports existing records, but **verify every line below is
+present before you flip the nameservers.** Two of these are easy to miss and
+take down systems the crew and customers use daily.
+
+| Type | Name | Value | After the move |
+|---|---|---|---|
+| A | `@` (apex) | `34.95.85.224` (Madwire) | **replaced** — see below |
+| CNAME | `www` | `roybalconstruction.com` | **replaced** — Worker Custom Domain |
+| CNAME | `app` | `brandenroybal.github.io` | **KEEP — DNS only (grey cloud)** |
+| CNAME | `portal` | `cname.vercel-dns.com` | **KEEP — DNS only (grey cloud)** |
+| MX (10) | `@` | `aspmx.l.google.com` | keep |
+| MX (20) | `@` | `alt1.aspmx.l.google.com` | keep |
+| MX (30) | `@` | `alt2.aspmx.l.google.com` | keep |
+| MX (40) | `@` | `alt3.aspmx.l.google.com` | keep |
+| MX (50) | `@` | `alt4.aspmx.l.google.com` | keep |
+| TXT | `@` | `v=spf1 include:_spf.createsend.com include:_spf.google.com ~all` | keep |
+| TXT | `@` | `google-site-verification=TZSrekgUL4A7NiQfaKgKC2Xs9W1bGIRqIU6OwhZefC0` | keep |
+| TXT | `_dmarc` | `v=DMARC1; p=none;` | keep |
+| TXT | `cm._domainkey` | `k=rsa; p=MIGf…` (Campaign Monitor DKIM) | keep |
+
+**`app` and `portal` must be DNS-only (grey cloud), not proxied.** GitHub Pages
+and Vercel terminate TLS themselves; proxying them through Cloudflare invites
+certificate errors and redirect loops. `app` serves the field, admin, and board
+apps the crew uses; `portal` serves customers.
+
+**Thirteen records.** The `cm._domainkey` entry is Campaign Monitor's DKIM key
+— it pairs with `_spf.createsend.com` in the SPF record, and losing it makes
+marketing email start failing DKIM and landing in spam. It was NOT found by
+the `dig` sweep that produced this table (that probed a fixed list of subdomain
+names); Cloudflare's zone scan found it. Trust the scan over a probe.
+
+**Set every record to DNS only (grey cloud) for the nameserver move.** Not just
+`app` and `portal` — the apex and `www` too. They still point at Madwire, and
+proxying them puts Cloudflare's cache and an unverified SSL mode in front of a
+server that performs its own apex→www redirect, which is how redirect loops
+happen. The move should change nothing for visitors; grey-clouding everything
+guarantees that. Proxying gets turned on deliberately when the Worker is bound.
+
+**The five MX records and the SPF TXT are the business's email.** Miss one and
+mail stops — far worse than any website problem. Do not flip nameservers until
+you have counted all five.
+
+### ⚠️ DNSSEC MUST BE DISABLED FIRST — this one can black out the whole domain
+
+Verified 2026-08-12: DNSSEC **is enabled**. The `.com` registry holds a DS record
+for this domain:
 
 ```
-www.roybalconstruction.com  CNAME → roybalconstruction.com
-roybalconstruction.com      A     → 34.95.85.224   (Madwire)
+DS  24292 8 2 A07F093628041FBBE58E688C8DA2B1C0F1CDEFAF89A9F913AB05D440 8E7183F1
 ```
 
-and **Madwire's server performs the `roybalconstruction.com` → `www.` 301**.
-So cancelling them breaks two things: the apex stops resolving anywhere useful,
-*and* the redirect that catches everyone who types the domain without `www`
-disappears with it. Handle both.
+That record tells every validating resolver "answers for this domain are signed
+by Wix's key". Move the nameservers to Cloudflare while it is still published
+and those resolvers — Google 8.8.8.8, Cloudflare 1.1.1.1, Quad9, most ISPs —
+get answers signed by the wrong key and **refuse to resolve the domain at all.**
 
-### The safe route: keep DNS at Wix
+Not just the website: email, `app`, and `portal` go with it, for an
+unpredictable subset of people depending on which resolver they use. There is
+no fast rollback; the DS record's TTL is **86400s (24 hours)**, so recovery
+means waiting out the same cache either way.
 
-Change one record and add one forward:
+Cloudflare's setup page lists this under "Recommended". For this domain it is
+mandatory.
 
-1. **`www`** — change from a CNAME pointing at the apex to a CNAME pointing at
-   `<your-project>.pages.dev`. In Cloudflare Pages, add
-   `www.roybalconstruction.com` under **Custom domains** first; it tells you
-   the exact target and issues the certificate automatically.
-2. **Apex** — use Wix's domain forwarding to redirect `roybalconstruction.com`
-   → `https://www.roybalconstruction.com`, replacing what Madwire was doing.
+Order:
 
-**This leaves email completely untouched**, which is the point. Your MX and SPF
-records stay exactly where they are and Google Workspace never notices.
+1. **Wix → Domains → DNSSEC → turn OFF.** This asks the registry to drop the DS.
+2. Poll until this returns **nothing**:
+   ```bash
+   dig +short DS roybalconstruction.com @a.gtld-servers.net
+   ```
+3. **Then wait out the 24h TTL** before switching nameservers. The registry
+   dropping the record does not evict it from resolvers that already cached it.
+4. Only then do the nameserver change below.
+5. Re-enable DNSSEC afterwards from Cloudflare's side if wanted — free, a real
+   improvement, and safe once Cloudflare is authoritative. Never during the move.
 
-### The better long-term route: move DNS to Cloudflare
+### Steps
 
-Free, faster, and the apex works properly via CNAME flattening with a Redirect
-Rule for apex → www. But moving nameservers means **re-creating your email
-records**, and getting that wrong takes down mail — which is far worse than a
-website problem.
+1. **Cloudflare → Add a site** → `roybalconstruction.com` → Free plan.
+2. **Review the imported records against the table above.** Add anything
+   missing. Set `app` and `portal` to DNS-only.
+3. **Wix → Domains → Nameservers** → point to the two Cloudflare nameservers
+   Cloudflare gives you. Propagation is usually minutes, up to 24h.
+4. Wait for Cloudflare to report the zone **Active**.
+5. **Workers → `roybal-site` → Settings → Domains & Routes → Add Custom Domain**
+   → `www.roybalconstruction.com`. Cloudflare creates the DNS record and issues
+   the certificate automatically. This replaces the old `www` CNAME.
+6. **Apex → www redirect.** Cloudflare → Rules → Redirect Rules → create:
+   *If* hostname equals `roybalconstruction.com` → *then* dynamic redirect,
+   **301**, to `concat("https://www.roybalconstruction.com", http.request.uri.path)`.
+   This replaces the redirect Madwire's server was performing, and preserves the
+   path so deep links keep working.
+7. Delete the old apex `A` record pointing at `34.95.85.224`.
 
-If you do it, Cloudflare's import scan runs before you flip the nameservers.
-**Do not flip until you have confirmed all seven of these are present:**
+**Do it on a weekday morning**, not a Friday afternoon.
 
+### Immediately verify email still works
+
+Before touching anything else:
+
+```bash
+dig +short MX roybalconstruction.com   # must list all five Google servers
+dig +short TXT roybalconstruction.com  # must include the SPF line
 ```
-MX   10 aspmx.l.google.com          MX   40 alt3.aspmx.l.google.com
-MX   20 alt1.aspmx.l.google.com     MX   50 alt4.aspmx.l.google.com
-MX   30 alt2.aspmx.l.google.com
-TXT  v=spf1 include:_spf.createsend.com include:_spf.google.com ~all
-TXT  google-site-verification=TZSrekgUL4A7NiQfaKgKC2Xs9W1bGIRqIU6OwhZefC0
+
+Then send yourself a message from an outside address and confirm it arrives.
+
+### And that nothing else broke
+
+```bash
+curl -sI https://app.roybalconstruction.com/    -o /dev/null -w "app    %{http_code}\n"
+curl -sI https://portal.roybalconstruction.com/ -o /dev/null -w "portal %{http_code}\n"
 ```
-
-**Recommendation: take the safe route on cutover day.** Move DNS to Cloudflare
-later, on a quiet afternoon, once the site is proven. Don't change two risky
-things at once — if something breaks, you want to know which one did it.
-
-### Either way
-
-**Do it on a weekday morning**, not a Friday afternoon. Lower the TTL on the
-`www` record to 300 seconds a day beforehand so a rollback propagates in
-minutes rather than hours.
 
 ## 8. Immediately after
 
