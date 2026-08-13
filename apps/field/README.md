@@ -175,7 +175,7 @@ runs offline.
 
 ## Suggested next steps
 
-1. **Cloud sync (optional).** This repo already has a Supabase backend in `apps/web`. We can
+1. **Cloud sync (optional).** This repo already has a Supabase backend in `supabase/`. We can
    add an optional "Sync to office" button so jobs/photos land in the admin dashboard and
    QuickBooks — while the field app keeps working offline-first.
 2. **Attach the generated PDF directly to an email/share** (today: Save as PDF, then share
