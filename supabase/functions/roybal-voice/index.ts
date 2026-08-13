@@ -9,9 +9,12 @@
  * no user session; auth is X-Twilio-Signature exactly like roybal-notify's
  * /inbound):
  *   POST /            incoming call → <Dial answerOnBridge> the owner's
- *                     cell (timeout DIAL_TIMEOUT, default 15s) with a
+ *                     cell (timeout DIAL_TIMEOUT, default 10s) with a
  *                     press-any-key SCREEN on the callee leg, action=
  *                     /screen. OWNER_CELL unset → straight to the relay.
+ *                     A call that a carrier ALREADY forwarded (To listed in
+ *                     FORWARD_ONLY_TO, or ForwardedFrom present) skips the
+ *                     dial entirely — see alreadyRang().
  *   POST /whisper     runs on the OWNER's leg when their phone answers:
  *                     "Call for Roybal Construction — press any key."
  *                     Only a human can pass it — the owner's carrier
@@ -42,7 +45,10 @@
  *
  * Secrets:  TWILIO_AUTH_TOKEN (shared), PHONE_AGENT_WSS
  *           (wss://<app>.fly.dev/relay), PHONE_RELAY_TOKEN, OWNER_CELL,
- *           DIAL_TIMEOUT (optional, seconds)
+ *           DIAL_TIMEOUT (optional, seconds), ESCALATE_TIMEOUT (optional,
+ *           seconds — both MUST stay under the owner cell carrier's
+ *           no-answer timer), FORWARD_ONLY_TO (optional, comma-separated
+ *           E.164 numbers that exist only as carrier-forwarding targets)
  * Deploy:   supabase functions deploy roybal-voice --no-verify-jwt
  */
 
@@ -53,7 +59,36 @@ const TWILIO_AUTH = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const AGENT_WSS = Deno.env.get("PHONE_AGENT_WSS") ?? "";
 const RELAY_TOKEN = Deno.env.get("PHONE_RELAY_TOKEN") ?? "";
 const OWNER_CELL = Deno.env.get("OWNER_CELL") ?? "";
-const DIAL_TIMEOUT = Math.min(Math.max(Number(Deno.env.get("DIAL_TIMEOUT") ?? "15") || 15, 5), 30);
+/* BOTH dial timeouts must stay STRICTLY BELOW the no-answer timer on the
+   owner's own cell carrier — AT&T, set to 15s on 2026-08-12. That line
+   conditionally forwards unanswered calls into this very function, so a
+   <Dial> that rings as long as the carrier waits is a RACE: when the carrier
+   wins, it forwards our own call back here and the caller meets the
+   receptionist a second time, on a second billed call. Ringing for less time
+   is merely suboptimal; ringing for as long or longer is a loop.
+   10s leaves 5s of margin. Retune BOTH if the carrier timer ever changes —
+   see docs/Phone_Forwarding_Runbook.md. */
+const DIAL_TIMEOUT = Math.min(Math.max(Number(Deno.env.get("DIAL_TIMEOUT") ?? "10") || 10, 5), 30);
+const ESCALATE_TIMEOUT = Math.min(Math.max(Number(Deno.env.get("ESCALATE_TIMEOUT") ?? "10") || 10, 5), 30);
+
+/* Numbers whose ONLY job is to be a carrier-forwarding target — every call
+   they receive is by definition one the owner already missed. Comma-separated
+   E.164, compared on the last 10 digits so formatting never matters. */
+const FORWARD_ONLY = (Deno.env.get("FORWARD_ONLY_TO") ?? "")
+  .split(",").map((s) => s.replace(/\D/g, "").slice(-10)).filter((s) => s.length === 10);
+
+/* Did a carrier already ring a human before handing us this call? Two
+   independent signals, because neither is sufficient alone:
+   - `To` in FORWARD_ONLY_TO — always present on every Twilio voice webhook,
+     but only meaningful for numbers dedicated to forwarding;
+   - `ForwardedFrom` — general, but carrier-dependent (plenty strip it).
+   Either one means: skip the owner dial, the caller has waited enough. */
+function alreadyRang(params: URLSearchParams): boolean {
+  const fwd = String(params.get("ForwardedFrom") ?? "").replace(/\D/g, "");
+  if (fwd.length >= 10) return true;
+  const to = String(params.get("To") ?? "").replace(/\D/g, "").slice(-10);
+  return to.length === 10 && FORWARD_ONLY.includes(to);
+}
 
 const esc = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -134,7 +169,12 @@ serve(async (req: Request) => {
   // answerOnBridge keeps ringback playing for the caller while the owner's
   // leg runs the press-any-key screen. ----
   if (path === "") {
-    if (!OWNER_CELL) return twiml(relayTwiml());
+    // A forwarded call has ALREADY rung the owner's handset for the carrier's
+    // full no-answer timer. Dialling it again adds DIAL_TIMEOUT seconds of
+    // ringback to a caller who has waited 15s to get here — and rings a phone
+    // that just demonstrably went unanswered. Go straight to the receptionist,
+    // which is what the caller thought voicemail was going to be.
+    if (!OWNER_CELL || alreadyRang(params)) return twiml(relayTwiml());
     return twiml(
       `<Dial timeout="${DIAL_TIMEOUT}" answerOnBridge="true" action="${base}/screen">` +
       `<Number url="${base}/whisper">${esc(OWNER_CELL)}</Number></Dial>`);
@@ -164,7 +204,7 @@ serve(async (req: Request) => {
     if (handoff.reasonCode === "escalate" && OWNER_CELL) {
       return twiml(
         `<Say>Connecting you now — one moment.</Say>` +
-        `<Dial timeout="25">${esc(OWNER_CELL)}</Dial>` +
+        `<Dial timeout="${ESCALATE_TIMEOUT}">${esc(OWNER_CELL)}</Dial>` +
         voicemail("We couldn't reach anyone directly."));
     }
     // the agent deliberately handed off (capped / token mismatch / envelope
