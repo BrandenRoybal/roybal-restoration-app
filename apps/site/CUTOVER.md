@@ -1,5 +1,57 @@
 # Cutover runbook — Marketing 360 → self-hosted
 
+## ✅ LAUNCHED 2026-08-13 — `www` is the new site
+
+`https://www.roybalconstruction.com` serves the Astro build from Cloudflare
+Pages (`roybal-site-pages`, direct upload — no Git CI; redeploy with
+`npx wrangler pages deploy apps/site/dist --project-name roybal-site-pages`).
+
+Verified at launch: 36/36 ranking URLs `200` with no redirect · sitemap index →
+36 URLs · real `404` on unknown paths · TLS 1.3, chain verify 0, cert from
+Google Trust Services · HSTS `max-age=31536000` · zero mixed content · CORS
+green from the live origin on both `roybal-lead` and `roybal-web-agent` ·
+`app` and `portal` untouched at `200`.
+
+**The same morning also ended a months-long outage.** `www` had been a CNAME to
+a dead Wix stub whose certificate expired 2025-04-15, so the site was hard-
+blocked and 33 of 35 ranking URLs returned 404 to Googlebot. See step 6b.
+
+### What is still on Madwire — do NOT cancel
+
+The **apex only**. `roybalconstruction.com` keeps its `A` record at
+`34.95.85.224`, and that server performs the apex→`www` 301. Bare
+`roybalconstruction.com` is on business cards and the Google Business Profile,
+and nothing else serves that redirect until step 7 in October.
+
+Consequence worth knowing: typing the bare domain means **one plain-HTTP hop**
+on Madwire before the redirect lands on HTTPS. Chrome flags that hop "Not
+Secure" — it is the hop, not the site. **Publish the `www` URL** everywhere.
+The hop disappears when Cloudflare owns the zone.
+
+### Open items
+
+- **Oct 11** — registrar transfer to Porkbun (step 6b), then step 7. Do not
+  change the registrant contact before then; it restarts the 60-day lock.
+- Search Console: resubmit the sitemap, request indexing on `/`.
+- GA4 property in your own account (step 3) — do it before October so traffic
+  is comparable across the second move.
+- `src/data/site.ts` still carries approximate Fairbanks coordinates; replace
+  with the real lat/long from the GBP listing now that Royal Rd is live.
+- Drop `https://roybal-site-pages.pages.dev` from `LEAD_ALLOW_ORIGIN` and
+  `WEB_AGENT_ALLOW_ORIGIN` once nothing needs the staging origin.
+
+### DNS propagation behaves worse than "wait for the TTL"
+
+During this launch `8.8.8.8` served the **old** record while `8.8.4.4`, Google's
+own DoH endpoint, `1.1.1.1`, `9.9.9.9` and OpenDNS all served the new one — and
+the stale node re-cached with a fresh 1800s TTL. Chrome hit the stale node while
+`curl` on the same machine got the new answer, which reads exactly like a broken
+deploy and is not one. **Incognito does not help** (this is resolver state, not
+browser cache). Confirm against `https://roybal-site-pages.pages.dev` directly,
+which bypasses the domain entirely, before debugging anything else.
+
+---
+
 Order matters. Steps 1–5 change nothing publicly and are all reversible.
 Step 7 is the switch.
 
