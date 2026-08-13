@@ -1,14 +1,9 @@
-# Roybal Restoration — Field Documentation App
+# Roybal Construction — App Monorepo
 
-**Version 1.0** · Built for Roybal Construction, LLC / Roybal Restoration
+**Built for Roybal Construction, LLC / Roybal Restoration** · Fairbanks / North Pole, Alaska
 
-A full-stack, monorepo field operations app for water damage mitigation, mold remediation, and fire/smoke restoration work in Fairbanks / North Pole, Alaska.
-
-> **New: simple field app for crews.** `apps/field` is a self-contained, offline-first PWA
-> built around the Roybal form packet (Moisture Map, Drying Log, Work Authorization w/
-> on-device signature or photo upload, Construction Log, Certificate of Drying, Change Order,
-> Invoice). No login, no setup — run it with `npm run field`. See
-> [`apps/field/README.md`](apps/field/README.md).
+Field operations, office coordination, and customer-facing web for water damage mitigation,
+mold remediation, fire/smoke restoration, and construction/remodel work.
 
 ---
 
@@ -17,178 +12,126 @@ A full-stack, monorepo field operations app for water damage mitigation, mold re
 ```
 roybal-restoration-app/
 ├── apps/
-│   ├── field/           # ⭐ Offline-first Field Forms PWA — no login, no backend
-│   ├── mobile/          # Expo (React Native) — iOS + Android field app
-│   └── web/             # React + Vite + Tailwind — Admin dashboard
-├── packages/
-│   └── shared/          # Shared TypeScript types, services, PDF generators
-└── supabase/
-    ├── migrations/       # Postgres schema + RLS policies
-    └── functions/        # Edge Functions (Magicplan webhook)
+│   ├── field/           # ⭐ Offline-first Field Forms PWA — crew-facing, no login
+│   ├── admin/           # Office admin — messages, QuickBooks/Gmail connections
+│   ├── board/           # Job Board (digital whiteboard) — pipeline, crew, scheduling
+│   ├── portal/          # Read-only customer status page (share link, no login)
+│   └── site/            # Astro marketing site — www.roybalconstruction.com
+├── services/
+│   └── phone-agent/     # Fly-hosted voice/phone agent (Twilio)
+├── supabase/
+│   ├── migrations/      # Postgres schema + RLS policies
+│   └── functions/       # Edge Functions (AI office, proxies, portal gateway, …)
+├── design-system/       # Brand tokens + component reference
+└── docs/                # Plans, runbooks, prototypes
 ```
+
+All the crew- and office-facing apps are **plain HTML/CSS/JS served statically** — no build
+step, no framework. The marketing site is the one exception (Astro).
 
 ### Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Mobile | React Native + Expo SDK 51 |
-| Web Admin | React 18 + Vite + Tailwind CSS |
-| Backend | Supabase (Postgres + Auth + Storage) |
-| Shared | TypeScript monorepo (`@roybal/shared`) |
-| PDF Reports | @react-pdf/renderer |
-| Offline | WatermelonDB + Expo SQLite |
-| Floor Plans | Magicplan REST API + webhook |
+| Field / Admin / Board / Portal | Vanilla JS + HTML, served static; IndexedDB for offline state |
+| Marketing site | Astro 5 |
+| Backend | Supabase (Postgres + Auth + Storage + Edge Functions) |
+| Phone agent | Node on Fly.io + Twilio |
+| Floor plans | Magicplan REST API + webhook |
+
+### Brand
+
+Navy (`#0f1b2d`) + safety orange (`#f26a21`). See [`design-system/`](design-system/).
 
 ---
 
 ## Prerequisites
 
 1. **Node.js** (LTS) — https://nodejs.org
-2. **Supabase account** — https://supabase.com (free tier works)
-3. **Expo Go** app on your test device (iOS or Android)
-4. **Magicplan account** (optional, for floor plan integration)
+2. **Supabase account** — https://supabase.com
+3. **Supabase CLI** (to deploy edge functions) — https://supabase.com/docs/guides/cli
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone / navigate to the project
 cd "roybal-restoration-app"
-
-# 2. Run the setup script
 chmod +x setup.sh
 ./setup.sh
-
-# 3. Fill in your credentials
-nano apps/mobile/.env
-nano apps/web/.env
-
-# 4. Run Supabase migrations (in the Supabase SQL Editor)
-#    → paste contents of supabase/migrations/001_initial_schema.sql
-#    → paste contents of supabase/migrations/002_storage.sql
-
-# 5. Start the web admin
-npm run web
-# → Opens at http://localhost:5173
-
-# 6. Start the mobile app
-npm run mobile
-# → Scan QR code with Expo Go app
 ```
 
----
-
-## Environment Variables
-
-### `apps/mobile/.env`
-```
-EXPO_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-EXPO_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-EXPO_PUBLIC_MAGICPLAN_API_KEY=your-magicplan-api-key
-EXPO_PUBLIC_MAGICPLAN_CUSTOMER_ID=your-magicplan-customer-id
-```
-
-### `apps/web/.env`
-```
-VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-key
-VITE_MAGICPLAN_API_KEY=your-magicplan-api-key
-VITE_MAGICPLAN_CUSTOMER_ID=your-magicplan-customer-id
-```
-
-> **Security:** Never expose `SUPABASE_SERVICE_ROLE_KEY` in frontend code.
-> It's only used in the Supabase Edge Function environment.
-
----
-
-## Supabase Setup
-
-### 1. Database
-
-Run the migrations in this order in the Supabase SQL Editor:
-
-```
-supabase/migrations/001_initial_schema.sql   ← Tables + RLS + triggers
-supabase/migrations/002_storage.sql          ← Storage buckets + policies
-```
-
-### 2. Auth
-
-- Enable Email auth in Supabase → Authentication → Providers
-- Invite admin (Branden) via Supabase Auth dashboard
-- Set `role = 'admin'` in the `profiles` table for admin user
-
-### 3. Magicplan Webhook
-
-Deploy the Edge Function:
+Then start whichever app you're working on:
 
 ```bash
-# Install Supabase CLI first: https://supabase.com/docs/guides/cli
+npm run field    # Field Forms PWA
+npm run board    # Job Board
+npm run site     # Marketing site (astro dev, port 4330)
+```
+
+`apps/admin` and `apps/portal` each have their own `serve.mjs`:
+
+```bash
+node apps/admin/serve.mjs
+```
+
+---
+
+## Scripts
+
+```bash
+npm run field           # Start the field forms PWA
+npm run field:test      # Field app test suite (25 test files)
+npm run board           # Start the job board
+npm run board:test      # Board scheduling engine tests
+npm run site            # Start the marketing site dev server
+npm run site:build      # Build the marketing site (+ parity checks)
+npm run site:check-live # Check the live site against the build
+npm run setup           # Install dependencies
+```
+
+---
+
+## Deployment
+
+**Field + Admin + Board** deploy together to GitHub Pages on every push to `main` that
+touches `apps/field/**`, `apps/admin/**`, or `apps/board/**` — see
+[`.github/workflows/deploy-field.yml`](.github/workflows/deploy-field.yml):
+
+| App | URL |
+|---|---|
+| Field | https://app.roybalconstruction.com/ |
+| Admin | https://app.roybalconstruction.com/admin/ |
+| Board | https://app.roybalconstruction.com/board/ |
+
+**Portal** — `portal.roybalconstruction.com`, served through the `roybal-portal` edge
+function. See [`apps/portal/README.md`](apps/portal/README.md).
+
+**Edge functions** deploy with the Supabase CLI:
+
+```bash
 supabase login
 supabase link --project-ref your-project-ref
 supabase functions deploy magicplan-webhook
-
-# Set secrets
-supabase secrets set MAGICPLAN_API_KEY=your-key
-supabase secrets set MAGICPLAN_CUSTOMER_ID=your-id
-supabase secrets set MAGICPLAN_WEBHOOK_SECRET=your-secret
 ```
 
-Configure the webhook in Magicplan's developer settings to POST to:
-```
-https://your-project.supabase.co/functions/v1/magicplan-webhook
+**Phone agent** deploys to Fly from the repo root (the Dockerfile pulls shared files in at
+their repo-relative paths, so the build context must be the root):
+
+```bash
+fly deploy --config services/phone-agent/fly.toml --dockerfile services/phone-agent/Dockerfile .
 ```
 
 ---
 
-## Features
+## Security
 
-### Mobile App (Field Techs)
-
-| Screen | Feature |
-|---|---|
-| **Job List** | All assigned jobs, filterable by status, searchable |
-| **New Job** | Create jobs with loss type, category, owner, insurance info |
-| **Job Detail** | Tabbed: Overview / Photos / Moisture / Equipment / Scope / Floor Plan |
-| **Photo Capture** | Camera/gallery, GPS tagging, captions, organized by room + category |
-| **Moisture Readings** | Per-room/location readings, IICRC color-coding, trend tracking |
-| **Equipment Log** | Place/remove equipment, 7-day flag, days-on-site counter |
-| **Scope Builder** | Xactimate-style line items, T&M + scope billing, running totals |
-| **Floor Plan** | Synced from Magicplan, manual sync button, version history |
-| **Offline** | WatermelonDB caches all data for field use without cell signal |
-
-### Web Admin Dashboard
-
-| Page | Feature |
-|---|---|
-| **Dashboard** | KPI cards: Active Jobs, Drying, Invoicing, Equipment, Open A/R |
-| **Pipeline** | Kanban-style view by job status |
-| **Jobs** | Full list with search + filter, click-through to detail |
-| **Job Detail** | All modules: Overview, Photos, Moisture, Equipment, Scope, Floor Plans, Reports |
-| **Reports** | Generate PDF reports for carrier/adjuster submission |
-| **Settings** | User management, company info, security overview |
-
-### PDF Reports (4 types)
-
-1. **Photo Report** — Photos by room + category with timestamps
-2. **Moisture/Drying Report** — Daily readings + dry standard comparison + sign-off block
-3. **Equipment Log** — Placement dates, locations, days on site
-4. **Scope of Work / Invoice** — Line items, markup/overhead, grand total, signature block
-
-All PDFs: dark navy + safety orange branding, job number footer, Alaska time.
-
----
-
-## User Roles
-
-| Role | Access |
-|---|---|
-| `admin` | All jobs, all features, all users, reports, settings |
-| `tech` | Only assigned jobs, mobile features, no settings |
-| `viewer` | Read-only access (for adjusters, owners if needed) |
-
-RLS is enforced at the database level — techs cannot see unassigned jobs even via API.
+- Never expose `SUPABASE_SERVICE_ROLE_KEY` in frontend code — it belongs only in the Edge
+  Function environment, where Supabase injects it automatically.
+- Magicplan and QuickBooks credentials live in Supabase secrets, not in the repo:
+  ```bash
+  supabase secrets set MAGICPLAN_API_KEY=your-key
+  ```
 
 ---
 
@@ -205,77 +148,20 @@ Color coding: 🔴 Wet → 🟡 Monitoring → 🟢 Dry
 
 ---
 
-## Scripts
+## History
 
-```bash
-npm run web           # Start web admin dev server (port 5173)
-npm run mobile        # Start Expo mobile dev server (port 8081)
-npm run shared:build  # Build shared package
-npm run setup         # Install + build everything
-```
-
----
-
-## Adding a New Tech
-
-1. Invite them via Supabase Auth → Authentication → Users → Invite
-2. They receive an email and set a password
-3. Their profile is auto-created by the database trigger
-4. Assign them to jobs via the web admin job detail page (assigned_tech_ids field)
-5. They log in via the mobile app with their email/password
-
----
-
-## File Structure Details
-
-```
-packages/shared/src/
-├── types/index.ts          ← All TS types, enums, helpers (centsToDisplay, etc.)
-├── services/magicplan.ts   ← MagicplanService API client
-└── pdf/
-    ├── styles.ts           ← PDF brand styles
-    ├── components.tsx      ← Shared PDF components (header, footer, etc.)
-    └── reports.tsx         ← 4 report documents (PhotoReport, MoistureDryingReport, etc.)
-
-apps/mobile/app/
-├── (auth)/login.tsx        ← Login screen
-├── (tabs)/index.tsx        ← Job list
-├── (tabs)/new-job.tsx      ← Create job
-├── (tabs)/settings.tsx     ← Profile + sign out
-└── job/[id]/
-    ├── [id].tsx            ← Job detail (tabbed)
-    ├── photos.tsx          ← Photo capture + gallery
-    ├── moisture.tsx        ← Moisture readings
-    ├── equipment.tsx       ← Equipment log
-    ├── scope.tsx           ← Line item builder
-    └── floorplan.tsx       ← Floor plan viewer
-
-apps/web/src/pages/
-├── LoginPage.tsx
-├── DashboardPage.tsx       ← KPI cards + pipeline
-├── JobsPage.tsx            ← Job list table
-├── JobNewPage.tsx          ← Create job form
-├── JobDetailPage.tsx       ← Full detail + all modules
-└── SettingsPage.tsx        ← Users + security
-
-supabase/
-├── migrations/
-│   ├── 001_initial_schema.sql  ← Tables, enums, RLS, triggers
-│   └── 002_storage.sql         ← Storage buckets + policies
-└── functions/magicplan-webhook/
-    └── index.ts                ← Webhook handler (Deno)
-```
+A React + Vite admin (`apps/web`), an Expo mobile app (`apps/mobile`), and a shared
+TypeScript package (`packages/shared`) were the original 2026 architecture. All three were
+abandoned in favor of the static, offline-first apps above and removed from the tree in
+August 2026 — the code remains in git history if you ever need it.
 
 ---
 
 ## Support
 
-For issues with this codebase, contact your developer or create an issue in the project repository.
-
 For Supabase issues: https://supabase.com/docs
-For Expo issues: https://docs.expo.dev
 For Magicplan API: https://app.magicplan.app/api/docs
 
 ---
 
-*Roybal Construction, LLC · Roybal Restoration · Fairbanks, Alaska*
+*Roybal Construction, LLC · Fairbanks, Alaska*

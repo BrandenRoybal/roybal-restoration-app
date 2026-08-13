@@ -3,28 +3,19 @@
   "version": "1.0.0",
   "private": true,
   "workspaces": [
-    "apps/mobile",
-    "apps/web",
     "apps/field",
     "apps/board",
-    "apps/site",
-    "packages/shared"
+    "apps/site"
   ],
   "scripts": {
-    "mobile": "npm run start --workspace=apps/mobile",
-    "web": "npm run dev --workspace=apps/web",
     "field": "npm run dev --workspace=apps/field",
     "field:test": "npm run test --workspace=apps/field",
     "board": "npm run dev --workspace=apps/board",
+    "board:test": "npm run test --workspace=apps/board",
     "site": "npm run dev --workspace=apps/site",
     "site:build": "npm run build --workspace=apps/site",
     "site:check-live": "npm run check-live --workspace=apps/site --",
-    "shared:build": "npm run build --workspace=packages/shared",
-    "setup": "npm install && npm run shared:build"
-  },
-  "overrides": {
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "setup": "npm install"
   },
   "devDependencies": {
     "typescript": "^5.4.5"

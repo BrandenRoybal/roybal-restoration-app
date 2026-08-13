@@ -4,8 +4,10 @@
 .claude
 .git
 **/node_modules
+# NOTE: do not ignore apps/board — the Dockerfile copies apps/board/js/schedule.js
 apps/field
-apps/web
-apps/mobile
 apps/admin
+apps/site
+apps/portal
+design-system
 docs
