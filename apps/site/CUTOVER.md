@@ -474,11 +474,27 @@ and Vercel terminate TLS themselves; proxying them through Cloudflare invites
 certificate errors and redirect loops. `app` serves the field, admin, and board
 apps the crew uses; `portal` serves customers.
 
-**Thirteen records.** The `cm._domainkey` entry is Campaign Monitor's DKIM key
-— it pairs with `_spf.createsend.com` in the SPF record, and losing it makes
-marketing email start failing DKIM and landing in spam. It was NOT found by
-the `dig` sweep that produced this table (that probed a fixed list of subdomain
-names); Cloudflare's zone scan found it. Trust the scan over a probe.
+**Thirteen records — and neither discovery method found all of them.** The
+`cm._domainkey` entry is Campaign Monitor's DKIM key. It pairs with
+`_spf.createsend.com` in the SPF record, and losing it makes marketing email
+start failing DKIM and landing in spam. The `dig` sweep that produced this table
+missed it (that sweep probed a fixed list of subdomain names); Cloudflare's zone
+scan caught it.
+
+But the scan is not complete either. Wix's DNS editor shows a **fourteenth**
+record the Cloudflare scan did not import:
+
+| Type | Name | Value | Verdict |
+|---|---|---|---|
+| CNAME | `en` | `cdn1.wixdns.net` | dead — **do not recreate** |
+
+Checked 2026-08-13: it answers `404` (with a valid certificate), and `en.` appears
+nowhere in `.site-archive/content.json`, so no ranking URL depends on it. It is
+Wix-site debris. Letting it die at cutover is correct.
+
+**The lesson is that no single source is authoritative.** Read the zone from the
+provider's own editor *and* the Cloudflare scan *and* a `dig` sweep, then
+reconcile. Each one missed something the others caught.
 
 **Set every record to DNS only (grey cloud) for the nameserver move.** Not just
 `app` and `portal` — the apex and `www` too. They still point at Madwire, and
