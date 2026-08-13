@@ -251,13 +251,74 @@ on one.
 security headers, and a redirects file that is deliberately empty because
 nothing has moved.
 
+## 6b. ⚠️ The domain must leave Wix first — discovered 2026-08-13
+
+**Wix will not delegate nameservers, so step 7 cannot be performed from Wix.**
+Its DNS editor shows an NS section marked *"NS records are not editable"*, and
+that is a platform limit, not a hidden setting: Wix's own help center states
+*"it's not possible to change name servers (edit NS records) for a Wix domain"*
+and offers transferring the domain away as the only route
+(support.wix.com/en/article/request-changing-name-server-ns-records-for-a-wix-domain).
+
+**And Cloudflare Registrar cannot be the transfer target.** It requires the
+domain to already be an active zone on Cloudflare nameservers before it will
+accept a transfer
+(developers.cloudflare.com/registrar/get-started/transfer-domain-to-cloudflare).
+Wix blocks the nameserver change; Cloudflare demands it first. Going
+Wix → Cloudflare Registrar directly is a deadlock. An intermediate registrar is
+mandatory.
+
+**Chosen route: transfer to Porkbun**, then delegate to Cloudflare. Prerequisites
+are already satisfied — DNSSEC is off (verified: no DS at the registry, and none
+cached at 8.8.8.8 / 1.1.1.1 / 9.9.9.9), and the domain is far past the 60-day age
+floor.
+
+1. **Wix → Domains → `…` → Transfer away from Wix.** Unlock the domain and
+   request the authorization (EPP) code. It is emailed to the registrant address.
+2. **Porkbun → Transfer a Domain**, enter the auth code, pay (~$11; a .com
+   transfer adds a year, so `2030-03-31` becomes `2031-03-31`).
+3. **Approve the transfer from the Wix side** if offered. Otherwise it waits out
+   the mandatory 5-day ICANN window.
+
+### ⚠️ The one dangerous moment is the instant the transfer completes
+
+Until then, Wix keeps answering DNS and nothing changes. **When the domain
+leaves, Wix stops serving the zone** — and if the nameservers still point at
+`ns8/ns9.wixdns.net` at that moment, the domain goes dark. Not just the website:
+**email dies too.**
+
+So the moment the transfer lands, set the nameservers at Porkbun to the
+Cloudflare pair — before anything else, same sitting:
+
+```
+archer.ns.cloudflare.com
+barbara.ns.cloudflare.com
+```
+
+The Cloudflare zone is already built and verified (all 13 records, all five MX,
+confirmed identical from both nameservers on 2026-08-13), so it takes over
+cleanly. Then verify email immediately per the checks at the end of step 7.
+
+### Meanwhile: the `www` outage fix, applied 2026-08-13
+
+`www` was a CNAME to `initial.wixdns.net` — a dead Wix stub with a certificate
+that expired 2025-04-15 — which is why the site was hard-blocked. Madwire was
+healthy throughout; verified with a forced-resolve request that
+`34.95.85.224` serves `www.roybalconstruction.com` at **200 with a valid cert**.
+
+Fix while DNS is still at Wix: edit the `www` CNAME value to
+`roybalconstruction.com` (chains to the apex A record at Madwire). Edit in
+place — deleting and re-adding as an A record leaves a window with no record
+at all.
+
 ## 7. The switch — move DNS to Cloudflare
 
 Workers Custom Domains require the domain to be an active Cloudflare zone
 ("you cannot create a Custom Domain … on a zone you do not own" —
 developers.cloudflare.com/workers/configuration/routing/custom-domains). So the
-nameservers move from Wix to Cloudflare. Pages would have allowed a plain CNAME
-from Wix for `www`, but this site is deployed as a Worker.
+nameservers move to Cloudflare — **from Porkbun, after step 6b**, not from Wix.
+Pages would have allowed a plain CNAME from Wix for `www`, but this site is
+deployed as a Worker, and a CNAME could never have covered the apex anyway.
 
 ### ⚠️ THE COMPLETE ZONE, captured 2026-08-12 BEFORE any change
 
@@ -341,10 +402,15 @@ Order:
 ### Steps
 
 1. **Cloudflare → Add a site** → `roybalconstruction.com` → Free plan.
+   ✅ Done 2026-08-13 — zone `4df71ef17338f142d605ec839604bd6c`, Free plan.
 2. **Review the imported records against the table above.** Add anything
    missing. Set `app` and `portal` to DNS-only.
-3. **Wix → Domains → Nameservers** → point to the two Cloudflare nameservers
-   Cloudflare gives you. Propagation is usually minutes, up to 24h.
+   ✅ Done 2026-08-13 — 13 records, all DNS-only. The scan imported only one MX;
+   the four `alt1`–`alt4` were added by hand. Verified from both nameservers.
+3. **Porkbun → Domain Management → Authoritative Nameservers** → replace
+   Porkbun's defaults with the two Cloudflare nameservers. Do this the moment
+   the transfer completes (see step 6b — Wix stops serving DNS at that point).
+   Propagation is usually minutes, up to 24h.
 4. Wait for Cloudflare to report the zone **Active**.
 5. **Workers → `roybal-site` → Settings → Domains & Routes → Add Custom Domain**
    → `www.roybalconstruction.com`. Cloudflare creates the DNS record and issues
