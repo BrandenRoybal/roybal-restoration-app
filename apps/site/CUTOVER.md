@@ -251,13 +251,201 @@ on one.
 security headers, and a redirects file that is deliberately empty because
 nothing has moved.
 
+## 6b. ⚠️ The domain must leave Wix first — discovered 2026-08-13
+
+**Wix will not delegate nameservers, so step 7 cannot be performed from Wix.**
+Its DNS editor shows an NS section marked *"NS records are not editable"*, and
+that is a platform limit, not a hidden setting: Wix's own help center states
+*"it's not possible to change name servers (edit NS records) for a Wix domain"*
+and offers transferring the domain away as the only route
+(support.wix.com/en/article/request-changing-name-server-ns-records-for-a-wix-domain).
+
+**And Cloudflare Registrar cannot be the transfer target.** It requires the
+domain to already be an active zone on Cloudflare nameservers before it will
+accept a transfer
+(developers.cloudflare.com/registrar/get-started/transfer-domain-to-cloudflare).
+Wix blocks the nameserver change; Cloudflare demands it first. Going
+Wix → Cloudflare Registrar directly is a deadlock. An intermediate registrar is
+mandatory.
+
+**Chosen route: transfer to Porkbun**, then delegate to Cloudflare.
+
+### 🔒 BLOCKED UNTIL 2026-10-11 — the address change armed a transfer lock
+
+Wix reports the domain *"is currently locked and can't be transferred to another
+domain provider. It will be available for transfer on Oct 11, 2026."*
+
+Sixty days before Oct 11 is **Aug 12** — the day the registrant contact was
+updated to the Royal Rd address. That is step 0 of this runbook. **Doing step 0
+correctly is what blocked step 7.** ICANN's Transfer Policy requires a 60-day
+inter-registrar lock after any change to registrant information.
+
+**It cannot be lifted.** Registrars may offer an opt-out *before* a registrant
+change, but ICANN bars them from removing it once running: registrars "may not
+allow registrants to opt out of the 60-day inter-registrar transfer lock during
+the 60-day lock." Do not waste time on Wix support — it is not their rule.
+
+The escape hatch is priced out: Cloudflare's partial (CNAME) zone setup would
+keep DNS at Wix while still using Cloudflare, but it is "only available to
+customers on a Business or Enterprise plan" — $200+/month.
+
+**So the launch does not wait for this.** See step 6c: the site ships on
+Cloudflare Pages over the existing Wix DNS, and only the Madwire cancellation
+slips to October. DNSSEC is already off, which stays true and is one less thing
+to do then.
+
+**On or after 2026-10-11:**
+
+1. **Wix → Domains → `…` → Transfer away from Wix.** Unlock the domain and
+   request the authorization (EPP) code. It is emailed to the registrant address.
+2. **Porkbun → Transfer a Domain**, enter the auth code, pay (~$11; a .com
+   transfer adds a year, so `2030-03-31` becomes `2031-03-31`).
+3. **Approve the transfer from the Wix side** if offered. Otherwise it waits out
+   the mandatory 5-day ICANN window.
+4. **Do not change the registrant contact again before then** — it would restart
+   the 60-day clock.
+
+### ⚠️ The one dangerous moment is the instant the transfer completes
+
+Until then, Wix keeps answering DNS and nothing changes. **When the domain
+leaves, Wix stops serving the zone** — and if the nameservers still point at
+`ns8/ns9.wixdns.net` at that moment, the domain goes dark. Not just the website:
+**email dies too.**
+
+So the moment the transfer lands, set the nameservers at Porkbun to the
+Cloudflare pair — before anything else, same sitting:
+
+```
+archer.ns.cloudflare.com
+barbara.ns.cloudflare.com
+```
+
+The Cloudflare zone is already built and verified (all 13 records, all five MX,
+confirmed identical from both nameservers on 2026-08-13), so it takes over
+cleanly. Then verify email immediately per the checks at the end of step 7.
+
+### Meanwhile: the `www` outage fix, applied 2026-08-13
+
+`www` was a CNAME to `initial.wixdns.net` — a dead Wix stub with a certificate
+that expired 2025-04-15 — which is why the site was hard-blocked. Madwire was
+healthy throughout; verified with a forced-resolve request that
+`34.95.85.224` serves `www.roybalconstruction.com` at **200 with a valid cert**.
+
+Fix while DNS is still at Wix: edit the `www` CNAME value to
+`roybalconstruction.com` (chains to the apex A record at Madwire). Edit in
+place — deleting and re-adding as an A record leaves a window with no record
+at all.
+
+That restores the *old* Madwire site. Step 6c then repoints the same record at
+the new one.
+
+## 6c. Interim launch — Cloudflare Pages over Wix DNS
+
+Ship the new site on `www` now, without the transfer. **Pages, not a Worker:**
+Workers Custom Domains require an active Cloudflare zone, but Pages issues a
+certificate for a custom domain reached by a plain CNAME from an external DNS
+provider. That works for **subdomains only** — "if you are deploying to an apex
+domain, then you will need to add your site as a Cloudflare zone and configure
+your nameservers." `www` is a subdomain, so `www` can move today. The apex
+cannot, which is why Madwire stays until October.
+
+Nothing in the repo needs to change. The build already emits Pages-native
+`_headers` and `_redirects` into `dist/`, and `astro.config.mjs` sets
+`build.format: "file"` with `trailingSlash: "never"`, so paths stay
+extensionless. Verified 2026-08-13: Pages serves `/contact-us` from
+`contact-us.html` at **200 with no redirect** — the same behavior the Worker
+gets from `html_handling: "auto-trailing-slash"`.
+
+The root `wrangler.jsonc` can stay exactly as it is. It has no
+`pages_build_output_dir`, so a Pages Git build ignores it (warning only) — the
+Worker config survives untouched for October.
+
+### Create the project
+
+**Workers & Pages → Create → Pages → Connect to Git.**
+
+| Setting | Value |
+|---|---|
+| Project name | `roybal-site-pages` — the Worker already owns `roybal-site` |
+| Production branch | `main` |
+| Build command | `npm run site:build` |
+| Build output directory | `apps/site/dist` |
+| Root directory | *leave blank* — the repo root |
+
+Name it something other than `roybal-site`. A Worker of that name already
+exists from the staging deploy, and Cloudflare has been merging the two
+namespaces. The `*.pages.dev` hostname derives from this name.
+
+**Environment variables** — Production *and* Preview:
+
+```
+NODE_VERSION               = 22
+PUBLIC_LEAD_ENDPOINT       = https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-lead
+PUBLIC_WEB_AGENT_ENDPOINT  = https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-web-agent
+```
+
+⚠️ `apps/site/.env` is gitignored, so Cloudflare never sees it. Both values are
+read at **build** time (`import.meta.env` in `QuoteForm.astro` and
+`Receptionist.astro`). Miss them and the build still succeeds — but the quote
+form posts nowhere and the receptionist renders nothing at all. Silent.
+
+### Prove it on `*.pages.dev` BEFORE touching `www`
+
+```bash
+npm run site:check-live -- https://roybal-site-pages.pages.dev
+```
+
+Must print `✓ Every ranking URL answers 200 with no redirect. Safe to cut over.`
+This is the gate. Pages' path handling is host configuration, invisible locally,
+and it is the one thing that could put a 301 on all 36 ranking URLs.
+
+Also add the Pages origin to the two edge functions, or the form and the
+receptionist will be blocked by CORS from the new host:
+
+```bash
+supabase secrets set LEAD_ALLOW_ORIGIN=https://roybal-site-pages.pages.dev,https://www.roybalconstruction.com
+supabase secrets set WEB_AGENT_ALLOW_ORIGIN=https://roybal-site-pages.pages.dev,https://www.roybalconstruction.com
+```
+
+Drop the `pages.dev` entry from both once `www` is serving, so a staging URL
+can't drive the paid AI lane. Same cleanup the `workers.dev` URL needs.
+
+### Point `www` at it — dashboard first, DNS second
+
+**Order matters and the failure is misleading.** Cloudflare: "manually adding a
+custom CNAME record pointing to your Cloudflare Pages site without first
+associating the domain in the Cloudflare Pages dashboard will result in your
+domain failing to resolve … and display a 522 error." A 522 reads like a broken
+deployment; it is only a missing association.
+
+1. **Pages → the project → Custom domains → Set up a custom domain** →
+   `www.roybalconstruction.com`. Cloudflare will say it cannot find the domain
+   in your account and offer the CNAME target instead. That is expected — the
+   zone is not delegated.
+2. **Then** in Wix DNS, edit the `www` CNAME value to the `*.pages.dev`
+   hostname. Edit in place; do not delete and re-add.
+3. Wait for the certificate to issue (minutes, occasionally an hour).
+4. Re-run the checker against the real host:
+   ```bash
+   npm run site:check-live -- https://www.roybalconstruction.com
+   ```
+
+### What is still on Madwire after 6c
+
+Only the apex. `roybalconstruction.com` keeps its `A` record at `34.95.85.224`,
+whose server performs the apex→`www` 301. **Do not cancel Marketing 360 yet** —
+bare `roybalconstruction.com` is on business cards and the Google Business
+Profile, and nothing else is serving that redirect until the zone is on
+Cloudflare in October and step 7's redirect rule replaces it.
+
 ## 7. The switch — move DNS to Cloudflare
 
 Workers Custom Domains require the domain to be an active Cloudflare zone
 ("you cannot create a Custom Domain … on a zone you do not own" —
 developers.cloudflare.com/workers/configuration/routing/custom-domains). So the
-nameservers move from Wix to Cloudflare. Pages would have allowed a plain CNAME
-from Wix for `www`, but this site is deployed as a Worker.
+nameservers move to Cloudflare — **from Porkbun, after step 6b**, not from Wix.
+Pages would have allowed a plain CNAME from Wix for `www`, but this site is
+deployed as a Worker, and a CNAME could never have covered the apex anyway.
 
 ### ⚠️ THE COMPLETE ZONE, captured 2026-08-12 BEFORE any change
 
@@ -286,11 +474,27 @@ and Vercel terminate TLS themselves; proxying them through Cloudflare invites
 certificate errors and redirect loops. `app` serves the field, admin, and board
 apps the crew uses; `portal` serves customers.
 
-**Thirteen records.** The `cm._domainkey` entry is Campaign Monitor's DKIM key
-— it pairs with `_spf.createsend.com` in the SPF record, and losing it makes
-marketing email start failing DKIM and landing in spam. It was NOT found by
-the `dig` sweep that produced this table (that probed a fixed list of subdomain
-names); Cloudflare's zone scan found it. Trust the scan over a probe.
+**Thirteen records — and neither discovery method found all of them.** The
+`cm._domainkey` entry is Campaign Monitor's DKIM key. It pairs with
+`_spf.createsend.com` in the SPF record, and losing it makes marketing email
+start failing DKIM and landing in spam. The `dig` sweep that produced this table
+missed it (that sweep probed a fixed list of subdomain names); Cloudflare's zone
+scan caught it.
+
+But the scan is not complete either. Wix's DNS editor shows a **fourteenth**
+record the Cloudflare scan did not import:
+
+| Type | Name | Value | Verdict |
+|---|---|---|---|
+| CNAME | `en` | `cdn1.wixdns.net` | dead — **do not recreate** |
+
+Checked 2026-08-13: it answers `404` (with a valid certificate), and `en.` appears
+nowhere in `.site-archive/content.json`, so no ranking URL depends on it. It is
+Wix-site debris. Letting it die at cutover is correct.
+
+**The lesson is that no single source is authoritative.** Read the zone from the
+provider's own editor *and* the Cloudflare scan *and* a `dig` sweep, then
+reconcile. Each one missed something the others caught.
 
 **Set every record to DNS only (grey cloud) for the nameserver move.** Not just
 `app` and `portal` — the apex and `www` too. They still point at Madwire, and
@@ -341,10 +545,15 @@ Order:
 ### Steps
 
 1. **Cloudflare → Add a site** → `roybalconstruction.com` → Free plan.
+   ✅ Done 2026-08-13 — zone `4df71ef17338f142d605ec839604bd6c`, Free plan.
 2. **Review the imported records against the table above.** Add anything
    missing. Set `app` and `portal` to DNS-only.
-3. **Wix → Domains → Nameservers** → point to the two Cloudflare nameservers
-   Cloudflare gives you. Propagation is usually minutes, up to 24h.
+   ✅ Done 2026-08-13 — 13 records, all DNS-only. The scan imported only one MX;
+   the four `alt1`–`alt4` were added by hand. Verified from both nameservers.
+3. **Porkbun → Domain Management → Authoritative Nameservers** → replace
+   Porkbun's defaults with the two Cloudflare nameservers. Do this the moment
+   the transfer completes (see step 6b — Wix stops serving DNS at that point).
+   Propagation is usually minutes, up to 24h.
 4. Wait for Cloudflare to report the zone **Active**.
 5. **Workers → `roybal-site` → Settings → Domains & Routes → Add Custom Domain**
    → `www.roybalconstruction.com`. Cloudflare creates the DNS record and issues
