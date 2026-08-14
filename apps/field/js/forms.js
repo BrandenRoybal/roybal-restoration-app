@@ -2009,18 +2009,24 @@ const STAGE_RANK = { before: 0, during: 1, after: 2 };
 const STAGE_HEADER = { before: "Before", during: "During", after: "After" };
 const photoTs = (p) => Date.parse(p.ts || "") || 0;
 const photoStageRank = (p) => STAGE_RANK[p.stage] ?? 1;   // unlabeled ≈ "during" (the capture default)
-const photoRoom = (p) => (p.room || "").trim();
+const photoRoom = (p) => (p.room || "").trim().replace(/\s+/g, " ");
+/* Room comparison for BOTH sorting and group breaks. Case/accent-insensitive
+   so "kitchen" and "Kitchen" (typed by different techs / autocapitalize) file
+   as ONE room — grouping must use this same comparison, or base-equal
+   spellings interleave in the sorted array and fragment into repeated
+   identical-looking headers (they print uppercase). */
+const photoRoomCmp = (a, b) => {
+  const ra = photoRoom(a), rb = photoRoom(b);
+  if (!ra !== !rb) return ra ? -1 : 1;                    // photos with no room sink to the end
+  return ra.localeCompare(rb, undefined, { sensitivity: "base" });
+};
 const PHOTO_SORTS = {
   manual: { label: "Manual (◀ ▶ to arrange)" },
   stage:  { label: "Before → During → After",
             cmp: (a, b) => photoStageRank(a) - photoStageRank(b) || photoTs(a) - photoTs(b) },
   room:   { label: "Room, then Before → After",
-            cmp: (a, b) => {
-              const ra = photoRoom(a), rb = photoRoom(b);
-              if (!ra !== !rb) return ra ? -1 : 1;        // photos with no room sink to the end
-              return ra.localeCompare(rb, undefined, { sensitivity: "base" })
-                || photoStageRank(a) - photoStageRank(b) || photoTs(a) - photoTs(b);
-            } },
+            cmp: (a, b) => photoRoomCmp(a, b)
+              || photoStageRank(a) - photoStageRank(b) || photoTs(a) - photoTs(b) },
   oldest: { label: "Date taken — oldest first", cmp: (a, b) => photoTs(a) - photoTs(b) },
   newest: { label: "Date taken — newest first", cmp: (a, b) => photoTs(b) - photoTs(a) },
 };
@@ -2073,20 +2079,52 @@ export function photosForm(project) {
   const shownPhotos = () =>
     stageFilter ? shownAll().filter((p) => (p.stage || "during") === stageFilter) : shownAll();
 
+  /* A blur-triggered repaint must not destroy the element a finger is mid-tap
+     on: a tap elsewhere in the gallery runs pointerdown → blur/change →
+     pointerup → click, and rebuilding the cards during the blur would detach
+     the tapped button before its click lands (the tap just dies). If a tap is
+     in flight inside the gallery, hold the repaint until it resolves. */
+  let tapping = false;
+  const oncePointerDone = (fn) => {
+    const done = () => {
+      window.removeEventListener("pointerup", done, true);
+      window.removeEventListener("pointercancel", done, true);
+      fn();
+    };
+    window.addEventListener("pointerup", done, true);
+    window.addEventListener("pointercancel", done, true);
+  };
+  wrap.addEventListener("pointerdown", () => {
+    tapping = true;
+    oncePointerDone(() => { tapping = false; });
+  }, true);
+  const repaintAfterTap = () => {
+    if (!tapping) { paint(); return; }
+    oncePointerDone(() => setTimeout(paint, 0));   // after the click task, not during it
+  };
+
   function card(p) {
-    const manual = project.photoSort === "manual";
+    // reordering needs the full list visible: hand-arranged sort, no filter —
+    // under a filter ◀ ▶ would swap with HIDDEN neighbors (looks dead, still
+    // rewrites the printed report's order)
+    const manual = project.photoSort === "manual" && !stageFilter;
     const cap = h("textarea", { class: "photocaption", rows: "5", placeholder: "Caption" });
     const growCap = () => { cap.style.height = "auto"; cap.style.height = Math.max(cap.scrollHeight, 120) + "px"; };
     cap.addEventListener("input", () => { p.caption = cap.value; growCap(); refresh(); commit(); });
     const room = h("input", { value: p.room || "", placeholder: "Room / location" });
     room.addEventListener("input", () => { p.room = room.value; refresh(); commit(); });
     // regroup on blur, not per keystroke — repainting mid-word would eat the keyboard
-    room.addEventListener("change", () => { if (project.photoSort === "room") paint(); });
+    room.addEventListener("change", () => { if (project.photoSort === "room") repaintAfterTap(); });
     const stage = sel(p, "stage", [
       { value: "before", label: "Before" }, { value: "during", label: "During" }, { value: "after", label: "After" }]);
+    // legacy photos may predate the stage field: every sort/filter/count treats
+    // them as "during" (the capture default), so the control must SHOW that —
+    // with no matching option the browser would display "Before". Display only;
+    // p.stage is written when the user actually picks.
+    if (!(p.stage in STAGE_RANK)) stage.value = "during";
     stage.addEventListener("change", () => {
       refresh();
-      if (project.photoSort === "stage" || project.photoSort === "room" || stageFilter) paint();
+      if (project.photoSort === "stage" || project.photoSort === "room" || stageFilter) repaintAfterTap();
       else paintFilter();                    // keep the chip counts honest
     });
     const idx = project.photos.indexOf(p);   // manual-order position (cards rebuild on every paint)
@@ -2163,6 +2201,15 @@ export function photosForm(project) {
     filterRow.hidden = !project.photos.length;
   }
 
+  /* Group membership must be decided by the SAME comparison the sort used \u2014
+     deciding by label equality would split base-equal room spellings
+     ("kitchen"/"Kitchen" interleave under the case-insensitive sort) into
+     repeated identical-looking headers. The header shows the first photo's
+     spelling; a group's variants are one room by construction. */
+  const sameGroup = (a, b) =>
+    project.photoSort === "stage" ? photoStageRank(a) === photoStageRank(b)
+    : project.photoSort === "room" ? photoRoomCmp(a, b) === 0
+    : true;                                   // ungrouped sorts: one section
   const groupLabel = (p) =>
     project.photoSort === "stage" ? (STAGE_HEADER[p.stage] || "During")
     : project.photoSort === "room" ? (photoRoom(p) || "No room set")
@@ -2174,17 +2221,18 @@ export function photosForm(project) {
   function paint() {
     refreshers.clear();
     wrap.replaceChildren();
-    let sec = null, secGrid = null, secShown = 0, lastLabel;
+    let sec = null, secGrid = null, secShown = 0, prev = null;
     const hideEmpty = () => { if (sec && stageFilter && !secShown) sec.classList.add("photohide"); };
     for (const p of shownAll()) {
-      const label = groupLabel(p);
-      if (!sec || label !== lastLabel) {
+      if (!sec || !sameGroup(prev, p)) {
         hideEmpty();
+        const label = groupLabel(p);
         secGrid = h("div", { class: "photogrid" });
         sec = h("section", { class: "photosec" }, label == null ? null : h("div", { class: "photogroup" }, label), secGrid);
         wrap.append(sec);
-        lastLabel = label; secShown = 0;
+        secShown = 0;
       }
+      prev = p;
       const el = card(p);
       if (stageFilter && (p.stage || "during") !== stageFilter) el.classList.add("photohide");
       else secShown++;
@@ -2192,6 +2240,8 @@ export function photosForm(project) {
     }
     hideEmpty();
     if (!project.photos.length) wrap.append(h("p", { class: "subtle app-only" }, "No photos yet \u2014 tap \u201cAdd photos.\u201d"));
+    else if (stageFilter && !project.photos.some((p) => (p.stage || "during") === stageFilter))
+      wrap.append(h("p", { class: "subtle app-only" }, `No \u201c${stageFilter}\u201d photos on this job yet \u2014 the other chips have them all.`));
     paintFilter();
   }
 
@@ -2238,6 +2288,9 @@ export function photosForm(project) {
     // Photolog photos don't need camera-res: capture at ~1200px / q0.6 so jobs
     // stay small to sync and email. The size-tier control shrinks them further.
     for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f, 1200, 0.6); project.photos.push(ph); added.push(ph); }
+    // new photos are stage "during" — an active Before/After chip would hide
+    // every one of them ("my photos didn't save"), so the add clears the filter
+    stageFilter = "";
     input.value = ""; commit(); paint(); paintAiBtn();
     runAi(added, { silent: true });          // fire-and-forget; typed captions still work offline
   });
