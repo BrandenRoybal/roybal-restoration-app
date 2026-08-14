@@ -15,6 +15,8 @@
    workday. The board's calendar settings never persist server-side
    (the '__settings__' row can't exist in a uuid-keyed table), so the
    workday check is DEFAULT_SETTINGS' Mon–Fri — documented, not sneaky.
+   (Weekend clock-ins still message: the publisher falls back to the
+   actual clocked-in names when this returns nobody.)
 
    Shared by the roybal-portal gateway (Deno) and the Node test —
    plain ESM, no imports.
@@ -65,9 +67,10 @@ export function namesLine(names) {
   return n.slice(0, -1).join(", ") + " and " + n[n.length - 1];
 }
 
-/* the customer-facing morning line; empty string = post nothing */
+/* the customer-facing line, posted when the crew's first clock-in of the day
+   lands (qb-time-proxy clockinSweep → dailyCrewLines); empty = post nothing */
 export function crewLine(names) {
   const line = namesLine(names);
   if (!line) return "";
-  return `Good morning! ${line} from our crew ${names.length === 1 ? "is" : "are"} scheduled at your property today.`;
+  return `${line} from our crew ${names.length === 1 ? "is" : "are"} on the job at your property today.`;
 }

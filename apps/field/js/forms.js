@@ -3244,8 +3244,9 @@ export function portalShareForm(project) {
   const notifyBox = h("input", { type: "checkbox", checked: s.notifyOnStatus !== false });
   notifyBox.addEventListener("change", () => { s.notifyOnStatus = notifyBox.checked; commit(); });
 
-  // who's-coming-today toggle (CF-2) — the weekday morning crew intro,
-  // published server-side from the board schedule; publish carries it over
+  // who's-on-the-job toggle (CF-2) — the crew intro posted when the crew's
+  // first QuickBooks Time clock-in of the day lands, named from the board
+  // schedule server-side; publish carries it over
   const crewLineBox = h("input", { type: "checkbox", checked: s.notifyCrew !== false });
   crewLineBox.addEventListener("change", () => { s.notifyCrew = crewLineBox.checked; commit(); });
 
@@ -3662,7 +3663,7 @@ export function portalShareForm(project) {
         h("label", { class: "check", style: "margin:2px 0 0" }, notifyBox,
           h("span", {}, "Message the customer when I publish a new status")),
         h("label", { class: "check", style: "margin:2px 0 0" }, crewLineBox,
-          h("span", {}, "Weekday mornings, tell them who's coming today (from the board schedule)")),
+          h("span", {}, "When the crew clocks in (QuickBooks Time), tell them who's on the job today (names from the board schedule)")),
         sectionTitle("Shared photos"),
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Tap to include a photo in the customer view (highlighted = shared)."),
         photoWrap,
