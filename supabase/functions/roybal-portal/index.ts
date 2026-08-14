@@ -746,14 +746,30 @@ async function myProjects(session: string) {
   };
 }
 
-/* ---------- CF-2: the weekday who's-coming-today publisher ----------
-   Fired by pg_cron (migration 233), guarded by the cron secret. One thread
-   line per enabled+opted-in job per Alaska day, naming the crew the board
-   has scheduled at the property TODAY — facts only, never a finish date. */
-async function dailyCrewLines() {
+/* ---------- CF-2: the who's-on-the-job-today publisher ----------
+   Guarded by the cron secret. One thread line per enabled+opted-in job per
+   Alaska day, naming the crew the board has scheduled at the property TODAY —
+   facts only, never a finish date.
+
+   Reworked 2026-08-14: fired by qb-time-proxy's clockinSweep on the day's
+   FIRST clock-in (migration 236), not a fixed weekday morning. The sweep
+   passes fieldProjectIds (only jobs whose crew actually clocked in) plus
+   clockedIn names per job — the fallback when the board lists nobody for
+   today (a Saturday visit, an off-plan trip). Dedupe is unchanged:
+   crew_line_date stamps one line per job per day. */
+async function dailyCrewLines(opts: { fieldProjectIds?: unknown; clockedIn?: unknown } = {}) {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Anchorage" });
+  const only = Array.isArray(opts.fieldProjectIds)
+    ? [...new Set(opts.fieldProjectIds.map((v) => String(v || "")).filter((v) => /^[\w-]+$/.test(v)))]
+    : null;
+  if (only && !only.length) return { checked: 0, posted: 0 };
+  const clockedIn: Record<string, string[]> = {};
+  if (opts.clockedIn && typeof opts.clockedIn === "object")
+    for (const [k, v] of Object.entries(opts.clockedIn as Record<string, unknown>))
+      if (Array.isArray(v)) clockedIn[k] = v.map((n) => String(n || "").slice(0, 60)).filter(Boolean).slice(0, 12);
   const jq = `portal_jobs?enabled=eq.true&notify_crew=eq.true&status=neq.complete` +
-    `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id,field_project_id,status&limit=100`;
+    `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id,field_project_id,status` +
+    (only ? `&field_project_id=in.(${only.join(",")})` : "") + `&limit=100`;
   const rows = await (await fetch(`${SUPABASE_URL}/rest/v1/${jq}`, { headers: svc })).json().catch(() => []);
   if (!Array.isArray(rows) || !rows.length) return { checked: 0, posted: 0 };
 
@@ -772,24 +788,64 @@ async function dailyCrewLines() {
 
   let posted = 0;
   for (const row of rows) {
-    const board = row.field_project_id ? boardByField.get(String(row.field_project_id)) : null;
-    if (!board) continue;
-    const names = crewToday(board, today).map((id: string) => crewName.get(id)).filter(Boolean) as string[];
+    const fid = String(row.field_project_id || "");
+    const board = fid ? boardByField.get(fid) : null;
+    // board-schedule names first (the promise), actual clock-ins as fallback
+    let names = board
+      ? crewToday(board, today).map((id: string) => crewName.get(id)).filter(Boolean) as string[]
+      : [];
+    if (!names.length) names = clockedIn[fid] || [];
     const line = crewLine(names);
-    if (!line) continue;                              // nobody scheduled → silence, not noise
+    if (!line) continue;                              // nobody to name → silence, not noise
+    // Claim the day FIRST, atomically: a conditional stamp only one caller
+    // can win. Under the old once-daily cron, post-then-stamp was safe ("at
+    // worst a re-check tomorrow") — under a 15-minute sweep an unstamped
+    // posted job would re-post and re-text every tick all day. Claim-then-
+    // post inverts the failure: at worst a lost line, never spam.
+    const claim = await fetch(
+      `${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}` +
+      `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id`, {
+      method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=representation" },
+      body: JSON.stringify({ crew_line_date: today }),
+    }).catch(() => null);
+    const won = claim?.ok ? await claim.json().catch(() => []) : [];
+    if (!Array.isArray(won) || !won.length) continue; // another tick beat us (or the stamp failed) — do not post
     const ins = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
       method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
       body: JSON.stringify([{ portal_job_id: row.id, direction: "out", channel: "portal",
         author: "office", body: line, read_by_office: true, read_by_customer: false }]),
     });
-    if (!ins.ok) continue;
-    await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
-      method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
-      body: JSON.stringify({ crew_line_date: today }),
-    }).catch(() => {});                               // unstamped = at worst a re-check, never a loss
+    if (!ins.ok) { console.error(`crew line lost for portal job ${row.id}: insert ${ins.status}`); continue; }
+    await mirrorCrewLineToSms(String(row.id), line).catch(() => {});   // bridge: best-effort
     posted++;
   }
   return { checked: rows.length, posted };
+}
+
+/* The SMS half of the crew line — the field app's mirrorReplyToSms rule,
+   server-side: text it ONLY when the customer's latest inbound message rode
+   SMS (they're conversing by text; web-thread customers get no duplicate).
+   Kind 'portal' is quiet-hours guarded and roybal-notify REFUSES (no queue)
+   outside 8am–8pm Alaska — which is why clockinSweep only runs inside that
+   window: thread line and text always land together. A refusal here (e.g. a
+   tightened quiet-hours env) is logged, not retried; the thread line stands. */
+async function mirrorCrewLineToSms(portalJobId: string, text: string) {
+  const lq = `portal_messages?portal_job_id=eq.${portalJobId}&direction=eq.in&select=channel&order=created_at.desc&limit=1`;
+  const last = await fetch(`${SUPABASE_URL}/rest/v1/${lq}`, { headers: svc });
+  const m = last.ok ? (await last.json())[0] : null;
+  if (!m || m.channel !== "sms") return;
+  const pj = await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${portalJobId}&select=contact_id&limit=1`, { headers: svc });
+  const cid = pj.ok ? ((await pj.json())[0] || {}).contact_id : null;
+  if (!cid) return;
+  const cr = await fetch(`${SUPABASE_URL}/rest/v1/contacts?id=eq.${cid}&select=phone_norm&limit=1`, { headers: svc });
+  const phone = cr.ok ? String(((await cr.json())[0] || {}).phone_norm || "") : "";
+  if (phone.length !== 10) return;
+  const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "sendSms", to: phone, kind: "portal", captured_by: "portal-crewline",
+      body: `Roybal Construction: ${text} Reply to this text or see your project page.` }),
+  });
+  if (!send.ok) console.error(`crew-line SMS mirror refused (${send.status}) for portal job ${portalJobId}`);
 }
 
 serve(async (req: Request) => {
@@ -805,7 +861,7 @@ serve(async (req: Request) => {
     if (action === "dailyCrewLines") {
       if (!CRON_SECRET || req.headers.get("x-cron-secret") !== CRON_SECRET)
         return json({ ok: false, error: "forbidden" }, 403);
-      return json({ ok: true, ...(await dailyCrewLines()) });
+      return json({ ok: true, ...(await dailyCrewLines({ fieldProjectIds: body.fieldProjectIds, clockedIn: body.clockedIn })) });
     }
 
     // CF-1: a session + jobId is as good as that job's own token — resolved
