@@ -119,6 +119,18 @@ const businessSchema = {
     })),
   ],
   sameAs: BUSINESS.social,
+  // The IICRC WRT certification — also shown as the badge in the footer and
+  // on restoration pages, so the markup matches what a visitor can see.
+  hasCredential: {
+    "@type": "EducationalOccupationalCredential",
+    credentialCategory: "certification",
+    name: "IICRC Water Damage Restoration Technician (WRT)",
+    recognizedBy: {
+      "@type": "Organization",
+      name: "Institute of Inspection, Cleaning and Restoration Certification",
+      url: "https://www.iicrc.org",
+    },
+  },
   hasOfferCatalog: {
     "@type": "OfferCatalog",
     name: "Construction and Restoration Services",

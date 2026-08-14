@@ -102,7 +102,7 @@ export const BUSINESS = {
    `page: true` means a dedicated location page exists. */
 export const SERVICE_AREAS = [
   { name: "Fairbanks", slug: "fairbanks", page: true },
-  { name: "North Pole", slug: "north-pole", page: false },
+  { name: "North Pole", slug: "north-pole", page: true },
   { name: "Fox", slug: "fox", page: false },
   { name: "Ester", slug: "ester", page: false },
 ] as const;
@@ -152,6 +152,14 @@ export const SERVICES: Service[] = [
     path: "/restoration-services/water-damage-restoration-in-fairbanks",
     blurb:
       "We quickly and effectively restore your property after water damage, minimizing loss and preventing further issues like mold growth.",
+    group: "restoration",
+    emergency: true,
+  },
+  {
+    name: "Frozen & Burst Pipe Repair",
+    path: "/restoration-services/frozen-burst-pipe-repair-in-fairbanks",
+    blurb:
+      "Frozen lines thawed safely, burst pipes repaired fast — and the water damage extracted, dried, and rebuilt under one contract.",
     group: "restoration",
     emergency: true,
   },

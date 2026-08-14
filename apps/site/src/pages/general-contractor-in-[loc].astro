@@ -52,6 +52,7 @@ const areaServed = isNeighborhood
       containedInPlace: { "@type": "State", name: "Alaska" },
     };
 
+const faq = d.faq ?? [];
 const schema = [
   {
     "@type": "Service",
@@ -61,6 +62,18 @@ const schema = [
     areaServed,
     url: `${site}${d.path}`,
   },
+  ...(faq.length > 0
+    ? [
+        {
+          "@type": "FAQPage",
+          mainEntity: faq.map((f) => ({
+            "@type": "Question",
+            name: f.q,
+            acceptedAnswer: { "@type": "Answer", text: f.a },
+          })),
+        },
+      ]
+    : []),
   {
     "@type": "BreadcrumbList",
     itemListElement: [
@@ -107,10 +120,54 @@ const schema = [
     </div>
   </section>
 
+  {faq.length > 0 && (
+    <section class="section">
+      <div class="wrap">
+        <span class="eyebrow">Straight answers</span>
+        <h2>Frequently asked questions</h2>
+        <div class="faqs">
+          {faq.map((f) => (
+            <details class="faqs__item">
+              <summary>{f.q}</summary>
+              <p>{f.a}</p>
+            </details>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
+
   <CtaBand heading={`Working on something in ${town}?`} />
 </Base>
 
 <style>
+  .faqs {
+    margin-top: 1.6rem;
+    max-width: 46rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .faqs__item {
+    background: var(--white);
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius);
+  }
+  .faqs__item summary {
+    cursor: pointer;
+    padding: 0.95rem 1.15rem;
+    font-weight: 600;
+    color: var(--navy-800);
+  }
+  .faqs__item summary:hover { color: var(--orange-dark); }
+  .faqs__item[open] summary { border-bottom: 1px solid var(--slate-100); }
+  .faqs__item p {
+    margin: 0;
+    padding: 0.9rem 1.15rem 1.05rem;
+    color: var(--slate-600);
+    line-height: 1.65;
+  }
+
   .hoodNote {
     border-left: 3px solid var(--orange);
     padding: 0.15rem 0 0.15rem 1rem;
