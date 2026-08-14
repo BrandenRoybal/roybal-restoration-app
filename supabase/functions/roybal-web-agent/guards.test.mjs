@@ -333,10 +333,13 @@ test("the function touches NO table path — only web_* RPCs", () => {
   }
 });
 
-test("the only RPCs called are the five from migration 227", () => {
+test("the only RPCs called are the five from 227 plus the CRM resolver", () => {
   const called = new Set([...CODE.matchAll(/rpc\(\s*["'`]([a-z_]+)["'`]/g)].map((m) => m[1]));
   const allowed = new Set([
     "web_session_begin", "web_turn_begin", "web_turn_end", "web_lead_insert", "web_alert_claim",
+    // migration 228's contact resolver, called UNTRUSTED (public lane) to link
+    // a lead to a person — it cannot enrich an existing contact from here
+    "contact_resolve",
   ]);
   for (const fn of called) assert.ok(allowed.has(fn), `unexpected RPC "${fn}"`);
   assert.ok(called.has("web_session_begin") && called.has("web_turn_begin"), "core RPCs missing");

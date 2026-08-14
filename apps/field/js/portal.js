@@ -70,10 +70,24 @@ export async function publishPortal(project) {
     // inline src would point the portal at a 480px thumb that isn't uploaded
     photos.push({ mediaHash: ph.cloud || await sha256Hex(ph.src), caption: ph.caption, stage: ph.stage });
   }
+  // the spine link: this used to write unified_job_id: null — the portal row
+  // now rides the crosswalk (and carries the person) when the spine has one.
+  // Best-effort AND non-destructive: a failed/empty lookup must OMIT these
+  // columns from the merge-duplicates upsert (the spine.js delete-key
+  // precedent) so a transient GET can never null out a backfilled or
+  // office-set link. Only a successful lookup writes them.
+  let spineLink = null;
+  try {
+    const sr = await rest(`unified_jobs?field_project_id=eq.${project.id}&select=id,contact_id&limit=1`, { method: "GET" });
+    if (sr.ok) {
+      const s = (await sr.json())[0] || null;
+      if (s && s.id) spineLink = { unified_job_id: s.id, contact_id: s.contact_id || null };
+    }
+  } catch { /* leave spineLink null → the columns are omitted, links untouched */ }
   const row = {
     id: share.id,
     field_project_id: project.id || null,
-    unified_job_id: null,
+    ...(spineLink || {}),
     share_token: share.shareToken,
     enabled: !!share.enabled,
     customer_name: proj.customer_name,

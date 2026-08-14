@@ -151,6 +151,33 @@ const PROTECTED_KINDS = new Set([
 ]);
 const PUBLIC_KINDS = new Set(["webOwner", "webLead"]);
 
+// Owner/crew-directed kinds: their to_number is the OWNER or a crew member,
+// never a customer, so they must NOT be stamped onto a customer's contact_id
+// (the contact_timeline would show internal notifications on a customer
+// thread). Everything else is customer-numbered and stamps on a single match.
+const OWNER_KINDS = new Set([
+  "brief", "phoneOwner", "webOwner", "webLead", "forward", "assistCrew", "approval",
+]);
+
+/* The person behind a phone number: exactly one live contact, or null.
+   `q` is a REST caller — `admin` on the inbound service path, a jwt-bound
+   closure on the outbound path. kind gates out owner/crew-directed sends. */
+async function contactByPhone(
+  q: (path: string, opts?: RequestInit) => Promise<Response>,
+  digits10: string,
+  kind = "",
+): Promise<string | null> {
+  if (OWNER_KINDS.has(kind) || digits10.length !== 10) return null;
+  try {
+    const r = await q(`contacts?select=id&phone_norm=eq.${digits10}&merged_into=is.null&limit=2`, { method: "GET" });
+    if (r.ok) {
+      const rows = (await r.json()) as Array<{ id: string }>;
+      if (rows.length === 1) return rows[0].id;
+    }
+  } catch (_) { /* the link is optional */ }
+  return null;
+}
+
 /* A BLANK secret must not disable the cap. Deno returns "" for a secret set to
    an empty value, and Number("") === 0 — which would make `used >= 0` true
    forever, refusing everything, or with the cap at 0 disable it entirely.
@@ -238,12 +265,18 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
       `the phone lane. Kind '${kind}' is refused until next month or until SMS_MONTHLY_CAP is raised.`,
     );
 
+  // person link: customer-directed kinds stamp the outbound side so the
+  // contact_timeline shows both halves of the conversation. Owner/crew kinds
+  // are skipped inside contactByPhone. Runs under the caller's JWT (RLS).
+  const outContact = await contactByPhone((p, o) => db(p, jwt, o), to.replace(/[^\d]/g, "").slice(-10), kind);
+
   // RLS-gated insert BEFORE the paid call — unauthenticated callers stop here
   const ins = await db("sms_messages", jwt, {
     method: "POST",
     headers: { Prefer: "return=representation" },
     body: JSON.stringify([{
       unified_job_id: body.unified_job_id ?? null,
+      contact_id: outContact,
       direction: "outbound", to_number: to, from_number: TWILIO_FROM,
       body: clip(text), kind,
       sent_by: body.captured_by ?? null, status: "pending",
@@ -447,11 +480,16 @@ async function handleInbound(req: Request): Promise<Response> {
 
   const admin = (path: string, opts: RequestInit = {}) => db(path, SERVICE_KEY, opts, SERVICE_KEY);
 
-  // best-effort job link: match the sender's number to a unified job so the
-  // field app's Message log can find this reply by JOB, not just by number
+  // best-effort links: the PERSON first (contacts by indexed phone_norm,
+  // stamped only on an unambiguous single live match — lookup-only, an
+  // unknown texter never mints a contact), then the sender's unified job so
+  // the field app's Message log can find this reply by JOB, not just number
+  const fromDigits = from.replace(/[^\d]/g, "").slice(-10);
+  // person link: separate call so a contacts hiccup can't cost the job link.
+  // Inbound is always a reply FROM a customer, so no kind gate is needed.
+  const contact_id = await contactByPhone(admin, fromDigits);
   let unified_job_id: string | null = null;
   try {
-    const fromDigits = from.replace(/[^\d]/g, "").slice(-10);
     if (fromDigits.length === 10) {
       const jr = await admin("unified_jobs?select=id,owner_phone&owner_phone=not.is.null&limit=500", { method: "GET" });
       if (jr.ok) {
@@ -460,12 +498,13 @@ async function handleInbound(req: Request): Promise<Response> {
         unified_job_id = hit?.id ?? null;
       }
     }
-  } catch (_) { /* the link is optional — the row still logs by number */ }
+  } catch (_) { /* the job link is optional — the row still logs by number */ }
 
   const ins = await admin("sms_messages", {
     method: "POST",
     body: JSON.stringify([{
       unified_job_id,
+      contact_id,
       direction: "inbound", to_number: String(params.get("To") ?? ""), from_number: from,
       body: clip(text), kind: "reply", status: "received",
       twilio_sid: params.get("MessageSid") ?? null,

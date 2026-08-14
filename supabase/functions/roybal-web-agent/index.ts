@@ -35,7 +35,9 @@
  *   LLM endpoint is an unbounded bill, and the fallback is a working form.
  *
  *   NO READ PATH. This function never reads customer data. It touches the
- *   database ONLY through four fixed-signature RPCs; there is no
+ *   database ONLY through fixed-signature RPCs — the five web_* guards from
+ *   migration 227 plus contact_resolve (228), called UNTRUSTED so it can link
+ *   a lead to a person but never enrich an existing contact. There is no
  *   /rest/v1/<table> path anywhere in this file, and guards.test.mjs greps the
  *   source and fails if that stops being true.
  *
@@ -311,6 +313,17 @@ async function saveLead(
   const urgent = emergency || String(args.urgency ?? "") === "emergency";
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
+
+  // CRM: resolve the person (UNTRUSTED — self-reported on a public lane, so
+  // the resolver links or creates but never enriches an existing contact).
+  // Never fatal to the lead.
+  let contactId: string | null = null;
+  try {
+    contactId = await rpc("contact_resolve", {
+      p_name: name, p_phone: phone, p_email: "", p_address: clip(args.address, 160),
+      p_source: "ai-chat", p_trusted: false, p_role: "customer",
+    }) as string | null;
+  } catch { /* the lead carries no link, exactly like before */ }
   const transcript = [...hist.map((m) => `${m.r === "a" ? "Assistant" : "Visitor"}: ${m.t}`), `Visitor: ${latestText}`]
     .join("\n").slice(0, 4000);
 
@@ -337,6 +350,7 @@ async function saveLead(
     channel: "ai-chat",
     webLead: true,
     aiBooked: true,
+    ...(contactId ? { contactId } : {}),
     rev: 1,
     createdAt: now,
     updatedAt: now,

@@ -66,6 +66,11 @@ export function getUnifiedJobId(projectId) {
   return _unifiedIds.get(projectId) || null;
 }
 
+/* Per-project digest of the identity fields last run through contact_resolve,
+   so an unchanged job page doesn't re-resolve (and re-queue dismissed
+   suggestions) on every render. Session-scoped; cleared on reload. */
+const _resolvedKey = new Map();
+
 /* Upsert the spine row for a field project, linking the Board job when a
    claim # matches. Fire-and-forget safe: always resolves, never throws. */
 export async function syncSpine(project) {
@@ -92,6 +97,42 @@ export async function syncSpine(project) {
     const rows = await res2.json().catch(() => []);
     const row = rows[0] || null;
     if (row && row.id) _unifiedIds.set(project.id, row.id);
+    // 3. link the person: run the header fields through the server-side
+    //    resolve ladder (migration 228) and stamp contact_id. Trusted lane —
+    //    the office typed these fields. Best-effort: a resolver hiccup never
+    //    touches the spine row that already landed, and offline we skip it.
+    //
+    //    Gated so it fires only when it can do NEW work: the row has no
+    //    contact yet, OR the identity fields changed since the last resolve.
+    //    Re-resolving unchanged fields every job-page open would re-queue a
+    //    'conflict' suggestion the office already dismissed (228's dedupe
+    //    covers only status='open'), turning the review queue into an
+    //    undismissable nag.
+    try {
+      const idKey = [project.customer, project.phone, project.email, project.address]
+        .map((v) => String(v || "").trim().toLowerCase()).join("|");
+      const hasIdentity = project.customer || project.phone || project.email;
+      if (row && row.id && hasIdentity && (!row.contact_id || _resolvedKey.get(project.id) !== idKey)) {
+        const rr = await rest(`rpc/contact_resolve`, {
+          method: "POST",
+          body: JSON.stringify({
+            p_name: project.customer || "", p_phone: project.phone || "",
+            p_email: project.email || "", p_address: project.address || "",
+            p_source: "field", p_trusted: true, p_role: "customer",
+          }),
+        });
+        if (rr.ok) {
+          const cid = await rr.json().catch(() => null);
+          if (cid && cid !== row.contact_id) {
+            await rest(`unified_jobs?id=eq.${row.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ contact_id: cid }),
+            });
+          }
+          if (cid) _resolvedKey.set(project.id, idKey);   // don't re-resolve unchanged identity
+        }
+      }
+    } catch { /* the link is best-effort; the spine row is already safe */ }
     return { ok: true, row, coordinationLinked: !!coordId };
   } catch (e) {
     return { ok: false, error: String(e) };

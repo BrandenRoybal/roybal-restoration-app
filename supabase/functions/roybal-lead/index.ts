@@ -327,6 +327,24 @@ serve(async (req) => {
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
 
+  // CRM: resolve the person and carry the link on the lead card. UNTRUSTED —
+  // this is a public lane, so the resolver never enriches an existing contact
+  // from here (a stranger typing a customer's phone gets a link queued for
+  // review, never a silent field fill). Never fatal: a resolver hiccup must
+  // not cost a lead.
+  let contactId: string | null = null;
+  try {
+    const cr = await fetch(`${SUPABASE_URL}/rest/v1/rpc/contact_resolve`, {
+      method: "POST",
+      headers: { ...svc, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        p_name: name, p_phone: phone, p_email: email, p_address: address,
+        p_source: "web-form", p_trusted: false, p_role: "customer",
+      }),
+    });
+    if (cr.ok) contactId = (await cr.json().catch(() => null)) as string | null;
+  } catch (e) { console.error("contact_resolve failed (lead continues)", String((e as Error)?.message ?? e)); }
+
   // Same envelope and field names as services/phone-agent/tools.mjs createLead,
   // so the board renders a web lead and a phone lead identically.
   const lead = {
@@ -359,6 +377,7 @@ serve(async (req) => {
     ipHash,
     subnetHash,
     webLead: true,
+    ...(contactId ? { contactId } : {}),
     rev: 1,
     createdAt: now,
     updatedAt: now,
