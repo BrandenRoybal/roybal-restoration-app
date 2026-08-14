@@ -261,3 +261,30 @@ export const SERVICES: Service[] = [
 
 export const RESTORATION_SERVICES = SERVICES.filter((s) => s.group === "restoration");
 export const CONSTRUCTION_SERVICES = SERVICES.filter((s) => s.group === "construction");
+
+/* ── Backend endpoints ──────────────────────────────────────────
+   The two Supabase edge functions the public site calls. Both are
+   public, non-secret URLs (each function self-protects: honeypot,
+   rate caps, spend ceiling), so the production values are committed
+   here as build-time defaults.
+
+   Why committed: on 2026-08-13 a build from a checkout without the
+   gitignored apps/site/.env silently shipped with no receptionist
+   panel and a quote form that posted nowhere. An UNSET env var must
+   never again be a silent off-switch.
+
+   Overriding per environment still works via PUBLIC_LEAD_ENDPOINT /
+   PUBLIC_WEB_AGENT_ENDPOINT. Setting one EXPLICITLY to "" or "off"
+   is the build-time kill switch (the receptionist's kill scenario);
+   unset now means "use the production default". */
+export const DEFAULT_LEAD_ENDPOINT =
+  "https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-lead";
+export const DEFAULT_WEB_AGENT_ENDPOINT =
+  "https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-web-agent";
+
+/** unset → fallback; "" or "off" → explicitly disabled (returns ""); else the override. */
+export function resolveEndpoint(raw: string | undefined, fallback: string): string {
+  if (raw === undefined) return fallback;
+  const value = raw.trim();
+  return value.toLowerCase() === "off" ? "" : value;
+}

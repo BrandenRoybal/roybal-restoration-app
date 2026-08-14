@@ -9,7 +9,7 @@
    Progressive enhancement: the form is a real <form> with a real action, so
    it still posts if the inline script fails. The script only upgrades it to
    an inline success message instead of a page navigation. */
-import { BUSINESS, SERVICES } from "../data/site";
+import { BUSINESS, SERVICES, DEFAULT_LEAD_ENDPOINT, resolveEndpoint } from "../data/site";
 
 interface Props {
   /** Pre-selects the service dropdown when embedded on a service page. */
@@ -18,7 +18,11 @@ interface Props {
 }
 const { service = "", compact = false } = Astro.props;
 
-const endpoint = import.meta.env.PUBLIC_LEAD_ENDPOINT ?? "";
+/* Unset env var → the committed production endpoint, so an env-less build
+   still produces a form that posts somewhere real. There is no legitimate
+   "form off" state — a blank/"off" override resolves empty here, and the
+   postbuild guard fails that build rather than let a dead form deploy. */
+const endpoint = resolveEndpoint(import.meta.env.PUBLIC_LEAD_ENDPOINT, DEFAULT_LEAD_ENDPOINT);
 ---
 
 <form
