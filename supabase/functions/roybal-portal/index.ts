@@ -48,6 +48,8 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const MEDIA_BUCKET = "field-media";
 const PHOTO_MAX = 24;    // max full images inlined in a view response
+const DOC_MAX = 6;       // max shared documents in a view response
+const DOC_PAGE_MAX = 8;  // max inlined pages per document
 const MSG_MAX = 2000;    // max characters a customer may send in one message
 const MSG_LIMIT = 200;   // most-recent messages returned per thread
 const FLOOD_WINDOW_MS = 60_000;  // inbound-message rate window
@@ -88,7 +90,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 async function jobByToken(token: string) {
   const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,customer_name,property_address,status,milestones,photos,documents,selections_submitted_at&limit=1`;
+    `&select=id,customer_name,property_address,status,milestones,photos,documents,drying,selections_submitted_at&limit=1`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
@@ -132,6 +134,31 @@ async function view(token: string) {
     const url = await mediaSrc(p.mediaHash);
     if (url) photos.push({ url, caption: p.caption || "", stage: p.stage || "" });
   }
+  // documents (CF-2): office-picked supporting-doc pages, served through the
+  // same content-addressed media path as photos. Caps keep the payload sane.
+  const documents: Array<{ label: string; type: string; pages: string[] }> = [];
+  for (const d of (Array.isArray(row.documents) ? row.documents : []).slice(0, DOC_MAX)) {
+    const pages: string[] = [];
+    for (const hash of (Array.isArray(d.pages) ? d.pages : []).slice(0, DOC_PAGE_MAX)) {
+      const url = await mediaSrc(hash);
+      if (url) pages.push(url);
+    }
+    if (pages.length) documents.push({ label: String(d.label || "Document").slice(0, 120), type: String(d.type || "").slice(0, 60), pages });
+  }
+  // drying (CF-2): readings only, re-projected through an explicit allow-list —
+  // a field added to the stored blob later cannot leak by being forgotten here.
+  const dr = row.drying && typeof row.drying === "object" ? row.drying : null;
+  const drying = dr ? {
+    asOf: String(dr.asOf || "").slice(0, 10),
+    areas: (Array.isArray(dr.areas) ? dr.areas : []).slice(0, 12).map((a: Record<string, unknown>) => ({
+      area: String(a.area || "").slice(0, 80),
+      material: String(a.material || "").slice(0, 60),
+      current: Number(a.current),
+      goal: a.goal == null ? null : Number(a.goal),
+      dry: !!a.dry,
+    })).filter((a: { current: number }) => Number.isFinite(a.current)),
+    equipmentOut: Number(dr.equipmentOut) || 0,
+  } : null;
   return {
     job: {
       customerName: row.customer_name || "",
@@ -140,7 +167,8 @@ async function view(token: string) {
       milestones: Array.isArray(row.milestones) ? row.milestones : [],
     },
     photos,
-    documents: [],
+    documents,
+    drying: drying && (drying.areas.length || drying.equipmentOut) ? drying : null,
     unread: await unreadForCustomer(row.id),
   };
 }

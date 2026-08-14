@@ -2,7 +2,7 @@
    portalProjection(project) must expose ONLY curated, customer-safe fields
    and never any internal data. Run: node apps/field/test/portal.test.mjs */
 import assert from "node:assert";
-import { portalProjection, portalMilestones, portalShareLink, newShareToken, portalDigest, threadForAi } from "../js/portal.js";
+import { portalProjection, portalMilestones, portalShareLink, newShareToken, portalDigest, threadForAi, dryingSummary } from "../js/portal.js";
 
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); console.log("  ✓ " + name); pass++; };
@@ -53,7 +53,7 @@ for (const needle of FORBIDDEN)
   ok(`internal data never leaks: "${needle}"`, !json.includes(needle));
 
 ok("projection keys are the curated set only",
-  Object.keys(proj).sort().join(",") === "customer_name,milestones,photos,property_address,status,statusLabel");
+  Object.keys(proj).sort().join(",") === "customer_name,documents,drying,milestones,photos,property_address,status,statusLabel");
 
 /* ---------- milestone states ---------- */
 const ms = portalMilestones("drying");
@@ -92,5 +92,54 @@ const forAi = threadForAi([
 ok("threadForAi maps in->customer, out->office",
   forAi[0].from === "customer" && forAi[0].body === "When do you start?" && forAi[1].from === "office");
 ok("threadForAi handles empty", threadForAi(null).length === 0);
+
+
+/* ---------- dryingSummary: readings only, never a promise (CF-2) ---------- */
+const dryJob = {
+  moistureMaps: [
+    { label: "Living room floor", material: "OSB subfloor", dryGoal: "12",
+      readings: [
+        { date: "2026-08-10", values: ["18", "22.4", "", "19"] },
+        { date: "2026-08-13", values: ["13.6", "14.2", "", "12.1"] },
+      ] },
+    { label: "Hall wall", material: "drywall", dryGoal: "1",
+      readings: [{ date: "2026-08-13", values: ["0.8"] }] },
+    { label: "No readings yet", material: "", dryGoal: "12", readings: [] },
+  ],
+  dryingLogs: [{ equipment: [
+    { asset: "AM-1", placed: "2026-08-08", removed: "" },
+    { asset: "DH-2", placed: "2026-08-08", removed: "2026-08-12" },
+    { asset: "AM-3", placed: "2026-08-09" },
+  ] }],
+};
+const dsum = dryingSummary(dryJob);
+ok("drying: latest row wins and wettest value is reported", dsum.areas[0].current === 14.2 && dsum.asOf === "2026-08-13");
+ok("drying: goal + not-dry flag", dsum.areas[0].goal === 12 && dsum.areas[0].dry === false);
+ok("drying: a dry area flags dry", dsum.areas[1].dry === true);
+ok("drying: readings-less maps are skipped", dsum.areas.length === 2);
+ok("drying: equipment counts placed-and-not-removed only", dsum.equipmentOut === 2);
+ok("drying: never emits a trend or ETA key",
+  Object.keys(dsum).sort().join(",") === "areas,asOf,equipmentOut");
+ok("drying: empty job -> null (card never renders)", dryingSummary({}) === null);
+
+/* ---------- documents: allow-list only, digest never leaves ---------- */
+const docJob = { ...project,
+  supportDocs: [
+    { id: "d1", title: "Cert of Drying", docType: "Certificate", aiDigest: "SECRET-DIGEST",
+      uploadedPages: ["data:image/png;base64,PAGE1", "data:image/png;base64,PAGE2"] },
+    { id: "d2", title: "Engineer report", docType: "Report", aiDigest: "PRIVATE",
+      uploadedPages: ["data:image/png;base64,PAGE3"] },
+    { id: "d3", title: "No pages", docType: "", uploadedPages: [] },
+  ],
+  portalShare: { ...project.portalShare, sharedDocIds: ["d1", "d3"], shareDrying: true },
+  moistureMaps: dryJob.moistureMaps, dryingLogs: dryJob.dryingLogs,
+};
+const dp = portalProjection(docJob);
+ok("documents: only ticked docs with pages project", dp.documents.length === 1 && dp.documents[0].label === "Cert of Drying");
+ok("documents: pages carried, digest never read", JSON.stringify(dp.documents).includes("PAGE1") && !JSON.stringify(dp).includes("SECRET-DIGEST"));
+ok("documents: unticked doc (d2) stays private", !JSON.stringify(dp).includes("PAGE3"));
+ok("drying rides the projection only when toggled", dp.drying && dp.drying.areas.length === 2);
+ok("drying stays null when toggle is off",
+  portalProjection({ ...docJob, portalShare: { ...docJob.portalShare, shareDrying: false } }).drying === null);
 
 console.log(`\n${pass} portal checks passed.`);

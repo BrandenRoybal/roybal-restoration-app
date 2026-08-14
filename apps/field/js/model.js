@@ -443,6 +443,8 @@ export function newPortalShare() {
     shareToken: "",            // set on first enable — the Phase-A credential
     status: "scheduled",       // current milestone key
     sharedPhotoIds: [],        // which project.photos are shown to the customer
+    sharedDocIds: [],          // which project.supportDocs are shown (CF-2 documents)
+    shareDrying: false,        // publish the readings-only drying summary (CF-2)
     publishedAt: "",           // last publish to the portal
     notifyOnStatus: true,      // auto-post a nudge to the thread when status advances
     selectionsSource: null,    // {file, importedAt, decisions, ...} once an estimate is imported
