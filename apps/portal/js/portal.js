@@ -52,6 +52,9 @@ const submitSelections = (cred) => callGateway({ action: "submitSelections", ...
 const requestAccess = (cred) => callGateway({ action: "requestAccess", ...cred });
 const verifyAccess = (cred, code) => callGateway({ action: "verifyAccess", ...cred, code });
 const fetchProjects = (session) => callGateway({ action: "myProjects", session });
+const warrantyRequest = (cred, note) => callGateway({ action: "warrantyRequest", ...cred, note });
+
+const REVIEW_URL = "https://g.page/r/CSv3IUml4W9GEBM/review";
 
 /* ---------- CF-1 account session (localStorage) ---------- */
 const SESSION_KEY = "roybal-portal-session";
@@ -388,6 +391,54 @@ function render(data, token, opts) {
       `${dr.equipmentOut} drying machine${dr.equipmentOut === 1 ? "" : "s"} running at your property.`) : null,
     h("p", { class: "dry__note" }, "These are our meter readings — your team confirms timing directly with you.")) : null;
 
+  // closeout (CF-4): once complete, the page becomes the customer's record —
+  // warranty with one-tap service request, the home file, review + referral
+  const co = data.closeout;
+  let closeoutCards = [];
+  if (co && job.status === "complete") {
+    const ends = co.completedAt && co.warrantyMonths
+      ? new Date(new Date(co.completedAt + "T12:00:00").setMonth(new Date(co.completedAt + "T12:00:00").getMonth() + co.warrantyMonths))
+          .toISOString().slice(0, 10) : "";
+    const note = h("textarea", { class: "warr__note", rows: "2", placeholder: "What's going on? (optional)" });
+    const reqBtn = h("button", { class: "acct__btn", type: "button" }, "Request warranty service");
+    const reqStatus = h("p", { class: "acct__status", role: "status" });
+    reqBtn.addEventListener("click", async () => {
+      reqBtn.disabled = true; reqStatus.textContent = "Sending…";
+      try {
+        const r = await warrantyRequest(token, note.value);
+        reqStatus.textContent = r.already
+          ? "We already have your request — we'll be in touch shortly."
+          : "Got it — we'll reach out to schedule a look. Thank you!";
+        note.value = "";
+      } catch { reqStatus.textContent = "Couldn't send — call us at 907-371-9868."; reqBtn.disabled = false; }
+    });
+    const warranty = h("div", { class: "card" },
+      h("p", { class: "sectitle" }, "Your warranty"),
+      h("p", { class: "warr__p" },
+        co.warrantyMonths
+          ? `Our workmanship on this project is covered for ${co.warrantyMonths} months` +
+            (co.completedAt ? ` from ${co.completedAt}` : "") + (ends ? ` (through ${ends})` : "") + "."
+          : "Questions about our workmanship? We stand behind it — reach out any time."),
+      h("p", { class: "warr__p" }, "Notice something that doesn't look right? Tell us and we'll make it right."),
+      note, h("div", { style: "margin-top:8px" }, reqBtn), reqStatus);
+
+    const fileRows = (co.homeFile || []).map((r) =>
+      h("div", { class: "hf__row" }, h("span", { class: "hf__k" }, r.label), h("span", { class: "hf__v" }, r.value)));
+    const homeFile = fileRows.length ? h("div", { class: "card" },
+      h("p", { class: "sectitle" }, "Your home file"),
+      h("p", { class: "dry__note", style: "margin-top:0" },
+        "The details worth keeping — paint colors, materials, and what's behind the walls. This page is yours for good."),
+      ...fileRows) : null;
+
+    const review = h("div", { class: "card review" },
+      h("p", { class: "sectitle" }, "How did we do?"),
+      h("p", { class: "warr__p" }, "If we earned it, a quick review helps our small Fairbanks crew more than you know."),
+      h("a", { class: "acct__btn review__btn", href: REVIEW_URL, target: "_blank", rel: "noopener" }, "Leave us a review"),
+      h("p", { class: "dry__note" }, "Know someone with a project? Send them our way — 907-371-9868. Mention your name; we take care of the people our customers send."));
+
+    closeoutCards = [warranty, homeFile, review].filter(Boolean);
+  }
+
   // documents the office shared — tap a page to view it full screen
   const docs = (data.documents || []).map((d) =>
     h("div", { class: "doc" },
@@ -415,7 +466,7 @@ function render(data, token, opts) {
     ? accountCard(token) : null;
 
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[back, hero, timeline, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
+  app.replaceChildren(...[back, hero, timeline, ...closeoutCards, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";

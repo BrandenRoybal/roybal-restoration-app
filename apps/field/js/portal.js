@@ -85,6 +85,18 @@ export function portalProjection(project) {
       pages: arr(d.uploadedPages).filter((pg) => typeof pg === "string" && pg.startsWith("data:image/")),
     }))
     .filter((d) => d.pages.length);
+  // closeout (CF-4): the permanent record, projected only once the job is
+  // complete. Office-curated rows only — label/value strings, nothing read
+  // from internal data.
+  const co = share.closeout || null;
+  const closeout = share.status === "complete" && co ? {
+    completedAt: String(co.completedAt || "").slice(0, 10),
+    warrantyMonths: Number(co.warrantyMonths) || 0,
+    homeFile: arr(co.homeFile)
+      .filter((r) => r && (r.label || r.value))
+      .slice(0, 40)
+      .map((r) => ({ label: String(r.label || "").slice(0, 80), value: String(r.value || "").slice(0, 200) })),
+  } : null;
   return {
     customer_name: p.customer || "",
     property_address: p.address || "",
@@ -94,6 +106,7 @@ export function portalProjection(project) {
     photos,   // still carries the data URL here; publishPortal swaps to media hashes
     documents, // page data URLs here; publishPortal swaps to media hashes
     drying: share.shareDrying ? dryingSummary(p) : null,
+    closeout,
   };
 }
 
@@ -157,6 +170,7 @@ export async function publishPortal(project) {
     photos,
     documents,
     drying: proj.drying,
+    closeout: proj.closeout,
     notify_crew: share.notifyCrew !== false,   // the who's-coming-today toggle (default on)
     published_at: new Date().toISOString(),
   };

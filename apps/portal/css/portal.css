@@ -196,3 +196,14 @@ body {
 .projrow__t { font-weight: 700; font-size: 15px; }
 .projrow__s { font-size: 12.5px; color: var(--muted, #6b7686); }
 .projrow__go { font-size: 22px; color: var(--muted, #6b7686); }
+
+/* ---------- closeout: warranty, home file, review (CF-4) ---------- */
+.warr__p { font-size: 13.5px; margin: 4px 0 8px; }
+.warr__note { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 14px;
+  border: 1.5px solid var(--line-strong, #cdd5df); border-radius: 11px; padding: 9px 10px; resize: vertical; }
+.warr__note:focus { outline: none; border-color: var(--brand, #f26a21); }
+.hf__row { display: flex; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line, #e7ebf1); font-size: 13.5px; }
+.hf__row:last-child { border-bottom: 0; }
+.hf__k { flex: 0 0 42%; color: var(--muted, #6b7686); }
+.hf__v { flex: 1; font-weight: 600; overflow-wrap: anywhere; }
+.review__btn { display: inline-block; text-decoration: none; text-align: center; }

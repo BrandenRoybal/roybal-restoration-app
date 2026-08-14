@@ -3146,6 +3146,74 @@ export function portalShareForm(project) {
     }
   }
 
+  // closeout (CF-4) — appears once the milestone is 'complete': the warranty
+  // record, the home-file rows, and the one-time review ask.
+  const closeBox = h("div", { style: "display:none" });
+  function paintCloseout() {
+    const on = s.status === "complete";
+    closeBox.style.display = on ? "" : "none";
+    if (!on) return;
+    if (!s.closeout) s.closeout = { completedAt: todayISO(), warrantyMonths: 12, homeFile: [] };
+    const co = s.closeout;
+    closeBox.replaceChildren();
+    const doneInp = h("input", { type: "date", value: co.completedAt || "" });
+    doneInp.addEventListener("change", () => { co.completedAt = doneInp.value || ""; commit(); });
+    const warrInp = h("input", { type: "number", min: "0", step: "1", value: co.warrantyMonths ?? 12, style: "max-width:110px" });
+    warrInp.addEventListener("input", () => { co.warrantyMonths = warrInp.value ? Number(warrInp.value) : 0; commit(); });
+
+    const rowsWrap = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
+    function paintRows() {
+      rowsWrap.replaceChildren();
+      (co.homeFile || []).forEach((r, i) => {
+        const lab = h("input", { value: r.label || "", placeholder: "Living room paint", style: "flex:1" });
+        const val = h("input", { value: r.value || "", placeholder: "SW 7008 Alabaster, eggshell", style: "flex:2" });
+        lab.addEventListener("input", () => { r.label = lab.value; commit(); });
+        val.addEventListener("input", () => { r.value = val.value; commit(); });
+        const x = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", onclick: () => { co.homeFile.splice(i, 1); commit(); paintRows(); } }, "✕");
+        rowsWrap.append(h("div", { style: "display:flex;gap:6px" }, lab, val, x));
+      });
+      rowsWrap.append(h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto",
+        onclick: () => { co.homeFile = co.homeFile || []; co.homeFile.push({ label: "", value: "" }); commit(); paintRows(); } }, "+ Add a home-file line"));
+    }
+    paintRows();
+
+    // one-time review ask — texts the Google link, stamps review_asked_at
+    const askBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "⭐ Ask for a review by text");
+    const askStatus = h("span", { class: "subtle", style: "font-size:12px" });
+    askBtn.addEventListener("click", async () => {
+      askBtn.disabled = true; askStatus.textContent = "Checking…";
+      try {
+        const { rest, callFunction } = await import("./supa.js");
+        const pj = await rest(`portal_jobs?id=eq.${s.id}&select=contact_id&limit=1`, { method: "GET" });
+        const cid = pj.ok ? ((await pj.json())[0] || {}).contact_id : null;
+        if (!cid) { askStatus.textContent = "Publish to the portal first so the job is linked to the customer."; askBtn.disabled = false; return; }
+        const cr = await rest(`contacts?id=eq.${cid}&select=phone_norm,review_asked_at&limit=1`, { method: "GET" });
+        const c = cr.ok ? (await cr.json())[0] : null;
+        if (c && c.review_asked_at) { askStatus.textContent = "Already asked " + fmtDate(String(c.review_asked_at).slice(0, 10)) + " — we never ask twice."; return; }
+        if (!c || String(c.phone_norm || "").length !== 10) { askStatus.textContent = "No phone on file for this customer."; askBtn.disabled = false; return; }
+        const stamp = await rest("rpc/contact_mark_review_asked", { method: "POST", body: JSON.stringify({ p_contact: cid }) });
+        if (!stamp.ok || (await stamp.json()) !== true) { askStatus.textContent = "Already asked — we never ask twice."; return; }
+        await callFunction("roybal-notify", {
+          action: "sendSms", to: c.phone_norm, kind: "portal", captured_by: techName(),
+          body: `Thanks for trusting Roybal Construction with your project! If we earned it, a quick review means the world to our Fairbanks crew: https://g.page/r/CSv3IUml4W9GEBM/review`,
+        });
+        askStatus.textContent = "Sent ✓";
+        toast("Review ask sent.");
+      } catch (e) { askStatus.textContent = "Couldn't send — " + (e && e.message ? e.message : e); askBtn.disabled = false; }
+    });
+
+    closeBox.append(
+      sectionTitle("Closeout"),
+      h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
+        "The customer's permanent record: warranty, and the home file they'll keep forever — paint colors, materials, what's behind the walls."),
+      h("div", { class: "grid2" },
+        field("Completed on", doneInp),
+        field("Workmanship warranty (months)", warrInp)),
+      field("Home file", rowsWrap),
+      h("div", { style: "display:flex;gap:10px;align-items:center;margin-top:6px" }, askBtn, askStatus));
+  }
+  statusSel.addEventListener("change", paintCloseout);
+
   const publishBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "⬆ Publish to portal");
   publishBtn.addEventListener("click", async () => {
     if (!s.enabled) { toast("Turn the portal on first."); return; }
@@ -3349,12 +3417,13 @@ export function portalShareForm(project) {
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
           "Documents the customer (or their adjuster / lender) may need — cert of drying, permits, reports. Pages only; internal notes never leave."),
         docWrap,
+        closeBox,
         h("div", { style: "margin-top:12px" }, publishBtn),
         linkBox,
         selBox,
         threadBox) : null,
     );
-    paintPhotos(); paintDryPreview(); paintDocs(); paintLink(); paintSelections(); paintThread();
+    paintPhotos(); paintDryPreview(); paintDocs(); paintCloseout(); paintLink(); paintSelections(); paintThread();
   }
   paint();
 

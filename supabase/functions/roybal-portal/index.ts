@@ -112,7 +112,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 async function jobByToken(token: string) {
   const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,contact_id,customer_name,property_address,status,milestones,photos,documents,drying,selections_submitted_at&limit=1`;
+    `&select=id,contact_id,customer_name,property_address,status,milestones,photos,documents,drying,closeout,selections_submitted_at&limit=1`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
@@ -181,6 +181,17 @@ async function view(token: string) {
     })).filter((a: { current: number }) => Number.isFinite(a.current)),
     equipmentOut: Number(dr.equipmentOut) || 0,
   } : null;
+  // closeout (CF-4): re-projected through an explicit allow-list, and only
+  // once the job is complete — the record card must never pre-announce.
+  const co = row.status === "complete" && row.closeout && typeof row.closeout === "object" ? row.closeout : null;
+  const closeout = co ? {
+    completedAt: String(co.completedAt || "").slice(0, 10),
+    warrantyMonths: Number(co.warrantyMonths) || 0,
+    homeFile: (Array.isArray(co.homeFile) ? co.homeFile : []).slice(0, 40).map((r: Record<string, unknown>) => ({
+      label: String(r.label || "").slice(0, 80),
+      value: String(r.value || "").slice(0, 200),
+    })).filter((r: { label: string; value: string }) => r.label || r.value),
+  } : null;
   return {
     job: {
       customerName: row.customer_name || "",
@@ -191,8 +202,64 @@ async function view(token: string) {
     photos,
     documents,
     drying: drying && (drying.areas.length || drying.equipmentOut) ? drying : null,
+    closeout,
     unread: await unreadForCustomer(row.id),
   };
+}
+
+/* ---------- CF-4: request warranty service ----------
+   One tap turns "something's wrong with the work" into a board lead
+   pre-linked to the same person (channel 'repeat'), plus the owner alert
+   every other lead lane gets. Deduped: one open warranty lead per contact
+   per 7 days — a second tap inside the window just reassures. */
+async function warrantyRequest(token: string, note: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  const msg = String(note || "").trim().slice(0, 600);
+
+  // dedupe window (soft — a duplicate card is annoying, not dangerous)
+  if (row.contact_id) {
+    const since = new Date(Date.now() - 7 * 86400_000).toISOString();
+    const dq = `coordination_jobs?deleted=eq.false&data->>channel=eq.repeat` +
+      `&data->>contactId=eq.${row.contact_id}&data->>createdAt=gte.${since}&select=id&limit=1`;
+    const dres = await fetch(`${SUPABASE_URL}/rest/v1/${dq}`, { headers: svc });
+    if (dres.ok && ((await dres.json()) as unknown[]).length) return { requested: true, already: true };
+  }
+
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  const lead = {
+    id, stage: "lead", type: "restoration",
+    title: `Warranty — ${row.property_address || row.customer_name || "portal request"}`,
+    customer: row.customer_name || "", phone: "", email: "",
+    address: row.property_address || "",
+    priority: "high", materials: "none", crewIds: [], deps: [], subtasks: [],
+    scheduleMode: "auto", pinnedStart: "", durationDays: null,
+    notes: `Warranty service request from the customer portal.\n` +
+      (msg ? `Customer says: ${msg}\n` : "") + `Origin job: ${row.property_address || row.id}`,
+    channel: "repeat",
+    ...(row.contact_id ? { contactId: String(row.contact_id) } : {}),
+    rev: 1, createdAt: now, updatedAt: now,
+  };
+  const ins = await fetch(`${SUPABASE_URL}/rest/v1/coordination_jobs`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify([{ id, data: lead, deleted: false }]),
+  });
+  if (!ins.ok) throw new Error("request_failed");
+
+  // owner alert — the roybal-lead recipient pattern (ALERT_CELLS falls back
+  // to OWNER_CELL; per-recipient sends, each isolated), never fatal
+  const cells = (Deno.env.get("ALERT_CELLS") || Deno.env.get("OWNER_CELL") || "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  for (const to of cells) {
+    fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+      method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "sendSms", to, kind: "webLead", captured_by: "portal-warranty",
+        body: `🛠 Warranty request — ${row.customer_name || "customer"}, ${row.property_address || ""}. ${msg ? msg.slice(0, 120) : "No details given."}` }),
+    }).catch(() => {});
+  }
+  return { requested: true };
 }
 
 /* the job's thread, oldest-first, mapped to customer-safe shape. Reading the
@@ -681,6 +748,7 @@ serve(async (req: Request) => {
     if (action === "myProjects") result = await myProjects(session);
     else if (action === "requestAccess") result = await requestAccess(token);
     else if (action === "verifyAccess") result = await verifyAccess(token, String(body.code ?? "").trim());
+    else if (action === "warrantyRequest") result = await warrantyRequest(token, String(body.note ?? ""));
     else if (action === "view") result = await view(token);
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));

@@ -53,7 +53,7 @@ for (const needle of FORBIDDEN)
   ok(`internal data never leaks: "${needle}"`, !json.includes(needle));
 
 ok("projection keys are the curated set only",
-  Object.keys(proj).sort().join(",") === "customer_name,documents,drying,milestones,photos,property_address,status,statusLabel");
+  Object.keys(proj).sort().join(",") === "closeout,customer_name,documents,drying,milestones,photos,property_address,status,statusLabel");
 
 /* ---------- milestone states ---------- */
 const ms = portalMilestones("drying");
@@ -141,5 +141,17 @@ ok("documents: unticked doc (d2) stays private", !JSON.stringify(dp).includes("P
 ok("drying rides the projection only when toggled", dp.drying && dp.drying.areas.length === 2);
 ok("drying stays null when toggle is off",
   portalProjection({ ...docJob, portalShare: { ...docJob.portalShare, shareDrying: false } }).drying === null);
+
+
+/* ---------- closeout: complete-only, office rows only (CF-4) ---------- */
+const coJob = { ...project, portalShare: { ...project.portalShare, status: "complete",
+  closeout: { completedAt: "2026-08-14", warrantyMonths: 12,
+    homeFile: [{ label: "Living room paint", value: "SW 7008 Alabaster" }, { label: "", value: "" }] } } };
+const cop = portalProjection(coJob);
+ok("closeout projects once complete", cop.closeout && cop.closeout.warrantyMonths === 12 && cop.closeout.homeFile.length === 1);
+ok("closeout hidden before complete",
+  portalProjection({ ...coJob, portalShare: { ...coJob.portalShare, status: "drying" } }).closeout === null);
+ok("closeout keys are the safe set only",
+  Object.keys(cop.closeout).sort().join(",") === "completedAt,homeFile,warrantyMonths");
 
 console.log(`\n${pass} portal checks passed.`);
