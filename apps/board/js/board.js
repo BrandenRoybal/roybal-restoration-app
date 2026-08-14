@@ -267,6 +267,9 @@ function render() {
   if (currentView === "calendar") return renderCalendarView();
   if (currentView === "day") return renderDayView();
   if (currentView === "gantt") return renderGanttView();
+  if (currentView === "lanes") return renderLanesView();
+  if (currentView === "table") return renderTableView();
+  if (currentView === "triage") return renderTriageView();
   renderBoardView();
 }
 
@@ -305,6 +308,9 @@ function repaint() {
   if (currentView === "calendar") return paintCalendar();
   if (currentView === "day") return paintDay();
   if (currentView === "gantt") return paintGantt();
+  if (currentView === "lanes") return paintLanes();
+  if (currentView === "table") return paintTable();
+  if (currentView === "triage") return paintTriage();
   paintColumns();
 }
 
@@ -313,7 +319,10 @@ function viewSwitch() {
     class: "vsw__b" + (currentView === id ? " on" : ""),
     onclick: () => { if (currentView !== id) { currentView = id; render(); } },
   }, label);
-  return h("div", { class: "vsw" }, mk("board", "Board"), mk("crew", "Crew"), mk("calendar", "Calendar"), mk("day", "Day"), mk("gantt", "Gantt"));
+  return h("div", { class: "vsw" },
+    mk("board", "Kanban"), mk("lanes", "Swimlanes"), mk("table", "Table"), mk("triage", "Triage"),
+    h("span", { class: "vsw__sep" }),
+    mk("crew", "Crew"), mk("day", "Day"), mk("calendar", "Calendar"), mk("gantt", "Gantt"));
 }
 
 function filterControls() {
@@ -536,101 +545,237 @@ function renderCard(j) {
     return card;
   }
   const ty = typeOf(j.type);
-  const late = j.targetDate && j.targetDate < todayISO() && (j.stage || "lead") !== "done";
+  const late = !!j.targetDate && j.targetDate < todayISO() && (j.stage || "lead") !== "done";
+  const dueToday = j.targetDate === todayISO() && (j.stage || "lead") !== "done";
   const act = actualHours(j.id);
   const est = Number(j.estimatedHours) || 0;
-  const over = est > 0 && act > est;
 
   const card = h("div", {
-    class: "bcard", draggable: "true",
+    class: "bcard compact", draggable: "true",
     style: `border-left-color:${stageOf(j.stage).color}`,
     onclick: () => openJobModal(j),
+    title: cardHover(j, act, est),
   });
   card.addEventListener("dragstart", (e) => { draggingId = j.id; e.dataTransfer.setData("text/plain", j.id); e.dataTransfer.effectAllowed = "move"; card.classList.add("dragging"); });
   card.addEventListener("dragend", () => { draggingId = null; card.classList.remove("dragging"); });
 
+  // ── title row: the job's identity, one line ──
+  const prio = j.priority === "high" ? h("span", { class: "prio prio--high", title: "High priority" })
+    : j.priority === "low" ? h("span", { class: "prio prio--low", title: "Low priority" }) : null;
   const top = h("div", { class: "bcard__top" },
-    h("span", { class: "btype", style: `background:${ty.color}` }, ty.label),
-    j.priority === "high" ? h("span", { class: "prio prio--high", title: "High priority" }) :
-      j.priority === "low" ? h("span", { class: "prio prio--low", title: "Low priority" }) : null);
+    h("span", { class: "bcard__title" }, j.title || j.customer || "Untitled job"), prio);
+  const addr = j.address && !String(j.title || "").includes(j.address)
+    ? h("div", { class: "bcard__sub" }, j.address) : null;
 
+  // ── meta row: crew · type · date · phases, then only the exceptions
+  //    (overload, critical, field update, lock, materials). The verbose
+  //    live-phase / hours detail moved to the hover title + the editor. ──
   const meta = h("div", { class: "bcard__meta" });
-  // crew over-allocation warning
-  const jc = conflicts.byJob.get(j.id) || [];
-  const clashCrew = new Set(jc.map((x) => x.crewId));
-  if (jc.length) {
-    const detail = jc.map((x) => `${crewName(x.crewId)} ${Math.round(x.hours)}h on ${fmtShort(x.day)}`).join("\n");
-    meta.append(h("span", { class: "chip is-warn", title: detail },
-      `⚠ ${clashCrew.size === 1 ? crewName([...clashCrew][0]) + " overloaded" : clashCrew.size + " crew overloaded"}`));
-  }
-  // critical path
-  if (critical.has(j.id)) meta.append(h("span", { class: "chip is-crit", title: "On the critical path — a slip here pushes your final completion date" }, "⚡ Critical"));
-  // crew chips
   const ids = (j.crewIds || []).filter(crewById);
+  const jc = conflicts.byJob.get(j.id) || [];
+  const clash = new Set(jc.map((x) => x.crewId));
   if (ids.length) {
     meta.append(h("span", { class: "crew" },
-      ...ids.slice(0, 5).map((id) => { const c = crewById(id); return h("span", { class: "crewchip" + (clashCrew.has(id) ? " is-clash" : ""), style: `background:${c.color || "#7a8aa0"}`, title: c.name + (clashCrew.has(id) ? " — double-booked (overlapping jobs)" : "") }, initials(c.name)); })));
+      ...ids.slice(0, 5).map((id) => { const c = crewById(id); return h("span", { class: "crewchip" + (clash.has(id) ? " is-clash" : ""), style: `background:${c.color || "#7a8aa0"}`, title: c.name + (clash.has(id) ? " — double-booked (overlapping jobs)" : "") }, initials(c.name)); })));
+  } else {
+    meta.append(h("span", { class: "crew-none", title: "No crew assigned yet" }, "— crew"));
   }
-  // dates
+  meta.append(h("span", { class: "btype btype--sm", style: `background:${ty.color}`, title: ty.label }, ty.label));
   if (j.startDate || j.targetDate) {
-    const txt = j.startDate && j.targetDate ? `${fmtShort(j.startDate)} → ${fmtShort(j.targetDate)}`
-      : j.targetDate ? `Due ${fmtShort(j.targetDate)}` : `Start ${fmtShort(j.startDate)}`;
-    meta.append(h("span", { class: "chip" + (late ? " is-late" : "") }, "📅 " + txt));
+    const txt = j.targetDate ? fmtShort(j.targetDate) : "Start " + fmtShort(j.startDate);
+    meta.append(h("span", { class: "chip chip--sm" + (late ? " is-late" : dueToday ? " is-due" : ""),
+      title: j.startDate && j.targetDate ? `${fmtShort(j.startDate)} → ${fmtShort(j.targetDate)}` : (j.targetDate ? "Target " : "Start ") + txt }, "📅 " + txt));
   }
-  // phased jobs: where the job actually is right now (live phase, %, delay)
-  if ((j.subtasks || []).length && j.startDate && !j.isMilestone) {
-    const L = liveLayoutOf(j);
-    const cur = L.find((r) => !r.done);
-    if (!cur) meta.append(h("span", { class: "chip", title: "Every phase is marked complete" }, "✓ Phases done"));
-    else {
-      const n = L.indexOf(cur) + 1;
-      meta.append(h("span", {
-        class: "chip" + (cur.late ? " is-late" : ""),
-        title: `Current phase (${n}/${L.length}): ${cur.sub.name || "Phase"}${cur.est ? ` — ${Math.round(cur.act * 100) / 100} of ${cur.est}h logged` : ""}${cur.late ? ` — running ${cur.lateDays || "?"} work day${cur.lateDays === 1 ? "" : "s"} behind plan` : ""}`,
-      }, `▸ ${cur.sub.name || "Phase " + n}${cur.est ? ` ${Math.min(999, cur.pct)}%` : ""}${cur.late && cur.lateDays ? ` · +${cur.lateDays}d` : ""}`));
-    }
-  }
-  // hours: actual vs estimated
-  if (act || est) {
-    const label = est && act ? "⏱ " + (Math.round(act * 100) / 100) + " / " + fmtH(est)
-      : est ? "⏱ " + fmtH(est) + " est" : "⏱ " + fmtH(act) + " logged";
-    meta.append(h("span", { class: "chip" + (over ? " is-late" : "") }, label));
-  }
-  // materials
+  if ((j.subtasks || []).length) meta.append(h("span", { class: "chip chip--sm is-phase", title: `${j.subtasks.length} phase${j.subtasks.length === 1 ? "" : "s"}` }, "📋 " + j.subtasks.length));
+  if (jc.length) meta.append(h("span", { class: "chip chip--sm is-warn", title: jc.map((x) => `${crewName(x.crewId)} ${Math.round(x.hours)}h on ${fmtShort(x.day)}`).join("\n") }, "⚠"));
+  if (critical.has(j.id)) meta.append(h("span", { class: "chip chip--sm is-crit", title: "On the critical path — a slip here pushes your finish date" }, "⚡"));
+  if (j.fieldPlanProposal) meta.append(h("span", { class: "chip chip--sm is-warn", title: "The field app sent an updated phase plan — open to review" }, "⚠ field"));
+  if (j.notBefore) meta.append(h("span", { class: "chip chip--sm is-lock", title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "can't start before " + fmtShort(j.notBefore) }, "🔒"));
   const mat = j.materials || "none";
-  if (mat === "ordered") meta.append(h("span", { class: "chip mat-ordered" }, "🔧 Materials ordered"));
-  else if (mat === "received") meta.append(h("span", { class: "chip mat-received" }, "🔧 Materials in"));
-  else meta.append(h("span", { class: "chip mat-none" }, "🔧 Materials TBD"));
-  // start-no-earlier-than constraint (materials / permit)
-  if (j.notBefore) meta.append(h("span", { class: "chip is-lock", title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "can't start before " + fmtShort(j.notBefore) },
-    "🔒 " + (j.notBeforeLabel ? j.notBeforeLabel + " " : "not before ") + fmtShort(j.notBefore)));
-  // phases (sub-tasks)
-  if ((j.subtasks || []).length) meta.append(h("span", { class: "chip is-phase", title: j.subtasks.map((st, i) => `${i + 1}. ${st.name || "Phase"} — ${st.durationDays || 1}d${st.lagDays ? ` (+${st.lagDays}d lag)` : ""}`).join("\n") },
-    "📋 " + j.subtasks.length + " phase" + (j.subtasks.length === 1 ? "" : "s")));
-  // field-app link — amber when the field sent a phase plan awaiting review
-  if (j.fieldJobId) meta.append(h("span", {
-    class: "chip" + (j.fieldPlanProposal ? " is-warn" : ""),
-    title: j.fieldPlanProposal ? "The field app sent an updated phase plan — open the job to review it" : "Linked to a field app job",
-  }, j.fieldPlanProposal ? "⚠ field update" : "📱 field-linked"));
+  if (mat === "ordered") meta.append(h("span", { class: "chip chip--sm mat-ordered", title: "Materials ordered" }, "🔧"));
+  else if (mat === "received") meta.append(h("span", { class: "chip chip--sm mat-received", title: "Materials received" }, "🔧"));
+  if (j.phone) meta.append(h("a", { class: "bcall bcall--sm", href: "tel:" + j.phone.replace(/[^\d+]/g, ""), onclick: (e) => e.stopPropagation(), title: "Call " + j.phone, "aria-label": "Call " + j.phone }, "📞"));
 
-  const phone = j.phone ? h("a", { class: "bcall", href: "tel:" + j.phone.replace(/[^\d+]/g, ""), onclick: (e) => e.stopPropagation() }, "📞 " + j.phone) : null;
-
-  // hours progress meter (only when an estimate exists)
-  const bar = est > 0 ? h("div", { class: "hbar", title: `${Math.round(act * 100) / 100} of ${est}h logged` },
-    h("span", { class: "hbar__fill" + (over ? " over" : ""), style: `width:${Math.min(100, est ? (act / est) * 100 : 0)}%` })) : null;
-
-  card.append(...[
-    top,
-    h("div", { class: "bcard__title" }, j.title || j.customer || "Untitled job"),
-    j.address ? h("div", { class: "bcard__sub" }, j.address) : null,
-    meta,
-    bar,
-    phone ? h("div", { style: "margin-top:6px" }, phone) : null,
-  ].filter(Boolean));
+  card.append(...[top, addr, meta].filter(Boolean));
   return card;
 }
 
 const fmtShort = (iso) => { const d = fmtDate(iso); return d.replace(/, \d{4}$/, ""); }; // "Jun 12"
+
+/* one-line hover summary for the compact card — the detail that came off the
+   card face still lives here (and in the editor) */
+function cardHover(j, act, est) {
+  const bits = [];
+  if (j.customer && j.customer !== (j.title || "")) bits.push(j.customer);
+  if (act || est) bits.push(`${Math.round(act * 100) / 100}${est ? " / " + est : ""} h logged`);
+  if (j.phone) bits.push("📞 " + j.phone);
+  return bits.join(" · ");
+}
+const validCrew = (j) => (j.crewIds || []).filter(crewById);
+
+/* ============================================================
+   Swimlanes — stages as full-width rows of compact cards.
+   The same drag-to-restage and click-to-edit as the Kanban; the
+   cards just wrap into a grid instead of stacking past the fold.
+   Empty stages stay as a slim drop strip so you can still drag into them.
+   ============================================================ */
+function renderLanesView() {
+  const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
+  body.append(renderToolbar());
+  if (!crew.length) return emptyCrewPrompt(body);
+  body.append(h("div", { class: "blanes" }));
+  paintLanes();
+}
+function paintLanes() {
+  const host = $(".blanes", view);
+  if (!host) return render();
+  clear(host);
+  const visible = jobs.filter(matchesFilter);
+  for (const st of STAGES) {
+    const colJobs = visible.filter((j) => (j.stage || "lead") === st.id).sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    const grid = h("div", { class: "blane__grid" + (colJobs.length ? "" : " blane__grid--empty") },
+      ...(colJobs.length ? colJobs.map(renderCard) : [h("span", { class: "subtle" }, "Drop a job here")]));
+    grid.addEventListener("dragover", (e) => { e.preventDefault(); grid.classList.add("drop-over"); });
+    grid.addEventListener("dragleave", () => grid.classList.remove("drop-over"));
+    grid.addEventListener("drop", (e) => {
+      e.preventDefault(); grid.classList.remove("drop-over");
+      moveJob(draggingId || e.dataTransfer.getData("text/plain"), st.id);
+    });
+    host.append(h("div", { class: "blane" },
+      h("div", { class: "blane__head" },
+        h("span", { class: "blane__bar", style: `background:${st.color}` }),
+        h("h3", { class: "blane__name" }, st.label),
+        h("span", { class: "blane__count" }, `${colJobs.length} ${colJobs.length === 1 ? "job" : "jobs"}`)),
+      grid));
+  }
+}
+
+/* ============================================================
+   Table — every job on one sortable line; the densest scan.
+   Click a header to sort, click a row to open the job.
+   ============================================================ */
+let tableSort = { key: "stage", dir: 1 };
+function renderTableView() {
+  const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
+  body.append(renderToolbar());
+  if (!crew.length) return emptyCrewPrompt(body);
+  body.append(h("div", { class: "btable-wrap" }));
+  paintTable();
+}
+function paintTable() {
+  const host = $(".btable-wrap", view);
+  if (!host) return render();
+  clear(host);
+  const order = STAGES.map((s) => s.id);
+  const cmp = (a, b) => {
+    const { key, dir } = tableSort;
+    let av, bv;
+    switch (key) {
+      case "stage": av = order.indexOf(a.stage || "lead"); bv = order.indexOf(b.stage || "lead"); break;
+      case "crew": av = validCrew(a).length; bv = validCrew(b).length; break;
+      case "phases": av = (a.subtasks || []).length; bv = (b.subtasks || []).length; break;
+      case "hours": av = actualHours(a.id); bv = actualHours(b.id); break;
+      case "value": av = Number(a.contractValue) || 0; bv = Number(b.contractValue) || 0; break;
+      case "type": av = (a.type || ""); bv = (b.type || ""); break;
+      case "start": av = a.startDate || "9999"; bv = b.startDate || "9999"; break;
+      case "target": av = a.targetDate || "9999"; bv = b.targetDate || "9999"; break;
+      default: av = (a.title || a.customer || "").toLowerCase(); bv = (b.title || b.customer || "").toLowerCase();
+    }
+    return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+  };
+  const rows = jobs.filter(matchesFilter).sort(cmp);
+  const cols = [
+    { k: "job", t: "Job" }, { k: "stage", t: "Stage" }, { k: "type", t: "Type" }, { k: "crew", t: "Crew" },
+    { k: "start", t: "Start", num: 1 }, { k: "target", t: "Target", num: 1 }, { k: "phases", t: "Phases", num: 1 },
+    { k: "hours", t: "Hours", num: 1 }, { k: "value", t: "Contract", num: 1 },
+  ];
+  const thead = h("tr", {}, ...cols.map((c) => {
+    const arrow = tableSort.key === c.k ? (tableSort.dir > 0 ? " ▲" : " ▼") : "";
+    return h("th", { class: c.num ? "num" : "", onclick: () => { if (tableSort.key === c.k) tableSort.dir *= -1; else { tableSort.key = c.k; tableSort.dir = 1; } paintTable(); } }, c.t + arrow);
+  }));
+  const body = h("tbody");
+  for (const j of rows) {
+    const st = stageOf(j.stage), ty = typeOf(j.type);
+    const late = !!j.targetDate && j.targetDate < todayISO() && (j.stage || "lead") !== "done";
+    const dueT = j.targetDate === todayISO() && (j.stage || "lead") !== "done";
+    const ids = validCrew(j);
+    const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
+    body.append(h("tr", { onclick: () => openJobModal(j) },
+      h("td", { class: "td-job" }, h("div", { class: "td-job__t" }, j.title || j.customer || "Untitled job"),
+        j.address ? h("div", { class: "td-job__s" }, j.address) : null),
+      h("td", {}, h("span", { class: "stg" }, h("span", { class: "bcol__dot", style: `background:${st.color}` }), st.label)),
+      h("td", {}, h("span", { class: "btype btype--sm", style: `background:${ty.color}` }, ty.label)),
+      h("td", {}, ids.length ? h("span", { class: "crew" }, ...ids.slice(0, 6).map((id) => { const c = crewById(id); return h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}`, title: c.name }, initials(c.name)); })) : h("span", { class: "crew-none" }, "—")),
+      h("td", { class: "num" }, j.startDate ? fmtShort(j.startDate) : "—"),
+      h("td", { class: "num" + (late ? " is-late-t" : dueT ? " is-due-t" : "") }, j.targetDate ? (dueT ? "Today" : fmtShort(j.targetDate)) : "—"),
+      h("td", { class: "num" }, (j.subtasks || []).length || "—"),
+      h("td", { class: "num" }, act || est ? `${Math.round(act * 100) / 100}${est ? " / " + est : ""}` : "—"),
+      h("td", { class: "num" }, j.contractValue ? "$" + Number(j.contractValue).toLocaleString() : "—")));
+  }
+  if (!rows.length) { host.append(h("div", { class: "bempty" }, h("p", { class: "subtle" }, "No jobs match your filters."))); return; }
+  host.append(h("table", { class: "btable" }, h("thead", {}, thead), body));
+}
+
+/* ============================================================
+   Triage — not a board, the to-do list the board builds for you.
+   Only the jobs that need a decision today, grouped by why.
+   Reuses the schedule engine's conflicts + critical globals.
+   ============================================================ */
+function renderTriageView() {
+  const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
+  body.append(renderToolbar());
+  if (!crew.length) return emptyCrewPrompt(body);
+  body.append(h("div", { class: "btriage" }));
+  paintTriage();
+}
+function paintTriage() {
+  const host = $(".btriage", view);
+  if (!host) return render();
+  clear(host);
+  const today = todayISO();
+  const live = jobs.filter(matchesFilter).filter((j) => (j.stage || "lead") !== "done");
+  const overdueDays = (iso) => Math.round((new Date(today) - new Date(iso)) / 86400000);
+  const groups = [
+    { cls: "crit", icon: "⏰", title: "Overdue", jobs: live.filter((j) => j.targetDate && j.targetDate < today).sort((a, b) => (a.targetDate || "").localeCompare(b.targetDate || "")),
+      rt: (j) => `${overdueDays(j.targetDate)}d over` },
+    { cls: "crit", icon: "📍", title: "Due today", jobs: live.filter((j) => j.targetDate === today), rt: () => "target today" },
+    { cls: "crit", icon: "⚠", title: "Crew overloaded", jobs: live.filter((j) => (conflicts.byJob.get(j.id) || []).length),
+      rt: (j) => { const s = new Set((conflicts.byJob.get(j.id) || []).map((x) => x.crewId)); return s.size === 1 ? crewName([...s][0]) + " over" : s.size + " crew over"; } },
+    { cls: "warn", icon: "👷", title: "No crew assigned", jobs: live.filter((j) => !validCrew(j).length), rt: (j) => stageOf(j.stage).label },
+    { cls: "warn", icon: "⚠", title: "Field updates to review", jobs: live.filter((j) => j.fieldPlanProposal), rt: () => "tap to review" },
+    { cls: "info", icon: "🔧", title: "Materials arriving", jobs: live.filter((j) => (j.materials || "none") === "ordered"), rt: () => "ordered" },
+  ].filter((g) => g.jobs.length);
+
+  if (!groups.length) {
+    host.append(h("div", { class: "bempty" }, h("h2", {}, "All clear"), h("p", { class: "subtle" }, "Nothing needs a decision right now.")));
+    return;
+  }
+  for (const g of groups) {
+    const box = h("div", { class: "tgroup tgroup--" + g.cls },
+      h("div", { class: "tgroup__head" },
+        h("span", { class: "tgroup__ic" }, g.icon),
+        h("h3", {}, g.title),
+        h("span", { class: "tgroup__count" }, String(g.jobs.length))));
+    for (const j of g.jobs) {
+      box.append(h("div", { class: "trow", onclick: () => openJobModal(j) },
+        h("div", {}, h("div", { class: "trow__t" }, j.title || j.customer || "Untitled job"),
+          j.address ? h("div", { class: "trow__s" }, j.address) : null),
+        h("span", { class: "trow__rt" }, g.rt(j))));
+    }
+    host.append(box);
+  }
+}
+
+/* the "add your crew first" prompt, shared by every job view */
+function emptyCrewPrompt(body) {
+  body.append(h("div", { class: "bempty" },
+    h("h2", {}, "Add your crew first"),
+    h("p", { class: "subtle" }, "Add your crew members so you can assign them to jobs and tap to call."),
+    h("button", { class: "btn btn--primary", style: "max-width:240px;margin:0 auto", onclick: openCrewModal }, "+ Manage crew")));
+}
 
 async function moveJob(id, stageId) {
   const j = jobs.find((x) => x.id === id);
