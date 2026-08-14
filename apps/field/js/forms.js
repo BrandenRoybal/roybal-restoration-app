@@ -1918,9 +1918,10 @@ const PHOTO_SIZES = {
    a tap on the image, or arrow keys — no need to close between photos. Esc,
    ✕, or a tap on the dark backdrop exits. Offloaded photos show their preview
    instantly and swap to full-res as soon as it downloads; neighbors prefetch
-   so swiping feels instant. */
-function openLightbox(project, startIndex) {
-  const photos = project.photos || [];
+   so swiping feels instant. `list` is the photos in the order the gallery is
+   currently showing them (sorted/filtered) so swiping matches the screen. */
+function openLightbox(project, startIndex, list) {
+  const photos = (list && list.length ? list : project.photos) || [];
   if (!photos.length) return;
   let i = Math.max(0, Math.min(startIndex, photos.length - 1));
   const fullCache = new Map();               // photo.id -> full-res (this viewing only)
@@ -1998,10 +1999,44 @@ function openLightbox(project, startIndex) {
   show(i);
 }
 
+/* Gallery sort orders. Manual is the original hand-arranged order (◀ ▶);
+   the rest are computed views over the same array — the stored photo order is
+   never rewritten, so switching back to Manual always restores it. The chosen
+   sort is saved on the job (photoSort) and drives the printed Photo Report
+   too, with group headers when sorting by stage or room. Ties keep manual
+   order (Array.sort is stable). */
+const STAGE_RANK = { before: 0, during: 1, after: 2 };
+const STAGE_HEADER = { before: "Before", during: "During", after: "After" };
+const photoTs = (p) => Date.parse(p.ts || "") || 0;
+const photoStageRank = (p) => STAGE_RANK[p.stage] ?? 1;   // unlabeled ≈ "during" (the capture default)
+const photoRoom = (p) => (p.room || "").trim().replace(/\s+/g, " ");
+/* Room comparison for BOTH sorting and group breaks. Case/accent-insensitive
+   so "kitchen" and "Kitchen" (typed by different techs / autocapitalize) file
+   as ONE room — grouping must use this same comparison, or base-equal
+   spellings interleave in the sorted array and fragment into repeated
+   identical-looking headers (they print uppercase). */
+const photoRoomCmp = (a, b) => {
+  const ra = photoRoom(a), rb = photoRoom(b);
+  if (!ra !== !rb) return ra ? -1 : 1;                    // photos with no room sink to the end
+  return ra.localeCompare(rb, undefined, { sensitivity: "base" });
+};
+const PHOTO_SORTS = {
+  manual: { label: "Manual (◀ ▶ to arrange)" },
+  stage:  { label: "Before → During → After",
+            cmp: (a, b) => photoStageRank(a) - photoStageRank(b) || photoTs(a) - photoTs(b) },
+  room:   { label: "Room, then Before → After",
+            cmp: (a, b) => photoRoomCmp(a, b)
+              || photoStageRank(a) - photoStageRank(b) || photoTs(a) - photoTs(b) },
+  oldest: { label: "Date taken — oldest first", cmp: (a, b) => photoTs(a) - photoTs(b) },
+  newest: { label: "Date taken — newest first", cmp: (a, b) => photoTs(b) - photoTs(a) },
+};
+
 export function photosForm(project) {
   if (!Array.isArray(project.photos)) project.photos = [];
   if (!PHOTO_SIZES[project.photoSize]) project.photoSize = "medium";
-  const grid = h("div", { class: "photogrid" });
+  if (!PHOTO_SORTS[project.photoSort]) project.photoSort = "manual";
+  const wrap = h("div", { class: "photowrap" });
+  let stageFilter = "";                       // screen-only quick filter; print always shows everything
 
   const refreshers = new Map();               // photo.id -> refresh that card in place
   const sizeCache = new Map();                // `${photo.id}:${tier}` -> shrunk dataURL (in-memory only)
@@ -2034,18 +2069,68 @@ export function photosForm(project) {
     paint(); commit();
   }
 
-  function card(p, i) {
+  /* sorted view over the photo array (the array itself is never reordered
+     except by the manual ◀ ▶ buttons) */
+  const shownAll = () => {
+    const s = PHOTO_SORTS[project.photoSort] || PHOTO_SORTS.manual;
+    return s.cmp ? [...project.photos].sort(s.cmp) : project.photos.slice();
+  };
+  /* …minus any stage-filtered ones — the lightbox pages in on-screen order */
+  const shownPhotos = () =>
+    stageFilter ? shownAll().filter((p) => (p.stage || "during") === stageFilter) : shownAll();
+
+  /* A blur-triggered repaint must not destroy the element a finger is mid-tap
+     on: a tap elsewhere in the gallery runs pointerdown → blur/change →
+     pointerup → click, and rebuilding the cards during the blur would detach
+     the tapped button before its click lands (the tap just dies). If a tap is
+     in flight inside the gallery, hold the repaint until it resolves. */
+  let tapping = false;
+  const oncePointerDone = (fn) => {
+    const done = () => {
+      window.removeEventListener("pointerup", done, true);
+      window.removeEventListener("pointercancel", done, true);
+      fn();
+    };
+    window.addEventListener("pointerup", done, true);
+    window.addEventListener("pointercancel", done, true);
+  };
+  wrap.addEventListener("pointerdown", () => {
+    tapping = true;
+    oncePointerDone(() => { tapping = false; });
+  }, true);
+  const repaintAfterTap = () => {
+    if (!tapping) { paint(); return; }
+    oncePointerDone(() => setTimeout(paint, 0));   // after the click task, not during it
+  };
+
+  function card(p) {
+    // reordering needs the full list visible: hand-arranged sort, no filter —
+    // under a filter ◀ ▶ would swap with HIDDEN neighbors (looks dead, still
+    // rewrites the printed report's order)
+    const manual = project.photoSort === "manual" && !stageFilter;
     const cap = h("textarea", { class: "photocaption", rows: "5", placeholder: "Caption" });
     const growCap = () => { cap.style.height = "auto"; cap.style.height = Math.max(cap.scrollHeight, 120) + "px"; };
     cap.addEventListener("input", () => { p.caption = cap.value; growCap(); refresh(); commit(); });
     const room = h("input", { value: p.room || "", placeholder: "Room / location" });
     room.addEventListener("input", () => { p.room = room.value; refresh(); commit(); });
+    // regroup on blur, not per keystroke — repainting mid-word would eat the keyboard
+    room.addEventListener("change", () => { if (project.photoSort === "room") repaintAfterTap(); });
     const stage = sel(p, "stage", [
       { value: "before", label: "Before" }, { value: "during", label: "During" }, { value: "after", label: "After" }]);
-    stage.addEventListener("change", () => refresh());
-    const moveL = h("button", { type: "button", class: "btn btn--sm", title: "Move earlier", disabled: i === 0, onclick: () => movePhoto(i, i - 1) }, "◀");
-    const moveR = h("button", { type: "button", class: "btn btn--sm", title: "Move later", disabled: i === project.photos.length - 1, onclick: () => movePhoto(i, i + 1) }, "▶");
-    const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); project.photos.splice(i, 1); paint(); commit(); } }, "Delete");
+    // legacy photos may predate the stage field: every sort/filter/count treats
+    // them as "during" (the capture default), so the control must SHOW that —
+    // with no matching option the browser would display "Before". Display only;
+    // p.stage is written when the user actually picks.
+    if (!(p.stage in STAGE_RANK)) stage.value = "during";
+    stage.addEventListener("change", () => {
+      refresh();
+      if (project.photoSort === "stage" || project.photoSort === "room" || stageFilter) repaintAfterTap();
+      else paintFilter();                    // keep the chip counts honest
+    });
+    const idx = project.photos.indexOf(p);   // manual-order position (cards rebuild on every paint)
+    const moveL = !manual ? null : h("button", { type: "button", class: "btn btn--sm", title: "Move earlier", disabled: idx === 0, onclick: () => movePhoto(idx, idx - 1) }, "◀");
+    const moveR = !manual ? null : h("button", { type: "button", class: "btn btn--sm", title: "Move later", disabled: idx === project.photos.length - 1, onclick: () => movePhoto(idx, idx + 1) }, "▶");
+    const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); project.photos.splice(project.photos.indexOf(p), 1); paint(); commit(); } }, "Delete");
     const tools = h("div", { class: "photocard__tools" }, moveL, moveR, h("span", { class: "photocard__spacer" }), del);
     const printCap = h("div", { class: "photocap print-only" });
     /* The AI findings under the photo are EDITABLE — reword or delete
@@ -2073,18 +2158,19 @@ export function photosForm(project) {
     }
     refreshers.set(p.id, refresh);
     refresh();
+    const view = () => { const list = shownPhotos(); openLightbox(project, list.indexOf(p), list); };
     const imgEl = h("img", {
       alt: p.caption || "",
       class: "photocard__img",
       title: "Tap to view full screen",
-      onclick: () => openLightbox(project, project.photos.indexOf(p)),
+      onclick: view,
     });
     applySize(imgEl, p);
     /* offloaded photo: full-res lives in the cloud — the viewer fetches it */
     const cloudTag = !p.cloud ? null : h("button", {
       type: "button", class: "btn btn--ghost btn--sm app-only",
       title: "Full resolution is stored in the cloud — view it full screen",
-      onclick: () => openLightbox(project, project.photos.indexOf(p)),
+      onclick: view,
     }, "☁ View full-res");
     return h("div", { class: "photocard" },
       imgEl,
@@ -2093,10 +2179,70 @@ export function photosForm(project) {
       h("div", { class: "app-only photoedit" }, tools, room, stage, cap),
       aiLine);
   }
+  /* Stage chips \u2014 one-tap "show me just the befores". Screen-only on purpose:
+     the printed/emailed report always includes every photo, so a forgotten
+     filter can never quietly drop photos from an insurance packet. */
+  const filterRow = h("div", { class: "app-only photofilter" });
+  function paintFilter() {
+    const counts = { before: 0, during: 0, after: 0 };
+    for (const p of project.photos) counts[(p.stage || "during")] != null && counts[p.stage || "during"]++;
+    const chip = (val, label) => {
+      const b = h("button", { type: "button", class: "chip" + (stageFilter === val ? " active" : "") }, label);
+      b.addEventListener("click", () => { stageFilter = stageFilter === val ? "" : val; paint(); });
+      return b;
+    };
+    filterRow.replaceChildren(...[
+      chip("", `All (${project.photos.length})`),
+      chip("before", `Before (${counts.before})`),
+      chip("during", `During (${counts.during})`),
+      chip("after", `After (${counts.after})`),
+      stageFilter ? h("span", { class: "photofilter__note" }, "print & email still include every photo") : null,
+    ].filter(Boolean));
+    filterRow.hidden = !project.photos.length;
+  }
+
+  /* Group membership must be decided by the SAME comparison the sort used \u2014
+     deciding by label equality would split base-equal room spellings
+     ("kitchen"/"Kitchen" interleave under the case-insensitive sort) into
+     repeated identical-looking headers. The header shows the first photo's
+     spelling; a group's variants are one room by construction. */
+  const sameGroup = (a, b) =>
+    project.photoSort === "stage" ? photoStageRank(a) === photoStageRank(b)
+    : project.photoSort === "room" ? photoRoomCmp(a, b) === 0
+    : true;                                   // ungrouped sorts: one section
+  const groupLabel = (p) =>
+    project.photoSort === "stage" ? (STAGE_HEADER[p.stage] || "During")
+    : project.photoSort === "room" ? (photoRoom(p) || "No room set")
+    : null;
+
+  /* Each group is its own <section> with a header + its own .photogrid. That
+     keeps the print layout's :nth-child odd/even 2-across pairing correct per
+     group (a header inside one shared grid would shift every pair after it). */
   function paint() {
     refreshers.clear();
-    grid.replaceChildren(...project.photos.map(card));
-    if (!project.photos.length) grid.append(h("p", { class: "subtle app-only" }, "No photos yet \u2014 tap \u201cAdd photos.\u201d"));
+    wrap.replaceChildren();
+    let sec = null, secGrid = null, secShown = 0, prev = null;
+    const hideEmpty = () => { if (sec && stageFilter && !secShown) sec.classList.add("photohide"); };
+    for (const p of shownAll()) {
+      if (!sec || !sameGroup(prev, p)) {
+        hideEmpty();
+        const label = groupLabel(p);
+        secGrid = h("div", { class: "photogrid" });
+        sec = h("section", { class: "photosec" }, label == null ? null : h("div", { class: "photogroup" }, label), secGrid);
+        wrap.append(sec);
+        secShown = 0;
+      }
+      prev = p;
+      const el = card(p);
+      if (stageFilter && (p.stage || "during") !== stageFilter) el.classList.add("photohide");
+      else secShown++;
+      secGrid.append(el);
+    }
+    hideEmpty();
+    if (!project.photos.length) wrap.append(h("p", { class: "subtle app-only" }, "No photos yet \u2014 tap \u201cAdd photos.\u201d"));
+    else if (stageFilter && !project.photos.some((p) => (p.stage || "during") === stageFilter))
+      wrap.append(h("p", { class: "subtle app-only" }, `No \u201c${stageFilter}\u201d photos on this job yet \u2014 the other chips have them all.`));
+    paintFilter();
   }
 
   /* AI photo analysis — captions + visible damage/materials/safety. Online-only
@@ -2142,6 +2288,9 @@ export function photosForm(project) {
     // Photolog photos don't need camera-res: capture at ~1200px / q0.6 so jobs
     // stay small to sync and email. The size-tier control shrinks them further.
     for (const f of input.files) { const ph = newPhoto(); ph.src = await fileToDataURL(f, 1200, 0.6); project.photos.push(ph); added.push(ph); }
+    // new photos are stage "during" — an active Before/After chip would hide
+    // every one of them ("my photos didn't save"), so the add clears the filter
+    stageFilter = "";
     input.value = ""; commit(); paint(); paintAiBtn();
     runAi(added, { silent: true });          // fire-and-forget; typed captions still work offline
   });
@@ -2158,6 +2307,17 @@ export function photosForm(project) {
   });
   const sizeRow = h("label", { class: "app-only photosize" },
     h("span", {}, "Photo size for email:"), sizeSel);
+
+  /* Sort order — saved on the job, and the printed Photo Report follows it
+     (with Before/During/After or per-room section headers). */
+  const sortSel = h("select", {},
+    ...Object.entries(PHOTO_SORTS).map(([v, s]) =>
+      h("option", { value: v, ...(v === project.photoSort ? { selected: true } : {}) }, s.label)));
+  sortSel.addEventListener("change", () => {
+    project.photoSort = sortSel.value; commit(); paint();
+  });
+  const sortRow = h("label", { class: "app-only photosize" },
+    h("span", {}, "Sort:"), sortSel);
 
   /* ---------- get the photos OUT: zip download + cloud offload ---------- */
   const zipBtn = h("button", { type: "button", class: "btn btn--sm", style: "margin-left:8px" }, "⬇ Download all (.zip)");
@@ -2212,8 +2372,9 @@ export function photosForm(project) {
   return sheet("PHOTO REPORT", "Job Site Documentation", "Photo Report",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
-    h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, zipBtn, cloudBtn, sizeRow, input),
-    grid);
+    h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, zipBtn, cloudBtn, sortRow, sizeRow, input),
+    filterRow,
+    wrap);
 }
 
 /* ============================================================

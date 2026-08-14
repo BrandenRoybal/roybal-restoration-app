@@ -280,6 +280,24 @@ tr.flag7 td { background: #fdf3e0 !important; }
 /* ---------- Job photos ---------- */
 .photogrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 480px) { .photogrid { grid-template-columns: 1fr; } }
+/* group headers when sorted by stage or room (they print too) */
+.photogroup {
+  font-size: 15px; font-weight: 800; color: var(--ink); text-transform: uppercase;
+  letter-spacing: .4px; margin: 18px 0 8px; padding-bottom: 4px;
+  border-bottom: 2px solid var(--brand);
+}
+.photosec:first-child .photogroup { margin-top: 0; }
+/* stage filter chips — a screen-side finding aid; print always shows all */
+.photofilter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.photofilter .chip {
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px; background: #fff;
+  color: var(--ink); padding: 6px 14px;
+}
+.photofilter .chip.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+.photofilter__note { font-size: 12px; color: var(--muted); }
+/* filtered-out cards/sections hide on SCREEN only — the printed report is complete */
+@media screen { .photohide { display: none !important; } }
 .photocard { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #fff; box-shadow: var(--shadow); }
 .photocard img { width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block; }
 .photocard__img { cursor: zoom-in; }

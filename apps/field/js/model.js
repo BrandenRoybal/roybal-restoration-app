@@ -202,7 +202,7 @@ export function newPhoto() {
    ANY real content — one letter of a name, one photo, one log row — keeps
    the full never-lose-work protection. Conservative on purpose: unknown or
    prefilled values count as content. */
-const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "createdBy", "updatedAt", "archivedAt", "jobType", "photoSize"]);
+const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "createdBy", "updatedAt", "archivedAt", "jobType", "photoSize", "photoSort"]);
 function emptyDeep(v) {
   if (v == null || v === "" || v === false) return true;
   if (Array.isArray(v)) return v.length === 0;   // any element at all is content
