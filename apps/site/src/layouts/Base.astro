@@ -196,8 +196,11 @@ const graph = { "@context": "https://schema.org", "@graph": [businessSchema, web
       <slot />
     </main>
     <Footer />
-    {/* Renders nothing at all unless PUBLIC_WEB_AGENT_ENDPOINT is set, so an
-        unset env var is a clean no-op rather than a broken panel. */}
+    {/* Ships by default: the endpoint has a committed production fallback, so
+        an unset env var can no longer silently drop the panel (that happened
+        2026-08-13). Turning it off at build time takes an EXPLICIT
+        PUBLIC_WEB_AGENT_ENDPOINT="" or "off"; the runtime kill switch is the
+        WEB_AGENT_ENABLED=false secret, no rebuild needed. */}
     <Receptionist />
   </body>
 </html>

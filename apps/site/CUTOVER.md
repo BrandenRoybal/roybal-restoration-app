@@ -4,7 +4,12 @@
 
 `https://www.roybalconstruction.com` serves the Astro build from Cloudflare
 Pages (`roybal-site-pages`, direct upload — no Git CI; redeploy with
-`npx wrangler pages deploy apps/site/dist --project-name roybal-site-pages`).
+`npx wrangler pages deploy apps/site/dist --project-name roybal-site-pages --branch main`).
+
+⚠️ **`--branch main` is required for a production deploy.** Without it,
+wrangler uses the branch of the current git checkout — and any non-`main`
+checkout (a worktree, a feature branch) silently creates a **preview**
+deployment instead: it succeeds, prints a URL, and changes nothing on `www`.
 
 Verified at launch: 36/36 ranking URLs `200` with no redirect · sitemap index →
 36 URLs · real `404` on unknown paths · TLS 1.3, chain verify 0, cert from
@@ -165,6 +170,14 @@ supabase functions deploy roybal-lead --no-verify-jwt
 
 `--no-verify-jwt` is required: the public site has no session. The function
 self-protects — honeypot, per-IP and global hourly caps, no read path at all.
+
+> Since 2026-08-14, `supabase/config.toml` pins `verify_jwt = false` for this
+> function (and `roybal-web-agent`), so a plain CLI deploy without the flag
+> keeps the setting. The flag stays harmless. ⚠️ The Supabase MCP deploy tool
+> ignores config.toml and defaults verify_jwt to **true** — that flip killed
+> both functions on 2026-08-13. Deploy these via CLI, and after any MCP or
+> dashboard redeploy verify with
+> `supabase functions list --project-ref djpgvcvhvgrzgaziruze -o json`.
 Optional tuning:
 
 ```bash
@@ -176,8 +189,11 @@ board in the lead column.
 
 ## 2b. Deploy the AI receptionist (optional — the site works without it)
 
-The panel renders only when `PUBLIC_WEB_AGENT_ENDPOINT` is set, so you can ship the
-site first and turn the receptionist on afterwards.
+Since 2026-08-14 the panel ships **by default** — the production endpoint is
+committed in `src/data/site.ts`, so no env var is needed. To ship the site
+first and turn the receptionist on afterwards, build with
+`PUBLIC_WEB_AGENT_ENDPOINT=""` (or `off`) — the explicit build-time kill
+switch; the postbuild guard warns but allows it.
 
 ```bash
 supabase db push
@@ -185,7 +201,8 @@ supabase secrets set WEB_AGENT_SECRET="$(openssl rand -hex 32)"
 supabase functions deploy roybal-web-agent --no-verify-jwt
 ```
 
-Then set `PUBLIC_WEB_AGENT_ENDPOINT` in `apps/site/.env` and rebuild.
+No `.env` step needed since 2026-08-14 — the committed default endpoint means
+a plain rebuild picks the receptionist up.
 
 Before you point real traffic at it, run the abuse pass from
 `supabase/functions/roybal-web-agent/README.md`: set `WEB_SPEND_DAILY_USD=0.01` and
@@ -266,10 +283,12 @@ PUBLIC_LEAD_ENDPOINT       = https://djpgvcvhvgrzgaziruze.supabase.co/functions/
 PUBLIC_WEB_AGENT_ENDPOINT  = https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-web-agent
 ```
 
-⚠️ **`apps/site/.env` is gitignored, so Cloudflare will never see it.** Miss
-these two and the build still succeeds — but the quote form posts nowhere and
-the receptionist panel doesn't render at all. Silent, and exactly the kind of
-thing nobody notices for a week.
+**Since 2026-08-14 the two `PUBLIC_*` values are optional** — the production
+endpoints are committed as defaults in `src/data/site.ts`, and the postbuild
+guard fails any build whose HTML is missing the quote-form endpoint or the
+receptionist markup. (Before that, missing them meant the build still
+succeeded with a dead form and no panel. Silent, and it bit for real on
+2026-08-13.) Set them only to point a preview at different endpoints.
 
 Every push to `main` now rebuilds and publishes. The parity gate runs as part
 of `npm run site:build`, so **a build that would orphan a ranking URL fails
@@ -436,10 +455,12 @@ PUBLIC_LEAD_ENDPOINT       = https://djpgvcvhvgrzgaziruze.supabase.co/functions/
 PUBLIC_WEB_AGENT_ENDPOINT  = https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-web-agent
 ```
 
-⚠️ `apps/site/.env` is gitignored, so Cloudflare never sees it. Both values are
-read at **build** time (`import.meta.env` in `QuoteForm.astro` and
-`Receptionist.astro`). Miss them and the build still succeeds — but the quote
-form posts nowhere and the receptionist renders nothing at all. Silent.
+**Since 2026-08-14 the two `PUBLIC_*` values are optional.** They are read at
+**build** time (`import.meta.env` in `QuoteForm.astro` and
+`Receptionist.astro`), but an unset var now falls back to the committed
+production endpoint in `src/data/site.ts`, and the postbuild guard fails any
+build whose HTML lacks the quote-form endpoint or receptionist markup — the
+silent env-less breakage of 2026-08-13 can no longer deploy.
 
 ### Prove it on `*.pages.dev` BEFORE touching `www`
 

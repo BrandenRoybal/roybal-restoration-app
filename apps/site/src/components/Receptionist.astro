@@ -13,14 +13,22 @@
 
    No framework, no dependency: same vanilla <script> + scoped <style> idiom
    as QuoteForm.astro. */
-import { BUSINESS } from "../data/site";
+import { BUSINESS, DEFAULT_WEB_AGENT_ENDPOINT, resolveEndpoint } from "../data/site";
 
 interface Props {
   /** Preselects the topic when embedded on a service page. */
   service?: string;
 }
 const { service = "" } = Astro.props;
-const endpoint = import.meta.env.PUBLIC_WEB_AGENT_ENDPOINT ?? "";
+/* Unset env var → the committed production endpoint (an env-less build must
+   ship a working panel — see DEFAULT_WEB_AGENT_ENDPOINT in data/site.ts).
+   PUBLIC_WEB_AGENT_ENDPOINT="" or "off" is the EXPLICIT build-time kill
+   switch: endpoint resolves empty and the panel is not rendered at all.
+   (Runtime kill needs no rebuild: `supabase secrets set WEB_AGENT_ENABLED=false`.) */
+const endpoint = resolveEndpoint(
+  import.meta.env.PUBLIC_WEB_AGENT_ENDPOINT,
+  DEFAULT_WEB_AGENT_ENDPOINT,
+);
 ---
 
 {/* data-phone: an Astro <script> is bundled separately and cannot read
