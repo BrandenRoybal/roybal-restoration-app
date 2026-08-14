@@ -27,6 +27,42 @@ export function portalMilestones(status) {
   }));
 }
 
+/* PURE + TESTABLE — the readings-only drying summary (CF-2). Facts a meter
+   measured, nothing predictive: per moisture-map area the LATEST row's
+   wettest reading vs the dry goal, plus how many machines are still out.
+   Deliberately NO trend and NO ETA — the portal's shipped discipline is
+   that dates and commitments are human-only, and the concierge is grounded
+   in this slice, so an auto-computed date here would become an AI-repeatable
+   promise (docs/CRM_Design.md §8 CF-2). */
+export function dryingSummary(project) {
+  const p = project || {};
+  const areas = [];
+  let asOf = "";
+  for (const m of arr(p.moistureMaps)) {
+    const rows = arr(m && m.readings).filter((r) => r && r.date);
+    if (!rows.length) continue;
+    const latest = rows.reduce((a, b) => (String(b.date) > String(a.date) ? b : a));
+    const vals = arr(latest.values).map((v) => parseFloat(v)).filter((n) => Number.isFinite(n));
+    if (!vals.length) continue;
+    const current = Math.round(Math.max(...vals) * 10) / 10;
+    const goal = parseFloat(m.dryGoal);
+    areas.push({
+      area: m.label || "Affected area",
+      material: m.material || "",
+      current,
+      goal: Number.isFinite(goal) ? goal : null,
+      dry: Number.isFinite(goal) ? current <= goal : false,
+    });
+    if (String(latest.date) > asOf) asOf = String(latest.date);
+  }
+  let equipmentOut = 0;
+  for (const d of arr(p.dryingLogs))
+    for (const e of arr(d && d.equipment))
+      if (e && e.placed && !e.removed) equipmentOut++;
+  if (!areas.length && !equipmentOut) return null;
+  return { asOf, areas, equipmentOut };
+}
+
 /* PURE + TESTABLE — the customer-safe projection. Only these fields ever
    reach the portal; nothing internal is read here. */
 export function portalProjection(project) {
@@ -36,6 +72,19 @@ export function portalProjection(project) {
   const photos = arr(p.photos)
     .filter((ph) => ph && ph.src && sharedIds.has(ph.id))
     .map((ph) => ({ id: ph.id, src: ph.src, cloud: ph.cloud || "", caption: ph.caption || "", stage: ph.stage || "" }));
+  // documents: only the supportDocs the office ticked, and only their pages
+  // (uploaded scans/PDF pages are stored as data:image strings, same as
+  // photos). The aiDigest and any other internal field is never read.
+  const sharedDocs = new Set(arr(share.sharedDocIds));
+  const documents = arr(p.supportDocs)
+    .filter((d) => d && sharedDocs.has(d.id) && arr(d.uploadedPages).length)
+    .map((d) => ({
+      id: d.id,
+      label: d.title || d.docType || "Document",
+      type: d.docType || "",
+      pages: arr(d.uploadedPages).filter((pg) => typeof pg === "string" && pg.startsWith("data:image/")),
+    }))
+    .filter((d) => d.pages.length);
   return {
     customer_name: p.customer || "",
     property_address: p.address || "",
@@ -43,6 +92,8 @@ export function portalProjection(project) {
     statusLabel: portalMilestoneLabel(share.status),
     milestones: portalMilestones(share.status),
     photos,   // still carries the data URL here; publishPortal swaps to media hashes
+    documents, // page data URLs here; publishPortal swaps to media hashes
+    drying: share.shareDrying ? dryingSummary(p) : null,
   };
 }
 
@@ -70,6 +121,15 @@ export async function publishPortal(project) {
     // inline src would point the portal at a 480px thumb that isn't uploaded
     photos.push({ mediaHash: ph.cloud || await sha256Hex(ph.src), caption: ph.caption, stage: ph.stage });
   }
+  // documents: pages are content-addressed in the same media bucket the sync
+  // offload writes (scanned pages exceed the 8KB offload floor in practice),
+  // so their sha256 IS the bucket path — the same contract photos ride.
+  const documents = [];
+  for (const d of proj.documents || []) {
+    const pages = [];
+    for (const pg of d.pages) pages.push(await sha256Hex(pg));
+    if (pages.length) documents.push({ label: d.label, type: d.type, pages });
+  }
   // the spine link: this used to write unified_job_id: null — the portal row
   // now rides the crosswalk (and carries the person) when the spine has one.
   // Best-effort AND non-destructive: a failed/empty lookup must OMIT these
@@ -95,7 +155,8 @@ export async function publishPortal(project) {
     status: proj.status,
     milestones: proj.milestones,
     photos,
-    documents: [],
+    documents,
+    drying: proj.drying,
     published_at: new Date().toISOString(),
   };
   const res = await rest("portal_jobs", {

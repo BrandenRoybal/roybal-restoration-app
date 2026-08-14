@@ -19,7 +19,7 @@ import {
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
   newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
-import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge } from "./portal.js";
+import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
 import { selectionSheetFromXlsx } from "./xactimate.js";
 import { publishSelections } from "./selections.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
@@ -3104,6 +3104,43 @@ export function portalShareForm(project) {
     });
   }
 
+  // drying toggle (CF-2): readings-only — today's % vs the dry standard and
+  // machines running. Never a trend or finish date; those stay human-only.
+  const dryBox = h("input", { type: "checkbox", checked: !!s.shareDrying });
+  dryBox.addEventListener("change", () => { s.shareDrying = dryBox.checked; commit(); paintDryPreview(); });
+  const dryPreview = h("p", { class: "subtle", style: "font-size:12px;margin:4px 0 0 26px" });
+  function paintDryPreview() {
+    const d = s.shareDrying ? dryingSummary(project) : null;
+    dryPreview.textContent = !s.shareDrying ? ""
+      : !d ? "No readings on this job yet — the card appears once a moisture map has readings."
+      : d.areas.map((a) => `${a.area}${a.material ? " (" + a.material + ")" : ""}: ${a.current}%` +
+          (a.goal != null ? ` / dry at ${a.goal}%` : "")).join(" · ") +
+        (d.equipmentOut ? ` · ${d.equipmentOut} machine${d.equipmentOut === 1 ? "" : "s"} running` : "");
+  }
+
+  // document picker (CF-2): supporting docs the customer may see — the pages
+  // only, never the AI digest. COI, cert of drying, permits, reports.
+  const docWrap = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
+  function paintDocs() {
+    docWrap.replaceChildren();
+    if (!Array.isArray(s.sharedDocIds)) s.sharedDocIds = [];
+    const docs = (project.supportDocs || []).filter((d) => d && (d.uploadedPages || []).length);
+    if (!docs.length) { docWrap.append(h("p", { class: "subtle", style: "font-size:12px;margin:0" }, "No supporting docs with pages yet — upload them on the Supporting Docs form.")); return; }
+    for (const d of docs) {
+      const on = s.sharedDocIds.includes(d.id);
+      const box = h("input", { type: "checkbox", checked: on });
+      box.addEventListener("change", () => {
+        if (box.checked) { if (!s.sharedDocIds.includes(d.id)) s.sharedDocIds.push(d.id); }
+        else s.sharedDocIds = s.sharedDocIds.filter((x) => x !== d.id);
+        commit();
+      });
+      docWrap.append(h("label", { class: "check", style: "margin:0" }, box,
+        h("span", {}, (d.title || d.docType || "Document") +
+          (d.docType && d.title ? " · " + d.docType : "") +
+          ` · ${d.uploadedPages.length} page${d.uploadedPages.length === 1 ? "" : "s"}`)));
+    }
+  }
+
   const publishBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "⬆ Publish to portal");
   publishBtn.addEventListener("click", async () => {
     if (!s.enabled) { toast("Turn the portal on first."); return; }
@@ -3297,12 +3334,20 @@ export function portalShareForm(project) {
         sectionTitle("Shared photos"),
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Tap to include a photo in the customer view (highlighted = shared)."),
         photoWrap,
+        sectionTitle("Drying progress"),
+        h("label", { class: "check", style: "margin:2px 0 0" }, dryBox,
+          h("span", {}, "Share drying readings — today's moisture vs the dry standard, and machines running. Never a finish date.")),
+        dryPreview,
+        sectionTitle("Shared documents"),
+        h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
+          "Documents the customer (or their adjuster / lender) may need — cert of drying, permits, reports. Pages only; internal notes never leave."),
+        docWrap,
         h("div", { style: "margin-top:12px" }, publishBtn),
         linkBox,
         selBox,
         threadBox) : null,
     );
-    paintPhotos(); paintLink(); paintSelections(); paintThread();
+    paintPhotos(); paintDryPreview(); paintDocs(); paintLink(); paintSelections(); paintThread();
   }
   paint();
 

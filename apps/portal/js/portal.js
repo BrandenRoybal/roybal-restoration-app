@@ -275,13 +275,42 @@ function render(data, token) {
     ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Photos"), h("div", { class: "gallery" }, ...photos))
     : null;
 
+  // drying readings — measured facts, in plain words. No dates promised.
+  const dr = data.drying;
+  const drying = dr && ((dr.areas || []).length || dr.equipmentOut) ? h("div", { class: "card" },
+    h("p", { class: "sectitle" }, "Drying progress"),
+    dr.asOf ? h("p", { class: "dry__asof" }, "Readings from " + dr.asOf) : null,
+    ...(dr.areas || []).map((a) => h("div", { class: "dry__row" + (a.dry ? " is-dry" : "") },
+      h("span", { class: "dry__mark" }, a.dry ? "✓" : "…"),
+      h("div", {},
+        h("div", { class: "dry__area" }, a.area + (a.material ? " — " + a.material : "")),
+        h("div", { class: "dry__nums" },
+          `${a.current}% moisture now` + (a.goal != null ? ` · dry at ${a.goal}%` : ""),
+          a.dry ? " · dry ✓" : " · still drying")))),
+    dr.equipmentOut ? h("p", { class: "dry__equip" },
+      `${dr.equipmentOut} drying machine${dr.equipmentOut === 1 ? "" : "s"} running at your property.`) : null,
+    h("p", { class: "dry__note" }, "These are our meter readings — your team confirms timing directly with you.")) : null;
+
+  // documents the office shared — tap a page to view it full screen
+  const docs = (data.documents || []).map((d) =>
+    h("div", { class: "doc" },
+      h("div", { class: "doc__label" }, d.label, d.type ? h("span", { class: "stage" }, " · " + d.type) : null),
+      h("div", { class: "doc__pages" }, ...(d.pages || []).map((u, i) =>
+        h("img", { src: u, alt: `${d.label} — page ${i + 1}`, loading: "lazy",
+          onclick: () => openLightbox(u, `${d.label} — page ${i + 1}`) })))));
+  const documents = docs.length
+    ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Documents"),
+        h("p", { class: "dry__note", style: "margin-top:0" }, "Shared for you and your insurance — tap a page to read it."),
+        ...docs)
+    : null;
+
   // Selections sit above the photos: they're the only thing on this page the
   // customer has to act on, and they're time-bound by the material order.
   const selections = data.selections && data.selections.total
     ? selectionsCard(token, data.selections) : null;
 
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[hero, timeline, selections, gallery, threadCard(token)].filter(Boolean));
+  app.replaceChildren(...[hero, timeline, drying, selections, gallery, documents, threadCard(token)].filter(Boolean));
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";
