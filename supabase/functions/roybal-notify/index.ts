@@ -529,6 +529,30 @@ async function handleInbound(req: Request): Promise<Response> {
     }
   } catch (e) { console.error("approval handling failed", e); }
 
+  // SMS bridge (CF-2 / portal M2, reserved in migration 108 since day one):
+  // a text from a portal customer ALSO lands on their job's thread — but only
+  // on an unambiguous single enabled portal job (the gmail lane's refusal
+  // rule: ambiguity stays in sms_messages, never files to the wrong thread).
+  // Placed AFTER the approval early-return so an owner YES/NO never files.
+  if (contact_id) {
+    try {
+      const pr = await admin(`portal_jobs?contact_id=eq.${contact_id}&enabled=eq.true&select=id&limit=2`, { method: "GET" });
+      if (pr.ok) {
+        const pjs = (await pr.json()) as Array<{ id: string }>;
+        if (pjs.length === 1) {
+          await admin("portal_messages", {
+            method: "POST",
+            headers: { Prefer: "return=minimal" },
+            body: JSON.stringify([{
+              portal_job_id: pjs[0].id, direction: "in", channel: "sms",
+              author: "customer", body: clip(text), read_by_office: false,
+            }]),
+          });
+        }
+      }
+    } catch (_) { /* the bridge is additive — the text is already logged + forwarded */ }
+  }
+
   // best-effort forward — never back to the sender (a one-hop echo guard),
   // never past the monthly cap, and a failure still ACKs Twilio with TwiML
   const fwd = toE164(SMS_FORWARD_TO);

@@ -43,6 +43,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { customerSheet, validateResponse, submissionMessage } from "./selections.ts";
+import { crewToday, crewLine } from "./crewtoday.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -82,6 +83,7 @@ const HANDOFF_LINE =
    accepts {session, jobId} anywhere it accepts a job token — resolved
    server-side to that job's own share_token, which never leaves the server
    in a session response. Rate caps + attempt counters live in the 232 RPCs. */
+const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const SESSION_TTL_DAYS = Number(Deno.env.get("PORTAL_SESSION_TTL_DAYS") ?? "180");
 const CODE_HOURLY_MAX = Number(Deno.env.get("PORTAL_CODE_HOURLY_MAX") ?? "3");
 const CODE_DAILY_MAX = Number(Deno.env.get("PORTAL_CODE_DAILY_MAX") ?? "20");
@@ -606,6 +608,52 @@ async function myProjects(session: string) {
   };
 }
 
+/* ---------- CF-2: the weekday who's-coming-today publisher ----------
+   Fired by pg_cron (migration 233), guarded by the cron secret. One thread
+   line per enabled+opted-in job per Alaska day, naming the crew the board
+   has scheduled at the property TODAY — facts only, never a finish date. */
+async function dailyCrewLines() {
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Anchorage" });
+  const jq = `portal_jobs?enabled=eq.true&notify_crew=eq.true&status=neq.complete` +
+    `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id,field_project_id,status&limit=100`;
+  const rows = await (await fetch(`${SUPABASE_URL}/rest/v1/${jq}`, { headers: svc })).json().catch(() => []);
+  if (!Array.isArray(rows) || !rows.length) return { checked: 0, posted: 0 };
+
+  const [boardRows, crewRows] = await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/coordination_jobs?deleted=eq.false&select=id,data&limit=300`, { headers: svc })
+      .then((r) => r.json()).catch(() => []),
+    fetch(`${SUPABASE_URL}/rest/v1/crew_members?deleted=eq.false&select=data&limit=100`, { headers: svc })
+      .then((r) => r.json()).catch(() => []),
+  ]);
+  const boardByField = new Map<string, Record<string, unknown>>();
+  for (const b of Array.isArray(boardRows) ? boardRows : [])
+    if (b?.data?.fieldJobId) boardByField.set(String(b.data.fieldJobId), b.data);
+  const crewName = new Map<string, string>();
+  for (const c of Array.isArray(crewRows) ? crewRows : [])
+    if (c?.data?.id && c.data.active !== false) crewName.set(String(c.data.id), String(c.data.name || ""));
+
+  let posted = 0;
+  for (const row of rows) {
+    const board = row.field_project_id ? boardByField.get(String(row.field_project_id)) : null;
+    if (!board) continue;
+    const names = crewToday(board, today).map((id: string) => crewName.get(id)).filter(Boolean) as string[];
+    const line = crewLine(names);
+    if (!line) continue;                              // nobody scheduled → silence, not noise
+    const ins = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
+      method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify([{ portal_job_id: row.id, direction: "out", channel: "portal",
+        author: "office", body: line, read_by_office: true, read_by_customer: false }]),
+    });
+    if (!ins.ok) continue;
+    await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
+      method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify({ crew_line_date: today }),
+    }).catch(() => {});                               // unstamped = at worst a re-check, never a loss
+    posted++;
+  }
+  return { checked: rows.length, posted };
+}
+
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
@@ -614,6 +662,13 @@ serve(async (req: Request) => {
     const action = String(body.action ?? "view");
     let token = String(body.token ?? "").trim();
     const session = String(body.session ?? "").trim();
+
+    // cron-only publisher: no token, no session — the secret is the gate
+    if (action === "dailyCrewLines") {
+      if (!CRON_SECRET || req.headers.get("x-cron-secret") !== CRON_SECRET)
+        return json({ ok: false, error: "forbidden" }, 403);
+      return json({ ok: true, ...(await dailyCrewLines()) });
+    }
 
     // CF-1: a session + jobId is as good as that job's own token — resolved
     // here, once, server-side. Every action below stays token-shaped.

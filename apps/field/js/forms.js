@@ -3083,6 +3083,11 @@ export function portalShareForm(project) {
   const notifyBox = h("input", { type: "checkbox", checked: s.notifyOnStatus !== false });
   notifyBox.addEventListener("change", () => { s.notifyOnStatus = notifyBox.checked; commit(); });
 
+  // who's-coming-today toggle (CF-2) — the weekday morning crew intro,
+  // published server-side from the board schedule; publish carries it over
+  const crewLineBox = h("input", { type: "checkbox", checked: s.notifyCrew !== false });
+  crewLineBox.addEventListener("change", () => { s.notifyCrew = crewLineBox.checked; commit(); });
+
   // photo picker
   const photoWrap = h("div", { class: "thumbs" });
   function paintPhotos() {
@@ -3331,6 +3336,8 @@ export function portalShareForm(project) {
         field("Current status", statusSel),
         h("label", { class: "check", style: "margin:2px 0 0" }, notifyBox,
           h("span", {}, "Message the customer when I publish a new status")),
+        h("label", { class: "check", style: "margin:2px 0 0" }, crewLineBox,
+          h("span", {}, "Weekday mornings, tell them who's coming today (from the board schedule)")),
         sectionTitle("Shared photos"),
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Tap to include a photo in the customer view (highlighted = shared)."),
         photoWrap,
