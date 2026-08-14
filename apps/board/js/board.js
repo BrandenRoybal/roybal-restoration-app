@@ -44,6 +44,31 @@ const PRIORITIES = [
   { id: "normal", label: "Normal" },
   { id: "high",   label: "High" },
 ];
+/* CRM lead lifecycle (docs/CRM_Design.md §6). Where a lead came in — the
+   backend writers stamp channel at creation (web-form|ai-chat|phone); the
+   office can also set referral|repeat|walk-in by hand. Legacy leads carry
+   only source:'web', mapped to web-form. */
+const CHANNELS = [
+  { id: "web-form", label: "Web form", color: "#5b6b80" },
+  { id: "ai-chat",  label: "AI chat",  color: "#1f9d55" },
+  { id: "phone",    label: "Phone",    color: "#f26a21" },
+  { id: "referral", label: "Referral", color: "#8a6fb0" },
+  { id: "repeat",   label: "Repeat",   color: "#1c5fb0" },
+  { id: "walk-in",  label: "Walk-in",  color: "#2f8f8f" },
+];
+const LOST_REASONS = [
+  { id: "price",           label: "Price" },
+  { id: "went-with-other", label: "Went with another contractor" },
+  { id: "no-response",     label: "No response" },
+  { id: "not-a-fit",       label: "Not a fit" },
+  { id: "other",           label: "Other" },
+];
+const channelOf = (j) => j.channel || (j.source === "web" ? "web-form" : "");
+const channelInfo = (j) => CHANNELS.find((c) => c.id === channelOf(j)) || null;
+const lostReasonLabel = (id) => (LOST_REASONS.find((r) => r.id === id) || {}).label || id || "";
+const isLead = (j) => (j.stage || "lead") === "lead" && !j.isMilestone;
+/* calendar days from today: negative = past (overdue), 0 = today, positive = future */
+const daysFromToday = (iso) => iso ? Math.round((new Date(iso + "T00:00:00") - new Date(todayISO() + "T00:00:00")) / 86400000) : null;
 const CREW_COLORS = ["#f26a21", "#1c5fb0", "#1f9d55", "#8a6fb0", "#d4520f", "#2f8f8f", "#4a7fb5", "#c2487a", "#5b6b80", "#7a8aa0"];
 /* Day-view job tints. The whole read of that view is "every colour change in a
    row is a drive", so these must stay separable side by side — no two greens. */
@@ -270,6 +295,7 @@ function render() {
   if (currentView === "lanes") return renderLanesView();
   if (currentView === "table") return renderTableView();
   if (currentView === "triage") return renderTriageView();
+  if (currentView === "pipeline") return renderPipelineView();
   renderBoardView();
 }
 
@@ -311,6 +337,7 @@ function repaint() {
   if (currentView === "lanes") return paintLanes();
   if (currentView === "table") return paintTable();
   if (currentView === "triage") return paintTriage();
+  if (currentView === "pipeline") return paintPipeline();
   paintColumns();
 }
 
@@ -320,7 +347,7 @@ function viewSwitch() {
     onclick: () => { if (currentView !== id) { currentView = id; render(); } },
   }, label);
   return h("div", { class: "vsw" },
-    mk("board", "Kanban"), mk("lanes", "Swimlanes"), mk("table", "Table"), mk("triage", "Triage"),
+    mk("board", "Kanban"), mk("lanes", "Swimlanes"), mk("table", "Table"), mk("triage", "Triage"), mk("pipeline", "Pipeline"),
     h("span", { class: "vsw__sep" }),
     mk("crew", "Crew"), mk("day", "Day"), mk("calendar", "Calendar"), mk("gantt", "Gantt"));
 }
@@ -581,6 +608,18 @@ function renderCard(j) {
     meta.append(h("span", { class: "crew-none", title: "No crew assigned yet" }, "— crew"));
   }
   meta.append(h("span", { class: "btype btype--sm", style: `background:${ty.color}`, title: ty.label }, ty.label));
+  // CRM lead: where it came from, and the next-action nudge
+  if (isLead(j)) {
+    const ch = channelInfo(j);
+    if (ch) meta.append(h("span", { class: "chip chip--sm src-chip", style: `border-color:${ch.color};color:${ch.color}`, title: "Lead source: " + ch.label }, ch.label));
+    if (j.nextActionAt) {
+      const d = daysFromToday(j.nextActionAt);
+      meta.append(h("span", { class: "chip chip--sm" + (d < 0 ? " is-late" : d === 0 ? " is-due" : ""),
+        title: (j.nextAction ? j.nextAction + " — " : "") + "follow up " + fmtShort(j.nextActionAt) },
+        "⏰ " + (d < 0 ? `${-d}d late` : d === 0 ? "today" : fmtShort(j.nextActionAt))));
+    }
+    if (j.estValue) meta.append(h("span", { class: "chip chip--sm", title: "Estimated value" }, "~$" + Math.round(Number(j.estValue)).toLocaleString()));
+  }
   if (j.startDate || j.targetDate) {
     const txt = j.targetDate ? fmtShort(j.targetDate) : "Start " + fmtShort(j.startDate);
     meta.append(h("span", { class: "chip chip--sm" + (late ? " is-late" : dueToday ? " is-due" : ""),
@@ -767,6 +806,70 @@ function paintTriage() {
     }
     host.append(box);
   }
+}
+
+/* ============================================================
+   Pipeline — leads only, by next action (CRM step 4, doc §6 + decision 7).
+   Conversion stats up top; each lead its source, est value, and the
+   follow-up nudge. Overdue follow-ups rise to the top.
+   ============================================================ */
+const statCard = (label, value, cls) => h("div", { class: "pipe-stat" + (cls ? " " + cls : "") },
+  h("div", { class: "pipe-stat__v" }, value), h("div", { class: "pipe-stat__k" }, label));
+
+function renderPipelineView() {
+  const body = clear(view);
+  body.append(h("div", { class: "printhdr" }));
+  body.append(renderToolbar());
+  if (!crew.length) return emptyCrewPrompt(body);
+  body.append(h("div", { class: "bpipe" }));
+  paintPipeline();
+}
+function paintPipeline() {
+  const host = $(".bpipe", view);
+  if (!host) return render();
+  clear(host);
+  // conversion from every job that reached an outcome (active + archived)
+  const all = [...jobs, ...archivedJobs];
+  const won = all.filter((j) => j.outcome === "won").length;
+  const lost = all.filter((j) => j.outcome === "lost").length;
+  const rate = won + lost ? Math.round((won / (won + lost)) * 100) : null;
+  host.append(h("div", { class: "pipe-stats" },
+    statCard("Open leads", String(jobs.filter(isLead).length)),
+    statCard("Won", String(won), "is-won"),
+    statCard("Lost", String(lost), "is-lost"),
+    statCard("Win rate", rate == null ? "—" : rate + "%")));
+
+  const leads = jobs.filter(isLead).filter(matchesFilter).sort((a, b) => {
+    const da = a.nextActionAt || "9999-99-99", db = b.nextActionAt || "9999-99-99";
+    return da !== db ? da.localeCompare(db) : sortKey(a).localeCompare(sortKey(b));
+  });
+  if (!leads.length) {
+    host.append(h("div", { class: "bempty" }, h("h2", {}, "No open leads"),
+      h("p", { class: "subtle" }, "New web, phone, and AI-chat leads land here. Set a next action to work them, and mark Won or Lost from the job to feed the stats above.")));
+    return;
+  }
+  const list = h("div", { class: "pipe-list" });
+  for (const j of leads) {
+    const ch = channelInfo(j);
+    const d = daysFromToday(j.nextActionAt);
+    const age = daysFromToday(String(j.createdAt || "").slice(0, 10));
+    const naChip = j.nextActionAt
+      ? h("span", { class: "chip chip--sm" + (d < 0 ? " is-late" : d === 0 ? " is-due" : "") },
+          "⏰ " + (d < 0 ? `${-d}d late` : d === 0 ? "today" : fmtShort(j.nextActionAt)))
+      : h("span", { class: "chip chip--sm subtle-chip" }, "no follow-up set");
+    list.append(h("div", { class: "pipe-row", onclick: () => openJobModal(j) },
+      h("div", { class: "pipe-row__main" },
+        h("div", { class: "pipe-row__t" }, j.title || j.customer || "Untitled lead",
+          j.priority === "high" ? h("span", { class: "prio prio--high", title: "High priority", style: "margin-left:6px" }) : null),
+        j.address || j.customer ? h("div", { class: "pipe-row__s" }, j.address || j.customer) : null,
+        j.nextAction ? h("div", { class: "pipe-row__na" }, "→ " + j.nextAction) : null),
+      h("div", { class: "pipe-row__meta" },
+        ch ? h("span", { class: "chip chip--sm src-chip", style: `border-color:${ch.color};color:${ch.color}` }, ch.label) : null,
+        j.estValue ? h("span", { class: "chip chip--sm" }, "~$" + Math.round(Number(j.estValue)).toLocaleString()) : null,
+        naChip,
+        age != null && age < -1 ? h("span", { class: "chip chip--sm subtle-chip", title: "Age in the pipeline" }, `${-age}d old`) : null)));
+  }
+  host.append(list);
 }
 
 /* the "add your crew first" prompt, shared by every job view */
@@ -1981,6 +2084,30 @@ function openJobModal(existing, newMilestone) {
   const crewField = field("Assigned crew", crewPick);
   crewField.classList.add("hide-for-ms");
 
+  // ----- CRM lead section (visible for lead-stage jobs) -----
+  const chanSel = (f.channel = h("select", {},
+    h("option", { value: "" }, "— unset —"),
+    ...CHANNELS.map((c) => h("option", { value: c.id, selected: channelOf(j) === c.id }, c.label))));
+  f.estValue = h("input", { type: "number", min: "0", step: "100", placeholder: "e.g. 8000", value: j.estValue || "" });
+  f.nextActionAt = h("input", { type: "date", value: j.nextActionAt || "" });
+  f.nextAction = h("input", { type: "text", placeholder: "e.g. Call back with the quote", value: j.nextAction || "" });
+  const lostSel = h("select", {}, ...LOST_REASONS.map((r) => h("option", { value: r.id, selected: j.lostReason === r.id }, r.label)));
+  const lostConfirm = h("button", { class: "btn btn--danger btn--sm", type: "button" }, "Confirm lost");
+  const wonBtn = h("button", { class: "btn btn--sm lead-win", type: "button", title: "Convert — advances the lead to Scheduled" }, "✓ Won");
+  const lostBtn = h("button", { class: "btn btn--sm lead-lose", type: "button", title: "Mark lost and file it in the archive" }, "✕ Lost");
+  const lostWrap = h("div", { class: "lead-lost-wrap", style: "display:none" },
+    h("span", { class: "subtle" }, "Reason"), lostSel, lostConfirm);
+  const outcomeNote = j.outcome === "won"
+    ? h("span", { class: "lead-badge is-won" }, "✓ Won" + (j.outcomeAt ? " · " + fmtShort(j.outcomeAt) : ""))
+    : j.outcome === "lost"
+      ? h("span", { class: "lead-badge is-lost" }, "✕ Lost — " + lostReasonLabel(j.lostReason))
+      : null;
+  const leadSection = h("div", { class: "leadsec hide-for-ms", style: isLead(j) ? "" : "display:none" },
+    h("div", { class: "leadsec__h" }, "🎯 Lead", outcomeNote),
+    h("div", { class: "grid2" }, field("Source", chanSel), field("Estimated value ($)", f.estValue)),
+    h("div", { class: "grid2" }, field("Next action — when", f.nextActionAt), field("Next action — what", f.nextAction)),
+    h("div", { class: "lead-actions" }, wonBtn, lostBtn, lostWrap));
+
   const body = h("div", { class: "bmodal__body" + (j.isMilestone ? " is-milestone" : "") },
     field(j.isMilestone ? "Milestone name" : "Job / Customer name", inp("title", { type: "text", placeholder: j.isMilestone ? "e.g. City framing inspection" : "e.g. Smith Kitchen Remodel" })),
     msRow,
@@ -1992,6 +2119,7 @@ function openJobModal(existing, newMilestone) {
     h("div", { class: "grid2" },
       field("Stage", sel("stage", STAGES)),
       field("Priority", sel("priority", PRIORITIES))),
+    leadSection,
     datesRow, hoursRow, moneyRow, crewField,
     fieldPlanSection,
     scheduleSection,
@@ -2007,6 +2135,34 @@ function openJobModal(existing, newMilestone) {
   });
 
   const saveBtn = h("button", { class: "btn btn--primary" }, isNew ? "Create job" : "Save");
+
+  // Lead lifecycle actions. Won advances the lead to Scheduled and records the
+  // outcome (feeds the pipeline win-rate). Lost stamps the reason, then archives.
+  f.stage.addEventListener("change", () => { leadSection.style.display = f.stage.value === "lead" ? "" : "none"; });
+  wonBtn.addEventListener("click", () => {
+    j.outcome = "won"; j.outcomeAt = todayISO(); j.lostReason = "";
+    f.stage.value = "scheduled";
+    leadSection.style.display = "none";
+    saveBtn.click();     // reuse the normal save (schedule cascade + persist)
+  });
+  lostBtn.addEventListener("click", () => { lostWrap.style.display = lostWrap.style.display === "none" ? "flex" : "none"; });
+  lostConfirm.addEventListener("click", async () => {
+    Object.assign(j, {
+      outcome: "lost", lostReason: lostSel.value, outcomeAt: todayISO(),
+      title: f.title.value.trim() || j.title || "Untitled lead",
+      customer: f.customer.value.trim(), phone: f.phone.value.trim(), address: f.address.value.trim(),
+      channel: f.channel.value || j.channel || "",
+      estValue: f.estValue.value ? Number(f.estValue.value) : "",
+      nextActionAt: "", nextAction: "",
+    });
+    closeModal();
+    setSync("syncing");
+    await archiveJob(j);   // sets archived + saves; j is the working copy carrying the outcome
+    setSync(pendingCount() ? "error" : "synced");
+    render();
+    toast("Lead marked lost — filed in 🗄 Archive");
+  });
+
   saveBtn.addEventListener("click", async () => {
     const title = f.title.value.trim();
     if (!title) { toast("Add a job / customer name"); f.title.focus(); return; }
@@ -2021,6 +2177,11 @@ function openJobModal(existing, newMilestone) {
       pinnedStart: j.scheduleMode === "manual" ? (f.pinnedStart.value || "") : (j.pinnedStart || ""),
       notBefore: f.notBefore.value || "",
       notBeforeLabel: f.notBefore.value ? f.notBeforeLabel.value.trim() : "",
+      // CRM lead fields (harmless on non-leads; only rendered on lead cards / pipeline)
+      channel: f.channel.value || j.channel || "",
+      estValue: f.estValue.value ? Number(f.estValue.value) : "",
+      nextActionAt: f.nextActionAt.value || "",
+      nextAction: f.nextAction.value.trim(),
     });
     // j.deps / j.scheduleMode / j.durationDays are mutated live by the Schedule section
     saveBtn.disabled = true;
@@ -2279,15 +2440,27 @@ function openArchiveModal() {
   const search = h("input", { type: "search", class: "archsearch", placeholder: "Search archived jobs — name, customer, address…" });
   const list = h("div", { class: "archlist" });
 
+  // filter: all / completed / lost leads (CRM step 4)
+  let archFilter = "all";
+  const fbar = h("div", { class: "vsw archfilter" });
+  const fbtns = {};
+  for (const [id, label] of [["all", "All"], ["done", "Completed"], ["lost", "Lost leads"]]) {
+    const b = h("button", { class: "vsw__b" + (id === archFilter ? " on" : ""), type: "button" }, label);
+    b.addEventListener("click", () => { archFilter = id; for (const k in fbtns) fbtns[k].classList.toggle("on", k === id); paint(); });
+    fbtns[id] = b; fbar.append(b);
+  }
+
   function paint() {
+    const lostN = archivedJobs.filter((j) => j.outcome === "lost").length;
     sub.textContent = archivedJobs.length
-      ? `${archivedJobs.length} job${archivedJobs.length === 1 ? "" : "s"} on record. Click one to open it, or ↩ Restore to put it back on the board in its old stage.`
+      ? `${archivedJobs.length} on record${lostN ? ` · ${lostN} lost lead${lostN === 1 ? "" : "s"}` : ""}. Click one to open it, or ↩ Restore to put it back on the board.`
       : "Jobs you archive land here — off the board, calendar, and timeline, but never gone.";
     clear(list);
     const q = (search.value || "").trim().toLowerCase();
     const rows = archivedJobs
+      .filter((j) => archFilter === "all" ? true : archFilter === "lost" ? j.outcome === "lost" : j.outcome !== "lost")
       .filter((j) => !q || (j.title + " " + (j.customer || "") + " " + (j.address || "")).toLowerCase().includes(q))
-      .sort((a, b) => (b.archivedAt || "").localeCompare(a.archivedAt || "") || (a.title || "").localeCompare(b.title || ""));
+      .sort((a, b) => (b.archivedAt || b.outcomeAt || "").localeCompare(a.archivedAt || a.outcomeAt || "") || (a.title || "").localeCompare(b.title || ""));
     if (!rows.length) {
       list.append(h("div", { class: "subtle", style: "padding:14px 2px" },
         archivedJobs.length ? "No archived jobs match your search."
@@ -2300,11 +2473,14 @@ function openArchiveModal() {
       const span = j.startDate && j.targetDate ? `${fmtDate(j.startDate)} → ${fmtDate(j.targetDate)}`
         : (j.startDate || j.targetDate) ? fmtDate(j.startDate || j.targetDate) : "";
       const meta = [j.customer, j.address, span, act ? fmtH(act) + " logged" : "",
+        j.outcome === "lost" ? "lost — " + lostReasonLabel(j.lostReason) : "",
         j.archivedAt ? "archived " + fmtDate(j.archivedAt) : ""].filter(Boolean).join("  ·  ");
-      list.append(h("div", { class: "archrow" },
+      list.append(h("div", { class: "archrow" + (j.outcome === "lost" ? " is-lost" : "") },
         h("div", { class: "archrow__main", onclick: () => openJobModal(j) },
           h("div", { class: "archrow__title" },
-            j.isMilestone ? h("span", { class: "ms-diamond" }, "◆") : h("span", { class: "btype", style: `background:${ty.color}` }, ty.label),
+            j.isMilestone ? h("span", { class: "ms-diamond" }, "◆")
+              : j.outcome === "lost" ? h("span", { class: "btype", style: "background:#cc3f3f" }, "LOST")
+              : h("span", { class: "btype", style: `background:${ty.color}` }, ty.label),
             h("strong", {}, j.title || j.customer || "Job")),
           h("div", { class: "archrow__meta subtle" }, meta || "—")),
         h("div", { class: "archrow__act" },
@@ -2317,7 +2493,7 @@ function openArchiveModal() {
   }
 
   search.addEventListener("input", paint);
-  body.append(sub, search, list);
+  body.append(sub, fbar, search, list);
   paint();
   openModal("🗄 Archive", body, h("div", { class: "bmodal__foot" },
     h("button", { class: "btn btn--primary", onclick: closeModal }, "Done")));
