@@ -1,0 +1,69 @@
+# Pins per-function deploy settings so a redeploy cannot silently flip them.
+#
+# WHY THIS FILE EXISTS: `supabase functions deploy` defaults verify_jwt to
+# TRUE when nothing pins it. On 2026-08-13 a bulk redeploy (likely the
+# Supabase MCP deploy tool, same default) flipped roybal-lead and
+# roybal-web-agent to true — every anonymous browser call got
+# UNAUTHORIZED_NO_AUTH_HEADER, so the www quote form and the AI receptionist
+# were dead until hot-fixed on 2026-08-14. With the entries below, a plain
+# CLI `supabase functions deploy <slug>` keeps each function's setting; no
+# --no-verify-jwt flag to remember.
+#
+# ⚠️ The Supabase MCP deploy tool does NOT read this file. After any MCP or
+# dashboard-driven redeploy, re-check with:
+#   supabase functions list --project-ref djpgvcvhvgrzgaziruze -o json
+# and confirm verify_jwt is still false on the six functions marked below.
+#
+# verify_jwt=false is NOT "unprotected": each of those functions self-protects
+# (CORS allowlist, honeypot, per-IP/global rate caps, spend ceiling, or its
+# own secret check) — they exist to be called by anonymous browsers/webhooks.
+#
+# Values below mirror production as read live on 2026-08-14.
+
+project_id = "djpgvcvhvgrzgaziruze"
+
+# ── Anonymous-caller functions — verify_jwt MUST stay false ──────────────
+
+[functions.roybal-lead]
+verify_jwt = false # the www quote form posts here with no session
+
+[functions.roybal-web-agent]
+verify_jwt = false # the www AI receptionist panel calls here with no session
+
+[functions.magicplan-proxy]
+verify_jwt = false
+
+[functions.roybal-ai-ingest]
+verify_jwt = false
+
+[functions.roybal-ai-narrative]
+verify_jwt = false
+
+[functions.roybal-voice]
+verify_jwt = false
+
+# ── Authenticated functions — verify_jwt stays true ──────────────────────
+
+[functions.gmail-proxy]
+verify_jwt = true
+
+[functions.magicplan-webhook]
+verify_jwt = true
+
+[functions.qb-time-proxy]
+verify_jwt = true
+
+[functions.qbo-proxy]
+verify_jwt = true
+
+[functions.roybal-ai-office]
+verify_jwt = true
+
+[functions.roybal-brief]
+verify_jwt = true
+
+[functions.roybal-notify]
+verify_jwt = true
+
+[functions.roybal-portal]
+verify_jwt = true

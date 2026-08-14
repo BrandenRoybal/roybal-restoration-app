@@ -35,14 +35,19 @@ comment on column public.portal_jobs.crew_line_date is
 
 do $$
 declare
-  v_secret text;
+  v_cmd    text;
+  v_secret text; v_apikey text; v_authz text;
 begin
-  -- reuse the cron secret the morning-brief job already carries; never
-  -- write it into a repo file
-  select substring(command from 'x-cron-secret'', ''([^'']+)') into v_secret
-    from cron.job where jobname = 'morning-brief' limit 1;
-  if v_secret is null or v_secret = '' then
-    raise exception 'portal-crew-lines: could not extract the cron secret from the morning-brief job — schedule manually';
+  -- reuse the cron secret AND the platform auth headers the morning-brief
+  -- job already carries (roybal-portal deploys verify_jwt=true, so pg_cron
+  -- must present the anon key like every other cron); never write any of
+  -- them into a repo file
+  select command into v_cmd from cron.job where jobname = 'morning-brief' limit 1;
+  v_secret := substring(v_cmd from 'x-cron-secret'', ''([^'']+)');
+  v_apikey := substring(v_cmd from '''apikey'', ''([^'']+)');
+  v_authz  := substring(v_cmd from 'Authorization'', ''([^'']+)');
+  if v_secret is null or v_apikey is null or v_authz is null then
+    raise exception 'portal-crew-lines: could not extract auth from the morning-brief job — schedule manually';
   end if;
 
   if exists (select 1 from cron.job where jobname = 'portal-crew-lines') then
@@ -57,9 +62,11 @@ begin
       url     := 'https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-portal',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
+        'apikey', %L,
+        'Authorization', %L,
         'x-cron-secret', %L
       ),
       body := '{"action":"dailyCrewLines"}'::jsonb
     );
-    $j$, v_secret));
+    $j$, v_apikey, v_authz, v_secret));
 end $$;
