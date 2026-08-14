@@ -127,6 +127,9 @@ const CREW_KINDS = new Set([
   // Website lead alerts. A 2am flooding basement should buzz the owner's
   // phone — that is the whole point of a 24/7 restoration business.
   "webOwner", "webLead",
+  // Portal access codes (CF-1): a SOLICITED one-time code — the customer just
+  // tapped the button, so quiet hours must not eat their own login.
+  "portalCode",
 ]);
 
 /* ---------- the monthly reserve ----------
@@ -149,7 +152,10 @@ const PROTECTED_KINDS = new Set([
   // field app + board customer messaging (authenticated callers)
   "onOurWay", "assist", "text", "portal", "reminder",
 ]);
-const PUBLIC_KINDS = new Set(["webOwner", "webLead"]);
+// portalCode is public by this file's own rule — anyone holding a share token
+// can request one — so it respects the reserve floor (its own 232-RPC caps of
+// 3/contact/hr + 20/day bound it long before the reserve matters).
+const PUBLIC_KINDS = new Set(["webOwner", "webLead", "portalCode"]);
 
 // Owner/crew-directed kinds: their to_number is the OWNER or a crew member,
 // never a customer, so they must NOT be stamped onto a customer's contact_id
@@ -167,7 +173,9 @@ async function contactByPhone(
   digits10: string,
   kind = "",
 ): Promise<string | null> {
-  if (OWNER_KINDS.has(kind) || digits10.length !== 10) return null;
+  // portalCode is customer-directed but is OTP plumbing, not conversation —
+  // it stays off the contact timeline.
+  if (OWNER_KINDS.has(kind) || kind === "portalCode" || digits10.length !== 10) return null;
   try {
     const r = await q(`contacts?select=id&phone_norm=eq.${digits10}&merged_into=is.null&limit=2`, { method: "GET" });
     if (r.ok) {
@@ -520,6 +528,30 @@ async function handleInbound(req: Request): Promise<Response> {
         { headers: { "Content-Type": "text/xml" } });
     }
   } catch (e) { console.error("approval handling failed", e); }
+
+  // SMS bridge (CF-2 / portal M2, reserved in migration 108 since day one):
+  // a text from a portal customer ALSO lands on their job's thread — but only
+  // on an unambiguous single enabled portal job (the gmail lane's refusal
+  // rule: ambiguity stays in sms_messages, never files to the wrong thread).
+  // Placed AFTER the approval early-return so an owner YES/NO never files.
+  if (contact_id) {
+    try {
+      const pr = await admin(`portal_jobs?contact_id=eq.${contact_id}&enabled=eq.true&select=id&limit=2`, { method: "GET" });
+      if (pr.ok) {
+        const pjs = (await pr.json()) as Array<{ id: string }>;
+        if (pjs.length === 1) {
+          await admin("portal_messages", {
+            method: "POST",
+            headers: { Prefer: "return=minimal" },
+            body: JSON.stringify([{
+              portal_job_id: pjs[0].id, direction: "in", channel: "sms",
+              author: "customer", body: clip(text), read_by_office: false,
+            }]),
+          });
+        }
+      }
+    } catch (_) { /* the bridge is additive — the text is already logged + forwarded */ }
+  }
 
   // best-effort forward — never back to the sender (a one-hop echo guard),
   // never past the monthly cap, and a failure still ACKs Twilio with TwiML

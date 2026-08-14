@@ -85,6 +85,18 @@ export function portalProjection(project) {
       pages: arr(d.uploadedPages).filter((pg) => typeof pg === "string" && pg.startsWith("data:image/")),
     }))
     .filter((d) => d.pages.length);
+  // closeout (CF-4): the permanent record, projected only once the job is
+  // complete. Office-curated rows only — label/value strings, nothing read
+  // from internal data.
+  const co = share.closeout || null;
+  const closeout = share.status === "complete" && co ? {
+    completedAt: String(co.completedAt || "").slice(0, 10),
+    warrantyMonths: Number(co.warrantyMonths) || 0,
+    homeFile: arr(co.homeFile)
+      .filter((r) => r && (r.label || r.value))
+      .slice(0, 40)
+      .map((r) => ({ label: String(r.label || "").slice(0, 80), value: String(r.value || "").slice(0, 200) })),
+  } : null;
   return {
     customer_name: p.customer || "",
     property_address: p.address || "",
@@ -94,6 +106,7 @@ export function portalProjection(project) {
     photos,   // still carries the data URL here; publishPortal swaps to media hashes
     documents, // page data URLs here; publishPortal swaps to media hashes
     drying: share.shareDrying ? dryingSummary(p) : null,
+    closeout,
   };
 }
 
@@ -157,6 +170,8 @@ export async function publishPortal(project) {
     photos,
     documents,
     drying: proj.drying,
+    closeout: proj.closeout,
+    notify_crew: share.notifyCrew !== false,   // the who's-coming-today toggle (default on)
     published_at: new Date().toISOString(),
   };
   const res = await rest("portal_jobs", {
@@ -204,7 +219,32 @@ export async function sendOfficeReply(portalJobId, body, author = "office") {
     }]),
   });
   if (!res.ok) throw new Error("Send failed (" + res.status + ")");
-  return (await res.json())[0];
+  const row = (await res.json())[0];
+  mirrorReplyToSms(portalJobId, text).catch(() => {});   // bridge: best-effort, never blocks the thread post
+  return row;
+}
+
+/* SMS bridge, outbound half (CF-2 / portal M2): when the customer's LATEST
+   inbound message arrived by text, they're conversing over SMS — so the
+   office reply is also texted to the phone on file (kind 'portal', the
+   authenticated lane roybal-notify reserved for exactly this). Customers
+   using the web thread get no duplicate texts. */
+async function mirrorReplyToSms(portalJobId, text) {
+  const { rest, callFunction } = await import("./supa.js");
+  const last = await rest(`portal_messages?portal_job_id=eq.${portalJobId}&direction=eq.in&select=channel&order=created_at.desc&limit=1`, { method: "GET" });
+  if (!last.ok) return;
+  const m = (await last.json())[0];
+  if (!m || m.channel !== "sms") return;
+  const pj = await rest(`portal_jobs?id=eq.${portalJobId}&select=contact_id&limit=1`, { method: "GET" });
+  const cid = pj.ok ? ((await pj.json())[0] || {}).contact_id : null;
+  if (!cid) return;
+  const cr = await rest(`contacts?id=eq.${cid}&select=phone_norm&limit=1`, { method: "GET" });
+  const phone = cr.ok ? String(((await cr.json())[0] || {}).phone_norm || "") : "";
+  if (phone.length !== 10) return;
+  await callFunction("roybal-notify", {
+    action: "sendSms", to: phone, kind: "portal", captured_by: "portal-bridge",
+    body: "Roybal Construction: " + text.slice(0, 280) + " — reply to this text or see your project page.",
+  });
 }
 
 /* PURE + customer-safe: the digest handed to portal AI drafts. Built from the

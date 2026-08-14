@@ -3083,6 +3083,11 @@ export function portalShareForm(project) {
   const notifyBox = h("input", { type: "checkbox", checked: s.notifyOnStatus !== false });
   notifyBox.addEventListener("change", () => { s.notifyOnStatus = notifyBox.checked; commit(); });
 
+  // who's-coming-today toggle (CF-2) — the weekday morning crew intro,
+  // published server-side from the board schedule; publish carries it over
+  const crewLineBox = h("input", { type: "checkbox", checked: s.notifyCrew !== false });
+  crewLineBox.addEventListener("change", () => { s.notifyCrew = crewLineBox.checked; commit(); });
+
   // photo picker
   const photoWrap = h("div", { class: "thumbs" });
   function paintPhotos() {
@@ -3139,6 +3144,170 @@ export function portalShareForm(project) {
           (d.docType && d.title ? " · " + d.docType : "") +
           ` · ${d.uploadedPages.length} page${d.uploadedPages.length === 1 ? "" : "s"}`)));
     }
+  }
+
+  // closeout (CF-4) — appears once the milestone is 'complete': the warranty
+  // record, the home-file rows, and the one-time review ask.
+  const closeBox = h("div", { style: "display:none" });
+  function paintCloseout() {
+    const on = s.status === "complete";
+    closeBox.style.display = on ? "" : "none";
+    if (!on) return;
+    if (!s.closeout) s.closeout = { completedAt: todayISO(), warrantyMonths: 12, homeFile: [] };
+    const co = s.closeout;
+    closeBox.replaceChildren();
+    const doneInp = h("input", { type: "date", value: co.completedAt || "" });
+    doneInp.addEventListener("change", () => { co.completedAt = doneInp.value || ""; commit(); });
+    const warrInp = h("input", { type: "number", min: "0", step: "1", value: co.warrantyMonths ?? 12, style: "max-width:110px" });
+    warrInp.addEventListener("input", () => { co.warrantyMonths = warrInp.value ? Number(warrInp.value) : 0; commit(); });
+
+    const rowsWrap = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
+    function paintRows() {
+      rowsWrap.replaceChildren();
+      (co.homeFile || []).forEach((r, i) => {
+        const lab = h("input", { value: r.label || "", placeholder: "Living room paint", style: "flex:1" });
+        const val = h("input", { value: r.value || "", placeholder: "SW 7008 Alabaster, eggshell", style: "flex:2" });
+        lab.addEventListener("input", () => { r.label = lab.value; commit(); });
+        val.addEventListener("input", () => { r.value = val.value; commit(); });
+        const x = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", onclick: () => { co.homeFile.splice(i, 1); commit(); paintRows(); } }, "✕");
+        rowsWrap.append(h("div", { style: "display:flex;gap:6px" }, lab, val, x));
+      });
+      rowsWrap.append(h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto",
+        onclick: () => { co.homeFile = co.homeFile || []; co.homeFile.push({ label: "", value: "" }); commit(); paintRows(); } }, "+ Add a home-file line"));
+    }
+    paintRows();
+
+    // one-time review ask — texts the Google link, stamps review_asked_at
+    const askBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "⭐ Ask for a review by text");
+    const askStatus = h("span", { class: "subtle", style: "font-size:12px" });
+    askBtn.addEventListener("click", async () => {
+      askBtn.disabled = true; askStatus.textContent = "Checking…";
+      try {
+        const { rest, callFunction } = await import("./supa.js");
+        const pj = await rest(`portal_jobs?id=eq.${s.id}&select=contact_id&limit=1`, { method: "GET" });
+        const cid = pj.ok ? ((await pj.json())[0] || {}).contact_id : null;
+        if (!cid) { askStatus.textContent = "Publish to the portal first so the job is linked to the customer."; askBtn.disabled = false; return; }
+        const cr = await rest(`contacts?id=eq.${cid}&select=phone_norm,review_asked_at&limit=1`, { method: "GET" });
+        const c = cr.ok ? (await cr.json())[0] : null;
+        if (c && c.review_asked_at) { askStatus.textContent = "Already asked " + fmtDate(String(c.review_asked_at).slice(0, 10)) + " — we never ask twice."; return; }
+        if (!c || String(c.phone_norm || "").length !== 10) { askStatus.textContent = "No phone on file for this customer."; askBtn.disabled = false; return; }
+        const stamp = await rest("rpc/contact_mark_review_asked", { method: "POST", body: JSON.stringify({ p_contact: cid }) });
+        if (!stamp.ok || (await stamp.json()) !== true) { askStatus.textContent = "Already asked — we never ask twice."; return; }
+        await callFunction("roybal-notify", {
+          action: "sendSms", to: c.phone_norm, kind: "portal", captured_by: techName(),
+          body: `Thanks for trusting Roybal Construction with your project! If we earned it, a quick review means the world to our Fairbanks crew: https://g.page/r/CSv3IUml4W9GEBM/review`,
+        });
+        askStatus.textContent = "Sent ✓";
+        toast("Review ask sent.");
+      } catch (e) { askStatus.textContent = "Couldn't send — " + (e && e.message ? e.message : e); askBtn.disabled = false; }
+    });
+
+    closeBox.append(
+      sectionTitle("Closeout"),
+      h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
+        "The customer's permanent record: warranty, and the home file they'll keep forever — paint colors, materials, what's behind the walls."),
+      h("div", { class: "grid2" },
+        field("Completed on", doneInp),
+        field("Workmanship warranty (months)", warrInp)),
+      field("Home file", rowsWrap),
+      h("div", { style: "display:flex;gap:10px;align-items:center;margin-top:6px" }, askBtn, askStatus));
+  }
+  statusSel.addEventListener("change", paintCloseout);
+
+  // ---------- Money (CF-3): change-order approvals + shared balance ----------
+  // Both live in portal_jobs columns publishPortal never touches (a republish
+  // must not reset a customer's answer or un-share the balance).
+  const moneyBox = h("div", { style: "margin-top:14px" });
+  async function paintMoney() {
+    moneyBox.replaceChildren(sectionTitle("Money"),
+      h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 8px" },
+        "Publish a change order for e-sign approval, and share the balance (QuickBooks is the ground truth on synced invoices)."));
+    if (!s.enabled || !s.shareToken) { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Turn the portal on first.")); return; }
+    const { rest, callFunction } = await import("./supa.js");
+    const { billingSummary, lineSubtotal, money: fmtMoney } = await import("./fincalc.js");
+    let approvals = [], billing = null;
+    try {
+      const r = await rest(`portal_jobs?id=eq.${s.id}&select=approvals,billing&limit=1`, { method: "GET" });
+      if (r.ok) { const row = (await r.json())[0] || {}; approvals = row.approvals || []; billing = row.billing || null; }
+    } catch { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Offline — money tools need a connection.")); return; }
+    const byId = new Map(approvals.map((a) => [a.id, a]));
+
+    // change orders
+    const cos = (project.changeOrders || []).filter((c) => c && (c.description || (c.items || []).length));
+    if (!cos.length) moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "No change orders on this job yet (Change Order form)."));
+    cos.forEach((co, i) => {
+      const amt = lineSubtotal(co.items || []);
+      const cur = byId.get(co.id);
+      const label = `CO ${co.coNo || i + 1} — ${fmtMoney(amt)}`;
+      let stateEl;
+      if (cur && cur.status === "approved") stateEl = h("span", { class: "subtle", style: "color:var(--green,#1f7a45);font-size:12px" }, `✓ approved${cur.signedName ? " — signed " + cur.signedName : ""}`);
+      else if (cur && cur.status === "declined") stateEl = h("span", { class: "subtle", style: "color:#c0392b;font-size:12px" }, "✗ declined" + (cur.note ? ` — "${cur.note}"` : ""));
+      else if (cur) stateEl = h("span", { class: "subtle", style: "font-size:12px" }, "⏳ awaiting the customer");
+      else {
+        const pub = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Publish for approval");
+        pub.addEventListener("click", async () => {
+          pub.disabled = true;
+          try {
+            const next = [...approvals.filter((a) => a.id !== co.id), {
+              id: co.id, title: `Change Order ${co.coNo || i + 1}`,
+              description: String(co.description || "").slice(0, 1200),
+              amountDelta: amt, status: "pending", publishedAt: new Date().toISOString(),
+            }];
+            const up = await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ approvals: next }) });
+            if (!up.ok) throw new Error("save failed");
+            await sendOfficeReply(s.id, `A change order needs your review and signature: Change Order ${co.coNo || i + 1} (${fmtMoney(amt)}). Open your project page to approve it.`);
+            if (project.phone) callFunction("roybal-notify", { action: "sendSms", to: project.phone, kind: "portal", captured_by: techName(),
+              body: `Roybal Construction: a change order needs your approval. Review and sign here: ${portalShareLink(s.shareToken)}` }).catch(() => {});
+            toast("Published — the customer was asked to review it.");
+            paintMoney();
+          } catch (e) { toast("Couldn't publish: " + (e.message || e)); pub.disabled = false; }
+        });
+        stateEl = pub;
+      }
+      moneyBox.append(h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)" },
+        h("span", { style: "font-size:13px;font-weight:600" }, label), stateEl));
+    });
+
+    // balance
+    const sum = billingSummary(project);
+    const balRow = h("div", { style: "margin-top:10px" });
+    if (billing) {
+      balRow.append(h("p", { class: "subtle", style: "font-size:12.5px;margin:0 0 6px" },
+        `Shared ${billing.asOf || ""}: ${fmtMoney(billing.invoiced)} invoiced · ${fmtMoney(billing.paid)} paid · `,
+        h("strong", {}, fmtMoney(billing.balance) + " due"), billing.payUrl ? " · pay-online link attached" : ""));
+    }
+    if (!sum) balRow.append(h("p", { class: "subtle", style: "font-size:12px;margin:0" }, "No tracked invoices yet — set an invoice status on the Invoice form."));
+    else {
+      const shareBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" },
+        (billing ? "Update" : "Share") + ` balance (${fmtMoney(sum.balance)} due)`);
+      shareBtn.addEventListener("click", async () => {
+        shareBtn.disabled = true;
+        try {
+          // best-effort pay link from the newest tracked unpaid invoice
+          let payUrl = "";
+          const cand = (project.invoices || []).filter((v) => v && v.qboInvoiceId && v.status && !["paid", "void"].includes(v.status)).pop();
+          if (cand) {
+            try { const r = await callFunction("qbo-proxy", { action: "invoiceLink", invoiceId: cand.qboInvoiceId });
+              const d = await r.json(); if (d && d.ok && d.link) payUrl = d.link; } catch { /* balance still shares */ }
+          }
+          const up = await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" },
+            body: JSON.stringify({ billing: { ...sum, payUrl, asOf: todayISO() } }) });
+          if (!up.ok) throw new Error("save failed");
+          toast(payUrl ? "Balance shared with a pay-online link." : "Balance shared.");
+          paintMoney();
+        } catch (e) { toast("Couldn't share: " + (e.message || e)); shareBtn.disabled = false; }
+      });
+      balRow.append(shareBtn);
+      if (billing) {
+        const stop = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto;margin-left:8px" }, "Stop sharing");
+        stop.addEventListener("click", async () => {
+          await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ billing: null }) }).catch(() => {});
+          toast("Balance hidden."); paintMoney();
+        });
+        balRow.append(stop);
+      }
+    }
+    moneyBox.append(balRow);
   }
 
   const publishBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "⬆ Publish to portal");
@@ -3331,6 +3500,8 @@ export function portalShareForm(project) {
         field("Current status", statusSel),
         h("label", { class: "check", style: "margin:2px 0 0" }, notifyBox,
           h("span", {}, "Message the customer when I publish a new status")),
+        h("label", { class: "check", style: "margin:2px 0 0" }, crewLineBox,
+          h("span", {}, "Weekday mornings, tell them who's coming today (from the board schedule)")),
         sectionTitle("Shared photos"),
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Tap to include a photo in the customer view (highlighted = shared)."),
         photoWrap,
@@ -3342,12 +3513,14 @@ export function portalShareForm(project) {
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
           "Documents the customer (or their adjuster / lender) may need — cert of drying, permits, reports. Pages only; internal notes never leave."),
         docWrap,
+        closeBox,
+        moneyBox,
         h("div", { style: "margin-top:12px" }, publishBtn),
         linkBox,
         selBox,
         threadBox) : null,
     );
-    paintPhotos(); paintDryPreview(); paintDocs(); paintLink(); paintSelections(); paintThread();
+    paintPhotos(); paintDryPreview(); paintDocs(); paintCloseout(); paintMoney(); paintLink(); paintSelections(); paintThread();
   }
   paint();
 

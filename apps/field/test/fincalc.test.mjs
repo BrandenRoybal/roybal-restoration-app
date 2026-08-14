@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import {
   lineSubtotal, invoiceTotals, money, loggedCosts, budgetBase, budgetStatus,
-  hasSubcontractorDocs, ESTIMATE_STATUSES, INVOICE_STATUSES, LINE_TYPES,
+  hasSubcontractorDocs, ESTIMATE_STATUSES, INVOICE_STATUSES, LINE_TYPES, billingSummary,
 } from "../js/fincalc.js";
 
 let pass = 0;
@@ -112,3 +112,21 @@ test("status enums match the spec", () => {
 });
 
 console.log(`\n${pass} fincalc checks passed.`);
+
+/* ---------- CF-3 billingSummary ---------- */
+{
+  const p = { invoices: [
+    { status: "sent", items: [{ qty: "1", price: "10000" }], overheadPct: "0", profitPct: "0", opMode: "pct" },
+    { status: "partially_paid", items: [{ qty: "1", price: "5000" }], overheadPct: "0", profitPct: "0", opMode: "pct",
+      previousPayments: "2000", qboBalance: 3000, payments: [{ amount: 2000 }] },
+    { status: "void", items: [{ qty: "1", price: "999" }] },
+    { items: [{ qty: "1", price: "777" }] },
+  ] };
+  const b = billingSummary(p);
+  assert.equal(b.count, 2, "billing counts tracked invoices only");
+  assert.equal(b.invoiced, 15000, "gross invoiced adds payments back");
+  assert.equal(b.balance, 13000, "balance = untracked total + qboBalance");
+  assert.equal(b.paid, 2000, "paid = invoiced - balance");
+  assert.equal(billingSummary({ invoices: [] }), null, "no tracked invoices -> null");
+  console.log("  \u2713 CF-3 billingSummary roll-up");
+}

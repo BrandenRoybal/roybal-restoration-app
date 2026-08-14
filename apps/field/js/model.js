@@ -85,7 +85,7 @@ export const FORMS = [
     blurb: "Final checklist, warranty + signatures" },
   { key: "changeOrders",     name: "Change Order",       icon: "🔁", multi: true,
     types: ["restoration", "construction"],
-    blurb: "Scope / supplement changes" },
+    blurb: "Scope / supplement changes — publishable to the portal for e-sign approval" },
   { key: "invoices",         name: "Construction Invoice", icon: "🧾", multi: true,
     types: ["restoration", "construction"],
     blurb: "T&M or contract billing — AI-drafted from the job's documentation or built by hand" },
@@ -94,7 +94,7 @@ export const FORMS = [
     blurb: "Proposed rebuild scope & pricing — AI-drafted from the documented damage, sends with the packet alongside the mitigation invoice" },
   { key: "portalShare",      name: "Client Portal",      icon: "🌐", multi: false,
     types: ["restoration", "construction"],
-    blurb: "Share job status & photos with the customer — internal only, never in the packet" },
+    blurb: "The customer's page: status, photos, drying, documents, e-sign change orders, balance & closeout — internal only, never in the packet" },
 ];
 
 /* Job kind. Jobs created before this field existed carry no jobType, so

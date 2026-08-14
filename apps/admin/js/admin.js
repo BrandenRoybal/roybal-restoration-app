@@ -41,15 +41,44 @@ function onStatus(s) {
 
 /* ---------- routes (the admin's first router — field-app hash pattern) ----------
    ''        → dashboard
-   #/c/<id>  → a contact's page (CRM step 5) */
+   #/c/<id>  → a contact's page (CRM step 5)
+   #/help    → how the office admin fits together */
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
 function route() {
   if (!isSignedIn() && SYNC_ENABLED) return renderLogin();
+  if (location.hash.startsWith("#/help")) return renderHelp();
   const cid = contactRoute();
   if (cid) return renderContactPage(view, cid);
   renderDashboard();
 }
 window.addEventListener("hashchange", route);
+
+/* ---------- help (#/help) ---------- */
+function renderHelp() {
+  const body = clear(view);
+  const sec = (title, ...paras) => h("div", { class: "card", style: "margin-top:14px" },
+    h("div", { style: "font-weight:700;margin-bottom:6px" }, title), ...paras);
+  const p = (...kids) => h("p", { class: "muted", style: "font-size:13px;margin:4px 0" }, ...kids);
+  body.append(
+    h("div", { class: "atoolbar" }, h("h1", {}, "How the Office Admin fits together"),
+      h("a", { class: "btn btn--ghost btn--sm", href: "#", onclick: (e) => { e.preventDefault(); location.hash = ""; } }, "‹ Back")),
+    sec("The dashboard",
+      p("The KPI row is the shop at a glance — total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). Below it, the connection panels: ",
+        h("strong", {}, "QuickBooks Time"), " (crew hours), ", h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), ",
+        h("strong", {}, "Gmail"), " (job-matched email), ", h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number), and ",
+        h("strong", {}, "👤 Contacts"), "."),
+      p("The Jobs table lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
+    sec("👤 Contacts — the customer directory",
+      p("Every customer, adjuster, and lead the business has ever touched, deduplicated automatically across the website, phone line, AI chat, texting, email, and field jobs. Search by name, phone, or email, or click a recent contact."),
+      p("A contact's page shows their identity (edit in place; the ", h("strong", {}, "marketing opt-in"), " checkbox lives here), every job on both the field and board sides, and the whole conversation — texts, emails, portal messages, and phone calls — in one timeline."),
+      p(h("strong", {}, "Merge review:"), " when the system suspects two entries are the same person (shared email, same name + address) a banner appears — ", h("strong", {}, "Merge"), " combines them and repoints every job, message, and portal link; ", h("strong", {}, "Not a match"), " dismisses it. Exact phone matches merge automatically; anything weaker always asks."),
+      p("A merged contact keeps working everywhere: links follow the surviving record, and QuickBooks identity rides along (no more duplicate customers from a renamed job).")),
+    sec("The customer portal, from the office side",
+      p("Each job's ", h("strong", {}, "🌐 Client Portal"), " form (in the field app) controls what its customer sees: status + photos, drying readings, shared documents, the weekday “who's coming today” line, change-order e-sign, the shared balance with a pay-online link, and — once complete — the warranty, home file, and review ask."),
+      p("Customer texts to the company number land on the job's portal thread automatically, and office replies text back when the customer is conversing by SMS. The 📨 unread count on the assistant tracks waiting messages.")),
+    sec("💬 Ask the office (the assistant)",
+      p("The floating assistant reads the same job records and can draft replies, adjuster emails, portal updates, invoices and change orders — every action lands behind a confirm chip; nothing sends or writes without your tap.")));
+}
 
 $("#signOutBtn").addEventListener("click", () => {
   if (!confirm("Sign out of the office admin?")) return;
@@ -144,7 +173,8 @@ async function renderDashboard() {
   body.append(h("div", { class: "atoolbar" },
     h("h1", {}, "Jobs"),
     h("div", { style: "display:flex;gap:10px" }, search,
-      h("button", { class: "btn btn--ghost btn--sm", onclick: () => syncNow() }, "↻ Refresh"))));
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => syncNow() }, "↻ Refresh"),
+      h("a", { class: "btn btn--ghost btn--sm", href: "#/help", title: "How the Office Admin fits together" }, "❓ Help"))));
 
   const tbody = h("tbody");
   body.append(h("div", { class: "atable-wrap" },

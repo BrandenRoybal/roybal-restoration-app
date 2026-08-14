@@ -43,6 +43,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { customerSheet, validateResponse, submissionMessage } from "./selections.ts";
+import { crewToday, crewLine } from "./crewtoday.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -75,6 +76,27 @@ const HANDOFF_LINE =
   "Thanks for your message! I've passed this along to the Roybal Construction team and they'll get back to you soon. " +
   "If it's urgent, please call us at 907-371-9868.";
 
+/* ---------- CF-1 contact sessions (accounts) ----------
+   "My projects" without a DB credential: the customer proves possession of
+   the phone ALREADY ON FILE (a 6-digit texted code) and receives a long
+   bearer session, hashed at rest in contact_sessions. The gateway then
+   accepts {session, jobId} anywhere it accepts a job token — resolved
+   server-side to that job's own share_token, which never leaves the server
+   in a session response. Rate caps + attempt counters live in the 232 RPCs. */
+const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
+const SESSION_TTL_DAYS = Number(Deno.env.get("PORTAL_SESSION_TTL_DAYS") ?? "180");
+const CODE_HOURLY_MAX = Number(Deno.env.get("PORTAL_CODE_HOURLY_MAX") ?? "3");
+const CODE_DAILY_MAX = Number(Deno.env.get("PORTAL_CODE_DAILY_MAX") ?? "20");
+
+const sha256Hex = async (s: string) => {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+const randHex = (bytes: number) =>
+  [...crypto.getRandomValues(new Uint8Array(bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+const randCode = () => String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, "0");
+const goodSession = (t: string) => /^[0-9a-f]{64}$/.test(t);
+
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -90,7 +112,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 async function jobByToken(token: string) {
   const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,customer_name,property_address,status,milestones,photos,documents,drying,selections_submitted_at&limit=1`;
+    `&select=id,contact_id,customer_name,property_address,status,milestones,photos,documents,drying,closeout,approvals,billing,selections_submitted_at&limit=1`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
@@ -159,6 +181,38 @@ async function view(token: string) {
     })).filter((a: { current: number }) => Number.isFinite(a.current)),
     equipmentOut: Number(dr.equipmentOut) || 0,
   } : null;
+  // closeout (CF-4): re-projected through an explicit allow-list, and only
+  // once the job is complete — the record card must never pre-announce.
+  const co = row.status === "complete" && row.closeout && typeof row.closeout === "object" ? row.closeout : null;
+  const closeout = co ? {
+    completedAt: String(co.completedAt || "").slice(0, 10),
+    warrantyMonths: Number(co.warrantyMonths) || 0,
+    homeFile: (Array.isArray(co.homeFile) ? co.homeFile : []).slice(0, 40).map((r: Record<string, unknown>) => ({
+      label: String(r.label || "").slice(0, 80),
+      value: String(r.value || "").slice(0, 200),
+    })).filter((r: { label: string; value: string }) => r.label || r.value),
+  } : null;
+  // approvals (CF-3): allow-list re-projection. The signature image is
+  // deliberately NOT echoed back — the customer drew it; the office views it.
+  const approvals = (Array.isArray(row.approvals) ? row.approvals : []).slice(0, 12)
+    .map((a: Record<string, unknown>) => ({
+      id: String(a.id || ""),
+      title: String(a.title || "Change order").slice(0, 120),
+      description: String(a.description || "").slice(0, 1200),
+      amountDelta: Number(a.amountDelta) || 0,
+      status: ["pending", "approved", "declined"].includes(String(a.status)) ? String(a.status) : "pending",
+      respondedAt: String(a.respondedAt || "").slice(0, 10),
+      signedName: String(a.signedName || "").slice(0, 80),
+    })).filter((a: { id: string }) => a.id);
+  // billing (CF-3): the office-shared roll-up, allow-listed
+  const bi = row.billing && typeof row.billing === "object" ? row.billing : null;
+  const billing = bi ? {
+    invoiced: Number(bi.invoiced) || 0,
+    paid: Number(bi.paid) || 0,
+    balance: Number(bi.balance) || 0,
+    payUrl: /^https:\/\//.test(String(bi.payUrl || "")) ? String(bi.payUrl) : "",
+    asOf: String(bi.asOf || "").slice(0, 10),
+  } : null;
   return {
     job: {
       customerName: row.customer_name || "",
@@ -169,8 +223,114 @@ async function view(token: string) {
     photos,
     documents,
     drying: drying && (drying.areas.length || drying.equipmentOut) ? drying : null,
+    closeout,
+    approvals,
+    billing,
     unread: await unreadForCustomer(row.id),
   };
+}
+
+/* ---------- CF-3: answer a change order (e-sign) ----------
+   Approve carries a typed legal name + a drawn signature (small PNG data
+   URL, stored with the approval row for the office; never echoed back).
+   Decline needs neither. Only a pending approval can be answered — a
+   second answer is a no-op that reports the standing status. */
+async function respondApproval(token: string, approvalId: string, approve: boolean,
+  name: string, signature: string, note: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  const list = Array.isArray(row.approvals) ? row.approvals : [];
+  const idx = list.findIndex((a: Record<string, unknown>) => String(a.id) === String(approvalId));
+  if (idx < 0) return { answered: false, reason: "not_found" };
+  const cur = list[idx] as Record<string, unknown>;
+  if (cur.status && cur.status !== "pending") return { answered: false, reason: "already", status: cur.status };
+
+  const cleanName = String(name || "").trim().slice(0, 80);
+  const sig = String(signature || "");
+  if (approve) {
+    if (cleanName.length < 2) throw new Error("name_required");
+    if (sig && (!sig.startsWith("data:image/png;base64,") || sig.length > 80_000)) throw new Error("bad_signature");
+  }
+  list[idx] = {
+    ...cur,
+    status: approve ? "approved" : "declined",
+    respondedAt: new Date().toISOString(),
+    signedName: approve ? cleanName : "",
+    signature: approve && sig ? sig : "",
+    note: String(note || "").trim().slice(0, 300),
+  };
+  const up = await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
+    method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ approvals: list }),
+  });
+  if (!up.ok) throw new Error("save_failed");
+
+  // the answer lands on the thread as the customer, unread for the office
+  await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify([{ portal_job_id: row.id, direction: "in", channel: "portal", author: "customer",
+      body: `${approve ? "✓ Approved" : "✗ Declined"}: ${String(cur.title || "change order")}` +
+        (approve && cleanName ? ` — signed ${cleanName}` : "") +
+        (String(note || "").trim() ? ` — "${String(note).trim().slice(0, 200)}"` : ""),
+      read_by_office: false, read_by_customer: true }]),
+  }).catch(() => {});
+  return { answered: true, status: approve ? "approved" : "declined" };
+}
+
+/* ---------- CF-4: request warranty service ----------
+   One tap turns "something's wrong with the work" into a board lead
+   pre-linked to the same person (channel 'repeat'), plus the owner alert
+   every other lead lane gets. Deduped: one open warranty lead per contact
+   per 7 days — a second tap inside the window just reassures. */
+async function warrantyRequest(token: string, note: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  const msg = String(note || "").trim().slice(0, 600);
+
+  // dedupe window (soft — a duplicate card is annoying, not dangerous)
+  if (row.contact_id) {
+    const since = new Date(Date.now() - 7 * 86400_000).toISOString();
+    const dq = `coordination_jobs?deleted=eq.false&data->>channel=eq.repeat` +
+      `&data->>contactId=eq.${row.contact_id}&data->>createdAt=gte.${since}&select=id&limit=1`;
+    const dres = await fetch(`${SUPABASE_URL}/rest/v1/${dq}`, { headers: svc });
+    if (dres.ok && ((await dres.json()) as unknown[]).length) return { requested: true, already: true };
+  }
+
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  const lead = {
+    id, stage: "lead", type: "restoration",
+    title: `Warranty — ${row.property_address || row.customer_name || "portal request"}`,
+    customer: row.customer_name || "", phone: "", email: "",
+    address: row.property_address || "",
+    priority: "high", materials: "none", crewIds: [], deps: [], subtasks: [],
+    scheduleMode: "auto", pinnedStart: "", durationDays: null,
+    notes: `Warranty service request from the customer portal.\n` +
+      (msg ? `Customer says: ${msg}\n` : "") + `Origin job: ${row.property_address || row.id}`,
+    channel: "repeat",
+    ...(row.contact_id ? { contactId: String(row.contact_id) } : {}),
+    rev: 1, createdAt: now, updatedAt: now,
+  };
+  const ins = await fetch(`${SUPABASE_URL}/rest/v1/coordination_jobs`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify([{ id, data: lead, deleted: false }]),
+  });
+  if (!ins.ok) throw new Error("request_failed");
+
+  // owner alert — the roybal-lead recipient pattern (ALERT_CELLS falls back
+  // to OWNER_CELL; per-recipient sends, each isolated), never fatal
+  const cells = (Deno.env.get("ALERT_CELLS") || Deno.env.get("OWNER_CELL") || "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  for (const to of cells) {
+    fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+      method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "sendSms", to, kind: "webLead", captured_by: "portal-warranty",
+        body: `🛠 Warranty request — ${row.customer_name || "customer"}, ${row.property_address || ""}. ${msg ? msg.slice(0, 120) : "No details given."}` }),
+    }).catch(() => {});
+  }
+  return { requested: true };
 }
 
 /* the job's thread, oldest-first, mapped to customer-safe shape. Reading the
@@ -488,16 +648,181 @@ async function ask(token: string, bodyText: string) {
   return { posted: { id: q.id }, answered: true, handoff: false, reply: { id: a.id, from: "office", body: ai.message.trim(), at: a.created_at } };
 }
 
+/* ---------- CF-1 account actions ---------- */
+
+/* the contact behind an ACTIVE session token, or null */
+async function sessionContact(session: string): Promise<{ contactId: string } | null> {
+  if (!goodSession(session)) return null;
+  const th = await sha256Hex(session);
+  const q = `contact_sessions?token_hash=eq.${th}&revoked_at=is.null&expires_at=gt.now&select=contact_id&limit=1`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) return null;
+  const row = (await res.json())[0];
+  return row ? { contactId: String(row.contact_id) } : null;
+}
+
+/* {session, jobId} → that job's own share_token — ONLY when the job belongs
+   to the session's contact. The token stays server-side; the client never
+   receives it from a session flow. */
+async function tokenForSession(session: string, jobId: string): Promise<string | null> {
+  const sc = await sessionContact(session);
+  if (!sc || !/^[0-9a-f-]{36}$/i.test(jobId)) return null;
+  const q = `portal_jobs?id=eq.${jobId}&contact_id=eq.${sc.contactId}&enabled=eq.true&select=share_token&limit=1`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) return null;
+  const row = (await res.json())[0];
+  return row ? String(row.share_token) : null;
+}
+
+/* "save this to my account" — text a code to the phone ON FILE (never a
+   number the visitor typed; decision 5's identity bar). Degrades politely:
+   sent:false is a normal outcome, not an error. */
+async function requestAccess(token: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  if (!row.contact_id) return { sent: false, reason: "no_account" };
+  const cres = await fetch(
+    `${SUPABASE_URL}/rest/v1/contacts?id=eq.${row.contact_id}&merged_into=is.null&select=phone_norm,name&limit=1`,
+    { headers: svc });
+  const c = cres.ok ? (await cres.json())[0] : null;
+  if (!c || String(c.phone_norm || "").length !== 10) return { sent: false, reason: "no_phone" };
+
+  const code = randCode();
+  const masked = "•••-" + String(c.phone_norm).slice(-4);
+  const begin = await fetch(`${SUPABASE_URL}/rest/v1/rpc/portal_access_begin`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ p_contact: row.contact_id, p_channel: "sms", p_dest: masked,
+      p_code_hash: await sha256Hex(code), p_hourly: CODE_HOURLY_MAX, p_daily: CODE_DAILY_MAX }),
+  });
+  const sessionId = begin.ok ? await begin.json() : null;
+  if (!sessionId) return { sent: false, reason: "try_later" };
+
+  const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "sendSms", to: c.phone_norm, kind: "portalCode", captured_by: "portal-gateway",
+      body: `Roybal Construction: your project portal code is ${code}. It expires in 10 minutes. Didn't request this? Ignore it.` }),
+  });
+  if (!send.ok) return { sent: false, reason: "try_later" };
+  return { sent: true, dest: masked };
+}
+
+/* code → long-lived session. The raw session token is returned exactly once. */
+async function verifyAccess(token: string, code: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  if (!/^\d{6}$/.test(code)) return { verified: false };
+  const row = await jobByToken(token);
+  if (!row) return null;
+  if (!row.contact_id) return { verified: false };
+  const session = randHex(32);
+  const ver = await fetch(`${SUPABASE_URL}/rest/v1/rpc/portal_access_verify`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ p_contact: row.contact_id, p_code_hash: await sha256Hex(code),
+      p_token_hash: await sha256Hex(session), p_ttl_days: SESSION_TTL_DAYS, p_max_attempts: 5 }),
+  });
+  const ok = ver.ok && (await ver.json()) === true;
+  return ok ? { verified: true, session } : { verified: false };
+}
+
+/* every enabled job for the session's contact — the "My projects" list.
+   Share tokens are deliberately NOT included. */
+async function myProjects(session: string) {
+  const sc = await sessionContact(session);
+  if (!sc) return null;
+  const q = `portal_jobs?contact_id=eq.${sc.contactId}&enabled=eq.true` +
+    `&select=id,property_address,status,milestones,updated_at&order=updated_at.desc&limit=24`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return {
+    projects: (Array.isArray(rows) ? rows : []).map((r: Record<string, unknown>) => ({
+      jobId: r.id,
+      address: String(r.property_address || "Your project"),
+      status: String(r.status || ""),
+      statusLabel: (Array.isArray(r.milestones) ? r.milestones as Array<Record<string, unknown>> : [])
+        .find((m) => m.state === "current")?.label || "",
+      updated: String(r.updated_at || "").slice(0, 10),
+    })),
+  };
+}
+
+/* ---------- CF-2: the weekday who's-coming-today publisher ----------
+   Fired by pg_cron (migration 233), guarded by the cron secret. One thread
+   line per enabled+opted-in job per Alaska day, naming the crew the board
+   has scheduled at the property TODAY — facts only, never a finish date. */
+async function dailyCrewLines() {
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Anchorage" });
+  const jq = `portal_jobs?enabled=eq.true&notify_crew=eq.true&status=neq.complete` +
+    `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id,field_project_id,status&limit=100`;
+  const rows = await (await fetch(`${SUPABASE_URL}/rest/v1/${jq}`, { headers: svc })).json().catch(() => []);
+  if (!Array.isArray(rows) || !rows.length) return { checked: 0, posted: 0 };
+
+  const [boardRows, crewRows] = await Promise.all([
+    fetch(`${SUPABASE_URL}/rest/v1/coordination_jobs?deleted=eq.false&select=id,data&limit=300`, { headers: svc })
+      .then((r) => r.json()).catch(() => []),
+    fetch(`${SUPABASE_URL}/rest/v1/crew_members?deleted=eq.false&select=data&limit=100`, { headers: svc })
+      .then((r) => r.json()).catch(() => []),
+  ]);
+  const boardByField = new Map<string, Record<string, unknown>>();
+  for (const b of Array.isArray(boardRows) ? boardRows : [])
+    if (b?.data?.fieldJobId) boardByField.set(String(b.data.fieldJobId), b.data);
+  const crewName = new Map<string, string>();
+  for (const c of Array.isArray(crewRows) ? crewRows : [])
+    if (c?.data?.id && c.data.active !== false) crewName.set(String(c.data.id), String(c.data.name || ""));
+
+  let posted = 0;
+  for (const row of rows) {
+    const board = row.field_project_id ? boardByField.get(String(row.field_project_id)) : null;
+    if (!board) continue;
+    const names = crewToday(board, today).map((id: string) => crewName.get(id)).filter(Boolean) as string[];
+    const line = crewLine(names);
+    if (!line) continue;                              // nobody scheduled → silence, not noise
+    const ins = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
+      method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify([{ portal_job_id: row.id, direction: "out", channel: "portal",
+        author: "office", body: line, read_by_office: true, read_by_customer: false }]),
+    });
+    if (!ins.ok) continue;
+    await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
+      method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify({ crew_line_date: today }),
+    }).catch(() => {});                               // unstamped = at worst a re-check, never a loss
+    posted++;
+  }
+  return { checked: rows.length, posted };
+}
+
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
   try {
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     const action = String(body.action ?? "view");
-    const token = String(body.token ?? "").trim();
+    let token = String(body.token ?? "").trim();
+    const session = String(body.session ?? "").trim();
+
+    // cron-only publisher: no token, no session — the secret is the gate
+    if (action === "dailyCrewLines") {
+      if (!CRON_SECRET || req.headers.get("x-cron-secret") !== CRON_SECRET)
+        return json({ ok: false, error: "forbidden" }, 403);
+      return json({ ok: true, ...(await dailyCrewLines()) });
+    }
+
+    // CF-1: a session + jobId is as good as that job's own token — resolved
+    // here, once, server-side. Every action below stays token-shaped.
+    if (!token && session && body.jobId) {
+      token = (await tokenForSession(session, String(body.jobId))) ?? "";
+      if (!token) return json({ ok: false, error: "not_found" }, 404);
+    }
 
     let result: unknown = null;
-    if (action === "view") result = await view(token);
+    if (action === "myProjects") result = await myProjects(session);
+    else if (action === "requestAccess") result = await requestAccess(token);
+    else if (action === "verifyAccess") result = await verifyAccess(token, String(body.code ?? "").trim());
+    else if (action === "warrantyRequest") result = await warrantyRequest(token, String(body.note ?? ""));
+    else if (action === "respondApproval") result = await respondApproval(token, String(body.approvalId ?? ""),
+      body.approve === true, String(body.name ?? ""), String(body.signature ?? ""), String(body.note ?? ""));
+    else if (action === "view") result = await view(token);
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));
     else if (action === "ask") result = await ask(token, String(body.body ?? ""));
