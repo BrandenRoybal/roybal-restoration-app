@@ -38,13 +38,26 @@ async function callGateway(payload) {
   return body;
 }
 
-const fetchView = (token) => callGateway({ action: "view", token });
-const fetchThread = (token) => callGateway({ action: "messages", token });
-const askConcierge = (token, body) => callGateway({ action: "ask", token, body });
-const fetchSelections = (token) => callGateway({ action: "selections", token });
-const respondSelection = (token, selectionId, choice, note) =>
-  callGateway({ action: "respondSelection", token, selectionId, choice, note });
-const submitSelections = (token) => callGateway({ action: "submitSelections", token });
+/* Every action takes a CRED — either {token} (a job link, Phase A) or
+   {session, jobId} (a CF-1 account viewing one of its own jobs). The gateway
+   resolves a session to the job's token server-side; this client never holds
+   share tokens it wasn't opened with. */
+const fetchView = (cred) => callGateway({ action: "view", ...cred });
+const fetchThread = (cred) => callGateway({ action: "messages", ...cred });
+const askConcierge = (cred, body) => callGateway({ action: "ask", ...cred, body });
+const fetchSelections = (cred) => callGateway({ action: "selections", ...cred });
+const respondSelection = (cred, selectionId, choice, note) =>
+  callGateway({ action: "respondSelection", ...cred, selectionId, choice, note });
+const submitSelections = (cred) => callGateway({ action: "submitSelections", ...cred });
+const requestAccess = (cred) => callGateway({ action: "requestAccess", ...cred });
+const verifyAccess = (cred, code) => callGateway({ action: "verifyAccess", ...cred, code });
+const fetchProjects = (session) => callGateway({ action: "myProjects", session });
+
+/* ---------- CF-1 account session (localStorage) ---------- */
+const SESSION_KEY = "roybal-portal-session";
+const storedSession = () => { try { return localStorage.getItem(SESSION_KEY) || ""; } catch { return ""; } };
+const saveSession = (s) => { try { localStorage.setItem(SESSION_KEY, s); } catch { /* private mode */ } };
+const clearSession = () => { try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ } };
 
 function message(icon, title, sub) {
   app.replaceChildren(h("div", { class: "msg" },
@@ -245,7 +258,91 @@ function selectionsCard(token, sheet) {
   return card;
 }
 
-function render(data, token) {
+/* ---------- CF-1: save this job to an account ----------
+   Shown only on a token link with no saved session. The code goes to the
+   phone we already have on file — never one typed here. */
+function accountCard(cred) {
+  const card = h("div", { class: "card acct" });
+  const start = h("button", { class: "acct__btn", type: "button" }, "Text me a code");
+  const status = h("p", { class: "acct__status", role: "status" });
+  const intro = () => card.replaceChildren(
+    h("p", { class: "sectitle" }, "Keep this handy"),
+    h("p", { class: "acct__p" }, "Save your projects to this phone — see every job, past and future, without keeping links."),
+    start, status);
+  start.addEventListener("click", async () => {
+    start.disabled = true; status.textContent = "Sending…";
+    try {
+      const r = await requestAccess(cred);
+      if (!r.sent) {
+        status.textContent = r.reason === "try_later"
+          ? "We've sent a few codes recently — try again in an hour."
+          : "We can't set this up automatically — call us at 907-371-9868 and we'll sort it out.";
+        start.disabled = false; return;
+      }
+      codeEntry(r.dest);
+    } catch { status.textContent = "Couldn't send the code — try again in a moment."; start.disabled = false; }
+  });
+  function codeEntry(dest) {
+    const code = h("input", { class: "acct__code", inputmode: "numeric", maxlength: "6", placeholder: "123456", "aria-label": "6-digit code" });
+    const go = h("button", { class: "acct__btn", type: "button" }, "Verify");
+    const st = h("p", { class: "acct__status", role: "status" });
+    go.addEventListener("click", async () => {
+      const v = code.value.replace(/\D/g, "");
+      if (v.length !== 6) { st.textContent = "Enter the 6-digit code."; return; }
+      go.disabled = true; st.textContent = "Checking…";
+      try {
+        const r = await verifyAccess(cred, v);
+        if (r.verified && r.session) {
+          saveSession(r.session);
+          card.replaceChildren(h("p", { class: "sectitle" }, "Saved ✓"),
+            h("p", { class: "acct__p" }, "Your projects now live at ",
+              h("a", { href: "/" }, "portal.roybalconstruction.com"), " on this phone."));
+        } else { st.textContent = "That code didn't match — check it and try again."; go.disabled = false; }
+      } catch { st.textContent = "Couldn't verify — try again in a moment."; go.disabled = false; }
+    });
+    code.addEventListener("keydown", (e) => { if (e.key === "Enter") go.click(); });
+    card.replaceChildren(h("p", { class: "sectitle" }, "Enter your code"),
+      h("p", { class: "acct__p" }, `We texted a 6-digit code to ${dest}. It expires in 10 minutes.`),
+      h("div", { class: "acct__row" }, code, go), st);
+    code.focus();
+  }
+  intro();
+  return card;
+}
+
+/* ---------- CF-1: the "My projects" screen ---------- */
+async function renderProjects(session) {
+  message("⏳", "Loading your projects…");
+  let r;
+  try { r = await fetchProjects(session); }
+  catch (e) {
+    if (e.status === 404) { clearSession(); return message("🔒", "Signed out", "Open a project link we've sent you to sign back in."); }
+    return message("⚠️", "Couldn't load your projects", "Please try again in a moment, or call 907-371-9868.");
+  }
+  const rows = (r.projects || []).map((p) => h("div", { class: "projrow", onclick: () => openProject(session, p.jobId) },
+    h("div", {},
+      h("div", { class: "projrow__t" }, p.address),
+      h("div", { class: "projrow__s" }, [p.statusLabel, p.updated ? "updated " + p.updated : ""].filter(Boolean).join(" · ") || "—")),
+    h("span", { class: "projrow__go" }, "›")));
+  app.replaceChildren(
+    h("div", { class: "card hero" }, h("h1", {}, "Your projects"),
+      h("p", { class: "addr" }, rows.length ? "Everything we're doing (and have done) for you." : "No active projects right now — we're a call away when you need us.")),
+    ...(rows.length ? [h("div", { class: "card" }, ...rows)] : []),
+    h("p", { class: "acct__signout" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); clearSession(); location.href = "/"; } }, "Sign out on this phone")));
+}
+
+async function openProject(session, jobId) {
+  const cred = { session, jobId };
+  message("⏳", "Loading…");
+  try {
+    const [view, sheet] = await Promise.all([fetchView(cred), fetchSelections(cred).catch(() => null)]);
+    render({ ...view, selections: sheet }, cred, { backToProjects: true });
+  } catch {
+    message("⚠️", "Couldn't load that project", "Please try again in a moment, or call 907-371-9868.");
+  }
+}
+
+function render(data, token, opts) {
   const job = data.job || {};
   const badge = job.status
     ? h("span", { class: "statusbadge" }, h("span", { class: "dot" }),
@@ -309,8 +406,16 @@ function render(data, token) {
   const selections = data.selections && data.selections.total
     ? selectionsCard(token, data.selections) : null;
 
+  // account chrome: back-nav in session mode; the save-card on a bare token
+  // link when this phone has no session yet
+  const back = opts && opts.backToProjects
+    ? h("p", { class: "acct__back" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); renderProjects(storedSession()); } }, "‹ All your projects"))
+    : null;
+  const saveCard = (!opts || !opts.backToProjects) && token && token.token && !storedSession()
+    ? accountCard(token) : null;
+
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[hero, timeline, drying, selections, gallery, documents, threadCard(token)].filter(Boolean));
+  app.replaceChildren(...[back, hero, timeline, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";
@@ -327,17 +432,24 @@ function openLightbox(src, alt) {
 }
 
 (async () => {
-  const token = tokenFromUrl();
-  if (!token) return message("🔗", "Link not found", "Open the project link we sent you to view your job status.");
+  const raw = tokenFromUrl();
+  // No token in the URL: an account phone lands on My Projects; anyone else
+  // gets the gentle link-not-found message, same as always.
+  if (!raw) {
+    const s = storedSession();
+    if (s) return renderProjects(s);
+    return message("🔗", "Link not found", "Open the project link we sent you to view your job status.");
+  }
+  const cred = { token: raw };
   try {
     // The status page must render even if the selections sheet fails or the
     // office hasn't published one — it is an addition to this page, not a
     // dependency of it.
     const [view, sheet] = await Promise.all([
-      fetchView(token),
-      fetchSelections(token).catch(() => null),
+      fetchView(cred),
+      fetchSelections(cred).catch(() => null),
     ]);
-    render({ ...view, selections: sheet }, token);
+    render({ ...view, selections: sheet }, cred);
   } catch (e) {
     if (e.status === 404) message("🔒", "This link isn't active", "It may have expired or been turned off. Call us at 907-371-9868 and we'll send a fresh one.");
     else message("⚠️", "Couldn't load your project", "Please try again in a moment, or call us at 907-371-9868.");

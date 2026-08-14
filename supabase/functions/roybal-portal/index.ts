@@ -75,6 +75,26 @@ const HANDOFF_LINE =
   "Thanks for your message! I've passed this along to the Roybal Construction team and they'll get back to you soon. " +
   "If it's urgent, please call us at 907-371-9868.";
 
+/* ---------- CF-1 contact sessions (accounts) ----------
+   "My projects" without a DB credential: the customer proves possession of
+   the phone ALREADY ON FILE (a 6-digit texted code) and receives a long
+   bearer session, hashed at rest in contact_sessions. The gateway then
+   accepts {session, jobId} anywhere it accepts a job token — resolved
+   server-side to that job's own share_token, which never leaves the server
+   in a session response. Rate caps + attempt counters live in the 232 RPCs. */
+const SESSION_TTL_DAYS = Number(Deno.env.get("PORTAL_SESSION_TTL_DAYS") ?? "180");
+const CODE_HOURLY_MAX = Number(Deno.env.get("PORTAL_CODE_HOURLY_MAX") ?? "3");
+const CODE_DAILY_MAX = Number(Deno.env.get("PORTAL_CODE_DAILY_MAX") ?? "20");
+
+const sha256Hex = async (s: string) => {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+};
+const randHex = (bytes: number) =>
+  [...crypto.getRandomValues(new Uint8Array(bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+const randCode = () => String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, "0");
+const goodSession = (t: string) => /^[0-9a-f]{64}$/.test(t);
+
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -90,7 +110,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 async function jobByToken(token: string) {
   const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,customer_name,property_address,status,milestones,photos,documents,drying,selections_submitted_at&limit=1`;
+    `&select=id,contact_id,customer_name,property_address,status,milestones,photos,documents,drying,selections_submitted_at&limit=1`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
@@ -488,16 +508,125 @@ async function ask(token: string, bodyText: string) {
   return { posted: { id: q.id }, answered: true, handoff: false, reply: { id: a.id, from: "office", body: ai.message.trim(), at: a.created_at } };
 }
 
+/* ---------- CF-1 account actions ---------- */
+
+/* the contact behind an ACTIVE session token, or null */
+async function sessionContact(session: string): Promise<{ contactId: string } | null> {
+  if (!goodSession(session)) return null;
+  const th = await sha256Hex(session);
+  const q = `contact_sessions?token_hash=eq.${th}&revoked_at=is.null&expires_at=gt.now&select=contact_id&limit=1`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) return null;
+  const row = (await res.json())[0];
+  return row ? { contactId: String(row.contact_id) } : null;
+}
+
+/* {session, jobId} → that job's own share_token — ONLY when the job belongs
+   to the session's contact. The token stays server-side; the client never
+   receives it from a session flow. */
+async function tokenForSession(session: string, jobId: string): Promise<string | null> {
+  const sc = await sessionContact(session);
+  if (!sc || !/^[0-9a-f-]{36}$/i.test(jobId)) return null;
+  const q = `portal_jobs?id=eq.${jobId}&contact_id=eq.${sc.contactId}&enabled=eq.true&select=share_token&limit=1`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) return null;
+  const row = (await res.json())[0];
+  return row ? String(row.share_token) : null;
+}
+
+/* "save this to my account" — text a code to the phone ON FILE (never a
+   number the visitor typed; decision 5's identity bar). Degrades politely:
+   sent:false is a normal outcome, not an error. */
+async function requestAccess(token: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  if (!row.contact_id) return { sent: false, reason: "no_account" };
+  const cres = await fetch(
+    `${SUPABASE_URL}/rest/v1/contacts?id=eq.${row.contact_id}&merged_into=is.null&select=phone_norm,name&limit=1`,
+    { headers: svc });
+  const c = cres.ok ? (await cres.json())[0] : null;
+  if (!c || String(c.phone_norm || "").length !== 10) return { sent: false, reason: "no_phone" };
+
+  const code = randCode();
+  const masked = "•••-" + String(c.phone_norm).slice(-4);
+  const begin = await fetch(`${SUPABASE_URL}/rest/v1/rpc/portal_access_begin`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ p_contact: row.contact_id, p_channel: "sms", p_dest: masked,
+      p_code_hash: await sha256Hex(code), p_hourly: CODE_HOURLY_MAX, p_daily: CODE_DAILY_MAX }),
+  });
+  const sessionId = begin.ok ? await begin.json() : null;
+  if (!sessionId) return { sent: false, reason: "try_later" };
+
+  const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "sendSms", to: c.phone_norm, kind: "portalCode", captured_by: "portal-gateway",
+      body: `Roybal Construction: your project portal code is ${code}. It expires in 10 minutes. Didn't request this? Ignore it.` }),
+  });
+  if (!send.ok) return { sent: false, reason: "try_later" };
+  return { sent: true, dest: masked };
+}
+
+/* code → long-lived session. The raw session token is returned exactly once. */
+async function verifyAccess(token: string, code: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  if (!/^\d{6}$/.test(code)) return { verified: false };
+  const row = await jobByToken(token);
+  if (!row) return null;
+  if (!row.contact_id) return { verified: false };
+  const session = randHex(32);
+  const ver = await fetch(`${SUPABASE_URL}/rest/v1/rpc/portal_access_verify`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ p_contact: row.contact_id, p_code_hash: await sha256Hex(code),
+      p_token_hash: await sha256Hex(session), p_ttl_days: SESSION_TTL_DAYS, p_max_attempts: 5 }),
+  });
+  const ok = ver.ok && (await ver.json()) === true;
+  return ok ? { verified: true, session } : { verified: false };
+}
+
+/* every enabled job for the session's contact — the "My projects" list.
+   Share tokens are deliberately NOT included. */
+async function myProjects(session: string) {
+  const sc = await sessionContact(session);
+  if (!sc) return null;
+  const q = `portal_jobs?contact_id=eq.${sc.contactId}&enabled=eq.true` +
+    `&select=id,property_address,status,milestones,updated_at&order=updated_at.desc&limit=24`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return {
+    projects: (Array.isArray(rows) ? rows : []).map((r: Record<string, unknown>) => ({
+      jobId: r.id,
+      address: String(r.property_address || "Your project"),
+      status: String(r.status || ""),
+      statusLabel: (Array.isArray(r.milestones) ? r.milestones as Array<Record<string, unknown>> : [])
+        .find((m) => m.state === "current")?.label || "",
+      updated: String(r.updated_at || "").slice(0, 10),
+    })),
+  };
+}
+
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
   try {
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     const action = String(body.action ?? "view");
-    const token = String(body.token ?? "").trim();
+    let token = String(body.token ?? "").trim();
+    const session = String(body.session ?? "").trim();
+
+    // CF-1: a session + jobId is as good as that job's own token — resolved
+    // here, once, server-side. Every action below stays token-shaped.
+    if (!token && session && body.jobId) {
+      token = (await tokenForSession(session, String(body.jobId))) ?? "";
+      if (!token) return json({ ok: false, error: "not_found" }, 404);
+    }
 
     let result: unknown = null;
-    if (action === "view") result = await view(token);
+    if (action === "myProjects") result = await myProjects(session);
+    else if (action === "requestAccess") result = await requestAccess(token);
+    else if (action === "verifyAccess") result = await verifyAccess(token, String(body.code ?? "").trim());
+    else if (action === "view") result = await view(token);
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));
     else if (action === "ask") result = await ask(token, String(body.body ?? ""));
