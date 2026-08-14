@@ -9,7 +9,7 @@
    limited so a prompt-injecting caller is bounded to one junk
    lead and a couple of texts.
    ============================================================ */
-import { rest, insertRow } from "./supa.mjs";
+import { rest, insertRow, patchCaptureEvent } from "./supa.mjs";
 import { SUPABASE_URL, SUPABASE_ANON_KEY, ALERT_CELLS } from "./config.mjs";
 import { accessToken } from "./supa.mjs";
 // the board's scheduling engine is pure ESM (no DOM, no imports) and is
@@ -103,6 +103,26 @@ async function createLead(input, session) {
   const lossType = ["water", "fire", "mold", "remodel", "other"].includes(input.lossType) ? input.lossType : "other";
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
+  // CRM: resolve the person under this machine's own JWT — the server-side
+  // gate admits phone-agent@ untrusted-only, so this can link or create but
+  // never enrich an existing contact. Never fatal to the lead.
+  let contactId = null;
+  try {
+    const rr = await rest(`rpc/contact_resolve`, {
+      method: "POST",
+      body: JSON.stringify({
+        p_name: name, p_phone: phone, p_email: "", p_address: address,
+        p_source: "phone", p_trusted: false, p_role: "customer",
+      }),
+    });
+    if (rr.ok) contactId = await rr.json().catch(() => null);
+    // stamp the call's capture_events envelope so this call shows on the
+    // contact's timeline (the 'call' lane keys on capture_events.contact_id),
+    // not just the lead card
+    if (contactId && session.captureEventId) {
+      await patchCaptureEvent(session.captureEventId, { contact_id: contactId });
+    }
+  } catch { /* the link is best-effort */ }
   const lead = {
     id, stage: "lead", type: lossType === "remodel" ? "remodel" : "mitigation",
     title: `${name} — ${lossType}`, customer: name, phone, address,
@@ -111,6 +131,10 @@ async function createLead(input, session) {
     scheduleMode: "auto", pinnedStart: "", durationDays: null,
     notes: `AI-booked from a phone call (${session.from || "unknown number"}).\n` +
       `${String(input.summary || "").slice(0, 500)}${input.urgency ? `\nUrgency: ${input.urgency}` : ""}`,
+    // channel makes phone leads visible to data->>'channel' queries — they
+    // used to be the one lane that wrote no provenance at all
+    channel: "phone",
+    ...(contactId ? { contactId } : {}),
     aiBooked: true, rev: 1, createdAt: now, updatedAt: now,
   };
   await insertRow("coordination_jobs", { id, data: lead, deleted: false });

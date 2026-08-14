@@ -117,19 +117,95 @@ const qboQuery = (realmId: string, tok: string, q: string) =>
   qboFetch(realmId, tok, `/query?query=${encodeURIComponent(q)}`);
 const escapeQ = (s: string) => String(s).replace(/'/g, "\\'");
 
-/** Find-or-create the customer by display name. Returns the customer Id. */
-async function ensureCustomer(realmId: string, tok: string, customer: { name: string; email?: string; phone?: string; address?: string }) {
-  const displayName = String(customer.name || "Customer").slice(0, 100);
-  const found = await qboQuery(realmId, tok, `select Id from Customer where DisplayName = '${escapeQ(displayName)}'`);
-  const existing = (found.QueryResponse as { Customer?: { Id: string }[] })?.Customer?.[0];
-  if (existing) return existing.Id;
+/** Find-or-create the customer. Returns the customer Id.
+    CRM (migration 228/229): the contact is the durable identity. The QBO Id
+    is persisted on the contact after the first push, and later pushes look
+    it up by Id FIRST — so renaming a customer in either system no longer
+    forks a duplicate QBO Customer on the next invoice. The DisplayName
+    find-or-create remains as the fallback, and every contact step is
+    best-effort: a resolver hiccup degrades to exactly the old behavior. */
+async function ensureCustomer(
+  realmId: string,
+  tok: string,
+  customer: { name: string; email?: string; phone?: string; address?: string },
+  // sb is passed ONLY for a verified office caller (see the gate in
+  // pushInvoice). When absent, this is exactly the pre-CRM find-or-create —
+  // no contact spine is ever touched, so the anon key cannot reach it.
+  sb?: ReturnType<typeof createClient>,
+) {
+  const wantName = String(customer.name || "Customer").slice(0, 100);
+  let contactId: string | null = null;
+  if (sb) {
+    try {
+      // trusted lane: the office is signed in and the fields come off the job
+      // header they curated
+      const { data } = await sb.rpc("contact_resolve", {
+        p_name: customer.name ?? "", p_phone: customer.phone ?? "",
+        p_email: customer.email ?? "", p_address: customer.address ?? "",
+        p_source: "field", p_trusted: true, p_role: "customer",
+      });
+      contactId = (data as string | null) ?? null;
+      if (contactId) {
+        const { data: c } = await sb.from("contacts").select("qbo_customer_id, name")
+          .eq("id", contactId).maybeSingle();
+        // Only reuse the stored id when the resolved person's name matches the
+        // invoice's customer — a phone-only match (spouses, a shared callback
+        // number) resolves to the WRONG person, and billing must never follow
+        // a phone number onto someone else's QBO ledger.
+        const nameMatches = String(c?.name ?? "").trim().toLowerCase() === wantName.trim().toLowerCase();
+        const stored = c?.qbo_customer_id ? String(c.qbo_customer_id) : "";
+        if (stored && nameMatches) {
+          // verify existence + identity: a customer deleted/merged in QBO must
+          // not sink the push with a dead CustomerRef
+          const chk = await qboQuery(realmId, tok, `select Id, DisplayName from Customer where Id = '${escapeQ(stored)}'`);
+          const hit = (chk.QueryResponse as { Customer?: { Id: string; DisplayName: string }[] })?.Customer?.[0];
+          if (hit && String(hit.DisplayName).trim().toLowerCase() === wantName.trim().toLowerCase()) return stored;
+        }
+        // resolved to a different-named person: do NOT reuse or stamp their id
+        if (!nameMatches) contactId = null;
+      }
+    } catch (_) { /* fall through to the DisplayName path */ }
+  }
 
-  const payload: Record<string, unknown> = { DisplayName: displayName };
-  if (customer.address) payload.BillAddr = { Line1: customer.address };
-  if (customer.email) payload.PrimaryEmailAddr = { Address: customer.email };
-  if (customer.phone) payload.PrimaryPhone = { FreeFormNumber: customer.phone };
-  const created = await qboFetch(realmId, tok, "/customer", { method: "POST", body: JSON.stringify(payload) });
-  return String((created.Customer as { Id: string }).Id);
+  const found = await qboQuery(realmId, tok, `select Id from Customer where DisplayName = '${escapeQ(wantName)}'`);
+  const existing = (found.QueryResponse as { Customer?: { Id: string }[] })?.Customer?.[0];
+  let qboId: string;
+  if (existing) {
+    qboId = String(existing.Id);
+  } else {
+    const payload: Record<string, unknown> = { DisplayName: wantName };
+    if (customer.address) payload.BillAddr = { Line1: customer.address };
+    if (customer.email) payload.PrimaryEmailAddr = { Address: customer.email };
+    if (customer.phone) payload.PrimaryPhone = { FreeFormNumber: customer.phone };
+    const created = await qboFetch(realmId, tok, "/customer", { method: "POST", body: JSON.stringify(payload) });
+    qboId = String((created.Customer as { Id: string }).Id);
+  }
+
+  if (sb && contactId) {
+    // persist the id on the same-named contact — service role, so the
+    // column-privilege fence on qbo_customer_id doesn't apply here
+    try { await sb.from("contacts").update({ qbo_customer_id: qboId }).eq("id", contactId); } catch (_) { /* optional */ }
+  }
+  return qboId;
+}
+
+/* Is the caller a signed-in office user (admin/office/tech)? The CRM spine
+   write in ensureCustomer runs p_trusted, so it must never be reachable with
+   just the published anon key. Returns the caller's role, or null. */
+async function callerRole(req: Request, sb: ReturnType<typeof createClient>): Promise<string | null> {
+  try {
+    const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+    if (!token || token === Deno.env.get("SUPABASE_ANON_KEY")) return null;
+    const u = await fetch(`${Deno.env.get("SUPABASE_URL")}/auth/v1/user`, {
+      headers: { apikey: Deno.env.get("SUPABASE_ANON_KEY")!, Authorization: `Bearer ${token}` },
+    });
+    if (!u.ok) return null;
+    const uid = (await u.json().catch(() => null))?.id;
+    if (!uid) return null;
+    const { data } = await sb.from("profiles").select("role").eq("id", uid).maybeSingle();
+    const role = data?.role ? String(data.role) : null;
+    return role;
+  } catch (_) { return null; }
 }
 
 /** Find-or-create the generic service item. Returns the item Id. */
@@ -218,7 +294,11 @@ serve(async (req) => {
       if (!customer?.name) return err("Missing customer name (set the job's Customer field first).");
 
       const { accessToken, realmId } = await getConnection(supabase);
-      const customerId = await ensureCustomer(realmId, accessToken, customer);
+      // CRM linkage runs ONLY for a verified office caller; an anon/machine
+      // push falls back to the pre-CRM DisplayName find-or-create untouched.
+      const role = await callerRole(req, supabase);
+      const trustedSb = (role === "admin" || role === "office" || role === "tech") ? supabase : undefined;
+      const customerId = await ensureCustomer(realmId, accessToken, customer, trustedSb);
       const itemId = await ensureServiceItem(realmId, accessToken);
 
       const lines: Record<string, unknown>[] = inv.items.map((it) => ({

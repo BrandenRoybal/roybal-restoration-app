@@ -35,6 +35,32 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { matchEmailToJob, buildRfc822, extractText, headerOf, addressOf, type Blob } from "./emailmatch.ts";
 
+/* CRM: link a filed email to the person. Exact address match first (only
+   when it hits exactly ONE live contact), then the job crosswalk via the
+   spine. Lookup-only — filing an email never creates a contact — and
+   best-effort: any hiccup returns null and the email files exactly as it
+   always did. */
+async function contactForEmail(
+  sb: ReturnType<typeof createClient>,
+  addr: string,
+  projectId: string | null,
+): Promise<string | null> {
+  try {
+    const a = String(addr || "").trim().toLowerCase();
+    if (a) {
+      const { data } = await sb.from("contacts").select("id")
+        .eq("email_norm", a).is("merged_into", null).limit(2);
+      if (data && data.length === 1) return String(data[0].id);
+    }
+    if (projectId) {
+      const { data } = await sb.from("unified_jobs").select("contact_id")
+        .eq("field_project_id", projectId).not("contact_id", "is", null).limit(1);
+      if (data && data.length === 1) return String(data[0].contact_id);
+    }
+  } catch (_) { /* the link is optional */ }
+  return null;
+}
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -211,6 +237,7 @@ serve(async (req) => {
         newestEpoch = Math.max(newestEpoch, Math.floor(receivedMs / 1000));
         const match = matchEmailToJob({ from: fromH, subject, text }, projects);
         if (!match) { skipped++; continue; }         // stays private, never stored
+        const contact_id = await contactForEmail(supabase, addressOf(fromH), match.projectId);
         const { error: insErr } = await supabase.from("email_messages").insert([{
           gmail_id: id,
           thread_id: String(msg.threadId || ""),
@@ -223,6 +250,7 @@ serve(async (req) => {
           message_id_header: headerOf(payload, "Message-ID"),
           job_id: match.projectId,
           matched_by: match.matchedBy,
+          contact_id,
           received_at: new Date(receivedMs).toISOString(),
           read_by_office: false,
         }]);
@@ -297,6 +325,7 @@ serve(async (req) => {
         message_id_header: "",
         job_id: jobId,
         matched_by: "sent",
+        contact_id: await contactForEmail(supabase, to, jobId),
         received_at: new Date().toISOString(),
         read_by_office: true,
         sent_by: caller,
