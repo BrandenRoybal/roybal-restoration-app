@@ -119,4 +119,15 @@ test("helpers: daysBefore + budgetStatus null without a base", () => {
   assert.equal(budgetStatus({ receipts: [{ amount: 500 }] }), null);
 });
 
+test("overdue lead follow-ups: count + names, ignoring future/resolved/non-leads", () => {
+  const b = buildBrief({ ...base, boardJobs: [
+    { stage: "lead", title: "Marcus Feld", nextActionAt: "2026-07-20" },              // overdue → shown
+    { stage: "lead", title: "Priya Chandra", nextActionAt: "2026-07-30" },            // future → ignored
+    { stage: "lead", title: "Old Won", nextActionAt: "2026-07-01", outcome: "won" },  // resolved → ignored
+    { stage: "scheduled", title: "Not a lead", nextActionAt: "2026-07-10" },          // not a lead → ignored
+  ] });
+  assert.match(b.text, /🎯 1 lead overdue for follow-up: Marcus Feld/);
+  assert.doesNotMatch(b.text, /Priya Chandra|Old Won|Not a lead/);
+});
+
 console.log(`\n${pass} digest checks passed.`);

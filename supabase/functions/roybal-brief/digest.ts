@@ -153,6 +153,10 @@ export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWa
   // 📅 board slips + materials not ordered near start
   const late = boardJobs.filter((j) => !j.isMilestone && j.targetDate && j.targetDate < today && (j.stage || "lead") !== "done");
   if (late.length) lines.push(`📅 past target: ${late.slice(0, 3).map((j) => j.title || j.customer || "job").join(", ")}${late.length > 3 ? ` +${late.length - 3}` : ""}`);
+  // 🎯 leads overdue for a follow-up (CRM step 4)
+  const staleLeads = boardJobs.filter((j) => !j.isMilestone && (j.stage || "lead") === "lead"
+    && !j.outcome && j.nextActionAt && j.nextActionAt < today);
+  if (staleLeads.length) lines.push(`🎯 ${staleLeads.length} lead${staleLeads.length === 1 ? "" : "s"} overdue for follow-up: ${staleLeads.slice(0, 3).map((j) => j.title || j.customer || "lead").join(", ")}${staleLeads.length > 3 ? ` +${staleLeads.length - 3}` : ""}`);
   // 📉 behind baseline — the live schedule re-dates a slipping phased job to
   // finish >= today (its phases drive targetDate), so it's never "past
   // target"; the Gantt baseline snapshot is the reference that exposes it
