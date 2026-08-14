@@ -14,14 +14,21 @@ const seo = {
   reviewed: z.boolean().default(false),
 };
 
+/* Optional on-page FAQ. The page template renders these visibly AND emits
+   them as FAQPage JSON-LD — Google only credits FAQ markup whose text
+   appears on the page, so the two must come from the same source. */
+const faq = z
+  .array(z.object({ q: z.string(), a: z.string() }))
+  .optional();
+
 const services = defineCollection({
   loader: glob({ pattern: "**/*.md", base: "./src/content/services" }),
-  schema: z.object({ ...seo, slug: z.string() }),
+  schema: z.object({ ...seo, slug: z.string(), faq }),
 });
 
 const locations = defineCollection({
   loader: glob({ pattern: "**/*.md", base: "./src/content/locations" }),
-  schema: z.object(seo),
+  schema: z.object({ ...seo, faq }),
 });
 
 const blog = defineCollection({

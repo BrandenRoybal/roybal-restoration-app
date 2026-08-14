@@ -36,7 +36,7 @@ Safety and quality are at the forefront of our general contracting approach in F
 
 ## Local Expertise and Trust
 
-With Roybal Construction, LLC, you get a dedicated partner committed to making your construction or restoration project a success.
+With Roybal Construction, LLC, you get a dedicated partner committed to making your construction or restoration project a success. And we don't stop at the city line — we also serve [North Pole](/general-contractor-in-north-pole), about twenty minutes down the Richardson Highway from our shop, along with Fox and Ester.
 
 ## Contact Us Today
 

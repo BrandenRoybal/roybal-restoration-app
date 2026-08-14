@@ -17,7 +17,9 @@ Water damage can be a nightmare for homeowners and businesses alike. At [Roybal 
 
 ## Understanding Our Water Damage Restoration Services
 
-Our water damage restoration services encompass a complete range of solutions to your needs. We thoroughly assess the damage, extract water, dry and dehumidify remediate mold, and complete restoration. We use advanced equipment and techniques to ensure your property is dried correctly and free from potential hazards. [Our experts](/about-roybal-construction-llc) work diligently to return your home or business to its pre-damage condition, focusing on every detail to guarantee quality results.
+Our water damage restoration services encompass a complete range of solutions to your needs. We thoroughly assess the damage, extract water, dry and dehumidify, remediate mold, and complete restoration. We use advanced equipment and techniques to ensure your property is dried correctly and free from potential hazards. [Our experts](/about-roybal-construction-llc) work diligently to return your home or business to its pre-damage condition, focusing on every detail to guarantee quality results.
+
+In Fairbanks, the most common source of winter water damage is a [frozen or burst pipe](/restoration-services/frozen-burst-pipe-repair-in-fairbanks). If that's what you're dealing with, we thaw the line, repair the break, and dry the damage under one contract — start there.
 
 ## Comprehensive Project Management from Start to Finish
 

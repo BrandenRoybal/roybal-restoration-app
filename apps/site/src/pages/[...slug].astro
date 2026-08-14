@@ -29,6 +29,7 @@ const crumbs = isRestoration && d.path !== "/restoration-services"
   : [];
 
 const site = BUSINESS.url;
+const faq = d.faq ?? [];
 const schema = [
   {
     "@type": "Service",
@@ -40,6 +41,18 @@ const schema = [
     areaServed: { "@type": "City", name: "Fairbanks", containedInPlace: { "@type": "State", name: "Alaska" } },
     url: `${site}${d.path}`,
   },
+  ...(faq.length > 0
+    ? [
+        {
+          "@type": "FAQPage",
+          mainEntity: faq.map((f) => ({
+            "@type": "Question",
+            name: f.q,
+            acceptedAnswer: { "@type": "Answer", text: f.a },
+          })),
+        },
+      ]
+    : []),
   {
     "@type": "BreadcrumbList",
     itemListElement: [
@@ -61,11 +74,40 @@ const related = SERVICES.filter((s) => s.path !== d.path)
 <Base title={d.title} description={d.description} schema={schema} image={d.image}>
   <PageHero heading={d.heading} lede={d.description} image={d.image} crumbs={crumbs} />
 
+  {isRestoration && (
+    <div class="wrap">
+      <p class="iicrc">
+        <img src="/images/iicrc-certified-horizontal.png" alt="IICRC Certified" width="106" height="44" loading="lazy" />
+        <span>
+          Certified by the <strong>IICRC</strong> — the Institute of Inspection, Cleaning
+          and Restoration Certification — in professional water damage restoration.
+        </span>
+      </p>
+    </div>
+  )}
+
   <section class="section">
     <div class="wrap prose">
       <Content />
     </div>
   </section>
+
+  {faq.length > 0 && (
+    <section class="section section--muted">
+      <div class="wrap">
+        <span class="eyebrow">Straight answers</span>
+        <h2>Frequently asked questions</h2>
+        <div class="faqs">
+          {faq.map((f) => (
+            <details class="faqs__item">
+              <summary>{f.q}</summary>
+              <p>{f.a}</p>
+            </details>
+          ))}
+        </div>
+      </div>
+    </section>
+  )}
 
   {related.length > 0 && (
     <section class="section section--muted">
@@ -87,3 +129,49 @@ const related = SERVICES.filter((s) => s.path !== d.path)
 
   <CtaBand />
 </Base>
+
+<style>
+  .iicrc {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    margin: 1.4rem 0 0;
+    padding: 0.8rem 1rem;
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius);
+    background: var(--white);
+    color: var(--slate-600);
+    font-size: 0.92rem;
+    max-width: 44rem;
+  }
+  .iicrc img { flex-shrink: 0; border-radius: 6px; }
+
+  .faqs {
+    margin-top: 1.6rem;
+    max-width: 46rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .faqs__item {
+    background: var(--white);
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius);
+    padding: 0;
+  }
+  .faqs__item summary {
+    cursor: pointer;
+    padding: 0.95rem 1.15rem;
+    font-weight: 600;
+    color: var(--navy-800);
+    list-style-position: outside;
+  }
+  .faqs__item summary:hover { color: var(--orange-dark); }
+  .faqs__item[open] summary { border-bottom: 1px solid var(--slate-100); }
+  .faqs__item p {
+    margin: 0;
+    padding: 0.9rem 1.15rem 1.05rem;
+    color: var(--slate-600);
+    line-height: 1.65;
+  }
+</style>

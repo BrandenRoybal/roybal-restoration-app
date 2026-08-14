@@ -59,6 +59,10 @@ const steps = [
         Fast response and proper mitigation are what keep a bad day from becoming a
         total loss. We handle the emergency, the paperwork, and the rebuild.
       </p>
+      <p class="iicrcLine">
+        <img src="/images/iicrc-certified-horizontal.png" alt="" width="96" height="40" loading="lazy" />
+        <span>IICRC-certified water damage restoration</span>
+      </p>
       <div class="grid grid--4" style="margin-top:2rem">
         {RESTORATION_SERVICES.map((s) => (
           <a class="card" href={s.path}>
@@ -183,6 +187,17 @@ const steps = [
     font-size: 0.88rem;
     color: var(--slate-400);
   }
+
+  .iicrcLine {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    margin: 1.1rem 0 0;
+    color: var(--slate-500);
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .iicrcLine img { border-radius: 5px; }
 
   .steps {
     display: grid;
