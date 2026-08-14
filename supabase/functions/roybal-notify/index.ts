@@ -9,7 +9,7 @@
  * Actions (body.action):
  *   sendSms — { to, body, kind?, unified_job_id?, captured_by?, mediaUrls?[] }
  *             sends from TWILIO_FROM, records the row, returns { sid, status }.
- *             Customer-facing kinds only send 8am–8pm Alaska (quiet hours);
+ *             Customer-facing kinds only send 7am–8pm Alaska (quiet hours);
  *             crew/office kinds (fieldReport, forward) are exempt.
  *
  * Inbound (POST …/roybal-notify/inbound):
@@ -29,7 +29,7 @@
  *                            this low, so they can never silence the phone
  *                            receptionist's alerts or approve-by-text.)
  *           SMS_FORWARD_TO  (optional — US number that inbound texts forward to)
- *           SMS_QUIET_START / SMS_QUIET_END (optional, default 8 / 20 — the
+ *           SMS_QUIET_START / SMS_QUIET_END (optional, default 7 / 20 — the
  *           Alaska-time window customer-facing texts may send in)
  * Deploy:   supabase functions deploy roybal-notify --no-verify-jwt
  *   (--no-verify-jwt required for browser CORS preflight + the Twilio
@@ -113,8 +113,9 @@ export function toE164(raw: unknown): string {
 const clip = (t: string, n = 1600) => Array.from(t).slice(0, n).join("");
 
 /* ---------- quiet hours ----------
-   Customer-facing texts only go out 8am–8pm America/Anchorage — a 6am
-   "on our way" or an evening assistant-proposed text waits for morning.
+   Customer-facing texts only go out 7am–8pm America/Anchorage — the crew
+   starts at 7, so the morning crew line and an "on our way" go out with
+   them; an evening assistant-proposed text still waits for morning.
    Crew/office kinds are exempt (the office WANTS a 6am field report,
    and a chip-confirmed evening text to the crew about tomorrow's start
    is the dispatcher's call — assistCrew is user-confirmed by the tap).
@@ -201,7 +202,7 @@ const qh = (v: string | undefined, dflt: number) => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 && n <= 24 ? n : dflt;
 };
-const QUIET_START = qh(Deno.env.get("SMS_QUIET_START"), 8);
+const QUIET_START = qh(Deno.env.get("SMS_QUIET_START"), 7);
 const QUIET_END = qh(Deno.env.get("SMS_QUIET_END"), 20);
 export function anchorageHour(d = new Date()): number {
   return Number(new Intl.DateTimeFormat("en-US", {

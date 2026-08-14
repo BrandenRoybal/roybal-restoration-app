@@ -238,7 +238,7 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
   sendText: {
     desc:
       "Send an SMS from the company number. params: { to: string — the recipient's phone from the context or a lookup (NEVER invented), " +
-      "message: string — the complete text, sent verbatim, audience: 'customer' | 'crew' }. Customer texts only go out 8am–8pm Alaska " +
+      "message: string — the complete text, sent verbatim, audience: 'customer' | 'crew' }. Customer texts only go out 7am–8pm Alaska " +
       "(quiet hours) — an off-hours tap fails with a clear error, so warn the user when it's late.",
   },
   boardWrite: {
@@ -295,7 +295,7 @@ export const ACTION_DEFS: Record<string, { desc: string }> = {
       "Text the job's customer asking for a specific document or photos (signed authorization, insurance letter, photos of the damage…). " +
       "params: { job: string — customer name or address to match exactly one job, items: string — what to ask for, in plain words, " +
       "note?: string — optional extra context }. The message is composed politely and sent as SMS to the phone number ON THE JOB RECORD — " +
-      "never an invented number. Customer texts respect quiet hours (8am–8pm Alaska).",
+      "never an invented number. Customer texts respect quiet hours (7am–8pm Alaska).",
   },
   portalPhotoShare: {
     desc:
