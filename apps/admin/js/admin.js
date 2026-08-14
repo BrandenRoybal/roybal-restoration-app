@@ -12,6 +12,7 @@ import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
 import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
 import { messagesPanel } from "./messages.js";
+import { contactsPanel, renderContactPage } from "./contacts.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
 
@@ -33,8 +34,22 @@ function onStatus(s) {
     offline: ["#ff6b6b", "Offline"], error: ["#ff6b6b", "Sync error"] };
   const [c, t] = map[s.state] || ["var(--green)", "Online"];
   dot.style.color = c; dot.title = t;
-  if (s.state === "synced" && isSignedIn()) renderDashboard();   // refresh as jobs arrive
+  // refresh as jobs arrive — but never clobber an open contact page
+  // (its edit form would lose keystrokes to a background sync)
+  if (s.state === "synced" && isSignedIn() && !contactRoute()) renderDashboard();
 }
+
+/* ---------- routes (the admin's first router — field-app hash pattern) ----------
+   ''        → dashboard
+   #/c/<id>  → a contact's page (CRM step 5) */
+const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
+function route() {
+  if (!isSignedIn() && SYNC_ENABLED) return renderLogin();
+  const cid = contactRoute();
+  if (cid) return renderContactPage(view, cid);
+  renderDashboard();
+}
+window.addEventListener("hashchange", route);
 
 $("#signOutBtn").addEventListener("click", () => {
   if (!confirm("Sign out of the office admin?")) return;
@@ -46,7 +61,7 @@ function boot() {
   if (!SYNC_ENABLED) return renderDashboard();        // local-only fallback
   if (isSignedIn()) {
     startSyncUI();
-    renderDashboard();
+    route();
     // If an OAuth provider just redirected back with a code, finish the
     // exchange. Google callbacks carry the gm- state prefix; QBO callbacks
     // carry a realmId; TSheets (QB Time) callbacks have neither.
@@ -71,7 +86,7 @@ function renderLogin() {
   const btn = h("button", { class: "btn btn--primary", style: "margin-top:6px" }, "Sign in");
   async function submit() {
     err.hidden = true; btn.disabled = true; btn.textContent = "Signing in…";
-    try { await signIn(email.value, pass.value); startSyncUI(); renderDashboard(); }
+    try { await signIn(email.value, pass.value); startSyncUI(); route(); }
     catch (e) { err.hidden = false; err.textContent = String(e && e.message || e); btn.disabled = false; btn.textContent = "Sign in"; }
   }
   btn.addEventListener("click", submit);
@@ -122,7 +137,7 @@ async function renderDashboard() {
     kpi(drying, "Drying in progress"),
     kpi(attention, "Need attention (7-day equip.)", attention > 0)));
 
-  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel(), gmailPanel(), messagesPanel());
+  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel(), gmailPanel(), messagesPanel(), contactsPanel());
 
   const search = h("input", { type: "search", placeholder: "Search customer, address, claim #…", value: filterText });
   search.addEventListener("input", () => { filterText = search.value.toLowerCase(); paintTable(); });
