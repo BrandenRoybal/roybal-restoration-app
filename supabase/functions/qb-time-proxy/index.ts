@@ -1177,15 +1177,23 @@ serve(async (req) => {
     const isCron = !!cronSecret && provided === cronSecret;
     if (!isCron && !(await requireUser(supabase, req))) return err("Not authorized", 401);
 
-    // Run only inside roybal-notify's SMS window (8am–8pm Alaska): the crew
-    // line's SMS mirror sends kind 'portal', which quiet-hours REFUSES (no
-    // queue) outside that window — so an earlier clock-in is deliberately
-    // held and posts on the first tick after 8, thread + text together.
+    // Run only inside roybal-notify's SMS window (7am–8pm Alaska — crew
+    // starts at 7): the crew line's SMS mirror sends kind 'portal', which
+    // quiet-hours REFUSES (no queue) outside that window — so an earlier
+    // clock-in is deliberately held and posts on the first tick after the
+    // window opens, thread + text together. Reads the SAME env overrides as
+    // roybal-notify (defaults in lockstep) so the two windows cannot drift.
+    const qhEnv = (v: string | undefined, dflt: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 && n <= 24 ? n : dflt;
+    };
+    const quietStart = qhEnv(Deno.env.get("SMS_QUIET_START"), 7);
+    const quietEnd = qhEnv(Deno.env.get("SMS_QUIET_END"), 20);
     const now = new Date();
     const akHour = Number(new Intl.DateTimeFormat("en-US", {
       timeZone: "America/Anchorage", hour: "numeric", hour12: false,
     }).format(now));
-    if (akHour < 8 || akHour >= 20) return ok({ skipped: "outside the SMS window" });
+    if (akHour < quietStart || akHour >= quietEnd) return ok({ skipped: "outside the SMS window" });
     const today = now.toLocaleDateString("en-CA", { timeZone: "America/Anchorage" });
 
     try {

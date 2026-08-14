@@ -826,7 +826,7 @@ async function dailyCrewLines(opts: { fieldProjectIds?: unknown; clockedIn?: unk
    server-side: text it ONLY when the customer's latest inbound message rode
    SMS (they're conversing by text; web-thread customers get no duplicate).
    Kind 'portal' is quiet-hours guarded and roybal-notify REFUSES (no queue)
-   outside 8am–8pm Alaska — which is why clockinSweep only runs inside that
+   outside 7am–8pm Alaska — which is why clockinSweep only runs inside that
    window: thread line and text always land together. A refusal here (e.g. a
    tightened quiet-hours env) is logged, not retried; the thread line stands. */
 async function mirrorCrewLineToSms(portalJobId: string, text: string) {

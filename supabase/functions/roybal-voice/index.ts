@@ -119,10 +119,10 @@ const voicemail = (lead: string) =>
   `<Record maxLength="120" playBeep="true"/>` +
   `<Say>Thanks — we'll be in touch soon. Goodbye.</Say><Hangup/>`;
 
-/* Business hours = the same 8am–8pm America/Anchorage window the SMS
+/* Business hours = the same 7am–8pm America/Anchorage window the SMS
    quiet-hours use (SMS_QUIET_START/END are project-wide secrets), so
    "office hours" means one thing across the whole phone/text lane. */
-const BIZ_START = qhNum(Deno.env.get("SMS_QUIET_START"), 8);
+const BIZ_START = qhNum(Deno.env.get("SMS_QUIET_START"), 7);
 const BIZ_END = qhNum(Deno.env.get("SMS_QUIET_END"), 20);
 function qhNum(v: string | undefined, dflt: number): number {
   const n = Number(v);
