@@ -228,6 +228,12 @@ table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover;
    the avoid, so a photo that won't fit drops whole to the next page.
    (font-size:0 kills the inline-block whitespace gap; .photocap restores it.) */
 .photogrid { display: block; font-size: 0; }
+/* stage/room section headers (sorted gallery) — keep each header with its photos */
+.photogroup {
+  font-size: 10.5pt; font-weight: 800; text-transform: uppercase; letter-spacing: .5px;
+  color: #0f1b2d; margin: 8px 0 5px; padding-bottom: 2px; border-bottom: 1px solid #0f1b2d;
+  break-after: avoid; page-break-after: avoid;
+}
 .photocard {
   display: inline-block; width: 49%; vertical-align: top; box-sizing: border-box;
   margin: 0 0 8px; border: 0.6px solid #6b7892; border-radius: 0; overflow: hidden;
