@@ -101,3 +101,26 @@ export function budgetStatus(p, threshold = 0.9) {
   const pct = costs / base;
   return { costs, base, pct: Math.round(pct * 100), over: pct > threshold };
 }
+
+/** CF-3 billing summary — the customer-safe money roll-up.
+    Chip-tracked invoices only (a status means the office manages this
+    invoice's lifecycle in the app); void excluded. Per invoice the balance
+    due is QuickBooks' live balance when the nightly pull tracks it
+    (qboBalance, ground truth for money received), else the app's own
+    remaining-due (invoiceTotals().total, already net of payments).
+    Gross invoiced adds recorded payments back so paid = invoiced − balance. */
+export function billingSummary(p) {
+  const num2 = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  let invoiced = 0, balance = 0, count = 0;
+  for (const inv of (p && p.invoices) || []) {
+    if (!inv || !inv.status || inv.status === "void") continue;
+    const t = invoiceTotals(inv);
+    const due = Number.isFinite(Number(inv.qboBalance)) ? Number(inv.qboBalance) : t.total;
+    invoiced += t.total + num2(inv.previousPayments);
+    balance += Math.max(0, due);
+    count++;
+  }
+  if (!count) return null;
+  const r2 = (n) => Math.round(n * 100) / 100;
+  return { invoiced: r2(invoiced), paid: r2(invoiced - balance), balance: r2(balance), count };
+}

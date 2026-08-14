@@ -207,3 +207,21 @@ body {
 .hf__k { flex: 0 0 42%; color: var(--muted, #6b7686); }
 .hf__v { flex: 1; font-weight: 600; overflow-wrap: anywhere; }
 .review__btn { display: inline-block; text-decoration: none; text-align: center; }
+
+/* ---------- change-order approvals + balance (CF-3) ---------- */
+.appr--pending { border: 2px solid var(--brand, #f26a21); }
+.appr--approved { border-left: 4px solid #1f8f4e; }
+.appr--declined { border-left: 4px solid #cc3f3f; }
+.appr__amt { font-weight: 700; font-size: 14.5px; margin: 6px 0 10px; }
+.appr__name { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 15px;
+  border: 1.5px solid var(--line-strong, #cdd5df); border-radius: 11px; padding: 10px; margin-bottom: 8px; }
+.appr__name:focus { outline: none; border-color: var(--brand, #f26a21); }
+.appr__row { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
+.appr__decline { background: none; border: 1.5px solid var(--line-strong, #cdd5df); color: #c0392b;
+  font-weight: 700; font-size: 14px; border-radius: 11px; padding: 11px 16px; cursor: pointer; font-family: inherit; }
+.sig { position: relative; }
+.sig__canvas { width: 100%; height: 120px; border: 1.5px dashed var(--line-strong, #cdd5df);
+  border-radius: 11px; background: #fff; touch-action: none; display: block; }
+.sig__clear { position: absolute; top: 6px; right: 6px; background: none; border: none;
+  color: var(--muted, #6b7686); font-size: 12px; cursor: pointer; font-family: inherit; }
+.bill__due { color: var(--brand-dark, #c14e12); font-size: 15px; }

@@ -344,6 +344,21 @@ serve(async (req) => {
       return ok({ qboInvoiceId: String(q.Id), docNumber: q.DocNumber, total: q.TotalAmt, updated: !!payload.Id });
     }
 
+    // ── invoiceLink (CF-3) ────────────────────────────────────────────────
+    // The QBO online-payment URL for one pushed invoice, for the portal's
+    // "Pay online" button. Office callers only — same gate as the CRM
+    // linkage: an anon-key caller gets a clean refusal, nothing else.
+    if (action === "invoiceLink") {
+      const invoiceId = String(body.invoiceId ?? "").trim();
+      if (!invoiceId) return err("Missing invoiceId");
+      const role = await callerRole(req, supabase);
+      if (!(role === "admin" || role === "office" || role === "tech")) return err("Sign in to fetch payment links", 403);
+      const { accessToken, realmId } = await getConnection(supabase);
+      const data = await qboFetch(realmId, accessToken, `/invoice/${encodeURIComponent(invoiceId)}?include=invoiceLink`);
+      const link = String((data.Invoice as Record<string, unknown>)?.InvoiceLink ?? "");
+      return ok({ link: /^https:\/\//.test(link) ? link : null });
+    }
+
     // ── pullPayments (cron only) ──────────────────────────────────────────
     if (action === "pullPayments") {
       const cronSecret = Deno.env.get("CRON_SECRET") ?? "";

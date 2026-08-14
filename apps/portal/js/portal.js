@@ -53,8 +53,32 @@ const requestAccess = (cred) => callGateway({ action: "requestAccess", ...cred }
 const verifyAccess = (cred, code) => callGateway({ action: "verifyAccess", ...cred, code });
 const fetchProjects = (session) => callGateway({ action: "myProjects", session });
 const warrantyRequest = (cred, note) => callGateway({ action: "warrantyRequest", ...cred, note });
+const respondApproval = (cred, approvalId, approve, name, signature, note) =>
+  callGateway({ action: "respondApproval", ...cred, approvalId, approve, name, signature, note });
 
 const REVIEW_URL = "https://g.page/r/CSv3IUml4W9GEBM/review";
+const usd = (n) => "$" + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+
+/* ---------- a small signature pad (CF-3 e-sign) ---------- */
+function sigPad() {
+  const canvas = h("canvas", { class: "sig__canvas", width: "560", height: "160" });
+  const ctx = canvas.getContext("2d");
+  ctx.lineWidth = 2.4; ctx.lineCap = "round"; ctx.strokeStyle = "#16395a";
+  let drawing = false, drew = false;
+  const pos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return [(e.clientX - r.left) * (canvas.width / r.width), (e.clientY - r.top) * (canvas.height / r.height)];
+  };
+  canvas.addEventListener("pointerdown", (e) => { drawing = true; drew = true; canvas.setPointerCapture(e.pointerId); const [x, y] = pos(e); ctx.beginPath(); ctx.moveTo(x, y); e.preventDefault(); });
+  canvas.addEventListener("pointermove", (e) => { if (!drawing) return; const [x, y] = pos(e); ctx.lineTo(x, y); ctx.stroke(); e.preventDefault(); });
+  const stop = () => { drawing = false; };
+  canvas.addEventListener("pointerup", stop); canvas.addEventListener("pointercancel", stop);
+  const clearBtn = h("button", { class: "sig__clear", type: "button",
+    onclick: () => { ctx.clearRect(0, 0, canvas.width, canvas.height); drew = false; } }, "Clear");
+  const wrap = h("div", { class: "sig" }, canvas, clearBtn);
+  wrap.getSignature = () => (drew ? canvas.toDataURL("image/png") : "");
+  return wrap;
+}
 
 /* ---------- CF-1 account session (localStorage) ---------- */
 const SESSION_KEY = "roybal-portal-session";
@@ -391,6 +415,64 @@ function render(data, token, opts) {
       `${dr.equipmentOut} drying machine${dr.equipmentOut === 1 ? "" : "s"} running at your property.`) : null,
     h("p", { class: "dry__note" }, "These are our meter readings — your team confirms timing directly with you.")) : null;
 
+  // approvals (CF-3): pending change orders sit right under the timeline —
+  // they're money waiting on the customer, the most time-bound thing here
+  const approvalCards = (data.approvals || []).map((a) => {
+    if (a.status !== "pending") {
+      return h("div", { class: "card appr appr--" + a.status },
+        h("p", { class: "sectitle" }, a.title),
+        h("p", { class: "warr__p" }, a.status === "approved"
+          ? `✓ Approved${a.respondedAt ? " " + a.respondedAt : ""}${a.signedName ? " — signed " + a.signedName : ""}.`
+          : `✗ Declined${a.respondedAt ? " " + a.respondedAt : ""}. We'll follow up to talk it through.`));
+    }
+    const nameInp = h("input", { class: "appr__name", placeholder: "Type your full legal name", "aria-label": "Your full legal name" });
+    const pad = sigPad();
+    const st = h("p", { class: "acct__status", role: "status" });
+    const okBtn = h("button", { class: "acct__btn", type: "button" }, "Approve & sign");
+    const noBtn = h("button", { class: "appr__decline", type: "button" }, "Decline");
+    const finish = (card, status) => card.replaceWith(h("div", { class: "card appr appr--" + status },
+      h("p", { class: "sectitle" }, a.title),
+      h("p", { class: "warr__p" }, status === "approved" ? "✓ Approved — thank you! We'll keep moving." : "✗ Declined — we'll reach out to talk it through.")));
+    okBtn.addEventListener("click", async () => {
+      const nm = nameInp.value.trim();
+      if (nm.length < 2) { st.textContent = "Type your full legal name to sign."; return; }
+      okBtn.disabled = true; st.textContent = "Sending…";
+      try {
+        const r = await respondApproval(token, a.id, true, nm, pad.getSignature(), "");
+        if (r.answered) finish(card, "approved");
+        else { st.textContent = "This was already answered — refresh to see the latest."; }
+      } catch { st.textContent = "Couldn't send — try again, or call 907-371-9868."; okBtn.disabled = false; }
+    });
+    noBtn.addEventListener("click", async () => {
+      if (!confirm("Decline this change order? We'll follow up to talk it through.")) return;
+      noBtn.disabled = true; st.textContent = "Sending…";
+      try {
+        const r = await respondApproval(token, a.id, false, "", "", "");
+        if (r.answered) finish(card, "declined"); else st.textContent = "Already answered — refresh to see the latest.";
+      } catch { st.textContent = "Couldn't send — try again, or call 907-371-9868."; noBtn.disabled = false; }
+    });
+    const card = h("div", { class: "card appr appr--pending" },
+      h("p", { class: "sectitle" }, "Needs your approval — " + a.title),
+      a.description ? h("p", { class: "warr__p" }, a.description) : null,
+      h("p", { class: "appr__amt" }, a.amountDelta > 0 ? `Adds ${usd(a.amountDelta)} to the contract.`
+        : a.amountDelta < 0 ? `Reduces the contract by ${usd(-a.amountDelta)}.` : "No change to the contract price."),
+      nameInp, pad,
+      h("div", { class: "appr__row" }, okBtn, noBtn), st);
+    return card;
+  });
+
+  // billing (CF-3): the shared balance, QBO-grounded
+  const bi = data.billing;
+  const billingCard = bi ? h("div", { class: "card" },
+    h("p", { class: "sectitle" }, "Your balance"),
+    h("div", { class: "hf__row" }, h("span", { class: "hf__k" }, "Invoiced"), h("span", { class: "hf__v" }, usd(bi.invoiced))),
+    h("div", { class: "hf__row" }, h("span", { class: "hf__k" }, "Paid"), h("span", { class: "hf__v" }, usd(bi.paid))),
+    h("div", { class: "hf__row" }, h("span", { class: "hf__k" }, "Balance due"), h("span", { class: "hf__v bill__due" }, usd(bi.balance))),
+    bi.payUrl && bi.balance > 0
+      ? h("a", { class: "acct__btn review__btn", style: "margin-top:10px", href: bi.payUrl, target: "_blank", rel: "noopener" }, "Pay online")
+      : bi.balance > 0 ? h("p", { class: "dry__note" }, "To pay, reply here or call 907-371-9868 — thank you!") : h("p", { class: "dry__note" }, "Paid in full — thank you!"),
+    bi.asOf ? h("p", { class: "dry__note" }, "As of " + bi.asOf + ".") : null) : null;
+
   // closeout (CF-4): once complete, the page becomes the customer's record —
   // warranty with one-tap service request, the home file, review + referral
   const co = data.closeout;
@@ -466,7 +548,7 @@ function render(data, token, opts) {
     ? accountCard(token) : null;
 
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[back, hero, timeline, ...closeoutCards, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
+  app.replaceChildren(...[back, hero, timeline, ...approvalCards, ...closeoutCards, billingCard, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";

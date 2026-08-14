@@ -3214,6 +3214,102 @@ export function portalShareForm(project) {
   }
   statusSel.addEventListener("change", paintCloseout);
 
+  // ---------- Money (CF-3): change-order approvals + shared balance ----------
+  // Both live in portal_jobs columns publishPortal never touches (a republish
+  // must not reset a customer's answer or un-share the balance).
+  const moneyBox = h("div", { style: "margin-top:14px" });
+  async function paintMoney() {
+    moneyBox.replaceChildren(sectionTitle("Money"),
+      h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 8px" },
+        "Publish a change order for e-sign approval, and share the balance (QuickBooks is the ground truth on synced invoices)."));
+    if (!s.enabled || !s.shareToken) { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Turn the portal on first.")); return; }
+    const { rest, callFunction } = await import("./supa.js");
+    const { billingSummary, lineSubtotal, money: fmtMoney } = await import("./fincalc.js");
+    let approvals = [], billing = null;
+    try {
+      const r = await rest(`portal_jobs?id=eq.${s.id}&select=approvals,billing&limit=1`, { method: "GET" });
+      if (r.ok) { const row = (await r.json())[0] || {}; approvals = row.approvals || []; billing = row.billing || null; }
+    } catch { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Offline — money tools need a connection.")); return; }
+    const byId = new Map(approvals.map((a) => [a.id, a]));
+
+    // change orders
+    const cos = (project.changeOrders || []).filter((c) => c && (c.description || (c.items || []).length));
+    if (!cos.length) moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "No change orders on this job yet (Change Order form)."));
+    cos.forEach((co, i) => {
+      const amt = lineSubtotal(co.items || []);
+      const cur = byId.get(co.id);
+      const label = `CO ${co.coNo || i + 1} — ${fmtMoney(amt)}`;
+      let stateEl;
+      if (cur && cur.status === "approved") stateEl = h("span", { class: "subtle", style: "color:var(--green,#1f7a45);font-size:12px" }, `✓ approved${cur.signedName ? " — signed " + cur.signedName : ""}`);
+      else if (cur && cur.status === "declined") stateEl = h("span", { class: "subtle", style: "color:#c0392b;font-size:12px" }, "✗ declined" + (cur.note ? ` — "${cur.note}"` : ""));
+      else if (cur) stateEl = h("span", { class: "subtle", style: "font-size:12px" }, "⏳ awaiting the customer");
+      else {
+        const pub = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Publish for approval");
+        pub.addEventListener("click", async () => {
+          pub.disabled = true;
+          try {
+            const next = [...approvals.filter((a) => a.id !== co.id), {
+              id: co.id, title: `Change Order ${co.coNo || i + 1}`,
+              description: String(co.description || "").slice(0, 1200),
+              amountDelta: amt, status: "pending", publishedAt: new Date().toISOString(),
+            }];
+            const up = await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ approvals: next }) });
+            if (!up.ok) throw new Error("save failed");
+            await sendOfficeReply(s.id, `A change order needs your review and signature: Change Order ${co.coNo || i + 1} (${fmtMoney(amt)}). Open your project page to approve it.`);
+            if (project.phone) callFunction("roybal-notify", { action: "sendSms", to: project.phone, kind: "portal", captured_by: techName(),
+              body: `Roybal Construction: a change order needs your approval. Review and sign here: ${portalShareLink(s.shareToken)}` }).catch(() => {});
+            toast("Published — the customer was asked to review it.");
+            paintMoney();
+          } catch (e) { toast("Couldn't publish: " + (e.message || e)); pub.disabled = false; }
+        });
+        stateEl = pub;
+      }
+      moneyBox.append(h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)" },
+        h("span", { style: "font-size:13px;font-weight:600" }, label), stateEl));
+    });
+
+    // balance
+    const sum = billingSummary(project);
+    const balRow = h("div", { style: "margin-top:10px" });
+    if (billing) {
+      balRow.append(h("p", { class: "subtle", style: "font-size:12.5px;margin:0 0 6px" },
+        `Shared ${billing.asOf || ""}: ${fmtMoney(billing.invoiced)} invoiced · ${fmtMoney(billing.paid)} paid · `,
+        h("strong", {}, fmtMoney(billing.balance) + " due"), billing.payUrl ? " · pay-online link attached" : ""));
+    }
+    if (!sum) balRow.append(h("p", { class: "subtle", style: "font-size:12px;margin:0" }, "No tracked invoices yet — set an invoice status on the Invoice form."));
+    else {
+      const shareBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" },
+        (billing ? "Update" : "Share") + ` balance (${fmtMoney(sum.balance)} due)`);
+      shareBtn.addEventListener("click", async () => {
+        shareBtn.disabled = true;
+        try {
+          // best-effort pay link from the newest tracked unpaid invoice
+          let payUrl = "";
+          const cand = (project.invoices || []).filter((v) => v && v.qboInvoiceId && v.status && !["paid", "void"].includes(v.status)).pop();
+          if (cand) {
+            try { const r = await callFunction("qbo-proxy", { action: "invoiceLink", invoiceId: cand.qboInvoiceId });
+              const d = await r.json(); if (d && d.ok && d.link) payUrl = d.link; } catch { /* balance still shares */ }
+          }
+          const up = await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" },
+            body: JSON.stringify({ billing: { ...sum, payUrl, asOf: todayISO() } }) });
+          if (!up.ok) throw new Error("save failed");
+          toast(payUrl ? "Balance shared with a pay-online link." : "Balance shared.");
+          paintMoney();
+        } catch (e) { toast("Couldn't share: " + (e.message || e)); shareBtn.disabled = false; }
+      });
+      balRow.append(shareBtn);
+      if (billing) {
+        const stop = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto;margin-left:8px" }, "Stop sharing");
+        stop.addEventListener("click", async () => {
+          await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ billing: null }) }).catch(() => {});
+          toast("Balance hidden."); paintMoney();
+        });
+        balRow.append(stop);
+      }
+    }
+    moneyBox.append(balRow);
+  }
+
   const publishBtn = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "⬆ Publish to portal");
   publishBtn.addEventListener("click", async () => {
     if (!s.enabled) { toast("Turn the portal on first."); return; }
@@ -3418,12 +3514,13 @@ export function portalShareForm(project) {
           "Documents the customer (or their adjuster / lender) may need — cert of drying, permits, reports. Pages only; internal notes never leave."),
         docWrap,
         closeBox,
+        moneyBox,
         h("div", { style: "margin-top:12px" }, publishBtn),
         linkBox,
         selBox,
         threadBox) : null,
     );
-    paintPhotos(); paintDryPreview(); paintDocs(); paintCloseout(); paintLink(); paintSelections(); paintThread();
+    paintPhotos(); paintDryPreview(); paintDocs(); paintCloseout(); paintMoney(); paintLink(); paintSelections(); paintThread();
   }
   paint();
 

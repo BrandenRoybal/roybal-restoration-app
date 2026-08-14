@@ -112,7 +112,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 async function jobByToken(token: string) {
   const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,contact_id,customer_name,property_address,status,milestones,photos,documents,drying,closeout,selections_submitted_at&limit=1`;
+    `&select=id,contact_id,customer_name,property_address,status,milestones,photos,documents,drying,closeout,approvals,billing,selections_submitted_at&limit=1`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
@@ -192,6 +192,27 @@ async function view(token: string) {
       value: String(r.value || "").slice(0, 200),
     })).filter((r: { label: string; value: string }) => r.label || r.value),
   } : null;
+  // approvals (CF-3): allow-list re-projection. The signature image is
+  // deliberately NOT echoed back — the customer drew it; the office views it.
+  const approvals = (Array.isArray(row.approvals) ? row.approvals : []).slice(0, 12)
+    .map((a: Record<string, unknown>) => ({
+      id: String(a.id || ""),
+      title: String(a.title || "Change order").slice(0, 120),
+      description: String(a.description || "").slice(0, 1200),
+      amountDelta: Number(a.amountDelta) || 0,
+      status: ["pending", "approved", "declined"].includes(String(a.status)) ? String(a.status) : "pending",
+      respondedAt: String(a.respondedAt || "").slice(0, 10),
+      signedName: String(a.signedName || "").slice(0, 80),
+    })).filter((a: { id: string }) => a.id);
+  // billing (CF-3): the office-shared roll-up, allow-listed
+  const bi = row.billing && typeof row.billing === "object" ? row.billing : null;
+  const billing = bi ? {
+    invoiced: Number(bi.invoiced) || 0,
+    paid: Number(bi.paid) || 0,
+    balance: Number(bi.balance) || 0,
+    payUrl: /^https:\/\//.test(String(bi.payUrl || "")) ? String(bi.payUrl) : "",
+    asOf: String(bi.asOf || "").slice(0, 10),
+  } : null;
   return {
     job: {
       customerName: row.customer_name || "",
@@ -203,8 +224,58 @@ async function view(token: string) {
     documents,
     drying: drying && (drying.areas.length || drying.equipmentOut) ? drying : null,
     closeout,
+    approvals,
+    billing,
     unread: await unreadForCustomer(row.id),
   };
+}
+
+/* ---------- CF-3: answer a change order (e-sign) ----------
+   Approve carries a typed legal name + a drawn signature (small PNG data
+   URL, stored with the approval row for the office; never echoed back).
+   Decline needs neither. Only a pending approval can be answered — a
+   second answer is a no-op that reports the standing status. */
+async function respondApproval(token: string, approvalId: string, approve: boolean,
+  name: string, signature: string, note: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  const list = Array.isArray(row.approvals) ? row.approvals : [];
+  const idx = list.findIndex((a: Record<string, unknown>) => String(a.id) === String(approvalId));
+  if (idx < 0) return { answered: false, reason: "not_found" };
+  const cur = list[idx] as Record<string, unknown>;
+  if (cur.status && cur.status !== "pending") return { answered: false, reason: "already", status: cur.status };
+
+  const cleanName = String(name || "").trim().slice(0, 80);
+  const sig = String(signature || "");
+  if (approve) {
+    if (cleanName.length < 2) throw new Error("name_required");
+    if (sig && (!sig.startsWith("data:image/png;base64,") || sig.length > 80_000)) throw new Error("bad_signature");
+  }
+  list[idx] = {
+    ...cur,
+    status: approve ? "approved" : "declined",
+    respondedAt: new Date().toISOString(),
+    signedName: approve ? cleanName : "",
+    signature: approve && sig ? sig : "",
+    note: String(note || "").trim().slice(0, 300),
+  };
+  const up = await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
+    method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ approvals: list }),
+  });
+  if (!up.ok) throw new Error("save_failed");
+
+  // the answer lands on the thread as the customer, unread for the office
+  await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
+    method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify([{ portal_job_id: row.id, direction: "in", channel: "portal", author: "customer",
+      body: `${approve ? "✓ Approved" : "✗ Declined"}: ${String(cur.title || "change order")}` +
+        (approve && cleanName ? ` — signed ${cleanName}` : "") +
+        (String(note || "").trim() ? ` — "${String(note).trim().slice(0, 200)}"` : ""),
+      read_by_office: false, read_by_customer: true }]),
+  }).catch(() => {});
+  return { answered: true, status: approve ? "approved" : "declined" };
 }
 
 /* ---------- CF-4: request warranty service ----------
@@ -749,6 +820,8 @@ serve(async (req: Request) => {
     else if (action === "requestAccess") result = await requestAccess(token);
     else if (action === "verifyAccess") result = await verifyAccess(token, String(body.code ?? "").trim());
     else if (action === "warrantyRequest") result = await warrantyRequest(token, String(body.note ?? ""));
+    else if (action === "respondApproval") result = await respondApproval(token, String(body.approvalId ?? ""),
+      body.approve === true, String(body.name ?? ""), String(body.signature ?? ""), String(body.note ?? ""));
     else if (action === "view") result = await view(token);
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));
