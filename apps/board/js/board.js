@@ -2696,8 +2696,13 @@ function openHelpModal() {
     h("div", { class: "help__legm" }, marker), h("div", { class: "help__legd" }, desc));
 
   const VIEWS = [
-    ["Board", "Your pipeline. Six columns from Leads to Complete — drag a card into another column to change its stage."],
+    ["Kanban", "The classic columns, Leads to Complete — drag a card into another column to change its stage. Cards are compact: hover one for hours and details, click to open it."],
+    ["Swimlanes", "The same cards with stages as full-width rows, wrapping into a grid — the busy In Progress stage reads in rows instead of a scroll. Drag between lanes to restage."],
+    ["Table", "Every job on one sortable line. Click a column header to sort (stage, target, hours, contract…), click a row to open the job. Overdue targets show red."],
+    ["Triage", "Not a board — your to-do list. Only the jobs that need a decision today: overdue, due today, crew overloaded, no crew assigned, field updates, materials arriving."],
+    ["Pipeline", "Leads only, sorted by next action (overdue first) with win-rate stats up top. Each lead shows its source, estimated value, and follow-up date."],
     ["Crew", "A daily magnet board. Drag a guy between job columns to assign him; pick a day with ‹ ›. Drop on “Out today” for a no-show. Changes here apply just to that day (or the whole job — toggle “Move”)."],
+    ["Day", "One day, hour by hour, one row per crew member — every colour change in a row is a drive between jobs."],
     ["Calendar", "Day / Week / Month grid. Each job fills every day between its start and due dates and shows colored crew icons for who's on it. Use ‹ › to change the range, Today to jump back."],
     ["Gantt", "A timeline with one bar per job. Drag a bar sideways to reschedule it. Zoom Fit / Day / Week / Month, and toggle the critical path or a saved baseline."],
   ];
@@ -2706,9 +2711,16 @@ function openHelpModal() {
     h("div", { class: "help" },
       h("p", { class: "help__lead" }, "The Job Board is your shop's digital whiteboard. Every job lives on it from first lead to final sign-off, and the whole crew sees the same board in real time."),
 
-      sec("The four views",
+      sec("The views",
         h("div", { class: "help__views" }, ...VIEWS.map(([n, d]) =>
           h("div", { class: "help__view" }, h("strong", {}, n), h("span", {}, d))))),
+
+      sec("Leads & the pipeline",
+        h("ul", { class: "help__ul" },
+          li("New leads land in ", h("strong", {}, "Leads / Bids"), " automatically from the website form, the AI chat, and the phone line — each card wears a ", h("strong", {}, "source badge"), " (Phone / AI chat / Web form / Referral / Repeat / Walk-in)."),
+          li("Open a lead and use the ", h("strong", {}, "🎯 Lead"), " section: source, estimated value, and a ", h("strong", {}, "next action"), " (what + when). Overdue follow-ups turn the ⏰ chip red, rise to the top of Pipeline, and show up in the morning brief."),
+          li(h("strong", {}, "✓ Won"), " advances the lead to Scheduled and counts toward your win rate. ", h("strong", {}, "✕ Lost"), " asks why (price / went with another / no response / not a fit / other) and files the card in the archive."),
+          li("The ", h("strong", {}, "🗄 Archive"), " browser has an ", h("strong", {}, "All / Completed / Lost leads"), " filter, so dead bids stay on record with their reason."))),
 
       sec("Adding & editing a job",
         h("ul", { class: "help__ul" },
@@ -2746,15 +2758,19 @@ function openHelpModal() {
           h("span", { class: "help__stage" }, dot(s.color), s.label)))),
 
       sec("Card symbols",
+        h("p", { class: "help__p" }, "Cards are compact on purpose — one line of identity, one row of signals. Hover a card for the details (hours logged, phone); click it to open the editor."),
         h("div", { class: "help__legend" },
           leg(h("span", { class: "prio prio--high", style: "margin:0" }), "High priority (a gray dot means low priority)"),
-          leg(h("span", { class: "chip" }, "📅 Due Jun 12"), "Scheduled dates — turns red when a job is past due"),
-          leg(h("span", { class: "chip" }, "⏱ 12 / 40h"), "Hours logged vs. estimate — red when over"),
-          leg(h("span", { class: "chip is-crit" }, "⚡ Critical"), "On the critical path — a slip moves your finish date"),
-          leg(h("span", { class: "chip is-warn" }, "⚠ double-booked"), "A crew member is on two overlapping jobs"),
-          leg(h("span", { class: "chip is-lock" }, "🔒 not before"), "Held until materials / permit are ready"),
-          leg(h("span", { class: "chip is-phase" }, "📋 3 phases"), "The job is broken into sequenced phases"),
-          leg(h("span", { class: "chip mat-ordered" }, "🔧 Materials ordered"), "Materials status (TBD / ordered / in)"),
+          leg(h("span", { class: "chip chip--sm" }, "📅 Jun 12"), "Target date — amber when due today, red when past due"),
+          leg(h("span", { class: "chip chip--sm src-chip", style: "border-color:#f26a21;color:#f26a21" }, "Phone"), "Lead source badge (leads only)"),
+          leg(h("span", { class: "chip chip--sm is-due" }, "⏰ today"), "Lead follow-up due — red once it's late"),
+          leg(h("span", { class: "chip chip--sm" }, "~$8,000"), "A lead's estimated value"),
+          leg(h("span", { class: "chip chip--sm is-crit" }, "⚡"), "On the critical path — a slip moves your finish date"),
+          leg(h("span", { class: "chip chip--sm is-warn" }, "⚠"), "A crew member is double-booked (hover for who and when)"),
+          leg(h("span", { class: "chip chip--sm is-lock" }, "🔒"), "Held until materials / permit are ready"),
+          leg(h("span", { class: "chip chip--sm is-phase" }, "📋 3"), "The job is broken into sequenced phases"),
+          leg(h("span", { class: "chip chip--sm mat-ordered" }, "🔧"), "Materials status (hover: TBD / ordered / in)"),
+          leg(h("span", { class: "crew-none" }, "— crew"), "Nobody assigned yet"),
           leg(h("span", { class: "ms-diamond", style: "font-size:15px" }, "◆"), "A milestone — zero-day marker"))),
 
       sec("Planning tools",
@@ -2767,6 +2783,7 @@ function openHelpModal() {
       sec("Tips",
         h("ul", { class: "help__ul" },
           li(h("strong", {}, "Search & filters"), " (by job, type, or crew) apply to every view at once."),
+          li("Jobs and leads are linked to the ", h("strong", {}, "customer directory"), " — open the Office Admin's Contacts panel to see every job, text, and email for one person in one place."),
           li(h("strong", {}, "🖨 PDF"), " prints the current view — best in Chrome with “Save as PDF.”"),
           li(h("strong", {}, "Works offline."), " Changes save on your device and sync when you're back online — watch the dot next to your email (green = synced)."),
           li("Everyone shares one login, so the board stays in sync across the shop. Use ", h("strong", {}, "↻ Refresh"), " to pull the latest right away."))),
