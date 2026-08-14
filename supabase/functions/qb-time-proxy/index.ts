@@ -12,6 +12,7 @@
  *   getTimesheets  — get time entries for a jobcode / date range
  *   getUsers       — list employees
  *   getCurrentTotals — who is currently clocked in
+ *   clockinSweep   — cron: fire the portal crew line on today's first clock-in
  */
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
@@ -148,6 +149,12 @@ async function getValidToken(supabase: ReturnType<typeof createClient>): Promise
 
   const newExpiry = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
 
+  // Conditional on the refresh token we started from: if a concurrent caller
+  // rotated first (TSheets rotates the refresh token on every grant, and the
+  // clockin sweep now exercises this path all day), writing our pair over
+  // theirs could store an already-invalidated refresh token — the 19-day
+  // dead-connection failure getStatus documents. 0 rows updated = they won;
+  // keep their stored pair, our access token is still good for this call.
   await supabase
     .from("qb_time_tokens")
     .update({
@@ -155,7 +162,8 @@ async function getValidToken(supabase: ReturnType<typeof createClient>): Promise
       refresh_token: tokens.refresh_token,
       expires_at: newExpiry,
     })
-    .eq("id", tokenRow.id);
+    .eq("id", tokenRow.id)
+    .eq("refresh_token", tokenRow.refresh_token);
 
   return tokens.access_token;
 }
@@ -1152,6 +1160,120 @@ serve(async (req) => {
       return ok({ jobcodes: phasedByJobcode.size, stamped, aiStamped, proposed, results });
     } catch (e) {
       return err(e instanceof Error ? e.message : "rematchAll failed");
+    }
+  }
+
+  // ── clockinSweep (every-15-min cron) ──────────────────────────────────────
+  // CF-2 rework (2026-08-14): the who's-on-the-job-today portal line fires on
+  // the crew's FIRST QB Time clock-in of the day instead of a fixed weekday
+  // morning — the customer hears it when work actually starts, weekends
+  // included. This sweep only decides WHICH jobs fire and who clocked in; the
+  // posting itself (board-schedule names, one-per-day dedupe, the SMS bridge)
+  // stays in roybal-portal. Jobs with no QB jobcode link have no clock-in
+  // signal and stay silent — link the job to light the line up.
+  if (action === "clockinSweep") {
+    const cronSecret = Deno.env.get("CRON_SECRET");
+    const provided = (body.cronSecret as string) ?? req.headers.get("x-cron-secret") ?? "";
+    const isCron = !!cronSecret && provided === cronSecret;
+    if (!isCron && !(await requireUser(supabase, req))) return err("Not authorized", 401);
+
+    // Run only inside roybal-notify's SMS window (8am–8pm Alaska): the crew
+    // line's SMS mirror sends kind 'portal', which quiet-hours REFUSES (no
+    // queue) outside that window — so an earlier clock-in is deliberately
+    // held and posts on the first tick after 8, thread + text together.
+    const now = new Date();
+    const akHour = Number(new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Anchorage", hour: "numeric", hour12: false,
+    }).format(now));
+    if (akHour < 8 || akHour >= 20) return ok({ skipped: "outside the SMS window" });
+    const today = now.toLocaleDateString("en-CA", { timeZone: "America/Anchorage" });
+
+    try {
+      // candidates: enabled+opted-in portal jobs still waiting on today's line
+      const { data: pjs } = await supabase
+        .from("portal_jobs")
+        .select("id, field_project_id")
+        .eq("enabled", true).eq("notify_crew", true).neq("status", "complete")
+        .or(`crew_line_date.is.null,crew_line_date.lt.${today}`)
+        .limit(100);
+      const want = new Set(
+        ((pjs ?? []) as { field_project_id?: string }[])
+          .map((r) => String(r.field_project_id || "")).filter(Boolean));
+      if (!want.size) return ok({ candidates: 0, clockedIn: 0 });
+
+      // jobcode → candidate field project, via the field project's own link
+      // AND any board card pointing at it (pullAllLinked's two-source rule).
+      // Project the two JSON keys, never the blobs — this path runs ~48×/day
+      // and full field_projects blobs are exactly what the Jul 2026 disk-IO
+      // incident was made of.
+      const [{ data: fps }, { data: cjs }] = await Promise.all([
+        supabase.from("field_projects").select("id, jc:data->>qbJobcodeId")
+          .eq("deleted", false).not("data->>qbJobcodeId", "is", null),
+        supabase.from("coordination_jobs").select("fid:data->>fieldJobId, jc:data->>qbJobcodeId")
+          .eq("deleted", false).not("data->>qbJobcodeId", "is", null),
+      ]);
+      const fieldsByJobcode = new Map<string, Set<string>>();
+      const link = (jc: unknown, fid: unknown) => {
+        const j = String(jc || ""), f = String(fid || "");
+        if (!j || !f || !want.has(f)) return;
+        if (!fieldsByJobcode.has(j)) fieldsByJobcode.set(j, new Set());
+        fieldsByJobcode.get(j)!.add(f);
+      };
+      for (const p of (fps ?? []) as { id: string; jc?: string }[]) link(p.jc, p.id);
+      for (const j of (cjs ?? []) as { fid?: string; jc?: string }[]) link(j.jc, j.fid);
+      if (!fieldsByJobcode.size) return ok({ candidates: want.size, linked: 0, clockedIn: 0 });
+
+      // today's timesheets on those jobcodes — on_the_clock "both", because
+      // the default ("no") hides exactly the person who just clocked in and
+      // hasn't clocked out. Paged like pullRange: a silent 200-row truncation
+      // would drop the same jobs on every tick all day.
+      const accessToken = await getValidToken(supabase);
+      const sheets: QbTimesheet[] = [];
+      const users: Record<string, { first_name: string; last_name: string }> = {};
+      for (let page = 1, more = true; more && page <= 5; page++) {
+        const qs = new URLSearchParams({
+          jobcode_ids: [...fieldsByJobcode.keys()].join(","),
+          start_date: today, end_date: today, page: String(page),
+          on_the_clock: "both", per_page: "200", supplemental_data: "yes",
+        });
+        const res = (await qbFetch(`/timesheets?${qs}`, accessToken)) as {
+          results: { timesheets: Record<string, QbTimesheet> };
+          supplemental_data: { users?: Record<string, { first_name: string; last_name: string }> };
+        };
+        const ts = Object.values(res.results?.timesheets ?? {});
+        sheets.push(...ts);
+        Object.assign(users, res.supplemental_data?.users ?? {});
+        more = ts.length >= 200; // a full page probably means there's another
+      }
+      if (!sheets.length) return ok({ candidates: want.size, clockedIn: 0 });
+
+      // per field project: who actually clocked in today (fallback names for
+      // jobs whose board card lists nobody — e.g. a Saturday visit)
+      const clockedIn: Record<string, string[]> = {};
+      for (const ts of sheets) {
+        const u = users[String(ts.user_id)];
+        const name = u ? `${u.first_name ?? ""} ${u.last_name ?? ""}`.trim() : "";
+        for (const fid of fieldsByJobcode.get(String(ts.jobcode_id)) ?? []) {
+          const list = (clockedIn[fid] ??= []);
+          if (name && !list.includes(name)) list.push(name);
+        }
+      }
+      const fids = Object.keys(clockedIn);
+      if (!fids.length) return ok({ candidates: want.size, clockedIn: 0 });
+
+      // hand off to the portal publisher (names, dedupe, SMS bridge live there)
+      const post = await fetch(`${supabaseUrl}/functions/v1/roybal-portal`, {
+        method: "POST",
+        headers: {
+          apikey: serviceRoleKey, Authorization: `Bearer ${serviceRoleKey}`,
+          "Content-Type": "application/json", "x-cron-secret": cronSecret ?? "",
+        },
+        body: JSON.stringify({ action: "dailyCrewLines", fieldProjectIds: fids, clockedIn }),
+      });
+      const portal = post.ok ? await post.json() : { ok: false, status: post.status };
+      return ok({ candidates: want.size, clockedIn: fids.length, portal });
+    } catch (e) {
+      return err(e instanceof Error ? e.message : "clockinSweep failed");
     }
   }
 

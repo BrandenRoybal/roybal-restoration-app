@@ -31,8 +31,8 @@ ok("dayCrew remove+add applies on that day only",
   crewToday(overridden, WED).join() === "b,c" && crewToday(overridden, "2026-08-13").join() === "a,b");
 
 /* copy */
-ok("one name reads 'is'", crewLine(["Joel Hess"]) === "Good morning! Joel Hess from our crew is scheduled at your property today.");
-ok("two names read 'and … are'", crewLine(["Joel Hess", "Jimmy Soland"]).includes("Joel Hess and Jimmy Soland from our crew are"));
+ok("one name reads 'is'", crewLine(["Joel Hess"]) === "Joel Hess from our crew is on the job at your property today.");
+ok("two names read 'and … are'", crewLine(["Joel Hess", "Jimmy Soland"]).includes("Joel Hess and Jimmy Soland from our crew are on the job"));
 ok("three names get the comma", namesLine(["A", "B", "C"]) === "A, B and C");
 ok("no names → empty (post nothing)", crewLine([]) === "");
 
