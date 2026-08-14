@@ -595,3 +595,73 @@ table.rtable .num.under { color: var(--green); }
 .cb-reset { flex: 0 0 auto; width: 26px; min-height: 26px; margin-left: auto; border: 1px solid var(--line); background: #fff; border-radius: 7px; cursor: pointer; font-size: 14px; line-height: 1; color: var(--muted); padding: 0; }
 .cb-reset:hover { color: var(--orange-dark); border-color: var(--orange); }
 .cbcol.cb-edited .bcol__count { margin-left: 8px; }
+
+/* ============================================================
+   Board layouts — compact cards, swimlanes, table, triage
+   (added with the CRM board-view rework)
+   ============================================================ */
+
+/* view switcher separator between the layout views and the schedule views */
+.vsw__sep { width: 1px; align-self: stretch; margin: 3px 5px; background: var(--line); }
+
+/* compact card — used by both Kanban and Swimlanes */
+.bcard.compact { padding: 8px 10px; }
+.bcard.compact .bcard__top { margin-bottom: 2px; }
+.bcard.compact .bcard__title { font-size: 13px; font-weight: 700; }
+.bcard.compact .bcard__sub { font-size: 11.5px; margin: 0 0 6px; }
+.bcard.compact .bcard__meta { gap: 5px; }
+.chip--sm { font-size: 11px; font-weight: 700; padding: 1px 6px; }
+.btype--sm { font-size: 10px; padding: 1px 7px; letter-spacing: .2px; }
+.chip.is-due { background: #fdf3e0; color: #8a6a18; border-color: #f0d8a8; }
+.crew-none { font-size: 11.5px; color: var(--muted); font-weight: 600; }
+.bcall--sm { margin-left: auto; font-size: 13px; padding: 0 2px; }
+
+/* swimlanes */
+.blanes { display: flex; flex-direction: column; gap: 12px; padding-bottom: 14px; }
+.blane { background: #fff; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.blane__head { display: flex; align-items: center; gap: 9px; padding: 9px 14px; background: #f6f8fb; border-bottom: 1px solid var(--line); }
+.blane__bar { width: 4px; height: 16px; border-radius: 4px; flex: 0 0 auto; }
+.blane__name { margin: 0; font-size: 12.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--navy); font-weight: 800; }
+.blane__count { margin-left: auto; font-size: 12px; color: var(--muted); }
+.blane__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(214px, 1fr)); gap: 9px; padding: 11px; }
+.blane__grid.drop-over { background: var(--brand-tint); outline: 2px dashed var(--orange); outline-offset: -6px; border-radius: 8px; }
+.blane__grid--empty { display: block; padding: 12px 14px; color: var(--muted); font-size: 12px; }
+
+/* table */
+.btable-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.btable { border-collapse: collapse; width: 100%; min-width: 840px; font-size: 13px; }
+.btable thead th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); font-weight: 800; padding: 10px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; cursor: pointer; user-select: none; }
+.btable thead th:hover { color: var(--navy); }
+.btable td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.btable tbody tr { cursor: pointer; }
+.btable tbody tr:hover { background: #f6f8fb; }
+.btable tbody tr:last-child td { border-bottom: 0; }
+.btable .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.btable .stg { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.td-job__t { font-weight: 700; color: var(--ink); }
+.td-job__s { font-size: 11.5px; color: var(--muted); }
+.btable .is-late-t { color: var(--red); font-weight: 800; }
+.btable .is-due-t { color: #8a6a18; font-weight: 800; }
+
+/* triage */
+.btriage { display: grid; grid-template-columns: repeat(auto-fit, minmax(266px, 1fr)); gap: 12px; align-items: start; padding-bottom: 14px; }
+.tgroup { background: #fff; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.tgroup--crit { border-color: #e6b3ad; }
+.tgroup__head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.tgroup__ic { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; font-size: 14px; flex: 0 0 auto; }
+.tgroup--crit .tgroup__ic { background: #fbe3e0; }
+.tgroup--warn .tgroup__ic { background: #fdf3e0; }
+.tgroup--info .tgroup__ic { background: var(--brand-tint); }
+.tgroup__head h3 { margin: 0; font-size: 13px; font-weight: 800; color: var(--navy); }
+.tgroup__count { margin-left: auto; font-size: 12px; font-weight: 700; color: var(--muted); background: #f2f5f8; border-radius: 999px; padding: 1px 9px; }
+.trow { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.trow:last-child { border-bottom: 0; }
+.trow:hover { background: #f6f8fb; }
+.trow__t { font-weight: 600; font-size: 13px; color: var(--ink); }
+.trow__s { font-size: 11.5px; color: var(--muted); }
+.trow__rt { margin-left: auto; text-align: right; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .btriage { grid-template-columns: 1fr; }
+  .blane__grid { grid-template-columns: 1fr 1fr; }
+}
