@@ -1,7 +1,7 @@
 /* Who's-coming-today — pure-logic tests (no Deno, no network).
    Run: node supabase/functions/roybal-portal/crewtoday.test.mjs */
 import assert from "node:assert/strict";
-import { crewToday, namesLine, crewLine } from "./crewtoday.mjs";
+import { crewToday, namesLine, crewLine, introLine } from "./crewtoday.mjs";
 
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); console.log("  ✓ " + name); pass++; };
@@ -35,5 +35,14 @@ ok("one name reads 'is'", crewLine(["Joel Hess"]) === "Joel Hess from our crew i
 ok("two names read 'and … are'", crewLine(["Joel Hess", "Jimmy Soland"]).includes("Joel Hess and Jimmy Soland from our crew are on the job"));
 ok("three names get the comma", namesLine(["A", "B", "C"]) === "A, B and C");
 ok("no names → empty (post nothing)", crewLine([]) === "");
+
+/* intro copy (crew-bios phase 2) — once per member per job */
+ok("no new names → no intro", introLine([], false) === "" && introLine(null, true) === "");
+ok("a job's first line invites, without repeating names",
+  introLine(["Joel Hess", "Jimmy Soland"], true) === "Meet the crew — photos and a little about each of them are on your project page.");
+ok("a mid-job joiner is called out by name, no pronouns",
+  introLine(["CJ Mars"], false) === "CJ Mars is new on your job — say hello under “Meet your crew” on your project page.");
+ok("two joiners read 'are'",
+  introLine(["CJ Mars", "Jimmy Soland"], false).startsWith("CJ Mars and Jimmy Soland are new on your job"));
 
 console.log(`\n${pass} crew-today checks passed.`);

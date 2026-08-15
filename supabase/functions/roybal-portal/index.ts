@@ -43,7 +43,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { customerSheet, validateResponse, submissionMessage } from "./selections.ts";
-import { crewToday, crewLine } from "./crewtoday.mjs";
+import { crewToday, crewLine, introLine } from "./crewtoday.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -806,7 +806,7 @@ async function dailyCrewLines(opts: { fieldProjectIds?: unknown; clockedIn?: unk
     for (const [k, v] of Object.entries(opts.clockedIn as Record<string, unknown>))
       if (Array.isArray(v)) clockedIn[k] = v.map((n) => String(n || "").slice(0, 60)).filter(Boolean).slice(0, 12);
   const jq = `portal_jobs?enabled=eq.true&notify_crew=eq.true&status=neq.complete` +
-    `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id,field_project_id,status` +
+    `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id,field_project_id,status,share_token,crew_intro_ids` +
     (only ? `&field_project_id=in.(${only.join(",")})` : "") + `&limit=100`;
   const rows = await (await fetch(`${SUPABASE_URL}/rest/v1/${jq}`, { headers: svc })).json().catch(() => []);
   if (!Array.isArray(rows) || !rows.length) return { checked: 0, posted: 0 };
@@ -821,40 +821,65 @@ async function dailyCrewLines(opts: { fieldProjectIds?: unknown; clockedIn?: unk
   for (const b of Array.isArray(boardRows) ? boardRows : [])
     if (b?.data?.fieldJobId) boardByField.set(String(b.data.fieldJobId), b.data);
   const crewName = new Map<string, string>();
+  const crewPhoto = new Map<string, string>();       // public-bio headshots only (crew-bios phase 2)
   for (const c of Array.isArray(crewRows) ? crewRows : [])
-    if (c?.data?.id && c.data.active !== false) crewName.set(String(c.data.id), String(c.data.name || ""));
+    if (c?.data?.id && c.data.active !== false) {
+      crewName.set(String(c.data.id), String(c.data.name || ""));
+      if (c.data.bioPublic === true && /^https:\/\//.test(String(c.data.photoUrl || "")))
+        crewPhoto.set(String(c.data.id), String(c.data.photoUrl));
+    }
 
   let posted = 0;
   for (const row of rows) {
     const fid = String(row.field_project_id || "");
     const board = fid ? boardByField.get(fid) : null;
     // board-schedule names first (the promise), actual clock-ins as fallback
-    let names = board
-      ? crewToday(board, today).map((id: string) => crewName.get(id)).filter(Boolean) as string[]
+    const boardIds: string[] = board
+      ? crewToday(board, today).filter((id: string) => crewName.get(id))
       : [];
+    let names = boardIds.map((id) => crewName.get(id)) as string[];
     if (!names.length) names = clockedIn[fid] || [];
     const line = crewLine(names);
     if (!line) continue;                              // nobody to name → silence, not noise
+    // crew-bios phase 2: the FIRST line that NAMES a member also introduces
+    // them — once per job, board-named crew only (QB fallback names carry no
+    // crew id; they're introduced the first day the board schedules them).
+    const already = new Set((Array.isArray(row.crew_intro_ids) ? row.crew_intro_ids : []).map(String));
+    const newIds = boardIds.filter((id) => !already.has(String(id)));
+    const intro = newIds.length
+      ? introLine(newIds.map((id) => crewName.get(id)) as string[], newIds.length === boardIds.length)
+      : "";
     // Claim the day FIRST, atomically: a conditional stamp only one caller
     // can win. Under the old once-daily cron, post-then-stamp was safe ("at
     // worst a re-check tomorrow") — under a 15-minute sweep an unstamped
     // posted job would re-post and re-text every tick all day. Claim-then-
-    // post inverts the failure: at worst a lost line, never spam.
+    // post inverts the failure: at worst a lost line, never spam. The intro
+    // ids stamp WITH the claim for the same reason: a lost intro over a
+    // repeated one.
     const claim = await fetch(
       `${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}` +
       `&or=(crew_line_date.is.null,crew_line_date.lt.${today})&select=id`, {
       method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=representation" },
-      body: JSON.stringify({ crew_line_date: today }),
+      body: JSON.stringify({
+        crew_line_date: today,
+        ...(newIds.length ? { crew_intro_ids: [...already, ...newIds.map(String)] } : {}),
+      }),
     }).catch(() => null);
     const won = claim?.ok ? await claim.json().catch(() => []) : [];
     if (!Array.isArray(won) || !won.length) continue; // another tick beat us (or the stamp failed) — do not post
+    const body = intro ? `${line} ${intro}` : line;
     const ins = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
       method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
       body: JSON.stringify([{ portal_job_id: row.id, direction: "out", channel: "portal",
-        author: "office", body: line, read_by_office: true, read_by_customer: false }]),
+        author: "office", body, read_by_office: true, read_by_customer: false }]),
     });
     if (!ins.ok) { console.error(`crew line lost for portal job ${row.id}: insert ${ins.status}`); continue; }
-    await mirrorCrewLineToSms(String(row.id), line).catch(() => {});   // bridge: best-effort
+    // bridge: best-effort. On intro days the text carries the portal link and
+    // up to 3 headshots (public bios only) — still the SAME single daily text.
+    const link = intro && /^[0-9a-f]{16,}$/i.test(String(row.share_token || ""))
+      ? `${PORTAL_BASE}/j/${row.share_token}` : "";
+    const mediaUrls = newIds.map((id) => crewPhoto.get(id) || "").filter(Boolean).slice(0, 3);
+    await mirrorCrewLineToSms(String(row.id), body, { link, mediaUrls: intro ? mediaUrls : [] }).catch(() => {});
     posted++;
   }
   return { checked: rows.length, posted };
@@ -867,7 +892,11 @@ async function dailyCrewLines(opts: { fieldProjectIds?: unknown; clockedIn?: unk
    outside 7am–8pm Alaska — which is why clockinSweep only runs inside that
    window: thread line and text always land together. A refusal here (e.g. a
    tightened quiet-hours env) is logged, not retried; the thread line stands. */
-async function mirrorCrewLineToSms(portalJobId: string, text: string) {
+const PORTAL_BASE = "https://portal.roybalconstruction.com";
+async function mirrorCrewLineToSms(
+  portalJobId: string, text: string,
+  extra: { link?: string; mediaUrls?: string[] } = {},
+) {
   const lq = `portal_messages?portal_job_id=eq.${portalJobId}&direction=eq.in&select=channel&order=created_at.desc&limit=1`;
   const last = await fetch(`${SUPABASE_URL}/rest/v1/${lq}`, { headers: svc });
   const m = last.ok ? (await last.json())[0] : null;
@@ -878,10 +907,15 @@ async function mirrorCrewLineToSms(portalJobId: string, text: string) {
   const cr = await fetch(`${SUPABASE_URL}/rest/v1/contacts?id=eq.${cid}&select=phone_norm&limit=1`, { headers: svc });
   const phone = cr.ok ? String(((await cr.json())[0] || {}).phone_norm || "") : "";
   if (phone.length !== 10) return;
+  // intro day (crew-bios phase 2): the one daily text carries the tap-in link
+  // (+ headshots as MMS via mediaUrls); every other day keeps the plain tail
+  const tail = extra.link ? `Reply here, or tap: ${extra.link}` : "Reply to this text or see your project page.";
+  const media = (extra.mediaUrls || []).filter((u) => /^https:\/\//.test(u)).slice(0, 3);
   const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
     method: "POST", headers: { ...svc, "Content-Type": "application/json" },
     body: JSON.stringify({ action: "sendSms", to: phone, kind: "portal", captured_by: "portal-crewline",
-      body: `Roybal Construction: ${text} Reply to this text or see your project page.` }),
+      body: `Roybal Construction: ${text} ${tail}`,
+      ...(media.length ? { mediaUrls: media } : {}) }),
   });
   if (!send.ok) console.error(`crew-line SMS mirror refused (${send.status}) for portal job ${portalJobId}`);
 }
