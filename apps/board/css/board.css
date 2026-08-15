@@ -710,3 +710,11 @@ table.rtable .num.under { color: var(--green); }
 /* archive Lost filter */
 .archfilter { margin-bottom: 10px; }
 .archrow.is-lost { border-left: 3px solid #cc3f3f; }
+
+/* toast — core.js toast() target (matches the field app's look) */
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  background: var(--navy, #16395a); color: #fff; padding: 11px 18px; border-radius: 999px;
+  font-size: 14px; z-index: 300; box-shadow: 0 14px 38px rgba(16, 24, 40, .16);
+  max-width: min(92vw, 640px);
+}

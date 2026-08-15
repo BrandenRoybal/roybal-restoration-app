@@ -83,6 +83,7 @@ let entries = [];
 let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
 let conflicts = { byJob: new Map(), overloads: [], load: new Map(), byCrew: new Map() };   // capacity over-allocations
 let critical = new Set();                          // job ids on the critical path
+let lastConflictToastAt = 0;   // when the cross-device conflict toast last fired — quieter toasts yield to it
 let phaseHours = new Map();                        // jobId → Map(subId → logged hours) — QB Time + manual, per phase
 let ganttCritical = false;                         // Gantt "Critical path" highlight toggle
 let ganttFocus = null;                             // job id whose PROJECT is focused in critical mode
@@ -170,6 +171,7 @@ async function startUI() {
   // a save that would have clobbered a newer edit from another device is refused;
   // tell the user and reload the latest so no office work is silently lost
   setConflictHandler((serverJob) => {
+    lastConflictToastAt = Date.now();
     toast(`⚠ “${(serverJob && (serverJob.title || serverJob.customer)) || "A job"}” was changed on another device — your edit wasn't saved. Loaded the latest.`, 7000);
     refresh();
   });
@@ -598,12 +600,28 @@ function renderCard(j) {
   //    (overload, critical, field update, lock, materials). The verbose
   //    live-phase / hours detail moved to the hover title + the editor. ──
   const meta = h("div", { class: "bcard__meta" });
-  const ids = (j.crewIds || []).filter(crewById);
+  /* Crew chips show who's ACTUALLY on the job today — the same three-layer
+     resolution (roster → spans → Crew-board day moves, minus out-days) the
+     calendar and day views use — so a magnet-board move is reflected here
+     too. Off the job's active window fall back to the full roster (which
+     includes phase crew: a phase-staffed job is not "— crew"). An ACTIVE job
+     whose people were all moved off / out for today says so honestly instead
+     of quietly re-showing the roster. */
+  const day = todayISO();
+  const active = jobActiveOn(j, day);
+  const todayIds = active
+    ? effectiveCrewOn(j, day).filter((id) => { const c = crewById(id); return c && !isOut(c, day); })
+    : [];
+  const roster = validCrew(j);
+  const clearedToday = active && !todayIds.length && roster.length > 0;
+  const ids = todayIds.length ? todayIds : (clearedToday ? [] : roster);
   const jc = conflicts.byJob.get(j.id) || [];
   const clash = new Set(jc.map((x) => x.crewId));
   if (ids.length) {
-    meta.append(h("span", { class: "crew" },
+    meta.append(h("span", { class: "crew", title: todayIds.length ? "On the job today (roster + Crew-board moves)" : "Assigned crew" },
       ...ids.slice(0, 5).map((id) => { const c = crewById(id); return h("span", { class: "crewchip" + (clash.has(id) ? " is-clash" : ""), style: `background:${c.color || "#7a8aa0"}`, title: c.name + (clash.has(id) ? " — double-booked (overlapping jobs)" : "") }, initials(c.name)); })));
+  } else if (clearedToday) {
+    meta.append(h("span", { class: "crew-none", title: "Nobody on this job today — everyone was moved off on the Crew board or is out. The assigned roster is in the editor." }, "— none today"));
   } else {
     meta.append(h("span", { class: "crew-none", title: "No crew assigned yet" }, "— crew"));
   }
@@ -650,7 +668,13 @@ function cardHover(j, act, est) {
   if (j.phone) bits.push("📞 " + j.phone);
   return bits.join(" · ");
 }
-const validCrew = (j) => (j.crewIds || []).filter(crewById);
+/* every member attached through ANY layer: base roster + phase crew — a
+   phase-staffed job keeps its people in subtasks[].crewIds and its top-level
+   crewIds is often empty, which made Table/Triage call staffed jobs crewless */
+const validCrew = (j) => [...new Set([
+  ...(j.crewIds || []),
+  ...(j.subtasks || []).flatMap((st) => st.crewIds || []),
+])].filter(crewById);
 
 /* ============================================================
    Swimlanes — stages as full-width rows of compact cards.
@@ -1496,9 +1520,31 @@ function paintGantt() {
       bar._dragged = true;                // swallow the click event that follows
       const daysMoved = Math.round(dx / dayW);
       if (!daysMoved) { paintGantt(); return; }
+      const name = j.title || j.customer || "Job";
+      const prevStart = j.startDate, prevTarget = j.targetDate;
       j.scheduleMode = "manual";
       j.pinnedStart = toISO(addDays(new Date(s + "T00:00:00"), daysMoved));
+      const wanted = j.pinnedStart;
       await recomputeAndPersist();
+      /* The engine can override the pin (not-before floor, workday snap) —
+         a bar that snaps back with no explanation reads as a broken drag,
+         so say WHY nothing (or something else) happened. There is only ONE
+         toast slot: if this save just hit a cross-device conflict, that
+         warning is the one that matters — never talk over it. */
+      if (Date.now() - lastConflictToastAt < 3000) return;
+      if (j.startDate === prevStart && j.targetDate === prevTarget) {
+        if (j.notBefore && wanted < j.notBefore) {
+          toast(`🔒 “${name}” can't start before ${fmtShort(j.notBefore)}${j.notBeforeLabel ? ` (${j.notBeforeLabel})` : ""} — the bar snapped back. Clear the not-before date in the editor to move it earlier.`, 6000);
+        } else {
+          toast(`“${name}” stayed on ${fmtShort(prevStart)} — ${fmtShort(wanted)} isn't a working day, so the start snaps forward to the same place.`, 5000);
+        }
+      } else if (j.startDate !== wanted) {
+        if (j.notBefore && wanted < j.notBefore) {
+          toast(`🔒 “${name}” can't start before ${fmtShort(j.notBefore)}${j.notBeforeLabel ? ` (${j.notBeforeLabel})` : ""} — it landed there instead of ${fmtShort(wanted)}.`, 5000);
+        } else {
+          toast(`“${name}” moved to ${fmtShort(j.startDate)} — ${fmtShort(wanted)} isn't a working day, so it snapped to the next one.`, 4500);
+        }
+      }
     });
     const track = h("div", {
       class: "gantt__track" + (monthMode ? " gantt__track--plain" : ""),
@@ -2771,6 +2817,7 @@ function openHelpModal() {
           leg(h("span", { class: "chip chip--sm is-phase" }, "📋 3"), "The job is broken into sequenced phases"),
           leg(h("span", { class: "chip chip--sm mat-ordered" }, "🔧"), "Materials status (hover: TBD / ordered / in)"),
           leg(h("span", { class: "crew-none" }, "— crew"), "Nobody assigned yet"),
+          leg(h("span", { class: "crew-none" }, "— none today"), "Assigned crew, but everyone was moved off for today on the Crew board (or is out)"),
           leg(h("span", { class: "ms-diamond", style: "font-size:15px" }, "◆"), "A milestone — zero-day marker"))),
 
       sec("Planning tools",
