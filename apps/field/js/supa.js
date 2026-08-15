@@ -216,6 +216,26 @@ export async function uploadMedia(hash, text) {
   if (!res.ok && res.status !== 409) throw new Error("Media upload failed (" + res.status + ")");
 }
 
+/* crew headshots (Job Board roster → portal bio cards) live in the PUBLIC
+   crew-photos bucket: customers load them straight from the CDN URL, and
+   Twilio can fetch them for the MMS intro later. One object per member,
+   upserted on replacement — the returned URL carries a cache-buster so a
+   new headshot actually shows. */
+const CREW_PHOTO_BUCKET = "crew-photos";
+export async function uploadCrewPhoto(memberId, blob) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/storage/v1/object/${CREW_PHOTO_BUCKET}/${memberId}.jpg`;
+  const send = () => fetch(url, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "image/jpeg", "x-upsert": "true" },
+    body: blob,
+  });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  if (!res.ok && res.status !== 409) throw new Error("Photo upload failed (" + res.status + ")");
+  return `${SUPABASE_URL}/storage/v1/object/public/${CREW_PHOTO_BUCKET}/${memberId}.jpg?v=${Date.now()}`;
+}
+
 /** Cheap existence check (HEAD) — the photo-offload flow verifies a bucket
     copy exists before it drops the inline original. */
 export async function mediaExists(hash) {
