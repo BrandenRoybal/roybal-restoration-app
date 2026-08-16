@@ -13,6 +13,7 @@ import {
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
   BOX_DESTINATIONS, POROUS_CATEGORIES, dispositionShort, dispositionLabel, depreciation,
   setAuthor, author,
+  lossTypesOf,
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
@@ -325,7 +326,12 @@ async function setArchived(project, on) {
    Unarchive button; a Complete-on-the-board row offers one-tap Archive. */
 function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
   const isConst = jobType(p) === "construction";
-  const cat = p.waterCategory ? `Cat ${p.waterCategory}` : "";
+  const cat = [
+    p.waterCategory ? `Cat ${p.waterCategory}` : "",
+    p.smokeType || p.fireDamage ? "🔥 Fire" : "",
+    p.moldCondition || p.moldExtent ? "🦠 Mold" : "",
+    p.stormCause || p.envelopeBreached ? "🌬️ Storm" : "",
+  ].filter(Boolean).join(" · ");
   const flags = p.archivedAt ? [] : (isConst ? buildFlags(p) : dryingFlags(p));   // rule-based watch flags — no AI, no cost
   const sub = isConst
     ? [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "",
@@ -1180,6 +1186,16 @@ function projectHome(project) {
     if (project.waterCategory) badges.append(h("span", { class: "badge cat" + project.waterCategory }, "Category " + project.waterCategory));
     if (project.waterClass) badges.append(h("span", { class: "badge" }, "Class " + project.waterClass));
     if (project.dryingSystem) badges.append(h("span", { class: "badge" }, project.dryingSystem + " drying"));
+    if (project.smokeType || project.fireDamage) {
+      const SMOKE = { wet: "Wet smoke", dry: "Dry smoke", protein: "Protein", fuel: "Fuel/soot" };
+      badges.append(h("span", { class: "badge cat3" }, ["🔥", SMOKE[project.smokeType], project.fireDamage].filter(Boolean).join(" ")));
+    }
+    if (project.moldCondition || project.moldExtent)
+      badges.append(h("span", { class: "badge cat2" }, ["🦠 Mold", project.moldCondition && "Cond. " + project.moldCondition, project.moldExtent && project.moldExtent + " sq ft"].filter(Boolean).join(" ")));
+    if (project.stormCause || project.envelopeBreached === "yes") {
+      const CAUSE = { wind: "Wind", hail: "Hail", tree: "Tree", "ice-dam": "Ice dam", flood: "Flood" };
+      badges.append(h("span", { class: "badge" }, ["🌬️", CAUSE[project.stormCause] || "Storm", project.envelopeBreached === "yes" ? "· envelope breached" : ""].filter(Boolean).join(" ")));
+    }
   }
   if (project.archivedAt)
     badges.append(h("span", { class: "badge", style: "background:#eceff3;color:#5b6672" },
@@ -2267,15 +2283,68 @@ function projectEdit(project) {
           f("Target completion", "targetCompletion", { type: "date" })),
         f("Permit numbers", "permitNumbers", { placeholder: "e.g. B26-1042, E26-0311" })));
   } else {
+    /* Loss classification — chips pick the loss type(s), each reveals its own
+       IICRC-grounded block. Real losses combine (fire carries suppression
+       water; storm is usually storm + water), so chips are multi-select.
+       Freeze-up is a WATER loss — put it in Loss Cause. A block holding data
+       stays visible even if its chip is tapped off (lossTypesOf re-adds it):
+       entered data is never hidden — clear the fields first, then the chip. */
+    const active = new Set(lossTypesOf(project));
+    const chips = h("div", { class: "seg" });
+    [{ value: "water", label: "💧 Water" }, { value: "fire", label: "🔥 Fire & Smoke" },
+     { value: "mold", label: "🦠 Mold" }, { value: "storm", label: "🌬️ Storm & Wind" }].forEach((t) => {
+      const b = h("button", { type: "button", class: active.has(t.value) ? "active" : "" }, t.label);
+      const HAS_DATA = {
+        water: (p) => p.waterCategory || p.waterClass || p.dryingSystem,
+        fire: (p) => p.smokeType || p.fireDamage,
+        mold: (p) => p.moldCondition || p.moldExtent,
+        storm: (p) => p.stormCause || p.envelopeBreached,
+      };
+      b.addEventListener("click", () => {
+        const cur = new Set(lossTypesOf(project));
+        if (cur.has(t.value) && HAS_DATA[t.value](project)) {
+          // a silent snap-back reads as a broken chip — say the rule out
+          // loud, and don't dirty/push the blob for a no-op
+          toast("That block has entries — clear its fields first. Entered classification is never hidden.");
+          return;
+        }
+        cur.has(t.value) ? cur.delete(t.value) : cur.add(t.value);
+        project.lossTypes = [...cur];
+        Store.put(project);
+        projectEdit(project);              // re-render swaps the blocks in/out
+      });
+      chips.append(b);
+    });
+    const blocks = [];
+    if (active.has("water")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Water Category (IICRC S500)"),
+        cat("waterCategory", [{ value: "1", label: "Cat 1 — Clean" }, { value: "2", label: "Cat 2 — Gray" }, { value: "3", label: "Cat 3 — Black" }])),
+      h("div", { class: "field" }, h("label", {}, "Class of Water"),
+        cat("waterClass", [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }, { value: "4", label: "4" }])),
+      h("div", { class: "field" }, h("label", {}, "Drying System"),
+        cat("dryingSystem", [{ value: "Open", label: "Open" }, { value: "Closed", label: "Closed" }, { value: "Hybrid", label: "Hybrid" }])));
+    if (active.has("fire")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Smoke / Residue Type"),
+        cat("smokeType", [{ value: "wet", label: "Wet smoke" }, { value: "dry", label: "Dry smoke" }, { value: "protein", label: "Protein" }, { value: "fuel", label: "Fuel / soot" }])),
+      h("div", { class: "field" }, h("label", {}, "Fire Damage Extent"),
+        cat("fireDamage", [{ value: "light", label: "Light" }, { value: "moderate", label: "Moderate" }, { value: "heavy", label: "Heavy" }])));
+    if (active.has("mold")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Mold Condition (IICRC S520)"),
+        cat("moldCondition", [{ value: "1", label: "1 — Normal" }, { value: "2", label: "2 — Settled spores" }, { value: "3", label: "3 — Actual growth" }])),
+      h("div", { class: "field" }, h("label", {}, "Affected Area"),
+        cat("moldExtent", [{ value: "<10", label: "< 10 sq ft" }, { value: "10-100", label: "10–100 sq ft" }, { value: ">100", label: "> 100 sq ft" }])));
+    if (active.has("storm")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Storm Cause"),
+        cat("stormCause", [{ value: "wind", label: "Wind" }, { value: "hail", label: "Hail" }, { value: "tree", label: "Tree" }, { value: "ice-dam", label: "Ice dam / snow" }, { value: "flood", label: "Flood" }])),
+      h("div", { class: "field" }, h("label", {}, "Building Envelope Breached?"),
+        cat("envelopeBreached", [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }])));
     body.append(
       h("div", { class: "card" },
         h("h2", { style: "margin-top:0" }, "Loss classification"),
-        h("div", { class: "field" }, h("label", {}, "Water Category (IICRC S500)"),
-          cat("waterCategory", [{ value: "1", label: "Cat 1 — Clean" }, { value: "2", label: "Cat 2 — Gray" }, { value: "3", label: "Cat 3 — Black" }])),
-        h("div", { class: "field" }, h("label", {}, "Class of Water"),
-          cat("waterClass", [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }, { value: "4", label: "4" }])),
-        h("div", { class: "field" }, h("label", {}, "Drying System"),
-          cat("dryingSystem", [{ value: "Open", label: "Open" }, { value: "Closed", label: "Closed" }, { value: "Hybrid", label: "Hybrid" }]))));
+        h("div", { class: "field" },
+          h("label", {}, "Loss type — pick all that apply ", h("span", { class: "hint" }, "(freeze-up = Water, note it in Loss Cause)")),
+          chips),
+        ...blocks));
   }
 
   body.append(

@@ -636,7 +636,9 @@ async function scopeInterview(body: Record<string, unknown>) {
         "changes the estimate and is NOT already settled by the narration or facts: which rooms/areas are in the rebuild; replace vs detach-&-reset per " +
         "major item (rule: REPLACE if damaged by the loss OR Cat 3 + porous material, else detach & reset); flooring type and match-existing vs upgrade; " +
         "drywall extent (flood-cut ~2 ft vs full height); paint extent (full room vs spot/patch); trades disturbed (electrical / plumbing / HVAC / " +
-        "insulation in opened walls); water category ONLY IF facts.job.waterCategory is blank (never re-ask a category already on file); and whether a " +
+        "insulation in opened walls); water category ONLY IF facts.job.lossTypes includes 'water' AND facts.job.waterCategory is blank (never re-ask a " +
+        "category already on file, and never ask it at all on a fire/mold/storm-only job — classify those from facts.job.smokeType/moldCondition/stormCause " +
+        "instead); and whether a " +
         "subcontractor is on the job (drives O&P). ONE question at a time, plain English, with 2-4 concrete options the tech can tap (they can also " +
         "free-type). NEVER ask about something already answered or already clear from the narration/facts. COVERAGE CHECK — before you set done=true, " +
         "reconcile the scope against EVERY documented damaged/affected area (facts.affectedAreas, facts.demoNotes, the loss description): if any documented " +
@@ -649,7 +651,8 @@ async function scopeInterview(body: Record<string, unknown>) {
         "documented job facts (labor hours, equipment days, drying, demo notes, receipts), the tech's spoken narration of what was done, and the answers " +
         "so far, either ask the SINGLE most important still-unresolved question, or declare the scope complete. Ask about what most changes the invoice and " +
         "is NOT already settled by the logs or narration: areas/rooms worked; demo & tear-out actually performed; equipment run and days; billable work not " +
-        "captured in the logs; pass-throughs / subcontractor invoices to bill (facts.receipts); water category (drives the Cat 3 mitigation package + PPE); " +
+        "captured in the logs; pass-throughs / subcontractor invoices to bill (facts.receipts); water category ONLY when facts.job.lossTypes includes 'water' " +
+        "(it drives the Cat 3 mitigation package + PPE — on a fire/mold-only job skip it and confirm the smoke/mold classification instead); " +
         "and whether a subcontractor is on the job (drives O&P). ONE question at a time, plain English, with 2-4 concrete tap options (they can also " +
         "free-type). NEVER ask about something already answered or clear from the facts. COVERAGE CHECK — before you set done=true, reconcile the billable " +
         "scope against every documented affected area and logged item (facts.affectedAreas, facts.demoNotes, facts.equipment, facts.labor): if documented " +

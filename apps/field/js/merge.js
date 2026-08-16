@@ -184,6 +184,16 @@ export function mergeProjects(a, b) {
     for (const r of oRooms) if (!nRooms.includes(r)) { nRooms.push(r); added++; }
   }
 
+  // loss-type chips: union by value, like rooms — two devices classifying
+  // concurrently are BOTH right (one taps Fire, one taps Storm → fire and
+  // storm). The scalar details inside each block stay newer-wins like every
+  // other header scalar.
+  const oLoss = Array.isArray(older.lossTypes) ? older.lossTypes : [];
+  if (oLoss.length) {
+    const nLoss = Array.isArray(merged.lossTypes) ? merged.lossTypes : (merged.lossTypes = []);
+    for (const t of oLoss) if (!nLoss.includes(t)) { nLoss.push(t); added++; }
+  }
+
   // a filled form beats an empty slot; two filled copies merge field-wise
   for (const key of FORM_SLOTS) {
     if (merged[key] == null) {
