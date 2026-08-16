@@ -5,6 +5,7 @@
 import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
 import { exportPhotosZip, archivePhotos, archivableCount, photoFullSrc } from "./photoexport.js";
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
+import { tombstoneItems } from "./merge.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
   lineItems, taCell, sheet, sheetFooter, letterhead, commit, uploadDoc, uploadedDocPages,
@@ -2130,7 +2131,9 @@ export function photosForm(project) {
     const idx = project.photos.indexOf(p);   // manual-order position (cards rebuild on every paint)
     const moveL = !manual ? null : h("button", { type: "button", class: "btn btn--sm", title: "Move earlier", disabled: idx === 0, onclick: () => movePhoto(idx, idx - 1) }, "◀");
     const moveR = !manual ? null : h("button", { type: "button", class: "btn btn--sm", title: "Move later", disabled: idx === project.photos.length - 1, onclick: () => movePhoto(idx, idx + 1) }, "▶");
-    const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); project.photos.splice(project.photos.indexOf(p), 1); paint(); commit(); } }, "Delete");
+    // tombstone BEFORE the splice: without the recorded delete, any other
+    // device still holding this photo unions it straight back in (merge.js)
+    const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); tombstoneItems(project, p.id); project.photos.splice(project.photos.indexOf(p), 1); paint(); commit(); } }, "Delete");
     const tools = h("div", { class: "photocard__tools" }, moveL, moveR, h("span", { class: "photocard__spacer" }), del);
     const printCap = h("div", { class: "photocap print-only" });
     /* The AI findings under the photo are EDITABLE — reword or delete
