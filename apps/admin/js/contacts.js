@@ -209,7 +209,10 @@ function identityCard(c) {
     save.addEventListener("click", async () => {
       const patch = { name: f.name.value.trim() || c.name, company: f.company.value.trim(), role: roleSel.value,
         phone: f.phone.value.trim(), email: f.email.value.trim(), address: f.address.value.trim(),
-        notes: notes.value.trim(), marketing_opt_in: optIn.checked };
+        notes: notes.value.trim(), marketing_opt_in: optIn.checked,
+        // consent record (CF-5): stamp only on a transition, clear on withdrawal
+        ...(optIn.checked !== !!c.marketing_opt_in
+          ? { marketing_opt_in_at: optIn.checked ? new Date().toISOString() : null } : {}) };
       save.disabled = true;
       try {
         const res = await rest(`contacts?id=eq.${c.id}`, { method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify(patch) });
