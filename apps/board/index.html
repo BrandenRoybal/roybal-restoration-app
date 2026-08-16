@@ -46,6 +46,10 @@
       }
     }, 3500);
   </script>
+  <!-- toast() from core.js targets #toast and silently no-ops without it —
+       the board never had one, so schedule-saved / conflict / gantt-feedback
+       toasts all vanished. Styled in board.css. -->
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <script type="module" src="js/board.js?v=62"></script>
 </body>
 </html>
