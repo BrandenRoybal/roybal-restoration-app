@@ -28,7 +28,7 @@ import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { dictateBtn } from "./dictate.js";
-import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend } from "./sms.js";
+import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
 
@@ -3209,32 +3209,119 @@ export function portalShareForm(project) {
   const body = h("div", { class: "app-only" });
   const linkBox = h("div", { style: "margin-top:10px" });
 
+  /* The link only resolves once a publish has written the portal_jobs row —
+     a link shared before that greets the customer with "this link isn't
+     active". So sharing (Copy/Text) and the enable toggle publish themselves.
+     ALL of these pushes ride ONE promise chain: publishPortal reads the live
+     portalShare at row-build time, so serializing the writes means the last
+     toggle always wins and an ON and an OFF can never interleave on the wire
+     (leaving the row live while the checkbox shows off, or vice versa). */
+  let pushChain = Promise.resolve();
+  function pushPortalState() {
+    pushChain = pushChain.then(async () => {
+      const want = !!s.enabled;
+      try {
+        await publishPortal(project);
+        if (!!s.enabled !== want) return;   // superseded mid-flight — the newer toggle queued its own push
+        if (want) {
+          if (!s.publishedAt) toast("Portal published — the link is live.");
+          s.publishedAt = new Date().toISOString();
+          commit(); paintLink(); paintThread();   // the thread gate reads publishedAt too
+        } else {
+          toast("Portal turned off — the customer link no longer works.");
+        }
+      } catch (e) {
+        if (want) {
+          toast("Couldn't publish the portal — the link won't open until it's published (" + ((e && e.message) || e) + ")");
+        } else {
+          // a silent failed disable would leave the customer link LIVE while
+          // every office surface says off — flip the toggle back to the truth
+          s.enabled = true; enable.checked = true;
+          commit(); paint();
+          toast("Couldn't turn the portal off — no connection? It's still on; try again in a moment.");
+        }
+      }
+    });
+    return pushChain;
+  }
+  let ensuring = null;   // dedup so a double-tapped Copy doesn't queue two publishes
+  function ensurePublished() {
+    if (s.publishedAt) return Promise.resolve(true);
+    if (!ensuring) ensuring = pushPortalState().then(() => { ensuring = null; return !!s.publishedAt; });
+    return ensuring;
+  }
+
   function paintLink() {
     linkBox.replaceChildren();
     if (!s.enabled || !s.shareToken) return;
     const url = portalShareLink(s.shareToken);
+    const first = String(project.customer || "").trim().split(/\s+/)[0];
+    const linkMsg = `Hi${first ? " " + first : ""}, it's Roybal Construction. Here's your project page — progress, photos, and a direct line to us, all in one place: ${url}`;
     const field2 = h("input", { value: url, readOnly: true, style: "flex:1;font-size:13px" });
     const copy = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Copy");
     copy.addEventListener("click", async () => {
+      ensurePublished();   // background — the link must be live by the time it's opened
       try { await navigator.clipboard.writeText(url); toast("Portal link copied."); }
       catch { field2.select(); document.execCommand && document.execCommand("copy"); toast("Portal link copied."); }
+    });
+    const textBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "💬 Text");
+    textBtn.addEventListener("click", async () => {
+      const to = normalizePhone(project.phone);
+      if (!to) { toast("No customer phone on this job — add it on the Job Home form."); return; }
+      if (!companySendEnabled()) {
+        // device lane: the sms: link must fire synchronously in THIS tap
+        // (iOS), so a never-published portal publishes now and asks for a
+        // re-tap — never text a link that isn't live yet.
+        if (!s.publishedAt) {
+          toast("Making the link live first — tap Text again in a moment.");
+          ensurePublished();
+          return;
+        }
+        logSms(project, { kind: "portalLink", to, body: linkMsg, by: techName() });
+        commit();
+        location.href = smsHref(to, linkMsg);
+        return;
+      }
+      // company lane: make sure the link is live, then send. A quiet-hours or
+      // opted-out refusal must NOT fall back to the device link — that would
+      // sidestep the guard the server just enforced (the assistSend rule).
+      textBtn.disabled = true;
+      try {
+        if (!(await ensurePublished())) return;
+        const entry = logSms(project, { kind: "portalLink", to, body: linkMsg, by: techName() });
+        commit();
+        try {
+          const r = await sendViaCompany({ to, body: linkMsg, kind: "portalLink", by: techName() });
+          entry.via = "company"; entry.status = r.status || "sent"; entry.sid = r.sid || "";
+          commit();
+          toast("Portal link texted from the company number ✓");
+        } catch (e) {
+          entry.via = "company"; entry.error = String((e && e.message) || e).slice(0, 140);
+          commit();
+          toast("Couldn't send: " + entry.error);
+        }
+      } finally { textBtn.disabled = false; }
     });
     linkBox.append(
       sectionTitle("Customer link"),
       h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
         s.publishedAt ? "Last published " + fmtDate(s.publishedAt.slice(0, 10)) + " " + s.publishedAt.slice(11, 16)
-                      : "Not published yet — tap “Publish to portal”, then share this link."),
-      h("div", { style: "display:flex;gap:8px;align-items:center" }, field2, copy),
+                      : "Not published yet — Copy or Text publishes it for you, or tap “Publish to portal”."),
+      h("div", { style: "display:flex;gap:8px;align-items:center" }, field2, copy, textBtn),
       h("p", { class: "subtle", style: "font-size:11px;margin:6px 0 0" },
-        "Texting this link to the customer arrives in a later step; for now copy + send it yourself. The link opens once the portal app is live."));
+        "“Text” sends the customer a ready-made message with their link; Copy lets you paste it anywhere. Publish again whenever you want the customer view refreshed."));
   }
 
-  // enable toggle — mint the token on first enable
+  // enable toggle — mint the token on first enable, and push the new state to
+  // the portal row right away: ON must make the link live without a separate
+  // Publish tap, and OFF must actually turn the live link off.
   const enable = h("input", { type: "checkbox", checked: !!s.enabled });
   enable.addEventListener("change", () => {
     s.enabled = enable.checked;
     if (s.enabled && !s.shareToken) s.shareToken = newShareToken();
+    if (s.enabled) s.publishedAt = "";   // the row may be absent or disabled server-side — force a fresh publish
     commit(); paint();
+    pushPortalState();
   });
 
   // current milestone

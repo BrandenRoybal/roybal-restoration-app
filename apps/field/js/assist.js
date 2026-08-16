@@ -32,6 +32,7 @@ import { rest } from "./supa.js";
 import { normalizePhone, smsHref, logSms, companySendEnabled, sendViaCompany } from "./sms.js";
 import { capturedBy } from "./tech.js";
 import { getUnifiedJobId } from "./spine.js";
+import { portalShareLink } from "./portal.js";
 
 /* Construction jobs get the construction digest (scope, schedule, inspections,
    selections, draws); water jobs keep the mitigation digest. */
@@ -57,8 +58,23 @@ function openFollowups(p) {
   }
   return out.slice(0, 12);
 }
+/* The customer-portal link for this job, so "what's the portal link?" (and
+   "text the customer their link") work in conversation. Link + publish state
+   only — the curated slice itself stays behind the portal gateway. */
+function portalContext(p) {
+  const share = p.portalShare || {};
+  if (!share.enabled || !share.shareToken)
+    return { link: "", note: "no customer portal for this job yet — it's turned on from the Client Portal form" };
+  return {
+    link: portalShareLink(share.shareToken),
+    published: !!share.publishedAt,
+    ...(share.publishedAt
+      ? { lastPublished: String(share.publishedAt) }
+      : { warning: "enabled but never published — the customer sees 'this link isn't active' until it's published from the Client Portal form" }),
+  };
+}
 function assistContext(p) {
-  const ctx = assistFacts(p);
+  const ctx = { ...assistFacts(p), customerPortal: portalContext(p) };
   const open = openFollowups(p);
   return open.length ? { ...ctx, openEstimatorFollowups: open } : ctx;
 }
