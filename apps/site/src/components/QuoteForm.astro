@@ -76,6 +76,14 @@ const endpoint = resolveEndpoint(import.meta.env.PUBLIC_LEAD_ENDPOINT, DEFAULT_L
     <label><input type="radio" name="urgency" value="emergency" /> Yes — active damage right now</label>
   </fieldset>
 
+  {/* CF-5 marketing consent — optional, unchecked by default, applies only
+      to the contact this submission creates (the lead lane never flips flags
+      on existing people). */}
+  <label class="qf__optin">
+    <input type="checkbox" name="optIn" value="yes" />
+    <span>Text me seasonal home tips — freeze-up prep, maintenance reminders. A few a year, stop anytime. (Optional)</span>
+  </label>
+
   {/* Honeypot: hidden from people, irresistible to bots. A filled value is
       rejected server-side. Not display:none — some bots skip those. */}
   <div class="qf__hp" aria-hidden="true">
@@ -214,6 +222,12 @@ const endpoint = resolveEndpoint(import.meta.env.PUBLIC_LEAD_ENDPOINT, DEFAULT_L
   .qf__urgency input { width: auto; min-height: 0; }
 
   /* Off-screen rather than hidden, so bots still see and fill it. */
+  .qf__optin {
+    display: flex; gap: 10px; align-items: flex-start;
+    font-size: 0.88rem; line-height: 1.45; margin: 2px 0 6px; cursor: pointer;
+  }
+  .qf__optin input { margin-top: 3px; width: 16px; height: 16px; flex: 0 0 auto; accent-color: var(--brand, #f26a21); }
+
   .qf__hp {
     position: absolute;
     left: -9999px;

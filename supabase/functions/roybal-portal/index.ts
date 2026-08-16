@@ -784,6 +784,33 @@ async function myProjects(session: string) {
   };
 }
 
+/* ---------- CF-5: marketing consent, collected where it's verified ----------
+   Session-only on purpose: a contact session means the person PROVED the
+   phone (CF-1's OTP), so the opt-in is attributable consent — a forwarded
+   job-token link is not. The flag + timestamp live on the contact;
+   roybal-notify's campaignGate enforces them at every send. */
+async function marketingPrefs(session: string) {
+  const sc = await sessionContact(session);
+  if (!sc) return null;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/contacts?id=eq.${sc.contactId}&select=marketing_opt_in&limit=1`, { headers: svc });
+  const row = r.ok ? ((await r.json())[0] || null) : null;
+  if (!row) return null;
+  return { optIn: row.marketing_opt_in === true };
+}
+async function setMarketing(session: string, optIn: boolean) {
+  const sc = await sessionContact(session);
+  if (!sc) return null;
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/contacts?id=eq.${sc.contactId}`, {
+    method: "PATCH", headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      marketing_opt_in: optIn === true,
+      marketing_opt_in_at: optIn === true ? new Date().toISOString() : null,
+    }),
+  });
+  if (!r.ok) throw new Error(`prefs save failed (${r.status})`);
+  return { optIn: optIn === true };
+}
+
 /* ---------- CF-2: the who's-on-the-job-today publisher ----------
    Guarded by the cron secret. One thread line per enabled+opted-in job per
    Alaska day, naming the crew the board has scheduled at the property TODAY —
@@ -945,6 +972,8 @@ serve(async (req: Request) => {
 
     let result: unknown = null;
     if (action === "myProjects") result = await myProjects(session);
+    else if (action === "prefs") result = await marketingPrefs(session);
+    else if (action === "setMarketing") result = await setMarketing(session, body.optIn === true);
     else if (action === "requestAccess") result = await requestAccess(token);
     else if (action === "verifyAccess") result = await verifyAccess(token, String(body.code ?? "").trim());
     else if (action === "warrantyRequest") result = await warrantyRequest(token, String(body.note ?? ""));

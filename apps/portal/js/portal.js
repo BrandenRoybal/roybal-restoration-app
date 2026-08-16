@@ -52,6 +52,8 @@ const submitSelections = (cred) => callGateway({ action: "submitSelections", ...
 const requestAccess = (cred) => callGateway({ action: "requestAccess", ...cred });
 const verifyAccess = (cred, code) => callGateway({ action: "verifyAccess", ...cred, code });
 const fetchProjects = (session) => callGateway({ action: "myProjects", session });
+const fetchPrefs = (session) => callGateway({ action: "prefs", session });
+const setMarketingPref = (session, optIn) => callGateway({ action: "setMarketing", session, optIn });
 const warrantyRequest = (cred, note) => callGateway({ action: "warrantyRequest", ...cred, note });
 const respondApproval = (cred, approvalId, approve, name, signature, note) =>
   callGateway({ action: "respondApproval", ...cred, approvalId, approve, name, signature, note });
@@ -355,7 +357,35 @@ async function renderProjects(session) {
     h("div", { class: "card hero" }, h("h1", {}, "Your projects"),
       h("p", { class: "addr" }, rows.length ? "Everything we're doing (and have done) for you." : "No active projects right now — we're a call away when you need us.")),
     ...(rows.length ? [h("div", { class: "card" }, ...rows)] : []),
+    marketingCard(session),
     h("p", { class: "acct__signout" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); clearSession(); location.href = "/"; } }, "Sign out on this phone")));
+}
+
+/* ---------- CF-5: marketing consent, on the account page ----------
+   The verified session is the consent surface — this person proved the
+   phone, so the toggle is attributable. Off by default; one tap either way;
+   the choice is saved to the contact and enforced at every campaign send. */
+function marketingCard(session) {
+  const card = h("div", { class: "card mkt" });
+  const paint = (optIn, note, busy) => {
+    const btn = h("button", { class: "acct__btn" + (optIn ? " mkt__btn--off" : ""), type: "button", disabled: !!busy },
+      busy ? "Saving…" : optIn ? "Turn off seasonal texts" : "Yes — text me seasonal tips");
+    btn.addEventListener("click", async () => {
+      paint(optIn, "", true);
+      try { const r = await setMarketingPref(session, !optIn); paint(r.optIn, r.optIn ? "You're in — a few texts a year, stop anytime." : "Turned off — no more seasonal texts."); }
+      catch { paint(optIn, "Couldn't save that — try again in a moment."); }
+    });
+    card.replaceChildren(
+      h("p", { class: "sectitle" }, "Seasonal tips & reminders"),
+      h("p", { class: "acct__p" }, optIn
+        ? "You get our seasonal home texts — Fairbanks freeze-up prep, maintenance reminders. A few a year, never spam."
+        : "Want a heads-up before freeze-up and a few seasonal home-care reminders? A few texts a year, never spam — reply STOP or turn it off here anytime."),
+      btn,
+      note ? h("p", { class: "acct__status", role: "status" }, note) : null);
+  };
+  fetchPrefs(session).then((r) => paint(r && r.optIn === true)).catch(() => card.remove());
+  paint(false, "", true);   // instant skeleton while prefs load
+  return card;
 }
 
 async function openProject(session, jobId) {
