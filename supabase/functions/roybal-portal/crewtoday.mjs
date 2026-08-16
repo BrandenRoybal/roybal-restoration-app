@@ -69,6 +69,16 @@ export function namesLine(names) {
 
 /* the customer-facing line, posted when the crew's first clock-in of the day
    lands (qb-time-proxy clockinSweep → dailyCrewLines); empty = post nothing */
+/* The intro sentence riding the FIRST crew line that names someone new
+   (crew-bios phase 2). A job's first-ever line (everyone is new) reads as
+   one invitation; a mid-job joiner gets called out by name. Names only —
+   no pronouns to get wrong. */
+export function introLine(newNames, allNew) {
+  if (!newNames || !newNames.length) return "";
+  if (allNew) return "Meet the crew — photos and a little about each of them are on your project page.";
+  return `${namesLine(newNames)} ${newNames.length === 1 ? "is" : "are"} new on your job — say hello under “Meet your crew” on your project page.`;
+}
+
 export function crewLine(names) {
   const line = namesLine(names);
   if (!line) return "";
