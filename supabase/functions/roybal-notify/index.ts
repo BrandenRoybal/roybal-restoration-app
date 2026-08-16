@@ -29,6 +29,8 @@
  *                            this low, so they can never silence the phone
  *                            receptionist's alerts or approve-by-text.)
  *           SMS_FORWARD_TO  (optional — US number that inbound texts forward to)
+ *           SMS_CAMPAIGN_CAP (optional, default 100 — CF-5 marketing texts
+ *           per month; own ceiling on top of consent + the reserve floor)
  *           SMS_QUIET_START / SMS_QUIET_END (optional, default 7 / 20 — the
  *           Alaska-time window customer-facing texts may send in)
  * Deploy:   supabase functions deploy roybal-notify --no-verify-jwt
@@ -43,6 +45,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard } from "./approve.ts";
+import { campaignGate } from "./campaign.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -198,6 +201,10 @@ const envNum = (name: string, dflt: number) => {
   return Number.isFinite(n) && n >= 0 ? n : dflt;
 };
 const SMS_RESERVE = envNum("SMS_RESERVE", 150);
+/* CF-5: campaigns get their OWN monthly ceiling on top of every shared
+   guard — see campaign.mjs for the full contract. 0 = no per-lane cap
+   (consent + the reserve floor still apply; consent is never waivable). */
+const SMS_CAMPAIGN_CAP = envNum("SMS_CAMPAIGN_CAP", 100);
 const qh = (v: string | undefined, dflt: number) => {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 && n <= 24 ? n : dflt;
@@ -219,11 +226,11 @@ function assertSendWindow(kind: string) {
     `it's ${fmt(hr === 0 ? 24 : hr)}–${fmt(hr + 1)} there now. It was NOT sent; try again in the window.`);
 }
 
-async function monthCount(token: string, apikey = ANON_KEY): Promise<number> {
+async function monthCount(token: string, apikey = ANON_KEY, extra = ""): Promise<number> {
   const from = new Date();
   from.setUTCDate(1); from.setUTCHours(0, 0, 0, 0);
   const res = await db(
-    `sms_messages?select=id&direction=eq.outbound&created_at=gte.${encodeURIComponent(from.toISOString())}`,
+    `sms_messages?select=id&direction=eq.outbound&created_at=gte.${encodeURIComponent(from.toISOString())}${extra}`,
     token, { method: "GET", headers: { Prefer: "count=exact", Range: "0-0" } }, apikey);
   if (!res.ok) throw new Error(`send-count read failed (${res.status})`);
   const range = res.headers.get("content-range") || "";           // e.g. "0-0/37"
@@ -274,10 +281,37 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
       `the phone lane. Kind '${kind}' is refused until next month or until SMS_MONTHLY_CAP is raised.`,
     );
 
+  /* CF-5 campaign lane: consent + its own ceiling + the reserve floor, all
+     decided in campaignGate (pure, tested). Consent lives HERE so a bug in a
+     future segmentation query can't text a person who never opted in — the
+     send layer itself refuses. Quiet hours already apply (campaign is not in
+     CREW_KINDS, and unknown kinds are guarded by default). STOP is honored a
+     layer down: Twilio refuses sends to opted-out numbers and the row settles
+     'failed'. */
+  let campaignContact: { id: string; optIn: boolean } | null = null;
+  if (kind === "campaign") {
+    const digits = to.replace(/[^\d]/g, "").slice(-10);
+    try {
+      const r = await db(`contacts?select=id,marketing_opt_in&phone_norm=eq.${digits}&merged_into=is.null&limit=2`, jwt, { method: "GET" });
+      if (r.ok) {
+        const rows = (await r.json()) as Array<{ id: string; marketing_opt_in: boolean }>;
+        if (rows.length === 1) campaignContact = { id: rows[0].id, optIn: rows[0].marketing_opt_in === true };
+      }
+    } catch (_) { /* stays null → the gate refuses */ }
+    const campaignUsed = await monthCount(jwt, ANON_KEY, "&kind=eq.campaign");
+    const gate = campaignGate({
+      used, cap: SMS_MONTHLY_CAP, reserve: SMS_RESERVE,
+      campaignUsed, campaignCap: SMS_CAMPAIGN_CAP, contact: campaignContact,
+    });
+    if (!gate.ok) throw new Error(gate.error);
+  }
+
   // person link: customer-directed kinds stamp the outbound side so the
   // contact_timeline shows both halves of the conversation. Owner/crew kinds
   // are skipped inside contactByPhone. Runs under the caller's JWT (RLS).
-  const outContact = await contactByPhone((p, o) => db(p, jwt, o), to.replace(/[^\d]/g, "").slice(-10), kind);
+  const outContact = kind === "campaign"
+    ? (campaignContact ? campaignContact.id : null)
+    : await contactByPhone((p, o) => db(p, jwt, o), to.replace(/[^\d]/g, "").slice(-10), kind);
 
   // RLS-gated insert BEFORE the paid call — unauthenticated callers stop here
   const ins = await db("sms_messages", jwt, {
