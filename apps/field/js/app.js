@@ -19,9 +19,9 @@ import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressS
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
-import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged } from "./sync.js";
+import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged, reloadFromCloud } from "./sync.js";
 import { graftProject } from "./graft.js";
-import { mergeProjects } from "./merge.js";
+import { mergeProjects, tombstoneItems } from "./merge.js";
 import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine, getUnifiedJobId } from "./spine.js";
 import { generateNarrative, constructionFacts } from "./narrative.js";
@@ -1031,6 +1031,42 @@ function backupsCard(project) {
   return box;
 }
 
+/* ---------- "take the cloud's copy" card ----------
+   The counterpart to the backups card above. That one ADDS BACK what went
+   missing; this one throws this device's copy away and takes the server's,
+   which is the only cure when this device is holding elements someone else
+   deleted (the merge unions, so it re-adds them every cycle — see the
+   tombstone note in merge.js). Folded away and worded as a last resort,
+   because for everything else the merge is the right answer. */
+function cloudCopyCard(project) {
+  const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "☁ Take the cloud's copy");
+  btn.addEventListener("click", async () => {
+    if (!confirm("Replace this device's copy of the job with the one in the cloud?\n\nAnything on this device that hasn't synced yet is REMOVED from the job (it's saved to Backups on this device first, so you can add it back). No other device is affected.")) return;
+    btn.disabled = true;
+    const before = (project.photos || []).length;
+    try {
+      const full = await reloadFromCloud(project.id);
+      const after = (full.photos || []).length;
+      toast(after === before ? "Took the cloud's copy — it matched what was here."
+        : `Took the cloud's copy — now ${after} photo${after === 1 ? "" : "s"} (was ${before}).`);
+      setTimeout(() => location.reload(), 700);
+    } catch (e) {
+      btn.disabled = false;
+      alert(String((e && e.message) || e));
+    }
+  });
+  const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
+    h("div", { style: "font-weight:700" }, "☁ Cloud copy of this job"));
+  const bodyBox = h("div", {},
+    h("p", { class: "subtle", style: "margin:6px 0 10px;font-size:13px" },
+      "Use this when this device is showing photos or items you deleted on another device and syncing won't clear them. " +
+      "Sync normally MERGES the two copies, which adds anything missing back — so it can't remove things on its own. " +
+      "This takes the cloud's copy instead. The current copy is saved to Backups on this device first."),
+    h("div", { style: "display:flex;justify-content:flex-end" }, btn));
+  foldable(head, bodyBox, "cloudcopy", true);   // last resort — starts tucked away
+  return h("div", { class: "card app-only" }, head, bodyBox);
+}
+
 function messageLogCard(project) {
   const log = Array.isArray(project.smsLog) ? project.smsLog : [];
 
@@ -1188,6 +1224,7 @@ function projectHome(project) {
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
   body.append(messageLogCard(project));
   body.append(backupsCard(project));         // on-device snapshots taken before sync overwrote this job
+  body.append(cloudCopyCard(project));       // …and the other direction: discard this device's copy, take the server's
 
   // Phase 6: no double entry — a job with real details gets/updates its board
   // tile (Leads until the coordinator stages it); fire-and-forget, offline-safe
@@ -1648,7 +1685,7 @@ async function deleteInstance(project, meta, instance, back) {
   if (!confirm(`Delete this ${meta.name}? This cannot be undone.`)) return;
   const arr = project[meta.key];
   const i = arr.findIndex((x) => x.id === instance.id);
-  if (i >= 0) arr.splice(i, 1);
+  if (i >= 0) { tombstoneItems(project, instance.id); arr.splice(i, 1); }   // recorded delete — see merge.js
   await Store.put(project);
   toast(meta.name + " deleted");
   go(back);
@@ -1994,7 +2031,7 @@ function contentsItemEditor(project, item) {
 async function deleteItem(project, item) {
   if (!confirm("Delete this item?")) return;
   const i = project.contents.findIndex((x) => x.id === item.id);
-  if (i >= 0) project.contents.splice(i, 1);
+  if (i >= 0) { tombstoneItems(project, item.id); project.contents.splice(i, 1); }   // recorded delete — see merge.js
   await Store.put(project);
   toast("Item deleted");
   go(`#/p/${project.id}/f/contents`);
@@ -2060,6 +2097,7 @@ function boxesManager(project) {
   function delBox(b) {
     if (!confirm("Delete " + b.label + "? Items stay in inventory but become unassigned.")) return;
     project.contents.forEach((it) => { if (it.boxId === b.id) it.boxId = ""; });
+    tombstoneItems(project, b.id);                    // recorded delete — see merge.js
     project.boxes = project.boxes.filter((x) => x.id !== b.id);
     Store.put(project); paint();
   }
