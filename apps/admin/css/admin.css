@@ -108,3 +108,7 @@ table.atable tbody tr:hover { background: #f7f9fc; }
 .mergecard { margin-top: 14px; border-color: #f0d8a8; background: #fffdf7; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } .crow__k { flex-basis: 74px; } }
+
+/* a disabled button must LOOK disabled — the campaigns panel's dead
+   "New campaign" button taught us this the hard way */
+.btn[disabled] { opacity: .45; cursor: not-allowed; box-shadow: none; }
