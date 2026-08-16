@@ -158,7 +158,8 @@ globalThis.fetch = async (url, opts = {}) => {
 
 const { Store } = await import("../js/core.js");
 const { signIn, isSignedIn } = await import("../js/supa.js");
-const { syncNow, startSync, resetSync } = await import("../js/sync.js");
+const { syncNow, startSync, resetSync, reloadFromCloud } = await import("../js/sync.js");
+const { tombstoneItems } = await import("../js/merge.js");
 
 (async () => {
   await signIn("crew@roybalconstruction.com", "pw");
@@ -491,6 +492,78 @@ const { syncNow, startSync, resetSync } = await import("../js/sync.js");
   await syncNow();
   const mA = await Store.get("mA");
   ok(!!mA && mA.photos[0].src === "data:image/jpeg;base64,ok", "the stuck row lands intact once its media is reachable");
+
+  // ============================================================
+  // A DELETED PHOTO STAYS DELETED (Aug 2026 — Fidler, job a28754b4)
+  // 163 photos deleted on the desktop came back from a phone on every
+  // cycle: the merge unions, and a union cannot tell "deleted" from
+  // "never had". These drive the whole loop, not just the merge.
+  // ============================================================
+  {
+    // the phone: holds all three photos and, after a sign-out/in, believes
+    // every row is unsynced work — the exact state that forces the merge path
+    await Store.put({ id: "del1", customer: "Fidler",
+      photos: [{ id: "P1", src: "one" }, { id: "P2", src: "two" }, { id: "P3", src: "three" }] });
+    await syncNow();
+
+    // the desktop deletes two of them and pushes
+    const desktop = JSON.parse(JSON.stringify(await Store.get("del1")));
+    tombstoneItems(desktop, ["P2", "P3"]);
+    desktop.photos = desktop.photos.filter((p) => p.id === "P1");
+    desktop.rev = Number(serverRows.get("del1").data.rev) || 1;
+    desktop.updatedAt = new Date(Date.now() + 60_000).toISOString();
+    serverRows.set("del1", { id: "del1", deleted: false, updated_at: nowIso(),
+      data: { ...desktop, rev: desktop.rev + 1 } });
+
+    // …and the phone re-dirties its copy, so pull MUST merge rather than replace
+    const phone = await Store.get("del1");
+    phone.receipts = [{ id: "R9", amount: 40 }];
+    await Store.put(phone, { quiet: true });
+
+    await syncNow();
+    const after = await Store.get("del1");
+    ok((after.photos || []).map((p) => p.id).join(",") === "P1",
+      "a photo deleted on another device does not come back on the merge path");
+    ok((after.receipts || []).length === 1, "…and the phone's own unsynced work still survives the merge");
+    await syncNow();
+    ok((serverRows.get("del1").data.photos || []).length === 1,
+      "…and the phone never pushes the deleted photos back to the server");
+    ok((await Store.get("del1")).photos.length === 1, "the delete holds across further cycles");
+  }
+
+  // ---------- reloadFromCloud: the escape hatch for pre-tombstone copies ----------
+  {
+    // a device stuck the OLD way: extra photos, no tombstones anywhere, and
+    // dirty bookkeeping, so no amount of syncing can ever remove them
+    await Store.put({ id: "rl1", customer: "Fidler",
+      photos: [{ id: "K1", src: "keep" }, { id: "X1", src: "ghost" }, { id: "X2", src: "ghost" }] });
+    await syncNow();
+    // the desktop deletes the ghosts on a build with NO tombstones, so the
+    // server copy simply lacks them — indistinguishable from "never had them"
+    serverRows.set("rl1", { id: "rl1", deleted: false, updated_at: nowIso(), data: {
+      id: "rl1", customer: "Fidler", rev: 40, photos: [{ id: "K1", src: "keep" }],
+      updatedAt: new Date(Date.now() + 60_000).toISOString() } });
+    const stuck = await Store.get("rl1");
+    await Store.put(stuck, { quiet: true });          // dirty → sync can only merge
+    await syncNow();
+    ok((await Store.get("rl1")).photos.length === 3, "…the union really does keep the ghosts (the bug being fixed)");
+    ok((serverRows.get("rl1").data.photos || []).length === 3,
+      "…and pushes them straight back at the desktop, undoing the delete for everyone");
+
+    // the desktop deletes them again; this time the phone stops merging and
+    // simply takes the cloud's copy
+    serverRows.set("rl1", { id: "rl1", deleted: false, updated_at: nowIso(), data: {
+      id: "rl1", customer: "Fidler", rev: 41, photos: [{ id: "K1", src: "keep" }],
+      updatedAt: new Date(Date.now() + 120_000).toISOString() } });
+    const got = await reloadFromCloud("rl1");
+    ok(got.photos.length === 1 && (await Store.get("rl1")).photos.length === 1,
+      "reloadFromCloud replaces the local copy with the server's");
+    ok((await Store.backups("rl1")).length >= 1, "…after snapshotting the discarded copy to on-device backups");
+    await syncNow();
+    ok((serverRows.get("rl1").data.photos || []).length === 1,
+      "…and the row is adopted CLEAN, so nothing is pushed back up");
+    ok(serverRows.get("rl1").deleted === false, "…and no tombstone is queued for anyone else");
+  }
 
   // ============================================================
   // SERVER-SIDE MERGE PATH (Phase 2b) — the twins of the tests above.

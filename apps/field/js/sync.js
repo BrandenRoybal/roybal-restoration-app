@@ -545,6 +545,45 @@ export async function syncNow() {
   }
 }
 
+/* ---------- take the cloud's copy of one job, wholesale ----------
+   The escape hatch for the one case the merge cannot fix by design. Sync
+   NEVER replaces a job this device has unsynced edits on — it merges, and
+   the merge is a union. So a job carrying elements another device deleted
+   on a build that predates per-item tombstones (merge.js) can sit wrong on
+   this device forever: every cycle re-adds them, and every sign-out/in makes
+   it worse, because resetSync() marks every local row unsynced and forces
+   the merge path. No amount of re-syncing can clear that; a deliberate
+   "their copy wins for this job" can.
+
+   Deliberately NOT a merge and deliberately NOT a delete: it drops only THIS
+   DEVICE's copy (snapshotted to backups first, so the discarded work is one
+   tap away on the job page) and adopts the server row CLEAN, so the next
+   cycle pushes nothing back. No tombstone is queued and no other device is
+   touched. Throws with a message worth showing the user. */
+export async function reloadFromCloud(id) {
+  if (!isSignedIn()) throw new Error("Sign in first — this takes the cloud's copy of the job.");
+  const row = await fetchRow(id);
+  if (!row || row.deleted || !row.data || !row.data.id) {
+    throw new Error("The cloud has no copy of this job yet, so there is nothing to take. Let it sync first.");
+  }
+  const { project: full, missing } = await inflateProject(row.data, downloadRemembered);
+  if (missing > 0) {
+    // storing markers-as-photos is how second devices used to end up with
+    // garbage images — refuse rather than write a corrupt copy
+    throw new Error(`${missing} photo${missing === 1 ? "" : "s"} on the cloud copy haven't finished uploading from the other device. Try again in a minute.`);
+  }
+  const local = await Store.get(id);
+  if (local) await Store.backup(local);       // the discarded copy stays restorable on this device
+  full.id = id;
+  delete full.rev;                            // revs live in sync bookkeeping, not the blob
+  await Store.put(full, { quiet: true, bump: false });
+  revs[id] = Number(row.data.rev) || 0; saveRevs();
+  pushed[id] = full.updatedAt; savePushed();  // clean: nothing left to assert back
+  mediaWait.delete(id);
+  rowChanged(id);
+  return full;
+}
+
 function schedulePush() {
   clearTimeout(pushTimer);
   pushTimer = setTimeout(syncNow, 1500);
