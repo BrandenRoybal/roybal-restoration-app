@@ -112,7 +112,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 async function jobByToken(token: string) {
   const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,contact_id,customer_name,property_address,status,milestones,photos,documents,drying,closeout,approvals,billing,selections_submitted_at&limit=1`;
+    `&select=id,contact_id,field_project_id,customer_name,property_address,status,milestones,photos,documents,drying,closeout,approvals,billing,selections_submitted_at&limit=1`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
@@ -213,6 +213,43 @@ async function view(token: string) {
     payUrl: /^https:\/\//.test(String(bi.payUrl || "")) ? String(bi.payUrl) : "",
     asOf: String(bi.asOf || "").slice(0, 10),
   } : null;
+  // crew bios (phase 1): everyone assigned on the linked board job (base
+  // roster + phase crew), re-projected through a hard allow-list. Bio detail
+  // (photo/years/certs/blurb) only when the office checked bioPublic on the
+  // roster — otherwise name + role alone, matching what the daily crew line
+  // already tells the customer. Phone, rate, QB ids can never leak: they are
+  // simply not in the projection.
+  const crewOut: Array<{ name: string; role: string; photoUrl: string; years: number; certs: string; blurb: string }> = [];
+  const fid = String(row.field_project_id || "");
+  if (fid && /^[\w-]+$/.test(fid)) {
+    const bq = `coordination_jobs?deleted=eq.false&data->>fieldJobId=eq.${encodeURIComponent(fid)}&select=data&limit=3`;
+    const boards = await fetch(`${SUPABASE_URL}/rest/v1/${bq}`, { headers: svc }).then((r) => r.json()).catch(() => []);
+    const b = Array.isArray(boards) && boards[0]?.data ? boards[0].data as Record<string, unknown> : null;
+    if (b) {
+      const subs = Array.isArray(b.subtasks) ? b.subtasks as Array<Record<string, unknown>> : [];
+      const ids = new Set(
+        [...(Array.isArray(b.crewIds) ? b.crewIds : []),
+         ...subs.flatMap((st) => Array.isArray(st?.crewIds) ? st.crewIds : [])].map((v) => String(v)));
+      if (ids.size) {
+        const crewRows = await fetch(`${SUPABASE_URL}/rest/v1/crew_members?deleted=eq.false&select=data&limit=100`, { headers: svc })
+          .then((r) => r.json()).catch(() => []);
+        for (const c of Array.isArray(crewRows) ? crewRows : []) {
+          const d = c?.data as Record<string, unknown> | undefined;
+          if (!d?.id || !ids.has(String(d.id)) || d.active === false || !d.name) continue;
+          const pub = d.bioPublic === true;
+          crewOut.push({
+            name: String(d.name).slice(0, 60),
+            role: String(d.role || "").slice(0, 60),
+            photoUrl: pub && /^https:\/\//.test(String(d.photoUrl || "")) ? String(d.photoUrl).slice(0, 300) : "",
+            years: pub ? Math.max(0, Math.min(60, Number(d.bioYears) || 0)) : 0,
+            certs: pub ? String(d.bioCerts || "").slice(0, 120) : "",
+            blurb: pub ? String(d.bioBlurb || "").slice(0, 200) : "",
+          });
+          if (crewOut.length >= 8) break;
+        }
+      }
+    }
+  }
   return {
     job: {
       customerName: row.customer_name || "",
@@ -220,6 +257,7 @@ async function view(token: string) {
       status: row.status || "",
       milestones: Array.isArray(row.milestones) ? row.milestones : [],
     },
+    crew: crewOut,
     photos,
     documents,
     drying: drying && (drying.areas.length || drying.equipmentOut) ? drying : null,

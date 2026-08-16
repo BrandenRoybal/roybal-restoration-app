@@ -389,6 +389,26 @@ function render(data, token, opts) {
     ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Progress"), h("ul", { class: "steps" }, ...steps))
     : null;
 
+  /* Meet your crew — bio cards for the people assigned to this job. The
+     gateway sends name+role for everyone; photo/years/certs/blurb only for
+     members the office marked public. A face before the knock on the door. */
+  const crewRows = (data.crew || []).map((c) =>
+    h("div", { class: "crewbio" },
+      c.photoUrl
+        ? h("img", { class: "crewbio__photo", src: c.photoUrl, alt: c.name, loading: "lazy" })
+        : h("div", { class: "crewbio__ini" }, (c.name || "?").split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase()),
+      h("div", { class: "crewbio__body" },
+        h("p", { class: "crewbio__name" }, c.name,
+          c.role ? h("span", { class: "crewbio__role" }, " · " + c.role) : null),
+        (c.years || c.certs)
+          ? h("p", { class: "crewbio__certs" },
+              [c.years ? c.years + (c.years === 1 ? " year" : " years") + " in the trade" : "", c.certs].filter(Boolean).join(" · "))
+          : null,
+        c.blurb ? h("p", { class: "crewbio__blurb" }, c.blurb) : null)));
+  const crewCard = crewRows.length
+    ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Meet your crew"), ...crewRows)
+    : null;
+
   const photos = (data.photos || []).map((p) =>
     h("figure", { class: "photo" },
       h("img", { src: p.url, alt: p.caption || "Project photo", loading: "lazy",
@@ -548,7 +568,7 @@ function render(data, token, opts) {
     ? accountCard(token) : null;
 
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[back, hero, timeline, ...approvalCards, ...closeoutCards, billingCard, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
+  app.replaceChildren(...[back, hero, timeline, crewCard, ...approvalCards, ...closeoutCards, billingCard, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";

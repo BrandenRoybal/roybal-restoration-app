@@ -4,7 +4,8 @@
    roster. Layout modeled on the Field app; gold aesthetic.
    Shares the field/admin login + Supabase session.
    ============================================================ */
-import { h, $, clear, uid, todayISO, fmtDate, toast } from "../../js/core.js";
+import { h, $, clear, uid, todayISO, fmtDate, toast, shrinkDataURL } from "../../js/core.js";
+import { uploadCrewPhoto } from "../../js/supa.js";
 import {
   SYNC_ENABLED, isSignedIn, signIn, signOut, currentEmail,
   cachedJobs, cachedCrew, cachedEntries, pull, saveJob, deleteJob,
@@ -2652,9 +2653,12 @@ function openCrewModal() {
     if (!all.length) list.append(h("p", { class: "subtle" }, "No crew yet. Add your first crew member below."));
     for (const c of all) {
       list.append(h("div", { class: "crewrow" },
-        h("span", { class: "crewchip crewchip--lg", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)),
+        c.photoUrl
+          ? h("img", { class: "crewphoto crewphoto--sm", src: c.photoUrl, alt: "" })
+          : h("span", { class: "crewchip crewchip--lg", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)),
         h("div", {},
-          h("div", { class: "crewrow__name" }, c.name, c.active === false ? h("span", { class: "subtle" }, "  (inactive)") : null),
+          h("div", { class: "crewrow__name" }, c.name, c.active === false ? h("span", { class: "subtle" }, "  (inactive)") : null,
+            c.bioPublic === true ? h("span", { class: "subtle", title: "Bio shows on customer portals" }, "  🌐") : null),
           h("div", { class: "crewrow__meta" }, [c.role, c.phone].filter(Boolean).join(" · ") || "—")),
         h("div", { class: "crewrow__act" },
           h("button", { class: "btn btn--ghost btn--sm", onclick: () => editForm(c) }, "Edit"),
@@ -2692,12 +2696,48 @@ function openCrewModal() {
       renderQb();
     }
 
+    /* ---- customer-facing bio (portal "Meet your crew" card) ----
+       Photo + three short fields. NOTHING shows to customers until the
+       "Show bio on the customer portal" box is checked — get the person's
+       OK first; their name/role already appear via the daily crew line. */
+    const photoImg = h("img", { class: "crewphoto", alt: "", hidden: !m.photoUrl, src: m.photoUrl || "" });
+    const photoChip = h("span", { class: "crewchip crewchip--lg", style: `background:${m.color || "#7a8aa0"}`, hidden: !!m.photoUrl }, initials(m.name || "?"));
+    const photoInput = h("input", { type: "file", accept: "image/*", style: "display:none" });
+    const photoBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, m.photoUrl ? "Replace photo" : "Add photo");
+    photoBtn.addEventListener("click", () => photoInput.click());
+    photoInput.addEventListener("change", async () => {
+      const f = photoInput.files && photoInput.files[0];
+      photoInput.value = "";
+      if (!f) return;
+      photoBtn.disabled = true; photoBtn.textContent = "Uploading…";
+      try {
+        const dataUrl = await new Promise((res, rej) => {
+          const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f);
+        });
+        const small = await shrinkDataURL(dataUrl, 512, 0.8);
+        const blob = await (await fetch(small)).blob();
+        m.photoUrl = await uploadCrewPhoto(m.id, blob);
+        photoImg.src = m.photoUrl; photoImg.hidden = false; photoChip.hidden = true;
+        toast("Photo uploaded — save to keep it");
+      } catch (e) {
+        toast("Photo upload failed: " + (e && e.message || e), 4000);
+      }
+      photoBtn.disabled = false; photoBtn.textContent = m.photoUrl ? "Replace photo" : "Add photo";
+    });
+    const years = h("input", { type: "number", min: "0", step: "1", value: m.bioYears || "", placeholder: "e.g. 8" });
+    const certs = h("input", { type: "text", value: m.bioCerts || "", placeholder: "e.g. IICRC WRT certified" });
+    const blurb = h("input", { type: "text", value: m.bioBlurb || "", placeholder: "One friendly line — “Born and raised in North Pole, dad of two”" });
+    const bioPub = h("input", { type: "checkbox", checked: m.bioPublic === true });
+
     const save = h("button", { class: "btn btn--primary btn--sm" }, isNew ? "Add member" : "Save");
     save.addEventListener("click", async () => {
       if (!name.value.trim()) { toast("Enter a name"); name.focus(); return; }
       Object.assign(m, {
         name: name.value.trim(), phone: phone.value.trim(), role: role.value.trim(),
         hourlyRate: rate.value ? Number(rate.value) : "", active: active.checked,
+        bioYears: years.value ? Number(years.value) : "",
+        bioCerts: certs.value.trim(), bioBlurb: blurb.value.trim(),
+        bioPublic: bioPub.checked,
       });
       crew = [...crew.filter((x) => x.id !== m.id), m];
       await saveCrewMember(m);
@@ -2710,6 +2750,12 @@ function openCrewModal() {
       h("div", { class: "grid2" }, field("Role", role), field("Hourly rate ($)", rate)),
       qbRow || h("span"),
       h("label", { style: "display:flex;align-items:center;gap:8px;font-size:14px;margin:6px 0 12px" }, active, "Active (show on the board)"),
+      h("div", { class: "subtle", style: "font-size:12px;margin-bottom:4px" }, "Customer-facing bio (portal “Meet your crew” card)"),
+      h("div", { style: "display:flex;gap:10px;align-items:center;margin:2px 0 10px" }, photoImg, photoChip, photoBtn, photoInput),
+      h("div", { class: "grid2" }, field("Years in the trade", years), field("Certifications", certs)),
+      field("About them (one friendly line customers see)", blurb),
+      h("label", { style: "display:flex;align-items:center;gap:8px;font-size:14px;margin:6px 0 12px" }, bioPub,
+        "Show bio on the customer portal (get their OK first)"),
       h("div", { class: "btn-row" }, save, h("button", { class: "btn btn--ghost btn--sm", onclick: () => clear(formWrap) }, "Cancel")));
     setTimeout(() => name.focus(), 30);
   }
