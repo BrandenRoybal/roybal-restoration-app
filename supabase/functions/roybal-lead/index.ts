@@ -345,6 +345,26 @@ serve(async (req) => {
     if (cr.ok) contactId = (await cr.json().catch(() => null)) as string | null;
   } catch (e) { console.error("contact_resolve failed (lead continues)", String((e as Error)?.message ?? e)); }
 
+  // CF-5 marketing consent from the form's optional checkbox — applied ONLY
+  // when this very submission CREATED the contact (created seconds ago).
+  // The public lane never enriches an existing person (228's rule): a
+  // stranger typing a customer's phone still can't flip their marketing
+  // flag — that consent belongs to the verified portal session. Best-effort:
+  // a hiccup here must not cost the lead.
+  if (contactId && (body.optIn === true || body.optIn === "yes" || body.optIn === "on")) {
+    try {
+      const cg = await fetch(`${SUPABASE_URL}/rest/v1/contacts?id=eq.${contactId}&select=created_at,marketing_opt_in&limit=1`, { headers: svc });
+      const row = cg.ok ? ((await cg.json())[0] || null) : null;
+      const created = row ? Date.parse(String(row.created_at || "")) : NaN;
+      if (row && row.marketing_opt_in !== true && Number.isFinite(created) && Date.now() - created < 15_000) {
+        await fetch(`${SUPABASE_URL}/rest/v1/contacts?id=eq.${contactId}`, {
+          method: "PATCH", headers: { ...svc, "Content-Type": "application/json" },
+          body: JSON.stringify({ marketing_opt_in: true, marketing_opt_in_at: new Date().toISOString() }),
+        });
+      }
+    } catch (e) { console.error("opt-in stamp failed (lead continues)", String((e as Error)?.message ?? e)); }
+  }
+
   // Same envelope and field names as services/phone-agent/tools.mjs createLead,
   // so the board renders a web lead and a phone lead identically.
   const lead = {
