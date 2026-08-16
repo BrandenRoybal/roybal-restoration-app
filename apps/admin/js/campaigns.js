@@ -105,10 +105,20 @@ export function campaignsPanel() {
         ...rows.slice(0, 5).map(([key, g]) => h("div", { style: "font-size:13px;padding:3px 0" },
           h("strong", {}, key.slice(9)), ` — ${g.sent} sent${g.failed ? `, ${g.failed} refused/failed` : ""} · ${String(g.last).slice(0, 10)}`)));
     }
-    const newBtn = h("button", { class: "btn btn--primary btn--sm", disabled: !sendable.length }, "＋ New campaign");
-    newBtn.addEventListener("click", () => composer(sendable));
-    body.append(h("div", { style: "margin-top:8px" }, newBtn,
-      sendable.length ? null : h("p", { class: "subtle" }, "Nobody to text yet — customers opt in on their portal page or the website form.")));
+    // no dead controls: an audience of zero gets the explanation, not a
+    // disabled-but-clickable-looking primary button ("I click, nothing happens")
+    if (sendable.length) {
+      const newBtn = h("button", { class: "btn btn--primary btn--sm" }, "＋ New campaign");
+      newBtn.addEventListener("click", () => composer(sendable));
+      body.append(h("div", { style: "margin-top:8px" }, newBtn));
+    } else {
+      body.append(h("p", { class: "subtle", style: "margin-top:6px" },
+        "Nobody's opted in yet, so there's no one to text. Customers join from the ",
+        h("strong", {}, "“Seasonal tips & reminders”"),
+        " card on their portal page or the checkbox on the website's quote form — or open a ",
+        h("a", { href: "#/", onclick: (e) => { e.preventDefault(); const s = document.querySelector("input[type=search]"); if (s) s.focus(); } }, "contact"),
+        " and check “Opted in to marketing” after they've told you yes. This panel lights up the moment the first person is in."));
+    }
   }
 
   function composer(sendable) {
