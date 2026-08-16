@@ -13,6 +13,7 @@ import { qboPanel, handleQboCallback } from "./qboconnect.js";
 import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
 import { messagesPanel } from "./messages.js";
 import { contactsPanel, renderContactPage } from "./contacts.js";
+import { campaignsPanel, campaignsBusy } from "./campaigns.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
 
@@ -35,8 +36,10 @@ function onStatus(s) {
   const [c, t] = map[s.state] || ["var(--green)", "Online"];
   dot.style.color = c; dot.title = t;
   // refresh as jobs arrive — but never clobber an open contact page
-  // (its edit form would lose keystrokes to a background sync)
-  if (s.state === "synced" && isSignedIn() && !contactRoute()) renderDashboard();
+  // (its edit form would lose keystrokes to a background sync) or the
+  // campaigns composer (curation gone, and a rebuilt panel would hide a
+  // send loop still running in a detached node — duplicate-SMS bait)
+  if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy()) renderDashboard();
 }
 
 /* ---------- routes (the admin's first router — field-app hash pattern) ----------
@@ -166,7 +169,7 @@ async function renderDashboard() {
     kpi(drying, "Drying in progress"),
     kpi(attention, "Need attention (7-day equip.)", attention > 0)));
 
-  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel(), gmailPanel(), messagesPanel(), contactsPanel());
+  if (SYNC_ENABLED) body.append(qbPanel(), qboPanel(), gmailPanel(), messagesPanel(), contactsPanel(), campaignsPanel());
 
   const search = h("input", { type: "search", placeholder: "Search customer, address, claim #…", value: filterText });
   search.addEventListener("input", () => { filterText = search.value.toLowerCase(); paintTable(); });

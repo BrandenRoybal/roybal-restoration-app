@@ -26,5 +26,8 @@
   </header>
   <main id="view" class="aview"><!-- routed content --></main>
   <script type="module" src="js/admin.js"></script>
+  <!-- toast() from core.js targets #toast and silently no-ops without it
+       (same fix the board got in PR #138). Styled by ../css/app.css. -->
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>
