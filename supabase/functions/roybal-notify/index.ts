@@ -304,6 +304,19 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
       campaignUsed, campaignCap: SMS_CAMPAIGN_CAP, contact: campaignContact,
     });
     if (!gate.ok) throw new Error(gate.error);
+    // One tag, one text per number — a partial campaign re-run (or a client
+    // retrying a lost HTTP response whose Twilio send actually completed)
+    // must skip everyone already texted, not repeat them. Failed rows don't
+    // count: a genuinely failed send may be retried.
+    const tag = String(body.captured_by ?? "");
+    if (tag) {
+      const dup = await db(
+        `sms_messages?select=id&direction=eq.outbound&kind=eq.campaign` +
+        `&sent_by=eq.${encodeURIComponent(tag)}&to_number=eq.${encodeURIComponent(to)}&status=neq.failed&limit=1`,
+        jwt, { method: "GET" });
+      if (dup.ok && ((await dup.json()) as unknown[]).length)
+        throw new Error("campaign_duplicate: this campaign already texted this number — skipped, not resent.");
+    }
   }
 
   // person link: customer-directed kinds stamp the outbound side so the
