@@ -148,7 +148,10 @@ export function newProject() {
     dryingSystem: "",    // Open | Closed | Hybrid
     // loss classification beyond water (chips reveal each type's block).
     // Freeze-up is a WATER loss (cause text) — no type of its own.
-    lossTypes: ["water"],  // water | fire | mold | storm — pick all that apply
+    // Empty on purpose: lossTypesOf() supplies the water default, so a fresh
+    // scaffold stays blank-reclaimable while a DELIBERATE selection (a fire
+    // job with nothing else typed yet) counts as real content.
+    lossTypes: [],         // water | fire | mold | storm — pick all that apply
     smokeType: "",         // fire: wet | dry | protein | fuel  (residue drives cleaning method)
     fireDamage: "",        // fire: light | moderate | heavy
     moldCondition: "",     // IICRC S520: 1 normal | 2 settled spores | 3 actual growth
@@ -211,9 +214,10 @@ export function newPhoto() {
    ANY real content — one letter of a name, one photo, one log row — keeps
    the full never-lose-work protection. Conservative on purpose: unknown or
    prefilled values count as content. */
-// lossTypes defaults to ["water"] in the factory — without this entry every
-// fresh "+ New Job" scaffold would count as real content and dodge blank-reclaim
-const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "createdBy", "updatedAt", "archivedAt", "jobType", "photoSize", "photoSort", "lossTypes"]);
+// lossTypes is NOT ignored here: the factory ships it empty (lossTypesOf
+// supplies the water default), so a fresh scaffold is blank while a
+// deliberately toggled classification is protected content like waterCategory
+const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "createdBy", "updatedAt", "archivedAt", "jobType", "photoSize", "photoSort"]);
 
 /* Loss types, read defensively: jobs predate the field. A block with DATA in
    it always counts as selected (never hide entered data — the formsFor rule);

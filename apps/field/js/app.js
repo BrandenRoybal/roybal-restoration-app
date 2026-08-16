@@ -329,8 +329,8 @@ function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
   const cat = [
     p.waterCategory ? `Cat ${p.waterCategory}` : "",
     p.smokeType || p.fireDamage ? "🔥 Fire" : "",
-    p.moldCondition ? "🦠 Mold" : "",
-    p.stormCause ? "🌬 Storm" : "",
+    p.moldCondition || p.moldExtent ? "🦠 Mold" : "",
+    p.stormCause || p.envelopeBreached ? "🌬️ Storm" : "",
   ].filter(Boolean).join(" · ");
   const flags = p.archivedAt ? [] : (isConst ? buildFlags(p) : dryingFlags(p));   // rule-based watch flags — no AI, no cost
   const sub = isConst
@@ -1194,7 +1194,7 @@ function projectHome(project) {
       badges.append(h("span", { class: "badge cat2" }, ["🦠 Mold", project.moldCondition && "Cond. " + project.moldCondition, project.moldExtent && project.moldExtent + " sq ft"].filter(Boolean).join(" ")));
     if (project.stormCause || project.envelopeBreached === "yes") {
       const CAUSE = { wind: "Wind", hail: "Hail", tree: "Tree", "ice-dam": "Ice dam", flood: "Flood" };
-      badges.append(h("span", { class: "badge" }, ["🌬", CAUSE[project.stormCause] || "Storm", project.envelopeBreached === "yes" ? "· envelope breached" : ""].filter(Boolean).join(" ")));
+      badges.append(h("span", { class: "badge" }, ["🌬️", CAUSE[project.stormCause] || "Storm", project.envelopeBreached === "yes" ? "· envelope breached" : ""].filter(Boolean).join(" ")));
     }
   }
   if (project.archivedAt)
@@ -2292,10 +2292,22 @@ function projectEdit(project) {
     const active = new Set(lossTypesOf(project));
     const chips = h("div", { class: "seg" });
     [{ value: "water", label: "💧 Water" }, { value: "fire", label: "🔥 Fire & Smoke" },
-     { value: "mold", label: "🦠 Mold" }, { value: "storm", label: "🌬 Storm & Wind" }].forEach((t) => {
+     { value: "mold", label: "🦠 Mold" }, { value: "storm", label: "🌬️ Storm & Wind" }].forEach((t) => {
       const b = h("button", { type: "button", class: active.has(t.value) ? "active" : "" }, t.label);
+      const HAS_DATA = {
+        water: (p) => p.waterCategory || p.waterClass || p.dryingSystem,
+        fire: (p) => p.smokeType || p.fireDamage,
+        mold: (p) => p.moldCondition || p.moldExtent,
+        storm: (p) => p.stormCause || p.envelopeBreached,
+      };
       b.addEventListener("click", () => {
         const cur = new Set(lossTypesOf(project));
+        if (cur.has(t.value) && HAS_DATA[t.value](project)) {
+          // a silent snap-back reads as a broken chip — say the rule out
+          // loud, and don't dirty/push the blob for a no-op
+          toast("That block has entries — clear its fields first. Entered classification is never hidden.");
+          return;
+        }
         cur.has(t.value) ? cur.delete(t.value) : cur.add(t.value);
         project.lossTypes = [...cur];
         Store.put(project);

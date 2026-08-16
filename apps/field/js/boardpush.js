@@ -17,7 +17,7 @@ import { uid, Store } from "./core.js";
 import { rest, isSignedIn } from "./supa.js";
 import { SYNC_ENABLED } from "./config.js";
 import { matchCoordinationId, normClaim } from "./spine.js";
-import { jobType, TRADES, newProject } from "./model.js";
+import { jobType, lossTypesOf, TRADES, newProject } from "./model.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const norm = (s) => String(s || "").trim().toLowerCase();
@@ -56,8 +56,18 @@ const toSubtasks = (phases) => arr(phases).map((p) => ({
 /* constructionType -> board job type; water jobs get the board's own
    "Water Mitigation" column color instead of masquerading as a remodel */
 const BOARD_TYPE = { remodel: "remodel", new_construction: "new_build", reconstruction: "restoration" };
-const boardTypeFor = (project) =>
-  jobType(project) === "construction" ? (BOARD_TYPE[project.constructionType] || "remodel") : "water";
+const boardTypeFor = (project) => {
+  if (jobType(project) === "construction") return BOARD_TYPE[project.constructionType] || "remodel";
+  // the board already has fire/mold tile types — a smoke or mold job should
+  // wear its own color, not masquerade as Water Mitigation. Water wins when
+  // it's in the mix (suppression water is still a drying job).
+  const t = lossTypesOf(project);
+  if (!t.includes("water")) {
+    if (t.includes("fire")) return "fire";
+    if (t.includes("mold")) return "mold";
+  }
+  return "water";
+};
 
 /* ---------- pure: build a brand-new board job from a field project ---------- */
 export function boardJobFromProject(project, plan, nowISO) {
@@ -563,6 +573,9 @@ export function fieldSeedFromBoardJob(row, blank) {
   const d = (row && row.data) || {};
   const p = { ...blank, id: "bj-" + row.id };
   p.jobType = (d.type === "water" || d.type === "fire" || d.type === "mold") ? "restoration" : "construction";
+  // a Fire or Mold board tile seeds a job file classified to match — not the
+  // water default the factory would leave behind
+  if (d.type === "fire" || d.type === "mold") p.lossTypes = [d.type];
   if (p.jobType === "construction") {
     p.constructionType = FIELD_TYPE[d.type] || "";
     p.startDate = d.startDate || "";

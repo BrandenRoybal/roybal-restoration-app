@@ -229,4 +229,15 @@ test("registry completeness: EVERY form in the app is covered by a merge rule", 
     "non-form collections stay registered too");
 });
 
+
+test("lossTypes union like rooms: concurrent chip toggles are both kept", () => {
+  const older = { id: "j", updatedAt: "2026-08-16T10:00:00Z", lossTypes: ["water", "fire"], smokeType: "wet" };
+  const newer = { id: "j", updatedAt: "2026-08-16T10:05:00Z", lossTypes: ["water", "storm"], stormCause: "wind" };
+  const { merged } = mergeProjects(older, newer);
+  assert.deepEqual([...merged.lossTypes].sort(), ["fire", "storm", "water"],
+    "one device's Fire chip must survive the other's Storm push");
+  // detail scalars keep the newer-wins rule of every other header scalar
+  assert.equal(merged.stormCause, "wind");
+});
+
 console.log(`\n${pass} merge checks passed.`);
