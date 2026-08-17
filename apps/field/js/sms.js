@@ -92,6 +92,7 @@ export const SMS_KIND_LABELS = {
   fieldReport: "Field Report → office",
   onOurWay: "On our way → customer",
   text: "Text",
+  portalLink: "Portal link → customer",
   assist: "Assistant → customer (confirmed)",
   assistCrew: "Assistant → crew (confirmed)",
 };

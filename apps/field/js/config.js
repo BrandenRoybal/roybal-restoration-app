@@ -22,7 +22,7 @@ export const SYNC_VIA_RPC = true;
 // which would let exactly the stale devices the server's min-build gate exists
 // to catch sail straight through it. Bump in lockstep with sw.js CACHE
 // (build.test.mjs fails the suite if the two drift).
-export const BUILD = "v152";
+export const BUILD = "v153";
 
 // QuickBooks Time OAuth client id — PUBLIC (safe to ship). The Client Secret
 // and tokens live only in the qb-time-proxy Edge Function's secrets. Fill this
