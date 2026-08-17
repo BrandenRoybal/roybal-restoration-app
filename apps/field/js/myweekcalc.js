@@ -33,11 +33,38 @@ export function schedulableJobs(jobs) {
 }
 
 /* addDaysISO, local-midnight safe (mirrors schedule.js's private helper) */
-const nextDay = (iso) => {
+export const shiftDays = (iso, n) => {
   const d = new Date(iso + "T00:00:00");
-  d.setDate(d.getDate() + 1);
+  d.setDate(d.getDate() + n);
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 };
+const nextDay = (iso) => shiftDays(iso, 1);
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/* The oldest time entry that can still change a live schedule.
+   buildLiveOpts only attributes hours to jobs that are still live (see
+   liveCrewDays), so entries predating the oldest live job are dead weight —
+   and time_entries outgrew Supabase's 1000-row page in Aug 2026, where an
+   unbounded read silently dropped the NEWEST rows and the week drifted from
+   the board. `buffer` covers hours logged a little before a job's start;
+   `maxDays` stops a typo'd 1999 start date from widening the window forever.
+   ⚠️ Mirrored server-side in supabase/functions/roybal-brief/crewdigest.ts —
+   both are unit-tested on the same cases; change them together. */
+export function entriesCutoff(jobs, today, buffer = 30, maxDays = 365) {
+  const dates = [];
+  for (const j of schedulableJobs(jobs)) {
+    for (const v of [j.startDate, j.hoursFrom]) {
+      const s = String(v || "").trim();
+      if (ISO_DATE.test(s)) dates.push(s);
+    }
+  }
+  const floor = shiftDays(today, -maxDays);
+  if (!dates.length) return shiftDays(today, -90);
+  const oldest = dates.sort()[0];
+  const withBuffer = shiftDays(oldest, -buffer);
+  return withBuffer < floor ? floor : withBuffer;
+}
 
 /* The live per-crew, per-day job map for EVERY crew member at once —
    shared by My Week (one member) and the crew digest (all of them).

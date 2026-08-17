@@ -30,6 +30,35 @@ export function schedulableJobs(jobs: Blob[]): Blob[] {
     j && !j.archived && !j.isMilestone && j.stage !== "lead" && j.stage !== "done");
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export function shiftDays(iso: string, n: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/* The oldest time entry that can still change a live schedule — hours only
+   attribute to jobs that are still live, and time_entries passed Supabase's
+   1000-row page in Aug 2026 (an unbounded read came back missing the NEWEST
+   rows and silently re-dated jobs).
+   ⚠️ Mirrors apps/field/js/myweekcalc.js entriesCutoff — the two feed the same
+   schedule from different runtimes, so change them together; both are tested
+   on the same cases. */
+export function entriesCutoff(jobs: Blob[], today: string, buffer = 30, maxDays = 365): string {
+  const dates: string[] = [];
+  for (const j of schedulableJobs(jobs)) {
+    for (const v of [j.startDate, j.hoursFrom]) {
+      const s = String(v || "").trim();
+      if (ISO_DATE.test(s)) dates.push(s);
+    }
+  }
+  const floor = shiftDays(today, -maxDays);
+  if (!dates.length) return shiftDays(today, -90);
+  const oldest = dates.sort()[0];
+  const withBuffer = shiftDays(oldest, -buffer);
+  return withBuffer < floor ? floor : withBuffer;
+}
+
 /* One member's text. Exported for tests; index.ts never builds text itself. */
 export function memberText(pretty: string, jobs: Blob[]): string {
   const lines = jobs.map((j) => {

@@ -1,8 +1,8 @@
 /* My Week — pure slicing tests (no DOM, no network).
    Run: node apps/field/test/myweek.test.mjs */
 import assert from "node:assert/strict";
-import { crewByEmail, schedulableJobs, buildMyWeek } from "../js/myweekcalc.js";
-import { mapsHref, resolveIdentity } from "../js/myweek.js";
+import { crewByEmail, schedulableJobs, buildMyWeek, entriesCutoff, shiftDays } from "../js/myweekcalc.js";
+import { mapsHref, resolveIdentity, cacheUsable } from "../js/myweek.js";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -86,6 +86,41 @@ test("mapsHref: Apple on iPhone, Google elsewhere, empty for no address", () => 
   assert.match(mapsHref("123 Main St", "iPhone OS 17"), /^https:\/\/maps\.apple\.com/);
   assert.match(mapsHref("123 Main St", "Android 15"), /^https:\/\/maps\.google\.com/);
   assert.equal(mapsHref("", "Android"), "");
+});
+
+/* ---------- the time_entries window (the 1000-row page bug) ---------- */
+test("entriesCutoff reaches back to the oldest live job, minus a buffer", () => {
+  // oldest live start 2026-08-17 → 30-day buffer → 2026-07-18
+  assert.equal(entriesCutoff(JOBS, TODAY), "2026-07-18");
+});
+
+test("entriesCutoff honors hoursFrom when it predates the start date", () => {
+  const jobs = [{ id: "j", stage: "in_progress", startDate: "2026-07-13", hoursFrom: "2026-06-01" }];
+  assert.equal(entriesCutoff(jobs, TODAY), shiftDays("2026-06-01", -30));
+});
+
+test("entriesCutoff ignores archived/done/lead jobs — dead work can't widen the window", () => {
+  const jobs = [...JOBS, { id: "old", stage: "done", startDate: "2020-01-01" },
+    { id: "arch", archived: true, stage: "in_progress", startDate: "2020-01-01" }];
+  assert.equal(entriesCutoff(jobs, TODAY), "2026-07-18");
+});
+
+test("entriesCutoff: no dated jobs → 90 days; a typo'd year clamps to maxDays", () => {
+  assert.equal(entriesCutoff([{ id: "x", stage: "scheduled" }], TODAY), shiftDays(TODAY, -90));
+  assert.equal(entriesCutoff([{ id: "x", stage: "scheduled", startDate: "1999-01-01" }], TODAY),
+    shiftDays(TODAY, -365));
+  assert.equal(entriesCutoff([{ id: "x", stage: "scheduled", startDate: "not-a-date" }], TODAY),
+    shiftDays(TODAY, -90));
+});
+
+/* ---------- shared-tablet cache identity ---------- */
+test("cacheUsable: only the same signed-in email may reuse a cached week", () => {
+  const c = { week: { days: [] }, email: "joel@x.com" };
+  assert.equal(cacheUsable(c, "joel@x.com"), true);
+  assert.equal(cacheUsable(c, "jimmy@x.com"), false);   // shared tablet, next tech
+  assert.equal(cacheUsable(c, ""), false);
+  assert.equal(cacheUsable({ week: { days: [] } }, ""), false);   // legacy payload, no email
+  assert.equal(cacheUsable(null, "joel@x.com"), false);
 });
 
 console.log(`myweek: ${pass} passed`);

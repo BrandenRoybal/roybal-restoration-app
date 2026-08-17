@@ -13,6 +13,7 @@
 import { SYNC_ENABLED } from "../../js/config.js";
 import { rest, isSignedIn, signIn, signOut, currentEmail } from "../../js/supa.js";
 import { DEFAULT_SETTINGS } from "./schedule.js";
+import { crewMergedOverServer } from "./crewmerge.js";
 
 /* re-export auth so the UI imports everything board-related from here */
 export { isSignedIn, signIn, signOut, currentEmail, SYNC_ENABLED };
@@ -50,7 +51,7 @@ export async function saveSettings(s) {
 /* ---------- offline write queue ---------- */
 function queue() { return readCache(Q_KEY); }
 function setQueue(q) { writeCache(Q_KEY, q); }
-function enqueue(table, row) { const q = queue(); q.push({ table, row }); setQueue(q); }
+function enqueue(table, row, mergeCrew) { const q = queue(); q.push({ table, row, mergeCrew: !!mergeCrew }); setQueue(q); }
 /* a guarded (optimistic-concurrency) job write — dedup so repeated offline edits
    of the same job collapse to one write guarding the last-synced revision */
 function enqueueJob(id, base, data) {
@@ -71,6 +72,10 @@ async function flushQueue() {
         const r = await guardedJobWrite(item.id, item.base, next);
         if (r.conflict) notifyConflict(applyServer(item.id, r.server));   // dropped — don't clobber newer
         else applyLocal(next);
+      } else if (item.mergeCrew) {
+        // an offline crew edit can be hours stale by now — merge, don't clobber
+        const merged = await crewMergedOverServer(item.row.data, serverCrewRow);
+        await upsert(item.table, [{ ...item.row, data: merged }]);
       } else {
         await upsert(item.table, [item.row]);
       }
@@ -179,15 +184,35 @@ export async function deleteJob(id) {
   try { await upsert(JOBS_TABLE, [row]); } catch { enqueue(JOBS_TABLE, row); }
 }
 
-/* ---------- crew ---------- */
+/* ---------- crew ----------
+   Saves MERGE onto the server's copy rather than replacing it — see
+   crewmerge.js for why (data.email is now identity-critical and these rows
+   have no rev guard). */
+async function serverCrewRow(id) {
+  const res = await rest(`${CREW_TABLE}?id=eq.${encodeURIComponent(id)}&select=data&deleted=is.false`, { method: "GET" });
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return (rows[0] && rows[0].data) || null;
+}
+
 export async function saveCrewMember(member) {
   member.updatedAt = new Date().toISOString();
   if (!member.createdAt) member.createdAt = member.updatedAt;
-  writeCache(C_KEY, [...cachedCrew().filter((c) => c.id !== member.id), member]);
-  const row = { id: member.id, data: member, deleted: false };
-  if (!SYNC_ENABLED) return member;
-  try { await upsert(CREW_TABLE, [row]); } catch { enqueue(CREW_TABLE, row); }
-  return member;
+  if (!SYNC_ENABLED) {
+    writeCache(C_KEY, [...cachedCrew().filter((c) => c.id !== member.id), member]);
+    return member;
+  }
+  let toWrite = member;
+  try {
+    toWrite = await crewMergedOverServer(member, serverCrewRow);
+    writeCache(C_KEY, [...cachedCrew().filter((c) => c.id !== toWrite.id), toWrite]);
+    await upsert(CREW_TABLE, [{ id: toWrite.id, data: toWrite, deleted: false }]);
+  } catch {
+    writeCache(C_KEY, [...cachedCrew().filter((c) => c.id !== toWrite.id), toWrite]);
+    // queued writes re-merge at flush time — by then the server may have moved again
+    enqueue(CREW_TABLE, { id: toWrite.id, data: toWrite, deleted: false }, true);
+  }
+  return toWrite;
 }
 export async function deleteCrewMember(id) {
   const m = cachedCrew().find((c) => c.id === id);

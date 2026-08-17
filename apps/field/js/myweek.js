@@ -13,9 +13,15 @@
 import { h, clear, toast } from "./core.js";
 import { rest, isSignedIn, currentEmail } from "./supa.js";
 import { getTech, pickTech } from "./tech.js";
-import { crewByEmail, buildMyWeek } from "./myweekcalc.js";
+import { crewByEmail, buildMyWeek, entriesCutoff } from "./myweekcalc.js";
 
 const CACHE_KEY = "roybal-myweek-cache";
+
+/* Sign-out must drop the cached week: the next person to sign in on a shared
+   tablet would otherwise be shown the last person's jobs. */
+export function clearMyWeekCache() {
+  try { localStorage.removeItem(CACHE_KEY); } catch { /* private mode */ }
+}
 
 const akToday = () => new Date().toLocaleDateString("en-CA");  // device-local day, matching the board
 
@@ -40,22 +46,40 @@ function writeCache(payload) {
   try { localStorage.setItem(CACHE_KEY, JSON.stringify(payload)); } catch { /* full/private mode */ }
 }
 
+/* Logged hours drive the LIVE schedule, and time_entries passed Supabase's
+   1000-row page in Aug 2026 — one unbounded read came back an arbitrary
+   subset WITHOUT the newest rows, which silently re-dated jobs. So: only the
+   entries that can still matter (entriesCutoff), and page until the server
+   runs dry rather than trusting one request to hold everything. */
+const PAGE = 1000;
+async function fetchEntries(cutoff) {
+  const out = [];
+  for (let page = 0; page < 6; page++) {
+    const res = await rest(
+      `time_entries?select=id,data&deleted=is.false&data->>date=gte.${cutoff}` +
+      `&order=updated_at.desc&limit=${PAGE}&offset=${page * PAGE}`, { method: "GET" });
+    if (!res.ok) break;                       // hours are an optimization; the plan still renders
+    const rows = await res.json();
+    for (const r of rows) if (r && r.data) out.push(r.data);
+    if (rows.length < PAGE) break;
+  }
+  return out;
+}
+
 /* board tables: {id, data, deleted} envelope; the reserved __settings__ row
    carries the work calendar (workDays/holidays/hoursPerDay) */
-async function fetchBoard() {
-  const [jobsRes, crewRes, entriesRes] = await Promise.all([
-    rest("coordination_jobs?select=id,data,deleted&limit=300", { method: "GET" }),
+async function fetchBoard(today) {
+  const [jobsRes, crewRes] = await Promise.all([
+    rest("coordination_jobs?select=id,data&deleted=is.false&limit=500", { method: "GET" }),
     rest("crew_members?select=data&deleted=is.false", { method: "GET" }),
-    rest("time_entries?select=id,data,deleted&limit=1000", { method: "GET" }).catch(() => null),
   ]);
   if (!jobsRes.ok || !crewRes.ok) throw new Error("board read failed");
   const jobRows = await jobsRes.json();
-  const settings = (jobRows.find((r) => r.id === "__settings__" && !r.deleted) || {}).data || {};
-  const jobs = jobRows.filter((r) => r && !r.deleted && r.id !== "__settings__" && r.data).map((r) => r.data);
+  const settings = (jobRows.find((r) => r.id === "__settings__") || {}).data || {};
+  const jobs = jobRows.filter((r) => r && r.id !== "__settings__" && r.data).map((r) => r.data);
   const crew = (await crewRes.json()).map((r) => r.data).filter(Boolean);
-  const entries = entriesRes && entriesRes.ok
-    ? (await entriesRes.json()).filter((r) => r && !r.deleted && r.data).map((r) => r.data)
-    : [];
+  // the entries window depends on the jobs, so this read follows them
+  const entries = await fetchEntries(entriesCutoff(jobs, today));
   return { jobs, crew, settings, entries };
 }
 
@@ -72,12 +96,14 @@ export function resolveIdentity(crew, email, tech) {
   return null;
 }
 
-function paintWeek(box, week, meta) {
+/* `today` is passed in, never assumed to be the week's first day: a cached
+   week rendered offline tomorrow would otherwise label yesterday "today". */
+function paintWeek(box, week, today) {
   clear(box);
-  if (meta) box.append(meta);
   let shown = 0;
   for (const d of week.days) {
-    const isToday = d.day === week.days[0].day;
+    if (d.day < today) continue;              // stale cache: don't show days that already passed
+    const isToday = d.day === today;
     const head = h("div", { style: "display:flex;align-items:center;gap:8px;margin:14px 2px 6px" },
       h("span", { style: "font-weight:800;font-size:14px;color:var(--navy,#0f1b2d)" },
         dayLabel(d.day) + (isToday ? " · today" : "")),
@@ -112,6 +138,12 @@ function paintWeek(box, week, meta) {
   }
 }
 
+/* A cached week is only THIS person's: the payload records the email that
+   computed it, and a different login (shared tablet) must never see it. */
+export function cacheUsable(cached, email) {
+  return !!(cached && cached.week && cached.email && cached.email === email);
+}
+
 /* The page. `container` is the router's cleared #view element. */
 export function myWeekPage(container) {
   const wrap = h("div", { style: "max-width:560px;margin:0 auto" });
@@ -122,6 +154,7 @@ export function myWeekPage(container) {
   const box = h("div");
   wrap.append(head, sub, box);
 
+  const today = akToday();
   const cached = readCache();
 
   async function load() {
@@ -134,8 +167,8 @@ export function myWeekPage(container) {
       return;
     }
     try {
-      const { jobs, crew, settings, entries } = await fetchBoard();
-      let who = resolveIdentity(crew, currentEmail(), getTech());
+      const { jobs, crew, settings, entries } = await fetchBoard(today);
+      const who = resolveIdentity(crew, currentEmail(), getTech());
       if (!who) {
         clear(box);
         box.append(h("div", { class: "empty" },
@@ -149,17 +182,19 @@ export function myWeekPage(container) {
           }, "Pick my name")));
         return;
       }
-      const week = buildMyWeek({ jobs, crew, entries, settings, crewId: who.crewId, today: akToday() });
+      const week = buildMyWeek({ jobs, crew, entries, settings, crewId: who.crewId, today });
       sub.textContent = who.name
         ? who.name + (who.via === "email" ? "" : " (from this device's tech pick)")
         : "";
       writeCache({ at: new Date().toISOString(), email: currentEmail(), who, week });
-      paintWeek(box, week, null);
+      paintWeek(box, week, today);
     } catch (e) {
-      if (cached && cached.week) {
+      // same identity guard as the instant paint: never show one tech the
+      // week another tech cached on this device
+      if (cacheUsable(cached, currentEmail())) {
         sub.textContent = (cached.who && cached.who.name ? cached.who.name + " · " : "") +
-          "offline — showing " + String(cached.at || "").slice(0, 10);
-        paintWeek(box, cached.week, null);
+          "offline — last updated " + String(cached.at || "").slice(0, 10);
+        paintWeek(box, cached.week, today);
       } else {
         clear(box);
         box.append(h("p", { class: "warn" }, "Couldn't load the schedule: " + String((e && e.message) || e)));
@@ -168,9 +203,9 @@ export function myWeekPage(container) {
   }
 
   // cached copy paints instantly; the live pull replaces it
-  if (cached && cached.week && cached.email === currentEmail()) {
+  if (cacheUsable(cached, currentEmail())) {
     sub.textContent = (cached.who && cached.who.name) || "";
-    paintWeek(box, cached.week, null);
+    paintWeek(box, cached.week, today);
   } else {
     box.append(h("p", { class: "subtle" }, "Loading your schedule…"));
   }

@@ -8,6 +8,8 @@
     "apps/site"
   ],
   "scripts": {
+    "test": "npm run field:test && npm run board:test && npm run fn:test",
+    "fn:test": "for f in supabase/functions/*/*.test.mjs; do echo \"— $f\"; node --experimental-strip-types --no-warnings \"$f\" || exit 1; done",
     "field": "npm run dev --workspace=apps/field",
     "field:test": "npm run test --workspace=apps/field",
     "board": "npm run dev --workspace=apps/board",

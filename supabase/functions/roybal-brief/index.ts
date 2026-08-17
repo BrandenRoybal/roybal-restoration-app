@@ -37,7 +37,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { buildBrief, invoiceTotals, reminderEmail, type Blob } from "./digest.ts";
 import { buildWeekly } from "./weekly.ts";
-import { buildCrewDigest } from "./crewdigest.ts";
+import { buildCrewDigest, entriesCutoff } from "./crewdigest.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -120,18 +120,29 @@ serve(async (req: Request) => {
     // ---------- crew digest: each member's "where you're working today" text
     // (cron, weekday mornings inside the SMS send window — migration 244) ----------
     if (mode === "crewDigest") {
-      const [jobRows, crewRows, entryRows] = await Promise.all([
-        rest(jwt, "coordination_jobs?select=id,data,deleted&limit=300"),
-        rest(jwt, "crew_members?select=id,data,deleted&limit=100"),
-        rest(jwt, "time_entries?select=id,data,deleted&order=updated_at.desc&limit=1000").catch(() => []),
+      const [jobRows, crewRows] = await Promise.all([
+        rest(jwt, "coordination_jobs?select=id,data&deleted=eq.false&limit=500"),
+        rest(jwt, "crew_members?select=id,data&deleted=eq.false&limit=100"),
       ]);
       const unwrap = (rows: Blob[]) =>
-        rows.filter((r: Blob) => r && !r.deleted && r.id !== "__settings__" && r.data).map((r: Blob) => r.data);
-      const settings: Blob =
-        (jobRows.find((r: Blob) => r?.id === "__settings__" && !r.deleted)?.data as Blob) || {};
+        rows.filter((r: Blob) => r && r.id !== "__settings__" && r.data).map((r: Blob) => r.data);
+      const settings: Blob = (jobRows.find((r: Blob) => r?.id === "__settings__")?.data as Blob) || {};
+      const jobs = unwrap(jobRows);
+      const today = akDate();
+      // paged + windowed: time_entries outgrew the 1000-row page, and one
+      // unbounded read silently came back without the newest hours (see
+      // entriesCutoff). Same rule the field app's My Week uses.
+      const entries: Blob[] = [];
+      const cutoff = entriesCutoff(jobs, today);
+      for (let page = 0; page < 6; page++) {
+        const rows = await rest(jwt,
+          `time_entries?select=id,data&deleted=eq.false&data->>date=gte.${cutoff}` +
+          `&order=updated_at.desc&limit=1000&offset=${page * 1000}`).catch(() => []) as Blob[];
+        for (const r of rows) if (r?.data) entries.push(r.data as Blob);
+        if (!Array.isArray(rows) || rows.length < 1000) break;
+      }
       const digest = buildCrewDigest({
-        jobs: unwrap(jobRows), crew: unwrap(crewRows), entries: unwrap(entryRows),
-        settings, today: akDate(), pretty: akPretty(),
+        jobs, crew: unwrap(crewRows), entries, settings, today, pretty: akPretty(),
       });
       if (!digest.workday) return json({ ok: true, mode: "crewDigest", workday: false, sent: 0 });
 

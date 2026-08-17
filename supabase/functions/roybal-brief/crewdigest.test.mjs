@@ -3,7 +3,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { buildCrewDigest, memberText, schedulableJobs, APP_URL } from "./crewdigest.ts";
+import { buildCrewDigest, memberText, schedulableJobs, entriesCutoff, APP_URL } from "./crewdigest.ts";
+import { entriesCutoff as clientCutoff } from "../../../apps/field/js/myweekcalc.js";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -115,6 +116,24 @@ test("two jobs in one day = two bullets in one text", () => {
 test("memberText marks on-hold jobs", () => {
   const t = memberText(PRETTY, [{ title: "Henderson", address: "123 Main St", stage: "on_hold" }]);
   assert.match(t, /\(on hold\)/);
+});
+
+/* The digest and the field app's My Week must window time_entries identically,
+   or the morning text and the app show the same crew member different days. */
+test("entriesCutoff agrees with the field app's copy on every case", () => {
+  const cases = [
+    JOBS,
+    [{ id: "j", stage: "in_progress", startDate: "2026-07-13", hoursFrom: "2026-06-01" }],
+    [{ id: "j", stage: "done", startDate: "2020-01-01" }],
+    [{ id: "j", stage: "scheduled" }],
+    [{ id: "j", stage: "scheduled", startDate: "1999-01-01" }],
+    [{ id: "j", stage: "scheduled", startDate: "not-a-date" }],
+    [],
+  ];
+  for (const jobs of cases) {
+    assert.equal(entriesCutoff(jobs, TODAY), clientCutoff(jobs, TODAY),
+      "server/client cutoff drifted for " + JSON.stringify(jobs));
+  }
 });
 
 console.log(`crewdigest: ${pass} passed`);

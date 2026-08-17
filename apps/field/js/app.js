@@ -37,7 +37,7 @@ import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fe
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
-import { myWeekPage } from "./myweek.js";
+import { myWeekPage, clearMyWeekCache } from "./myweek.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -285,6 +285,7 @@ function accountRow() {
 function doSignOut() {
   if (!confirm("Sign out? Jobs stay saved on this device.")) return;
   signOut(); setAuthor(""); resetSync(); syncStarted = false;
+  clearMyWeekCache();   // the next tech on this tablet must not see this one's week
   localStorage.removeItem(OFFLINE_KEY);
   route();
 }
