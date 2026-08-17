@@ -2659,7 +2659,7 @@ function openCrewModal() {
         h("div", {},
           h("div", { class: "crewrow__name" }, c.name, c.active === false ? h("span", { class: "subtle" }, "  (inactive)") : null,
             c.bioPublic === true ? h("span", { class: "subtle", title: "Bio shows on customer portals" }, "  🌐") : null),
-          h("div", { class: "crewrow__meta" }, [c.role, c.phone].filter(Boolean).join(" · ") || "—")),
+          h("div", { class: "crewrow__meta" }, [c.role, c.phone, c.email].filter(Boolean).join(" · ") || "—")),
         h("div", { class: "crewrow__act" },
           h("button", { class: "btn btn--ghost btn--sm", onclick: () => editForm(c) }, "Edit"),
           h("button", { class: "btn btn--danger btn--sm", onclick: () => removeMember(c) }, "Remove"))));
@@ -2674,6 +2674,9 @@ function openCrewModal() {
     const m = member ? { ...member } : { id: uid(), name: "", phone: "", role: "", active: true, color: CREW_COLORS[crew.length % CREW_COLORS.length] };
     const name = h("input", { type: "text", value: m.name || "", placeholder: "Full name" });
     const phone = h("input", { type: "tel", value: m.phone || "", placeholder: "(505) 555-0123" });
+    // links this crew member to their app login: the field app's My Week and
+    // the morning schedule text match the signed-in email against this
+    const email = h("input", { type: "email", value: m.email || "", placeholder: "their-login@gmail.com" });
     const role = h("input", { type: "text", value: m.role || "", placeholder: "Role (e.g. Lead, Tech, Carpenter)" });
     const rate = h("input", { type: "number", min: "0", step: "1", value: m.hourlyRate || "", placeholder: "e.g. 45" });
     const active = h("input", { type: "checkbox", checked: m.active !== false });
@@ -2733,7 +2736,7 @@ function openCrewModal() {
     save.addEventListener("click", async () => {
       if (!name.value.trim()) { toast("Enter a name"); name.focus(); return; }
       Object.assign(m, {
-        name: name.value.trim(), phone: phone.value.trim(), role: role.value.trim(),
+        name: name.value.trim(), phone: phone.value.trim(), email: email.value.trim(), role: role.value.trim(),
         hourlyRate: rate.value ? Number(rate.value) : "", active: active.checked,
         bioYears: years.value ? Number(years.value) : "",
         bioCerts: certs.value.trim(), bioBlurb: blurb.value.trim(),
@@ -2747,7 +2750,8 @@ function openCrewModal() {
     formWrap.append(
       h("h2", { style: "margin-top:0" }, isNew ? "Add crew member" : "Edit crew member"),
       h("div", { class: "grid2" }, field("Name", name), field("Phone", phone)),
-      h("div", { class: "grid2" }, field("Role", role), field("Hourly rate ($)", rate)),
+      h("div", { class: "grid2" }, field("App login email (links My Week + schedule texts)", email), field("Role", role)),
+      h("div", { class: "grid2" }, field("Hourly rate ($)", rate), h("span")),
       qbRow || h("span"),
       h("label", { style: "display:flex;align-items:center;gap:8px;font-size:14px;margin:6px 0 12px" }, active, "Active (show on the board)"),
       h("div", { class: "subtle", style: "font-size:12px;margin-bottom:4px" }, "Customer-facing bio (portal “Meet your crew” card)"),

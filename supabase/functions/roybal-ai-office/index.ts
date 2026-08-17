@@ -1376,6 +1376,27 @@ async function toolHoursLookup(input: Record<string, unknown>, jwt: string) {
   };
 }
 
+/* The crew roster with phone numbers — what sendText proposals to crew are
+   built from. Names/roles/phones only: pay rates and bio fields stay out of
+   the model's context on purpose. */
+async function toolCrewLookup(input: Record<string, unknown>, jwt: string) {
+  const crew = await boardRows("crew_members", jwt, 100);
+  const q = likeSafe(input.name);
+  const rows = crew
+    .filter((c) => !q || String(c.name ?? "").toLowerCase().includes(q))
+    .map((c) => ({
+      name: c.name || "—",
+      role: c.role || "",
+      phone: c.phone || "",
+      active: c.active !== false,
+    }))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return {
+    matches: rows.length, rows,
+    note: rows.some((r) => !r.phone) ? "members without a phone can't be texted — say so instead of guessing" : undefined,
+  };
+}
+
 async function runTool(name: string, input: Record<string, unknown>, jwt: string): Promise<unknown> {
   switch (name) {
     case "priceLookup": return toolPriceLookup(input, jwt);
@@ -1383,6 +1404,7 @@ async function runTool(name: string, input: Record<string, unknown>, jwt: string
     case "boardRead": return toolBoardRead(input, jwt);
     case "smsThread": return toolSmsThread(input, jwt);
     case "hoursLookup": return toolHoursLookup(input, jwt);
+    case "crewLookup": return toolCrewLookup(input, jwt);
     default: return { error: `unknown tool: ${name}` };
   }
 }

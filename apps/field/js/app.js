@@ -37,6 +37,7 @@ import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fe
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
+import { myWeekPage } from "./myweek.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -156,8 +157,13 @@ async function route() {
   if (needsLogin()) return renderLogin();
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   window.scrollTo(0, 0);
-  // parts: [] | ['new'] | ['p', id] | ['p', id, 'edit'] | ['p', id, 'f', key] | ['p', id, 'f', key, instId]
+  // parts: [] | ['new'] | ['week'] | ['p', id] | ['p', id, 'edit'] | ['p', id, 'f', key] | ['p', id, 'f', key, instId]
   if (parts[0] === "new") return void (await createProject());
+  if (parts[0] === "week") {
+    setChrome("My Week", "#/");
+    mountAssist(null);
+    return myWeekPage(clear(view));
+  }
   if (parts[0] === "p" && parts[1]) {
     const project = await Store.get(parts[1]);
     if (!project) return go("#/");
@@ -196,7 +202,8 @@ function renderTechChip() {
 }
 
 /* ============================================================
-   Login (shared crew account) + sync status
+   Login (personal crew logins — email → crew card is the link
+   My Week and the daily schedule text key off) + sync status
    ============================================================ */
 let lastSync = null;
 function updateSyncStatus(s) {
@@ -250,7 +257,7 @@ function renderLogin() {
     h("div", { style: "max-width:380px;margin:8vh auto 0;text-align:center" },
       h("img", { src: "assets/emblem-mark.svg", alt: "", style: "width:84px;height:84px;border-radius:18px;background:#fff;padding:12px" }),
       h("h1", { style: "margin:14px 0 2px" }, "Roybal Field Forms"),
-      h("p", { class: "subtle" }, "Sign in with your crew account to sync jobs across devices."),
+      h("p", { class: "subtle" }, "Sign in with your own crew email — your jobs sync across devices and your schedule shows under 📅 My Week."),
       h("div", { class: "card", style: "text-align:left;margin-top:14px" },
         err,
         field("Email", email), field("Password", pass), btn),
@@ -377,7 +384,9 @@ async function projectList() {
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "Jobs"),
-      h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job")));
+      h("div", { style: "display:flex;gap:8px;flex:none" },
+        h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/week"), title: "Your schedule from the Job Board" }, "📅 My Week"),
+        h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job"))));
 
   const modeSeg = h("div", { class: "seg", style: "margin:0 0 10px" });
   [["restoration", `💧 Restoration (${activeCount("restoration")})`],

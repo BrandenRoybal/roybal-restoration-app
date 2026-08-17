@@ -155,6 +155,10 @@ const PROTECTED_KINDS = new Set([
   "phoneOwner", "forward", "brief", "assistCrew", "fieldReport",
   // field app + board customer messaging (authenticated callers)
   "onOurWay", "assist", "text", "portal", "reminder",
+  // the weekday-morning crew schedule digest (cron-triggered, crew-directed).
+  // NOT in CREW_KINDS on purpose: its cron fires inside the send window, and
+  // the quiet-hours guard stays as the backstop if that ever drifts.
+  "scheduleCrew",
 ]);
 // portalCode is public by this file's own rule — anyone holding a share token
 // can request one — so it respects the reserve floor (its own 232-RPC caps of
@@ -167,6 +171,7 @@ const PUBLIC_KINDS = new Set(["webOwner", "webLead", "portalCode"]);
 // thread). Everything else is customer-numbered and stamps on a single match.
 const OWNER_KINDS = new Set([
   "brief", "phoneOwner", "webOwner", "webLead", "forward", "assistCrew", "approval",
+  "scheduleCrew",   // crew-numbered — never stamps a customer contact timeline
 ]);
 
 /* The person behind a phone number: exactly one live contact, or null.
