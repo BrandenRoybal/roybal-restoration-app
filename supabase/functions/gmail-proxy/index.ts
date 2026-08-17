@@ -211,10 +211,14 @@ serve(async (req) => {
 
       const { accessToken, account, row } = await getConnection(supabase);
 
-      // jobs to match against (service role — the matcher only needs headers)
+      // jobs to match against (service role — the matcher only needs headers).
+      // Project the five fields matchEmailToJob actually reads instead of the
+      // whole job blob: ~1 kB a pull instead of ~400 kB, every 15 minutes.
       const { data: projRows } = await supabase
-        .from("field_projects").select("id, data").eq("deleted", false).limit(500);
-      const projects: Blob[] = (projRows ?? []).map((r: Blob) => r.data).filter(Boolean);
+        .from("field_projects")
+        .select("id:data->>id, email:data->>email, claimNo:data->>claimNo, customer:data->>customer, archivedAt:data->>archivedAt")
+        .eq("deleted", false).limit(500);
+      const projects: Blob[] = (projRows ?? []).filter((r: Blob) => r?.id);
 
       // pull window: since the last pull (epoch seconds), first run = 3 days back
       const sinceEpoch = Number(row.last_pull_epoch) || Math.floor(Date.now() / 1000) - 3 * 86400;
