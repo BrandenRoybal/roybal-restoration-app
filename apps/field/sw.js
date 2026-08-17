@@ -22,6 +22,9 @@ const CORE = [
   "js/xlsx.js", "js/xactimate.js", "js/selections.js",
   // Photo export/offload: forms.js statically imports photoexport.js → zip.js
   "js/zip.js", "js/photoexport.js",
+  // My Week: app.js → myweek.js → myweekcalc.js → the board's schedule engine
+  // (served at /board in production; serve.mjs maps it in local dev)
+  "js/myweek.js", "js/myweekcalc.js", "board/js/schedule.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];

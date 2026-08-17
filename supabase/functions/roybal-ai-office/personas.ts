@@ -132,6 +132,17 @@ export const TOOLS: Record<string, Record<string, unknown>> = {
       properties: { since_days: { type: "number", description: "Look-back window in days (default 7, max 90)" } },
     },
   },
+  crewLookup: {
+    name: "crewLookup",
+    description:
+      "The crew roster: each member's name, role, phone number, and whether they're active. Use it to get a crew member's " +
+      "REAL phone number before proposing a text to them ('text Joel he's on the Henderson job tomorrow') — never invent or " +
+      "guess a number. Optionally filter by name.",
+    input_schema: {
+      type: "object", additionalProperties: false,
+      properties: { name: { type: "string", description: "Optional name (or fragment) to filter to one member" } },
+    },
+  },
 };
 
 /* Which persona may use which tools. All three in-app personas get every
@@ -139,9 +150,9 @@ export const TOOLS: Record<string, Record<string, unknown>> = {
    office function's tool loop — its own agent runs PHONE_TOOLS below — and
    a browser caller claiming app:"phone" gets the persona with NO tools. */
 export const TOOLSETS: Record<string, string[]> = {
-  field: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup"],
-  board: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup"],
-  admin: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup"],
+  field: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup", "crewLookup"],
+  board: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup", "crewLookup"],
+  admin: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup", "crewLookup"],
   phone: [],
 };
 

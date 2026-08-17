@@ -27,8 +27,13 @@ const server = createServer(async (req, res) => {
   try {
     let path = decodeURIComponent(new URL(req.url, "http://x").pathname);
     if (path === "/") path = "/index.html";
-    const filePath = normalize(join(ROOT, path));
-    if (!filePath.startsWith(ROOT)) { res.writeHead(403).end("Forbidden"); return; }
+    // /board/* mirrors the production layout (deploy-field.yml puts the board
+    // app at /board) so field code can import the board's schedule engine by
+    // the same URL in dev and prod. Scoped to its own root guard.
+    let base = ROOT, rel = path;
+    if (path.startsWith("/board/")) { base = normalize(join(ROOT, "..", "board/")); rel = path.slice("/board".length); }
+    const filePath = normalize(join(base, rel));
+    if (!filePath.startsWith(base)) { res.writeHead(403).end("Forbidden"); return; }
     let target = filePath;
     try { if ((await stat(target)).isDirectory()) target = join(target, "index.html"); }
     catch { target = join(ROOT, "index.html"); } // SPA fallback

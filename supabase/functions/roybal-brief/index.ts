@@ -37,6 +37,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { buildBrief, invoiceTotals, reminderEmail, type Blob } from "./digest.ts";
 import { buildWeekly } from "./weekly.ts";
+import { buildCrewDigest, entriesCutoff } from "./crewdigest.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -114,6 +115,84 @@ serve(async (req: Request) => {
       }).catch(() => {});
       if (!(send.ok && sd.ok !== false)) return json({ ok: false, error: `notify failed: ${String(sd.error || send.status)}` }, 502);
       return json({ ok: true, mode: "weekly", items: weekly.items, chars: weekly.text.length });
+    }
+
+    // ---------- crew digest: each member's "where you're working today" text
+    // (cron, weekday mornings inside the SMS send window — migration 244) ----------
+    if (mode === "crewDigest") {
+      const [jobRows, crewRows] = await Promise.all([
+        rest(jwt, "coordination_jobs?select=id,data&deleted=eq.false&limit=500"),
+        rest(jwt, "crew_members?select=id,data&deleted=eq.false&limit=100"),
+      ]);
+      const unwrap = (rows: Blob[]) =>
+        rows.filter((r: Blob) => r && r.id !== "__settings__" && r.data).map((r: Blob) => r.data);
+      const settings: Blob = (jobRows.find((r: Blob) => r?.id === "__settings__")?.data as Blob) || {};
+      const jobs = unwrap(jobRows);
+      const today = akDate();
+      // paged + windowed: time_entries outgrew the 1000-row page, and one
+      // unbounded read silently came back without the newest hours (see
+      // entriesCutoff). Same rule the field app's My Week uses.
+      const entries: Blob[] = [];
+      const cutoff = entriesCutoff(jobs, today);
+      for (let page = 0; page < 6; page++) {
+        const rows = await rest(jwt,
+          `time_entries?select=id,data&deleted=eq.false&data->>date=gte.${cutoff}` +
+          `&order=updated_at.desc&limit=1000&offset=${page * 1000}`).catch(() => []) as Blob[];
+        for (const r of rows) if (r?.data) entries.push(r.data as Blob);
+        if (!Array.isArray(rows) || rows.length < 1000) break;
+      }
+      const digest = buildCrewDigest({
+        jobs, crew: unwrap(crewRows), entries, settings, today, pretty: akPretty(),
+      });
+      if (!digest.workday) return json({ ok: true, mode: "crewDigest", workday: false, sent: 0 });
+
+      // re-run safety: anyone already texted a schedule in the last 20h is
+      // skipped, so a manual retry after a partial failure never double-texts
+      const since = new Date(Date.now() - 20 * 3600000).toISOString();
+      const recent = await rest(jwt,
+        `sms_messages?select=to_number&direction=eq.outbound&kind=eq.scheduleCrew&status=neq.failed&created_at=gte.${encodeURIComponent(since)}&limit=200`)
+        .catch(() => []) as Blob[];
+      const texted = new Set(recent.map((r) => String(r.to_number || "").replace(/[^\d]/g, "").slice(-10)));
+
+      const results: Array<{ name: string; ok: boolean; error?: string }> = [];
+      for (const m of digest.messages) {
+        const digits = m.phone.replace(/[^\d]/g, "").slice(-10);
+        if (texted.has(digits)) { results.push({ name: m.name, ok: true, error: "already texted today" }); continue; }
+        const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+          method: "POST",
+          headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "sendSms", to: m.phone, body: m.text, kind: "scheduleCrew", captured_by: "crew-digest" }),
+        });
+        const sd = await send.json().catch(() => ({}));
+        results.push({ name: m.name, ok: send.ok && sd.ok !== false, error: sd.error ? String(sd.error).slice(0, 120) : undefined });
+      }
+      const failed = results.filter((r) => !r.ok);
+      const ownerText = digest.ownerText +
+        (failed.length ? ` · ⚠️ ${failed.length} failed: ${failed.map((f) => f.name).join(", ")}` : "");
+      let ownerOk = true;
+      if (OWNER_CELL) {
+        const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
+          method: "POST",
+          headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "sendSms", to: OWNER_CELL, body: ownerText, kind: "brief", captured_by: "crew-digest" }),
+        });
+        const sd = await send.json().catch(() => ({}));
+        ownerOk = send.ok && sd.ok !== false;
+      }
+      await fetch(`${SUPABASE_URL}/rest/v1/capture_events`, {
+        method: "POST",
+        headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+        body: JSON.stringify([{
+          source_type: "crew_digest", form_key: "crewDigest", captured_by: "crew-digest",
+          status: "extracted", processed_at: new Date().toISOString(),
+          raw_payload: { planned: digest.messages.length, skipped: digest.skipped },
+          result: { results, ownerOk },
+        }]),
+      }).catch(() => { /* the texts matter more than the receipt */ });
+      return json({
+        ok: failed.length === 0, mode: "crewDigest", workday: true,
+        sent: results.filter((r) => r.ok && !r.error).length, failed: failed.length, skipped: digest.skipped.length,
+      });
     }
 
     const [projRows, boardRows, portalWaiting, emailRows] = await Promise.all([
