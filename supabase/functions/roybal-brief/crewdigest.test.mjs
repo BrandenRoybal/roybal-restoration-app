@@ -86,11 +86,34 @@ test("a dayCrew override moves the text to the substitute", () => {
   assert.ok(!d.messages.some((m) => m.name === "Joel Hess"), "pulled member not texted");
 });
 
+test("an off-app member is never texted, but the owner is told what to relay", () => {
+  const crew = CREW.map((c) => (c.id === "c1" ? { ...c, digestOptOut: true } : c));
+  const d = buildCrewDigest({ ...base, crew });
+  assert.ok(!d.messages.some((m) => m.name === "Joel Hess"), "opted-out member not texted");
+  assert.match(d.ownerText, /📞 you tell: Joel→Henderson/);
+  assert.deepEqual(d.skipped.find((s) => s.name === "Joel Hess"),
+    { name: "Joel Hess", reason: "off-app", jobs: ["Henderson"] });
+});
+
+test("an off-app member with nothing scheduled is just idle, not a relay chore", () => {
+  const crew = CREW.map((c) => (c.id === "c3" ? { ...c, digestOptOut: true } : c));   // Matt has no live job
+  const d = buildCrewDigest({ ...base, crew });
+  assert.doesNotMatch(d.ownerText, /you tell/);
+  assert.match(d.ownerText, /not scheduled: Matt/);
+});
+
+test("an off-app member who is OUT reads as out, not as a call to make", () => {
+  const crew = CREW.map((c) => (c.id === "c1" ? { ...c, digestOptOut: true, outDays: [TODAY] } : c));
+  const d = buildCrewDigest({ ...base, crew });
+  assert.match(d.ownerText, /out: Joel/);
+  assert.doesNotMatch(d.ownerText, /you tell/);
+});
+
 test("no phone on the roster = skipped loudly, never a throw", () => {
   const crew = CREW.map((c) => (c.id === "c2" ? { ...c, phone: "" } : c));
   const d = buildCrewDigest({ ...base, crew });
   assert.ok(!d.messages.some((m) => m.name === "Jimmy Soland"));
-  assert.match(d.ownerText, /no phone on the roster: Jimmy/);
+  assert.match(d.ownerText, /no phone on the roster: Jimmy→Dental office/);
 });
 
 test("weekend: nothing sends at all", () => {
