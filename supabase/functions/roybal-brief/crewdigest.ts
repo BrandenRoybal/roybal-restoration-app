@@ -77,7 +77,7 @@ export function buildCrewDigest(input: {
 }): {
   workday: boolean;
   messages: Array<{ crewId: string; name: string; phone: string; text: string; jobs: string[] }>;
-  skipped: Array<{ name: string; reason: "out" | "nothing scheduled" | "no phone" }>;
+  skipped: Array<{ name: string; reason: "out" | "nothing scheduled" | "no phone" | "off-app"; jobs?: string[] }>;
   ownerText: string;
 } {
   const s = { ...DEFAULT_SETTINGS, ...(input.settings || {}) };
@@ -94,7 +94,7 @@ export function buildCrewDigest(input: {
   const byId = new Map(jobs.map((j) => [j.id, j]));
 
   const messages: Array<{ crewId: string; name: string; phone: string; text: string; jobs: string[] }> = [];
-  const skipped: Array<{ name: string; reason: "out" | "nothing scheduled" | "no phone" }> = [];
+  const skipped: Array<{ name: string; reason: "out" | "nothing scheduled" | "no phone" | "off-app"; jobs?: string[] }> = [];
   const active = (input.crew || []).filter((c) => c && c.active !== false && String(c.name || "").trim());
   for (const c of active) {
     const name = String(c.name).trim();
@@ -103,20 +103,25 @@ export function buildCrewDigest(input: {
       .map((id) => byId.get(id)).filter(Boolean) as Blob[];
     todays.sort((a, b) => String(a.title || a.customer || "").localeCompare(String(b.title || b.customer || "")));
     if (!todays.length) { skipped.push({ name, reason: "nothing scheduled" }); continue; }
+    const titles = todays.map((j) => String(j.title || j.customer || "Job"));
+    /* Not everyone works through the app. Someone marked off-app is scheduled
+       on the board like anyone else but is never texted by an automated lane —
+       the owner reaches them himself. The roll-up carries their jobs so the
+       owner knows what to relay, instead of them vanishing from the morning. */
+    if (c.digestOptOut === true) { skipped.push({ name, reason: "off-app", jobs: titles }); continue; }
     const phone = String(c.phone || "").trim();
-    if (!phone) { skipped.push({ name, reason: "no phone" }); continue; }
-    messages.push({
-      crewId: c.id, name, phone,
-      text: memberText(input.pretty, todays),
-      jobs: todays.map((j) => String(j.title || j.customer || "Job")),
-    });
+    if (!phone) { skipped.push({ name, reason: "no phone", jobs: titles }); continue; }
+    messages.push({ crewId: c.id, name, phone, text: memberText(input.pretty, todays), jobs: titles });
   }
 
   const first = (n: string) => n.split(/\s+/)[0];
   const parts: string[] = [`📅 Crew digest ${input.pretty} — texting ${messages.length}`];
   if (messages.length) parts.push(messages.map((m) => `${first(m.name)}→${m.jobs.join(" + ")}`).join("; "));
   const by = (r: string) => skipped.filter((x) => x.reason === r).map((x) => first(x.name));
-  const idle = by("nothing scheduled"), out = by("out"), nophone = by("no phone");
+  const withJobs = (r: string) => skipped.filter((x) => x.reason === r)
+    .map((x) => `${first(x.name)}→${(x.jobs || []).join(" + ")}`);
+  const idle = by("nothing scheduled"), out = by("out"), nophone = withJobs("no phone"), offApp = withJobs("off-app");
+  if (offApp.length) parts.push(`📞 you tell: ${offApp.join("; ")}`);
   if (idle.length) parts.push(`not scheduled: ${idle.join(", ")}`);
   if (out.length) parts.push(`out: ${out.join(", ")}`);
   if (nophone.length) parts.push(`⚠️ no phone on the roster: ${nophone.join(", ")}`);

@@ -82,7 +82,8 @@ serve(async (req: Request) => {
     const jwt = await signIn();
 
     // ---------- weekly mode: "what the AI did" (cron, Sundays) ----------
-    const mode = String((await req.clone().json().catch(() => ({})))?.mode || "");
+    const reqBody = (await req.clone().json().catch(() => ({}))) as Blob;
+    const mode = String(reqBody?.mode || "");
     if (mode === "weekly") {
       const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
       const count = (path: string) =>
@@ -128,7 +129,12 @@ serve(async (req: Request) => {
         rows.filter((r: Blob) => r && r.id !== "__settings__" && r.data).map((r: Blob) => r.data);
       const settings: Blob = (jobRows.find((r: Blob) => r?.id === "__settings__")?.data as Blob) || {};
       const jobs = unwrap(jobRows);
-      const today = akDate();
+      /* dryRun previews exactly what the crew would receive and sends NOTHING —
+         the only safe way to check a change before it texts real people. An
+         optional `date` previews another day (e.g. Monday's texts on Sunday). */
+      const dryRun = reqBody?.dryRun === true;
+      const asked = String(reqBody?.date ?? "");
+      const today = dryRun && /^\d{4}-\d{2}-\d{2}$/.test(asked) ? asked : akDate();
       // paged + windowed: time_entries outgrew the 1000-row page, and one
       // unbounded read silently came back without the newest hours (see
       // entriesCutoff). Same rule the field app's My Week uses.
@@ -142,8 +148,16 @@ serve(async (req: Request) => {
         if (!Array.isArray(rows) || rows.length < 1000) break;
       }
       const digest = buildCrewDigest({
-        jobs, crew: unwrap(crewRows), entries, settings, today, pretty: akPretty(),
+        jobs, crew: unwrap(crewRows), entries, settings, today,
+        pretty: dryRun && asked ? asked : akPretty(),
       });
+      if (dryRun) {
+        return json({
+          ok: true, mode: "crewDigest", dryRun: true, today, workday: digest.workday,
+          wouldText: digest.messages.map((m) => ({ name: m.name, phone: m.phone, text: m.text })),
+          skipped: digest.skipped, ownerText: digest.ownerText,
+        });
+      }
       if (!digest.workday) return json({ ok: true, mode: "crewDigest", workday: false, sent: 0 });
 
       // re-run safety: anyone already texted a schedule in the last 20h is

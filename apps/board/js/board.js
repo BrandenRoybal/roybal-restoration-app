@@ -2658,7 +2658,8 @@ function openCrewModal() {
           : h("span", { class: "crewchip crewchip--lg", style: `background:${c.color || "#7a8aa0"}` }, initials(c.name)),
         h("div", {},
           h("div", { class: "crewrow__name" }, c.name, c.active === false ? h("span", { class: "subtle" }, "  (inactive)") : null,
-            c.bioPublic === true ? h("span", { class: "subtle", title: "Bio shows on customer portals" }, "  🌐") : null),
+            c.bioPublic === true ? h("span", { class: "subtle", title: "Bio shows on customer portals" }, "  🌐") : null,
+            c.digestOptOut === true ? h("span", { class: "subtle", title: "No automated texts — you tell them yourself" }, "  📞") : null),
           h("div", { class: "crewrow__meta" }, [c.role, c.phone, c.email].filter(Boolean).join(" · ") || "—")),
         h("div", { class: "crewrow__act" },
           h("button", { class: "btn btn--ghost btn--sm", onclick: () => editForm(c) }, "Edit"),
@@ -2680,6 +2681,9 @@ function openCrewModal() {
     const role = h("input", { type: "text", value: m.role || "", placeholder: "Role (e.g. Lead, Tech, Carpenter)" });
     const rate = h("input", { type: "number", min: "0", step: "1", value: m.hourlyRate || "", placeholder: "e.g. 45" });
     const active = h("input", { type: "checkbox", checked: m.active !== false });
+    // some of the crew don't work through the app at all — they're scheduled
+    // on the board like anyone else, but the owner tells them himself
+    const digest = h("input", { type: "checkbox", checked: m.digestOptOut !== true });
 
     // QuickBooks Time employee link — so this person's QB hours attribute to them.
     let qbRow = null;
@@ -2738,6 +2742,7 @@ function openCrewModal() {
       Object.assign(m, {
         name: name.value.trim(), phone: phone.value.trim(), email: email.value.trim(), role: role.value.trim(),
         hourlyRate: rate.value ? Number(rate.value) : "", active: active.checked,
+        digestOptOut: !digest.checked,
         bioYears: years.value ? Number(years.value) : "",
         bioCerts: certs.value.trim(), bioBlurb: blurb.value.trim(),
         bioPublic: bioPub.checked,
@@ -2753,7 +2758,9 @@ function openCrewModal() {
       h("div", { class: "grid2" }, field("App login email (links My Week + schedule texts)", email), field("Role", role)),
       h("div", { class: "grid2" }, field("Hourly rate ($)", rate), h("span")),
       qbRow || h("span"),
-      h("label", { style: "display:flex;align-items:center;gap:8px;font-size:14px;margin:6px 0 12px" }, active, "Active (show on the board)"),
+      h("label", { style: "display:flex;align-items:center;gap:8px;font-size:14px;margin:6px 0 4px" }, active, "Active (show on the board)"),
+      h("label", { style: "display:flex;align-items:center;gap:8px;font-size:14px;margin:0 0 12px" }, digest,
+        "Send them the daily schedule text (off = you tell them yourself)"),
       h("div", { class: "subtle", style: "font-size:12px;margin-bottom:4px" }, "Customer-facing bio (portal “Meet your crew” card)"),
       h("div", { style: "display:flex;gap:10px;align-items:center;margin:2px 0 10px" }, photoImg, photoChip, photoBtn, photoInput),
       h("div", { class: "grid2" }, field("Years in the trade", years), field("Certifications", certs)),
