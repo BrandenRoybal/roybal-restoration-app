@@ -18,6 +18,7 @@
    ============================================================ */
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 import { accessToken } from "./supa.js";
+import { lossTypesOf } from "./model.js";
 import { getUnifiedJobId } from "./spine.js";
 import { capturedBy } from "./tech.js";
 
@@ -247,9 +248,16 @@ export function narrativeFacts(project) {
       adjuster: p.adjuster || "",
       dateOfLoss: p.dateOfLoss || "",
       lossCause: p.lossCause || "",
+      lossTypes: lossTypesOf(p),
       waterCategory: p.waterCategory || "",
       waterClass: p.waterClass || "",
       dryingSystem: p.dryingSystem || "",
+      smokeType: p.smokeType || "",
+      fireDamage: p.fireDamage || "",
+      moldCondition: p.moldCondition || "",
+      moldExtent: p.moldExtent || "",
+      stormCause: p.stormCause || "",
+      envelopeBreached: p.envelopeBreached || "",
       jobId: p.workOrderNo || "",
     },
     affectedAreas: affectedAreas(p),
@@ -360,6 +368,12 @@ export function narrativeInfoRows(facts) {
   const j = facts.job;
   const lossType = [
     [j.waterCategory && `Cat ${j.waterCategory}`, j.waterClass && `Class ${j.waterClass}`].filter(Boolean).join(" / "),
+    [j.smokeType && ({ wet: "wet smoke", dry: "dry smoke", protein: "protein residue", fuel: "fuel/soot" })[j.smokeType],
+      j.fireDamage && `${j.fireDamage} fire damage`].filter(Boolean).join(", "),
+    (j.moldCondition || j.moldExtent) &&
+      `S520${j.moldCondition ? ` Condition ${j.moldCondition}` : " mold"}${j.moldExtent ? ` (${j.moldExtent} sq ft)` : ""}`,
+    (j.stormCause || j.envelopeBreached === "yes") &&
+      `storm${j.stormCause ? `: ${j.stormCause}` : ""}${j.envelopeBreached === "yes" ? ", envelope breached" : ""}`,
     j.lossCause,
   ].filter(Boolean).join(" — ");
   return [

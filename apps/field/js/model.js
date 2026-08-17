@@ -146,6 +146,18 @@ export function newProject() {
     waterCategory: "",   // 1 | 2 | 3
     waterClass: "",      // 1 | 2 | 3 | 4
     dryingSystem: "",    // Open | Closed | Hybrid
+    // loss classification beyond water (chips reveal each type's block).
+    // Freeze-up is a WATER loss (cause text) — no type of its own.
+    // Empty on purpose: lossTypesOf() supplies the water default, so a fresh
+    // scaffold stays blank-reclaimable while a DELIBERATE selection (a fire
+    // job with nothing else typed yet) counts as real content.
+    lossTypes: [],         // water | fire | mold | storm — pick all that apply
+    smokeType: "",         // fire: wet | dry | protein | fuel  (residue drives cleaning method)
+    fireDamage: "",        // fire: light | moderate | heavy
+    moldCondition: "",     // IICRC S520: 1 normal | 2 settled spores | 3 actual growth
+    moldExtent: "",        // "<10" | "10-100" | ">100"  (sq ft — remediation sizing)
+    stormCause: "",        // wind | hail | tree | ice-dam | flood
+    envelopeBreached: "",  // storm: yes | no
     // job kind + construction header (construction jobs only; blank on water jobs)
     jobType: "restoration",   // "restoration" | "construction"
     constructionType: "",     // remodel | new_construction | reconstruction
@@ -202,7 +214,24 @@ export function newPhoto() {
    ANY real content — one letter of a name, one photo, one log row — keeps
    the full never-lose-work protection. Conservative on purpose: unknown or
    prefilled values count as content. */
+// lossTypes is NOT ignored here: the factory ships it empty (lossTypesOf
+// supplies the water default), so a fresh scaffold is blank while a
+// deliberately toggled classification is protected content like waterCategory
 const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "createdBy", "updatedAt", "archivedAt", "jobType", "photoSize", "photoSort"]);
+
+/* Loss types, read defensively: jobs predate the field. A block with DATA in
+   it always counts as selected (never hide entered data — the formsFor rule);
+   no data + no choice = water, the only classification the card ever showed
+   before this field existed. */
+export function lossTypesOf(p) {
+  const s = new Set(Array.isArray(p.lossTypes) ? p.lossTypes : []);
+  if (p.waterCategory || p.waterClass || p.dryingSystem) s.add("water");
+  if (p.smokeType || p.fireDamage) s.add("fire");
+  if (p.moldCondition || p.moldExtent) s.add("mold");
+  if (p.stormCause || p.envelopeBreached) s.add("storm");
+  if (!s.size) s.add("water");
+  return [...s];
+}
 function emptyDeep(v) {
   if (v == null || v === "" || v === false) return true;
   if (Array.isArray(v)) return v.length === 0;   // any element at all is content

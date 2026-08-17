@@ -1,7 +1,7 @@
 /* Project merge — the rule set that makes two-device edits additive.
    Run: node test/merge.test.mjs */
 import assert from "node:assert/strict";
-import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "../js/merge.js";
+import { mergeProjects, tombstoneItems, ID_COLLECTIONS, FORM_SLOTS, DELETED_IDS } from "../js/merge.js";
 import { FORMS, newWorkAuth, newLaborLog, newFloorPlan } from "../js/model.js";
 
 let pass = 0;
@@ -137,6 +137,87 @@ test("output is a deep copy — mutating merged never touches the inputs", () =>
   assert.equal(b.photos[0].caption, "y");
 });
 
+/* ---------- per-item delete tombstones ----------
+   The Aug 2026 Fidler bug: 163 photos deleted on the desktop came back from a
+   phone on every single sync cycle, because a union cannot tell "deleted" from
+   "never had". These lock the fix in place. */
+
+test("a deleted photo does NOT come back from the device that still holds it", () => {
+  const phone = { id: "j", updatedAt: T1, photos: [{ id: "A" }, { id: "B" }, { id: "C" }] };
+  const desktop = { id: "j", updatedAt: T2, photos: [{ id: "A" }] };
+  tombstoneItems(desktop, ["B", "C"]);
+  const { merged, removed } = mergeProjects(phone, desktop);
+  assert.deepEqual(merged.photos.map((p) => p.id), ["A"]);
+  assert.equal(removed, 2);
+});
+
+test("…and it stays deleted when the DELETER is the older copy", () => {
+  // the phone kept typing after the desktop's delete, so the phone is newer;
+  // the delete must still win, or the loser of a race un-deletes things
+  const desktop = { id: "j", updatedAt: T1, photos: [{ id: "A" }] };
+  tombstoneItems(desktop, "B");
+  const phone = { id: "j", updatedAt: T2, photos: [{ id: "A" }, { id: "B" }] };
+  const { merged } = mergeProjects(phone, desktop);
+  assert.deepEqual(merged.photos.map((p) => p.id), ["A"]);
+});
+
+test("the tombstone travels, so a third device can't resurrect it either", () => {
+  const desktop = { id: "j", updatedAt: T2, photos: [{ id: "A" }] };
+  tombstoneItems(desktop, "B");
+  // office pulls the desktop's copy: it never held B, but it carries the mark
+  const { merged: office } = mergeProjects({ id: "j", updatedAt: T1, photos: [] }, desktop);
+  assert.ok(office[DELETED_IDS].B, "the mark rode along");
+  // …and now the stale phone syncs against the OFFICE copy
+  const phone = { id: "j", updatedAt: T1, photos: [{ id: "A" }, { id: "B" }] };
+  const { merged } = mergeProjects(phone, { ...office, updatedAt: T2 });
+  assert.deepEqual(merged.photos.map((p) => p.id), ["A"]);
+});
+
+test("deletes on both sides both stick, and the earlier stamp is kept", () => {
+  const a = { id: "j", updatedAt: T1, photos: [{ id: "A" }], [DELETED_IDS]: { X: T1, Z: T2 } };
+  const b = { id: "j", updatedAt: T2, photos: [{ id: "A" }], [DELETED_IDS]: { Y: T2, Z: T1 } };
+  const { merged } = mergeProjects(a, b);
+  assert.deepEqual(Object.keys(merged[DELETED_IDS]).sort(), ["X", "Y", "Z"]);
+  assert.equal(merged[DELETED_IDS].Z, T1, "the earlier of two stamps for the same id");
+});
+
+test("deleting one element never touches the others, in any collection", () => {
+  const older = { id: "j", updatedAt: T1, contents: [{ id: "C1" }, { id: "C2" }], receipts: [{ id: "R1" }] };
+  const newer = { id: "j", updatedAt: T2, contents: [{ id: "C1" }], receipts: [{ id: "R1" }] };
+  tombstoneItems(newer, "C2");
+  const { merged } = mergeProjects(older, newer);
+  assert.deepEqual(merged.contents.map((c) => c.id), ["C1"]);
+  assert.deepEqual(merged.receipts.map((r) => r.id), ["R1"], "an unrelated collection is untouched");
+});
+
+test("a job with no deletes carries no deletedIds key at all", () => {
+  // an empty map would be pure noise in every row and in sameContent()
+  const { merged } = mergeProjects({ id: "j", updatedAt: T1, photos: [{ id: "A" }] },
+                                   { id: "j", updatedAt: T2, photos: [{ id: "B" }] });
+  assert.ok(!(DELETED_IDS in merged));
+});
+
+test("tombstoneItems is idempotent and keeps the first stamp", () => {
+  const p = { id: "j", photos: [] };
+  tombstoneItems(p, "A");
+  const first = p[DELETED_IDS].A;
+  tombstoneItems(p, ["A", "B"]);
+  assert.equal(p[DELETED_IDS].A, first, "re-deleting does not re-stamp");
+  assert.ok(p[DELETED_IDS].B);
+  tombstoneItems(p, [null, undefined, ""]);           // junk ids are ignored
+  assert.deepEqual(Object.keys(p[DELETED_IDS]).sort(), ["A", "B"]);
+});
+
+test("the tombstone map is capped, dropping the OLDEST marks", () => {
+  const p = { id: "j" };
+  const marks = {};
+  for (let i = 0; i < 2050; i++) marks[`id${String(i).padStart(4, "0")}`] = `2026-01-01T00:${String(i % 60).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.${String(i).padStart(4, "0")}Z`;
+  p[DELETED_IDS] = marks;
+  tombstoneItems(p, "fresh");
+  assert.equal(Object.keys(p[DELETED_IDS]).length, 2000);
+  assert.ok(p[DELETED_IDS].fresh, "the newest mark survives the cap");
+});
+
 test("registry completeness: EVERY form in the app is covered by a merge rule", () => {
   // this is the test that would have caught supportDocs/floorPlan going
   // missing — any new form added to model.js must pick a merge strategy
@@ -146,6 +227,17 @@ test("registry completeness: EVERY form in the app is covered by a merge rule", 
   }
   assert.ok(ID_COLLECTIONS.includes("receipts") && ID_COLLECTIONS.includes("boxes"),
     "non-form collections stay registered too");
+});
+
+
+test("lossTypes union like rooms: concurrent chip toggles are both kept", () => {
+  const older = { id: "j", updatedAt: "2026-08-16T10:00:00Z", lossTypes: ["water", "fire"], smokeType: "wet" };
+  const newer = { id: "j", updatedAt: "2026-08-16T10:05:00Z", lossTypes: ["water", "storm"], stormCause: "wind" };
+  const { merged } = mergeProjects(older, newer);
+  assert.deepEqual([...merged.lossTypes].sort(), ["fire", "storm", "water"],
+    "one device's Fire chip must survive the other's Storm push");
+  // detail scalars keep the newer-wins rule of every other header scalar
+  assert.equal(merged.stormCause, "wind");
 });
 
 console.log(`\n${pass} merge checks passed.`);

@@ -14,12 +14,14 @@
    gate: 'hard' = blocks billing (a real gap)
          'soft' = warn only (good practice, not a blocker)
    when: null = always required
-         'cat3' | 'contents' | 'cleaning' = conditional add-on
+         'water' | 'cat3' | 'contents' | 'cleaning' = conditional —
+         drying/moisture/cert rows only bind when water is an active
+         loss type (fire/mold/storm-only jobs are never drying-blocked)
 
    Construction jobs check against CONSTRUCTION_REQUIREMENTS instead
    (contract → permits → inspections → punch list → cert of completion).
    ============================================================ */
-import { jobType, PRECON_CONTRACT, PRECON_PERMITS } from "./model.js";
+import { jobType, lossTypesOf, PRECON_CONTRACT, PRECON_PERMITS } from "./model.js";
 
 /* ---------- small helpers ---------- */
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -33,6 +35,10 @@ const anyInstanceRow = (instances, rowsKey, test) =>
    can override (e.g. a "this job has cleaning" toggle in the UI). */
 export function activeConditions(p, override = {}) {
   return {
+    // drying documentation only applies when WATER is one of the job's loss
+    // types — a smoke-cleanup or mold job must not be billing-blocked forever
+    // on psychrometric readings that cannot exist
+    water: override.water ?? lossTypesOf(p).includes("water"),
     cat3: override.cat3 ?? (String(p.waterCategory) === "3"),
     contents: override.contents ?? (arr(p.contents).length > 0),
     cleaning: override.cleaning ?? false,
@@ -54,37 +60,37 @@ export const REQUIREMENTS = [
     present: (p) => !!p.workAuth && filled(p.workAuth.ownerDate || p.workAuth.date) },
 
   // ----- Floor plan (lives inside a Moisture Map in the field app) -----
-  { id: "fp_present", form: "floorPlan", label: "At least one floor plan / job map", gate: "hard",
+  { id: "fp_present", form: "floorPlan", label: "At least one floor plan / job map", gate: "hard", when: "water",
     present: (p) => arr(p.moistureMaps).some((m) => filled(m.floorPlan) || filled(m.sketch)) },
 
   // ----- Moisture Map -----
-  { id: "mm_material", form: "moistureMaps", label: "Material on each moisture map", gate: "hard",
+  { id: "mm_material", form: "moistureMaps", label: "Material on each moisture map", gate: "hard", when: "water",
     present: (p) => arr(p.moistureMaps).length > 0 && arr(p.moistureMaps).every((m) => filled(m.material)) },
-  { id: "mm_drygoal", form: "moistureMaps", label: "Dry goal (auto-fills from material)", gate: "hard",
+  { id: "mm_drygoal", form: "moistureMaps", label: "Dry goal (auto-fills from material)", gate: "hard", when: "water",
     present: (p) => arr(p.moistureMaps).length > 0 && arr(p.moistureMaps).every((m) => filled(m.dryGoal)) },
-  { id: "mm_readings", form: "moistureMaps", label: "At least one dated MC% reading", gate: "hard",
+  { id: "mm_readings", form: "moistureMaps", label: "At least one dated MC% reading", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.moistureMaps, "readings", (r) => arr(r.values).some(filled)) },
 
   // ----- Drying Log -> Psychrometric (split #1) -----
-  { id: "dl_affT", form: "dryingLogs", label: "Affected-area temp (psychrometric)", gate: "hard",
+  { id: "dl_affT", form: "dryingLogs", label: "Affected-area temp (psychrometric)", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "readings", (r) => filled(r.affT)) },
-  { id: "dl_affRH", form: "dryingLogs", label: "Affected-area RH (psychrometric)", gate: "hard",
+  { id: "dl_affRH", form: "dryingLogs", label: "Affected-area RH (psychrometric)", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "readings", (r) => filled(r.affRH)) },
-  { id: "dl_outT", form: "dryingLogs", label: "Outside temp (psychrometric)", gate: "hard",
+  { id: "dl_outT", form: "dryingLogs", label: "Outside temp (psychrometric)", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "readings", (r) => filled(r.outT)) },
-  { id: "dl_outRH", form: "dryingLogs", label: "Outside RH (psychrometric)", gate: "hard",
+  { id: "dl_outRH", form: "dryingLogs", label: "Outside RH (psychrometric)", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "readings", (r) => filled(r.outRH)) },
-  { id: "dl_gd", form: "dryingLogs", label: "Grain depression (auto-calc)", gate: "soft",
+  { id: "dl_gd", form: "dryingLogs", label: "Grain depression (auto-calc)", gate: "soft", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "readings", (r) => filled(r.gd)) },
 
   // ----- Drying Log -> Equipment (split #2) -----
-  { id: "eq_type", form: "dryingLogs", label: "Equipment type", gate: "hard",
+  { id: "eq_type", form: "dryingLogs", label: "Equipment type", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "equipment", (e) => filled(e.type)) },
-  { id: "eq_loc", form: "dryingLogs", label: "Equipment location", gate: "hard",
+  { id: "eq_loc", form: "dryingLogs", label: "Equipment location", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "equipment", (e) => filled(e.location)) },
-  { id: "eq_placed", form: "dryingLogs", label: "Equipment date placed", gate: "hard",
+  { id: "eq_placed", form: "dryingLogs", label: "Equipment date placed", gate: "hard", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "equipment", (e) => filled(e.placed)) },
-  { id: "eq_removed", form: "dryingLogs", label: "Equipment date removed (to close phase)", gate: "soft",
+  { id: "eq_removed", form: "dryingLogs", label: "Equipment date removed (to close phase)", gate: "soft", when: "water",
     present: (p) => anyInstanceRow(p.dryingLogs, "equipment", (e) => filled(e.removed)) },
 
   // ----- Photo Log -----
@@ -98,11 +104,11 @@ export const REQUIREMENTS = [
     present: (p) => arr(p.photos).length === 0 || arr(p.photos).every((ph) => filled(ph.caption)) },
 
   // ----- Certificate of Drying -----
-  { id: "cd_final", form: "certDrying", label: "Final reading per material", gate: "hard",
+  { id: "cd_final", form: "certDrying", label: "Final reading per material", gate: "hard", when: "water",
     present: (p) => !!p.certDrying && anyRow(p.certDrying.verification, (v) => filled(v.final)) },
-  { id: "cd_goal", form: "certDrying", label: "Dry goal per material", gate: "hard",
+  { id: "cd_goal", form: "certDrying", label: "Dry goal per material", gate: "hard", when: "water",
     present: (p) => !!p.certDrying && anyRow(p.certDrying.verification, (v) => filled(v.goal)) },
-  { id: "cd_sig", form: "certDrying", label: "Tech sign-off", gate: "hard",
+  { id: "cd_sig", form: "certDrying", label: "Tech sign-off", gate: "hard", when: "water",
     present: (p) => !!p.certDrying && (filled(p.certDrying.sigTech) || arr(p.certDrying.uploadedPages).length > 0) },
 
   // ----- Labor Log (QuickBooks Time) -----

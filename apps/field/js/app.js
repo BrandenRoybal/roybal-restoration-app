@@ -13,15 +13,16 @@ import {
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
   BOX_DESTINATIONS, POROUS_CATEGORIES, dispositionShort, dispositionLabel, depreciation,
   setAuthor, author,
+  lossTypesOf,
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
-import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged } from "./sync.js";
+import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged, reloadFromCloud } from "./sync.js";
 import { graftProject } from "./graft.js";
-import { mergeProjects } from "./merge.js";
+import { mergeProjects, tombstoneItems } from "./merge.js";
 import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine, getUnifiedJobId } from "./spine.js";
 import { generateNarrative, constructionFacts } from "./narrative.js";
@@ -325,7 +326,12 @@ async function setArchived(project, on) {
    Unarchive button; a Complete-on-the-board row offers one-tap Archive. */
 function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
   const isConst = jobType(p) === "construction";
-  const cat = p.waterCategory ? `Cat ${p.waterCategory}` : "";
+  const cat = [
+    p.waterCategory ? `Cat ${p.waterCategory}` : "",
+    p.smokeType || p.fireDamage ? "🔥 Fire" : "",
+    p.moldCondition || p.moldExtent ? "🦠 Mold" : "",
+    p.stormCause || p.envelopeBreached ? "🌬️ Storm" : "",
+  ].filter(Boolean).join(" · ");
   const flags = p.archivedAt ? [] : (isConst ? buildFlags(p) : dryingFlags(p));   // rule-based watch flags — no AI, no cost
   const sub = isConst
     ? [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "",
@@ -1031,6 +1037,42 @@ function backupsCard(project) {
   return box;
 }
 
+/* ---------- "take the cloud's copy" card ----------
+   The counterpart to the backups card above. That one ADDS BACK what went
+   missing; this one throws this device's copy away and takes the server's,
+   which is the only cure when this device is holding elements someone else
+   deleted (the merge unions, so it re-adds them every cycle — see the
+   tombstone note in merge.js). Folded away and worded as a last resort,
+   because for everything else the merge is the right answer. */
+function cloudCopyCard(project) {
+  const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "☁ Take the cloud's copy");
+  btn.addEventListener("click", async () => {
+    if (!confirm("Replace this device's copy of the job with the one in the cloud?\n\nAnything on this device that hasn't synced yet is REMOVED from the job (it's saved to Backups on this device first, so you can add it back). No other device is affected.")) return;
+    btn.disabled = true;
+    const before = (project.photos || []).length;
+    try {
+      const full = await reloadFromCloud(project.id);
+      const after = (full.photos || []).length;
+      toast(after === before ? "Took the cloud's copy — it matched what was here."
+        : `Took the cloud's copy — now ${after} photo${after === 1 ? "" : "s"} (was ${before}).`);
+      setTimeout(() => location.reload(), 700);
+    } catch (e) {
+      btn.disabled = false;
+      alert(String((e && e.message) || e));
+    }
+  });
+  const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
+    h("div", { style: "font-weight:700" }, "☁ Cloud copy of this job"));
+  const bodyBox = h("div", {},
+    h("p", { class: "subtle", style: "margin:6px 0 10px;font-size:13px" },
+      "Use this when this device is showing photos or items you deleted on another device and syncing won't clear them. " +
+      "Sync normally MERGES the two copies, which adds anything missing back — so it can't remove things on its own. " +
+      "This takes the cloud's copy instead. The current copy is saved to Backups on this device first."),
+    h("div", { style: "display:flex;justify-content:flex-end" }, btn));
+  foldable(head, bodyBox, "cloudcopy", true);   // last resort — starts tucked away
+  return h("div", { class: "card app-only" }, head, bodyBox);
+}
+
 function messageLogCard(project) {
   const log = Array.isArray(project.smsLog) ? project.smsLog : [];
 
@@ -1144,6 +1186,16 @@ function projectHome(project) {
     if (project.waterCategory) badges.append(h("span", { class: "badge cat" + project.waterCategory }, "Category " + project.waterCategory));
     if (project.waterClass) badges.append(h("span", { class: "badge" }, "Class " + project.waterClass));
     if (project.dryingSystem) badges.append(h("span", { class: "badge" }, project.dryingSystem + " drying"));
+    if (project.smokeType || project.fireDamage) {
+      const SMOKE = { wet: "Wet smoke", dry: "Dry smoke", protein: "Protein", fuel: "Fuel/soot" };
+      badges.append(h("span", { class: "badge cat3" }, ["🔥", SMOKE[project.smokeType], project.fireDamage].filter(Boolean).join(" ")));
+    }
+    if (project.moldCondition || project.moldExtent)
+      badges.append(h("span", { class: "badge cat2" }, ["🦠 Mold", project.moldCondition && "Cond. " + project.moldCondition, project.moldExtent && project.moldExtent + " sq ft"].filter(Boolean).join(" ")));
+    if (project.stormCause || project.envelopeBreached === "yes") {
+      const CAUSE = { wind: "Wind", hail: "Hail", tree: "Tree", "ice-dam": "Ice dam", flood: "Flood" };
+      badges.append(h("span", { class: "badge" }, ["🌬️", CAUSE[project.stormCause] || "Storm", project.envelopeBreached === "yes" ? "· envelope breached" : ""].filter(Boolean).join(" ")));
+    }
   }
   if (project.archivedAt)
     badges.append(h("span", { class: "badge", style: "background:#eceff3;color:#5b6672" },
@@ -1188,6 +1240,7 @@ function projectHome(project) {
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
   body.append(messageLogCard(project));
   body.append(backupsCard(project));         // on-device snapshots taken before sync overwrote this job
+  body.append(cloudCopyCard(project));       // …and the other direction: discard this device's copy, take the server's
 
   // Phase 6: no double entry — a job with real details gets/updates its board
   // tile (Leads until the coordinator stages it); fire-and-forget, offline-safe
@@ -1648,7 +1701,7 @@ async function deleteInstance(project, meta, instance, back) {
   if (!confirm(`Delete this ${meta.name}? This cannot be undone.`)) return;
   const arr = project[meta.key];
   const i = arr.findIndex((x) => x.id === instance.id);
-  if (i >= 0) arr.splice(i, 1);
+  if (i >= 0) { tombstoneItems(project, instance.id); arr.splice(i, 1); }   // recorded delete — see merge.js
   await Store.put(project);
   toast(meta.name + " deleted");
   go(back);
@@ -1994,7 +2047,7 @@ function contentsItemEditor(project, item) {
 async function deleteItem(project, item) {
   if (!confirm("Delete this item?")) return;
   const i = project.contents.findIndex((x) => x.id === item.id);
-  if (i >= 0) project.contents.splice(i, 1);
+  if (i >= 0) { tombstoneItems(project, item.id); project.contents.splice(i, 1); }   // recorded delete — see merge.js
   await Store.put(project);
   toast("Item deleted");
   go(`#/p/${project.id}/f/contents`);
@@ -2060,6 +2113,7 @@ function boxesManager(project) {
   function delBox(b) {
     if (!confirm("Delete " + b.label + "? Items stay in inventory but become unassigned.")) return;
     project.contents.forEach((it) => { if (it.boxId === b.id) it.boxId = ""; });
+    tombstoneItems(project, b.id);                    // recorded delete — see merge.js
     project.boxes = project.boxes.filter((x) => x.id !== b.id);
     Store.put(project); paint();
   }
@@ -2229,15 +2283,68 @@ function projectEdit(project) {
           f("Target completion", "targetCompletion", { type: "date" })),
         f("Permit numbers", "permitNumbers", { placeholder: "e.g. B26-1042, E26-0311" })));
   } else {
+    /* Loss classification — chips pick the loss type(s), each reveals its own
+       IICRC-grounded block. Real losses combine (fire carries suppression
+       water; storm is usually storm + water), so chips are multi-select.
+       Freeze-up is a WATER loss — put it in Loss Cause. A block holding data
+       stays visible even if its chip is tapped off (lossTypesOf re-adds it):
+       entered data is never hidden — clear the fields first, then the chip. */
+    const active = new Set(lossTypesOf(project));
+    const chips = h("div", { class: "seg" });
+    [{ value: "water", label: "💧 Water" }, { value: "fire", label: "🔥 Fire & Smoke" },
+     { value: "mold", label: "🦠 Mold" }, { value: "storm", label: "🌬️ Storm & Wind" }].forEach((t) => {
+      const b = h("button", { type: "button", class: active.has(t.value) ? "active" : "" }, t.label);
+      const HAS_DATA = {
+        water: (p) => p.waterCategory || p.waterClass || p.dryingSystem,
+        fire: (p) => p.smokeType || p.fireDamage,
+        mold: (p) => p.moldCondition || p.moldExtent,
+        storm: (p) => p.stormCause || p.envelopeBreached,
+      };
+      b.addEventListener("click", () => {
+        const cur = new Set(lossTypesOf(project));
+        if (cur.has(t.value) && HAS_DATA[t.value](project)) {
+          // a silent snap-back reads as a broken chip — say the rule out
+          // loud, and don't dirty/push the blob for a no-op
+          toast("That block has entries — clear its fields first. Entered classification is never hidden.");
+          return;
+        }
+        cur.has(t.value) ? cur.delete(t.value) : cur.add(t.value);
+        project.lossTypes = [...cur];
+        Store.put(project);
+        projectEdit(project);              // re-render swaps the blocks in/out
+      });
+      chips.append(b);
+    });
+    const blocks = [];
+    if (active.has("water")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Water Category (IICRC S500)"),
+        cat("waterCategory", [{ value: "1", label: "Cat 1 — Clean" }, { value: "2", label: "Cat 2 — Gray" }, { value: "3", label: "Cat 3 — Black" }])),
+      h("div", { class: "field" }, h("label", {}, "Class of Water"),
+        cat("waterClass", [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }, { value: "4", label: "4" }])),
+      h("div", { class: "field" }, h("label", {}, "Drying System"),
+        cat("dryingSystem", [{ value: "Open", label: "Open" }, { value: "Closed", label: "Closed" }, { value: "Hybrid", label: "Hybrid" }])));
+    if (active.has("fire")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Smoke / Residue Type"),
+        cat("smokeType", [{ value: "wet", label: "Wet smoke" }, { value: "dry", label: "Dry smoke" }, { value: "protein", label: "Protein" }, { value: "fuel", label: "Fuel / soot" }])),
+      h("div", { class: "field" }, h("label", {}, "Fire Damage Extent"),
+        cat("fireDamage", [{ value: "light", label: "Light" }, { value: "moderate", label: "Moderate" }, { value: "heavy", label: "Heavy" }])));
+    if (active.has("mold")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Mold Condition (IICRC S520)"),
+        cat("moldCondition", [{ value: "1", label: "1 — Normal" }, { value: "2", label: "2 — Settled spores" }, { value: "3", label: "3 — Actual growth" }])),
+      h("div", { class: "field" }, h("label", {}, "Affected Area"),
+        cat("moldExtent", [{ value: "<10", label: "< 10 sq ft" }, { value: "10-100", label: "10–100 sq ft" }, { value: ">100", label: "> 100 sq ft" }])));
+    if (active.has("storm")) blocks.push(
+      h("div", { class: "field" }, h("label", {}, "Storm Cause"),
+        cat("stormCause", [{ value: "wind", label: "Wind" }, { value: "hail", label: "Hail" }, { value: "tree", label: "Tree" }, { value: "ice-dam", label: "Ice dam / snow" }, { value: "flood", label: "Flood" }])),
+      h("div", { class: "field" }, h("label", {}, "Building Envelope Breached?"),
+        cat("envelopeBreached", [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }])));
     body.append(
       h("div", { class: "card" },
         h("h2", { style: "margin-top:0" }, "Loss classification"),
-        h("div", { class: "field" }, h("label", {}, "Water Category (IICRC S500)"),
-          cat("waterCategory", [{ value: "1", label: "Cat 1 — Clean" }, { value: "2", label: "Cat 2 — Gray" }, { value: "3", label: "Cat 3 — Black" }])),
-        h("div", { class: "field" }, h("label", {}, "Class of Water"),
-          cat("waterClass", [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }, { value: "4", label: "4" }])),
-        h("div", { class: "field" }, h("label", {}, "Drying System"),
-          cat("dryingSystem", [{ value: "Open", label: "Open" }, { value: "Closed", label: "Closed" }, { value: "Hybrid", label: "Hybrid" }]))));
+        h("div", { class: "field" },
+          h("label", {}, "Loss type — pick all that apply ", h("span", { class: "hint" }, "(freeze-up = Water, note it in Loss Cause)")),
+          chips),
+        ...blocks));
   }
 
   body.append(
