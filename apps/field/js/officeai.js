@@ -92,7 +92,23 @@ export function analyzePhotos(project, photos) {
   }).then((b) => b.results ?? []);
 }
 
-/** Write an analysis onto its photo: fill the caption only if the tech left it blank. */
+/* The engine that wrote an analysis. BUMP THIS whenever the photo-analysis
+   prompt or logic changes enough that older write-ups are worse than a re-run:
+   every photo carrying an older stamp then shows up in the gallery's
+   "Refresh AI captions (N)" button, so a job's captions can be brought up to
+   the current engine in one tap. Analyses written before the stamp existed
+   have no `v` and count as outdated — which is correct, they predate the
+   stage-aware briefs. Bumping never auto-fires anything: an old job with 200
+   photos costs nothing until someone taps the button.
+   1 — stage briefs (before proves the loss / after documents finished work)
+       + loss-type and job-kind context. */
+export const PHOTO_AI_VERSION = 1;
+
+/** True when this photo's analysis came from an older engine than we run now. */
+export const photoAiOutdated = (photo) => !!photo.ai && (photo.ai.v || 0) < PHOTO_AI_VERSION;
+
+/** Write an analysis onto its photo: fill the caption only if the tech left it
+    blank (or the AI wrote the one that's there). Returns true if it wrote one. */
 export function applyPhotoAnalysis(photo, analysis, stage) {
   /* Re-analysis after a re-tag must be able to REPLACE a caption the AI wrote
      — that stale caption IS the wrong-stage text we are fixing — but a caption
@@ -101,6 +117,7 @@ export function applyPhotoAnalysis(photo, analysis, stage) {
   const aiOwnsCaption = !!prev && String(photo.caption || "").trim() === String(prev.caption || "").trim();
   photo.ai = {
     caption: analysis.caption || "",
+    v: PHOTO_AI_VERSION,
     // the stage this analysis was written FOR, so a later re-tag can spot that
     // the findings are stale and offer to re-run them
     stage: stage || photo.stage || "during",
@@ -113,7 +130,11 @@ export function applyPhotoAnalysis(photo, analysis, stage) {
     confidence: analysis.confidence ?? null,
     at: new Date().toISOString(),
   };
-  if (analysis.caption && (!String(photo.caption || "").trim() || aiOwnsCaption)) photo.caption = analysis.caption;
+  if (analysis.caption && (!String(photo.caption || "").trim() || aiOwnsCaption)) {
+    photo.caption = analysis.caption;
+    return true;
+  }
+  return false;
 }
 
 /* ---------- invoice facts (digest for draft + audit) ---------- */

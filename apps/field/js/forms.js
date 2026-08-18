@@ -26,7 +26,7 @@ import { publishSelections } from "./selections.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
-import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
+import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, photoAiOutdated, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { dictateBtn } from "./dictate.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
@@ -2136,7 +2136,15 @@ export function photosForm(project) {
     // tombstone BEFORE the splice: without the recorded delete, any other
     // device still holding this photo unions it straight back in (merge.js)
     const del = h("button", { type: "button", class: "btn btn--danger btn--sm", onclick: () => { refreshers.delete(p.id); tombstoneItems(project, p.id); project.photos.splice(project.photos.indexOf(p), 1); paint(); commit(); } }, "Delete");
-    const tools = h("div", { class: "photocard__tools" }, moveL, moveR, h("span", { class: "photocard__spacer" }), del);
+    /* One photo, on demand: the whole-gallery button can't help a tech who
+       just wants THIS caption written again — after a re-tag, after an engine
+       change, or because the first pass read the room wrong. */
+    const redo = h("button", { type: "button", class: "btn btn--sm", title: "Analyze this photo again with the current AI" }, "");
+    redo.addEventListener("click", () => {
+      if (aiBusy) return toast("Already analyzing \u2014 one moment");
+      runAi([p]);
+    });
+    const tools = h("div", { class: "photocard__tools" }, moveL, moveR, redo, h("span", { class: "photocard__spacer" }), del);
     const printCap = h("div", { class: "photocap print-only" });
     /* The AI findings under the photo are EDITABLE — reword or delete
        anything the analysis got wrong (stored as p.aiNote; an emptied note
@@ -2162,6 +2170,8 @@ export function photosForm(project) {
         p.ai.stageObserved && p.ai.stageObserved !== photoStage(p)
           ? `\u26a0 looks like an ${p.ai.stageObserved.toUpperCase()} photo` : "",
       ].filter(Boolean).join(" \u00b7 ") : "";
+      // short labels on purpose: the tools row is one line on a phone-width card
+      redo.textContent = p.ai ? "\u2728 Redo" : "\u2728 Analyze";
       const shown = p.aiNote != null ? p.aiNote : (bits ? "\u2728 " + bits : "");
       if (document.activeElement !== aiLine) aiLine.value = shown;
       aiLine.hidden = !p.ai && p.aiNote == null;
@@ -2262,30 +2272,39 @@ export function photosForm(project) {
   /* An analysis is written FOR a stage: a before photo proves the loss, an
      after photo proves finished work. Re-tagging the stage therefore makes the
      findings wrong, not just incomplete — the analysis has to run again.
-     Analyses from before stage logic existed carry no p.ai.stage; they count
-     as needing a refresh for the BUTTON (one tap re-does the job) but never
-     auto-fire, so opening an old job with 200 photos costs nothing. */
+     Same for an analysis written by an older engine (photoAiOutdated — which
+     covers the ones from before any of this existed): the write-up is worse
+     than what a re-run would produce. Both count as needing a refresh for the
+     BUTTON (one tap re-does the job) but never auto-fire, so opening an old
+     job with 200 photos costs nothing until someone asks. */
   const aiStale = (p) => !!p.ai && !!p.ai.stage && p.ai.stage !== photoStage(p);
-  const aiLegacy = (p) => !!p.ai && !p.ai.stage;
-  const pendingAi = () => project.photos.filter((p) => p.src && (!p.ai || aiStale(p) || aiLegacy(p)));
+  const analyzable = () => project.photos.filter((p) => p.src);
+  const pendingAi = () => analyzable().filter((p) => !p.ai || aiStale(p) || photoAiOutdated(p));
   let aiBusy = false;
   function paintAiBtn() {
-    const list = pendingAi();
-    aiBtn.hidden = !list.length || aiBusy;
+    const list = pendingAi(), all = analyzable();
+    aiBtn.hidden = !all.length || aiBusy;
     // "Refresh" when every pending photo already HAS an analysis — a job full
-    // of captioned photos showing "AI captions (150)" reads like they're missing
+    // of captioned photos showing "AI captions (150)" reads like they're missing.
+    // With nothing pending the button stays up as "Redo": a caption you don't
+    // like is always worth another pass, engine bump or not.
     if (!aiBusy) aiBtn.textContent = list.some((p) => !p.ai)
       ? `\u2728 AI captions (${list.length})`
-      : `\u2728 Refresh AI captions (${list.length})`;
+      : list.length
+        ? `\u2728 Refresh AI captions (${list.length})`
+        : `\u2728 Redo AI captions (${all.length})`;
   }
   async function runAi(targets, { silent = false } = {}) {
     if (aiBusy || !targets.length) return;
     if (silent ? !aiReady() : !aiAvailable()) return;
     aiBusy = true;
     aiBtn.hidden = false; aiBtn.disabled = true; aiBtn.textContent = "\u2728 Analyzing\u2026";
+    let done = 0, wrote = 0;
     try {
       for (let i = 0; i < targets.length; i += 10) {
         const batch = targets.slice(i, i + 10);
+        // a whole-gallery redo runs for minutes — show it moving
+        if (targets.length > 10) aiBtn.textContent = `\u2728 Analyzing ${i + 1}\u2013${i + batch.length} of ${targets.length}\u2026`;
         // the stage AS SENT — a re-tag mid-flight must leave the result stale,
         // not silently stamp the new stage onto findings written for the old one
         const sentStage = new Map(batch.map((p) => [p.id, photoStage(p)]));
@@ -2294,19 +2313,35 @@ export function photosForm(project) {
           if (!r.ok || !r.analysis) continue;
           const ph = project.photos.find((x) => x.id === r.id);
           if (!ph) continue;
-          applyPhotoAnalysis(ph, r.analysis, sentStage.get(r.id));
+          if (applyPhotoAnalysis(ph, r.analysis, sentStage.get(r.id))) wrote++;
+          done++;
           const refresh = refreshers.get(ph.id);
           if (refresh) refresh();               // update that card in place — no grid repaint
         }
         commit();
       }
+      /* A redo over hand-typed captions changes nothing visible up top (those
+         captions are the tech's and always stand), so say what it did — the
+         findings under the photo were rewritten either way. */
+      if (!silent && done) toast(wrote
+        ? `Updated ${wrote} caption${wrote === 1 ? "" : "s"} with the current AI`
+        : "AI findings updated \u2014 the captions you typed yourself were kept");
     } catch (e) {
       if (!silent) toast("AI photo analysis failed: " + (e && e.message ? e.message : e));
     }
     aiBusy = false; aiBtn.disabled = false;
     paintAiBtn();
   }
-  aiBtn.addEventListener("click", () => runAi(pendingAi()));
+  aiBtn.addEventListener("click", () => {
+    const list = pendingAi();
+    if (list.length) return runAi(list);
+    /* Every photo is already current — this is a deliberate do-over, and it
+       re-spends on work that's done, so it asks first. */
+    const all = analyzable();
+    if (!all.length) return;
+    if (!confirm(`Re-analyze all ${all.length} photo${all.length === 1 ? "" : "s"} with the current AI?\n\nCaptions the AI wrote are replaced with fresh ones. Captions you typed yourself are kept.`)) return;
+    runAi(all);
+  });
 
   /* Photos are analyzed the instant they're added, while they still carry the
      capture default of "during" — so the after photos a tech tags at closeout
