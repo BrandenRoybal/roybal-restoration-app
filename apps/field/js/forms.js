@@ -2010,6 +2010,7 @@ const STAGE_RANK = { before: 0, during: 1, after: 2 };
 const STAGE_HEADER = { before: "Before", during: "During", after: "After" };
 const photoTs = (p) => Date.parse(p.ts || "") || 0;
 const photoStageRank = (p) => STAGE_RANK[p.stage] ?? 1;   // unlabeled ≈ "during" (the capture default)
+const photoStage = (p) => (p.stage in STAGE_RANK ? p.stage : "during");
 const photoRoom = (p) => (p.room || "").trim().replace(/\s+/g, " ");
 /* Room comparison for BOTH sorting and group breaks. Case/accent-insensitive
    so "kitchen" and "Kitchen" (typed by different techs / autocapitalize) file
@@ -2125,6 +2126,7 @@ export function photosForm(project) {
     if (!(p.stage in STAGE_RANK)) stage.value = "during";
     stage.addEventListener("change", () => {
       refresh();
+      queueRestage(p); paintAiBtn();         // findings written for the old stage are now wrong
       if (project.photoSort === "stage" || project.photoSort === "room" || stageFilter) repaintAfterTap();
       else paintFilter();                    // keep the chip counts honest
     });
@@ -2153,7 +2155,12 @@ export function photosForm(project) {
         h("span", { class: "photometa" }, fmtDate((p.ts || "").slice(0, 10))));
       const bits = p.ai ? [
         p.ai.damage && p.ai.damage.length ? "Damage: " + p.ai.damage.join("; ") : "",
+        p.ai.workDone && p.ai.workDone.length ? "Work: " + p.ai.workDone.join("; ") : "",
         p.ai.safety && p.ai.safety.length ? "\u26a0 " + p.ai.safety.join("; ") : "",
+        // the analysis read the image as a different stage than it's tagged —
+        // usually an after photo still sitting on the "during" capture default
+        p.ai.stageObserved && p.ai.stageObserved !== photoStage(p)
+          ? `\u26a0 looks like an ${p.ai.stageObserved.toUpperCase()} photo` : "",
       ].filter(Boolean).join(" \u00b7 ") : "";
       const shown = p.aiNote != null ? p.aiNote : (bits ? "\u2728 " + bits : "");
       if (document.activeElement !== aiLine) aiLine.value = shown;
@@ -2252,12 +2259,24 @@ export function photosForm(project) {
      enhancement: auto-runs on newly added photos when signed in + online, and the
      catch-up button covers anything captured offline. Never blocks manual entry. */
   const aiBtn = h("button", { type: "button", class: "btn btn--sm", style: "margin-left:8px" }, "");
-  const pendingAi = () => project.photos.filter((p) => p.src && !p.ai);
+  /* An analysis is written FOR a stage: a before photo proves the loss, an
+     after photo proves finished work. Re-tagging the stage therefore makes the
+     findings wrong, not just incomplete — the analysis has to run again.
+     Analyses from before stage logic existed carry no p.ai.stage; they count
+     as needing a refresh for the BUTTON (one tap re-does the job) but never
+     auto-fire, so opening an old job with 200 photos costs nothing. */
+  const aiStale = (p) => !!p.ai && !!p.ai.stage && p.ai.stage !== photoStage(p);
+  const aiLegacy = (p) => !!p.ai && !p.ai.stage;
+  const pendingAi = () => project.photos.filter((p) => p.src && (!p.ai || aiStale(p) || aiLegacy(p)));
   let aiBusy = false;
   function paintAiBtn() {
-    const n = pendingAi().length;
-    aiBtn.hidden = !n || aiBusy;
-    if (!aiBusy) aiBtn.textContent = `\u2728 AI captions (${n})`;
+    const list = pendingAi();
+    aiBtn.hidden = !list.length || aiBusy;
+    // "Refresh" when every pending photo already HAS an analysis — a job full
+    // of captioned photos showing "AI captions (150)" reads like they're missing
+    if (!aiBusy) aiBtn.textContent = list.some((p) => !p.ai)
+      ? `\u2728 AI captions (${list.length})`
+      : `\u2728 Refresh AI captions (${list.length})`;
   }
   async function runAi(targets, { silent = false } = {}) {
     if (aiBusy || !targets.length) return;
@@ -2266,12 +2285,16 @@ export function photosForm(project) {
     aiBtn.hidden = false; aiBtn.disabled = true; aiBtn.textContent = "\u2728 Analyzing\u2026";
     try {
       for (let i = 0; i < targets.length; i += 10) {
-        const results = await analyzePhotos(project, targets.slice(i, i + 10));
+        const batch = targets.slice(i, i + 10);
+        // the stage AS SENT — a re-tag mid-flight must leave the result stale,
+        // not silently stamp the new stage onto findings written for the old one
+        const sentStage = new Map(batch.map((p) => [p.id, photoStage(p)]));
+        const results = await analyzePhotos(project, batch);
         for (const r of results) {
           if (!r.ok || !r.analysis) continue;
           const ph = project.photos.find((x) => x.id === r.id);
           if (!ph) continue;
-          applyPhotoAnalysis(ph, r.analysis);
+          applyPhotoAnalysis(ph, r.analysis, sentStage.get(r.id));
           const refresh = refreshers.get(ph.id);
           if (refresh) refresh();               // update that card in place — no grid repaint
         }
@@ -2284,6 +2307,24 @@ export function photosForm(project) {
     paintAiBtn();
   }
   aiBtn.addEventListener("click", () => runAi(pendingAi()));
+
+  /* Photos are analyzed the instant they're added, while they still carry the
+     capture default of "during" — so the after photos a tech tags at closeout
+     were every one of them written up as during-work damage. Re-tagging the
+     stage re-runs them, coalesced so a run of quick toggles is a single call. */
+  let restageTimer = 0;
+  const restaged = new Set();
+  function queueRestage(photo) {
+    restaged.add(photo);
+    clearTimeout(restageTimer);
+    restageTimer = setTimeout(function fire() {
+      if (aiBusy) { restageTimer = setTimeout(fire, 1500); return; }   // let the in-flight run land first
+      // a photo deleted while the timer ran is no longer ours to analyze
+      const batch = [...restaged].filter((x) => x.src && aiStale(x) && project.photos.includes(x));
+      restaged.clear();
+      if (batch.length) runAi(batch, { silent: true });
+    }, 1500);
+  }
 
   const input = h("input", { type: "file", accept: "image/*", multiple: true, style: "display:none" });
   input.addEventListener("change", async () => {
