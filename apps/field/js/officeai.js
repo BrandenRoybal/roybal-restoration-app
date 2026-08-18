@@ -12,6 +12,7 @@ import { SUPABASE_URL, SUPABASE_KEY, SYNC_ENABLED } from "./config.js";
 import { isSignedIn, accessToken } from "./supa.js";
 import { getUnifiedJobId } from "./spine.js";
 import { capturedBy } from "./tech.js";
+import { jobType, lossTypesOf } from "./model.js";
 import { narrativeFacts } from "./narrative.js";
 import { rebuildFacts } from "./convert.js";
 import { toast } from "./core.js";
@@ -59,10 +60,32 @@ async function callOffice(project, action, payload) {
 }
 
 /* ---------- photo analysis ---------- */
+/* The analysis needs BOTH halves of the job's identity or it defaults to
+   writing water-damage justification over everything: the loss classification
+   (what to look for — freeze-ups ride in lossCause as a water loss) and the
+   job kind (a remodel has no loss to justify at all). The per-photo stage
+   carries the rest — an after photo documents finished work, not damage. */
 /** Analyze the given project photos (≤10 per call). Returns [{id, ok, analysis?, error?}]. */
 export function analyzePhotos(project, photos) {
+  const build = jobType(project) === "construction";
   return callOffice(project, "photoAnalysis", {
-    context: { lossCause: project.lossCause || "", waterCategory: project.waterCategory || "", address: project.address || "" },
+    context: {
+      jobType: jobType(project),
+      constructionType: build ? (project.constructionType || "") : "",
+      // a construction job has no loss classification to send — sending one
+      // would put the "look for damage" lines back into the prompt
+      lossTypes: build ? [] : lossTypesOf(project),
+      lossCause: project.lossCause || "",
+      waterCategory: build ? "" : (project.waterCategory || ""),
+      waterClass: build ? "" : (project.waterClass || ""),
+      smokeType: build ? "" : (project.smokeType || ""),
+      fireDamage: build ? "" : (project.fireDamage || ""),
+      moldCondition: build ? "" : (project.moldCondition || ""),
+      moldExtent: build ? "" : (project.moldExtent || ""),
+      stormCause: build ? "" : (project.stormCause || ""),
+      envelopeBreached: build ? "" : (project.envelopeBreached || ""),
+      address: project.address || "",
+    },
     photos: photos.slice(0, 10).map((p) => ({
       id: p.id, image: p.src, room: p.room || "", stage: p.stage || "", caption: p.caption || "",
     })),
@@ -70,17 +93,27 @@ export function analyzePhotos(project, photos) {
 }
 
 /** Write an analysis onto its photo: fill the caption only if the tech left it blank. */
-export function applyPhotoAnalysis(photo, analysis) {
+export function applyPhotoAnalysis(photo, analysis, stage) {
+  /* Re-analysis after a re-tag must be able to REPLACE a caption the AI wrote
+     — that stale caption IS the wrong-stage text we are fixing — but a caption
+     the tech typed or edited is theirs and always stands. */
+  const prev = photo.ai;
+  const aiOwnsCaption = !!prev && String(photo.caption || "").trim() === String(prev.caption || "").trim();
   photo.ai = {
     caption: analysis.caption || "",
+    // the stage this analysis was written FOR, so a later re-tag can spot that
+    // the findings are stale and offer to re-run them
+    stage: stage || photo.stage || "during",
+    stageObserved: analysis.stageObserved || "",
     damage: analysis.damage || [],
+    workDone: analysis.workDone || [],
     materials: analysis.materials || [],
     equipment: analysis.equipment || [],
     safety: analysis.safety || [],
     confidence: analysis.confidence ?? null,
     at: new Date().toISOString(),
   };
-  if (!String(photo.caption || "").trim() && analysis.caption) photo.caption = analysis.caption;
+  if (analysis.caption && (!String(photo.caption || "").trim() || aiOwnsCaption)) photo.caption = analysis.caption;
 }
 
 /* ---------- invoice facts (digest for draft + audit) ---------- */
@@ -112,7 +145,7 @@ function photoAiSummary(project) {
       // the tech's edited note overrides the raw analysis — deleted findings stay deleted
       ...(p.aiNote != null
         ? { findings: p.aiNote }
-        : { damage: p.ai.damage || [], materials: p.ai.materials || [] }),
+        : { damage: p.ai.damage || [], workDone: p.ai.workDone || [], materials: p.ai.materials || [] }),
     });
   }
   return out.slice(0, 40);

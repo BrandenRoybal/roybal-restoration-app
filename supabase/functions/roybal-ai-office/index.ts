@@ -238,34 +238,91 @@ function dataUrlToImage(src: string): { mediaType: string; data: string } | null
    ============================================================ */
 const PHOTO_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["caption", "damage", "materials", "equipment", "safety", "confidence"],
+  required: ["caption", "stageObserved", "damage", "workDone", "materials", "equipment", "safety", "confidence"],
   properties: {
-    caption: { type: "string", description: "One-sentence adjuster-ready caption of what is actually visible, e.g. 'Standing water and saturated carpet along the north wall.'" },
-    damage: { type: "array", items: { type: "string" }, description: "Specific visible damage (water staining, swollen baseboard, microbial growth, char...)" },
-    materials: { type: "array", items: { type: "string" }, description: "Building materials visibly affected (drywall, carpet, subfloor, insulation...)" },
+    caption: { type: "string", description: "One-sentence adjuster-ready caption of what IS in the frame, written for THIS photo's stage — a loss observation on a before photo ('Standing water and saturated carpet along the north wall.'), a completed-work observation on an after photo ('Replacement carpet installed and base reset along the north wall.'), a plain identification when the frame is neither ('Front elevation, north and east exposures.'). NEVER narrate absence: no 'no visible damage', no 'no char observed from this vantage point', no hedging about what the photo does not show." },
+    stageObserved: { type: "string", enum: ["before", "during", "after"], description: "Which stage this frame ACTUALLY looks like: 'before' = untouched loss/existing conditions, 'during' = work in progress (tear-out open, equipment running, assemblies exposed), 'after' = finished, restored, cleaned, put back. Trust the image over the tag the tech typed — they may not have re-tagged it yet." },
+    damage: { type: "array", items: { type: "string" }, description: "Damage VISIBLE IN THIS FRAME (water staining, swollen baseboard, microbial growth, char...). MUST be an empty array when the frame shows restored, finished, or undamaged work — an empty array already states that nothing was found, so NEVER put a negative or hedging entry here ('no visible char', 'no damage from this angle'). Never infer damage from the job's loss type, the room, or the other photos: if you cannot see it here, it does not go here." },
+    workDone: { type: "array", items: { type: "string" }, description: "Restoration or construction work visibly completed or underway in this frame (tear-out to studs, containment erected, drying equipment set, new drywall hung, texture, paint, flooring installed, fixtures set, final cleaning). Empty on an untouched before photo." },
+    materials: { type: "array", items: { type: "string" }, description: "Building materials in play (drywall, carpet, subfloor, insulation...) — affected materials on a before/during photo, installed/restored materials on an after photo." },
     equipment: { type: "array", items: { type: "string" }, description: "Restoration equipment visible (air movers, LGR dehumidifier, air scrubber, heater...)" },
-    safety: { type: "array", items: { type: "string" }, description: "Visible safety/health concerns (suspected microbial growth, sewage, electrical, structural)" },
+    safety: { type: "array", items: { type: "string" }, description: "Visible safety/health concerns (suspected microbial growth, sewage, electrical, structural). Empty on a completed frame with nothing hazardous in it." },
     confidence: { type: "number", minimum: 0, maximum: 1 },
   },
 } as const;
+
+/* Loss classification -> what is worth looking for. Freeze-ups are a WATER loss
+   in the data model (the cause rides in lossCause text), so the water line is
+   the one that names them. */
+const LOSS_FOCUS: Record<string, string> = {
+  water: "WATER: tide lines and staining, wicking height, saturated/swollen/delaminating materials, standing water, drying equipment. Frozen and burst supply lines are water losses and read the same way.",
+  fire: "FIRE: char and consumed material, soot/smoke residue and how heavy it is, thermal deformation, smoke webbing, odor-bearing surfaces.",
+  mold: "MOLD: visible microbial growth and the substrate it sits on, staining, containment barriers, negative air / HEPA equipment, and the moisture source.",
+  storm: "STORM: wind/hail/tree/ice-dam impact, breached building envelope, missing or displaced roofing, siding or glazing, and the water-intrusion path that followed.",
+};
+
+/* What the photo is EVIDENCE OF changes completely with its stage. The AFTER
+   rule is the one that matters: a restored room photographed at closeout was
+   getting a damage narrative written over finished work. */
+const STAGE_BRIEF_LOSS: Record<string, string> = {
+  before: "BEFORE — pre-mitigation. This photo documents the loss AS FOUND and justifies the scope: report the damage, contamination, and affected materials in full.",
+  during: "DURING — work in progress. Document the WORK: tear-out extent, containment, drying/cleaning equipment set, exposed assemblies. Damage still visible is fair to report; do not describe anything as finished.",
+  after: "AFTER — post-restoration. This is COMPLETED work. Do NOT write a damage narrative and do NOT justify scope. Describe the restored condition and the work visibly completed. Leave `damage` EMPTY unless damage is genuinely still present in this frame — if it is, name it plainly as a remaining punch-list item.",
+};
+
+/* Construction / remodel: there is no insurance loss to prove at all. */
+const STAGE_BRIEF_BUILD: Record<string, string> = {
+  before: "BEFORE — existing conditions ahead of the work. Describe what is there now: layout, finishes, condition. Pre-existing wear may be noted, but this is NOT an insurance loss — write no damage justification.",
+  during: "DURING — construction in progress. Document the stage of work: demo, framing, mechanical/electrical/plumbing rough-in, insulation, drywall, finish carpentry, paint.",
+  after: "AFTER — completed work. Describe the finished installation and the workmanship. Leave `damage` EMPTY: there is no loss on this job.",
+};
 
 async function photoAnalysis(body: Record<string, unknown>) {
   const photos = body.photos as Array<{ id: string; image: string; room?: string; stage?: string; caption?: string }> | undefined;
   if (!photos?.length) throw new Error("Provide `photos` [{id, image (data URL), room?, stage?, caption?}].");
   if (photos.length > 10) throw new Error("Analyze at most 10 photos per request.");
-  const ctx = (body.context ?? {}) as { lossCause?: string; waterCategory?: string; address?: string };
+  const ctx = (body.context ?? {}) as {
+    lossCause?: string; waterCategory?: string; waterClass?: string; address?: string;
+    jobType?: string; constructionType?: string; lossTypes?: string[];
+    smokeType?: string; fireDamage?: string; moldCondition?: string; moldExtent?: string;
+    stormCause?: string; envelopeBreached?: string;
+  };
+  const build = ctx.jobType === "construction";
+  const types = (Array.isArray(ctx.lossTypes) ? ctx.lossTypes : []).filter((t) => t in LOSS_FOCUS);
+  // the tech's free text usually ends in a period already — don't double it up
+  const cause = String(ctx.lossCause ?? "").trim().slice(0, 200).replace(/[.;,\s]+$/, "");
 
-  const ctxLine = [
-    "This photo documents a water/fire/mold restoration job",
-    ctx.lossCause ? `(loss cause: ${String(ctx.lossCause).slice(0, 200)})` : "",
-    ctx.waterCategory ? `— IICRC Category ${ctx.waterCategory} water loss` : "",
-    "in Interior Alaska.",
-  ].filter(Boolean).join(" ");
+  /* Job-wide framing: WHAT KIND OF JOB this is, so a remodel is never read as a
+     loss and a fire job is not written up in water-loss language. */
+  const ctxLine = build
+    ? [
+        `This is a construction job${ctx.constructionType ? ` (${ctx.constructionType.replace(/_/g, " ")})` : ""} in Interior Alaska — there is NO insurance loss and nothing to justify.`,
+        cause ? `Job notes: ${cause}.` : "",
+      ].filter(Boolean).join(" ")
+    : [
+        `This photo documents a ${types.length ? types.join(" + ") + " " : ""}restoration job in Interior Alaska.`,
+        cause ? `Reported cause of loss: ${cause}.` : "",
+        ctx.waterCategory ? `IICRC Category ${ctx.waterCategory} water${ctx.waterClass ? `, Class ${ctx.waterClass}` : ""}.` : "",
+        ctx.smokeType || ctx.fireDamage ? `Fire: ${[ctx.fireDamage && `${ctx.fireDamage} damage`, ctx.smokeType && `${ctx.smokeType} smoke residue`].filter(Boolean).join(", ")}.` : "",
+        ctx.moldCondition || ctx.moldExtent ? `Mold: IICRC S520 Condition ${ctx.moldCondition || "?"}${ctx.moldExtent ? `, ~${ctx.moldExtent} sq ft` : ""}.` : "",
+        ctx.stormCause || ctx.envelopeBreached ? `Storm: ${ctx.stormCause || "cause not set"}${ctx.envelopeBreached === "yes" ? ", building envelope breached" : ""}.` : "",
+        types.length ? `What to look for on this loss type — ${types.map((t) => LOSS_FOCUS[t]).join(" ")}` : "",
+      ].filter(Boolean).join(" ");
 
-  const system =
-    `You are a senior IICRC WRT-certified restoration estimator documenting a loss for an insurance claim. ` +
-    `Analyze the job-site photo and call \`analyze\` with what is ACTUALLY VISIBLE — never invent damage or equipment you cannot see. ` +
-    `The caption must be professional, concise, and adjuster-ready.`;
+  /* The classification above says what to LOOK for; the per-photo stage brief
+     below says what the photo is EVIDENCE OF. Both are needed — without the
+     stage, an after photo of a finished room comes back as damage justification. */
+  const system = build
+    ? `You are a senior construction project manager at Roybal Construction, LLC documenting remodel and rebuild progress. ` +
+      `Analyze the job-site photo and call \`analyze\` with what is ACTUALLY VISIBLE. ` +
+      `This is NOT an insurance loss: never write damage justification, and leave \`damage\` empty unless you can literally see something damaged. ` +
+      `Captions are professional, concise, and describe the state of the work. ` +
+      `Never narrate absence: a frame with nothing notable in it gets a plain identifying caption and empty arrays, not a sentence about what is not there.`
+    : `You are a senior IICRC-certified restoration estimator documenting a job for an insurance claim. ` +
+      `Analyze the job-site photo and call \`analyze\` with what is ACTUALLY VISIBLE — never invent damage, contamination, or equipment you cannot see, and never carry damage over from the job's loss type or from the other photos. ` +
+      `Photos are captured at three stages and each stage proves a DIFFERENT thing; the stage brief on each photo governs what you write. ` +
+      `Never narrate absence: plenty of photos are establishing shots or clean rooms, and those get a plain identifying caption with empty arrays — NOT a sentence about what is not visible or what the frame fails to show. ` +
+      `The caption must be professional, concise, and adjuster-ready.`;
 
   const results: Array<Record<string, unknown>> = [];
   const usage: Usage = { inTok: 0, outTok: 0 };
@@ -273,10 +330,17 @@ async function photoAnalysis(body: Record<string, unknown>) {
     const img = dataUrlToImage(p.image);
     if (!img) { results.push({ id: p.id, ok: false, error: "not_an_image_data_url" }); continue; }
     try {
+      /* Unlabeled photos are "during" everywhere else in the app (the capture
+         default), so they are "during" here too. The tag carries the tech's
+         intent, but photos are auto-analyzed the moment they are added — often
+         BEFORE anyone re-tags them "after" — so the model is told to believe
+         the image when the two disagree, and to report the conflict. */
+      const stage = ["before", "during", "after"].includes(String(p.stage)) ? String(p.stage) : "during";
       const hint = [
         ctxLine,
         p.room ? `The tech tagged the room/location as "${String(p.room).slice(0, 80)}".` : "",
-        p.stage ? `Photo stage: ${p.stage}.` : "",
+        `Stage tagged by the tech: ${stage}. ${(build ? STAGE_BRIEF_BUILD : STAGE_BRIEF_LOSS)[stage]}`,
+        `If the photo plainly disagrees with that tag — a finished, restored room tagged "during", say — describe WHAT YOU SEE and set stageObserved to the stage the image actually shows.`,
         p.caption ? `Tech's existing caption: "${String(p.caption).slice(0, 160)}".` : "",
       ].filter(Boolean).join(" ");
       const { input, usage: u } = await forcedTool({
