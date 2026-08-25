@@ -145,7 +145,52 @@ export async function publishPhotoShare(project, kind, onProgress = () => {}) {
 
 const escHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
 
-/* clone the live sheets into a detached, serializable copy */
+/* The pads draw their saved content ASYNC — signaturePad and sketchPad size
+   themselves in a requestAnimationFrame and paint the saved strokes in an
+   Image.onload — and sizing needs LAYOUT, which detached sheets don't have.
+   So before snapshotting, the sheets live briefly in an off-screen host at
+   print width: images land, the pads' draw callbacks run, and only then is
+   anything frozen. Returns the host; the caller removes it. */
+async function settleSheets(sheets) {
+  const host = document.createElement("div");
+  host.style.cssText = "position:absolute;left:-10000px;top:0;width:816px;background:#fff";
+  sheets.forEach((s) => host.append(s));
+  document.body.append(host);
+  const imgs = [...host.querySelectorAll("img")];
+  await Promise.all(imgs.map((img) => {
+    if (!img.getAttribute("src") || img.complete) return null;
+    if (typeof img.decode === "function") return img.decode().catch(() => {});
+    return new Promise((r) => {
+      img.addEventListener("load", r, { once: true });
+      img.addEventListener("error", r, { once: true });
+      setTimeout(r, 1500);
+    });
+  }));
+  const raf = () => new Promise((r) => (window.requestAnimationFrame || ((f) => setTimeout(f, 16)))(() => r()));
+  await raf(); await raf();                          // pads size to the host's width
+  await new Promise((r) => setTimeout(r, 250));      // saved strokes/signatures paint (Image.onload)
+  await raf();
+  return host;
+}
+
+/* moisture/equipment map: the floor plan is an <img> UNDER a transparent
+   strokes canvas — flatten both into one image (core.js composite()'s own
+   recipe: white fill, plan stretched to the canvas box, strokes over) so
+   the snapshot can never squish the layers apart */
+function flattenSketch(origCanvas) {
+  const bg = origCanvas.parentElement.querySelector("img.sketch__bg");
+  const out = document.createElement("canvas");
+  out.width = origCanvas.width || 320;
+  out.height = origCanvas.height || 320;
+  const o = out.getContext && out.getContext("2d");
+  if (!o) return origCanvas.toDataURL("image/png");
+  o.fillStyle = "#ffffff"; o.fillRect(0, 0, out.width, out.height);
+  if (bg && bg.complete && bg.naturalWidth) o.drawImage(bg, 0, 0, out.width, out.height);
+  o.drawImage(origCanvas, 0, 0);
+  return out.toDataURL("image/jpeg", 0.85);
+}
+
+/* clone the (settled, laid-out) sheets into a serializable copy */
 export function snapshotSheets(sheets) {
   const wrap = document.createElement("div");
   for (const sheetEl of sheets) {
@@ -165,11 +210,23 @@ export function snapshotSheets(sheets) {
         const sel = o.selectedIndex;
         [...c.options].forEach((op, j) => { if (j === sel) op.setAttribute("selected", ""); else op.removeAttribute("selected"); });
       } else if (tag === "CANVAS" && typeof o.toDataURL === "function") {
-        // a drawn signature/sketch only exists as pixels — freeze it
+        // a drawn signature/sketch/map only exists as pixels — freeze it
         const img = document.createElement("img");
-        try { img.src = o.toDataURL("image/png"); } catch { /* tainted/empty — leave blank */ }
-        img.setAttribute("class", o.getAttribute("class") || "");
-        img.setAttribute("style", o.getAttribute("style") || "");
+        img.className = "canvas-snap " + (o.getAttribute("class") || "");
+        if (o.parentElement && o.parentElement.classList.contains("sketch")) {
+          // map: one flattened image replaces the plan + strokes stack
+          try { img.src = flattenSketch(o); } catch { /* blank slot beats a crash */ }
+          img.setAttribute("style", "position:relative;display:block;max-width:100%;height:auto");
+          const cBg = c.parentElement && c.parentElement.querySelector("img.sketch__bg");
+          if (cBg) cBg.remove();
+        } else {
+          try { img.src = o.toDataURL("image/png"); } catch { /* empty pad — leave blank */ }
+          // freeze the box it actually occupied, so CSS written for
+          // `canvas` selectors can't reshape the replacement image
+          const r = o.getBoundingClientRect();
+          img.setAttribute("style", (o.getAttribute("style") || "") +
+            (r.width && r.height ? `;width:${Math.round(r.width)}px;height:${Math.round(r.height)}px` : ""));
+        }
         c.replaceWith(img);
       }
     }
@@ -195,10 +252,13 @@ export async function dehydrateImages(root) {
   return media;
 }
 
-/* the self-contained document: snapshot + the app's own stylesheets, so the
-   share renders exactly like the printed packet */
+/* the self-contained document: settle, snapshot + the app's own stylesheets,
+   so the share renders exactly like the printed packet */
 export async function buildPacketHtml(project, sheets) {
-  const wrap = snapshotSheets(sheets);
+  const host = await settleSheets(sheets);
+  let wrap;
+  try { wrap = snapshotSheets(sheets); }
+  finally { host.remove(); }
   const media = await dehydrateImages(wrap);
   let css = "";
   try {
@@ -212,7 +272,9 @@ export async function buildPacketHtml(project, sheets) {
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<title>Job Packet — ${escHtml(project.customer)}</title>` +
     `<style>${css}</style>` +
-    `<style>body{background:#fff;margin:0;padding:16px}.sheet{margin:0 auto 24px;max-width:8.5in;box-shadow:none}</style>` +
+    `<style>body{background:#fff;margin:0;padding:16px}.sheet{margin:0 auto 24px;max-width:8.5in;box-shadow:none}` +
+    /* frozen canvases are <img> now — mirror the print rules written for `canvas` */
+    `.sigpad img.canvas-snap{height:70px !important;width:auto}</style>` +
     `</head><body>${wrap.innerHTML}</body></html>`;
   return { html, media };
 }

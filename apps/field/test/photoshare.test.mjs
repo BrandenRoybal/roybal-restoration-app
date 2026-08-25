@@ -138,7 +138,11 @@ const { sha256Hex } = await import("../js/media.js");
 }
 
 /* ---- 5. packet share: snapshot semantics ---- */
-window.HTMLCanvasElement.prototype.toDataURL = () => "data:image/png;base64,SIGSTUB";
+// no native canvas in jsdom: 2d calls become no-ops, and toDataURL tells the
+// two freeze paths apart (maps flatten to jpeg, signatures freeze to png)
+window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {} });
+window.HTMLCanvasElement.prototype.toDataURL = (type) =>
+  type === "image/jpeg" ? "data:image/jpeg;base64,MAPSTUB" : "data:image/png;base64,SIGSTUB";
 const bigImg = "data:image/jpeg;base64," + "Z".repeat(9000);
 const mkSheet = () => {
   const sheet = window.document.createElement("section");
@@ -167,6 +171,19 @@ const mkSheet = () => {
   ok(!snap.querySelector("canvas") && snap.querySelector("img.sigpad")?.getAttribute("src") === "data:image/png;base64,SIGSTUB",
     "a drawn canvas freezes to an image");
   ok(!snap.querySelector(".app-only"), "app-only screen controls are stripped");
+
+  // moisture/equipment map: floor-plan <img> + strokes <canvas> flatten to ONE image
+  const mapSheet = window.document.createElement("section");
+  mapSheet.className = "sheet";
+  mapSheet.innerHTML = `<div class="sketch"><img class="sketch__bg" src="data:image/png;base64,PLAN"><canvas></canvas></div>`;
+  const mapSnap = snapshotSheets([mapSheet]);
+  ok(!mapSnap.querySelector("canvas") && !mapSnap.querySelector(".sketch__bg"),
+    "map snapshot has no layered plan + strokes stack left to squish");
+  const mapImg = mapSnap.querySelector(".sketch img.canvas-snap");
+  ok(!!mapImg && mapImg.getAttribute("src") === "data:image/jpeg;base64,MAPSTUB",
+    "map slot holds one flattened plan+strokes image");
+  ok(/max-width:100%/.test(mapImg.getAttribute("style") || "") && /height:auto/.test(mapImg.getAttribute("style") || ""),
+    "flattened map keeps its own aspect ratio");
   const media = await dehydrateImages(snap);
   ok(media.length === 1 && media[0].text === bigImg, "the big embedded image is extracted once");
   ok(!snap.querySelector("#big").hasAttribute("src") && snap.querySelector("#big").getAttribute("data-media") === media[0].hash,
