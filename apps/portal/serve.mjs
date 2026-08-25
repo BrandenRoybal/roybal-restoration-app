@@ -26,7 +26,10 @@ const server = createServer(async (req, res) => {
     if (!file.startsWith(ROOT)) { res.writeHead(403).end("Forbidden"); return; }
     let target = file;
     try { if ((await stat(target)).isDirectory()) target = join(target, "index.html"); }
-    catch { target = join(ROOT, "index.html"); }   // /j/<token> and friends
+    catch {
+      // mirror vercel.json: /photos/<token> → photos.html; everything else → index.html
+      target = join(ROOT, path.startsWith("/photos/") ? "photos.html" : "index.html");
+    }
     const data = await readFile(target);
     res.writeHead(200, { "Content-Type": MIME[extname(target)] || "application/octet-stream", "Cache-Control": "no-store" });
     res.end(data);

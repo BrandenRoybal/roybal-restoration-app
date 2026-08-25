@@ -16,6 +16,11 @@
  *
  * Actions:
  *   view     — { token } -> { ok, job, photos, documents, unread }
+ *   photoShare — { token } -> { ok, kind, claim header, photos:[{hash,caption,room,stage,item}] }
+ *                An insurance photo link (photo_shares row): the full-size
+ *                photo list for the adjuster page, references only.
+ *   photoMedia — { token, hash } -> { ok, src } — ONE full-size image, served
+ *                only when its hash is in that token's photo_shares row.
  *   messages — { token } -> { ok, messages:[{id,from,body,at,channel}] }
  *              (also marks outbound messages as seen by the customer)
  *   send     — { token, body } -> { ok, message:{id,from,body,at} }
@@ -130,6 +135,59 @@ async function mediaSrc(hash: string): Promise<string | null> {
   if (!res.ok) return null;
   const text = await res.text();
   return text.startsWith("data:image/") ? text : null;
+}
+
+/* ---------- insurance photo links (photo_shares) ----------
+   The field app publishes a job's Photo Log (or Contents item photos) as one
+   photo_shares row — content hashes + claim header, no image data. The
+   adjuster's page lists the share, then pulls each full-size image ONE AT A
+   TIME by hash (a 150-photo job inlined into a single JSON response would be
+   tens of MB). photoMedia only serves hashes that are IN the token's row, so
+   the token gates every byte the same way `view` does. */
+const PHOTO_SHARE_MAX = 500;   // list cap — hashes + labels only, so cheap
+
+async function photoShareByToken(token: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const q = `photo_shares?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
+    `&select=id,kind,customer_name,property_address,claim_no,date_of_loss,photos,published_at&limit=1`;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  if (!res.ok) throw new Error(`lookup failed (${res.status})`);
+  const rows = await res.json();
+  return Array.isArray(rows) ? rows[0] || null : null;
+}
+
+async function photoShareView(token: string) {
+  const row = await photoShareByToken(token);
+  if (!row) return null;
+  const photos = (Array.isArray(row.photos) ? row.photos : []).slice(0, PHOTO_SHARE_MAX)
+    .filter((p: Record<string, unknown>) => /^[0-9a-f]{64}$/.test(String(p.hash || "")))
+    .map((p: Record<string, unknown>) => ({
+      hash: String(p.hash),
+      caption: String(p.caption || "").slice(0, 500),
+      room: String(p.room || "").slice(0, 80),
+      stage: String(p.stage || "").slice(0, 20),
+      item: String(p.item || "").slice(0, 140),
+    }));
+  return {
+    kind: row.kind === "contents" ? "contents" : "photos",
+    customer_name: String(row.customer_name || "").slice(0, 120),
+    property_address: String(row.property_address || "").slice(0, 200),
+    claim_no: String(row.claim_no || "").slice(0, 60),
+    date_of_loss: String(row.date_of_loss || "").slice(0, 20),
+    published_at: String(row.published_at || "").slice(0, 10),
+    photos,
+  };
+}
+
+async function photoShareMedia(token: string, hash: string) {
+  const row = await photoShareByToken(token);
+  if (!row) return null;
+  const want = String(hash || "");
+  const listed = (Array.isArray(row.photos) ? row.photos : []).slice(0, PHOTO_SHARE_MAX)
+    .some((p: Record<string, unknown>) => String(p.hash || "") === want);
+  if (!listed) return null;
+  const src = await mediaSrc(want);
+  return src ? { src } : null;
 }
 
 /* count of inbound messages the customer hasn't-yet been the concern of —
@@ -980,6 +1038,8 @@ serve(async (req: Request) => {
     else if (action === "respondApproval") result = await respondApproval(token, String(body.approvalId ?? ""),
       body.approve === true, String(body.name ?? ""), String(body.signature ?? ""), String(body.note ?? ""));
     else if (action === "view") result = await view(token);
+    else if (action === "photoShare") result = await photoShareView(token);
+    else if (action === "photoMedia") result = await photoShareMedia(token, String(body.hash ?? ""));
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));
     else if (action === "ask") result = await ask(token, String(body.body ?? ""));
