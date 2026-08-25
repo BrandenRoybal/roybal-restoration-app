@@ -272,3 +272,9 @@ body {
   width: 46px; height: 46px; font-size: 26px; line-height: 1; cursor: pointer; }
 .plight__nav--l { left: 10px; }
 .plight__nav--r { right: 10px; }
+
+/* ---------- Insurance packet link page (/packet/<token>) ---------- */
+.wrap--wide { max-width: 980px; }
+.packetframe { width: 100%; min-height: 60vh; border: 1px solid var(--line); border-radius: 12px;
+  background: #fff; box-shadow: var(--shadow); display: block; }
+.packet-progress { color: var(--brand-dark); font-weight: 600; }

@@ -46,8 +46,8 @@ globalThis.fetch = async (url, opts = {}) => {
   return resp(404);
 };
 
-const { collectSharePhotos, buildSharePhotos, publishPhotoShare, setPhotoShareEnabled, photoShareLink } =
-  await import("../js/photoshare.js");
+const { collectSharePhotos, buildSharePhotos, publishPhotoShare, setPhotoShareEnabled, photoShareLink,
+  snapshotSheets, dehydrateImages, publishPacketShare } = await import("../js/photoshare.js");
 const { sha256Hex } = await import("../js/media.js");
 
 /* ---- 1. collectSharePhotos ---- */
@@ -135,6 +135,70 @@ const { sha256Hex } = await import("../js/media.js");
   try { await publishPhotoShare({ id: "job-3", contents: [{ name: "x", photos: [] }] }, "contents"); } catch (e) { msg = e.message; }
   ok(/No item photos/.test(msg), "publishing contents with no item photos refuses");
   ok(photoShareLink("") === "", "no token, no link");
+}
+
+/* ---- 5. packet share: snapshot semantics ---- */
+window.HTMLCanvasElement.prototype.toDataURL = () => "data:image/png;base64,SIGSTUB";
+const bigImg = "data:image/jpeg;base64," + "Z".repeat(9000);
+const mkSheet = () => {
+  const sheet = window.document.createElement("section");
+  sheet.className = "sheet";
+  sheet.innerHTML = `
+    <div class="app-only"><button>screen-only tool</button></div>
+    <input id="t1" type="text">
+    <input id="c1" type="checkbox">
+    <textarea id="ta"></textarea>
+    <select id="se"><option value="a">A</option><option value="b">B</option></select>
+    <canvas id="sig" class="sigpad"></canvas>
+    <img id="big" src="${bigImg}">
+    <img id="small" src="data:image/gif;base64,tiny">`;
+  sheet.querySelector("#t1").value = "Jane Homeowner";
+  sheet.querySelector("#c1").checked = true;
+  sheet.querySelector("#ta").value = "north wall notes";
+  sheet.querySelector("#se").selectedIndex = 1;
+  return sheet;
+};
+{
+  const snap = snapshotSheets([mkSheet()]);
+  ok(snap.querySelector("#t1").getAttribute("value") === "Jane Homeowner", "typed value survives the snapshot");
+  ok(snap.querySelector("#c1").hasAttribute("checked"), "checked box survives the snapshot");
+  ok(snap.querySelector("#ta").textContent === "north wall notes", "textarea text survives the snapshot");
+  ok(snap.querySelector("option[selected]")?.getAttribute("value") === "b", "select choice survives the snapshot");
+  ok(!snap.querySelector("canvas") && snap.querySelector("img.sigpad")?.getAttribute("src") === "data:image/png;base64,SIGSTUB",
+    "a drawn canvas freezes to an image");
+  ok(!snap.querySelector(".app-only"), "app-only screen controls are stripped");
+  const media = await dehydrateImages(snap);
+  ok(media.length === 1 && media[0].text === bigImg, "the big embedded image is extracted once");
+  ok(!snap.querySelector("#big").hasAttribute("src") && snap.querySelector("#big").getAttribute("data-media") === media[0].hash,
+    "the image slot points at its content hash");
+  ok(snap.querySelector("#small").getAttribute("src") === "data:image/gif;base64,tiny", "small images stay inline");
+}
+
+/* ---- 6. packet share: full publish path ---- */
+{
+  const project = { id: "job-9", customer: "Jane Homeowner", address: "123 Main St", claimNo: "CL-77", dateOfLoss: "2026-08-01" };
+  const r = await publishPacketShare(project, [mkSheet()]);
+  ok(/^https:\/\/portal\.roybalconstruction\.com\/packet\/[0-9a-f]{48}$/.test(r.link), "packet link is /packet/<token>");
+  ok(r.count === 1, "publish reports the page count");
+  const s = project.photoShares.packet;
+  const row = shareRows.get(s.id);
+  ok(row && row.kind === "packet" && row.share_token === s.token, "photo_shares row upserted as kind packet");
+  const htmlEntry = row.photos.find((p) => p.role === "html");
+  const imgEntries = row.photos.filter((p) => p.role === "img");
+  ok(!!htmlEntry && imgEntries.length === 1, "row lists the skeleton + each embedded image");
+  const skeleton = String(mediaStore.get(htmlEntry.hash) || "");
+  ok(skeleton.startsWith("<!DOCTYPE"), "skeleton uploaded as a self-contained HTML document");
+  ok(skeleton.includes('value="Jane Homeowner"') && skeleton.includes("north wall notes"), "skeleton carries the frozen form state");
+  ok(skeleton.includes(`data-media="${imgEntries[0].hash}"`) && !skeleton.includes("Z".repeat(100)),
+    "skeleton references images by hash and carries no image bytes");
+  ok(mediaStore.get(imgEntries[0].hash) === bigImg, "the embedded image uploaded content-addressed");
+
+  // republish keeps the token; sheets with nothing in them refuse
+  const r2 = await publishPacketShare(project, [mkSheet()]);
+  ok(r2.link === r.link, "packet republish keeps the same link");
+  let msg = "";
+  try { await publishPacketShare({ id: "job-10" }, []); } catch (e) { msg = e.message; }
+  ok(/Nothing in the packet/.test(msg), "an empty packet refuses to publish");
 }
 
 console.log(failures ? `\n${failures} CHECK(S) FAILED` : "\nALL CHECKS PASSED");

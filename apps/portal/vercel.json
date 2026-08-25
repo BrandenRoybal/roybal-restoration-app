@@ -6,6 +6,7 @@
   "outputDirectory": ".",
   "rewrites": [
     { "source": "/j/(.*)", "destination": "/index.html" },
-    { "source": "/photos/(.*)", "destination": "/photos.html" }
+    { "source": "/photos/(.*)", "destination": "/photos.html" },
+    { "source": "/packet/(.*)", "destination": "/packet.html" }
   ]
 }

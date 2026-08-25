@@ -27,8 +27,9 @@ const server = createServer(async (req, res) => {
     let target = file;
     try { if ((await stat(target)).isDirectory()) target = join(target, "index.html"); }
     catch {
-      // mirror vercel.json: /photos/<token> → photos.html; everything else → index.html
-      target = join(ROOT, path.startsWith("/photos/") ? "photos.html" : "index.html");
+      // mirror vercel.json: /photos/ → photos.html, /packet/ → packet.html, else index.html
+      target = join(ROOT, path.startsWith("/photos/") ? "photos.html"
+        : path.startsWith("/packet/") ? "packet.html" : "index.html");
     }
     const data = await readFile(target);
     res.writeHead(200, { "Content-Type": MIME[extname(target)] || "application/octet-stream", "Cache-Control": "no-store" });

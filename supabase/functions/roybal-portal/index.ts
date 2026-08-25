@@ -21,6 +21,8 @@
  *                photo list for the adjuster page, references only.
  *   photoMedia — { token, hash } -> { ok, src } — ONE full-size image, served
  *                only when its hash is in that token's photo_shares row.
+ *   packetHtml — { token } -> { ok, html } — a packet share's snapshot HTML
+ *                (kind='packet'); its images hydrate via photoMedia.
  *   messages — { token } -> { ok, messages:[{id,from,body,at,channel}] }
  *              (also marks outbound messages as seen by the customer)
  *   send     — { token, body } -> { ok, message:{id,from,body,at} }
@@ -159,6 +161,20 @@ async function photoShareByToken(token: string) {
 async function photoShareView(token: string) {
   const row = await photoShareByToken(token);
   if (!row) return null;
+  const header = {
+    customer_name: String(row.customer_name || "").slice(0, 120),
+    property_address: String(row.property_address || "").slice(0, 200),
+    claim_no: String(row.claim_no || "").slice(0, 60),
+    date_of_loss: String(row.date_of_loss || "").slice(0, 20),
+    published_at: String(row.published_at || "").slice(0, 10),
+  };
+  // a packet share is a document, not a gallery: the viewer fetches the
+  // HTML skeleton via `packetHtml`, so here only the header + image count
+  if (row.kind === "packet") {
+    const images = (Array.isArray(row.photos) ? row.photos : [])
+      .filter((p: Record<string, unknown>) => p.role === "img" && /^[0-9a-f]{64}$/.test(String(p.hash || "")));
+    return { kind: "packet", ...header, image_count: images.length, photos: [] };
+  }
   const photos = (Array.isArray(row.photos) ? row.photos : []).slice(0, PHOTO_SHARE_MAX)
     .filter((p: Record<string, unknown>) => /^[0-9a-f]{64}$/.test(String(p.hash || "")))
     .map((p: Record<string, unknown>) => ({
@@ -170,13 +186,23 @@ async function photoShareView(token: string) {
     }));
   return {
     kind: row.kind === "contents" ? "contents" : "photos",
-    customer_name: String(row.customer_name || "").slice(0, 120),
-    property_address: String(row.property_address || "").slice(0, 200),
-    claim_no: String(row.claim_no || "").slice(0, 60),
-    date_of_loss: String(row.date_of_loss || "").slice(0, 20),
-    published_at: String(row.published_at || "").slice(0, 10),
+    ...header,
     photos,
   };
+}
+
+/* the packet share's HTML skeleton — one text object in the media bucket,
+   referenced by the row's role:'html' entry, served only for its own token */
+async function packetShareHtml(token: string) {
+  const row = await photoShareByToken(token);
+  if (!row || row.kind !== "packet") return null;
+  const entry = (Array.isArray(row.photos) ? row.photos : [])
+    .find((p: Record<string, unknown>) => p.role === "html" && /^[0-9a-f]{64}$/.test(String(p.hash || "")));
+  if (!entry) return null;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${entry.hash}`, { headers: svc });
+  if (!res.ok) return null;
+  const text = await res.text();
+  return text.trimStart().startsWith("<") ? { html: text } : null;
 }
 
 async function photoShareMedia(token: string, hash: string) {
@@ -1040,6 +1066,7 @@ serve(async (req: Request) => {
     else if (action === "view") result = await view(token);
     else if (action === "photoShare") result = await photoShareView(token);
     else if (action === "photoMedia") result = await photoShareMedia(token, String(body.hash ?? ""));
+    else if (action === "packetHtml") result = await packetShareHtml(token);
     else if (action === "messages") result = await messages(token);
     else if (action === "send") result = await send(token, String(body.body ?? ""));
     else if (action === "ask") result = await ask(token, String(body.body ?? ""));
