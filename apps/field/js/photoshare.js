@@ -18,12 +18,20 @@
    ============================================================ */
 import { h, uid, toast, Store } from "./core.js";
 import { rest, isSignedIn, uploadMedia, mediaExists } from "./supa.js";
-import { sha256Hex, MARKER_RE } from "./media.js";
+import { sha256Hex, MARKER_RE, MEDIA_MIN } from "./media.js";
 import { newShareToken } from "./portal.js";
 import { qrSvg } from "./qr.js";
 
 export const photoShareLink = (token) =>
   token ? `https://portal.roybalconstruction.com/photos/${token}` : "";
+export const packetShareLink = (token) =>
+  token ? `https://portal.roybalconstruction.com/packet/${token}` : "";
+export const shareLinkFor = (kind, token) =>
+  kind === "packet" ? packetShareLink(token) : photoShareLink(token);
+export const shareLive = (project, kind) => {
+  const s = project.photoShares && project.photoShares[kind];
+  return s && s.publishedAt && s.enabled !== false ? s : null;
+};
 
 const isInline = (s) => typeof s === "string" && s.startsWith("data:");
 
@@ -77,16 +85,14 @@ async function ensureUploaded(hash, src) {
   if (!(await mediaExists(hash))) throw new Error("cloud copy could not be verified");
 }
 
-/* Publish (or re-publish) the share: upload what's missing, upsert the row
-   by its stable id, remember the token on the job so every device offers
-   the SAME link. Returns { link, count, skipped }. */
-export async function publishPhotoShare(project, kind, onProgress = () => {}) {
+const requireOnline = () => {
   if (!isSignedIn()) throw new Error("Sign in under Menu → Sync first — the link is served from the cloud");
   if (navigator.onLine === false) throw new Error("Publishing a link needs internet — try again when online");
-  const found = collectSharePhotos(project, kind);
-  if (!found.length) throw new Error(kind === "contents" ? "No item photos yet — add photos to the items first" : "No photos on this job yet");
-  const { rows, skipped } = await buildSharePhotos(found, ensureUploaded, onProgress);
-  if (!rows.length) throw new Error("No photo is reachable from this device yet — sync first, then try again");
+};
+
+/* Upsert the share row by its stable id and remember the token on the job,
+   so every device offers the SAME link. Shared by both share kinds. */
+async function upsertShareRow(project, kind, photos, count) {
   if (!project.photoShares || typeof project.photoShares !== "object") project.photoShares = {};
   const s = project.photoShares[kind] || (project.photoShares[kind] = { id: uid(), token: newShareToken() });
   const row = {
@@ -99,7 +105,7 @@ export async function publishPhotoShare(project, kind, onProgress = () => {}) {
     property_address: project.address || "",
     claim_no: project.claimNo || "",
     date_of_loss: project.dateOfLoss || "",
-    photos: rows,
+    photos,
     published_at: new Date().toISOString(),
   };
   const res = await rest("photo_shares", {
@@ -109,11 +115,122 @@ export async function publishPhotoShare(project, kind, onProgress = () => {}) {
   });
   if (!res.ok) throw new Error("Publish failed (" + res.status + "): " + (await res.text().catch(() => "")));
   s.publishedAt = row.published_at;
-  s.count = rows.length;
+  s.count = count;
   s.enabled = true;
   project.updatedAt = new Date().toISOString();
   await Store.put(project);
+  return s;
+}
+
+/* Publish (or re-publish) a photo share: upload what's missing, upsert the
+   row. Returns { link, count, skipped }. */
+export async function publishPhotoShare(project, kind, onProgress = () => {}) {
+  requireOnline();
+  const found = collectSharePhotos(project, kind);
+  if (!found.length) throw new Error(kind === "contents" ? "No item photos yet — add photos to the items first" : "No photos on this job yet");
+  const { rows, skipped } = await buildSharePhotos(found, ensureUploaded, onProgress);
+  if (!rows.length) throw new Error("No photo is reachable from this device yet — sync first, then try again");
+  const s = await upsertShareRow(project, kind, rows, rows.length);
   return { link: photoShareLink(s.token), count: rows.length, skipped };
+}
+
+/* ---------- packet share: the WHOLE job packet as a link ----------
+   The packet is rendered HTML, so the share is a SNAPSHOT of it: the live
+   sheets are cloned with their state made serializable (typed values →
+   attributes, drawn canvases → images, app-only controls removed), every
+   embedded image is swapped for its content hash (the sync offload's own
+   trick), and the slim skeleton is uploaded to the same bucket. The row is
+   photo_shares kind='packet': [{hash, role:'html'|'img'}] — the gateway
+   serves the skeleton once and each image by hash, all token-gated. */
+
+const escHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+/* clone the live sheets into a detached, serializable copy */
+export function snapshotSheets(sheets) {
+  const wrap = document.createElement("div");
+  for (const sheetEl of sheets) {
+    const clone = sheetEl.cloneNode(true);
+    const orig = [sheetEl, ...sheetEl.querySelectorAll("*")];
+    const copy = [clone, ...clone.querySelectorAll("*")];
+    for (let i = 0; i < orig.length; i++) {
+      const o = orig[i], c = copy[i];
+      const tag = o.tagName;
+      if (tag === "INPUT") {
+        if (o.type === "checkbox" || o.type === "radio") {
+          if (o.checked) c.setAttribute("checked", ""); else c.removeAttribute("checked");
+        } else c.setAttribute("value", o.value || "");
+      } else if (tag === "TEXTAREA") {
+        c.textContent = o.value || "";
+      } else if (tag === "SELECT") {
+        const sel = o.selectedIndex;
+        [...c.options].forEach((op, j) => { if (j === sel) op.setAttribute("selected", ""); else op.removeAttribute("selected"); });
+      } else if (tag === "CANVAS" && typeof o.toDataURL === "function") {
+        // a drawn signature/sketch only exists as pixels — freeze it
+        const img = document.createElement("img");
+        try { img.src = o.toDataURL("image/png"); } catch { /* tainted/empty — leave blank */ }
+        img.setAttribute("class", o.getAttribute("class") || "");
+        img.setAttribute("style", o.getAttribute("style") || "");
+        c.replaceWith(img);
+      }
+    }
+    clone.querySelectorAll(".app-only").forEach((el) => el.remove());
+    wrap.append(clone);
+  }
+  return wrap;
+}
+
+/* swap every big embedded image for its content hash (data-media) — the
+   skeleton stays small and each image ships once, content-addressed */
+export async function dehydrateImages(root) {
+  const media = [];
+  const seen = new Map();   // src -> hash (copied photos dedupe)
+  for (const img of [...root.querySelectorAll("img")]) {
+    const src = img.getAttribute("src") || "";
+    if (!src.startsWith("data:") || src.length <= MEDIA_MIN) continue;
+    let hash = seen.get(src);
+    if (!hash) { hash = await sha256Hex(src); seen.set(src, hash); media.push({ hash, text: src }); }
+    img.removeAttribute("src");
+    img.setAttribute("data-media", hash);
+  }
+  return media;
+}
+
+/* the self-contained document: snapshot + the app's own stylesheets, so the
+   share renders exactly like the printed packet */
+export async function buildPacketHtml(project, sheets) {
+  const wrap = snapshotSheets(sheets);
+  const media = await dehydrateImages(wrap);
+  let css = "";
+  try {
+    const [a, p] = await Promise.all([
+      fetch("css/app.css").then((r) => r.text()),
+      fetch("css/print.css").then((r) => r.text()),
+    ]);
+    css = a + "\n" + p;   // print.css unwrapped: the share IS the document look
+  } catch { /* offline css fetch — the skeleton still carries the content */ }
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+    `<title>Job Packet — ${escHtml(project.customer)}</title>` +
+    `<style>${css}</style>` +
+    `<style>body{background:#fff;margin:0;padding:16px}.sheet{margin:0 auto 24px;max-width:8.5in;box-shadow:none}</style>` +
+    `</head><body>${wrap.innerHTML}</body></html>`;
+  return { html, media };
+}
+
+/* Publish (or re-publish) the packet link from the packet's rendered,
+   non-excluded sheets. Returns { link, count }. */
+export async function publishPacketShare(project, sheets, onProgress = () => {}) {
+  requireOnline();
+  if (!sheets || !sheets.length) throw new Error("Nothing in the packet yet — fill out some forms first");
+  const { html, media } = await buildPacketHtml(project, sheets);
+  let n = 0;
+  for (const m of media) { n++; onProgress(n, media.length + 1); await ensureUploaded(m.hash, m.text); }
+  const htmlHash = await sha256Hex(html);
+  onProgress(media.length + 1, media.length + 1);
+  await ensureUploaded(htmlHash, html);
+  const rows = [{ hash: htmlHash, role: "html" }, ...media.map((m) => ({ hash: m.hash, role: "img" }))];
+  const s = await upsertShareRow(project, "packet", rows, sheets.length);
+  return { link: packetShareLink(s.token), count: sheets.length };
 }
 
 /* Flip the server row's switch — the link dies (or revives) immediately,
@@ -148,34 +265,41 @@ export function photoShareSheetLine(project, kind) {
     qr);
 }
 
-/* ---------- UI control (photo log + contents manager) ----------
+/* ---------- UI control (photo log / contents manager / packet page) ----------
    One button that publishes / re-publishes, and once live, the link row:
    copy, open, turn off. Photos added after publishing aren't in the link
    until it's updated — the button says so. onChange fires after any state
-   change so a host page can repaint its printed link line. */
-export function photoShareControl(project, kind, onChange = () => {}) {
+   change so a host page can repaint its printed link line. The packet page
+   passes its own `publish` (the snapshot needs the rendered sheets). */
+export function photoShareControl(project, kind, onChange = () => {}, publish = null) {
   const wrap = h("div", { class: "app-only sharelink" });
   const btn = h("button", { type: "button", class: "btn btn--sm" });
   const row = h("div", { class: "sharelink__row" });
   const info = h("div", { class: "subtle", style: "font-size:12px" });
-  const noun = kind === "contents" ? "item photos" : "photos";
+  const noun = kind === "contents" ? "item photos" : kind === "packet" ? "packet pages" : "photos";
+  const doPublish = publish || ((onProgress) => publishPhotoShare(project, kind, onProgress));
 
   const state = () => (project.photoShares && project.photoShares[kind]) || null;
 
   function paint() {
     const s = state();
     const live = s && s.publishedAt && s.enabled !== false;
-    btn.textContent = live ? "🔗 Update insurance link" : "🔗 Insurance photo link";
-    btn.title = `Publish a link the adjuster opens to view and download every ${kind === "contents" ? "contents item photo" : "job photo"} full size`;
+    btn.textContent = live
+      ? (kind === "packet" ? "🔗 Update packet link" : "🔗 Update insurance link")
+      : (kind === "packet" ? "🔗 Insurance packet link" : "🔗 Insurance photo link");
+    btn.title = kind === "packet"
+      ? "Publish a link the adjuster opens to view and print the whole job packet"
+      : `Publish a link the adjuster opens to view and download every ${kind === "contents" ? "contents item photo" : "job photo"} full size`;
     row.replaceChildren();
     info.textContent = "";
     if (!live) return;
-    const url = photoShareLink(s.token);
+    const url = shareLinkFor(kind, s.token);
     const field = h("input", { value: url, readOnly: true, style: "flex:1;font-size:13px;min-height:0" });
     const copy = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Copy");
     copy.addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(url); toast("Insurance photo link copied."); }
-      catch { field.select(); document.execCommand && document.execCommand("copy"); toast("Insurance photo link copied."); }
+      const said = kind === "packet" ? "Insurance packet link copied." : "Insurance photo link copied.";
+      try { await navigator.clipboard.writeText(url); toast(said); }
+      catch { field.select(); document.execCommand && document.execCommand("copy"); toast(said); }
     });
     const open = h("a", { class: "btn btn--ghost btn--sm", style: "width:auto", href: url, target: "_blank", rel: "noopener" }, "Open");
     const off = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Turn off");
@@ -189,13 +313,14 @@ export function photoShareControl(project, kind, onChange = () => {}) {
     });
     row.append(field, copy, open, off);
     info.textContent =
-      `${s.count || 0} ${noun} in the link · published ${String(s.publishedAt).slice(0, 10)} — tap Update after adding photos`;
+      `${s.count || 0} ${noun} in the link · published ${String(s.publishedAt).slice(0, 10)}` +
+      (kind === "packet" ? " — tap Update after changing forms" : " — tap Update after adding photos");
   }
 
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     try {
-      const { count, skipped } = await publishPhotoShare(project, kind, (n, total) => {
+      const { count, skipped } = await doPublish((n, total) => {
         btn.textContent = `🔗 Publishing ${n}/${total}…`;
       });
       toast(`Insurance link is live — ${count} ${noun}` + (skipped ? ` (${skipped} unavailable on this device)` : "") + ". Copy it below.", 4500);

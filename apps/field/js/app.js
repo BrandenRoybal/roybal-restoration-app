@@ -17,7 +17,7 @@ import {
 } from "./model.js";
 import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } from "./formkit.js";
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
-import { photoShareControl } from "./photoshare.js";
+import { photoShareControl, publishPacketShare, packetShareLink, photoShareLink, shareLive } from "./photoshare.js";
 import { qrSvg } from "./qr.js";
 import { SYNC_ENABLED } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
@@ -1331,11 +1331,9 @@ function projectHome(project) {
    the document on screen AND in the print; the choice is saved
    on the job (project.packetExclude) so it sticks per job.
    ============================================================ */
-function packetPage(project) {
-  setChrome("Job packet", `#/p/${project.id}`);
-  const body = clear(view);
-  setCtx(project, null);
-
+/* The packet's document groups — shared by the on-screen packet page and
+   the packet-share snapshot (which renders the same sheets detached). */
+function packetGroups(project) {
   // Forms where an uploaded signed PDF/scan REPLACES the generated form.
   const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
 
@@ -1391,6 +1389,22 @@ function packetPage(project) {
   // Construction narrative is the opening document of the packet.
   if (project.narrative) groups.unshift({ key: "narrative", icon: "📝", label: "Construction Narrative", note: "", sheets: [narrativeSheet(project)] });
 
+  return groups;
+}
+
+/* fresh, detached copies of the packet's INCLUDED sheets — what the packet
+   share snapshots (renders the same as print, honoring the checklist) */
+function packetShareSheets(project) {
+  const excluded = new Set(Array.isArray(project.packetExclude) ? project.packetExclude : []);
+  return packetGroups(project).filter((g) => !excluded.has(g.key)).flatMap((g) => g.sheets);
+}
+
+function packetPage(project) {
+  setChrome("Job packet", `#/p/${project.id}`);
+  const body = clear(view);
+  setCtx(project, null);
+
+  const groups = packetGroups(project);
   const excluded = new Set(Array.isArray(project.packetExclude) ? project.packetExclude : []);
   const applyVis = (g) => g.sheets.forEach((s) => s.classList.toggle("packet-skip", excluded.has(g.key)));
   const shownCount = () => groups.filter((g) => !excluded.has(g.key)).length;
@@ -1423,6 +1437,11 @@ function packetPage(project) {
           g.note ? h("span", { class: "subtle", style: "font-size:12px" }, g.note) : null);
       })));
   }
+
+  // publish the packet itself as a link — snapshots FRESH sheets so the
+  // share always matches the current checklist, not this page's DOM
+  if (groups.length) body.append(photoShareControl(project, "packet", () => {},
+    (onProgress) => publishPacketShare(project, packetShareSheets(project), onProgress)));
 
   groups.forEach((g) => { applyVis(g); g.sheets.forEach((s) => body.append(s)); });
 
@@ -1593,10 +1612,29 @@ function narrativePage(project) {
     emailBtn.disabled = true; status.textContent = "Drafting the adjuster email…";
     try {
       const draft = await draftAdjusterEmail(project);
+      /* The claim links are appended DETERMINISTICALLY, never AI-written —
+         a URL the model composed would be a guess. The packet link is the
+         email's whole point, so a missing one publishes right here; the
+         photo/contents links ride along only if already live. */
+      const links = [];
+      try {
+        if (!shareLive(project, "packet")) {
+          status.textContent = "Publishing the packet link…";
+          await publishPacketShare(project, packetShareSheets(project), (n, total) => {
+            status.textContent = `Publishing the packet link… ${n}/${total}`;
+          });
+        }
+        links.push(`• Full job packet (view & print): ${packetShareLink(project.photoShares.packet.token)}`);
+      } catch (e) {
+        toast("Email drafted, but the packet link couldn't publish — " + (e && e.message || e), 5000);
+      }
+      if (shareLive(project, "photos")) links.push(`• All job photos, full resolution: ${photoShareLink(project.photoShares.photos.token)}`);
+      if (shareLive(project, "contents")) links.push(`• Contents item photos, full resolution: ${photoShareLink(project.photoShares.contents.token)}`);
       status.textContent = "";
       const subj = h("input", { value: draft.subject || "", style: "width:100%;padding:8px 10px;border:1px solid #cdd5df;border-radius:10px;font-size:13px" });
       const bodyTa = h("textarea", { style: "width:100%;min-height:200px;font-size:13px;line-height:1.5;padding:10px;border:1px solid #cdd5df;border-radius:10px;margin-top:6px" });
-      bodyTa.value = draft.body || "";
+      bodyTa.value = (draft.body || "").trimEnd() +
+        (links.length ? "\n\nClaim documentation online:\n" + links.join("\n") + "\n" : "");
       const copyBtn = h("button", { class: "btn btn--sm" }, "Copy");
       copyBtn.addEventListener("click", async () => {
         await navigator.clipboard.writeText(`Subject: ${subj.value}\n\n${bodyTa.value}`);
@@ -1608,7 +1646,7 @@ function narrativePage(project) {
       });
       emailPanel.replaceChildren(
         h("div", { style: "border:1px dashed #b9c4d4;border-radius:12px;padding:12px;margin:10px 0;background:#f7f9fc" },
-          h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "✉️ Adjuster email draft — review, then copy or open in your mail app and attach the packet PDF:"),
+          h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "✉️ Adjuster email draft — the packet + photo links are included; review, then copy or open in your mail app:"),
           subj, bodyTa,
           h("div", { style: "display:flex;gap:8px;margin-top:8px" }, copyBtn, mailBtn)));
     } catch (e) {

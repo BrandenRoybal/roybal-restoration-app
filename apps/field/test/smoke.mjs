@@ -228,6 +228,8 @@ function setInput(el, val) {
   await tick(60);
   ok(view().querySelectorAll(".sheet").length >= 4, "full packet stacks multiple sheets (got " + view().querySelectorAll(".sheet").length + ")");
   ok([...view().querySelectorAll("button")].some((b) => /Save packet as PDF/.test(b.textContent)), "packet offers Save as PDF");
+  ok([...view().querySelectorAll("button")].some((b) => /Insurance packet link/.test(b.textContent)),
+    "packet page offers the insurance packet link");
 
   // 8d. packet picker — any document can be left out of this job's packet
   // (e.g. a huge photo report), and the choice persists on the job
