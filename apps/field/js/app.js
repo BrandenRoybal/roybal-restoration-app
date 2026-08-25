@@ -1323,7 +1323,12 @@ function projectHome(project) {
 }
 
 /* ============================================================
-   Full job packet — every started form, stacked for one PDF
+   Full job packet — every started form, stacked for one PDF.
+   Built as GROUPS (one per document) with an app-only checklist,
+   so any form can be left out of this job's packet — e.g. a
+   163-photo report the adjuster didn't ask for. Unchecking hides
+   the document on screen AND in the print; the choice is saved
+   on the job (project.packetExclude) so it sticks per job.
    ============================================================ */
 function packetPage(project) {
   setChrome("Job packet", `#/p/${project.id}`);
@@ -1333,7 +1338,7 @@ function packetPage(project) {
   // Forms where an uploaded signed PDF/scan REPLACES the generated form.
   const UPLOAD_REPLACES = { workAuth: "Work Authorization & Service Agreement", certDrying: "Certificate of Drying" };
 
-  const included = [];
+  const groups = [];   // { key, icon, label, note, sheets: [section, …] }
   for (const f of formsFor(project)) {
     // Daily construction logs are internal (crew notes/issues/materials) — the
     // one-page Labor Log from QuickBooks Time represents the labor in the packet.
@@ -1344,47 +1349,83 @@ function packetPage(project) {
     const render = RENDERERS[f.key];
     if (!render) continue;
     // Supporting docs: each uploaded document prints FULL PAGE (the sheet is
-    // management UI + AI digest, not packet material)
+    // management UI + AI digest, not packet material) — and each is its own
+    // toggle, so the engineer's report can stay while another doc sits out.
     if (f.key === "supportDocs") {
       for (const d of (v || [])) {
         const pages = uploadedDocPages(d);
-        if (pages.length) included.push(...uploadedDocSheet(pages,
-          "Supporting Document" + (d.title ? " — " + d.title : d.docType ? " — " + d.docType : "")));
+        if (!pages.length) continue;
+        const title = d.title ? " — " + d.title : d.docType ? " — " + d.docType : "";
+        groups.push({ key: "supportDocs:" + d.id, icon: f.icon, label: "Supporting Doc" + title,
+          note: pages.length > 1 ? `${pages.length} pages` : "",
+          sheets: uploadedDocSheet(pages, "Supporting Document" + title) });
       }
       continue;
     }
+    const sheets = [];
     if (f.multi) {
-      (v || []).forEach((inst) => included.push(render(project, inst)));
-    } else {
+      (v || []).forEach((inst) => sheets.push(render(project, inst)));
+    } else if (f.key === "floorPlan") {
       // Floor plan: every plan page FULL PAGE. The room-dimensions takeoff
       // table is INTERNAL ONLY — the adjuster reads SF/LF off the full-size
       // dimensioned plan; the table stays editable in the form for our use.
-      if (f.key === "floorPlan") {
-        const pages = v ? uploadedDocPages(v) : [];
-        if (pages.length) included.push(...uploadedDocSheet(pages, "Floor Plan — Dimensions & Square Footages"));
-        continue;
-      }
+      const pages = v ? uploadedDocPages(v) : [];
+      if (pages.length) sheets.push(...uploadedDocSheet(pages, "Floor Plan — Dimensions & Square Footages"));
+    } else {
       let has = Array.isArray(v) ? v.length > 0 : !!v;   // photos/contents are arrays → one report
       if (f.key === "laborLog") has = !!(v && Array.isArray(v.entries) && v.entries.length);  // only when synced
-      if (!has) continue;
-      const pages = UPLOAD_REPLACES[f.key] && v.mode === "upload" ? uploadedDocPages(v) : [];
-      if (pages.length) included.push(...uploadedDocSheet(pages, UPLOAD_REPLACES[f.key]));
-      else included.push(render(project, v));
+      if (has) {
+        const pages = UPLOAD_REPLACES[f.key] && v.mode === "upload" ? uploadedDocPages(v) : [];
+        if (pages.length) sheets.push(...uploadedDocSheet(pages, UPLOAD_REPLACES[f.key]));
+        else sheets.push(render(project, v));
+      }
     }
+    if (!sheets.length) continue;
+    const count = formCount(project, f.key);
+    const note = f.key === "photos" ? `${count} photos` : f.key === "contents" ? `${count} items`
+      : f.multi && count > 1 ? `${count}` : "";
+    groups.push({ key: f.key, icon: f.icon, label: f.name, note, sheets });
   }
 
   // Construction narrative is the opening document of the packet.
-  if (project.narrative) included.unshift(narrativeSheet(project));
+  if (project.narrative) groups.unshift({ key: "narrative", icon: "📝", label: "Construction Narrative", note: "", sheets: [narrativeSheet(project)] });
 
-  body.append(
-    h("h1", { class: "app-only" }, "Full job packet"),
-    h("p", { class: "subtle app-only" }, included.length
-      ? `${included.length} document(s) for ${project.customer || "this job"}. Tap “Save packet as PDF,” then share to the carrier.`
-      : "Nothing to include yet — fill out some forms first."));
+  const excluded = new Set(Array.isArray(project.packetExclude) ? project.packetExclude : []);
+  const applyVis = (g) => g.sheets.forEach((s) => s.classList.toggle("packet-skip", excluded.has(g.key)));
+  const shownCount = () => groups.filter((g) => !excluded.has(g.key)).length;
 
-  included.forEach((s) => body.append(s));
+  const subtitle = h("p", { class: "subtle app-only" });
+  const updateSubtitle = () => {
+    const n = shownCount();
+    subtitle.textContent = !groups.length ? "Nothing to include yet — fill out some forms first."
+      : !n ? "Everything is unchecked — check at least one document to print a packet."
+      : `${n} of ${groups.length} document(s) for ${project.customer || "this job"}. Tap “Save packet as PDF,” then share to the carrier.`;
+  };
+  updateSubtitle();
 
-  if (included.length) {
+  body.append(h("h1", { class: "app-only" }, "Full job packet"), subtitle);
+
+  if (groups.length > 1) {
+    body.append(h("div", { class: "app-only packet-picker" },
+      h("div", { style: "font-weight:600;font-size:13px;margin-bottom:2px" }, "Include in this packet:"),
+      ...groups.map((g) => {
+        const cb = h("input", { type: "checkbox", checked: !excluded.has(g.key), style: "width:22px;height:22px;min-height:0;flex:0 0 auto" });
+        cb.addEventListener("change", async () => {
+          if (cb.checked) excluded.delete(g.key); else excluded.add(g.key);
+          applyVis(g); updateSubtitle();
+          project.packetExclude = [...excluded];
+          project.updatedAt = new Date().toISOString();
+          await Store.put(project);
+        });
+        return h("label", { style: "display:flex;align-items:center;gap:10px;padding:4px 0;font-size:14px;cursor:pointer" },
+          cb, h("span", { style: "flex:1" }, `${g.icon} ${g.label}`),
+          g.note ? h("span", { class: "subtle", style: "font-size:12px" }, g.note) : null);
+      })));
+  }
+
+  groups.forEach((g) => { applyVis(g); g.sheets.forEach((s) => body.append(s)); });
+
+  if (groups.length) {
     body.append(h("div", { class: "sticky-actions app-only" },
       h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}`) }, "Back"),
       h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Save packet as PDF")));
