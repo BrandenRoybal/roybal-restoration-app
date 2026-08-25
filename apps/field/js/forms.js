@@ -21,6 +21,7 @@ import {
   newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
+import { photoShareControl } from "./photoshare.js";
 import { selectionSheetFromXlsx } from "./xactimate.js";
 import { publishSelections } from "./selections.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
@@ -2452,6 +2453,7 @@ export function photosForm(project) {
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
     h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, zipBtn, cloudBtn, sortRow, sizeRow, input),
+    photoShareControl(project, "photos"),
     filterRow,
     wrap);
 }
@@ -2460,15 +2462,32 @@ export function photosForm(project) {
    9. CONTENTS INVENTORY — printable report (read-only)
    Editing happens in the dedicated Contents manager (app.js).
    ============================================================ */
+/* Photo presentation on the printed inventory — a 42px thumb identifies the
+   row for us, but an adjuster reviewing the claim needs to SEE the item, and
+   an item's extra photos exist for exactly that reader. Saved per job. */
+const CONTENTS_PHOTO_SIZES = {
+  small:  { label: "Small — first photo only", cls: "" },
+  medium: { label: "Medium — all item photos", cls: "csize-md" },
+  large:  { label: "Large — all item photos",  cls: "csize-lg" },
+};
+
 export function contentsReport(project) {
+  if (!CONTENTS_PHOTO_SIZES[project.contentsPhotoSize]) project.contentsPhotoSize = "small";
   const items = project.contents || [];
   const boxes = project.boxes || [];
   const boxLabel = (it) => it.noBox ? ("Loose" + (it.destination ? " — " + it.destination : "")) : (boxes.find((b) => b.id === it.boxId)?.label || "");
   const ext = (it) => (Number(it.value) || 0) * (Number(it.qty) || 1);
 
+  const photoCell = (it) => {
+    const ph = (it.photos || []).filter(Boolean);
+    if (!ph.length) return "";
+    const list = project.contentsPhotoSize === "small" ? ph.slice(0, 1) : ph;
+    return h("div", { class: "cphotos" }, ...list.map((src) => h("img", { src, class: "cthumb", alt: "" })));
+  };
+
   const invRows = items.map((it) =>
     h("tr", {},
-      h("td", {}, it.photos && it.photos[0] ? h("img", { src: it.photos[0], class: "cthumb", alt: "" }) : ""),
+      h("td", {}, photoCell(it)),
       h("td", { style: "text-align:left" }, it.name || "—", it.brand || it.model ? h("div", { class: "csub" }, [it.brand, it.model].filter(Boolean).join(" ")) : null),
       h("td", {}, it.qty || ""),
       h("td", {}, it.room || ""),
@@ -2496,7 +2515,24 @@ export function contentsReport(project) {
 
   const totalItems = items.reduce((s, it) => s + (Number(it.qty) || 1), 0);
 
-  return sheet("CONTENTS INVENTORY", "Personal Property Documentation", "Contents Inventory",
+  // size selector (app-only) — swapping the class re-sizes screen AND print
+  const sizeSel = h("select", {}, ...Object.entries(CONTENTS_PHOTO_SIZES).map(([v, t]) =>
+    h("option", { value: v, ...(v === project.contentsPhotoSize ? { selected: true } : {}) }, t.label)));
+  const applySize = () => {
+    for (const t of Object.values(CONTENTS_PHOTO_SIZES)) if (t.cls) el.classList.remove(t.cls);
+    const cls = CONTENTS_PHOTO_SIZES[project.contentsPhotoSize].cls;
+    if (cls) el.classList.add(cls);
+  };
+  sizeSel.addEventListener("change", () => {
+    const prev = project.contentsPhotoSize;
+    project.contentsPhotoSize = sizeSel.value;
+    applySize(); commit();
+    // small ↔ medium/large changes WHICH photos render, not just their size
+    if ((prev === "small") !== (sizeSel.value === "small"))
+      items.forEach((it, i) => { const td = invRows[i].firstChild; td.replaceChildren(); const c = photoCell(it); if (c) td.append(c); });
+  });
+
+  const el = sheet("CONTENTS INVENTORY", "Personal Property Documentation", "Contents Inventory",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
     h("div", { class: "badgeline" },
@@ -2506,6 +2542,8 @@ export function contentsReport(project) {
       loss.length ? h("span", { class: "badge cat3" }, loss.length + " non-salvageable") : null),
 
     sectionTitle("Inventory"),
+    items.length ? h("label", { class: "app-only photosize", style: "margin:2px 0 8px" },
+      h("span", {}, "Photo size on the report:"), sizeSel) : null,
     items.length
       ? h("div", { class: "tablewrap" },
           h("table", { class: "grid contents-grid" },
@@ -2526,6 +2564,8 @@ export function contentsReport(project) {
                 h("td", {}, ""),
                 h("td", { style: "font-weight:800" }, money(totACV))))))
       : null);
+  applySize();
+  return el;
 }
 
 /* ---------- Contents pack-back receipt (homeowner sign-off) ---------- */

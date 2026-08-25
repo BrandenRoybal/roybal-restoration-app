@@ -5,6 +5,7 @@
   "buildCommand": "echo 'static site — no build'",
   "outputDirectory": ".",
   "rewrites": [
-    { "source": "/j/(.*)", "destination": "/index.html" }
+    { "source": "/j/(.*)", "destination": "/index.html" },
+    { "source": "/photos/(.*)", "destination": "/photos.html" }
   ]
 }

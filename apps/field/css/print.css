@@ -209,6 +209,8 @@ table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-si
 
 /* contents inventory */
 table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover; border: 0.5px solid #6b7892; }
+.sheet.csize-md table.grid.contents-grid .cthumb { width: 100px; height: 100px; }
+.sheet.csize-lg table.grid.contents-grid .cthumb { width: 150px; height: 150px; }
 .csub { font-size: 7.5pt; color: #5b6b80; }
 
 /* box labels — 2 per row, clean cut-out cards */

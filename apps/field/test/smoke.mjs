@@ -169,6 +169,8 @@ function setInput(el, val) {
   await tick(40);
   ok(/PHOTO REPORT/.test(text()), "job photos renders a Photo Report sheet");
   ok([...view().querySelectorAll("button")].some((b) => /Add photos/.test(b.textContent)), "photos page has an Add photos button");
+  ok([...view().querySelectorAll("button")].some((b) => /Insurance photo link/.test(b.textContent)),
+    "photo log offers the insurance photo link");
 
   // 8b2. Contents inventory: add item -> condition/disposition/value -> report
   await nav(`#/p/${id}/f/contents`);
@@ -188,9 +190,23 @@ function setInput(el, val) {
   ok(/Sectional Sofa/.test(text()), "item appears in the contents inventory PDF");
   ok(/Non-Salvageable Loss Summary/.test(text()) && /\$500\.00/.test(text()), "loss summary + total compute");
   ok(/ACV/.test(text()), "loss summary shows ACV / depreciation columns");
+  // photo size on the report — bigger item photos for the adjuster, saved per job
+  const csizeSel = [...view().querySelectorAll("select")].find((s) =>
+    [...s.options].some((o) => /all item photos/.test(o.textContent)));
+  ok(!!csizeSel, "contents report offers the photo-size selector");
+  csizeSel.value = "large";
+  csizeSel.dispatchEvent(new window.Event("change"));
+  await tick(30);
+  ok(!!view().querySelector(".sheet.csize-lg"), "large photo size marks the report sheet");
+  await nav(`#/p/${id}/f/contents`);
+  await nav(`#/p/${id}/f/contents/report`);
+  await tick(40);
+  ok(!!view().querySelector(".sheet.csize-lg"), "photo-size choice persists across visits");
   await nav(`#/p/${id}/f/contents`);
   ok(/Sectional Sofa/.test(text()), "item shows in the contents list");
   ok([...view().querySelectorAll("button")].some((b) => /CSV/.test(b.textContent)), "contents manager offers CSV export");
+  ok([...view().querySelectorAll("button")].some((b) => /Insurance photo link/.test(b.textContent)),
+    "contents manager offers the insurance photo link");
   // boxes + QR labels
   await nav(`#/p/${id}/f/contents/boxes`);
   [...view().querySelectorAll("button")].find((b) => /New box/.test(b.textContent))?.click();
