@@ -20,6 +20,7 @@ import { h, uid, toast, Store } from "./core.js";
 import { rest, isSignedIn, uploadMedia, mediaExists } from "./supa.js";
 import { sha256Hex, MARKER_RE } from "./media.js";
 import { newShareToken } from "./portal.js";
+import { qrSvg } from "./qr.js";
 
 export const photoShareLink = (token) =>
   token ? `https://portal.roybalconstruction.com/photos/${token}` : "";
@@ -127,11 +128,32 @@ export async function setPhotoShareEnabled(project, kind, enabled) {
   await Store.put(project);
 }
 
+/* Print-visible link block for a report sheet — the PDF the adjuster gets
+   carries the full-size photo link ON the report, typed or scanned (QR,
+   same lazy vendored generator as the box labels). Renders nothing unless
+   the share is live, so a dead link never prints. */
+export function photoShareSheetLine(project, kind) {
+  const s = project.photoShares && project.photoShares[kind];
+  if (!s || !s.publishedAt || s.enabled === false) return null;
+  const url = photoShareLink(s.token);
+  const qr = h("div", { class: "sharelink-print__qr" });
+  qrSvg(url, 2, 0).then((svg) => { qr.innerHTML = svg; }).catch(() => {});
+  return h("div", { class: "sharelink-print" },
+    h("div", { class: "sharelink-print__body" },
+      h("div", { class: "sharelink-print__head" },
+        (kind === "contents" ? "All item photos" : "All job photos") + " — full resolution, view & download:"),
+      h("a", { class: "sharelink-print__url", href: url }, url),
+      h("div", { class: "sharelink-print__sub" },
+        "Open the link (or scan the code) to view every photo full size and download them individually or as one ZIP.")),
+    qr);
+}
+
 /* ---------- UI control (photo log + contents manager) ----------
    One button that publishes / re-publishes, and once live, the link row:
    copy, open, turn off. Photos added after publishing aren't in the link
-   until it's updated — the button says so. */
-export function photoShareControl(project, kind) {
+   until it's updated — the button says so. onChange fires after any state
+   change so a host page can repaint its printed link line. */
+export function photoShareControl(project, kind, onChange = () => {}) {
   const wrap = h("div", { class: "app-only sharelink" });
   const btn = h("button", { type: "button", class: "btn btn--sm" });
   const row = h("div", { class: "sharelink__row" });
@@ -163,6 +185,7 @@ export function photoShareControl(project, kind) {
       try { await setPhotoShareEnabled(project, kind, false); toast("Link turned off."); }
       catch (e) { toast("Couldn't turn the link off: " + (e && e.message || e), 4000); }
       paint();
+      onChange();
     });
     row.append(field, copy, open, off);
     info.textContent =
@@ -181,6 +204,7 @@ export function photoShareControl(project, kind) {
     }
     btn.disabled = false;
     paint();
+    onChange();
   });
 
   wrap.append(btn, row, info);

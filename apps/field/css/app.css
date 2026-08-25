@@ -499,6 +499,16 @@ tr.fill-target > td { background: var(--brand-tint); box-shadow: inset 0 0 0 1px
 .sharelink__row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 6px 0 2px; }
 .sharelink__row input { flex: 1 1 180px; min-height: 0; padding: 8px 10px; }
 
+/* …and the PRINT-visible line on the Photo Report / Contents Inventory:
+   the PDF the adjuster gets carries the link + QR (NOT app-only) */
+.sharelink-print { display: flex; gap: 12px; align-items: center; border: 1.5px solid var(--navy, #0f1b2d); border-radius: 10px; padding: 10px 12px; margin: 10px 0; background: #fff; }
+.sharelink-print__body { flex: 1; min-width: 0; }
+.sharelink-print__head { font-weight: 800; font-size: 13px; }
+.sharelink-print__url { font-size: 13px; word-break: break-all; color: #1c5fb0; }
+.sharelink-print__sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.sharelink-print__qr { width: 76px; height: 76px; flex: 0 0 auto; }
+.sharelink-print__qr svg { width: 100%; height: 100%; display: block; }
+
 /* room title above each affected-area / equipment map */
 .maptitle { font-weight: 800; font-size: 15px; color: var(--navy, #0f1b2d); margin: 8px 0 4px; }
 
