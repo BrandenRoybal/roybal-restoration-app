@@ -213,6 +213,16 @@ table.grid.contents-grid .cthumb { width: 42px; height: 42px; object-fit: cover;
 .sheet.csize-lg table.grid.contents-grid .cthumb { width: 150px; height: 150px; }
 .csub { font-size: 7.5pt; color: #5b6b80; }
 
+/* insurance photo link — prints with the Photo Report / Contents Inventory
+   so the adjuster's PDF carries the full-size link, typed or scanned */
+.sharelink-print { display: flex; gap: 10px; align-items: center; border: 1.5px solid #0f1b2d;
+  border-radius: 6px; padding: 8px 10px; margin: 8px 0; break-inside: avoid; }
+.sharelink-print__head { font-weight: 800; font-size: 9.5pt; }
+.sharelink-print__url { font-size: 9pt; word-break: break-all; color: #1c5fb0; text-decoration: none; }
+.sharelink-print__sub { font-size: 7.5pt; color: #5b6b80; margin-top: 2px; }
+.sharelink-print__qr { width: 0.8in; height: 0.8in; flex: 0 0 auto; }
+.sharelink-print__qr svg { width: 100%; height: 100%; display: block; }
+
 /* box labels — 2 per row, clean cut-out cards */
 .boxlabels { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25in; }
 .boxlabel { border: 1.5px solid #0f1b2d; border-radius: 6px; padding: 10px; break-inside: avoid; min-height: 2.6in; }

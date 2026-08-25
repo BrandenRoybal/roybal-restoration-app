@@ -406,6 +406,30 @@ function setInput(el, val) {
   ok(!window.document.querySelector(".lightbox"), "Esc closes the viewer");
   ok(window.document.body.style.overflow !== "hidden", "page scrolling restored after close");
 
+  // 13. a LIVE insurance link prints on the reports (and a dead one never does)
+  const shareProj = await Store.get(id);
+  shareProj.photoShares = {
+    photos:   { id: "s1", token: "ab".repeat(24), publishedAt: "2026-08-25T00:00:00Z", count: 2, enabled: true },
+    contents: { id: "s2", token: "cd".repeat(24), publishedAt: "2026-08-25T00:00:00Z", count: 1, enabled: true },
+  };
+  await Store.put(shareProj, { quiet: true });
+  await nav(`#/p/${id}/f/photos`);
+  await tick(40);
+  const lineUrl = view().querySelector(".sheet .sharelink-print__url");
+  ok(!!lineUrl && lineUrl.textContent.includes("/photos/" + "ab".repeat(24)),
+    "photo report prints the insurance link on the sheet");
+  await nav(`#/p/${id}/f/contents/report`);
+  await tick(40);
+  const cLine = view().querySelector(".sheet .sharelink-print__url");
+  ok(!!cLine && cLine.textContent.includes("/photos/" + "cd".repeat(24)),
+    "contents report prints ITS OWN insurance link");
+  shareProj.photoShares.contents.enabled = false;
+  await Store.put(shareProj, { quiet: true });
+  await nav(`#/p/${id}/f/photos`);
+  await nav(`#/p/${id}/f/contents/report`);
+  await tick(40);
+  ok(!view().querySelector(".sharelink-print"), "a turned-off link never prints on the report");
+
   console.log("\n" + (failures ? `FAILED: ${failures} check(s)` : "ALL CHECKS PASSED"));
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error("THREW:", e); process.exit(1); });

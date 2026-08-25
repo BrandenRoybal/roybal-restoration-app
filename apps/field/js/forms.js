@@ -21,7 +21,7 @@ import {
   newPortalShare, PORTAL_MILESTONES,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
-import { photoShareControl } from "./photoshare.js";
+import { photoShareControl, photoShareSheetLine } from "./photoshare.js";
 import { selectionSheetFromXlsx } from "./xactimate.js";
 import { publishSelections } from "./selections.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
@@ -2449,11 +2449,22 @@ export function photosForm(project) {
   paint();
   paintAiBtn();
 
+  // the insurance link prints ON the report (when live) — publishing from
+  // this very page repaints the line without a renavigate
+  const shareLine = h("div");
+  const paintShareLine = () => {
+    shareLine.replaceChildren();
+    const l = photoShareSheetLine(project, "photos");
+    if (l) shareLine.append(l);
+  };
+  paintShareLine();
+
   return sheet("PHOTO REPORT", "Job Site Documentation", "Photo Report",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
+    shareLine,
     h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, zipBtn, cloudBtn, sortRow, sizeRow, input),
-    photoShareControl(project, "photos"),
+    photoShareControl(project, "photos", paintShareLine),
     filterRow,
     wrap);
 }
@@ -2535,6 +2546,7 @@ export function contentsReport(project) {
   const el = sheet("CONTENTS INVENTORY", "Personal Property Documentation", "Contents Inventory",
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
+    photoShareSheetLine(project, "contents"),
     h("div", { class: "badgeline" },
       h("span", { class: "badge" }, items.length + " line items"),
       h("span", { class: "badge" }, totalItems + " pieces"),
