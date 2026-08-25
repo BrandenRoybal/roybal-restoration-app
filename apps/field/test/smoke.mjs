@@ -213,6 +213,26 @@ function setInput(el, val) {
   ok(view().querySelectorAll(".sheet").length >= 4, "full packet stacks multiple sheets (got " + view().querySelectorAll(".sheet").length + ")");
   ok([...view().querySelectorAll("button")].some((b) => /Save packet as PDF/.test(b.textContent)), "packet offers Save as PDF");
 
+  // 8d. packet picker — any document can be left out of this job's packet
+  // (e.g. a huge photo report), and the choice persists on the job
+  const picker = view().querySelector(".packet-picker");
+  ok(picker !== null, "packet offers the include-in-packet picker");
+  picker.querySelector("input[type=checkbox]").click();
+  await tick(40);
+  ok(view().querySelectorAll(".sheet.packet-skip").length > 0,
+    "unchecking a document hides its sheets from the packet");
+  await nav("#/");
+  await nav(`#/p/${id}/packet`);
+  await tick(60);
+  ok(view().querySelector(".packet-picker input[type=checkbox]").checked === false,
+    "the leave-out choice persists on the job across visits");
+  ok(view().querySelectorAll(".sheet.packet-skip").length > 0,
+    "excluded document stays hidden after reload");
+  view().querySelector(".packet-picker input[type=checkbox]").click();   // restore for later packet checks
+  await tick(40);
+  ok(view().querySelectorAll(".sheet.packet-skip").length === 0,
+    "re-checking brings the document back into the packet");
+
   // 9. data persisted across reload (fake-indexeddb keeps state in-process)
   await nav("#/");
   ok(/Jane Homeowner/.test(text()), "job persists and shows in list after navigation");
