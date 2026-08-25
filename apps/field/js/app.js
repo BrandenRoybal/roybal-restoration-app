@@ -180,10 +180,32 @@ async function route() {
   return projectList();
 }
 
-function setChrome(sub, back) {
+/* A browser names a printed PDF after document.title, and ours was the static
+   "Roybal Field Forms" on every page — so a packet mailed to a carrier arrived
+   as five attachments with the same name and a (1)(2)(3) after it. The page's
+   own title names the file instead, plus the customer: two jobs' floor plans
+   are otherwise indistinguishable in a downloads folder.
+   `fileTitle` overrides when the on-screen label isn't the right filename (a
+   tab reading "Boxes" prints box labels; one drying log of several wants its
+   date in the name). */
+function setChrome(sub, back, fileTitle) {
   topbarSub.textContent = sub;
   backTarget = back || "#/";
   backBtn.hidden = !back;
+  document.title = pdfName(fileTitle || sub);
+}
+
+const APP_TITLE = "Roybal Field Forms";
+function pdfName(title) {
+  // \ / : * ? " < > | are illegal in a filename on some platform or other, and
+  // a browser silently drops or mangles them rather than refusing to save
+  const clean = (s) => String(s || "").replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+  const doc = clean(title);
+  const job = clean(liveProject && liveProject.customer);
+  if (!doc) return APP_TITLE;
+  // the job page's own title IS the customer — "Smith — Smith" helps nobody
+  const full = !job || doc === job ? doc : `${doc} \u2014 ${job}`;
+  return full.length > 90 ? full.slice(0, 90).trim() : full;
 }
 
 /* Header chip: who's capturing on this device (Step E). Tap to set/change. */
@@ -230,7 +252,7 @@ function syncLabel() {
 }
 
 function renderLogin() {
-  setChrome("Sign in", null);
+  setChrome("Sign in", null, APP_TITLE);
   const body = clear(view);
   const email = h("input", { type: "email", placeholder: "Email", autocomplete: "username", value: "" });
   const pass = h("input", { type: "password", placeholder: "Password", autocomplete: "current-password" });
@@ -372,7 +394,7 @@ let _listRender = null;  // token identifying the projectList render currently o
 const stageSig = (rows) => JSON.stringify((rows || []).map((r) => [r.id, r.data && r.data.stage, r.data && r.data.fieldJobId]).sort());
 
 async function projectList() {
-  setChrome("Field Forms", null);
+  setChrome("Field Forms", null, APP_TITLE);
   const projects = await Store.all();
   const body = clear(view);
   const mode = activeMode();
@@ -1644,7 +1666,9 @@ async function addInstance(project, meta) {
 /* ---------- the actual form editor ---------- */
 function formEditor(project, meta, instance) {
   const back = meta.multi ? `#/p/${project.id}/f/${meta.key}` : `#/p/${project.id}`;
-  setChrome(meta.name, back);
+  // instanceTitle is what the app already calls this entry in the list —
+  // "Drying log — Aug 12, 2026", the doc's own title for a supporting doc
+  setChrome(meta.name, back, meta.multi ? (instanceTitle(meta.key, instance) || meta.name) : meta.name);
   const body = clear(view);
 
   const pill = h("span", { class: "saved-pill" }, "✓ Saved");
@@ -2065,7 +2089,7 @@ async function deleteItem(project, item) {
 
 /* ---------- Boxes manager (+ printable labels) ---------- */
 function boxesManager(project) {
-  setChrome("Boxes", `#/p/${project.id}/f/contents`);
+  setChrome("Boxes", `#/p/${project.id}/f/contents`, "Box labels");
   const body = clear(view);
   const pill = h("span", { class: "saved-pill" }, "✓ Saved");
   setCtx(project, pill);
@@ -2166,7 +2190,7 @@ function boxesManager(project) {
 }
 
 function contentsReportPage(project) {
-  setChrome("Contents PDF", `#/p/${project.id}/f/contents`);
+  setChrome("Contents PDF", `#/p/${project.id}/f/contents`, "Contents inventory");
   const body = clear(view);
   setCtx(project, null);
   body.append(
@@ -2201,7 +2225,7 @@ function exportContentsCSV(project) {
 
 /* ---------- Pack-back checklist + receipt ---------- */
 function contentsPackBack(project) {
-  setChrome("Pack-back", `#/p/${project.id}/f/contents`);
+  setChrome("Pack-back", `#/p/${project.id}/f/contents`, "Pack-back receipt");
   const body = clear(view);
   const pill = h("span", { class: "saved-pill" }, "✓ Saved");
   setCtx(project, pill);
