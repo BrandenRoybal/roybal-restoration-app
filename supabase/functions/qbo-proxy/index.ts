@@ -50,6 +50,8 @@ const QBO_BASE = Deno.env.get("QBO_BASE_URL") ?? "https://quickbooks.api.intuit.
 const MINOR_VERSION = "70";
 /** Generic service item used for all invoice lines */
 const SERVICE_ITEM_NAME = "Restoration Services";
+/** Billing item when SERVICE_ITEM_NAME is taken by a QBO category (catalog reorg) */
+const SERVICE_SUBITEM_NAME = "Restoration — General";
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
@@ -208,19 +210,29 @@ async function callerRole(req: Request, sb: ReturnType<typeof createClient>): Pr
   } catch (_) { return null; }
 }
 
-/** Find-or-create the generic service item. Returns the item Id. */
+/** Find-or-create the generic service item. Returns the item Id.
+    QBO categories live in the same Item table, and a category on an invoice
+    line is rejected (fault 2500) — so when "Restoration Services" is a
+    category (the reorganized catalog), bill under a "Restoration — General"
+    service created inside it instead. */
 async function ensureServiceItem(realmId: string, tok: string) {
-  const found = await qboQuery(realmId, tok, `select Id from Item where Name = '${escapeQ(SERVICE_ITEM_NAME)}'`);
-  const existing = (found.QueryResponse as { Item?: { Id: string }[] })?.Item?.[0];
-  if (existing) return existing.Id;
+  const found = await qboQuery(realmId, tok, `select Id, Type from Item where Name = '${escapeQ(SERVICE_ITEM_NAME)}'`);
+  const existing = (found.QueryResponse as { Item?: { Id: string; Type?: string }[] })?.Item?.[0];
+  if (existing && existing.Type !== "Category") return existing.Id;
+
+  if (existing) {
+    const sub = await qboQuery(realmId, tok, `select Id, Type from Item where Name = '${escapeQ(SERVICE_SUBITEM_NAME)}'`);
+    const subItem = (sub.QueryResponse as { Item?: { Id: string; Type?: string }[] })?.Item?.[0];
+    if (subItem && subItem.Type !== "Category") return subItem.Id;
+  }
 
   const accounts = await qboQuery(realmId, tok, `select Id from Account where AccountType = 'Income' maxresults 1`);
   const income = (accounts.QueryResponse as { Account?: { Id: string }[] })?.Account?.[0];
   if (!income) throw new Error("No income account found in QuickBooks — create one in QBO first.");
-  const created = await qboFetch(realmId, tok, "/item", {
-    method: "POST",
-    body: JSON.stringify({ Name: SERVICE_ITEM_NAME, Type: "Service", IncomeAccountRef: { value: income.Id } }),
-  });
+  const item: Record<string, unknown> = existing
+    ? { Name: SERVICE_SUBITEM_NAME, Type: "Service", IncomeAccountRef: { value: income.Id }, SubItem: true, ParentRef: { value: existing.Id } }
+    : { Name: SERVICE_ITEM_NAME, Type: "Service", IncomeAccountRef: { value: income.Id } };
+  const created = await qboFetch(realmId, tok, "/item", { method: "POST", body: JSON.stringify(item) });
   return String((created.Item as { Id: string }).Id);
 }
 
