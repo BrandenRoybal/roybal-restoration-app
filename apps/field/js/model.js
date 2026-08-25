@@ -176,6 +176,9 @@ export function newProject() {
     // AI construction narrative (packet cover) — markdown prose + date generated
     narrative: "",
     narrativeDate: "",
+    // office override: unlocks narrative generation while hard completeness
+    // gaps remain — the chip keeps reporting the gaps; only the lock is skipped
+    narrativeOverride: false,
     // AI progress update (construction jobs) — weekly owner/adjuster/lender summary
     progressNarrative: "",
     progressNarrativeDate: "",

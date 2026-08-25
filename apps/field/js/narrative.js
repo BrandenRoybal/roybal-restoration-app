@@ -2,9 +2,10 @@
    Roybal Field Forms — Construction narrative (AI)
    ------------------------------------------------------------
    The opening document of the job packet: an AI-written construction /
-   mitigation narrative, generated ONLY once the job is billable (all
-   hard billing-requirement gaps closed), reviewed + edited by the
-   office, then printed as the packet cover.
+   mitigation narrative, generated once the job is billable (all hard
+   billing-requirement gaps closed) or the office sets the per-job
+   override (narrativeOverride), reviewed + edited by the office, then
+   printed as the packet cover.
 
    This module's pure core — narrativeFacts(project) — digests the
    DOCUMENTED job data into the structured facts the model writes from.

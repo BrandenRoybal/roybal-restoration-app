@@ -1451,7 +1451,10 @@ function progressPage(project) {
 
 /* ============================================================
    Construction narrative — AI-written packet cover, unlocked once
-   every billing-requirement document is complete (isBillable).
+   every billing-requirement document is complete (isBillable) or
+   the office sets the per-job override. The override skips ONLY
+   this lock: the completeness chip keeps reporting the gaps, and
+   this page keeps them in view until they close.
    ============================================================ */
 function narrativePage(project) {
   setChrome("Construction Narrative", `#/p/${project.id}`);
@@ -1460,13 +1463,29 @@ function narrativePage(project) {
 
   body.append(h("h1", {}, "📝 Construction Narrative"));
 
-  if (!ev.isBillable) {
+  const gapList = () =>
+    h("ul", { style: "margin:6px 0 0;padding-left:20px;font-size:14px" }, ...ev.hardGaps.map((g) => h("li", { style: "margin:2px 0" }, `${g.formLabel} — ${g.label}`)));
+  const setOverride = async (on) => {
+    project.narrativeOverride = on; project.updatedAt = new Date().toISOString();
+    await Store.put(project);
+    narrativePage(project);
+  };
+  const overridden = !ev.isBillable && !!project.narrativeOverride;
+
+  if (!ev.isBillable && !overridden) {
+    const overrideBtn = h("button", { class: "btn btn--ghost" }, "⚠️ Override — unlock anyway");
+    overrideBtn.addEventListener("click", () => {
+      if (!confirm("Unlock the narrative with required documents still missing?\n\nThe gaps stay listed on this page and on the completeness chip until they're closed — the override only unlocks writing the narrative.")) return;
+      setOverride(true);
+    });
     body.append(
       h("div", { style: "border:1px solid #f0b463;background:#fff4e5;border-radius:12px;padding:14px;margin:8px 0" },
         h("div", { style: "font-weight:700;color:#8a6d00" }, "Finish the required documents first"),
         h("p", { style: "margin:6px 0;font-size:14px" }, "The construction narrative unlocks once every billing-requirement document is complete. Still missing:"),
-        h("ul", { style: "margin:6px 0 0;padding-left:20px;font-size:14px" }, ...ev.hardGaps.map((g) => h("li", { style: "margin:2px 0" }, `${g.formLabel} — ${g.label}`)))),
-      h("button", { class: "btn btn--ghost", style: "margin-top:12px", onclick: () => go(`#/p/${project.id}`) }, "Back to job"));
+        gapList()),
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:12px" },
+        h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}`) }, "Back to job"),
+        overrideBtn));
     return;
   }
 
@@ -1534,8 +1553,19 @@ function narrativePage(project) {
     emailBtn.disabled = false;
   });
 
+  if (overridden) {
+    const clearBtn = h("button", { class: "btn btn--sm", style: "margin-top:8px" }, "Remove override");
+    clearBtn.addEventListener("click", () => setOverride(false));
+    body.append(
+      h("div", { style: "border:1px solid #f0b463;background:#fff4e5;border-radius:12px;padding:12px;margin:8px 0" },
+        h("div", { style: "font-weight:700;color:#8a6d00" }, `⚠️ Override active — ${ev.hardGaps.length} required item(s) still missing`),
+        gapList(),
+        clearBtn));
+  }
   body.append(
-    h("p", { class: "subtle", style: "font-size:14px" }, "All required documents are complete. Generate the construction narrative, review and edit it, then it becomes the opening page of the job packet. (The reconstruction scope + estimate are added separately.)"),
+    h("p", { class: "subtle", style: "font-size:14px" }, overridden
+      ? "Override active: the narrative writes only from what IS documented, so anything still missing above simply won't appear in it. Close the gaps before the packet goes to the carrier."
+      : "All required documents are complete. Generate the construction narrative, review and edit it, then it becomes the opening page of the job packet. (The reconstruction scope + estimate are added separately.)"),
     h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin:8px 0" }, genBtn, saveBtn,
       h("button", { class: "btn btn--ghost", onclick: () => go(`#/p/${project.id}/packet`) }, "📄 Open packet"),
       emailBtn),
