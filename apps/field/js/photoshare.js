@@ -16,7 +16,7 @@
    the same never-trust-until-verified rule as archivePhotos.
    The pure builders are Node-testable; the UI control is not.
    ============================================================ */
-import { h, uid, toast, Store } from "./core.js";
+import { h, uid, toast, Store, likelyOffline } from "./core.js";
 import { rest, isSignedIn, uploadMedia, mediaExists } from "./supa.js";
 import { sha256Hex, MARKER_RE, MEDIA_MIN } from "./media.js";
 import { newShareToken } from "./portal.js";
@@ -87,7 +87,7 @@ async function ensureUploaded(hash, src) {
 
 const requireOnline = () => {
   if (!isSignedIn()) throw new Error("Sign in under Menu → Sync first — the link is served from the cloud");
-  if (navigator.onLine === false) throw new Error("Publishing a link needs internet — try again when online");
+  if (likelyOffline()) throw new Error("Publishing a link needs internet — try again when online");
 };
 
 /* Upsert the share row by its stable id and remember the token on the job,

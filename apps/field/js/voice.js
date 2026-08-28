@@ -105,7 +105,7 @@ export function transcribeWidget({ project, formKey, instance, rerender }) {
     if (busy) return;                       // re-entrancy guard: ignore a second tap mid-cycle
     if (!SYNC_ENABLED || !FN_URL) return toast("Voice needs the cloud backend configured.");
     if (!isSignedIn()) return toast("Sign in to use voice transcription.");
-    if (typeof navigator !== "undefined" && navigator.onLine === false)
+    if (likelyOffline())
       return toast("No connection — voice needs internet. Your typed entries are saved.");
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined")
       return toast("This device can't record audio — type your entries.");

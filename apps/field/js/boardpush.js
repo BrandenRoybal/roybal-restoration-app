@@ -13,7 +13,7 @@
    a job save only lands when the server is still on the rev the
    write started from — a stale copy can never clobber newer edits.
    ============================================================ */
-import { uid, Store } from "./core.js";
+import { uid, Store, stripCtrl, likelyOffline } from "./core.js";
 import { rest, isSignedIn } from "./supa.js";
 import { SYNC_ENABLED } from "./config.js";
 import { matchCoordinationId, normClaim } from "./spine.js";
@@ -197,8 +197,7 @@ export function phasesToSubRows(subtasks, blankFn) {
 /* ============================================================
    Network (browser-only; every call is fail-safe for the UI)
    ============================================================ */
-const ready = () => SYNC_ENABLED && isSignedIn() &&
-  !(typeof navigator !== "undefined" && navigator.onLine === false);
+const ready = () => SYNC_ENABLED && isSignedIn() && !likelyOffline();
 
 async function fetchBoardRows() {
   const res = await rest(`coordination_jobs?select=id,data&deleted=is.false`, { method: "GET" });
@@ -582,10 +581,12 @@ export function fieldSeedFromBoardJob(row, blank) {
     p.targetCompletion = d.targetDate || "";
     if (Number(d.contractValue)) p.contractAmount = String(d.contractValue);
   }
-  p.customer = d.customer || d.title || "";
-  p.address = d.address || "";
-  p.phone = d.phone || "";
-  p.claimNo = d.claimNo || "";
+  // sanitize on the way in — a board tile can carry the same scanner/paste
+  // junk a job file can, and this is the other door into project text fields
+  p.customer = stripCtrl(d.customer || d.title || "");
+  p.address = stripCtrl(d.address || "");
+  p.phone = stripCtrl(d.phone || "");
+  p.claimNo = stripCtrl(d.claimNo || "");
   return p;
 }
 

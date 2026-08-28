@@ -1,7 +1,7 @@
 /* ============================================================
    Roybal Field Forms — app shell + hash router
    ============================================================ */
-import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow } from "./core.js";
+import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow, stripCtrl, likelyOffline } from "./core.js";
 import {
   formByKey, formCount, newProject, isBlankProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
@@ -19,7 +19,7 @@ import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } fro
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
 import { photoShareControl, publishPacketShare, packetShareLink, photoShareLink, shareLive } from "./photoshare.js";
 import { qrSvg } from "./qr.js";
-import { SYNC_ENABLED } from "./config.js";
+import { SYNC_ENABLED, SUPABASE_URL, SUPABASE_KEY, BUILD } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
 import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged, reloadFromCloud } from "./sync.js";
 import { graftProject } from "./graft.js";
@@ -91,9 +91,26 @@ if (location.search.includes("diag")) {
     : el.tagName + (el.className ? "." + String(el.className).trim().split(/\s+/).join(".") : "")
       + (el.placeholder ? "[" + el.placeholder + "]" : "");
   const L = { click: "—", stack: "—", input: "—", focus: "—", key: "—", typed: "—" };
+  // NET: navigator.onLine is the flag every offline gate in the app reads, and
+  // it can be stuck false on a working connection. REACH is the truth — an
+  // actual request to Supabase. When NET=false but REACH=ok, the flag is lying.
+  const net = () => `onLine=${navigator.onLine} believedOffline=${likelyOffline()} build=${BUILD} reach=${L.reach}`;
+  L.reach = "(tap NET test)";
   const paint = () => { dbox.textContent =
-    "CLICK  " + L.click + "\nSTACK  " + L.stack + "\nINPUT  " + L.input +
+    "NET    " + net() + "\nCLICK  " + L.click + "\nSTACK  " + L.stack + "\nINPUT  " + L.input +
     "\nFOCUS  " + L.focus + "\nKEY    " + L.key + "\nTYPED  " + L.typed; };
+  // prove reachability independently of the flag, on load and every 10s
+  const probe = async () => {
+    const t = Date.now();
+    try {
+      await fetch(SUPABASE_URL + "/auth/v1/health", { headers: { apikey: SUPABASE_KEY }, cache: "no-store" });
+      L.reach = "ok " + (Date.now() - t) + "ms";
+    } catch (e) { L.reach = "FAILED " + String((e && e.message) || e); }
+    paint();
+  };
+  probe(); setInterval(probe, 10000);
+  window.addEventListener("online", paint);
+  window.addEventListener("offline", paint);
   document.addEventListener("pointerdown", (e) => {
     L.click = desc(e.target);
     const els = document.elementsFromPoint(e.clientX, e.clientY);
@@ -237,6 +254,7 @@ function updateSyncStatus(s) {
     offline: ["#ff6b6b", "Offline — saved on device"], error: ["#ff6b6b", "Sync error"] };
   const [color, title] = map[s.state] || ["var(--green)", "Online"];
   dot.style.color = color; dot.title = title;
+  updateNet();                      // a completed sync clears a stale red dot
   // refresh the account row if it's on screen
   const row = $("#acctRow");
   if (row) row.replaceWith(accountRow());
@@ -296,7 +314,7 @@ function accountRow() {
       h("div", { class: "acctrow__main" },
         h("div", {}, "Signed in · " + currentEmail()),
         h("div", { class: "acctrow__status" }, syncLabel())),
-      h("button", { class: "btn btn--ghost btn--sm", onclick: () => syncNow() }, "↻ Sync"),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => syncNow({ force: true }) }, "↻ Sync"),
       h("button", { class: "linklike", onclick: doSignOut }, "Sign out"));
   } else {
     row.append(
@@ -1179,7 +1197,7 @@ function messageLogCard(project) {
   // number) — online-only enhancement; offline the card shows sends as before
   (async () => {
     try {
-      if (!SYNC_ENABLED || !isSignedIn() || navigator.onLine === false) return;
+      if (!SYNC_ENABLED || !isSignedIn() || likelyOffline()) return;
       const uid = getUnifiedJobId(project.id);
       const digits = String(project.phone || "").replace(/[^\d]/g, "");
       const e164 = digits.length === 10 ? "+1" + digits
@@ -2367,9 +2385,27 @@ function projectEdit(project) {
   const pill = h("span", { class: "saved-pill" }, "✓ Saved");
   setCtx(project, pill);
 
+  // Set when a STORED value turned out to carry control-character junk (see
+  // stripCtrl) — jobs scanned before the sanitizer existed. Healed in place
+  // and written once at the end, so opening a clean job stays a pure read.
+  let healed = false;
+
   const f = (label, key, opts = {}) => {
-    const el = h("input", { type: opts.type || "text", value: project[key] ?? "", placeholder: opts.placeholder || "" });
-    el.addEventListener("input", () => { project[key] = el.value; Store.put(project); });
+    const stored = project[key];
+    const clean = stripCtrl(stored ?? "");
+    // strings only — contractAmount is a number, and stripCtrl would stringify it
+    if (typeof stored === "string" && clean !== stored) { project[key] = clean; healed = true; }
+    const el = h("input", { type: opts.type || "text", value: clean, placeholder: opts.placeholder || "" });
+    el.addEventListener("input", () => {
+      // Scanner bursts and PDF pastes carry invisible control chars into these
+      // fields. Rewriting el.value moves the caret to the end, so only touch it
+      // when something was actually dropped — that's a paste, where the caret
+      // was heading to the end anyway.
+      const cleaned = stripCtrl(el.value);
+      if (cleaned !== el.value) el.value = cleaned;
+      project[key] = cleaned;
+      Store.put(project);
+    });
     return h("div", { class: "field" }, h("label", {}, label), el);
   };
   const cat = (key, vals) => {
@@ -2495,6 +2531,11 @@ function projectEdit(project) {
   body.append(
     h("button", { class: "btn btn--primary", style: "margin-top:6px", onclick: () => go(`#/p/${project.id}`) }, "Done — go to forms"),
     h("button", { class: "btn btn--danger", style: "margin-top:10px", onclick: () => deleteProject(project) }, "Delete job"));
+
+  // One write for however many fields were carrying junk. This is the only
+  // path that repairs jobs saved before stripCtrl existed, so it must land
+  // AFTER every f() call above (including the construction/loss branches).
+  if (healed) Store.put(project);
 }
 
 async function deleteProject(project) {
@@ -2510,7 +2551,13 @@ async function deleteProject(project) {
 /* ---------- network status + service worker ---------- */
 function updateNet() {
   const s = $("#netStatus");
-  if (navigator.onLine) { s.classList.remove("off"); s.title = "Online"; }
+  if (!s) return;
+  // navigator.onLine lies (see sync.js): a woken home-screen app can report
+  // offline on good wifi. A sync that actually COMPLETED is proof of a working
+  // connection, so evidence outranks the flag — otherwise the dot sat red
+  // while the app was demonstrably talking to the server.
+  const proven = lastSync && (lastSync.state === "synced" || lastSync.state === "syncing");
+  if (!likelyOffline() || proven) { s.classList.remove("off"); s.title = "Online"; }
   else { s.classList.add("off"); s.title = "Offline — your work is saved on this device"; }
 }
 window.addEventListener("online", updateNet);

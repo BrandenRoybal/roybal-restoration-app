@@ -59,6 +59,31 @@ test("short claim numbers can't false-match", () => {
   assert.equal(m, null);
 });
 
+test("control characters in the stored claim # don't block the match", () => {
+  // Live row (Don Hovda): claimNo is "100250382\b \b" — barcode-scanner or
+  // PDF-paste junk. The \b used to survive normalization, so the claim was
+  // long enough to clear the 4-char floor but could never appear in an email.
+  const junk = [{ id: "pj", customer: "Don Hovda", email: "", claimNo: "100250382\b \b" }];
+  assert.deepEqual(
+    matchEmailToJob({ from: "adjuster@carrier.com", subject: "Claim #100250382 — estimate", text: "" }, junk),
+    { projectId: "pj", matchedBy: "claim" },
+  );
+  // and buried in the body, however the sender punctuated it
+  assert.deepEqual(
+    matchEmailToJob({ from: "a@b.com", subject: "docs", text: "re: claim no. 100-250-382, see attached" }, junk),
+    { projectId: "pj", matchedBy: "claim" },
+  );
+});
+
+test("a claim that's mostly junk still can't clear the 4-char floor", () => {
+  // "\b \b#-.\b" has no alphanumerics at all; "AB\b-1" normalizes to "AB1".
+  // Neither may match, or every email would file itself against these jobs.
+  assert.equal(matchEmailToJob({ from: "x@y.com", subject: "anything at all", text: "body" },
+    [{ id: "pz", customer: "Z", claimNo: "\b \b#-.\b" }]), null);
+  assert.equal(matchEmailToJob({ from: "x@y.com", subject: "ab1 shipment", text: "" },
+    [{ id: "pz", customer: "Z", claimNo: "AB\b-1" }]), null);
+});
+
 test("buildRfc822: headers, threading, base64url with no padding", () => {
   const { raw, base64url } = buildRfc822({
     to: "adjuster@carrier.com", from: "branden@roybalconstruction.com",

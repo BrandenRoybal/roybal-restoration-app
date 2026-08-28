@@ -28,6 +28,11 @@ ok("construction job carries loss_type construction",
 /* normClaim is tolerant of formatting */
 ok("normClaim strips spaces/dashes/case", normClaim(" abc-1 2_3 ") === "ABC123");
 ok("normClaim empty -> ''", normClaim(null) === "");
+ok("normClaim drops punctuation the sender typed", normClaim("#100/250.382") === "100250382");
+/* Scanner/paste junk: a live job stores "100250382\b \b". The control chars
+   used to survive normalization, so this claim compared equal to nothing. */
+ok("normClaim drops control characters", normClaim("100250382\b \b") === "100250382");
+ok("junk claim == clean claim after norm", normClaim("100250382\b \b") === normClaim("100250382"));
 
 /* matchCoordinationId finds the right Board job by claim # */
 const coordRows = [
@@ -39,5 +44,12 @@ ok("matches across formatting + alt field name", matchCoordinationId(coordRows, 
 ok("no match -> null", matchCoordinationId(coordRows, "QQQ-999") === null);
 ok("empty claim -> null", matchCoordinationId(coordRows, "") === null);
 ok("handles empty rows", matchCoordinationId([], "ABC-123") === null);
+/* the Don Hovda case: junk on ONE side alone used to break the link */
+ok("a job's junk claim still finds its Board row",
+  matchCoordinationId([{ id: "co-9", data: { claimNo: "100250382" } }], "100250382\b \b") === "co-9");
+ok("and the other way round",
+  matchCoordinationId([{ id: "co-9", data: { claimNo: "100250382\b \b" } }], "100250382") === "co-9");
+/* an all-junk claim must not collapse to "" and match everything */
+ok("all-junk claim -> null, not a wildcard", matchCoordinationId(coordRows, "\b \b") === null);
 
 console.log(`\n${pass} checks passed.`);

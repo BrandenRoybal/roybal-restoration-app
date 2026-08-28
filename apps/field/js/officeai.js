@@ -15,21 +15,20 @@ import { capturedBy } from "./tech.js";
 import { jobType, lossTypesOf } from "./model.js";
 import { narrativeFacts } from "./narrative.js";
 import { rebuildFacts } from "./convert.js";
-import { toast } from "./core.js";
+import { toast, likelyOffline } from "./core.js";
 
 const FN_URL = SUPABASE_URL ? `${SUPABASE_URL}/functions/v1/roybal-ai-office` : "";
 
 /** Silent readiness check — for auto-fired AI that must never nag offline. */
 export function aiReady() {
-  return !!(SYNC_ENABLED && FN_URL && isSignedIn() &&
-    !(typeof navigator !== "undefined" && navigator.onLine === false));
+  return !!(SYNC_ENABLED && FN_URL && isSignedIn() && !likelyOffline());
 }
 
 /** True when the online-only AI path is usable right now (else toasts why). */
 export function aiAvailable() {
   if (!SYNC_ENABLED || !FN_URL) { toast("AI needs the cloud backend configured."); return false; }
   if (!isSignedIn()) { toast("Sign in to use AI features."); return false; }
-  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+  if (likelyOffline()) {
     toast("No connection — AI needs internet. Your typed entries are saved.");
     return false;
   }

@@ -2055,7 +2055,7 @@ export function photosForm(project) {
     if (sizeCache.has(key)) { imgEl.src = sizeCache.get(key); return; }
     imgEl.src = p.src || "";
     let master = p.src || "";
-    if (p.cloud && navigator.onLine !== false) {
+    if (p.cloud && !likelyOffline()) {
       try { master = (await photoFullSrc(p)) || master; } catch { /* offline blip — keep the preview */ }
     }
     if (!master) return;
@@ -2425,7 +2425,7 @@ export function photosForm(project) {
   cloudBtn.addEventListener("click", async () => {
     const n = archivableCount(project);
     if (!n) return toast("This job's photos are already slim — nothing to move");
-    if (navigator.onLine === false) return toast("Moving photos needs internet — try again when online");
+    if (likelyOffline()) return toast("Moving photos needs internet — try again when online");
     if (!confirm(`Move ${n} photo${n === 1 ? "" : "s"} to cloud storage?\n\nThe job keeps a small preview of each photo and gets MUCH faster to sync. Full resolution stays saved in the cloud — the gallery, printed report, and “Download all” fetch the originals whenever you're online.`)) return;
     cloudBtn.disabled = true;
     try {

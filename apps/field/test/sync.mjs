@@ -656,6 +656,49 @@ const { tombstoneItems } = await import("../js/merge.js");
 
   }   // end SYNC_VIA_RPC-only cases
 
+  /* ---------- navigator.onLine is advisory, never a trap ----------
+     A home-screen PWA woken from sleep can report onLine === false on a
+     perfectly good connection and never fire "online" again. That flag used
+     to hard-return out of syncNow, and since the Sync button, sign-out/in and
+     an app restart all funnel through syncNow, the device was stranded until
+     the tablet itself was rebooted. Reported from the office, Aug 2026. */
+  {
+    let st = null;
+    startSync((s) => { st = s; });
+    const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 25)); };
+    await settle();                     // let startSync's un-awaited cycle finish
+
+    let tried = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, opts) => { tried++; return realFetch(url, opts); };
+
+    // precondition: while ONLINE the engine really does hit the network here,
+    // so a later "no fetch" result means the flag gate, not an idle engine
+    const pre = tried; await syncNow({ force: true }); await settle();
+    ok(tried > pre, "precondition: a sync while online reaches the network");
+
+    Object.defineProperty(globalThis, "navigator", { value: { onLine: false }, configurable: true });
+
+    // Phase-independent: a queued schedulePush can land mid-run, so assert the
+    // PROPERTY (mostly skip, but never permanently stuck) rather than an exact
+    // hit on the 4th pass.
+    // THE RESCUE: requests have been succeeding, so the proof stamped in core.js
+    // outranks the lying flag and the device keeps syncing instead of stranding.
+    const N = 4;
+    let reached = 0;
+    for (let i = 0; i < N; i++) { const a = tried; await syncNow(); await settle(); if (tried > a) reached++; }
+    ok(reached === N,
+      "flag stuck false but requests keep working: sync carries on (device is not stranded)");
+    ok(st && (st.state === "offline" || st.state === "synced" || st.state === "error"),
+      "…and the status stays truthful throughout");
+
+    const a = tried; await syncNow({ force: true }); await settle();
+    ok(tried > a, "an explicit Sync tap ALWAYS tries the network, flag or not");
+
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis, "navigator", { value: { onLine: true }, configurable: true });
+  }
+
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error("THREW:", e); process.exit(1); });
