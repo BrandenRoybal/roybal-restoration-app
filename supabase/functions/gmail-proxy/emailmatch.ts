@@ -9,8 +9,8 @@
    Match rules, most to least certain:
    • customer-email — the sender address is the job's email on file
    • claim          — the job's claim # appears in the subject or body
-                      (normalized: spaces/dashes dropped; 4+ chars so a
-                      short fragment can't false-match)
+                      (normalized to alphanumerics; 4+ chars so a short
+                      fragment can't false-match)
    • customer-name  — the customer's full name (2+ words, all present)
                       appears in the subject
 
@@ -34,7 +34,15 @@ export function addressOf(fromHeader: string): string {
   return bare ? lc(bare[1]) : "";
 }
 
-const normClaim = (v: unknown) => String(v || "").replace(/[\s\-_.]/g, "").toUpperCase();
+/* Claim normalization — alphanumerics only, upper. Applied to BOTH the stored
+   claim # and the email haystack so the two stay symmetric.
+   Anything else is punctuation-or-junk: separators the sender may have typed
+   differently (spaces, dashes, slashes, #), and control characters that ride
+   in on barcode-scanner output or PDF pastes. At least one live job carries
+   "100250382\b \b" in claimNo — the \b survived the old [\s\-_.] strip, so the
+   normalized claim was unmatchable by any real email while still clearing the
+   4-char floor. Stripping to alphanumerics leaves "100250382" and it matches. */
+const normClaim = (v: unknown) => String(v || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 
 export interface EmailIn { from: string; subject: string; text: string }
 export interface Match { projectId: string; matchedBy: "customer-email" | "claim" | "customer-name" }

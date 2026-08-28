@@ -3,6 +3,7 @@
    No SDK: just fetch calls, to keep the app dependency-free.
    ============================================================ */
 import { SUPABASE_URL, SUPABASE_KEY, BUILD } from "./config.js";
+import { noteNetworkOk } from "./core.js";
 
 const SESSION_KEY = "roybal-session";
 const TABLE = "field_projects";
@@ -77,6 +78,10 @@ async function api(path, opts = {}) {
     await refresh();
     res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...opts, headers: { ...authHeaders(), ...(opts.headers || {}) } });
   }
+  // ANY response — even a 4xx — proves the request reached the server, which is
+  // the only thing likelyOffline() cares about (core.js). fetch() would have
+  // rejected instead if we were genuinely offline.
+  noteNetworkOk();
   return res;
 }
 

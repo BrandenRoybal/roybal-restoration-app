@@ -32,7 +32,7 @@
    - before any merge or overwrite, the local copy is snapshotted
      to the on-device backups store (restorable from the job page).
    ============================================================ */
-import { Store, onProjectSaved, onProjectDeleted } from "./core.js";
+import { Store, onProjectSaved, onProjectDeleted, likelyOffline } from "./core.js";
 import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSince, uploadMedia, downloadMedia,
          pushProject, tombstoneProject, reviveProject } from "./supa.js";
 import { SYNC_VIA_RPC } from "./config.js";
@@ -511,9 +511,24 @@ async function pull() {
 }
 
 /* ---------- run a full sync cycle ---------- */
-export async function syncNow() {
+/* navigator.onLine is ADVISORY, never the last word. It has false negatives:
+   a home-screen PWA woken from sleep can report offline on perfect office wifi
+   and never fire "online" again. This check used to return unconditionally,
+   which stranded the device — ↻ Sync, sign-out/in and a restart all funnel
+   through here, so there was no way back short of rebooting the tablet.
+   Now: skip the routine passes when the flag says offline (no point burning a
+   fetch), but ALWAYS let an explicit ↻ Sync try, and probe the network anyway
+   every PROBE_EVERY skips so a stuck flag heals itself within a few minutes.
+   A request that genuinely fails still reports offline — from evidence. */
+const PROBE_EVERY = 4;          // ~3 min at the 45s interval
+let flagSkips = 0;
+
+export async function syncNow(opts = {}) {
   if (!isSignedIn() || syncing) return;
-  if (typeof navigator !== "undefined" && navigator.onLine === false) { setStatus("offline"); return; }
+  if (likelyOffline() && !opts.force) {
+    if (++flagSkips % PROBE_EVERY !== 0) { setStatus("offline"); return; }
+  }
+  flagSkips = 0;
   syncing = true; updateRequired = false; setStatus("syncing");
   try {
     // PULL FIRST: absorb (and merge) everyone else's changes before asserting
@@ -533,7 +548,11 @@ export async function syncNow() {
     else setStatus("synced", { lastSync: Date.now() });
   } catch (e) {
     // push() rethrows the cycle's last error, so a build rejection lands here
-    setStatus("error", {
+    // fetch() rejects (TypeError) when the request never reached the network —
+    // that's the honest "offline", proven by a real attempt rather than by a
+    // flag that lies. Anything else is a server/app problem and stays an error.
+    if (e instanceof TypeError && !updateRequired) setStatus("offline");
+    else setStatus("error", {
       needsUpdate: updateRequired,
       message: updateRequired
         ? "This app is out of date — close and reopen it to update, then sync."
@@ -599,7 +618,7 @@ export function startSync(onStatus) {
   onProjectDeleted((id) => { deletes.set(id, new Date().toISOString()); saveDeletes(); schedulePush(); });
 
   if (typeof window !== "undefined") {
-    window.addEventListener("online", syncNow);
+    window.addEventListener("online", () => syncNow({ force: true }));
     window.addEventListener("offline", () => setStatus("offline"));
     setInterval(() => { if (isSignedIn()) syncNow(); }, 45000);  // catch others' changes
   }

@@ -27,6 +27,34 @@ export function h(tag, attrs = {}, ...children) {
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); return node; };
 
+/* Drop control characters from a single-line field value. Barcode scanners and
+   PDF pastes smuggle in C0/C1 bytes (a live job carries "100250382\b \b" as its
+   claim #) — invisible on screen, but they break every downstream text match
+   and ride out to the Board, the spine, and the email lane. Nothing typed into
+   a one-line input can legitimately be a control char, so drop them on write.
+   NOT trimmed: a trailing space is the user mid-word, not junk. Pure. */
+export const stripCtrl = (v) => String(v ?? "").replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+
+/* ---------- shared network belief ----------
+   navigator.onLine has FALSE NEGATIVES: a home-screen app woken from sleep can
+   report offline on perfect wifi and never fire "online" again. Every offline
+   gate in this app used to read that flag directly, so one stuck flag disabled
+   sync, AI, voice and photo moves at once, with no way back from inside the
+   app (reported from the office, Aug 2026).
+   The flag is now only half the answer: any request that actually SUCCEEDS
+   stamps proof here, and recent proof outranks the flag. Gates ask
+   likelyOffline() — "the flag says offline AND nothing has worked lately" —
+   so a lie expires instead of stranding the device. */
+const NET_PROOF_MS = 5 * 60 * 1000;
+let lastNetOk = 0;
+/** Record that a real request just succeeded — evidence we have a network. */
+export function noteNetworkOk() { lastNetOk = Date.now(); }
+/** Best guess, evidence first. Never treat as proof of being offline. */
+export function likelyOffline() {
+  if (typeof navigator === "undefined" || navigator.onLine !== false) return false;
+  return Date.now() - lastNetOk > NET_PROOF_MS;
+}
+
 /* ---------- ids / dates / money ---------- */
 export const uid = () =>
   (crypto.randomUUID ? crypto.randomUUID() : "id-" + Date.now() + "-" + Math.random().toString(16).slice(2));

@@ -39,9 +39,15 @@ export function toUnifiedRow(project, coordinationJobId = null) {
   };
 }
 
-/* Normalize a claim number for tolerant matching: drop spaces/dashes, upper. Pure. */
+/* Normalize a claim number for tolerant matching: alphanumerics only, upper.
+   Everything else is a separator someone typed differently (space, dash, #, /)
+   or scanner/paste junk — a live job carries "100250382\b \b" as its claim #,
+   and the control chars used to survive, so its claim compared equal to
+   NOTHING. Callers below compare normalized claims for EQUALITY, so junk on
+   one side alone was enough to break the link. Kept in step with the email
+   lane's normClaim in supabase/functions/gmail-proxy/emailmatch.ts. Pure. */
 export function normClaim(v) {
-  return String(v || "").replace(/[\s\-_.]/g, "").toUpperCase();
+  return String(v || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 }
 
 /* Given coordination_jobs rows ({id, data}), find the one whose claim #
