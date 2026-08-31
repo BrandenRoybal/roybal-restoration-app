@@ -22,6 +22,11 @@ const MIME = {
 const server = createServer(async (req, res) => {
   try {
     let path = decodeURIComponent(new URL(req.url, "http://x").pathname);
+    // Match production (GitHub Pages serves /board as a directory and 301s to
+    // /board/). Without the trailing slash the browser resolves the board's
+    // relative module imports (js/board.js) against "/", hitting the field
+    // root's SPA fallback and breaking the app. Redirect so dev matches prod.
+    if (path === "/board") { res.writeHead(301, { Location: "/board/" }).end(); return; }
     let root = FIELD_ROOT;
     if (path === "/board" || path.startsWith("/board/")) {
       root = BOARD_ROOT;
