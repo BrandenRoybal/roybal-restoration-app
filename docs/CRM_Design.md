@@ -281,6 +281,9 @@ Contacts turn AI Phase 6's "weather triggers → outreach campaigns to past cust
 | 13 | CRM home: full tabs | §13.2 — contacts filters + merge queue view, campaigns history | S–M | 12 |
 | 14 | Leads Inbox | §13.3 — 🟡 **BUILT 2026-09-01** (PR stacked on 12/13): `#/leads` + badge + brief 🆕 line; migration 246 **applied to prod** (probe-verified); roybal-lead v28 / web-agent v24 / brief v46 **deployed**, verify_jwt=false re-probed on both public lanes; phone-agent `message` field awaits its next Fly deploy | M | 12; RPC before any admin lead write |
 | 15 | Today stat row | §13.4 — 🟡 **BUILT 2026-09-01** (PR stacked on 14): lead row above the ops KPIs — unworked / overdue (click → inbox) / pipeline Σ estValue / avg first touch (archived leads count toward the average) | S | 14 |
+| 16 | Analytics tab | §14.1 — `#/analytics`: conversion by channel, lost reasons, speed to lead, est-vs-actual hours + bid-vs-contract diverging charts, headline factors; chart+table twins, validated palette | M | 4, 14 |
+| 17 | Estimating feedback loop | §14.2 — calibration factors (median actual/est by type, n≥5) surfaced to the assistant/estimating engine as suggestions only | S–M | 16 |
+| 18 | QBO profitability in the tab | §14.3 — read-only per-project P&L via qbo-proxy, displayed beside the CRM stats; needs project-linkage audit | M | 16 |
 
 Steps 1–3 are the whole foundation and touch **zero UI** — nothing can break that users see.
 **Rollback (1–3):** the columns and tables are additive and nullable; ignoring them restores today exactly.
@@ -353,6 +356,39 @@ Room the dashboard cards never had: role filter chips (customer / adjuster / sub
 
 Falls out of PR 3's stamps: unworked leads, overdue follow-ups, open-pipeline dollar value (Σ `estValue`), average time-to-first-touch — alongside (not replacing) the ops KPIs (drying, 7-day equipment). Win-rate-by-channel stays on the board's Pipeline view where it shipped; the brief gets one line, not a dashboard.
 
-### 13.5 Fence
+### 13.5 Fence (§13)
 
 No new tables, no new message store, no board layout changes (decision 7's board-density pass remains its own work), no automation (auto-ack and stale-lead escalation are candidates *after* the inbox proves what worked/unworked means — they ride §2's roybal-notify rails when they come). Each PR ships independently and leaves the app strictly better.
+
+## 14. Performance analytics (2026-09-01)
+
+**The ask (owner):** conversion charts, where dropped leads come from, job performance on completed work — real vs. estimated — and using those results to feed the estimating engine. Owner note: *QBO already does job profitability for projects set up in QBO* — so this tab does NOT rebuild job-cost accounting; it puts the numbers QBO can't see (channels, lost reasons, speed-to-lead, estimated hours vs. QB Time actuals) in one spot, with QBO's own project P&L joining the same tab in a later phase.
+
+**Everything is already captured — this is a read-only rollup, zero new collection:**
+
+| Question | Source (all shipped) |
+|---|---|
+| Conversion by channel | `outcome`/`outcomeAt`/`channel` on board blobs (step 4) |
+| Why we lose | `lostReason` (step 4) |
+| Speed to lead | `firstTouchAt` − `createdAt` (§13.3) |
+| Hours: est vs actual | `estimatedHours` (board editor) vs Σ `time_entries.hours` per `jobId` (migration 102, QB Time-synced) |
+| Dollars: bid vs won | `estValue` vs `contractValue` (step 4) |
+
+### 14.1 The Analytics tab — `#/analytics`
+
+One time-range filter row scoping everything below it; each card is a chart **with a table twin** (toggle — values never gated behind hover). Charts are hand-rolled SVG, dependency-free (house rule). Palette validated with the dataviz six-checks script 2026-09-01: single-series bars `#1c5fb0`; diverging over-estimate `#c0392b` / under `#0d9488` (deutan ΔE 12.1, all checks pass); orange `#f26a21` accent only (its 2.98:1 contrast WARN is covered by direct labels + table twins).
+
+1. **Headline tiles** — overall win rate, median hours-accuracy factor, median bid-accuracy factor, avg first touch.
+2. **Conversion by channel** — win% with n, from explicit outcomes only (the board Pipeline rule).
+3. **Why we lose** — `lostReason` counts.
+4. **Speed to lead by channel** — avg first touch.
+5. **Estimate vs actual, completed jobs** — diverging over/under bars per job (hours); completed = stage `done` or archived non-lost, with both est > 0 and actual > 0 (in-progress excluded — partial hours mislead).
+6. **Bid vs contract, won jobs** — same form in dollars.
+
+### 14.2 Phase 2 — the estimating feedback loop
+
+The tiles' accuracy factors (median actual/est by job type) become machine-readable **calibration factors** for the estimating engine and the assistant: "your mitigation estimates run ×1.18 vs. actuals (n=9)." These are OUR actuals — no Xactimate/Verisk data anywhere near it (decision 8 / the EULA memo untouched). Gates: a factor is only *suggested* in estimate drafts, never auto-applied, and never surfaced at all below n≥5 completed jobs of that type. Delivery candidates when it comes: the assistant context builders (field + admin) and the estimating rules doc's engine.
+
+### 14.3 Phase 3 — QBO project profitability, same spot
+
+`qbo-proxy` already holds the office-gated QBO lane; a read-only per-project P&L pull (QBO's own numbers, displayed not recomputed) can join the tab so profitability and CRM stats live on one screen. Needs a per-job QBO project/customer linkage audit first (`qbo_customer_id` is per-contact, not per-project).

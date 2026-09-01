@@ -16,6 +16,7 @@ import { messagesPanel } from "./messages.js";
 import { contactsTab, renderContactPage } from "./contacts.js";
 import { campaignsPanel, campaignsBusy } from "./campaigns.js";
 import { leadsTab, leadsBusy, leadsResetBusy, refreshLeadsBadge, leadStats, fmtTouch } from "./leads.js";
+import { analyticsTab } from "./analytics.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
 
@@ -56,7 +57,7 @@ function onStatus(s) {
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
 const TABS = [
   ["", "Today"], ["#/leads", "Leads"], ["#/jobs", "Jobs"], ["#/contacts", "Contacts"],
-  ["#/campaigns", "Campaigns"], ["#/settings", "⚙ Settings"],
+  ["#/campaigns", "Campaigns"], ["#/analytics", "Analytics"], ["#/settings", "⚙ Settings"],
 ];
 function sectionOf() {
   const hs = location.hash;
@@ -97,6 +98,7 @@ function route() {
   if (hs.startsWith("#/jobs")) return renderJobs();
   if (hs.startsWith("#/contacts")) return renderContactsTab();
   if (hs.startsWith("#/campaigns")) return renderCampaignsTab();
+  if (hs.startsWith("#/analytics")) { clear(view).append(analyticsTab()); return; }
   if (hs.startsWith("#/settings")) return renderSettings();
   renderToday();
 }
@@ -115,7 +117,8 @@ function renderHelp() {
       p("The office admin is organized into sections: ", h("strong", {}, "Today"), " — the shop at a glance plus ",
         h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number); ", h("strong", {}, "🆕 Leads"),
         " — the inbox for new business; ", h("strong", {}, "Jobs"),
-        " — every field job; ", h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; and ",
+        " — every field job; ", h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; ",
+        h("strong", {}, "📊 Analytics"), "; and ",
         h("strong", {}, "⚙ Settings"), " — the ", h("strong", {}, "QuickBooks Time"), " (crew hours), ",
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
         " (job-matched email) connections, set once and out of the way."),
@@ -138,6 +141,13 @@ function renderHelp() {
     sec("📣 Campaigns — texting more than one person",
       p("Pick recipients from the opted-in roster (the ", h("strong", {}, "marketing opt-in"), " on a contact's page is the gate), write the message once — ", h("strong", {}, "{name}"), " personalizes it — and approve the send. Every single text is re-checked on the server before it goes: consent, the campaign's monthly cap, the shared SMS budget, quiet hours, and a refusal to send the same campaign to the same person twice."),
       p("A send that stops partway (budget cap, closed tab) is safe — the ", h("strong", {}, "campaign history"), " lists every past send with its counts, and ", h("strong", {}, "Reopen"), " resumes one by name; people who already got it show unchecked and locked.")),
+    sec("📊 Analytics — how the business is actually doing",
+      p("Pick a time range up top and every card follows it. ", h("strong", {}, "Conversion by channel"),
+        " shows the win rate where it can be known (only leads marked Won or Lost count); ", h("strong", {}, "Why we lose"),
+        " tallies the lost reasons; ", h("strong", {}, "Speed to lead"), " averages how fast someone touches a new lead. ",
+        h("strong", {}, "Estimate vs actual"), " compares each completed job's estimated hours (board editor) against clocked QuickBooks Time hours — red ran over, teal came in under — and ",
+        h("strong", {}, "Bid vs contract"), " does the same in dollars for won work."),
+      p("Every chart has a ", h("strong", {}, "table"), " toggle with the exact numbers. The ×factors up top (actual ÷ estimate) are the honest correction on your estimating — job-cost profitability itself stays in QuickBooks, where it already lives for QBO projects.")),
     sec("💬 Ask the office (the assistant)",
       p("The floating assistant reads the same job records and can draft replies, adjuster emails, portal updates, estimates, invoices, change orders, and receipt logs — every action lands behind a confirm chip; nothing sends or writes without your tap.")));
 }

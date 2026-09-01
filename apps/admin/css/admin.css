@@ -119,6 +119,18 @@ table.atable tbody tr:hover { background: #f7f9fc; }
 
 .mergecard { margin-top: 14px; border-color: #f0d8a8; background: #fffdf7; }
 
+/* Analytics (§14.1): chart cards, table twins, the diverging legend */
+.acard { margin-top: 12px; overflow-x: auto; }
+.atoggle { font-size: 12px; color: var(--orange-dark, #c14e12); text-decoration: none; }
+.atoggle:hover { text-decoration: underline; }
+.alegend { display: flex; gap: 16px; font-size: 12px; color: var(--muted, #5f6b7a); margin: 0 0 8px; }
+.alegend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+table.minitable { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.minitable th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--muted, #5f6b7a); padding: 6px 10px; border-bottom: 1px solid var(--line, #e2e6ec); }
+table.minitable td { padding: 6px 10px; border-bottom: 1px solid var(--line, #e2e6ec); font-variant-numeric: tabular-nums; }
+table.minitable tr:last-child td { border-bottom: 0; }
+
 /* Leads Inbox (CRM home §13.3) */
 .lrow { margin-top: 10px; }
 .lrow--new { border-left: 4px solid var(--orange, #f26a21); border-radius: 0 12px 12px 0; }
