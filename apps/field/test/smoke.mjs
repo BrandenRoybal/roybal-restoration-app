@@ -63,6 +63,13 @@ function setInput(el, val) {
   ok(/No restoration jobs yet/.test(text()), "empty job list renders");
   ok(/🔨 Construction \(0\)/.test(text()), "home screen shows the construction mode toggle");
 
+  // 1b. ❓ Help renders, and its form list stays generated from FORMS
+  await nav("#/help");
+  ok(/How the app works/.test(text()), "help page renders");
+  ok(FORMS.every((f) => text().includes(f.name)), "help lists every form from the registry");
+  ok(/My Week/.test(text()) && /confirm chip/.test(text()), "help covers My Week + the assistant");
+  await nav("#/");
+
   // 2. create a job -> edit screen
   await nav("#/new");
   await tick(40);

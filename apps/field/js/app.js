@@ -40,6 +40,7 @@ import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
 import { myWeekPage, clearMyWeekCache, fetchEntriesSafe } from "./myweek.js";
+import { helpPage } from "./help.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -182,6 +183,11 @@ async function route() {
     setChrome("My Week", "#/");
     mountAssist(null);
     return myWeekPage(clear(view));
+  }
+  if (parts[0] === "help") {
+    setChrome("Help", "#/");
+    mountAssist(null);
+    return helpPage(clear(view));
   }
   if (parts[0] === "p" && parts[1]) {
     const project = await Store.get(parts[1]);
@@ -434,6 +440,7 @@ async function projectList() {
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "Jobs"),
       h("div", { style: "display:flex;gap:8px;flex:none" },
+        h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/help"), title: "How the app works" }, "❓"),
         h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/week"), title: "Your schedule from the Job Board" }, "📅 My Week"),
         h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job"))));
 
