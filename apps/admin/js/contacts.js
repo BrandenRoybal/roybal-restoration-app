@@ -89,7 +89,7 @@ function contactRow(c) {
 export async function renderContactPage(view, id) {
   const body = clear(view);
   body.append(h("div", { class: "atoolbar" },
-    h("a", { class: "btn btn--ghost btn--sm", href: "#", onclick: (e) => { e.preventDefault(); location.hash = ""; } }, "‹ Back to jobs")));
+    h("a", { class: "btn btn--ghost btn--sm", href: "#", onclick: (e) => { e.preventDefault(); location.hash = "#/contacts"; } }, "‹ Back to contacts")));
   const host = h("div"); body.append(host);
   host.append(h("p", { class: "muted" }, "Loading…"));
 

@@ -1,7 +1,7 @@
 # Roybal CRM — Design & Roadmap
 
-**Status:** proposal — nothing built yet
-**Date:** 2026-08-13
+**Status:** living doc — steps 1–5 and 7–10 shipped Aug 2026; step 11 (CF-5) sends pending; §13 (the CRM home) in progress
+**Date:** 2026-08-13 · §13 added 2026-09-01
 **Author:** Lead engineer
 **Scope:** a person-level spine (contacts, properties) under every lane we already run; lead lifecycle on the Job Board; an office contact view; and the customer-facing expansion of the portal that only a person spine makes possible. This doc absorbs and sequences — rather than respecifies — Portal Phases B1 / M2 / B4 / C1–C3 (`docs/Customer_Portal_Roadmap.md`), AI Roadmap Phases 2 / 5 / 6 (`docs/AI_Assistant_Roadmap.md`), and the Web Voice Phase 3 follow-ups (`docs/Web_Voice_Receptionist_Decision.md`).
 
@@ -194,6 +194,8 @@ Board affordances, in the order they earn their keep:
 
 The admin assistant's context builder (`assistctx.js`) also gets the contact digest, so "what's the history with the Grahams?" becomes answerable.
 
+*Superseded in layout (not in content) by §13: both phases shipped as described, and the 2026-09-01 restructure now gives these surfaces a navigation home instead of a dashboard slot.*
+
 ## 8. The customer side — what the spine unlocks
 
 This is the expansion you asked for. Ordered by dependency, each independently shippable; portal phase labels absorbed from `docs/Customer_Portal_Roadmap.md`.
@@ -275,6 +277,10 @@ Contacts turn AI Phase 6's "weather triggers → outreach campaigns to past cust
 | 9 | CF-3 money | ✅ **SHIPPED 2026-08-14** (v1) — `portal_jobs.approvals` + `billing` (migration 235; both outside publishPortal's payload, the omit-the-key discipline, so a republish can never reset an answer). Office: a Money section in the share form publishes change orders for approval (thread post + SMS nudge) and shares the balance via `fincalc.billingSummary` (QBO `qboBalance` = ground truth on tracked invoices; tested) with a best-effort QBO pay-online link (new office-gated `invoiceLink` action on qbo-proxy). Customer: pending-CO cards with amount delta, typed legal name + a drawn-signature pad, Approve/Decline (answers land on the thread; the signature is stored for the office, never echoed back); a balance card with Pay online. **v1 scope:** approval state lives in portal_jobs (office copies into the field CO form by hand); per-invoice detail later | L | 1, 7 |
 | 10 | CF-4 closeout + home file | ✅ **SHIPPED 2026-08-14** (v1) — `portal_jobs.closeout` (migration 234) office-curated in the share form (completion date, warranty months, home-file rows); complete-state portal cards: **warranty** with one-tap service request (→ a `channel:'repeat'` board lead pre-linked to the contact, 7-day dedupe, owner alert), **the home file**, **review ask** (Google link; `contact_mark_review_asked` RPC = the never-ask-twice stamp, probe-verified) and the referral line. **v1 scope:** home file is office-typed rows (auto-pull from selections later); no `propertyId` until the properties table ships | M | 6, 7 |
 | 11 | CF-5 outreach | 🟡 **IN PROGRESS** — campaign budget class ✅ **SHIPPED 2026-08-15** (PR #142): kind `campaign` in roybal-notify, gated by `campaignGate` (pure, 12 node checks) — send-layer consent (exactly-one live contact + `marketing_opt_in`, never waivable), own `SMS_CAMPAIGN_CAP` ceiling (default 100/mo), refused at the shared reserve floor, quiet-hours guarded, STOP honored by Twilio a layer down. Opt-in collection ✅ **SHIPPED 2026-08-15** (PR #143): portal session-gated "Seasonal tips & reminders" card (verified-phone consent; `prefs`/`setMarketing` gateway actions), site quote-form checkbox (applies ONLY to the contact that submission creates — the public lane never enriches an existing person), admin editor stamps transitions; `marketing_opt_in_at` (migration 240) records when. Campaigns panel (segments + human-approved sends) ✅ **SHIPPED 2026-08-16** (PR #144): admin dashboard panel — opted-in roster as a curated checkbox segment, {name} personalization, sequential sends re-gated per recipient, resume-not-repeat via the campaign tag (client unchecks already-texted + roybal-notify refuses `campaign_duplicate`), shared-number and non-US contacts excluded up front, honest sent/refused/not-attempted arithmetic, composer latched against the 45s dashboard repaint; adversarially reviewed, 10 findings fixed. Remaining: write + send the first seasonal campaign | M | 1, 10 |
+| 12 | CRM home: nav shell | §13.1 — admin tab bar (Today / Jobs / Contacts / Campaigns / ⚙), connections → `#/settings`, help updated | S | — |
+| 13 | CRM home: full tabs | §13.2 — contacts filters + merge queue view, campaigns history | S–M | 12 |
+| 14 | Leads Inbox | §13.3 — `#/leads`, `data.message` on writers, `data.firstTouchAt`, guarded rev-bump triage RPC | M | 12; RPC before any admin lead write |
+| 15 | Today stat row | §13.4 — unworked / overdue / pipeline $ / avg first touch | S | 14 |
 
 Steps 1–3 are the whole foundation and touch **zero UI** — nothing can break that users see.
 **Rollback (1–3):** the columns and tables are additive and nullable; ignoring them restores today exactly.
@@ -306,3 +312,47 @@ Steps 1–3 are the whole foundation and touch **zero UI** — nothing can break
 5. ✅ **DECIDED 2026-08-14 — review destination**: the Google review link `https://g.page/r/CSv3IUml4W9GEBM/review` (supplied by owner). CF-4's review ask points here; store it as config, not hardcoded in message bodies.
 6. 🔍 **IN EXPLORATION — QBO cleanup.** Inventory run 2026-08-13 against the live books: 91 customer records (~36 parent groups — the books use QBO's parent/sub-customer-per-property pattern, which the app is blind to). One live fork found: **"NextHome Arctic Sun"** ($7,239) vs **"Fairbanks Property, LLC dba NextHome Arctic Sun"** ($8,660 + sub) — same brokerage, two records. Also: "Valerie" has no last name (fork bait), and Awthentis billing is split half-parent/half-sub. Merging is a QBO-UI operation (the API cannot merge) — minutes each, no deadline. `qbo_customer_id` persistence lands with steps 2–3; the parent/sub pattern maps naturally onto the `properties` table when 230 ships (sub-customer ≈ property).
 7. ✏️ **REVISED 2026-08-13 — pipeline view is IN scope, and the board presentation itself gets a rework.** Owner: the in-progress column overflows past the fold, everything piles into two narrow columns, and the chip format doesn't support at-a-glance decisions. Direction: add viewing formats (more ways to see the same data, trim unused ones later) — a dedicated lead-pipeline view joins CRM step 4, and the board density/layout options get their own short design pass (compact cards, stage-swimlane rows, table view, exception/triage strip).
+8. ✅ **DECIDED 2026-09-01 — the admin app is the CRM home.** Owner, looking at the shipped admin: "this is almost the CRM, just in a really rough form — use this page that's already set up and make it more specific to a dedicated CRM page." §13 is that plan. The board keeps the Pipeline view (decision 3 untouched): the board is the wall-screen scheduling surface, the admin is the desk-work surface — same `coordination_jobs` rows, two lenses.
+
+## 13. The CRM home — the admin becomes the CRM (2026-09-01)
+
+**The problem is layout, not features.** Everything §7 and CF-5 shipped works, but it all renders as one vertical stack on a single dashboard route: three set-once OAuth connection panels (QB Time, QBO, Gmail — touched a few times a year) sit *above* the surfaces the office works daily (messages, contacts, campaigns), and the jobs table sits below all of it. The prompting incident: web-form leads land on the board with the customer's actual message buried in the chip editor's notes textarea (`roybal-lead/index.ts:387` concatenates it into `data.notes`; the board only renders notes inside the editor) — there is no surface anywhere that shows what a lead *said*.
+
+**The reframe:** the admin stops being "the connections page with some panels" and becomes "the CRM that happens to have connections in settings." Nothing moves stores, nothing touches the field app or board sync; this is routes and rearrangement plus one genuinely new view.
+
+### 13.1 Navigation shell — PR 1 (pure rearrangement, zero data changes)
+
+Tab bar under the header, riding the router the admin already has (`admin.js:45-57`):
+
+| Route | Tab | Contents |
+|---|---|---|
+| `` | **Today** | KPI row + 💬 messages — the at-a-glance + daily-work surface (CRM stat row joins in PR 4) |
+| `#/jobs` | **Jobs** | the existing search + jobs table, unchanged |
+| `#/contacts` | **Contacts** | `contactsPanel()` full-page (grows filters in PR 2) |
+| `#/campaigns` | **Campaigns** | `campaignsPanel()` full-page |
+| `#/settings` | ⚙ | the three connection panels (QB Time, QBO, Gmail) + sign-out context |
+| `#/c/:id`, `#/help` | — | unchanged |
+
+Rules that carry over: OAuth callback handling stays global at boot (redirects land on the root URL regardless of tab) and finishes on `#/settings` so the user sees the connected panel; the sync repaint re-renders *the current route* with the existing guards intact (never clobber an open contact edit or a busy campaign composer — `admin.js:38-43`); `#/help` is updated in the same PR (the help-catches-up rule, PR #169). No Leads tab yet — it appears in PR 3 when there is an inbox behind it, never as a stub.
+
+### 13.2 Contacts + Campaigns as real tabs — PR 2
+
+Room the dashboard cards never had: role filter chips (customer / adjuster / sub / …), marketing-opt-in status in the list, the open merge-suggestion queue in one place (today suggestions only surface on the individual contact pages they involve), and campaign history alongside the composer. Same data, same write paths, wider canvas.
+
+### 13.3 The Leads Inbox — PR 3 (the genuinely new view)
+
+`#/leads`: every open lead across all channels, newest first, **the customer's message rendered in the open**, one-tap triage on the row (set follow-up → `nextAction`/`nextActionAt`, mark contacted, call, mark lost/spam). Definitions the whole feature hangs on:
+
+- **Unworked lead** = `stage:'lead'`, no `outcome`, no `nextActionAt`, and no first-touch stamp. That count badges the Leads tab and joins the morning brief beside the existing overdue-follow-ups nag.
+- **`data.message`** — the writers (`roybal-lead`, `roybal-web-agent`, phone `createLead`) start storing the customer's verbatim ask as its own blob field instead of only concatenating it into `notes`. Additive; `notes` keeps receiving the composite for board back-compat.
+- **`data.firstTouchAt`** — stamped by the first triage action; time-to-first-touch becomes measurable ("response time IS the product" — `roybal-lead/index.ts:421`).
+
+**The write path is the real engineering.** Leads are `coordination_jobs` blobs the board saves whole, guarded by `data->>rev` (`apps/board/js/data.js:97-107`) — an admin PATCH that doesn't play by the rev rules is either silently clobbered by the next board save or costs every open board device its queued edit. Triage writes therefore go through a guarded `jsonb_set` + rev-bump RPC, the §5 / migration-225 `restore_photo` pattern, and we accept the board-device conflicts as the price (same trade §5 already priced in).
+
+### 13.4 Today stat row — PR 4
+
+Falls out of PR 3's stamps: unworked leads, overdue follow-ups, open-pipeline dollar value (Σ `estValue`), average time-to-first-touch — alongside (not replacing) the ops KPIs (drying, 7-day equipment). Win-rate-by-channel stays on the board's Pipeline view where it shipped; the brief gets one line, not a dashboard.
+
+### 13.5 Fence
+
+No new tables, no new message store, no board layout changes (decision 7's board-density pass remains its own work), no automation (auto-ack and stale-lead escalation are candidates *after* the inbox proves what worked/unworked means — they ride §2's roybal-notify rails when they come). Each PR ships independently and leaves the app strictly better.
