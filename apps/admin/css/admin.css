@@ -22,6 +22,8 @@ body { background: #eef2f7; }
 .anav a:hover { color: var(--navy); }
 .anav a.is-active { color: var(--navy); border-bottom-color: var(--orange); }
 .anav__help { margin-left: auto; }
+.navbadge { display: inline-block; margin-left: 6px; min-width: 18px; padding: 1px 5px; border-radius: 999px;
+  background: var(--orange, #f26a21); color: #fff; font-size: 11px; font-weight: 700; text-align: center; line-height: 16px; }
 @media (max-width: 700px) { .anav { padding: 0 8px; } .anav a { padding: 10px; } }
 
 .aview { max-width: 1100px; margin: 0 auto; padding: 22px 20px 80px; }
@@ -116,6 +118,26 @@ table.atable tbody tr:hover { background: #f7f9fc; }
 .tlicon { flex: 0 0 auto; font-size: 14px; }
 
 .mergecard { margin-top: 14px; border-color: #f0d8a8; background: #fffdf7; }
+
+/* Leads Inbox (CRM home §13.3) */
+.lrow { margin-top: 10px; }
+.lrow--new { border-left: 4px solid var(--orange, #f26a21); border-radius: 0 12px 12px 0; }
+.lhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lchip { font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--line, #e2e6ec); color: var(--muted, #5f6b7a); background: #fff; white-space: nowrap; }
+.lchip--hot { border-color: #e6b8b0; color: #c0392b; background: #fdf3f1; }
+.lchip--new { border-color: var(--orange, #f26a21); color: var(--orange-dark, #c14e12); background: #fef3ec; }
+.lchip--late { border-color: #e6b8b0; color: #c0392b; background: #fdf3f1; }
+.lchip--dim { border-style: dashed; }
+.lmsg { margin-top: 8px; padding: 9px 12px; background: #f6f8fb; border-radius: 10px;
+  font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.lmore { font-size: 12px; color: var(--orange-dark, #c14e12); text-decoration: none; }
+.lmore:hover { text-decoration: underline; }
+.lstate { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.lactions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.lform { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px;
+  padding-top: 8px; border-top: 1px dashed var(--line, #e2e6ec); }
+.lform input[type=text] { flex: 1; min-width: 200px; }
 
 /* Contacts tab (CRM home §13.2): role filter chips + the merge queue */
 .fchips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }

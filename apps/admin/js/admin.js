@@ -15,6 +15,7 @@ import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
 import { messagesPanel } from "./messages.js";
 import { contactsTab, renderContactPage } from "./contacts.js";
 import { campaignsPanel, campaignsBusy } from "./campaigns.js";
+import { leadsTab, leadsBusy, leadsResetBusy, refreshLeadsBadge } from "./leads.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
 
@@ -37,10 +38,11 @@ function onStatus(s) {
   const [c, t] = map[s.state] || ["var(--green)", "Online"];
   dot.style.color = c; dot.title = t;
   // refresh the current section as data arrives — but never clobber an open
-  // contact page (its edit form would lose keystrokes to a background sync)
-  // or the campaigns composer (curation gone, and a rebuilt panel would hide
-  // a send loop still running in a detached node — duplicate-SMS bait)
-  if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy()) route();
+  // contact page (its edit form would lose keystrokes to a background sync),
+  // the campaigns composer (curation gone, and a rebuilt panel would hide a
+  // send loop still running in a detached node — duplicate-SMS bait), or an
+  // open lead-triage form
+  if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy() && !leadsBusy()) route();
 }
 
 /* ---------- routes (the CRM home's hash router — doc §13.1) ----------
@@ -53,7 +55,7 @@ function onStatus(s) {
    #/help        → how the office admin fits together */
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
 const TABS = [
-  ["", "Today"], ["#/jobs", "Jobs"], ["#/contacts", "Contacts"],
+  ["", "Today"], ["#/leads", "Leads"], ["#/jobs", "Jobs"], ["#/contacts", "Contacts"],
   ["#/campaigns", "Campaigns"], ["#/settings", "⚙ Settings"],
 ];
 function sectionOf() {
@@ -73,18 +75,25 @@ function paintNav() {
   const cur = sectionOf();
   clear(nav);
   nav.append(
-    ...TABS.map(([href, label]) =>
-      h("a", { href: href || "#", class: cur === href ? "is-active" : "" }, label)),
+    ...TABS.map(([href, label]) => {
+      const a = h("a", { href: href || "#", class: cur === href ? "is-active" : "" }, label);
+      // the unworked-lead count rides the Leads tab (filled by refreshLeadsBadge)
+      if (href === "#/leads") a.append(h("span", { id: "leadsBadge", class: "navbadge", hidden: true }));
+      return a;
+    }),
     h("a", { href: "#/help", class: "anav__help" + (cur === "#/help" ? " is-active" : ""),
       title: "How the Office Admin fits together" }, "❓ Help"));
+  refreshLeadsBadge();
 }
 function route() {
   if (!isSignedIn() && SYNC_ENABLED) return renderLogin();
+  leadsResetBusy();      // a route change tears down any open triage form
   paintNav();
   const hs = location.hash;
   if (hs.startsWith("#/help")) return renderHelp();
   const cid = contactRoute();
   if (cid) return renderContactPage(view, cid);
+  if (hs.startsWith("#/leads")) return renderLeadsTab();
   if (hs.startsWith("#/jobs")) return renderJobs();
   if (hs.startsWith("#/contacts")) return renderContactsTab();
   if (hs.startsWith("#/campaigns")) return renderCampaignsTab();
@@ -104,12 +113,20 @@ function renderHelp() {
       h("a", { class: "btn btn--ghost btn--sm", href: "#", onclick: (e) => { e.preventDefault(); location.hash = ""; } }, "‹ Back")),
     sec("The tabs",
       p("The office admin is organized into sections: ", h("strong", {}, "Today"), " — the shop at a glance plus ",
-        h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number); ", h("strong", {}, "Jobs"),
+        h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number); ", h("strong", {}, "🆕 Leads"),
+        " — the inbox for new business; ", h("strong", {}, "Jobs"),
         " — every field job; ", h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; and ",
         h("strong", {}, "⚙ Settings"), " — the ", h("strong", {}, "QuickBooks Time"), " (crew hours), ",
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
         " (job-matched email) connections, set once and out of the way."),
       p("Today's KPI row is the shop at a glance — total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
+    sec("🆕 Leads — the inbox for new business",
+      p("Every open lead from every lane — website form, AI chat, phone line — newest first, with what the customer actually wrote or said shown in full (no more digging it out of a board chip's notes). The count on the tab is leads ", h("strong", {}, "nobody has touched yet"), "; the morning brief nags about them too."),
+      p("Work a lead right from the row: ", h("strong", {}, "📞 Call"), ", ", h("strong", {}, "⏰ Follow-up"),
+        " (what + when — it shows on the board card and turns red when overdue), ", h("strong", {}, "✓ Mark contacted"),
+        " (stops the response-time clock), or ", h("strong", {}, "✕ Lost / spam"),
+        " (picks a reason and files it in the board's 🗄 Archive). The first action on a lead stamps its response time. Every change lands on the same board card the crew sees — the board picks it up on its next sync instead of overwriting it."),
+      p("Won stays on the board: open the job there and use the 🎯 Lead section to mark it Won when the work is booked.")),
     sec("👤 Contacts — the customer directory",
       p("Every customer, adjuster, and lead the business has ever touched, deduplicated automatically across the website, phone line, AI chat, texting, email, and field jobs. Search by name, phone, or email, filter by role with the chips (customers, adjusters, subs…), or click a recent contact — a green ", h("strong", {}, "marketing ✓"), " shows who's opted in to outreach."),
       p("A contact's page shows their identity (edit in place; the ", h("strong", {}, "marketing opt-in"), " checkbox lives here), every job on both the field and board sides, and the whole conversation — texts, emails, portal messages, and phone calls — in one timeline."),
@@ -264,6 +281,11 @@ async function renderJobs() {
       h("td", { class: "muted" }, r.updated ? fmtDate(r.updated) : ""))));
   }
   paintTable();
+}
+
+/* ---------- Leads (#/leads) — the inbox lives in leads.js ---------- */
+function renderLeadsTab() {
+  clear(view).append(leadsTab());
 }
 
 /* ---------- Contacts (#/contacts) — full tab lives in contacts.js ---------- */

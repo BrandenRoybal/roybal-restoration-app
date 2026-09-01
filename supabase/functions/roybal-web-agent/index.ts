@@ -348,6 +348,9 @@ async function saveLead(
       `${clip(args.summary, 500)}\n\n--- what they told the assistant ---\n${transcript}`,
     source: "web",
     channel: "ai-chat",
+    // the assistant's distilled ask as its own field (CRM §13.3) — the Leads
+    // Inbox renders it in the open; notes keeps summary + transcript for the board
+    message: clip(args.summary, 500),
     webLead: true,
     aiBooked: true,
     ...(contactId ? { contactId } : {}),
