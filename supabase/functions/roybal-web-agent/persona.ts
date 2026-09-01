@@ -36,7 +36,7 @@
    serves. An assistant that does not know the catalogue is worse than no
    assistant, because it says no on the company's behalf. */
 const SERVICE_LINE =
-  "Restoration: water damage, fire damage and smoke cleanup, mold removal, storm repair. " +
+  "Restoration: water damage, frozen & burst pipe repair, fire damage and smoke cleanup, mold removal, storm repair. " +
   "Construction: residential remodeling, kitchen remodeling, commercial remodeling, interior painting, " +
   "exterior painting, roofing, flooring, deck building, snow removal, and new construction / custom design-build.";
 
