@@ -1,14 +1,16 @@
 /* ============================================================
-   Office Admin — 👥 Contacts (CRM step 5, docs/CRM_Design.md §7)
+   Office Admin — 👥 Contacts (CRM step 5 §7; tab layout §13.2)
    ------------------------------------------------------------
    Two surfaces over the contacts spine (migrations 228/229):
-     • contactsPanel()      — a dashboard card: search + recent people
+     • contactsTab()        — the #/contacts tab: search, role filter
+                              chips, opt-in badges, and every open
+                              merge suggestion in one queue
      • renderContactPage()  — the person's page: identity, their jobs,
                               the unified timeline, and merge review.
    Online-only; every fetch degrades quietly (the messagesPanel rule).
    All reads/writes ride the shared authenticated session via rest().
    ============================================================ */
-import { h, clear, fmtDate, Store } from "../../js/core.js";
+import { h, clear, fmtDate, toast, Store } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
 import { rest } from "../../js/supa.js";
 
@@ -31,44 +33,70 @@ function localWhen(iso) {
 
 const q = (s) => encodeURIComponent(s);
 
-/* ---------- dashboard panel ---------- */
-export function contactsPanel() {
-  const box = h("div");
-  if (!SYNC_ENABLED) return box;
-  const card = h("div", { class: "card", style: "margin-top:14px" });
-  const search = h("input", { type: "search", placeholder: "Search people — name, phone, email…" });
-  const list = h("div", { style: "margin-top:8px" });
-  card.append(
-    h("div", { style: "font-weight:700" }, "👥 Contacts"),
-    h("p", { class: "muted", style: "font-size:12px;margin:4px 0 8px" },
-      "Everyone you've worked with — customers and adjusters. Click a person to open their page."),
-    search, list);
+/* ---------- the Contacts tab (#/contacts — CRM home, doc §13.2) ---------- */
+const ROLE_CHIPS = [["", "All"], ["customer", "Customers"], ["adjuster", "Adjusters"], ["agent", "Agents"],
+  ["property_manager", "Property mgrs"], ["sub", "Subs"], ["other", "Other"]];
+/* module-level so the sync repaint restores rather than resets them
+   (the jobs-table filterText precedent) */
+let roleFilter = "";
+let searchTerm = "";
 
-  let timer = null;
-  async function paint(term) {
+export function contactsTab() {
+  const box = h("div");
+  if (!SYNC_ENABLED) {
+    box.append(h("div", { class: "atoolbar" }, h("h1", {}, "Contacts")),
+      h("p", { class: "muted" }, "Contacts need the cloud connection."));
+    return box;
+  }
+
+  const search = h("input", { type: "search", placeholder: "Search people — name, phone, email…", value: searchTerm });
+  const queueHost = h("div");
+  const chips = h("div", { class: "fchips" });
+  const list = h("div", { class: "card", style: "margin-top:10px" });
+  box.append(h("div", { class: "atoolbar" }, h("h1", {}, "Contacts"), search), queueHost, chips, list);
+
+  function paintChips() {
+    clear(chips);
+    for (const [val, label] of ROLE_CHIPS) {
+      chips.append(h("button", { class: "fchip" + (roleFilter === val ? " is-on" : ""),
+        onclick: () => { roleFilter = val; paintChips(); paintList(); } }, label));
+    }
+  }
+
+  async function paintList() {
     // commas/parens are PostgREST or= syntax — strip them from user input
-    const t = (term || "").trim().replace(/[(),]/g, " ").replace(/\s+/g, " ").trim();
+    const t = searchTerm.trim().replace(/[(),]/g, " ").replace(/\s+/g, " ").trim();
+    const role = roleFilter ? `&role=eq.${roleFilter}` : "";
     // recent when empty; a name/phone/email search otherwise
-    let path = "contacts?merged_into=is.null&select=id,name,role,phone,email,company&order=updated_at.desc&limit=8";
+    let path = `contacts?merged_into=is.null${role}&select=id,name,role,phone,email,company,marketing_opt_in&order=updated_at.desc&limit=30`;
     if (t) {
       const digitsOnly = t.replace(/[^\d]/g, "");
       const ors = [`name.ilike.*${t}*`, `email.ilike.*${t}*`];
       if (digitsOnly.length >= 3) ors.push(`phone_norm.ilike.*${digitsOnly.slice(-10)}*`);
-      path = `contacts?merged_into=is.null&or=(${ors.join(",")})&select=id,name,role,phone,email,company&order=name.asc&limit=12`;
+      path = `contacts?merged_into=is.null${role}&or=(${ors.join(",")})&select=id,name,role,phone,email,company,marketing_opt_in&order=name.asc&limit=40`;
     }
     try {
       const res = await rest(path.replace(/\*/g, "%2A"), { method: "GET" });
       if (!res.ok) return;
       const rows = await res.json();
       clear(list);
-      if (!rows.length) { list.append(h("div", { class: "muted", style: "font-size:13px;padding:6px 2px" }, t ? "No one matches." : "No contacts yet.")); return; }
+      if (!rows.length) {
+        list.append(h("div", { class: "muted", style: "font-size:13px;padding:6px 2px" },
+          t || roleFilter ? "No one matches." : "No contacts yet."));
+        return;
+      }
       for (const c of rows) list.append(contactRow(c));
     } catch (_) { /* offline — leave the last render */ }
   }
-  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => paint(search.value), 180); });
+  let timer = null;
+  search.addEventListener("input", () => {
+    searchTerm = search.value;
+    clearTimeout(timer); timer = setTimeout(paintList, 180);
+  });
 
-  box.append(card);
-  paint("");   // seed with recents; renders nothing on failure (card stays with search)
+  paintChips();
+  paintList();          // renders nothing on failure (page keeps search + chips)
+  paintMergeQueue(queueHost);
   return box;
 }
 
@@ -80,9 +108,85 @@ function contactRow(c) {
     h("span", { class: "cav" }, initials(c.name)),
     h("div", { style: "min-width:0;flex:1" },
       h("div", { style: "font-weight:600;font-size:13px" }, c.name || "—",
-        c.role && c.role !== "customer" ? h("span", { class: "badge", style: "margin-left:6px" }, c.role.replace("_", " ")) : null),
+        c.role && c.role !== "customer" ? h("span", { class: "badge", style: "margin-left:6px" }, c.role.replace("_", " ")) : null,
+        c.marketing_opt_in ? h("span", { class: "badge", style: "margin-left:6px;background:#e3f6ec;color:#1f7a45" }, "marketing ✓") : null),
       h("div", { class: "muted", style: "font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" },
         [c.company, c.phone, c.email].filter(Boolean).join(" · ") || "—")));
+}
+
+/* Every open merge suggestion in one queue (doc §13.2 — until now they only
+   surfaced on the individual contact pages they involve). A pair offers
+   Keep-this-one in BOTH directions via the same office-gated contact_merge
+   RPC the contact page uses; a field-change proposal informs + dismisses. */
+async function paintMergeQueue(host) {
+  let sugg = [];
+  const people = {};
+  try {
+    const rs = await rest("contact_merge_suggestions?status=eq.open&select=id,contact_a,contact_b,reason,detail&limit=50", { method: "GET" });
+    if (!rs.ok) return;
+    sugg = await rs.json();
+    const ids = [...new Set(sugg.flatMap((s) => [s.contact_a, s.contact_b]).filter(Boolean))];
+    if (ids.length) {
+      const rc = await rest(`contacts?id=in.(${ids.join(",")})&select=id,name,phone,email,role`, { method: "GET" });
+      if (rc.ok) for (const c of await rc.json()) people[c.id] = c;
+    }
+  } catch (_) { return; }
+  if (!sugg.length) return;
+  const card = h("div", { class: "card mergecard" });
+  card.append(
+    h("div", { style: "font-weight:700" }, `⚠ Merge review — ${sugg.length} waiting`),
+    h("p", { class: "muted", style: "font-size:13px;margin:4px 0 2px" },
+      "The system thinks these might be the same person. Merging moves every job, text, email, and portal link to the one you keep and retires the duplicate — it can't be undone from the app."));
+  for (const s of sugg) card.append(queueRow(s, people));
+  host.append(card);
+}
+
+const matchedBy = (r) => "Matched by " + (r === "email" ? "shared email" : r === "name-address" ? "name + address" : r === "name" ? "name only" : r);
+
+function queueRow(s, people) {
+  const row = h("div", { class: "mqrow" });
+  const dismiss = h("button", { class: "btn btn--ghost btn--sm" }, "Not a match");
+  dismiss.addEventListener("click", async () => {
+    dismiss.disabled = true;
+    await rest(`contact_merge_suggestions?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ status: "dismissed", resolved_at: new Date().toISOString() }) }).catch(() => {});
+    row.remove();
+  });
+  const a = people[s.contact_a], b = people[s.contact_b];
+  if (s.contact_b && a && b) {
+    const side = (winner, loser) => {
+      const btn = h("button", { class: "btn btn--ghost btn--sm" }, "Keep this one");
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Keep "${winner.name}" and merge "${loser.name}" into them?\n\nEverything linked to ${loser.name} — jobs, texts, emails — moves over, and the duplicate is retired. This can't be undone from the app.`)) return;
+        btn.disabled = true; btn.textContent = "Merging…";
+        try {
+          const res = await rest("rpc/contact_merge", { method: "POST", body: JSON.stringify({ p_winner: winner.id, p_loser: loser.id }) });
+          const ok = res.ok && (await res.json()) === true;
+          if (ok) { toast(`Merged into ${winner.name}.`); row.remove(); }
+          else { btn.disabled = false; btn.textContent = "Keep this one"; alert("Merge was refused (office role required)."); }
+        } catch (_) { btn.disabled = false; btn.textContent = "Keep this one"; }
+      });
+      return h("div", { class: "mqside" },
+        h("a", { class: "mqname", href: "#/c/" + winner.id }, winner.name || "—"),
+        h("div", { class: "muted", style: "font-size:12px" }, [winner.phone, winner.email].filter(Boolean).join(" · ") || "—"),
+        btn);
+    };
+    row.append(
+      h("div", { class: "mqreason" }, matchedBy(s.reason)),
+      h("div", { class: "mqpair" }, side(a, b), h("span", { class: "muted" }, "↔"), side(b, a)),
+      dismiss);
+  } else {
+    // a field-change proposal (untrusted-fill / conflict) — informational
+    const c = a || b;
+    row.append(
+      h("div", { class: "mqreason" }, s.reason === "conflict"
+        ? "A different value came in on another channel" : "A public lead offered new contact info"),
+      h("div", { class: "mqpair" }, h("div", { class: "mqside" },
+        c ? h("a", { class: "mqname", href: "#/c/" + c.id }, c.name || "—") : h("span", { class: "muted" }, "(contact)"),
+        h("code", { style: "font-size:12px;overflow-wrap:anywhere" }, JSON.stringify(s.detail || {}).slice(0, 160)))),
+      dismiss);
+  }
+  return row;
 }
 
 /* ---------- the contact page (#/c/:id) ---------- */

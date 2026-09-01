@@ -13,7 +13,7 @@ import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
 import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
 import { messagesPanel } from "./messages.js";
-import { contactsPanel, renderContactPage } from "./contacts.js";
+import { contactsTab, renderContactPage } from "./contacts.js";
 import { campaignsPanel, campaignsBusy } from "./campaigns.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
@@ -111,16 +111,16 @@ function renderHelp() {
         " (job-matched email) connections, set once and out of the way."),
       p("Today's KPI row is the shop at a glance — total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
     sec("👤 Contacts — the customer directory",
-      p("Every customer, adjuster, and lead the business has ever touched, deduplicated automatically across the website, phone line, AI chat, texting, email, and field jobs. Search by name, phone, or email, or click a recent contact."),
+      p("Every customer, adjuster, and lead the business has ever touched, deduplicated automatically across the website, phone line, AI chat, texting, email, and field jobs. Search by name, phone, or email, filter by role with the chips (customers, adjusters, subs…), or click a recent contact — a green ", h("strong", {}, "marketing ✓"), " shows who's opted in to outreach."),
       p("A contact's page shows their identity (edit in place; the ", h("strong", {}, "marketing opt-in"), " checkbox lives here), every job on both the field and board sides, and the whole conversation — texts, emails, portal messages, and phone calls — in one timeline."),
-      p(h("strong", {}, "Merge review:"), " when the system suspects two entries are the same person (shared email, same name + address) a banner appears — ", h("strong", {}, "Merge"), " combines them and repoints every job, message, and portal link; ", h("strong", {}, "Not a match"), " dismisses it. Exact phone matches merge automatically; anything weaker always asks."),
+      p(h("strong", {}, "Merge review:"), " every open duplicate suspicion (shared email, same name + address) queues at the top of the Contacts tab — pick ", h("strong", {}, "Keep this one"), " on the entry that should survive, and everything linked to the other — jobs, messages, portal links — moves over; ", h("strong", {}, "Not a match"), " dismisses it. The same review appears on the contact's own page. Exact phone matches merge automatically; anything weaker always asks."),
       p("A merged contact keeps working everywhere: links follow the surviving record, and QuickBooks identity rides along (no more duplicate customers from a renamed job).")),
     sec("The customer portal, from the office side",
       p("Each job's ", h("strong", {}, "🌐 Client Portal"), " form (in the field app) controls what its customer sees: status + photos, drying readings, shared documents, the “who's on the job today” line (sent when the crew's first QuickBooks Time clock-in of the day lands), change-order e-sign, the shared balance with a pay-online link, and — once complete — the warranty, home file, and review ask."),
       p("Customer texts to the company number land on the job's portal thread automatically, and office replies text back when the customer is conversing by SMS. The 📨 unread count on the assistant tracks waiting messages.")),
     sec("📣 Campaigns — texting more than one person",
       p("Pick recipients from the opted-in roster (the ", h("strong", {}, "marketing opt-in"), " on a contact's page is the gate), write the message once — ", h("strong", {}, "{name}"), " personalizes it — and approve the send. Every single text is re-checked on the server before it goes: consent, the campaign's monthly cap, the shared SMS budget, quiet hours, and a refusal to send the same campaign to the same person twice."),
-      p("A send that stops partway (budget cap, closed tab) is safe — reopen the same campaign title and it resumes; people who already got it show checked and locked.")),
+      p("A send that stops partway (budget cap, closed tab) is safe — the ", h("strong", {}, "campaign history"), " lists every past send with its counts, and ", h("strong", {}, "Reopen"), " resumes one by name; people who already got it show unchecked and locked.")),
     sec("💬 Ask the office (the assistant)",
       p("The floating assistant reads the same job records and can draft replies, adjuster emails, portal updates, estimates, invoices, change orders, and receipt logs — every action lands behind a confirm chip; nothing sends or writes without your tap.")));
 }
@@ -266,12 +266,9 @@ async function renderJobs() {
   paintTable();
 }
 
-/* ---------- Contacts (#/contacts) ---------- */
+/* ---------- Contacts (#/contacts) — full tab lives in contacts.js ---------- */
 function renderContactsTab() {
-  const body = clear(view);
-  body.append(h("div", { class: "atoolbar" }, h("h1", {}, "Contacts")));
-  if (!SYNC_ENABLED) { body.append(h("p", { class: "muted" }, "Contacts need the cloud connection.")); return; }
-  body.append(contactsPanel());
+  clear(view).append(contactsTab());
 }
 
 /* ---------- Campaigns (#/campaigns) ---------- */
@@ -279,7 +276,10 @@ function renderCampaignsTab() {
   const body = clear(view);
   body.append(h("div", { class: "atoolbar" }, h("h1", {}, "Campaigns")));
   if (!SYNC_ENABLED) { body.append(h("p", { class: "muted" }, "Campaigns need the cloud connection.")); return; }
-  body.append(campaignsPanel());
+  const panel = campaignsPanel();
+  const head = panel.querySelector("h2");   // the card's own 📣 heading is the page h1 now
+  if (head) head.remove();
+  body.append(panel);
 }
 
 /* ---------- ⚙ Settings (#/settings) — the set-once connections ---------- */

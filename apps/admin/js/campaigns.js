@@ -100,10 +100,22 @@ export function campaignsPanel() {
       unreachable > 0 ? ` ${unreachable} opted in but have no textable US number.` : ""));
     if (!Array.isArray(recent)) body.append(h("p", { class: "subtle" }, "⚠ Campaign history didn't load — counts below may be missing."));
     if (groups.size) {
+      // full history on the tab (doc §13.2) — with one-tap resume: Reopen
+      // prefills the title so markAlreadySent locks everyone already texted
       const rows = [...groups.entries()].sort((a, b) => (b[1].last || "").localeCompare(a[1].last || ""));
-      body.append(h("div", { class: "subtle", style: "font-size:12px;margin-bottom:4px" }, "Recent"),
-        ...rows.slice(0, 5).map(([key, g]) => h("div", { style: "font-size:13px;padding:3px 0" },
-          h("strong", {}, key.slice(9)), ` — ${g.sent} sent${g.failed ? `, ${g.failed} refused/failed` : ""} · ${String(g.last).slice(0, 10)}`)));
+      body.append(h("div", { class: "subtle", style: "font-size:12px;margin:6px 0 2px" }, "Campaign history"),
+        ...rows.slice(0, 20).map(([key, g]) => {
+          const reopen = sendable.length
+            ? h("button", { class: "btn btn--ghost btn--sm", onclick: () => composer(sendable, key.slice(9)),
+                title: "Reopen to finish or re-check this campaign — people already texted stay locked out" }, "Reopen")
+            : null;
+          return h("div", { style: "display:flex;align-items:center;gap:10px;font-size:13px;padding:3px 0" },
+            h("div", { style: "flex:1;min-width:0" },
+              h("strong", {}, key.slice(9)),
+              ` — ${g.sent} sent${g.failed ? `, ${g.failed} refused/failed` : ""} · ${String(g.last).slice(0, 10)}`),
+            reopen);
+        }));
+      if (rows.length > 20) body.append(h("p", { class: "subtle", style: "font-size:12px" }, `…and ${rows.length - 20} older.`));
     }
     // no dead controls: an audience of zero gets the explanation, not a
     // disabled-but-clickable-looking primary button ("I click, nothing happens")
@@ -121,7 +133,7 @@ export function campaignsPanel() {
     }
   }
 
-  function composer(sendable) {
+  function composer(sendable, prefillTitle) {
     busy = true;                 // survives the dashboard's 45s sync repaint
     let sending = false;
     clear(body);
@@ -239,6 +251,10 @@ export function campaignsPanel() {
       h("div", { class: "grid2" }, h("div", {}, title), h("div", {}, counter)),
       msg, preview, windowWarn, status,
       h("div", { class: "btn-row" }, sendBtn, cancel));
+    // A Reopen from the history list: the tag is a slug and slugify() is
+    // idempotent on slugs, so prefilling with it resolves to the SAME tag —
+    // resume-not-repeat locks everyone already texted before the first click.
+    if (prefillTitle) { title.value = prefillTitle; markAlreadySent(); }
     refresh();
   }
 
