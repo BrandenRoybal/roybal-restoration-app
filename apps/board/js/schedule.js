@@ -391,7 +391,7 @@ export function crewAssignments(jobs, settings) {
   const s = settings || DEFAULT_SETTINGS;
   const out = [];
   for (const j of jobs) {
-    if (j.isMilestone || !j.startDate) continue;
+    if (j.isMilestone || j.stage === "on_hold" || !j.startDate) continue;
     const phases = j.subtasks || [];
     if (phases.some((st) => (st.crewIds || []).length)) {
       for (const { sub, start, finish } of layoutSubtasks(phases, j.startDate, s))
@@ -579,7 +579,14 @@ export function crewDayLoad(jobs, settings, opts) {
     }
   };
   for (const j of jobs) {
-    if (j.isMilestone || !j.startDate) continue;
+    // A job On Hold books NOBODY: the pause is deliberate (insurance,
+    // materials, the customer), the crew got pulled to other work, and its
+    // estimate loading the leftover roster is what threw phantom overloads
+    // ("⚠ 14h booked" on one guy for a job nobody is on). Held jobs keep
+    // their dates on the Gantt/calendar; they just stop claiming people —
+    // which also drops them from My Week, the crew digest, and the phone
+    // agent's availability math (those all read this load).
+    if (j.isMilestone || j.stage === "on_hold" || !j.startDate) continue;
     const dayOv = j.dayCrew || null;
     const phases = j.subtasks || [];
     if (phases.some((st) => (st.crewIds || []).length)) {
