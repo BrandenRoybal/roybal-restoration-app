@@ -15,7 +15,7 @@ import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
 import { messagesPanel } from "./messages.js";
 import { contactsTab, renderContactPage } from "./contacts.js";
 import { campaignsPanel, campaignsBusy } from "./campaigns.js";
-import { leadsTab, leadsBusy, leadsResetBusy, refreshLeadsBadge } from "./leads.js";
+import { leadsTab, leadsBusy, leadsResetBusy, refreshLeadsBadge, leadStats, fmtTouch } from "./leads.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
 
@@ -119,7 +119,7 @@ function renderHelp() {
         h("strong", {}, "⚙ Settings"), " — the ", h("strong", {}, "QuickBooks Time"), " (crew hours), ",
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
         " (job-matched email) connections, set once and out of the way."),
-      p("Today's KPI row is the shop at a glance — total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
+      p("Today opens with two stat rows. The lead row: ", h("strong", {}, "unworked leads"), " and ", h("strong", {}, "overdue follow-ups"), " (click either to jump to the inbox), the open ", h("strong", {}, "pipeline value"), " (estimated dollars across open leads), and the ", h("strong", {}, "average first touch"), " — how fast someone reaches a new lead, measured from the moment it lands to the first action taken on it. Below it, the ops row: total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
     sec("🆕 Leads — the inbox for new business",
       p("Every open lead from every lane — website form, AI chat, phone line — newest first, with what the customer actually wrote or said shown in full (no more digging it out of a board chip's notes). The count on the tab is leads ", h("strong", {}, "nobody has touched yet"), "; the morning brief nags about them too."),
       p("Work a lead right from the row: ", h("strong", {}, "📞 Call"), ", ", h("strong", {}, "⏰ Follow-up"),
@@ -225,17 +225,33 @@ async function renderToday() {
   const drying = rows.filter((r) => r.drying > 0).length;
   const attention = rows.filter((r) => r.attention).length;
 
-  body.append(h("div", { class: "kpis" },
+  // the CRM row (doc §13.4) leads; the ops KPIs stay right below it.
+  // Placeholder first, filled when the lead fetch lands — Today must not
+  // wait on the network to paint (the messagesPanel rule).
+  const crmRow = h("div", { class: "kpis", hidden: true });
+  body.append(crmRow, h("div", { class: "kpis" },
     kpi(rows.length, "Total jobs"),
     kpi(active, "Active (last 7 days)"),
     kpi(drying, "Drying in progress"),
     kpi(attention, "Need attention (7-day equip.)", attention > 0)));
 
-  if (SYNC_ENABLED) body.append(messagesPanel());
+  if (SYNC_ENABLED) {
+    leadStats().then((s) => {
+      if (!s || !crmRow.isConnected) return;      // fetch failed, or Today re-rendered
+      const toLeads = () => { location.hash = "#/leads"; };
+      crmRow.append(
+        kpi(s.unworked, "Unworked leads", s.unworked > 0, toLeads),
+        kpi(s.overdue, "Overdue follow-ups", s.overdue > 0, toLeads),
+        kpi(s.pipeline ? "$" + Math.round(s.pipeline).toLocaleString() : "—", "Pipeline value", false, toLeads),
+        kpi(fmtTouch(s.avgTouchMs), "Avg first touch"));
+      crmRow.hidden = false;
+    });
+    body.append(messagesPanel());
+  }
 }
 
-function kpi(n, label, attn) {
-  return h("div", { class: "kpi" + (attn ? " attn" : "") },
+function kpi(n, label, attn, onclick) {
+  return h("div", { class: "kpi" + (attn ? " attn" : ""), ...(onclick ? { onclick, style: "cursor:pointer" } : {}) },
     h("div", { class: "kpi__n" }, String(n)),
     h("div", { class: "kpi__l" }, label));
 }

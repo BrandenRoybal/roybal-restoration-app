@@ -77,6 +77,14 @@ async function patchLead(id, patch) {
 /* stamp first touch exactly once, riding along on whatever action came first */
 const touch = (d) => (d.firstTouchAt ? {} : { firstTouchAt: new Date().toISOString() });
 
+/* every lead-stage blob, open or archived — archived lost leads still carry
+   the first-touch stamps the response-time average needs */
+async function fetchLeadData() {
+  const res = await rest("coordination_jobs?deleted=eq.false&data->>stage=eq.lead&select=data&limit=200", { method: "GET" });
+  if (!res.ok) throw new Error(String(res.status));
+  return (await res.json()).map((r) => r.data || {});
+}
+
 /* ---------- nav badge: the unworked count ---------- */
 let badgeCache = { n: 0, at: 0 };
 export async function refreshLeadsBadge() {
@@ -84,14 +92,38 @@ export async function refreshLeadsBadge() {
   if (!el || !SYNC_ENABLED) return;
   if (Date.now() - badgeCache.at < 20_000) { paintBadge(el, badgeCache.n); return; }
   try {
-    const res = await rest("coordination_jobs?deleted=eq.false&data->>stage=eq.lead&select=data&limit=100", { method: "GET" });
-    if (!res.ok) return;
-    const rows = await res.json();
-    badgeCache = { n: rows.map((r) => r.data || {}).filter(isUnworked).length, at: Date.now() };
+    badgeCache = { n: (await fetchLeadData()).filter(isUnworked).length, at: Date.now() };
     paintBadge(el, badgeCache.n);
   } catch (_) { /* offline — leave whatever the badge shows */ }
 }
 const paintBadge = (el, n) => { el.hidden = !n; el.textContent = String(n); };
+
+/* ---------- Today's CRM stat row (doc §13.4) ---------- */
+export async function leadStats() {
+  let all;
+  try { all = await fetchLeadData(); } catch (_) { return null; }
+  const open = all.filter(isOpenLead);
+  const today = localToday();
+  // avg time-to-first-touch over every lead that has both stamps — archived
+  // and lost included, they're evidence of how fast the phone got picked up
+  const touched = all
+    .map((d) => Date.parse(d.firstTouchAt || "") - Date.parse(d.createdAt || ""))
+    .filter((ms) => Number.isFinite(ms) && ms >= 0);
+  return {
+    open: open.length,
+    unworked: open.filter(isUnworked).length,
+    overdue: open.filter((d) => d.nextActionAt && d.nextActionAt < today).length,
+    pipeline: open.reduce((s, d) => s + (Number(d.estValue) || 0), 0),
+    avgTouchMs: touched.length ? touched.reduce((s, x) => s + x, 0) / touched.length : null,
+  };
+}
+export function fmtTouch(ms) {
+  if (ms == null) return "—";
+  const m = Math.round(ms / 60000);
+  if (m < 90) return m + "m";
+  if (m < 48 * 60) return (m / 60).toFixed(m < 600 ? 1 : 0) + "h";
+  return Math.round(m / 1440) + "d";
+}
 
 /* ---------- the tab ---------- */
 export function leadsTab() {
