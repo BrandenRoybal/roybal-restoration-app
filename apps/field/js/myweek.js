@@ -51,7 +51,11 @@ function writeCache(payload) {
    1000-row page in Aug 2026 — one unbounded read came back an arbitrary
    subset WITHOUT the newest rows, which silently re-dated jobs. So: only the
    entries that can still matter (entriesCutoff), and page until the server
-   runs dry rather than trusting one request to hold everything. */
+   runs dry rather than trusting one request to hold everything.
+   THROWS on an HTTP error (supa's rest returns the error response instead of
+   throwing): "the read failed" and "there are no hours" must never look the
+   same, or the schedule-truth flags cry "0h since start" at every job on a
+   429 blip. Callers that can degrade catch it (fetchEntriesSafe → null). */
 const PAGE = 1000;
 export async function fetchEntries(cutoff) {
   const out = [];
@@ -59,7 +63,7 @@ export async function fetchEntries(cutoff) {
     const res = await rest(
       `time_entries?select=id,data&deleted=is.false&data->>date=gte.${cutoff}` +
       `&order=updated_at.desc&limit=${PAGE}&offset=${page * PAGE}`, { method: "GET" });
-    if (!res.ok) break;                       // hours are an optimization; the plan still renders
+    if (!res.ok) throw new Error("time entries read failed (" + res.status + ")");
     const rows = await res.json();
     for (const r of rows) if (r && r.data) out.push(r.data);
     if (rows.length < PAGE) break;
@@ -68,7 +72,7 @@ export async function fetchEntries(cutoff) {
 }
 
 /** Same read, fail-safe, for callers where hours are decoration (the jobs
-    list's schedule-truth flags): null when offline / anything goes wrong,
+    list's schedule-truth flags): null when offline / HTTP error / anything,
     so those callers can tell "no entries" apart from "couldn't look". */
 export async function fetchEntriesSafe(jobs, today) {
   try { return await fetchEntries(entriesCutoff(jobs || [], today)); } catch (_) { return null; }
@@ -86,8 +90,12 @@ async function fetchBoard(today) {
   const settings = (jobRows.find((r) => r.id === "__settings__") || {}).data || {};
   const jobs = jobRows.filter((r) => r && r.id !== "__settings__" && r.data).map((r) => r.data);
   const crew = (await crewRes.json()).map((r) => r.data).filter(Boolean);
-  // the entries window depends on the jobs, so this read follows them
-  const entries = await fetchEntries(entriesCutoff(jobs, today));
+  // the entries window depends on the jobs, so this read follows them.
+  // A failed hours read must not sink the week (the plan still renders) —
+  // but it must stay distinguishable from "no hours": null tells
+  // buildMyWeek to keep the hours-dependent flags quiet.
+  let entries = null;
+  try { entries = await fetchEntries(entriesCutoff(jobs, today)); } catch (_) { /* plan-only week */ }
   return { jobs, crew, settings, entries };
 }
 
@@ -233,13 +241,15 @@ export function myWeekPage(container) {
       sub.textContent = who.name || "";
       paintIdentity(who);
       writeCache({ at: new Date().toISOString(), email: currentEmail(), who, week });
-      // one tap = the phase is done TODAY on the board; the schedule re-flows
-      // through the board's own write path (boardpush), then the week reloads
+      // one tap = the phase is done on the board, completed the last day its
+      // hours landed (flag.lastHoursOn — stamping today would retroactively
+      // swallow the next phase's hours); persists through the board's own
+      // write path (boardpush), then the week reloads
       const onMarkDone = async (jobId, flag, btn) => {
         btn.disabled = true; btn.textContent = "Saving…";
         try {
-          await markBoardPhaseDone(jobId, flag.subId);
-          toast(`Marked “${flag.subName || "phase"}” done — the board re-flows from today.`);
+          await markBoardPhaseDone(jobId, flag.subId, flag.lastHoursOn);
+          toast(`Marked “${flag.subName || "phase"}” done — the board schedule re-flows.`);
           load();
         } catch (e) {
           toast(String((e && e.message) || e));

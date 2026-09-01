@@ -34,8 +34,8 @@ import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
-import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone } from "./boardpush.js";
-import { scheduleFlags } from "../../board/js/schedulewatch.js";
+import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
+import { boardFlagsByJob } from "./myweekcalc.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -413,7 +413,8 @@ function jobRow(p, { onArchive = null, onUnarchive = null, watch = [] } = {}) {
 }
 
 let _boardRows = null;   // session cache of board tiles → stage groups paint instantly next time
-let _boardEntries = null; // session cache of time_entries (schedule-truth flags); null = never fetched
+let _boardEntries = null; // session cache of time_entries (schedule-truth flags); null = "couldn't read"
+let _boardCal = null;     // session cache of the board's work calendar (__settings__ row)
 let _archOpen = false;   // keep the Archived section open across re-renders
 let _listRender = null;  // token identifying the projectList render currently on screen
 const stageSig = (rows) => JSON.stringify((rows || []).map((r) => [r.id, r.data && r.data.stage, r.data && r.data.fieldJobId]).sort());
@@ -469,18 +470,22 @@ async function projectList() {
        job is linked to a board tile, a plain flat list otherwise (offline, or
        nothing on the board — typical for restoration mode). */
     const flagToday = new Date().toLocaleDateString("en-CA");
-    /* Schedule-truth flags for a linked tile. Until time_entries have loaded
-       (_boardEntries null) only no-jobcode can be judged — the hours-based
-       flags would false-alarm on an empty list, so they wait. */
-    const flagsForRow = (row) => {
-      if (!row || !row.data) return [];
-      try {
-        const fl = scheduleFlags(row.data, _boardEntries || [], flagToday);
-        return _boardEntries ? fl : fl.filter((f) => f.kind === "no-jobcode");
-      } catch (_) { return []; }
-    };
     const paint = (rows) => {
       clear(listWrap);
+      /* Schedule-truth flags for linked tiles, judged the way the BOARD
+         judges them (boardFlagsByJob runs the engine over the whole read:
+         live dates + the engine's own phase attribution + the board's real
+         work calendar). Until time_entries load (_boardEntries null) only
+         no-jobcode can be judged — the hours flags stay quiet rather than
+         false-alarming off an empty list. */
+      let flagMap = new Map();
+      try {
+        if (rows) flagMap = boardFlagsByJob({
+          jobs: rows.map((r) => r && r.data).filter(Boolean),
+          entries: _boardEntries, settings: _boardCal || undefined, today: flagToday,
+        });
+      } catch (_) { /* flags are an extra — the list still paints */ }
+      const flagsForRow = (row) => (row && row.data && flagMap.get(row.data.id)) || [];
       const staged = active.map((p) => {
         const row = rows ? boardRowFor(rows, p) : null;
         const sid = row && row.data && BOARD_STAGES[row.data.stage] ? row.data.stage : null;
@@ -524,10 +529,13 @@ async function projectList() {
     const changed = stageSig(rows) !== stageSig(_boardRows);
     _boardRows = rows;
     if (changed && paintLive) paintLive(rows);
-    // logged hours feed the schedule-truth flags — same window + paging as My
-    // Week; fail-safe null keeps the flags at "no-jobcode only" when offline
+    // logged hours + the board's work calendar feed the schedule-truth flags —
+    // same window + paging as My Week; fail-safe null keeps the flags at
+    // "no-jobcode only" when the hours can't be read (offline, HTTP error)
     fetchEntriesSafe(rows.map((r) => r && r.data).filter(Boolean), new Date().toLocaleDateString("en-CA"))
       .then((ent) => { if (ent) { _boardEntries = ent; if (paintLive) paintLive(_boardRows); } });
+    fetchBoardCalendarSafe()
+      .then((cal) => { if (cal) { _boardCal = cal; if (paintLive) paintLive(_boardRows); } });
     // A field-created tile sitting next to the tile the coordinator already
     // built merges into it (nothing they built is lost, the dupe retires)
     const healed = await healBoardDuplicates(rows);
@@ -1011,29 +1019,40 @@ function boardCard(project) {
   const wrap = h("div", { class: "card", hidden: true });
   (async () => {
     try {
-      const row = await findBoardRow(project);
+      const rows = await fetchBoardRowsSafe();
+      if (!rows) return;   // offline / signed out — the card just stays hidden
+      const row = boardRowFor(rows, project);
       if (!row || !row.data) return;
       const d = row.data;
       const today = new Date().toLocaleDateString("en-CA");
-      // logged hours feed the schedule-truth flags; if they can't be read
-      // (offline blip) only the hours-independent no-jobcode flag can be judged
-      const ent = await fetchEntriesSafe([d], today);
+      // logged hours + the board's calendar feed the schedule-truth flags,
+      // judged over the WHOLE board read (boardFlagsByJob = engine-fresh
+      // dates + engine attribution, same verdicts as the board and My Week).
+      // If the hours can't be read, only the no-jobcode flag can be judged.
+      const [ent, cal] = await Promise.all([
+        fetchEntriesSafe(rows.map((r) => r && r.data).filter(Boolean), today),
+        fetchBoardCalendarSafe(),
+      ]);
       let watch = [];
       try {
-        watch = scheduleFlags(d, ent || [], today);
-        if (!ent) watch = watch.filter((f) => f.kind === "no-jobcode");
+        watch = boardFlagsByJob({
+          jobs: rows.map((r) => r && r.data).filter(Boolean),
+          entries: ent, settings: cal || undefined, today,
+        }).get(d.id) || [];
       } catch (_) { watch = []; }
       const when = d.startDate && d.targetDate ? `${fmtDate(d.startDate)} → ${fmtDate(d.targetDate)}`
         : d.startDate ? "starts " + fmtDate(d.startDate) : "not scheduled yet";
       wrap.hidden = false;
-      // one tap = done TODAY on the board, through the board's own guarded write
+      // one tap = done on the board, completed the last day its hours landed
+      // (fl.lastHoursOn — today would swallow the next phase's hours), through
+      // the board's own guarded write
       const markDoneBtn = (st, fl) => {
         const b = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none;padding:3px 10px;font-size:12px" }, "✓ Mark done");
         b.addEventListener("click", async () => {
           b.disabled = true; b.textContent = "Saving…";
           try {
-            await markBoardPhaseDone(row.id, st.id);
-            toast(`Marked “${st.name || "phase"}” done — the board re-flows from today.`);
+            await markBoardPhaseDone(row.id, st.id, fl.lastHoursOn);
+            toast(`Marked “${st.name || "phase"}” done — the board schedule re-flows.`);
             projectHome(project);
           } catch (e) {
             toast(String((e && e.message) || e));

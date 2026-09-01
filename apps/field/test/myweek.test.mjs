@@ -100,14 +100,25 @@ test("flags go quiet once hours land on the linked jobcode", () => {
   assert.deepEqual(w.days[0].jobs[0].flags, []);
 });
 
-test("an unmarked-done phase surfaces with its subId (what the one-tap needs)", () => {
+test("an unmarked-done phase surfaces with its subId + lastHoursOn (what the one-tap needs)", () => {
   const jobs = [{ id: "j8", title: "Phased", stage: "in_progress", qbJobcodeId: "77",
     startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"],
     subtasks: [{ id: "p1", name: "Demo", estimatedHours: 10 }, { id: "p2", name: "Paint", estimatedHours: 20 }] }];
   const entries = [{ source: "qbtime", qbJobcodeId: "77", phaseId: "p1", date: "2026-08-11", hours: 12 }];
   const w = buildMyWeek({ ...base, jobs, entries, crewId: "c1", days: 1 });
   const flags = w.days[0].jobs[0].flags;
-  assert.deepEqual(flags.map((f) => [f.kind, f.subId]), [["unmarked-done", "p1"]]);
+  assert.deepEqual(flags.map((f) => [f.kind, f.subId, f.lastHoursOn]), [["unmarked-done", "p1", "2026-08-11"]]);
+});
+
+test("entries null (hours read failed): hours flags stay quiet, no-jobcode still shows", () => {
+  const jobs = [
+    { id: "j6", title: "Unlinked", stage: "in_progress", startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"] },
+    { id: "j7", title: "Silent", stage: "in_progress", qbJobcodeId: "77", startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"] },
+  ];
+  const w = buildMyWeek({ ...base, jobs, entries: null, crewId: "c1", days: 1 });
+  const byTitle = Object.fromEntries(w.days[0].jobs.map((j) => [j.title, j]));
+  assert.deepEqual(byTitle.Unlinked.flags.map((f) => f.kind), ["no-jobcode"]);
+  assert.deepEqual(byTitle.Silent.flags, []);   // NOT a false "0h since start"
 });
 
 test("buildMyWeek never mutates the caller's job objects", () => {

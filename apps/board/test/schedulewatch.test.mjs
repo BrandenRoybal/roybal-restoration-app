@@ -46,6 +46,16 @@ test("hoursFrom scopes old hours OUT — a rebuild sharing its jobcode still fla
   assert.deepEqual(scheduleFlags(j, [qb("2026-06-01", 40), qb("2026-06-16", 6)], TODAY, S), []);
 });
 
+test("shared jobcode with NO hoursFrom: pre-start hours neither silence no-hours nor fake phase progress", () => {
+  // the coordinator forgot hoursFrom — months of mitigation hours ride the jobcode
+  const j = job({
+    qbJobcodeId: "77", startDate: "2026-06-15", targetDate: "2026-06-19",
+    subtasks: [{ id: "p1", name: "Demo", estimatedHours: 40 }],
+  });
+  const f = scheduleFlags(j, [qb("2026-04-01", 80), qb("2026-05-10", 70)], TODAY, S);
+  assert.deepEqual(kinds(f), ["no-hours"]);   // the REAL gap — not a day-one "Demo looks finished"
+});
+
 test("started TODAY or in the future -> no no-hours (nightly QB pull hasn't run yet)", () => {
   assert.deepEqual(scheduleFlags(job({ qbJobcodeId: "77", startDate: TODAY }), [], TODAY, S), []);
   assert.deepEqual(scheduleFlags(job({ qbJobcodeId: "77", startDate: "2026-06-22" }), [], TODAY, S), []);
@@ -66,6 +76,31 @@ test("phase at/over its estimate but still open -> unmarked-done (warn) carrying
   assert.equal(f[0].tone, "warn");
   assert.equal(f[0].subId, "p1");
   assert.equal(f[0].subName, "Demo");
+});
+
+test("unmarked-done carries lastHoursOn — the last day hours landed on THAT phase, not today", () => {
+  const j = job({
+    qbJobcodeId: "77", startDate: "2026-06-15", targetDate: "2026-06-19",
+    subtasks: [{ id: "p1", name: "Demo", estimatedHours: 10 }, { id: "p2", name: "Paint", estimatedHours: 40 }],
+  });
+  const entries = [
+    { jobId: "j1", phaseId: "p1", date: "2026-06-15", hours: 6 },
+    { jobId: "j1", phaseId: "p1", date: "2026-06-16", hours: 6 },   // Demo's real last day
+    { jobId: "j1", phaseId: "p2", date: "2026-06-17", hours: 8 },   // successor hours — must not move it
+  ];
+  const f = scheduleFlags(j, entries, "2026-06-19", S);
+  assert.deepEqual(f.map((x) => [x.kind, x.subId, x.lastHoursOn]), [["unmarked-done", "p1", "2026-06-16"]]);
+});
+
+test("hoursBySub override: the engine's own attribution decides unmarked-done when provided", () => {
+  const j = job({
+    qbJobcodeId: "77", startDate: "2026-06-15",
+    subtasks: [{ id: "p1", name: "Demo", estimatedHours: 10 }, { id: "p2", name: "Paint", estimatedHours: 10 }],
+  });
+  const entries = [qb("2026-06-15", 12)];   // no phaseId — window-attributed
+  const engineSays = new Map([["p1", 0], ["p2", 12]]);   // what the Gantt bars show
+  const f = scheduleFlags(j, entries, TODAY, S, engineSays);
+  assert.deepEqual(f.map((x) => [x.kind, x.subId]), [["unmarked-done", "p2"]]);
 });
 
 test("a DONE phase at/over estimate is never flagged; a later open one at estimate is", () => {
@@ -94,8 +129,8 @@ test("a phase under estimate, or with no estimate, is never unmarked-done", () =
   assert.deepEqual(f, []);
 });
 
-test("lead / done / archived / milestone jobs are ignored entirely", () => {
-  for (const o of [{ stage: "lead" }, { stage: "done" }, { archived: true }, { isMilestone: true }]) {
+test("lead / done / archived / milestone / on-hold jobs are ignored entirely", () => {
+  for (const o of [{ stage: "lead" }, { stage: "done" }, { stage: "on_hold" }, { archived: true }, { isMilestone: true }]) {
     const j = job({ startDate: "2026-06-01", ...o });   // unlinked + started long ago
     assert.deepEqual(scheduleFlags(j, [], TODAY, S), [], JSON.stringify(o));
     assert.equal(watchable(j), false, "watchable " + JSON.stringify(o));
@@ -104,8 +139,20 @@ test("lead / done / archived / milestone jobs are ignored entirely", () => {
   assert.equal(watchable(null), false);
 });
 
-test("null/undefined entries are treated as none", () => {
+test("manual-entry-only job (no QB link) with hours flowing: no red chip — its hours DO move the schedule", () => {
+  const j = job({ startDate: "2026-06-15", targetDate: "2026-06-19" });   // no qbJobcodeId
+  assert.deepEqual(scheduleFlags(j, [{ jobId: "j1", date: "2026-06-15", hours: 6 }], TODAY, S), []);
+  // …but an unlinked job whose only hours PREDATE the start is still blind
+  assert.deepEqual(kinds(scheduleFlags(j, [{ jobId: "j1", date: "2026-06-01", hours: 6 }], TODAY, S)), ["no-jobcode"]);
+});
+
+test("null entries = 'couldn't look': hours-dependent flags stay quiet, no-jobcode still shows", () => {
+  // unlinked job: no-jobcode is judgeable without hours
   assert.deepEqual(kinds(scheduleFlags(job({ startDate: "2026-06-15" }), null, TODAY, S)), ["no-jobcode"]);
+  // linked, started job: with entries unreadable, NO false "0h since start"
+  assert.deepEqual(scheduleFlags(job({ qbJobcodeId: "77", startDate: "2026-06-15" }), null, TODAY, S), []);
+  const phased = job({ qbJobcodeId: "77", startDate: "2026-06-15", subtasks: [{ id: "p1", name: "Demo", estimatedHours: 1 }] });
+  assert.deepEqual(scheduleFlags(phased, undefined, TODAY, S), []);
 });
 
 console.log(`\nschedulewatch: ${pass} passed${fail ? `, ${fail} FAILED` : ""}`);

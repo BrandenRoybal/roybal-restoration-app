@@ -225,8 +225,12 @@ function applySchedule() {
   conflicts = findOverAllocations(jobs, settings, opts);  // refresh crew over-allocations (phase-aware)
   critical = computeCriticalPath(jobs, settings);// refresh critical path
   // schedule-truth flags: unlinked / silent / phase-looks-done jobs, computed
-  // once per recompute so every view (cards, table, Gantt, editor) reads one map
-  watchFlags = new Map(jobs.map((j) => [j.id, scheduleFlags(j, entries, todayISO(), settings)]));
+  // once per recompute so every view (cards, table, Gantt, editor) reads one
+  // map. Each job's phase attribution is handed in from opts.phaseHours — the
+  // SAME map the engine and the Gantt bars use — so a flag can never name a
+  // different phase than the bars show.
+  watchFlags = new Map(jobs.map((j) => [j.id,
+    scheduleFlags(j, entries, todayISO(), settings, opts.phaseHours && opts.phaseHours.get(j.id))]));
   return res;
 }
 async function recomputeAndPersist() {
