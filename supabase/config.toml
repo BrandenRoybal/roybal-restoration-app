@@ -42,6 +42,20 @@ verify_jwt = false
 [functions.roybal-voice]
 verify_jwt = false
 
+# These three were pinned true on 2026-08-14 but have run verify_jwt=false in
+# production since (confirmed against the live function list 2026-09-01) — the
+# pins drifted, and a plain CLI deploy honoring them would have flipped each
+# one and broken its no-JWT callers. All three authenticate in-code.
+
+[functions.roybal-ai-office]
+verify_jwt = false # app sends the user's access token; the function validates it in-code (RLS still gates every read)
+
+[functions.roybal-notify]
+verify_jwt = false # Twilio webhooks (status callbacks, approve-by-text inbound SMS) post with no JWT
+
+[functions.roybal-portal]
+verify_jwt = false # customers call with a share token, no session — in-code auth
+
 # ── Authenticated functions — verify_jwt stays true ──────────────────────
 
 [functions.gmail-proxy]
@@ -56,14 +70,5 @@ verify_jwt = true
 [functions.qbo-proxy]
 verify_jwt = true
 
-[functions.roybal-ai-office]
-verify_jwt = true
-
 [functions.roybal-brief]
-verify_jwt = true
-
-[functions.roybal-notify]
-verify_jwt = true
-
-[functions.roybal-portal]
 verify_jwt = true
