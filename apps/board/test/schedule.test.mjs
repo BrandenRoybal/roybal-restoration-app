@@ -629,6 +629,35 @@ test("timelinePct: positions within the window and clamps outside it", () => {
   assert.equal(timelinePct(H(20), w), 100);
 });
 
+group("overloads warn about the future, never re-grade the past");
+test("live mode: overload days before `today` are dropped; today-forward still fires", () => {
+  // the real failure shape (Sep 2026): shift cut 10h -> 8h, a job's estimate
+  // spread lands ~13h/day across its whole window — old days must not error
+  const S8 = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 8 };
+  const j = job({ id: "spread", crewIds: ["a"], estimatedHours: 65,
+    startDate: "2026-06-15", targetDate: "2026-06-19" });   // Mon–Fri, 13h/day booked
+  const live = findOverAllocations([j], S8, { today: "2026-06-17", phaseHours: new Map() });
+  assert.deepEqual(live.overloads.map((o) => o.day).sort(), ["2026-06-17", "2026-06-18", "2026-06-19"]);
+  assert.equal(live.byCrew.get("a").overDays, 3);
+  assert.equal((live.byJob.get("spread") || []).length, 3);
+  // the heat-map grid keeps the full span — only the WARNING is future-only
+  assert.equal(live.load.get("a").size, 5);
+});
+test("an OVERDUE job (window entirely in the past) throws zero overloads live", () => {
+  const S8 = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 8 };
+  const j = job({ id: "late", crewIds: ["a"], estimatedHours: 65,
+    startDate: "2026-06-15", targetDate: "2026-06-19" });
+  const live = findOverAllocations([j], S8, { today: "2026-06-22", phaseHours: new Map() });
+  assert.equal(live.overloads.length, 0);
+  assert.equal(live.byJob.size, 0);
+});
+test("opts-less (pure plan) callers still see the whole span", () => {
+  const S8 = { workDays: [1, 2, 3, 4, 5], hoursPerDay: 8 };
+  const j = job({ id: "plan", crewIds: ["a"], estimatedHours: 65,
+    startDate: "2026-06-15", targetDate: "2026-06-19" });
+  assert.equal(findOverAllocations([j], S8).overloads.length, 5);
+});
+
 group("on hold — a held job books nobody");
 test("an On Hold job loads no crew, so it can't throw overloads at the leftover roster", () => {
   // the real failure shape (Sep 2026): 800h job, crew pulled down to one guy,

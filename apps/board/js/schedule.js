@@ -633,12 +633,20 @@ export function findOverAllocations(jobs, settings, opts) {
   const s = settings || DEFAULT_SETTINGS;
   const cap = Math.max(1, Number(s.hoursPerDay) || DEFAULT_SETTINGS.hoursPerDay);
   const { load, jobsOn } = crewDayLoad(jobs, s, opts);
+  // Overloads are a FIX-THE-SCHEDULE warning, so with a live `today` they
+  // only count today forward. Past days are history: nobody can re-crew
+  // last Tuesday, an overdue job's estimate spread lands entirely on days
+  // already gone, and a shift change (10h -> 8h) re-grades every old day
+  // against a cap that wasn't the rule when it was worked. What actually
+  // happened on a past day is the Day view's job (logged hours), not this
+  // check's. Opts-less callers (pure plan) keep the full span.
+  const from = (opts && opts.today) || null;
   const byJob = new Map(), overloads = [], byCrew = new Map();
   for (const [cid, days] of load) {
     let bookedDays = 0, totHrs = 0, peak = 0, overDays = 0;
     for (const [day, hrs] of days) {
       bookedDays++; totHrs += hrs; if (hrs > peak) peak = hrs;
-      if (hrs > cap + 1e-6) {
+      if (hrs > cap + 1e-6 && (!from || day >= from)) {
         overDays++;
         const jids = [...((jobsOn.get(cid) || new Map()).get(day) || [])];
         overloads.push({ crewId: cid, day, hours: hrs, pct: Math.round((hrs / cap) * 100), jobIds: jids });
