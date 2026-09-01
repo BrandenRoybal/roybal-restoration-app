@@ -720,11 +720,10 @@ table.rtable .num.under { color: var(--green); }
 .archfilter { margin-bottom: 10px; }
 .archrow.is-lost { border-left: 3px solid #cc3f3f; }
 
-<<<<<<< HEAD
 /* crew headshots (roster modal + row) — bio phase 1 */
 .crewphoto { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; border: 2px solid var(--line, #e6e9ef); flex: 0 0 auto; }
 .crewphoto--sm { width: 40px; height: 40px; }
-=======
+
 /* toast — core.js toast() target (matches the field app's look) */
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
@@ -732,4 +731,3 @@ table.rtable .num.under { color: var(--green); }
   font-size: 14px; z-index: 300; box-shadow: 0 14px 38px rgba(16, 24, 40, .16);
   max-width: min(92vw, 640px);
 }
->>>>>>> origin/main
