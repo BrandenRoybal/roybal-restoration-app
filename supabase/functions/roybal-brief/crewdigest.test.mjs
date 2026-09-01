@@ -141,6 +141,75 @@ test("memberText marks on-hold jobs", () => {
   assert.match(t, /\(on hold\)/);
 });
 
+/* ---------- dispatch filter: the text means "go here today" ----------
+   The live engine slides a phase's unfinished hours onto this morning until
+   someone marks it done — right for the Gantt, wrong for a dispatch text.
+   A phased job whose PLAN ended last Tue (8/10 start, 20h ≈ 2 days) but was
+   never marked done keeps landing on live "today" forever. */
+const leftoverJob = (over = {}) => ({
+  id: "j9", title: "Leftover kitchen", address: "9 Slid Ct", stage: "in_progress",
+  startDate: "2026-08-10", targetDate: "2026-08-11",
+  subtasks: [{ id: "p1", name: "Paint", estimatedHours: 20, crewIds: ["c3"] }],
+  ...over,
+});
+
+test("a phase that slid past its plan window doesn't text anyone", () => {
+  const d = buildCrewDigest({ ...base, jobs: [...JOBS, leftoverJob()] });
+  assert.ok(!d.messages.some((m) => m.jobs.includes("Leftover kitchen")), "slid leftover never texts");
+  assert.deepEqual(d.skipped.find((s) => s.name === "Matt Gross"),
+    { name: "Matt Gross", reason: "leftover only", jobs: ["Leftover kitchen"] });
+  assert.match(d.ownerText, /leftover only \(no text\): Matt→Leftover kitchen/);
+  assert.doesNotMatch(d.ownerText, /not scheduled: Matt/);   // held ≠ idle
+});
+
+test("a phase whose plan includes today still texts, with the address", () => {
+  const jobs = [...JOBS, leftoverJob({ startDate: TODAY, targetDate: "2026-08-18" })];
+  const d = buildCrewDigest({ ...base, jobs });
+  const matt = d.messages.find((m) => m.name === "Matt Gross");
+  assert.ok(matt && matt.jobs.includes("Leftover kitchen"), "planned-today job texts");
+  assert.match(matt.text, /• Leftover kitchen — 9 Slid Ct/);
+});
+
+test("hours logged yesterday keep a slid job in the text", () => {
+  const entries = [{ id: "e1", jobId: "j9", crewId: "c3", date: "2026-08-16", hours: 4 }];
+  const d = buildCrewDigest({ ...base, jobs: [...JOBS, leftoverJob()], entries });
+  const matt = d.messages.find((m) => m.name === "Matt Gross");
+  assert.ok(matt && matt.jobs.includes("Leftover kitchen"), "fresh hours = still dispatched");
+});
+
+test("the evidence join is entriesOfJob's: QB Time jobcode rows count", () => {
+  const jobs = [...JOBS, leftoverJob({ qbJobcodeId: "77" })];
+  const entries = [{ id: "e2", source: "qbtime", qbJobcodeId: "77", date: TODAY, hours: 2 }];
+  const d = buildCrewDigest({ ...base, jobs, entries });
+  const matt = d.messages.find((m) => m.name === "Matt Gross");
+  assert.ok(matt && matt.jobs.includes("Leftover kitchen"), "jobcode-joined hours = still dispatched");
+});
+
+test("a dayCrew add for today keeps a slid job in the substitute's text", () => {
+  const jobs = [...JOBS, leftoverJob({ dayCrew: { [TODAY]: { add: ["c2"] } } })];
+  const d = buildCrewDigest({ ...base, jobs });
+  const jimmy = d.messages.find((m) => m.name === "Jimmy Soland");
+  assert.ok(jimmy && jimmy.jobs.includes("Leftover kitchen"), "override guest texted");
+  assert.ok(!d.messages.some((m) => m.name === "Matt Gross"), "leftover-only base crew still held");
+});
+
+test("owner roll-up still fires when every member was leftover-only", () => {
+  const jobs = [leftoverJob({ subtasks: [{ id: "p1", name: "Paint", estimatedHours: 20, crewIds: ["c1", "c2", "c3"] }] })];
+  const d = buildCrewDigest({ ...base, jobs });
+  assert.equal(d.workday, true);
+  assert.equal(d.messages.length, 0);
+  assert.match(d.ownerText, /texting 0/);
+  assert.match(d.ownerText,
+    /leftover only \(no text\): Joel→Leftover kitchen; Jimmy→Leftover kitchen; Matt→Leftover kitchen/);
+});
+
+test("an off-app member whose only job is leftover reads as held, not a relay chore", () => {
+  const crew = CREW.map((c) => (c.id === "c3" ? { ...c, digestOptOut: true } : c));
+  const d = buildCrewDigest({ ...base, jobs: [...JOBS, leftoverJob()], crew });
+  assert.doesNotMatch(d.ownerText, /you tell/);
+  assert.match(d.ownerText, /leftover only \(no text\): Matt→Leftover kitchen/);
+});
+
 /* The digest and the field app's My Week must window time_entries identically,
    or the morning text and the app show the same crew member different days. */
 test("entriesCutoff agrees with the field app's copy on every case", () => {
