@@ -22,6 +22,10 @@ import { jobType, lossTypesOf, TRADES, newProject } from "./model.js";
 const arr = (v) => (Array.isArray(v) ? v : []);
 const norm = (s) => String(s || "").trim().toLowerCase();
 
+/* the board's reserved settings row — a fixed uuid, filtered out of every
+   job list and read directly for the work calendar (see apps/board/js/settingsync.js) */
+const BOARD_SETTINGS_ID = "00000000-0000-0000-0000-000000000001";
+
 /* The model promises an ISO date for notBefore, but nothing enforces prose
    like "next Tuesday" — garbage here would reach the Board's date math. */
 export const isoDateOnly = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : "");
@@ -202,7 +206,7 @@ const ready = () => SYNC_ENABLED && isSignedIn() && !likelyOffline();
 async function fetchBoardRows() {
   const res = await rest(`coordination_jobs?select=id,data&deleted=is.false`, { method: "GET" });
   if (!res.ok) throw new Error("board read failed (" + res.status + ")");
-  return (await res.json()).filter((r) => r && r.id !== "__settings__");
+  return (await res.json()).filter((r) => r && r.id !== BOARD_SETTINGS_ID);
 }
 
 /* ---------- pure: fuzzy identity matching ----------
@@ -557,7 +561,7 @@ export async function markBoardPhaseDone(boardJobId, subId, completedOn) {
   return out;
 }
 
-/** The board's work calendar (the reserved __settings__ row, which
+/** The board's work calendar (the reserved settings row, which
     fetchBoardRows deliberately filters out). The schedule-truth flags need
     it: phase-hour attribution follows workDays/hoursPerDay/holidays, and
     judging with defaults while the board judges with its real calendar can
@@ -566,7 +570,7 @@ export async function markBoardPhaseDone(boardJobId, subId, completedOn) {
 export async function fetchBoardCalendarSafe() {
   try {
     if (!ready()) return null;
-    const res = await rest("coordination_jobs?id=eq.__settings__&select=data&deleted=is.false", { method: "GET" });
+    const res = await rest(`coordination_jobs?id=eq.${BOARD_SETTINGS_ID}&select=data&deleted=is.false`, { method: "GET" });
     if (!res.ok) return null;
     const rows = await res.json();
     return (rows[0] && rows[0].data) || null;

@@ -78,8 +78,10 @@ export async function fetchEntriesSafe(jobs, today) {
   try { return await fetchEntries(entriesCutoff(jobs || [], today)); } catch (_) { return null; }
 }
 
-/* board tables: {id, data, deleted} envelope; the reserved __settings__ row
-   carries the work calendar (workDays/holidays/hoursPerDay) */
+/* board tables: {id, data, deleted} envelope; the reserved settings row
+   (fixed uuid — see apps/board/js/settingsync.js) carries the work
+   calendar (workDays/holidays/hoursPerDay) */
+const BOARD_SETTINGS_ID = "00000000-0000-0000-0000-000000000001";
 async function fetchBoard(today) {
   const [jobsRes, crewRes] = await Promise.all([
     rest("coordination_jobs?select=id,data&deleted=is.false&limit=500", { method: "GET" }),
@@ -87,8 +89,8 @@ async function fetchBoard(today) {
   ]);
   if (!jobsRes.ok || !crewRes.ok) throw new Error("board read failed");
   const jobRows = await jobsRes.json();
-  const settings = (jobRows.find((r) => r.id === "__settings__") || {}).data || {};
-  const jobs = jobRows.filter((r) => r && r.id !== "__settings__" && r.data).map((r) => r.data);
+  const settings = (jobRows.find((r) => r.id === BOARD_SETTINGS_ID) || {}).data || {};
+  const jobs = jobRows.filter((r) => r && r.id !== BOARD_SETTINGS_ID && r.data).map((r) => r.data);
   const crew = (await crewRes.json()).map((r) => r.data).filter(Boolean);
   // the entries window depends on the jobs, so this read follows them.
   // A failed hours read must not sink the week (the plan still renders) —

@@ -54,6 +54,9 @@ import { crewToday, crewLine, introLine } from "./crewtoday.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+/* the board's reserved settings row in coordination_jobs — a fixed uuid
+   (see apps/board/js/settingsync.js) carrying the work calendar */
+const BOARD_SETTINGS_ID = "00000000-0000-0000-0000-000000000001";
 const MEDIA_BUCKET = "field-media";
 const PHOTO_MAX = 24;    // max full images inlined in a view response
 const DOC_MAX = 6;       // max shared documents in a view response
@@ -929,8 +932,13 @@ async function dailyCrewLines(opts: { fieldProjectIds?: unknown; clockedIn?: unk
       .then((r) => r.json()).catch(() => []),
   ]);
   const boardByField = new Map<string, Record<string, unknown>>();
-  for (const b of Array.isArray(boardRows) ? boardRows : [])
-    if (b?.data?.fieldJobId) boardByField.set(String(b.data.fieldJobId), b.data);
+  // the reserved settings row carries the work calendar crewToday honors;
+  // absent (or not yet synced) → crewToday's own Mon–Fri default
+  let boardCal: Record<string, unknown> | undefined;
+  for (const b of Array.isArray(boardRows) ? boardRows : []) {
+    if (b?.id === BOARD_SETTINGS_ID) boardCal = (b.data as Record<string, unknown>) || undefined;
+    else if (b?.data?.fieldJobId) boardByField.set(String(b.data.fieldJobId), b.data);
+  }
   const crewName = new Map<string, string>();
   const crewPhoto = new Map<string, string>();       // public-bio headshots only (crew-bios phase 2)
   for (const c of Array.isArray(crewRows) ? crewRows : [])
@@ -946,7 +954,7 @@ async function dailyCrewLines(opts: { fieldProjectIds?: unknown; clockedIn?: unk
     const board = fid ? boardByField.get(fid) : null;
     // board-schedule names first (the promise), actual clock-ins as fallback
     const boardIds: string[] = board
-      ? crewToday(board, today).filter((id: string) => crewName.get(id))
+      ? crewToday(board, today, boardCal).filter((id: string) => crewName.get(id))
       : [];
     let names = boardIds.map((id) => crewName.get(id)) as string[];
     if (!names.length) names = clockedIn[fid] || [];

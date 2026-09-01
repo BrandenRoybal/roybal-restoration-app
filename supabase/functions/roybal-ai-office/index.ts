@@ -1355,14 +1355,16 @@ async function toolJobLookup(input: Record<string, unknown>, jwt: string) {
 }
 
 /* board tables store the object in a `data` jsonb envelope ({id, data,
-   deleted}) — unwrap, skip deleted rows and the reserved settings row.
+   deleted}) — unwrap, skip deleted rows and the reserved settings row
+   (fixed uuid — see apps/board/js/settingsync.js).
    Archived jobs (data.archived) DO pass through here: hoursLookup needs them
    to label historical hours; list-facing tools filter them at their edge. */
+const BOARD_SETTINGS_ID = "00000000-0000-0000-0000-000000000001";
 async function boardRows(table: string, jwt: string, limit = 300): Promise<Array<Record<string, unknown>>> {
   const res = await db(`${table}?select=id,data,deleted&limit=${limit}`, jwt, { method: "GET" });
   if (!res.ok) throw new Error(`${table} read failed (${res.status})`);
   return ((await res.json()) as Array<{ id: string; data: Record<string, unknown>; deleted: boolean }>)
-    .filter((r) => r && !r.deleted && r.id !== "__settings__" && r.data)
+    .filter((r) => r && !r.deleted && r.id !== BOARD_SETTINGS_ID && r.data)
     .map((r) => r.data);
 }
 
