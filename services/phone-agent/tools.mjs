@@ -28,6 +28,10 @@ function callerBudget(digits) {
 
 const last10 = (p) => String(p || "").replace(/[^\d]/g, "").slice(-10);
 
+/* the board's reserved settings row — a fixed uuid (see
+   apps/board/js/settingsync.js). Excluded from job lists, read by id. */
+const BOARD_SETTINGS_ID = "00000000-0000-0000-0000-000000000001";
+
 /* board tables store the object in a {id, data, deleted} envelope; archived
    jobs (data.archived) are filed-away record — the phone lane quotes the live
    board only, so they never enter availability or the schedule engine */
@@ -35,12 +39,12 @@ async function boardRows(table, limit = 300) {
   const res = await rest(`${table}?select=id,data,deleted&limit=${limit}`, { method: "GET" });
   if (!res.ok) throw new Error(`${table} read failed (${res.status})`);
   return (await res.json())
-    .filter((r) => r && !r.deleted && r.id !== "__settings__" && r.data && !r.data.archived)
+    .filter((r) => r && !r.deleted && r.id !== BOARD_SETTINGS_ID && r.data && !r.data.archived)
     .map((r) => r.data);
 }
 
 async function boardSettings() {
-  const res = await rest(`coordination_jobs?select=id,data&id=eq.__settings__`, { method: "GET" });
+  const res = await rest(`coordination_jobs?select=id,data&id=eq.${BOARD_SETTINGS_ID}`, { method: "GET" });
   if (!res.ok) return { ...DEFAULT_SETTINGS };
   const row = (await res.json())[0];
   return { ...DEFAULT_SETTINGS, ...((row && row.data) || {}) };

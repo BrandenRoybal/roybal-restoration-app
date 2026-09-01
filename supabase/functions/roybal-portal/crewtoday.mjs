@@ -12,11 +12,13 @@
 
    Plus the scheduling window: the day must fall inside
    startDate..targetDate (missing target = start only), and on a
-   workday. The board's calendar settings never persist server-side
-   (the '__settings__' row can't exist in a uuid-keyed table), so the
-   workday check is DEFAULT_SETTINGS' Mon–Fri — documented, not sneaky.
-   (Weekend clock-ins still message: the publisher falls back to the
-   actual clocked-in names when this returns nobody.)
+   workday per the board's calendar settings — the reserved settings
+   row in coordination_jobs (fixed uuid, synced since 2026-09; see
+   apps/board/js/settingsync.js), passed in by the gateway. Absent or
+   partial settings fall back to Mon–Fri with no holidays — exactly
+   the behavior from before the settings row could persist.
+   (Off-calendar clock-ins still message: the publisher falls back to
+   the actual clocked-in names when this returns nobody.)
 
    Shared by the roybal-portal gateway (Deno) and the Node test —
    plain ESM, no imports.
@@ -24,15 +26,18 @@
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 
-const isWeekday = (dayISO) => {
+const isWorkDay = (dayISO, settings) => {
   const d = new Date(dayISO + "T12:00:00Z").getUTCDay();   // noon dodges TZ edges
-  return d >= 1 && d <= 5;
+  const s = settings || {};
+  const days = Array.isArray(s.workDays) && s.workDays.length ? s.workDays : [1, 2, 3, 4, 5];
+  const holidays = Array.isArray(s.holidays) ? s.holidays : [];
+  return days.includes(d) && !holidays.includes(dayISO);
 };
 
 const inSpan = (dayISO, sp) =>
   (!sp.from || dayISO >= sp.from) && (!sp.to || dayISO <= sp.to);
 
-export function crewToday(job, dayISO) {
+export function crewToday(job, dayISO, settings) {
   const j = job || {};
   if (!ISO.test(String(dayISO || ""))) return [];
   if (j.archived || j.isMilestone) return [];
@@ -40,7 +45,7 @@ export function crewToday(job, dayISO) {
   if (!["scheduled", "in_progress", "final"].includes(stage)) return [];
   if (!j.startDate || dayISO < j.startDate) return [];
   if (j.targetDate && dayISO > j.targetDate) return [];
-  if (!isWeekday(dayISO)) return [];
+  if (!isWorkDay(dayISO, settings)) return [];
 
   // base roster, constrained by each member's assignment spans
   let crew = (Array.isArray(j.crewIds) ? j.crewIds : []).filter((cid) => {

@@ -414,7 +414,7 @@ function jobRow(p, { onArchive = null, onUnarchive = null, watch = [] } = {}) {
 
 let _boardRows = null;   // session cache of board tiles → stage groups paint instantly next time
 let _boardEntries = null; // session cache of time_entries (schedule-truth flags); null = "couldn't read"
-let _boardCal = null;     // session cache of the board's work calendar (__settings__ row)
+let _boardCal = null;     // session cache of the board's work calendar (reserved settings row)
 let _archOpen = false;   // keep the Archived section open across re-renders
 let _listRender = null;  // token identifying the projectList render currently on screen
 const stageSig = (rows) => JSON.stringify((rows || []).map((r) => [r.id, r.data && r.data.stage, r.data && r.data.fieldJobId]).sort());

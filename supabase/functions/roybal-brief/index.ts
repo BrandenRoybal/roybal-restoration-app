@@ -47,6 +47,11 @@ const MACHINE_EMAIL = Deno.env.get("BRIEF_MACHINE_EMAIL") ?? "office-brief@royba
 const MACHINE_PASSWORD = Deno.env.get("BRIEF_MACHINE_PASSWORD") ?? "";
 const BUDGET_THRESHOLD = Number(Deno.env.get("BRIEF_BUDGET_THRESHOLD") ?? "0.9") || 0.9;
 
+/* the board's reserved settings row in coordination_jobs — a fixed uuid
+   (see apps/board/js/settingsync.js). Carries the work calendar + the
+   Gantt baseline; excluded from every job list, read directly by id. */
+const BOARD_SETTINGS_ID = "00000000-0000-0000-0000-000000000001";
+
 const json = (o: unknown, status = 200) =>
   new Response(JSON.stringify(o), { status, headers: { "Content-Type": "application/json" } });
 
@@ -126,8 +131,8 @@ serve(async (req: Request) => {
         rest(jwt, "crew_members?select=id,data&deleted=eq.false&limit=100"),
       ]);
       const unwrap = (rows: Blob[]) =>
-        rows.filter((r: Blob) => r && r.id !== "__settings__" && r.data).map((r: Blob) => r.data);
-      const settings: Blob = (jobRows.find((r: Blob) => r?.id === "__settings__")?.data as Blob) || {};
+        rows.filter((r: Blob) => r && r.id !== BOARD_SETTINGS_ID && r.data).map((r: Blob) => r.data);
+      const settings: Blob = (jobRows.find((r: Blob) => r?.id === BOARD_SETTINGS_ID)?.data as Blob) || {};
       const jobs = unwrap(jobRows);
       /* dryRun previews exactly what the crew would receive and sends NOTHING —
          the only safe way to check a change before it texts real people. An
@@ -227,13 +232,13 @@ serve(async (req: Request) => {
       .filter((r: Blob) => r?.data)
       .map((r: Blob) => ({ ...r.data, _rowUpdated: r.updated_at }));
     const boardJobs: Blob[] = boardRows
-      .filter((r: Blob) => r?.data && r.id !== "__settings__" && !r.data.archived)
+      .filter((r: Blob) => r?.data && r.id !== BOARD_SETTINGS_ID && !r.data.archived)
       .map((r: Blob) => r.data);
     // the board's baseline snapshot (Gantt "Baseline") rides the settings row —
     // it's the reference that catches phased jobs the live engine keeps
     // re-dating to >= today (they're never "past target", only "behind baseline")
     const boardBaseline: Blob | null =
-      (boardRows.find((r: Blob) => r?.id === "__settings__")?.data?.baseline as Blob) || null;
+      (boardRows.find((r: Blob) => r?.id === BOARD_SETTINGS_ID)?.data?.baseline as Blob) || null;
 
     // ---------- approve-by-text proposals (max 2) ----------
     // The brief may PROPOSE (an insert changes nothing until the owner texts

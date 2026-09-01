@@ -30,6 +30,16 @@ const overridden = { ...job, dayCrew: { [WED]: { remove: ["a"], add: ["c"] } } }
 ok("dayCrew remove+add applies on that day only",
   crewToday(overridden, WED).join() === "b,c" && crewToday(overridden, "2026-08-13").join() === "a,b");
 
+/* the board's calendar settings (the synced settings row) override Mon–Fri */
+ok("settings with Saturday as a workday open Saturday",
+  crewToday(job, SAT, { workDays: [1, 2, 3, 4, 5, 6] }).join() === "a,b");
+ok("a holiday closes a scheduled weekday",
+  crewToday(job, WED, { holidays: [WED] }).length === 0);
+ok("empty or malformed settings keep the Mon–Fri, no-holiday default",
+  crewToday(job, SAT, {}).length === 0 &&
+  crewToday(job, SAT, { workDays: "weekends" }).length === 0 &&
+  crewToday(job, WED, { workDays: [], holidays: null }).join() === "a,b");
+
 /* copy */
 ok("one name reads 'is'", crewLine(["Joel Hess"]) === "Joel Hess from our crew is on the job at your property today.");
 ok("two names read 'and … are'", crewLine(["Joel Hess", "Jimmy Soland"]).includes("Joel Hess and Jimmy Soland from our crew are on the job"));
