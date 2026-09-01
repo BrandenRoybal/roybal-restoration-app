@@ -13,7 +13,7 @@
    a job save only lands when the server is still on the rev the
    write started from — a stale copy can never clobber newer edits.
    ============================================================ */
-import { uid, Store, stripCtrl, likelyOffline } from "./core.js";
+import { uid, Store, stripCtrl, likelyOffline, todayISO } from "./core.js";
 import { rest, isSignedIn } from "./supa.js";
 import { SYNC_ENABLED } from "./config.js";
 import { matchCoordinationId, normClaim } from "./spine.js";
@@ -511,6 +511,67 @@ export async function pushActuals(project) {
     return { ok: true };
   } catch (_) {
     return { skipped: true };
+  }
+}
+
+/** One-tap "mark phase done" from the field. Sets done + completedOn on ONE
+    phase of a board job and saves through the same guarded write every other
+    board save uses. `completedOn` should be the last day hours landed on the
+    phase (the schedulewatch flag carries it as lastHoursOn): the flag fires
+    DAYS after the work really wrapped, and stamping today would pull every
+    unstamped successor-phase entry back into this phase (phaseActuals rule 2
+    attributes by completedOn), deflating the next phase and pushing the
+    projected finish OUT. Falls back to today when no date is known.
+    This is a REAL schedule edit (the engine re-flows from the completion),
+    so unlike the fieldActuals annotation it consumes a revision — a
+    coordinator saving the job at the same moment wins, and we retry once
+    against their fresh copy. Deliberate crossing of the ownership line
+    (board owns phases): the tech is reporting ground truth the board is
+    waiting on, and only ever by explicit tap. */
+export async function markBoardPhaseDone(boardJobId, subId, completedOn) {
+  if (!ready()) throw new Error("Sign in (online) to mark the phase done on the board.");
+  const today = todayISO();
+  const when = (/^\d{4}-\d{2}-\d{2}$/.test(String(completedOn || "")) && completedOn <= today)
+    ? completedOn : today;
+  const attempt = async () => {
+    const res = await rest(`coordination_jobs?id=eq.${encodeURIComponent(boardJobId)}&select=id,data&deleted=is.false`, { method: "GET" });
+    if (!res.ok) throw new Error("board read failed (" + res.status + ")");
+    const row = (await res.json())[0];
+    if (!row || !row.data) throw new Error("That job is no longer on the board.");
+    const d = row.data;
+    const st = arr(d.subtasks).find((s) => s && s.id === subId);
+    if (!st) throw new Error("That phase is no longer on the board job.");
+    if (st.done) return { unchanged: true };
+    const next = {
+      ...d,
+      subtasks: arr(d.subtasks).map((s) => (s && s.id === subId ? { ...s, done: true, completedOn: when } : s)),
+      updatedAt: new Date().toISOString(),
+    };
+    const base = Number(d.rev) || 0;
+    const r = await guardedWrite(boardJobId, base, { ...next, rev: base + 1 });
+    return r.conflict ? null : { ok: true, name: st.name || "Phase" };
+  };
+  let out = await attempt();
+  if (!out) out = await attempt();   // one retry after a rev conflict
+  if (!out) throw new Error("The board job changed while saving — try again.");
+  return out;
+}
+
+/** The board's work calendar (the reserved __settings__ row, which
+    fetchBoardRows deliberately filters out). The schedule-truth flags need
+    it: phase-hour attribution follows workDays/hoursPerDay/holidays, and
+    judging with defaults while the board judges with its real calendar can
+    put a flag on the wrong phase. Fail-safe null (caller falls back to
+    DEFAULT_SETTINGS — same behavior as before this existed). */
+export async function fetchBoardCalendarSafe() {
+  try {
+    if (!ready()) return null;
+    const res = await rest("coordination_jobs?id=eq.__settings__&select=data&deleted=is.false", { method: "GET" });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return (rows[0] && rows[0].data) || null;
+  } catch (_) {
+    return null;
   }
 }
 

@@ -13,6 +13,7 @@ import {
   cachedSettings, saveSettings, setConflictHandler,
 } from "./data.js";
 import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, layoutSubtasksLive, phaseActuals, buildLiveOpts, workDaysBetween, effCrew, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear, entryBlock, timelineWindow, packLanes, timelineTicks, timelinePct, idleGaps, fmtSpan, DEFAULT_SETTINGS } from "./schedule.js";
+import { scheduleFlags } from "./schedulewatch.js";
 import { pickJobcode, pickQbUser, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { boardAssistProvider } from "./assistctx.js";
@@ -84,6 +85,7 @@ let entries = [];
 let settings = DEFAULT_SETTINGS;        // work calendar (loaded from cache/server)
 let conflicts = { byJob: new Map(), overloads: [], load: new Map(), byCrew: new Map() };   // capacity over-allocations
 let critical = new Set();                          // job ids on the critical path
+let watchFlags = new Map();                        // jobId → schedule-truth flags (schedulewatch.js)
 let lastConflictToastAt = 0;   // when the cross-device conflict toast last fired — quieter toasts yield to it
 let phaseHours = new Map();                        // jobId → Map(subId → logged hours) — QB Time + manual, per phase
 let ganttCritical = false;                         // Gantt "Critical path" highlight toggle
@@ -222,6 +224,13 @@ function applySchedule() {
   const res = computeSchedule(jobs, settings, opts);   // { changed, cyclic }; mutates jobs in place
   conflicts = findOverAllocations(jobs, settings, opts);  // refresh crew over-allocations (phase-aware)
   critical = computeCriticalPath(jobs, settings);// refresh critical path
+  // schedule-truth flags: unlinked / silent / phase-looks-done jobs, computed
+  // once per recompute so every view (cards, table, Gantt, editor) reads one
+  // map. Each job's phase attribution is handed in from opts.phaseHours — the
+  // SAME map the engine and the Gantt bars use — so a flag can never name a
+  // different phase than the bars show.
+  watchFlags = new Map(jobs.map((j) => [j.id,
+    scheduleFlags(j, entries, todayISO(), settings, opts.phaseHours && opts.phaseHours.get(j.id))]));
   return res;
 }
 async function recomputeAndPersist() {
@@ -647,6 +656,7 @@ function renderCard(j) {
   if ((j.subtasks || []).length) meta.append(h("span", { class: "chip chip--sm is-phase", title: `${j.subtasks.length} phase${j.subtasks.length === 1 ? "" : "s"}` }, "📋 " + j.subtasks.length));
   if (jc.length) meta.append(h("span", { class: "chip chip--sm is-warn", title: jc.map((x) => `${crewName(x.crewId)} ${Math.round(x.hours)}h on ${fmtShort(x.day)}`).join("\n") }, "⚠"));
   if (critical.has(j.id)) meta.append(h("span", { class: "chip chip--sm is-crit", title: "On the critical path — a slip here pushes your finish date" }, "⚡"));
+  for (const fw of (watchFlags.get(j.id) || [])) meta.append(watchChip(fw));
   if (j.fieldPlanProposal) meta.append(h("span", { class: "chip chip--sm is-warn", title: "The field app sent an updated phase plan — open to review" }, "⚠ field"));
   if (j.notBefore) meta.append(h("span", { class: "chip chip--sm is-lock", title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "can't start before " + fmtShort(j.notBefore) }, "🔒"));
   const mat = j.materials || "none";
@@ -659,6 +669,14 @@ function renderCard(j) {
 }
 
 const fmtShort = (iso) => { const d = fmtDate(iso); return d.replace(/, \d{4}$/, ""); }; // "Jun 12"
+
+/* one schedule-truth flag as a chip — shared by cards, table rows, and the
+   editor strip. Short text on the chip face (space is tight), the crew-plain
+   sentence on hover; `full` puts the sentence on the face (editor has room). */
+const watchChip = (fw, full) => h("span", {
+  class: "chip chip--sm " + (fw.tone === "bad" ? "is-warn" : "is-watch"),
+  title: fw.label,
+}, "⚠ " + (full ? fw.label : fw.short));
 
 /* one-line hover summary for the compact card — the detail that came off the
    card face still lives here (and in the editor) */
@@ -766,9 +784,11 @@ function paintTable() {
     const dueT = j.targetDate === todayISO() && (j.stage || "lead") !== "done";
     const ids = validCrew(j);
     const act = actualHours(j.id), est = Number(j.estimatedHours) || 0;
+    const wf = watchFlags.get(j.id) || [];
     body.append(h("tr", { onclick: () => openJobModal(j) },
       h("td", { class: "td-job" }, h("div", { class: "td-job__t" }, j.title || j.customer || "Untitled job"),
-        j.address ? h("div", { class: "td-job__s" }, j.address) : null),
+        j.address ? h("div", { class: "td-job__s" }, j.address) : null,
+        wf.length ? h("div", { class: "td-job__flags" }, ...wf.map((fw) => watchChip(fw))) : null),
       h("td", {}, h("span", { class: "stg" }, h("span", { class: "bcol__dot", style: `background:${st.color}` }), st.label)),
       h("td", {}, h("span", { class: "btype btype--sm", style: `background:${ty.color}` }, ty.label)),
       h("td", {}, ids.length ? h("span", { class: "crew" }, ...ids.slice(0, 6).map((id) => { const c = crewById(id); return h("span", { class: "crewchip", style: `background:${c.color || "#7a8aa0"}`, title: c.name }, initials(c.name)); })) : h("span", { class: "crew-none" }, "—")),
@@ -1492,10 +1512,11 @@ function paintGantt() {
     // progress fill: tint the done portion of the bar (orange; red when over-hours)
     const fillBg = pct > 0 ? `;background:linear-gradient(to right, ${over ? "rgba(210,59,46,.24)" : "rgba(242,106,33,.24)"} ${pct}%, #fff ${pct}%)` : "";
     const clash = conflicts.byJob.has(j.id);
+    const wf = watchFlags.get(j.id) || [];
     const critCls = ganttCritical ? (focused(j.id) ? (isRed(j.id) ? " crit" : "") : " dim") : "";
     const bar = h("div", {
       class: "gantt__bar" + (clash ? " has-clash" : "") + critCls, style: `left:${left}px;width:${w}px;border-left-color:${stageOf(j.stage).color}${fillBg}`,
-      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h (${pct}%${over ? " — over" : ""})` : ""}${clash ? "\n⚠ crew double-booked" : ""}\n(drag to reschedule)`,
+      title: `${j.title || j.customer || "Job"}\n${fmtShort(s)} – ${fmtShort(t)}${est ? `\n${Math.round(act * 100) / 100} of ${est}h (${pct}%${over ? " — over" : ""})` : ""}${clash ? "\n⚠ crew double-booked" : ""}${wf.length ? "\n" + wf.map((f) => "⚠ " + f.label).join("\n") : ""}\n(drag to reschedule)`,
       onclick: () => { if (bar._dragged) { bar._dragged = false; return; } openJobModal(j); },
     }, (clash ? "⚠ " : "") + (j.title || j.customer || "Job") + hrs);
     // drag-to-reschedule: pins the job to a manual start, then cascades dependents
@@ -1559,6 +1580,7 @@ function paintGantt() {
         title: (j.notBeforeLabel ? j.notBeforeLabel + " — " : "") + "start no earlier than " + fmtShort(j.notBefore) }, "🔒"));
     }
     // baseline: ghost bar at the snapshot span + slippage chip
+    let badgeX = left + w + 4;   // chips trailing the bar stack rightward from here
     const base = ganttBaseline && settings.baseline && settings.baseline.jobs ? settings.baseline.jobs[j.id] : null;
     if (base && base.start && base.finish) {
       const bLeft = dayDiff(startISO, base.start) * dayW;
@@ -1567,9 +1589,21 @@ function paintGantt() {
       const cmp = t.localeCompare(base.finish);
       if (cmp !== 0) {
         const mag = workDaysBetween(cmp > 0 ? base.finish : t, cmp > 0 ? t : base.finish, settings) - 1;
-        if (mag > 0) track.append(h("div", { class: "gantt__slip " + (cmp > 0 ? "slip-late" : "slip-early"), style: `left:${left + w + 4}px`,
-          title: `${cmp > 0 ? mag + " work days behind" : mag + " work days ahead of"} baseline` }, (cmp > 0 ? "+" : "−") + mag + "d"));
+        if (mag > 0) {
+          track.append(h("div", { class: "gantt__slip " + (cmp > 0 ? "slip-late" : "slip-early"), style: `left:${badgeX}px`,
+            title: `${cmp > 0 ? mag + " work days behind" : mag + " work days ahead of"} baseline` }, (cmp > 0 ? "+" : "−") + mag + "d"));
+          badgeX += 48;
+        }
       }
+    }
+    // schedule-truth badge: an unlinked / silent / phase-looks-done job must be
+    // loud on the timeline itself, not tooltip-only
+    if (wf.length) {
+      track.append(h("div", {
+        class: "gantt__watch" + (wf.some((f) => f.tone === "bad") ? "" : " is-warnonly"),
+        style: `left:${badgeX}px`, title: wf.map((f) => f.label).join("\n"),
+        onclick: () => openJobModal(j),
+      }, "⚠ " + wf[0].short + (wf.length > 1 ? ` +${wf.length - 1}` : "")));
     }
     const subs = j.subtasks || [];
     const isCrit = isRed(j.id);
@@ -2155,7 +2189,11 @@ function openJobModal(existing, newMilestone) {
     h("div", { class: "grid2" }, field("Next action — when", f.nextActionAt), field("Next action — what", f.nextAction)),
     h("div", { class: "lead-actions" }, wonBtn, lostBtn, lostWrap));
 
+  // schedule-truth strip: the same flags the cards/Gantt carry, spelled out in
+  // full where the fix actually happens (link a jobcode, mark a phase done)
+  const liveWatch = isNew ? [] : (watchFlags.get(j.id) || []);
   const body = h("div", { class: "bmodal__body" + (j.isMilestone ? " is-milestone" : "") },
+    liveWatch.length ? h("div", { class: "watchstrip" }, ...liveWatch.map((fw) => watchChip(fw, true))) : null,
     field(j.isMilestone ? "Milestone name" : "Job / Customer name", inp("title", { type: "text", placeholder: j.isMilestone ? "e.g. City framing inspection" : "e.g. Smith Kitchen Remodel" })),
     msRow,
     field("Customer (if different)", inp("customer", { type: "text", placeholder: "Owner / contact name" })),

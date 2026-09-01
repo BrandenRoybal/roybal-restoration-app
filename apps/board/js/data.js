@@ -133,10 +133,25 @@ async function upsert(table, rows) {
   if (!res.ok) throw new Error("save " + res.status + " " + (await res.text().catch(() => "")));
   return res.json();
 }
+/* Page until the server runs dry. time_entries passed Supabase's 1000-row
+   page in Aug 2026 (the field app learned this first — see myweek.js): one
+   unpaged read here silently dropped the NEWEST-updated rows, i.e. last
+   night's QuickBooks pull, so the live schedule and the schedule-truth flags
+   ran on stale hours. Same treatment for all three tables — jobs and crew
+   are small today, but the failure mode is silent when they aren't. */
+const PAGE = 1000;
 async function getAll(table) {
-  const res = await rest(`${table}?select=id,data,deleted,updated_at&order=updated_at.asc`, { method: "GET" });
-  if (!res.ok) throw new Error("load " + res.status);
-  return res.json();
+  const out = [];
+  for (let page = 0; page < 20; page++) {
+    const res = await rest(
+      `${table}?select=id,data,deleted,updated_at&order=updated_at.asc&limit=${PAGE}&offset=${page * PAGE}`,
+      { method: "GET" });
+    if (!res.ok) throw new Error("load " + res.status);
+    const rows = await res.json();
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+  }
+  return out;
 }
 
 /* ---------- pull (refresh from server) ---------- */

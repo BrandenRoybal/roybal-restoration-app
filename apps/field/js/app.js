@@ -34,11 +34,12 @@ import { buildFlags } from "./buildwatch.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
-import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates } from "./boardpush.js";
+import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
+import { boardFlagsByJob } from "./myweekcalc.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
-import { myWeekPage, clearMyWeekCache } from "./myweek.js";
+import { myWeekPage, clearMyWeekCache, fetchEntriesSafe } from "./myweek.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -372,8 +373,10 @@ async function setArchived(project, on) {
 }
 
 /* One job card for the home list. Archived rows render dimmed with an
-   Unarchive button; a Complete-on-the-board row offers one-tap Archive. */
-function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
+   Unarchive button; a Complete-on-the-board row offers one-tap Archive.
+   `watch` = the linked board tile's schedule-truth flags (schedulewatch.js),
+   rendered with the same tone treatment as the drying/build flags. */
+function jobRow(p, { onArchive = null, onUnarchive = null, watch = [] } = {}) {
   const isConst = jobType(p) === "construction";
   const cat = [
     p.waterCategory ? `Cat ${p.waterCategory}` : "",
@@ -381,7 +384,8 @@ function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
     p.moldCondition || p.moldExtent ? "🦠 Mold" : "",
     p.stormCause || p.envelopeBreached ? "🌬️ Storm" : "",
   ].filter(Boolean).join(" · ");
-  const flags = p.archivedAt ? [] : (isConst ? buildFlags(p) : dryingFlags(p));   // rule-based watch flags — no AI, no cost
+  const flags = (p.archivedAt ? [] : (isConst ? buildFlags(p) : dryingFlags(p)))   // rule-based watch flags — no AI, no cost
+    .concat(p.archivedAt ? [] : (watch || []).map((f) => ({ tone: f.tone, label: f.short || f.label, title: f.label, icon: "🗓" })));
   const sub = isConst
     ? [p.address && p.customer ? p.address : "", p.claimNo ? "Claim " + p.claimNo : "",
        constructionTypeLabel(p.constructionType),
@@ -399,6 +403,7 @@ function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
       h("div", { class: "jobrow__sub" }, sub),
       flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" },
         ...flags.map((f) => h("span", {
+          title: f.title || null,
           style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
             (f.tone === "bad" ? "background:#fdecea;color:#b3261e" : "background:#fff4e5;color:#8a6d00"),
         }, (f.icon || "💧") + " " + f.label))) : null),
@@ -408,6 +413,8 @@ function jobRow(p, { onArchive = null, onUnarchive = null } = {}) {
 }
 
 let _boardRows = null;   // session cache of board tiles → stage groups paint instantly next time
+let _boardEntries = null; // session cache of time_entries (schedule-truth flags); null = "couldn't read"
+let _boardCal = null;     // session cache of the board's work calendar (__settings__ row)
 let _archOpen = false;   // keep the Archived section open across re-renders
 let _listRender = null;  // token identifying the projectList render currently on screen
 const stageSig = (rows) => JSON.stringify((rows || []).map((r) => [r.id, r.data && r.data.stage, r.data && r.data.fieldJobId]).sort());
@@ -462,16 +469,31 @@ async function projectList() {
     /* Paint the active list: grouped under the board's stage columns when any
        job is linked to a board tile, a plain flat list otherwise (offline, or
        nothing on the board — typical for restoration mode). */
+    const flagToday = new Date().toLocaleDateString("en-CA");
     const paint = (rows) => {
       clear(listWrap);
+      /* Schedule-truth flags for linked tiles, judged the way the BOARD
+         judges them (boardFlagsByJob runs the engine over the whole read:
+         live dates + the engine's own phase attribution + the board's real
+         work calendar). Until time_entries load (_boardEntries null) only
+         no-jobcode can be judged — the hours flags stay quiet rather than
+         false-alarming off an empty list. */
+      let flagMap = new Map();
+      try {
+        if (rows) flagMap = boardFlagsByJob({
+          jobs: rows.map((r) => r && r.data).filter(Boolean),
+          entries: _boardEntries, settings: _boardCal || undefined, today: flagToday,
+        });
+      } catch (_) { /* flags are an extra — the list still paints */ }
+      const flagsForRow = (row) => (row && row.data && flagMap.get(row.data.id)) || [];
       const staged = active.map((p) => {
         const row = rows ? boardRowFor(rows, p) : null;
         const sid = row && row.data && BOARD_STAGES[row.data.stage] ? row.data.stage : null;
-        return { p, sid };
+        return { p, sid, row };
       });
       if (!staged.some((x) => x.sid)) {
         const list = h("div", { class: "joblist" });
-        staged.forEach(({ p }) => list.append(jobRow(p)));
+        staged.forEach(({ p, row }) => list.append(jobRow(p, { watch: flagsForRow(row) })));
         listWrap.append(list);
         return;
       }
@@ -487,9 +509,10 @@ async function projectList() {
           h("span", { style: `width:9px;height:9px;border-radius:50%;flex:none;background:${g.meta.color}` }),
           `${g.meta.label} (${g.items.length})`));
         const list = h("div", { class: "joblist" });
-        g.items.forEach(({ p, sid }) => list.append(jobRow(p, {
+        g.items.forEach(({ p, sid, row }) => list.append(jobRow(p, {
           // Complete on the board → one-tap archive right on the card
           onArchive: sid === "done" ? async () => { await setArchived(p, true); projectList(); } : null,
+          watch: flagsForRow(row),
         })));
         listWrap.append(list);
       });
@@ -506,6 +529,13 @@ async function projectList() {
     const changed = stageSig(rows) !== stageSig(_boardRows);
     _boardRows = rows;
     if (changed && paintLive) paintLive(rows);
+    // logged hours + the board's work calendar feed the schedule-truth flags —
+    // same window + paging as My Week; fail-safe null keeps the flags at
+    // "no-jobcode only" when the hours can't be read (offline, HTTP error)
+    fetchEntriesSafe(rows.map((r) => r && r.data).filter(Boolean), new Date().toLocaleDateString("en-CA"))
+      .then((ent) => { if (ent) { _boardEntries = ent; if (paintLive) paintLive(_boardRows); } });
+    fetchBoardCalendarSafe()
+      .then((cal) => { if (cal) { _boardCal = cal; if (paintLive) paintLive(_boardRows); } });
     // A field-created tile sitting next to the tile the coordinator already
     // built merges into it (nothing they built is lost, the dupe retires)
     const healed = await healBoardDuplicates(rows);
@@ -989,21 +1019,67 @@ function boardCard(project) {
   const wrap = h("div", { class: "card", hidden: true });
   (async () => {
     try {
-      const row = await findBoardRow(project);
+      const rows = await fetchBoardRowsSafe();
+      if (!rows) return;   // offline / signed out — the card just stays hidden
+      const row = boardRowFor(rows, project);
       if (!row || !row.data) return;
       const d = row.data;
+      const today = new Date().toLocaleDateString("en-CA");
+      // logged hours + the board's calendar feed the schedule-truth flags,
+      // judged over the WHOLE board read (boardFlagsByJob = engine-fresh
+      // dates + engine attribution, same verdicts as the board and My Week).
+      // If the hours can't be read, only the no-jobcode flag can be judged.
+      const [ent, cal] = await Promise.all([
+        fetchEntriesSafe(rows.map((r) => r && r.data).filter(Boolean), today),
+        fetchBoardCalendarSafe(),
+      ]);
+      let watch = [];
+      try {
+        watch = boardFlagsByJob({
+          jobs: rows.map((r) => r && r.data).filter(Boolean),
+          entries: ent, settings: cal || undefined, today,
+        }).get(d.id) || [];
+      } catch (_) { watch = []; }
       const when = d.startDate && d.targetDate ? `${fmtDate(d.startDate)} → ${fmtDate(d.targetDate)}`
         : d.startDate ? "starts " + fmtDate(d.startDate) : "not scheduled yet";
       wrap.hidden = false;
+      // one tap = done on the board, completed the last day its hours landed
+      // (fl.lastHoursOn — today would swallow the next phase's hours), through
+      // the board's own guarded write
+      const markDoneBtn = (st, fl) => {
+        const b = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none;padding:3px 10px;font-size:12px" }, "✓ Mark done");
+        b.addEventListener("click", async () => {
+          b.disabled = true; b.textContent = "Saving…";
+          try {
+            await markBoardPhaseDone(row.id, st.id, fl.lastHoursOn);
+            toast(`Marked “${st.name || "phase"}” done — the board schedule re-flows.`);
+            projectHome(project);
+          } catch (e) {
+            toast(String((e && e.message) || e));
+            b.disabled = false; b.textContent = "✓ Mark done";
+          }
+        });
+        return b;
+      };
       // native append() stringifies null — filter, unlike the h() helper
       wrap.append(...[
         h("div", { style: "font-weight:700" }, "🗓 On the Job Board"),
         h("div", { class: "subtle", style: "font-size:13px;margin-top:4px" },
           [stageLabel(d.stage), when,
            d.notBefore ? "🔒 not before " + fmtDate(d.notBefore) : ""].filter(Boolean).join(" · ")),
+        watch.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:6px" },
+          ...watch.map((f) => h("span", {
+            title: f.label,
+            style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
+              (f.tone === "bad" ? "background:#fdecea;color:#b3261e" : "background:#fff4e5;color:#8a6d00"),
+          }, "🗓 " + (f.short || f.label)))) : null,
         (d.subtasks || []).length ? h("div", { style: "margin-top:6px;font-size:13px" },
-          ...d.subtasks.map((st, i) => h("div", {},
-            `${i + 1}. ${st.name || "Phase"}${st.estimatedHours ? " — " + st.estimatedHours + "h" : ""}${st.lagDays ? ` (+${st.lagDays}d lag)` : ""}`))) : null,
+          ...d.subtasks.map((st, i) => {
+            const fl = st && watch.find((f) => f.kind === "unmarked-done" && f.subId === st.id);
+            return h("div", { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap" + (fl ? ";margin:2px 0" : "") },
+              h("span", {}, `${i + 1}. ${st.name || "Phase"}${st.estimatedHours ? " — " + st.estimatedHours + "h" : ""}${st.lagDays ? ` (+${st.lagDays}d lag)` : ""}${st.done ? " ✓" : ""}`),
+              fl ? markDoneBtn(st, fl) : null);
+          })) : null,
         d.fieldPlanProposal ? h("div", { class: "note", style: "margin-top:6px" },
           "⚠ Your phase proposal is waiting for review on the board.") : null,
       ].filter(Boolean));

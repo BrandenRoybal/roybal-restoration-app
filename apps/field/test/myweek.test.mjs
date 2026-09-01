@@ -2,7 +2,7 @@
    Run: node apps/field/test/myweek.test.mjs */
 import assert from "node:assert/strict";
 import { crewByEmail, schedulableJobs, buildMyWeek, entriesCutoff, shiftDays } from "../js/myweekcalc.js";
-import { mapsHref, resolveIdentity, cacheUsable } from "../js/myweek.js";
+import { mapsHref, resolveIdentity, cacheUsable, identityNotice } from "../js/myweek.js";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -39,6 +39,17 @@ test("resolveIdentity: tech pick works when the email isn't linked yet", () => {
   assert.equal(resolveIdentity(CREW, "new-guy@gmail.com", { id: null, name: "Typed Name" }), null);
 });
 
+test("identityNotice: a tech-pick identity WARNS (wrong-week risk); an email match never does", () => {
+  assert.equal(identityNotice({ crewId: "c1", name: "Joel Hess", via: "email" }), null);
+  assert.equal(identityNotice(null), null);
+  const msg = identityNotice({ crewId: "c2", name: "Jimmy Soland", via: "tech" });
+  assert.ok(msg && msg.includes("Jimmy Soland"));
+  assert.ok(msg.includes("tech pick"));
+  assert.ok(msg.includes("crew card"));       // tells the office what fixes it
+  // a nameless pick still warns, readably
+  assert.ok(identityNotice({ crewId: "c2", name: "", via: "tech" }).includes("the picked tech"));
+});
+
 test("a member's week: their jobs on their days, weekends visible but empty", () => {
   const w = buildMyWeek({ ...base, crewId: "c1", days: 7 });
   assert.equal(w.member.name, "Joel Hess");
@@ -67,6 +78,47 @@ test("lead/done/archived jobs never appear", () => {
   const w = buildMyWeek({ ...base, jobs, crewId: "c1", days: 1 });
   assert.deepEqual(w.days[0].jobs.map((j) => j.title), ["Henderson"]);
   assert.deepEqual(schedulableJobs(jobs).map((j) => j.id), ["j1", "j2"]);
+});
+
+/* ---------- schedule-truth flags on the week's cards ---------- */
+test("an unlinked job and a linked-but-silent job carry their flags on the tech's cards", () => {
+  const jobs = [
+    { id: "j6", title: "Unlinked", stage: "in_progress", startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"] },
+    { id: "j7", title: "Silent", stage: "in_progress", qbJobcodeId: "77", startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"] },
+  ];
+  const w = buildMyWeek({ ...base, jobs, crewId: "c1", days: 1 });
+  const byTitle = Object.fromEntries(w.days[0].jobs.map((j) => [j.title, j]));
+  assert.deepEqual(byTitle.Unlinked.flags.map((f) => f.kind), ["no-jobcode"]);
+  assert.deepEqual(byTitle.Silent.flags.map((f) => f.kind), ["no-hours"]);
+});
+
+test("flags go quiet once hours land on the linked jobcode", () => {
+  const jobs = [{ id: "j7", title: "Silent", stage: "in_progress", qbJobcodeId: "77",
+    startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"] }];
+  const entries = [{ source: "qbtime", qbJobcodeId: "77", date: "2026-08-12", hours: 8 }];
+  const w = buildMyWeek({ ...base, jobs, entries, crewId: "c1", days: 1 });
+  assert.deepEqual(w.days[0].jobs[0].flags, []);
+});
+
+test("an unmarked-done phase surfaces with its subId + lastHoursOn (what the one-tap needs)", () => {
+  const jobs = [{ id: "j8", title: "Phased", stage: "in_progress", qbJobcodeId: "77",
+    startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"],
+    subtasks: [{ id: "p1", name: "Demo", estimatedHours: 10 }, { id: "p2", name: "Paint", estimatedHours: 20 }] }];
+  const entries = [{ source: "qbtime", qbJobcodeId: "77", phaseId: "p1", date: "2026-08-11", hours: 12 }];
+  const w = buildMyWeek({ ...base, jobs, entries, crewId: "c1", days: 1 });
+  const flags = w.days[0].jobs[0].flags;
+  assert.deepEqual(flags.map((f) => [f.kind, f.subId, f.lastHoursOn]), [["unmarked-done", "p1", "2026-08-11"]]);
+});
+
+test("entries null (hours read failed): hours flags stay quiet, no-jobcode still shows", () => {
+  const jobs = [
+    { id: "j6", title: "Unlinked", stage: "in_progress", startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"] },
+    { id: "j7", title: "Silent", stage: "in_progress", qbJobcodeId: "77", startDate: "2026-08-10", targetDate: "2026-08-18", crewIds: ["c1"] },
+  ];
+  const w = buildMyWeek({ ...base, jobs, entries: null, crewId: "c1", days: 1 });
+  const byTitle = Object.fromEntries(w.days[0].jobs.map((j) => [j.title, j]));
+  assert.deepEqual(byTitle.Unlinked.flags.map((f) => f.kind), ["no-jobcode"]);
+  assert.deepEqual(byTitle.Silent.flags, []);   // NOT a false "0h since start"
 });
 
 test("buildMyWeek never mutates the caller's job objects", () => {

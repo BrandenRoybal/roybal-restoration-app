@@ -15,6 +15,7 @@
 import {
   computeSchedule, crewDayLoad, buildLiveOpts, isWorkDay, DEFAULT_SETTINGS,
 } from "../../board/js/schedule.js";
+import { scheduleFlags } from "../../board/js/schedulewatch.js";
 
 /* Match the signed-in email to a crew member. Case/space-insensitive; rows
    are the crew data objects. Null when no email or no match — the caller
@@ -66,32 +67,77 @@ export function entriesCutoff(jobs, today, buffer = 30, maxDays = 365) {
   return withBuffer < floor ? floor : withBuffer;
 }
 
-/* The live per-crew, per-day job map for EVERY crew member at once —
-   shared by My Week (one member) and the crew digest (all of them).
-   Mutates nothing the caller keeps: jobs are cloned before the engine
-   writes computed dates onto them. Returns:
-     { jobsOn: Map(crewId -> Map(dayISO -> Set(jobId))), byId: Map(jobId -> job), settings } */
-export function liveCrewDays({ jobs, entries, settings, today }) {
+/* Clone + live-recompute core shared by the crew-day map and the flag map:
+   the engine's attribution (opts.phaseHours) is built from the SAVED dates,
+   then computeSchedule writes live dates onto the clones — exactly the
+   sequence the board's applySchedule runs, so every consumer of this file
+   judges jobs the same way the board does. Callers' jobs are never mutated. */
+function liveScheduled({ jobs, entries, settings, today }) {
   const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   const live = schedulableJobs(jobs).map((j) => ({ ...j }));
   let opts;
   try { opts = buildLiveOpts(live, entries || [], s, today); } catch { /* plan fallback */ }
   try { computeSchedule(live, s, opts); } catch { /* saved dates still work */ }
+  return { live, opts, s };
+}
+
+/* The live per-crew, per-day job map for EVERY crew member at once —
+   shared by My Week (one member) and the crew digest (all of them).
+   Mutates nothing the caller keeps: jobs are cloned before the engine
+   writes computed dates onto them. Returns:
+     { jobsOn: Map(crewId -> Map(dayISO -> Set(jobId))), byId: Map(jobId -> job), settings, opts } */
+export function liveCrewDays({ jobs, entries, settings, today }) {
+  const { live, opts, s } = liveScheduled({ jobs, entries, settings, today });
   // an opts-less recompute would silently un-push every delayed job — see
   // services/phone-agent/tools.mjs; always pass opts through to the load
   const { jobsOn } = crewDayLoad(live, s, opts);
-  return { jobsOn, byId: new Map(live.map((j) => [j.id, j])), settings: s };
+  return { jobsOn, byId: new Map(live.map((j) => [j.id, j])), settings: s, opts };
+}
+
+/* Schedule-truth flags for a whole board read, judged EXACTLY like the board
+   judges them: engine-fresh dates (a dependent job pushed by its predecessor
+   is not "silent since start" — it hasn't started) and the engine's own
+   phase attribution. The field jobs list and job-home card go through here
+   so no surface can disagree with the board or My Week.
+   `entries` may be null ("couldn't read hours") — scheduleFlags then keeps
+   the hours-dependent flags quiet. Returns Map(jobId -> flags). */
+export function boardFlagsByJob({ jobs, entries, settings, today }) {
+  const { live, opts, s } = liveScheduled({ jobs, entries, settings, today });
+  const out = new Map();
+  for (const j of live) {
+    try {
+      out.set(j.id, scheduleFlags(j, entries, today, s,
+        opts && opts.phaseHours && opts.phaseHours.get(j.id)));
+    } catch { out.set(j.id, []); }   // flags are an extra — never sink the caller
+  }
+  return out;
 }
 
 /* One crew member's day-by-day view from `today` forward.
-   Returns [{ day, isWork, out, jobs: [{ id, title, customer, address, stage }] }]
+   Returns [{ day, isWork, out, jobs: [{ id, title, customer, address, stage, flags }] }]
    — calendar days (weekends included so "nothing Saturday" is visible),
-   `out` from the member's outDays (PTO/blocked; jobs suppressed those days). */
+   `out` from the member's outDays (PTO/blocked; jobs suppressed those days).
+   `flags` are the board's schedule-truth flags (schedulewatch.js) so a job
+   whose hours can't reach the schedule is loud on the tech's own week too. */
 export function buildMyWeek({ jobs, crew, entries, settings, crewId, today, days = 14 }) {
   const member = (crew || []).find((c) => c && c.id === crewId) || null;
-  const { jobsOn, byId, settings: s } = liveCrewDays({ jobs, entries, settings, today });
+  const { jobsOn, byId, settings: s, opts } = liveCrewDays({ jobs, entries, settings, today });
   const mine = jobsOn.get(crewId) || new Map();
   const outDays = (member && member.outDays) || [];
+  const flagCache = new Map();   // jobId → flags, computed once per job
+  const flagsOf = (j) => {
+    if (!flagCache.has(j.id)) {
+      // entries === null means the hours read failed — scheduleFlags then
+      // keeps the hours-dependent flags quiet instead of crying "0h" at
+      // every job. Attribution comes from the engine's own opts.phaseHours
+      // so a flag never names a different phase than the schedule used.
+      try {
+        flagCache.set(j.id, scheduleFlags(j, entries, today, s,
+          opts && opts.phaseHours && opts.phaseHours.get(j.id)));
+      } catch { flagCache.set(j.id, []); }   // flags are an extra — never sink the week
+    }
+    return flagCache.get(j.id);
+  };
   const out = [];
   let day = today;
   for (let i = 0; i < days; i++) {
@@ -105,6 +151,7 @@ export function buildMyWeek({ jobs, crew, entries, settings, crewId, today, days
         customer: j.customer || "",
         address: j.address || "",
         stage: j.stage || "",
+        flags: flagsOf(j),
       }))
       .sort((a, b) => a.title.localeCompare(b.title));
     out.push({ day, isWork: isWorkDay(day, s), out: isOut, jobs: dayJobs });

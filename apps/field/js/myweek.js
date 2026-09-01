@@ -14,6 +14,7 @@ import { h, clear, toast } from "./core.js";
 import { rest, isSignedIn, currentEmail } from "./supa.js";
 import { getTech, pickTech } from "./tech.js";
 import { crewByEmail, buildMyWeek, entriesCutoff } from "./myweekcalc.js";
+import { markBoardPhaseDone } from "./boardpush.js";
 
 const CACHE_KEY = "roybal-myweek-cache";
 
@@ -50,20 +51,31 @@ function writeCache(payload) {
    1000-row page in Aug 2026 — one unbounded read came back an arbitrary
    subset WITHOUT the newest rows, which silently re-dated jobs. So: only the
    entries that can still matter (entriesCutoff), and page until the server
-   runs dry rather than trusting one request to hold everything. */
+   runs dry rather than trusting one request to hold everything.
+   THROWS on an HTTP error (supa's rest returns the error response instead of
+   throwing): "the read failed" and "there are no hours" must never look the
+   same, or the schedule-truth flags cry "0h since start" at every job on a
+   429 blip. Callers that can degrade catch it (fetchEntriesSafe → null). */
 const PAGE = 1000;
-async function fetchEntries(cutoff) {
+export async function fetchEntries(cutoff) {
   const out = [];
   for (let page = 0; page < 6; page++) {
     const res = await rest(
       `time_entries?select=id,data&deleted=is.false&data->>date=gte.${cutoff}` +
       `&order=updated_at.desc&limit=${PAGE}&offset=${page * PAGE}`, { method: "GET" });
-    if (!res.ok) break;                       // hours are an optimization; the plan still renders
+    if (!res.ok) throw new Error("time entries read failed (" + res.status + ")");
     const rows = await res.json();
     for (const r of rows) if (r && r.data) out.push(r.data);
     if (rows.length < PAGE) break;
   }
   return out;
+}
+
+/** Same read, fail-safe, for callers where hours are decoration (the jobs
+    list's schedule-truth flags): null when offline / HTTP error / anything,
+    so those callers can tell "no entries" apart from "couldn't look". */
+export async function fetchEntriesSafe(jobs, today) {
+  try { return await fetchEntries(entriesCutoff(jobs || [], today)); } catch (_) { return null; }
 }
 
 /* board tables: {id, data, deleted} envelope; the reserved __settings__ row
@@ -78,8 +90,12 @@ async function fetchBoard(today) {
   const settings = (jobRows.find((r) => r.id === "__settings__") || {}).data || {};
   const jobs = jobRows.filter((r) => r && r.id !== "__settings__" && r.data).map((r) => r.data);
   const crew = (await crewRes.json()).map((r) => r.data).filter(Boolean);
-  // the entries window depends on the jobs, so this read follows them
-  const entries = await fetchEntries(entriesCutoff(jobs, today));
+  // the entries window depends on the jobs, so this read follows them.
+  // A failed hours read must not sink the week (the plan still renders) —
+  // but it must stay distinguishable from "no hours": null tells
+  // buildMyWeek to keep the hours-dependent flags quiet.
+  let entries = null;
+  try { entries = await fetchEntries(entriesCutoff(jobs, today)); } catch (_) { /* plan-only week */ }
   return { jobs, crew, settings, entries };
 }
 
@@ -96,9 +112,27 @@ export function resolveIdentity(crew, email, tech) {
   return null;
 }
 
+/* A tech-pick identity is a GUESS, not a login match — on a shared tablet it
+   can be the last person's pick, and the week it shows would be theirs. That
+   must read as a warning banner, never a quiet subtitle. Returns the banner
+   text, or null when the identity is the durable email match (or absent —
+   the empty state handles that). */
+export function identityNotice(who) {
+  if (!who || who.via !== "tech") return null;
+  return `Showing ${who.name || "the picked tech"}'s week from this device's tech pick — this login isn't on the crew roster, so this may be the wrong person's week. Ask the office to add your email to your crew card on the Job Board.`;
+}
+
+/* schedule-truth flag chips (schedulewatch.js, attached by buildMyWeek) —
+   same tone treatment as the job list's drying flags */
+const flagChipStyle = (tone) =>
+  "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
+  (tone === "bad" ? "background:#fdecea;color:#b3261e" : "background:#fff4e5;color:#8a6d00");
+
 /* `today` is passed in, never assumed to be the week's first day: a cached
-   week rendered offline tomorrow would otherwise label yesterday "today". */
-function paintWeek(box, week, today) {
+   week rendered offline tomorrow would otherwise label yesterday "today".
+   `onMarkDone(jobId, flag, btn)` — when given, an unmarked-done flag grows a
+   one-tap "Mark done" button (live view only; a cached week can't write). */
+function paintWeek(box, week, today, onMarkDone) {
   clear(box);
   let shown = 0;
   for (const d of week.days) {
@@ -120,6 +154,7 @@ function paintWeek(box, week, today) {
     for (const j of d.jobs) {
       shown++;
       const maps = mapsHref(j.address);
+      const flags = j.flags || [];
       box.append(h("div", { class: "card", style: "margin:6px 0;padding:10px 12px" },
         h("div", { style: "font-weight:700" }, j.title),
         h("div", { style: "display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:2px" },
@@ -127,7 +162,18 @@ function paintWeek(box, week, today) {
             ? (maps ? h("a", { href: maps, target: "_blank", rel: "noopener", style: "font-size:13px" }, "📍 " + j.address)
                     : h("span", { class: "subtle", style: "font-size:13px" }, j.address))
             : h("span", { class: "subtle", style: "font-size:13px" }, "No address on the board"),
-          j.stage ? h("span", { class: "subtle", style: "font-size:12px" }, j.stage.replace(/_/g, " ")) : null)));
+          j.stage ? h("span", { class: "subtle", style: "font-size:12px" }, j.stage.replace(/_/g, " ")) : null),
+        flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px" },
+          ...flags.flatMap((f) => {
+            const chip = h("span", { title: f.label, style: flagChipStyle(f.tone) }, "⚠ " + (f.short || f.label));
+            if (f.kind === "unmarked-done" && onMarkDone) {
+              const b = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none;padding:3px 10px;font-size:12px" },
+                "✓ Mark done");
+              b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); onMarkDone(j.id, f, b); });
+              return [chip, b];
+            }
+            return [chip];
+          })) : null));
     }
   }
   if (!shown) {
@@ -151,11 +197,20 @@ export function myWeekPage(container) {
   const head = h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:2px" },
     h("h1", {}, "My Week"));
   const sub = h("div", { class: "subtle", style: "margin:0 0 4px;font-size:13px" }, "");
+  const warnBox = h("div");   // persistent identity warning (tech-pick fallback)
   const box = h("div");
-  wrap.append(head, sub, box);
+  wrap.append(head, sub, warnBox, box);
 
   const today = akToday();
   const cached = readCache();
+
+  // a tech-pick identity must stay a BANNER for the whole visit — a shared
+  // tablet showing someone else's week as a quiet subtitle looks confirmed
+  const paintIdentity = (who) => {
+    clear(warnBox);
+    const msg = identityNotice(who);
+    if (msg) warnBox.append(h("div", { class: "warn", style: "margin:6px 0 10px" }, h("strong", {}, "⚠ Is this you? "), msg));
+  };
 
   async function load() {
     if (!isSignedIn()) {
@@ -183,17 +238,32 @@ export function myWeekPage(container) {
         return;
       }
       const week = buildMyWeek({ jobs, crew, entries, settings, crewId: who.crewId, today });
-      sub.textContent = who.name
-        ? who.name + (who.via === "email" ? "" : " (from this device's tech pick)")
-        : "";
+      sub.textContent = who.name || "";
+      paintIdentity(who);
       writeCache({ at: new Date().toISOString(), email: currentEmail(), who, week });
-      paintWeek(box, week, today);
+      // one tap = the phase is done on the board, completed the last day its
+      // hours landed (flag.lastHoursOn — stamping today would retroactively
+      // swallow the next phase's hours); persists through the board's own
+      // write path (boardpush), then the week reloads
+      const onMarkDone = async (jobId, flag, btn) => {
+        btn.disabled = true; btn.textContent = "Saving…";
+        try {
+          await markBoardPhaseDone(jobId, flag.subId, flag.lastHoursOn);
+          toast(`Marked “${flag.subName || "phase"}” done — the board schedule re-flows.`);
+          load();
+        } catch (e) {
+          toast(String((e && e.message) || e));
+          btn.disabled = false; btn.textContent = "✓ Mark done";
+        }
+      };
+      paintWeek(box, week, today, onMarkDone);
     } catch (e) {
       // same identity guard as the instant paint: never show one tech the
       // week another tech cached on this device
       if (cacheUsable(cached, currentEmail())) {
         sub.textContent = (cached.who && cached.who.name ? cached.who.name + " · " : "") +
           "offline — last updated " + String(cached.at || "").slice(0, 10);
+        paintIdentity(cached.who);
         paintWeek(box, cached.week, today);
       } else {
         clear(box);
@@ -205,6 +275,7 @@ export function myWeekPage(container) {
   // cached copy paints instantly; the live pull replaces it
   if (cacheUsable(cached, currentEmail())) {
     sub.textContent = (cached.who && cached.who.name) || "";
+    paintIdentity(cached.who);
     paintWeek(box, cached.week, today);
   } else {
     box.append(h("p", { class: "subtle" }, "Loading your schedule…"));
