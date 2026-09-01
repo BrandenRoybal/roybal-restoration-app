@@ -14,6 +14,16 @@ body { background: #eef2f7; }
 .abar__acct { color: #cfd9e6; }
 #syncDot { color: var(--green); }
 
+/* section tabs (the CRM home — docs/CRM_Design.md §13.1) */
+.anav { display: flex; align-items: center; gap: 2px; background: #fff;
+  border-bottom: 1px solid var(--line); padding: 0 20px; overflow-x: auto; }
+.anav a { padding: 11px 13px; font-size: 13.5px; font-weight: 600; color: var(--muted);
+  text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+.anav a:hover { color: var(--navy); }
+.anav a.is-active { color: var(--navy); border-bottom-color: var(--orange); }
+.anav__help { margin-left: auto; }
+@media (max-width: 700px) { .anav { padding: 0 8px; } .anav a { padding: 10px; } }
+
 .aview { max-width: 1100px; margin: 0 auto; padding: 22px 20px 80px; }
 
 /* dashboard cards */
