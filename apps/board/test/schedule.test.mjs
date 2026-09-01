@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import {
   isWorkDay, addWorkDays, workDaysBetween, durationOf, durationFracOf,
-  layoutSubtasks, computeSchedule, effCrew, crewDayLoad, findOverAllocations,
+  layoutSubtasks, computeSchedule, effCrew, crewDayLoad, findOverAllocations, crewAssignments,
   wouldCreateCycle, computeCriticalPath, linkComponents, computeCfoSnapshot, DEFAULT_SETTINGS,
   listDays, dayCrewPull, dayCrewPush,
   spanActive, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear,
@@ -627,6 +627,43 @@ test("timelinePct: positions within the window and clamps outside it", () => {
   assert.equal(timelinePct(H(18), w), 100);
   assert.equal(timelinePct(H(6), w), 0);           // clamped, not negative
   assert.equal(timelinePct(H(20), w), 100);
+});
+
+group("on hold — a held job books nobody");
+test("an On Hold job loads no crew, so it can't throw overloads at the leftover roster", () => {
+  // the real failure shape (Sep 2026): 800h job, crew pulled down to one guy,
+  // long window -> ~14h/day booked on him across the whole span, all phantom
+  const held = job({
+    id: "hold", stage: "on_hold", crewIds: ["a"], estimatedHours: 800,
+    startDate: "2026-06-15", targetDate: "2026-08-28",
+  });
+  const { load, jobsOn } = crewDayLoad([held], S);
+  assert.equal(load.size, 0);
+  assert.equal(jobsOn.size, 0);
+  const over = findOverAllocations([held], S);
+  assert.equal(over.overloads.length, 0);
+  assert.equal(over.byJob.size, 0);
+  // …and the same job NOT on hold does book (sanity that the math still runs)
+  const active = { ...held, stage: "in_progress" };
+  assert.ok(findOverAllocations([active], S).overloads.length > 0);
+});
+test("On Hold books nothing in live mode either, phased or not", () => {
+  const held = job({
+    id: "hold", stage: "on_hold", crewIds: ["a"], startDate: "2026-06-15",
+    subtasks: [{ id: "p1", name: "Paint", durationDays: 5, crewIds: ["a"] }],
+  });
+  const opts = { today: "2026-06-17", phaseHours: new Map([["hold", new Map()]]) };
+  assert.equal(crewDayLoad([held], S, opts).load.size, 0);
+  assert.deepEqual(crewAssignments([held], S), []);
+});
+test("a held job keeps its dates — only the crew booking stops", () => {
+  const held = job({
+    id: "hold", stage: "on_hold", scheduleMode: "manual", pinnedStart: "2026-06-15",
+    durationDays: 3, crewIds: ["a"],
+  });
+  computeSchedule([held], S);
+  assert.equal(held.startDate, "2026-06-15");
+  assert.equal(held.targetDate, "2026-06-17");
 });
 
 group("defaults");

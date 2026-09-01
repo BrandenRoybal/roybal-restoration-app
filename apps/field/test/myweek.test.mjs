@@ -70,6 +70,13 @@ test("out day: marked, and that day's jobs are suppressed", () => {
   assert.deepEqual(thu.jobs.map((j) => j.title), ["Dental office"]);
 });
 
+test("an On Hold job leaves the tech's week — pulled crew are free, not booked on the hold", () => {
+  const jobs = [...JOBS, { id: "j9", title: "Held", stage: "on_hold", startDate: TODAY, targetDate: "2026-08-21", crewIds: ["c1"] }];
+  const w = buildMyWeek({ ...base, jobs, crewId: "c1", days: 5 });
+  assert.ok(w.days.every((d) => !d.jobs.some((j) => j.title === "Held")));
+  assert.deepEqual(w.days[0].jobs.map((j) => j.title), ["Henderson"]);   // real work still shows
+});
+
 test("lead/done/archived jobs never appear", () => {
   const jobs = [...JOBS,
     { id: "j3", title: "Lead", stage: "lead", startDate: TODAY, targetDate: TODAY, crewIds: ["c1"] },

@@ -1187,9 +1187,11 @@ function dayRowsFor(iso) {
     r.hours += Number(e.hours) || 0;
   }
 
-  // anyone the schedule put on a job today gets a row even with nothing logged
+  // anyone the schedule put on a job today gets a row even with nothing
+  // logged. On Hold doesn't count as "the schedule put them there" — a held
+  // job ghosting "scheduled today, no hours" every day of the hold is noise.
   for (const j of jobs.filter(matchesFilter)) {
-    if (j.isMilestone || !jobActiveOn(j, iso)) continue;
+    if (j.isMilestone || j.stage === "on_hold" || !jobActiveOn(j, iso)) continue;
     for (const cid of effectiveCrewOn(j, iso)) {
       const c = crewById(cid);
       if (!c || isOut(c, iso)) continue;
