@@ -390,6 +390,9 @@ serve(async (req) => {
       (email ? `Email: ${email}\n` : "") +
       (emergency ? `⚠️ Marked as an ACTIVE EMERGENCY by the customer.\n` : "") +
       (message ? `\n${message}` : ""),
+    // the customer's verbatim ask as its own field (CRM §13.3) — the Leads
+    // Inbox renders it in the open; notes keeps the composite for the board
+    message,
     source: "web",
     channel: "web-form",
     // Hashed, not raw: rate limiting only needs equality, and a visitor's IP

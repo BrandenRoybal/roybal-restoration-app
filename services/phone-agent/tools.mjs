@@ -135,6 +135,9 @@ async function createLead(input, session) {
     scheduleMode: "auto", pinnedStart: "", durationDays: null,
     notes: `AI-booked from a phone call (${session.from || "unknown number"}).\n` +
       `${String(input.summary || "").slice(0, 500)}${input.urgency ? `\nUrgency: ${input.urgency}` : ""}`,
+    // the caller's ask as its own field (CRM §13.3) — the Leads Inbox
+    // renders it in the open; notes keeps the composite for the board
+    message: String(input.summary || "").slice(0, 500),
     // channel makes phone leads visible to data->>'channel' queries — they
     // used to be the one lane that wrote no provenance at all
     channel: "phone",
