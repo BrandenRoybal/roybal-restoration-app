@@ -280,7 +280,7 @@ Contacts turn AI Phase 6's "weather triggers → outreach campaigns to past cust
 | 12 | CRM home: nav shell | §13.1 — admin tab bar (Today / Jobs / Contacts / Campaigns / ⚙), connections → `#/settings`, help updated | S | — |
 | 13 | CRM home: full tabs | §13.2 — contacts filters + merge queue view, campaigns history | S–M | 12 |
 | 14 | Leads Inbox | §13.3 — 🟡 **BUILT 2026-09-01** (PR stacked on 12/13): `#/leads` + badge + brief 🆕 line; migration 246 **applied to prod** (probe-verified); roybal-lead v28 / web-agent v24 / brief v46 **deployed**, verify_jwt=false re-probed on both public lanes; phone-agent `message` field awaits its next Fly deploy | M | 12; RPC before any admin lead write |
-| 15 | Today stat row | §13.4 — unworked / overdue / pipeline $ / avg first touch | S | 14 |
+| 15 | Today stat row | §13.4 — 🟡 **BUILT 2026-09-01** (PR stacked on 14): lead row above the ops KPIs — unworked / overdue (click → inbox) / pipeline Σ estValue / avg first touch (archived leads count toward the average) | S | 14 |
 
 Steps 1–3 are the whole foundation and touch **zero UI** — nothing can break that users see.
 **Rollback (1–3):** the columns and tables are additive and nullable; ignoring them restores today exactly.
