@@ -15,6 +15,7 @@
 import {
   computeSchedule, crewDayLoad, buildLiveOpts, isWorkDay, DEFAULT_SETTINGS,
 } from "../../board/js/schedule.js";
+import { scheduleFlags } from "../../board/js/schedulewatch.js";
 
 /* Match the signed-in email to a crew member. Case/space-insensitive; rows
    are the crew data objects. Null when no email or no match — the caller
@@ -84,14 +85,24 @@ export function liveCrewDays({ jobs, entries, settings, today }) {
 }
 
 /* One crew member's day-by-day view from `today` forward.
-   Returns [{ day, isWork, out, jobs: [{ id, title, customer, address, stage }] }]
+   Returns [{ day, isWork, out, jobs: [{ id, title, customer, address, stage, flags }] }]
    — calendar days (weekends included so "nothing Saturday" is visible),
-   `out` from the member's outDays (PTO/blocked; jobs suppressed those days). */
+   `out` from the member's outDays (PTO/blocked; jobs suppressed those days).
+   `flags` are the board's schedule-truth flags (schedulewatch.js) so a job
+   whose hours can't reach the schedule is loud on the tech's own week too. */
 export function buildMyWeek({ jobs, crew, entries, settings, crewId, today, days = 14 }) {
   const member = (crew || []).find((c) => c && c.id === crewId) || null;
   const { jobsOn, byId, settings: s } = liveCrewDays({ jobs, entries, settings, today });
   const mine = jobsOn.get(crewId) || new Map();
   const outDays = (member && member.outDays) || [];
+  const flagCache = new Map();   // jobId → flags, computed once per job
+  const flagsOf = (j) => {
+    if (!flagCache.has(j.id)) {
+      try { flagCache.set(j.id, scheduleFlags(j, entries || [], today, s)); }
+      catch { flagCache.set(j.id, []); }   // flags are an extra — never sink the week
+    }
+    return flagCache.get(j.id);
+  };
   const out = [];
   let day = today;
   for (let i = 0; i < days; i++) {
@@ -105,6 +116,7 @@ export function buildMyWeek({ jobs, crew, entries, settings, crewId, today, days
         customer: j.customer || "",
         address: j.address || "",
         stage: j.stage || "",
+        flags: flagsOf(j),
       }))
       .sort((a, b) => a.title.localeCompare(b.title));
     out.push({ day, isWork: isWorkDay(day, s), out: isOut, jobs: dayJobs });

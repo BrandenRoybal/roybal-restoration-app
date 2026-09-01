@@ -13,7 +13,7 @@
    a job save only lands when the server is still on the rev the
    write started from — a stale copy can never clobber newer edits.
    ============================================================ */
-import { uid, Store, stripCtrl, likelyOffline } from "./core.js";
+import { uid, Store, stripCtrl, likelyOffline, todayISO } from "./core.js";
 import { rest, isSignedIn } from "./supa.js";
 import { SYNC_ENABLED } from "./config.js";
 import { matchCoordinationId, normClaim } from "./spine.js";
@@ -512,6 +512,40 @@ export async function pushActuals(project) {
   } catch (_) {
     return { skipped: true };
   }
+}
+
+/** One-tap "mark phase done" from the field. Sets done + completedOn (today)
+    on ONE phase of a board job and saves through the same guarded write every
+    other board save uses. This is a REAL schedule edit (the engine re-flows
+    from the completion), so unlike the fieldActuals annotation it consumes a
+    revision — a coordinator saving the job at the same moment wins, and we
+    retry once against their fresh copy. Deliberate crossing of the ownership
+    line (board owns phases): the tech is reporting ground truth the board is
+    waiting on, and only ever by explicit tap. */
+export async function markBoardPhaseDone(boardJobId, subId) {
+  if (!ready()) throw new Error("Sign in (online) to mark the phase done on the board.");
+  const attempt = async () => {
+    const res = await rest(`coordination_jobs?id=eq.${encodeURIComponent(boardJobId)}&select=id,data&deleted=is.false`, { method: "GET" });
+    if (!res.ok) throw new Error("board read failed (" + res.status + ")");
+    const row = (await res.json())[0];
+    if (!row || !row.data) throw new Error("That job is no longer on the board.");
+    const d = row.data;
+    const st = arr(d.subtasks).find((s) => s && s.id === subId);
+    if (!st) throw new Error("That phase is no longer on the board job.");
+    if (st.done) return { unchanged: true };
+    const next = {
+      ...d,
+      subtasks: arr(d.subtasks).map((s) => (s && s.id === subId ? { ...s, done: true, completedOn: todayISO() } : s)),
+      updatedAt: new Date().toISOString(),
+    };
+    const base = Number(d.rev) || 0;
+    const r = await guardedWrite(boardJobId, base, { ...next, rev: base + 1 });
+    return r.conflict ? null : { ok: true, name: st.name || "Phase" };
+  };
+  let out = await attempt();
+  if (!out) out = await attempt();   // one retry after a rev conflict
+  if (!out) throw new Error("The board job changed while saving — try again.");
+  return out;
 }
 
 /** History digest for the estimator prompt — best-effort, empty on any failure. */
