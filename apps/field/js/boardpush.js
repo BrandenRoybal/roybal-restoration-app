@@ -689,6 +689,36 @@ export async function adoptBoardJobs(rows, projects) {
   return created;
 }
 
+/* ---------- pure: has the office already said no? ----------
+   The board→field direction respects tombstones (tilesNeedingFieldFile:
+   "a tile that EVER linked a field job is respected even if that job was
+   deleted"). This is the missing mirror: a DELETED board tile that carries
+   this project's fieldJobId means someone deliberately removed this job's
+   tile — the automatic push must not re-create it. Without this, a live
+   tile mislinked to a deleted duplicate job file makes the link lookup
+   miss, and every office delete is invisible to the deleted=is.false
+   fetch — the Hebard lead respawned six times in six weeks exactly this
+   way. A coordinator can still add the tile by hand (ensureBoardTile then
+   LINKS it via the match path), and the explicit push-to-board action is
+   untouched — only the automatic job-home path defers to the tombstone. */
+export function tombstoneBlocksCreate(tombstoneRows, projectId) {
+  return arr(tombstoneRows).some((r) => r && r.data && r.data.fieldJobId === projectId);
+}
+
+/* deleted board tiles carrying this project's link — the office's "no".
+   Fails CLOSED (null): if the check can't run, no tile is created this
+   pass (the serverHasProject precedent — ensureBoardTile re-runs on the
+   next job-home visit anyway). */
+async function deletedTilesFor(projectId) {
+  try {
+    const res = await rest(
+      `coordination_jobs?select=id,data&deleted=is.true&data->>fieldJobId=eq.${encodeURIComponent(projectId)}&limit=1`,
+      { method: "GET" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) { return null; }
+}
+
 /* ---------- field job -> board tile (no double entry) ----------
    Fires from the job home. Creates a phase-less tile the first time a job
    has real details; afterwards keeps the tile's identity fields (customer,
@@ -709,6 +739,10 @@ export async function ensureBoardTile(project) {
       // ≥2 lookalike tiles: never guess, never create a duplicate — a claim #
       // or an exact name on either side resolves it on a later visit
       if (looseCandidates(rows, project).length >= 2) return { skipped: true };
+      // a deleted tile that carried this job's link = the office said no;
+      // null = the check couldn't run — either way, don't create this pass
+      const gone = await deletedTilesFor(project.id);
+      if (gone === null || tombstoneBlocksCreate(gone, project.id)) return { skipped: true };
       const job = boardJobFromProject(project, null, new Date().toISOString());
       const r = await guardedWrite(job.id, 0, job);
       if (r.conflict) return { skipped: true };

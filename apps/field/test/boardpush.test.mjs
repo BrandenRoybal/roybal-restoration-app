@@ -7,6 +7,7 @@ import {
   rollupActuals, historyDigest, phasesToSubRows, isoDateOnly, matchCustomerRow,
   boardRowFor, tileCandidates, tilesNeedingFieldFile, fieldSeedFromBoardJob,
   nameLike, normAddr, sameWorkGroup, looseCandidates, mergeBoardTiles, duplicateTilePairs,
+  tombstoneBlocksCreate,
 } from "../js/boardpush.js";
 import { blankSubRow } from "../js/model.js";
 
@@ -323,5 +324,17 @@ const emptyKeeper = mergeBoardTiles({ id: "h9", stage: "scheduled", type: "remod
 ok("a phase-less keeper takes the dupe's phases directly", emptyKeeper.subtasks.length === 1 && emptyKeeper.subtasks[0].name === "Demo");
 ok("human notes typed on the dupe ride along", /WO 55 gate code 1234/.test(
   mergeBoardTiles(hand.data, { ...machine.data, notes: "WO 55 gate code 1234" }, NOW_ISO).notes));
+
+/* ---------- tombstoneBlocksCreate: the office's delete is respected ----------
+   The Hebard respawn (6 lead tiles in 6 weeks): a live tile mislinked to a
+   deleted duplicate job file made the link lookup miss, and every office
+   delete was invisible — the automatic push re-created the lead forever. */
+ok("a deleted tile carrying this job's link blocks auto-create",
+  tombstoneBlocksCreate([{ id: "t1", data: { fieldJobId: "fp-hebard", stage: "lead" } }], "fp-hebard"));
+ok("tombstones for OTHER jobs don't block this one",
+  !tombstoneBlocksCreate([{ id: "t1", data: { fieldJobId: "fp-somebody-else" } }], "fp-hebard"));
+ok("no tombstones, no block", !tombstoneBlocksCreate([], "fp-hebard"));
+ok("garbage rows (no data) never block or throw",
+  !tombstoneBlocksCreate([null, {}, { data: null }], "fp-hebard"));
 
 console.log(`\n${pass} board-bridge checks passed.`);
