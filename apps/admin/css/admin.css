@@ -119,6 +119,11 @@ table.atable tbody tr:hover { background: #f7f9fc; }
 
 .mergecard { margin-top: 14px; border-color: #f0d8a8; background: #fffdf7; }
 
+/* 📧 Job email card (Today) */
+.erow { display: flex; align-items: center; gap: 10px; padding: 8px 2px;
+  border-bottom: 1px solid var(--line, #e2e6ec); }
+.erow:last-child { border-bottom: 0; }
+
 /* Analytics (§14.1): chart cards, table twins, the diverging legend */
 .acard { margin-top: 12px; overflow-x: auto; }
 .atoggle { font-size: 12px; color: var(--orange-dark, #c14e12); text-decoration: none; }

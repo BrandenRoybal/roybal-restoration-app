@@ -260,6 +260,24 @@ function paintRow(row, id, d) {
     : null;
   if (touchedBtn) touchedBtn.addEventListener("click", () => apply({}, touchedBtn));
 
+  /* 📝 the SAME notes field the board chip shows — edited here, adopted
+     there on its next sync (the rev-bumping patch). "Left a voicemail"
+     no longer means switching apps. */
+  const notesBtn = h("button", { class: "btn btn--ghost btn--sm" }, "📝 Notes");
+  notesBtn.addEventListener("click", () => {
+    busy = true;                            // an open editor must survive the sync repaint
+    clear(formHost);
+    const ta = h("textarea", { rows: "5", style: "width:100%;box-sizing:border-box",
+      placeholder: "Left a voicemail 9/2, calling back tomorrow…" }, d.notes || "");
+    const save = h("button", { class: "btn btn--primary btn--sm" }, "Save notes");
+    const cancel = h("button", { class: "btn btn--ghost btn--sm", onclick: () => { busy = false; clear(formHost); } }, "Cancel");
+    save.addEventListener("click", () => apply({ notes: ta.value }, save));
+    formHost.append(h("div", { class: "lform", style: "flex-direction:column;align-items:stretch" },
+      ta, h("div", { style: "display:flex;gap:8px" }, save, cancel)));
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);   // cursor at the end, ready to append
+  });
+
   const lostBtn = h("button", { class: "btn btn--ghost btn--sm" }, "✕ Lost / spam");
   lostBtn.addEventListener("click", () => {
     busy = true;
@@ -281,7 +299,7 @@ function paintRow(row, id, d) {
   // DOM append() stringifies null (the campaigns lesson) — filter first
   for (const el of [
     d.phone ? h("a", { class: "btn btn--ghost btn--sm", href: "tel:" + digits(d.phone) }, "📞 Call") : null,
-    followBtn, touchedBtn, lostBtn,
+    followBtn, touchedBtn, notesBtn, lostBtn,
   ].filter(Boolean)) actions.append(el);
   row.append(actions, formHost, err);
 }
