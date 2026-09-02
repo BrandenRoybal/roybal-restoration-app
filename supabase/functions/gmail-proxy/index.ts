@@ -266,15 +266,46 @@ serve(async (req) => {
         updated_at: new Date().toISOString(),
       }).eq("id", row.id);
 
-      if (filed > 0 || msgIds.length > 0) {
+      // ── read-state sync (the ratchet fix) ────────────────────────────────
+      // "Waiting" used to be forever: the ONLY thing that cleared
+      // read_by_office was the assistant's reply chip, so mail handled in
+      // Gmail itself kept counting — the morning brief ratcheted to "50
+      // waiting" while 9 were real. Each pull now checks the still-unread
+      // rows against Gmail: no UNREAD label there (opened, archived-read) —
+      // or the message is GONE (404: deleted/trashed) — means the office
+      // handled it, so it stops counting here too. One metadata call per
+      // row, capped, newest first; a flaky row is skipped, never fatal.
+      let cleared = 0;
+      const { data: unreadRows } = await supabase.from("email_messages")
+        .select("id, gmail_id").eq("direction", "in").eq("read_by_office", false)
+        .order("received_at", { ascending: false }).limit(30);
+      for (const r of (unreadRows ?? []) as Blob[]) {
+        if (!r.gmail_id) continue;
+        let handled = false;
+        try {
+          const meta = await gmailFetch(accessToken, `/messages/${r.gmail_id}?format=minimal`);
+          // only a POSITIVE label read may clear — a malformed response must
+          // not silently mark mail read
+          handled = Array.isArray(meta.labelIds) && !(meta.labelIds as string[]).includes("UNREAD");
+        } catch (e) {
+          handled = /Gmail API 404/.test(String((e as Error)?.message ?? ""));
+        }
+        if (handled) {
+          const { error: updErr } = await supabase.from("email_messages")
+            .update({ read_by_office: true }).eq("id", r.id);
+          if (!updErr) cleared++;
+        }
+      }
+
+      if (filed > 0 || cleared > 0 || msgIds.length > 0) {
         await supabase.from("capture_events").insert([{
           source_type: "email_pull", form_key: "emailPull", captured_by: viaCron ? "gmail-cron" : (caller || "office"),
           status: "extracted", processed_at: new Date().toISOString(),
-          raw_payload: { scanned: msgIds.length, filed, skipped },
+          raw_payload: { scanned: msgIds.length, filed, skipped, cleared },
           result: {},
         }]).then(() => {}, () => {});
       }
-      return ok({ scanned: msgIds.length, filed, skipped });
+      return ok({ scanned: msgIds.length, filed, skipped, cleared });
     }
 
     // ── sendEmail (signed-in office user, OR an owner-approved text action) ──

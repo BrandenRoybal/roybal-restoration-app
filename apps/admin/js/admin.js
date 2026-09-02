@@ -13,6 +13,7 @@ import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
 import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
 import { messagesPanel } from "./messages.js";
+import { emailsPanel } from "./emailpanel.js";
 import { contactsTab, renderContactPage } from "./contacts.js";
 import { campaignsPanel, campaignsBusy } from "./campaigns.js";
 import { leadsTab, leadsBusy, leadsResetBusy, refreshLeadsBadge, leadStats, fmtTouch } from "./leads.js";
@@ -115,7 +116,8 @@ function renderHelp() {
       h("a", { class: "btn btn--ghost btn--sm", href: "#", onclick: (e) => { e.preventDefault(); location.hash = ""; } }, "‹ Back")),
     sec("The tabs",
       p("The office admin is organized into sections: ", h("strong", {}, "Today"), " — the shop at a glance plus ",
-        h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number); ", h("strong", {}, "🆕 Leads"),
+        h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number) and ",
+        h("strong", {}, "📧 Job email waiting"), " (the brief's number, now visible — mail handled in Gmail clears itself within 15 minutes); ", h("strong", {}, "🆕 Leads"),
         " — the inbox for new business; ", h("strong", {}, "Jobs"),
         " — every field job; ", h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; ",
         h("strong", {}, "📊 Analytics"), "; and ",
@@ -127,7 +129,8 @@ function renderHelp() {
       p("Every open lead from every lane — website form, AI chat, phone line — newest first, with what the customer actually wrote or said shown in full (no more digging it out of a board chip's notes). The count on the tab is leads ", h("strong", {}, "nobody has touched yet"), "; the morning brief nags about them too."),
       p("Work a lead right from the row: ", h("strong", {}, "📞 Call"), ", ", h("strong", {}, "⏰ Follow-up"),
         " (what + when — it shows on the board card and turns red when overdue), ", h("strong", {}, "✓ Mark contacted"),
-        " (stops the response-time clock), or ", h("strong", {}, "✕ Lost / spam"),
+        " (stops the response-time clock), ", h("strong", {}, "📝 Notes"),
+        " (the same notes the board chip shows — jot “left a voicemail” here and the board picks it up), or ", h("strong", {}, "✕ Lost / spam"),
         " (picks a reason and files it in the board's 🗄 Archive). The first action on a lead stamps its response time. Every change lands on the same board card the crew sees — the board picks it up on its next sync instead of overwriting it."),
       p("Won stays on the board: open the job there and use the 🎯 Lead section to mark it Won when the work is booked.")),
     sec("👤 Contacts — the customer directory",
@@ -257,7 +260,7 @@ async function renderToday() {
         kpi(fmtTouch(s.avgTouchMs), "Avg first touch"));
       crmRow.hidden = false;
     });
-    body.append(messagesPanel());
+    body.append(messagesPanel(), emailsPanel());
   }
 }
 
