@@ -282,7 +282,7 @@ Contacts turn AI Phase 6's "weather triggers → outreach campaigns to past cust
 | 14 | Leads Inbox | §13.3 — 🟡 **BUILT 2026-09-01** (PR stacked on 12/13): `#/leads` + badge + brief 🆕 line; migration 246 **applied to prod** (probe-verified); roybal-lead v28 / web-agent v24 / brief v46 **deployed**, verify_jwt=false re-probed on both public lanes; phone-agent `message` field awaits its next Fly deploy | M | 12; RPC before any admin lead write |
 | 15 | Today stat row | §13.4 — 🟡 **BUILT 2026-09-01** (PR stacked on 14): lead row above the ops KPIs — unworked / overdue (click → inbox) / pipeline Σ estValue / avg first touch (archived leads count toward the average) | S | 14 |
 | 16 | Analytics tab | §14.1 — `#/analytics`: conversion by channel, lost reasons, speed to lead, est-vs-actual hours + bid-vs-contract diverging charts, headline factors; chart+table twins, validated palette | M | 4, 14 |
-| 17 | Estimating feedback loop | §14.2 — calibration factors (median actual/est by type, n≥5) surfaced to the assistant/estimating engine as suggestions only | S–M | 16 |
+| 17 | Estimating feedback loop | §14.2 — ✅ **BUILT 2026-09-01**: calibration.js (gated factors, 7 node checks) feeding `estimateCalibration` into the admin + field assistant contexts; suggest-never-apply rides in-band | S | 16 |
 | 18 | QBO profitability in the tab | §14.3 — read-only per-project P&L via qbo-proxy, displayed beside the CRM stats; needs project-linkage audit | M | 16 |
 
 Steps 1–3 are the whole foundation and touch **zero UI** — nothing can break that users see.
@@ -385,9 +385,11 @@ One time-range filter row scoping everything below it; each card is a chart **wi
 5. **Estimate vs actual, completed jobs** — diverging over/under bars per job (hours); completed = stage `done` or archived non-lost, with both est > 0 and actual > 0 (in-progress excluded — partial hours mislead).
 6. **Bid vs contract, won jobs** — same form in dollars.
 
-### 14.2 Phase 2 — the estimating feedback loop
+### 14.2 Phase 2 — the estimating feedback loop — ✅ BUILT 2026-09-01
 
-The tiles' accuracy factors (median actual/est by job type) become machine-readable **calibration factors** for the estimating engine and the assistant: "your mitigation estimates run ×1.18 vs. actuals (n=9)." These are OUR actuals — no Xactimate/Verisk data anywhere near it (decision 8 / the EULA memo untouched). Gates: a factor is only *suggested* in estimate drafts, never auto-applied, and never surfaced at all below n≥5 completed jobs of that type. Delivery candidates when it comes: the assistant context builders (field + admin) and the estimating rules doc's engine.
+The tiles' accuracy factors (median actual/est by job type) are machine-readable **calibration factors** for the assistant: "your mitigation estimates run ×1.18 vs. actuals (n=9)." These are OUR actuals — no Xactimate/Verisk data anywhere near it (decision 8 / the EULA memo untouched).
+
+*As built:* `apps/field/js/calibration.js` — pure `computeCalibration()` (7 node checks: medians, the completed-job filter, the type split) + `fetchCalibration(rest)` (dependency-injected client, 10-min cache, failure → null so an ask is never blocked) + `calibrationContext()`. The gate is enforced in code: **factor = null below n≥5** of a type; typed factors (mitigation/remodel) surface when they pass, the overall factor only when neither does; nothing passing ⇒ the context key is omitted entirely. Both assistant context builders carry the block as `estimateCalibration` (admin `buildAdminContext`, field `assistContext`), and the **suggest-never-apply rule travels in-band** — a `note` field inside the data tells the model to mention the factor with its sample size and never silently apply it, so the rule needs no persona redeploy and can't drift from the data.
 
 ### 14.3 Phase 3 — QBO project profitability, same spot
 

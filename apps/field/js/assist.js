@@ -33,6 +33,7 @@ import { normalizePhone, smsHref, logSms, companySendEnabled, sendViaCompany } f
 import { capturedBy } from "./tech.js";
 import { getUnifiedJobId } from "./spine.js";
 import { portalShareLink } from "./portal.js";
+import { fetchCalibration, calibrationContext } from "./calibration.js";
 
 /* Construction jobs get the construction digest (scope, schedule, inspections,
    selections, draws); water jobs keep the mitigation digest. */
@@ -73,10 +74,16 @@ function portalContext(p) {
       : { warning: "enabled but never published — the customer sees 'this link isn't active' until it's published from the Client Portal form" }),
   };
 }
-function assistContext(p) {
+async function assistContext(p) {
   const ctx = { ...assistFacts(p), customerPortal: portalContext(p) };
   const open = openFollowups(p);
-  return open.length ? { ...ctx, openEstimatorFollowups: open } : ctx;
+  if (open.length) ctx.openEstimatorFollowups = open;
+  // §14.2: the estimating calibration factors — gated (n≥5), cached, and
+  // self-describing (the note tells the model: suggest, never apply). A
+  // fetch failure omits the key entirely; an ask is never blocked on it.
+  const cal = calibrationContext(await fetchCalibration(rest));
+  if (cal) ctx.estimateCalibration = cal;
+  return ctx;
 }
 
 const sessions = new Map();   // provider.key -> [{ role, text, images?, actions?, evId? }]

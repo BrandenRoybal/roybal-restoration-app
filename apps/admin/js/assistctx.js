@@ -20,6 +20,7 @@ import { fetchPortalThread, portalDigest, threadForAi, sendOfficeReply, publishP
 import { budgetStatus } from "../../js/fincalc.js";
 import { runFinanceAction } from "./finactions.js";
 import { fetchUnreadEmails, fetchJobEmails, gmailSend, markEmailRead } from "../../js/gmail.js";
+import { fetchCalibration, calibrationContext } from "../../js/calibration.js";
 
 /* mirrors admin.js jobAttention(): drying equipment on site ≥7 days */
 const equipOut7 = (p) => (p.dryingLogs || []).some((d) =>
@@ -98,8 +99,14 @@ export async function buildAdminContext() {
   const stale = rows.filter((r) => !r.updated || daysSince(r.updated) > 14);
   const equipFlags = rows.filter((r) => r.equipmentOut7Days);
   const budgetFlags = rows.filter((r) => r.overBudget);
-  const [qbo, unread, mail] = await Promise.all([quickbooks(), portalUnread(), emailWaiting(projects)]);
+  const [qbo, unread, mail, cal] = await Promise.all([
+    quickbooks(), portalUnread(), emailWaiting(projects),
+    // §14.2: gated (n≥5) estimating calibration — the note inside tells the
+    // model to SUGGEST, never apply. Cached 10 min; failure omits the key.
+    fetchCalibration(rest).then(calibrationContext).catch(() => null),
+  ]);
   return {
+    ...(cal ? { estimateCalibration: cal } : {}),
     today: todayISO(),
     kpis: {
       totalJobs: rows.length,
