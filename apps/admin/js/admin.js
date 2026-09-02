@@ -149,7 +149,8 @@ function renderHelp() {
         h("strong", {}, "Bid vs contract"), " does the same in dollars for won work."),
       p("Every chart has a ", h("strong", {}, "table"), " toggle with the exact numbers. The ×factors up top (actual ÷ estimate) are the honest correction on your estimating — job-cost profitability itself stays in QuickBooks, where it already lives for QBO projects.")),
     sec("💬 Ask the office (the assistant)",
-      p("The floating assistant reads the same job records and can draft replies, adjuster emails, portal updates, estimates, invoices, change orders, and receipt logs — every action lands behind a confirm chip; nothing sends or writes without your tap.")));
+      p("The floating assistant reads the same job records and can draft replies, adjuster emails, portal updates, estimates, invoices, change orders, and receipt logs — every action lands behind a confirm chip; nothing sends or writes without your tap."),
+      p("When it drafts or reviews an estimate, it also knows your historical accuracy (the Analytics ×factors, once 5+ completed jobs back them) and will ", h("strong", {}, "suggest"), " an adjustment with the sample size — it never silently changes your numbers.")));
 }
 
 $("#signOutBtn").addEventListener("click", () => {
