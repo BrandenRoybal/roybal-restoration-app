@@ -65,6 +65,17 @@ const LOST_REASONS = [
   { id: "not-a-fit",       label: "Not a fit" },
   { id: "other",           label: "Other" },
 ];
+/* what happened on a follow-up — the middle of the pipeline between fresh and
+   won/lost. Entries land in j.leadLog (date-stamped, newest last). Mirrored in
+   apps/admin/js/leads.js — same ids, same labels. */
+const LEAD_LOG_KINDS = [
+  { id: "inspected",     icon: "🔍", short: "Inspected",           label: "Inspection / site visit done" },
+  { id: "estimate-sent", icon: "📄", short: "Estimate sent",       label: "Estimate sent" },
+  { id: "waiting",       icon: "⏳", short: "Waiting on customer", label: "Waiting on customer" },
+  { id: "no-answer",     icon: "📵", short: "No answer",           label: "No answer / left message" },
+  { id: "note",          icon: "📝", short: "Note",                label: "Other / note" },
+];
+const leadLogKind = (id) => LEAD_LOG_KINDS.find((k) => k.id === id) || { icon: "📝", short: id || "note", label: id || "note" };
 const channelOf = (j) => j.channel || (j.source === "web" ? "web-form" : "");
 const channelInfo = (j) => CHANNELS.find((c) => c.id === channelOf(j)) || null;
 const lostReasonLabel = (id) => (LOST_REASONS.find((r) => r.id === id) || {}).label || id || "";
@@ -898,10 +909,14 @@ function paintPipeline() {
     const ch = channelInfo(j);
     const d = daysFromToday(j.nextActionAt);
     const age = daysFromToday(String(j.createdAt || "").slice(0, 10));
+    const lastLog = (j.leadLog || [])[(j.leadLog || []).length - 1];
     const naChip = j.nextActionAt
       ? h("span", { class: "chip chip--sm" + (d < 0 ? " is-late" : d === 0 ? " is-due" : "") },
           "⏰ " + (d < 0 ? `${-d}d late` : d === 0 ? "today" : fmtShort(j.nextActionAt)))
-      : h("span", { class: "chip chip--sm subtle-chip" }, "no follow-up set");
+      : lastLog
+        ? h("span", { class: "chip chip--sm subtle-chip", title: lastLog.note || "" },
+            leadLogKind(lastLog.kind).icon + " " + leadLogKind(lastLog.kind).short + " " + fmtShort(lastLog.at))
+        : h("span", { class: "chip chip--sm subtle-chip" }, "no follow-up set");
     list.append(h("div", { class: "pipe-row", onclick: () => openJobModal(j) },
       h("div", { class: "pipe-row__main" },
         h("div", { class: "pipe-row__t" }, j.title || j.customer || "Untitled lead",
@@ -2185,11 +2200,49 @@ function openJobModal(existing, newMilestone) {
     : j.outcome === "lost"
       ? h("span", { class: "lead-badge is-lost" }, "✕ Lost — " + lostReasonLabel(j.lostReason))
       : null;
+
+  // ✓ Log what happened — the middle of the pipeline. Stamps a date + kind +
+  // note into j.leadLog (the follow-up it completes rides along as `action`),
+  // optionally books the next follow-up, then reuses the normal Save.
+  const logList = h("div", { class: "lead-log" });
+  const paintLeadLog = () => {
+    clear(logList);
+    for (const e of [...(j.leadLog || [])].reverse()) {
+      const k = leadLogKind(e.kind);
+      const rm = h("button", { class: "lead-log__rm", type: "button", title: "Remove this entry" }, "✕");
+      rm.addEventListener("click", () => {
+        j.leadLog = (j.leadLog || []).filter((x) => x.id !== e.id);
+        paintLeadLog();
+        toast("Entry removed — Save to keep");
+      });
+      logList.append(h("div", { class: "lead-log__row" },
+        h("span", { class: "lead-log__at" }, fmtShort(e.at)),
+        h("span", {}, k.icon + " " + k.short
+          + (e.note ? " — " + e.note : "")
+          + (e.action ? " (was: " + e.action + ")" : "")),
+        rm));
+    }
+    logList.style.display = (j.leadLog || []).length ? "" : "none";
+  };
+  paintLeadLog();
+  const doneKind = h("select", {}, ...LEAD_LOG_KINDS.map((k) => h("option", { value: k.id }, k.icon + " " + k.label)));
+  const doneNote = h("input", { type: "text", maxlength: "200", placeholder: "How'd it go? — measured up, numbers by Friday…" });
+  const doneNextAt = h("input", { type: "date" });
+  const doneNextWhat = h("input", { type: "text", maxlength: "120", placeholder: "e.g. Send estimate, call back…" });
+  const doneConfirm = h("button", { class: "btn btn--primary btn--sm", type: "button" }, "Log & save");
+  const doneWrap = h("div", { class: "lead-done-wrap", style: "display:none" },
+    h("div", { class: "grid2" }, field("What happened", doneKind), field("Details", doneNote)),
+    h("div", { class: "grid2" }, field("Next follow-up — when (optional)", doneNextAt), field("Next follow-up — what", doneNextWhat)),
+    doneConfirm);
+  const doneBtn = h("button", { class: "btn btn--sm lead-done", type: "button",
+    title: "The appointment or call happened — log the outcome without calling it won or lost" }, "✓ Log what happened");
   const leadSection = h("div", { class: "leadsec hide-for-ms", style: isLead(j) ? "" : "display:none" },
     h("div", { class: "leadsec__h" }, "🎯 Lead", outcomeNote),
     h("div", { class: "grid2" }, field("Source", chanSel), field("Estimated value ($)", f.estValue)),
     h("div", { class: "grid2" }, field("Next action — when", f.nextActionAt), field("Next action — what", f.nextAction)),
-    h("div", { class: "lead-actions" }, wonBtn, lostBtn, lostWrap));
+    logList,
+    h("div", { class: "lead-actions" }, doneBtn, wonBtn, lostBtn, lostWrap),
+    doneWrap);
 
   // schedule-truth strip: the same flags the cards/Gantt carry, spelled out in
   // full where the fix actually happens (link a jobcode, mark a phase done)
@@ -2231,6 +2284,21 @@ function openJobModal(existing, newMilestone) {
     f.stage.value = "scheduled";
     leadSection.style.display = "none";
     saveBtn.click();     // reuse the normal save (schedule cascade + persist)
+  });
+  doneBtn.addEventListener("click", () => {
+    const open = doneWrap.style.display === "none";
+    doneWrap.style.display = open ? "" : "none";
+    if (open) { lostWrap.style.display = "none"; doneNote.focus(); }
+  });
+  doneConfirm.addEventListener("click", () => {
+    j.leadLog = [...(j.leadLog || []), {
+      id: uid(), at: todayISO(), kind: doneKind.value,
+      note: doneNote.value.trim(), action: f.nextAction.value.trim(),
+    }];
+    // the logged follow-up is done — whatever's typed here replaces it (or clears it)
+    f.nextActionAt.value = doneNextAt.value || "";
+    f.nextAction.value = doneNextWhat.value.trim();
+    saveBtn.click();     // reuse the normal save (schedule cascade + persist), like Won
   });
   lostBtn.addEventListener("click", () => { lostWrap.style.display = lostWrap.style.display === "none" ? "flex" : "none"; });
   lostConfirm.addEventListener("click", async () => {
@@ -2862,6 +2930,7 @@ function openHelpModal() {
         h("ul", { class: "help__ul" },
           li("New leads land in ", h("strong", {}, "Leads / Bids"), " automatically from the website form, the AI chat, and the phone line — each card wears a ", h("strong", {}, "source badge"), " (Phone / AI chat / Web form / Referral / Repeat / Walk-in)."),
           li("Open a lead and use the ", h("strong", {}, "🎯 Lead"), " section: source, estimated value, and a ", h("strong", {}, "next action"), " (what + when). Overdue follow-ups turn the ⏰ chip red, rise to the top of Pipeline, and show up in the morning brief."),
+          li(h("strong", {}, "✓ Log what happened"), " covers everything between fresh and won/lost: the appointment or call happened, so log it — inspection done, estimate sent, waiting on customer, no answer — with a note and an optional next follow-up. Each entry is date-stamped and the history stays on the lead (here and in the office app's Leads inbox)."),
           li(h("strong", {}, "✓ Won"), " advances the lead to Scheduled and counts toward your win rate. ", h("strong", {}, "✕ Lost"), " asks why (price / went with another / no response / not a fit / other) and files the card in the archive."),
           li("The ", h("strong", {}, "🗄 Archive"), " browser has an ", h("strong", {}, "All / Completed / Lost leads"), " filter, so dead bids stay on record with their reason."))),
 

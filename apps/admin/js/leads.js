@@ -4,7 +4,8 @@
    Every open lead across every channel, newest first, with the
    customer's actual message IN THE OPEN — the thing that used to
    live only inside the board chip's notes textarea. One-tap triage
-   per row: set a follow-up, mark contacted, call, mark lost.
+   per row: set a follow-up, log what happened when it did (✓ Done →
+   data.leadLog), mark contacted, call, mark lost.
 
    Writes ride coordination_job_patch (migrations 230+246): the
    rev-bumping shallow merge the board's whole-blob guard ADOPTS
@@ -16,7 +17,7 @@
    That count badges the Leads tab (refreshLeadsBadge) and the same
    definition feeds the morning brief's 🆕 line (roybal-brief).
    ============================================================ */
-import { h, clear, toast } from "../../js/core.js";
+import { h, clear, toast, uid } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
 import { rest } from "../../js/supa.js";
 
@@ -36,6 +37,16 @@ const LOST_REASONS = [
   { id: "not-a-fit",       label: "Not a fit" },
   { id: "other",           label: "Other" },
 ];
+/* mirrors apps/board/js/board.js LEAD_LOG_KINDS — same ids, same labels.
+   ✓ Done appends to data.leadLog; the board modal shows the full history. */
+const LEAD_LOG_KINDS = [
+  { id: "inspected",     icon: "🔍", short: "Inspected",           label: "Inspection / site visit done" },
+  { id: "estimate-sent", icon: "📄", short: "Estimate sent",       label: "Estimate sent" },
+  { id: "waiting",       icon: "⏳", short: "Waiting on customer", label: "Waiting on customer" },
+  { id: "no-answer",     icon: "📵", short: "No answer",           label: "No answer / left message" },
+  { id: "note",          icon: "📝", short: "Note",                label: "Other / note" },
+];
+const leadLogKind = (id) => LEAD_LOG_KINDS.find((k) => k.id === id) || { icon: "📝", short: id || "note", label: id || "note" };
 const channelInfo = (d) => CHANNELS.find((c) => c.id === (d.channel || (d.source === "web" ? "web-form" : ""))) || null;
 
 const isOpenLead = (d) => (d.stage || "lead") === "lead" && !d.isMilestone && !d.outcome && !d.archived;
@@ -213,7 +224,14 @@ function paintRow(row, id, d) {
     state.append(h("span", { class: "lchip" + (overdue ? " lchip--late" : "") },
       "⏰ " + d.nextActionAt + (d.nextAction ? " — " + d.nextAction : "") + (overdue ? " (overdue)" : "")));
   }
-  if (d.firstTouchAt && !d.nextActionAt) state.append(h("span", { class: "lchip lchip--dim" }, "✓ touched"));
+  const lastLog = (d.leadLog || [])[(d.leadLog || []).length - 1];
+  if (lastLog) {
+    const k = leadLogKind(lastLog.kind);
+    const note = String(lastLog.note || "");
+    state.append(h("span", { class: "lchip lchip--dim", title: note },
+      k.icon + " " + k.short + " · " + (lastLog.at || "") + (note ? " — " + (note.length > 60 ? note.slice(0, 60) + "…" : note) : "")));
+  }
+  if (d.firstTouchAt && !d.nextActionAt && !lastLog) state.append(h("span", { class: "lchip lchip--dim" }, "✓ touched"));
   if (state.childNodes.length) row.append(state);
 
   /* triage */
@@ -253,6 +271,33 @@ function paintRow(row, id, d) {
     });
     formHost.append(h("div", { class: "lform" }, date, what, save, cancel));
     what.focus();
+  });
+
+  /* ✓ Done — the follow-up happened; log what came of it. Same leadLog the
+     board's 🎯 Lead section keeps, so the history reads the same in both apps.
+     Clears the completed follow-up and (optionally) books the next one. */
+  const doneBtn = h("button", { class: "btn btn--ghost btn--sm",
+    title: "The appointment or call happened — log the outcome without calling it won or lost" }, "✓ Done");
+  doneBtn.addEventListener("click", () => {
+    busy = true;                            // an open form must survive the sync repaint
+    clear(formHost);
+    const kind = h("select", {}, ...LEAD_LOG_KINDS.map((k) => h("option", { value: k.id }, k.icon + " " + k.label)));
+    const note = h("input", { type: "text", maxlength: "200", style: "flex:1;min-width:180px",
+      placeholder: "How'd it go? — measured up, numbers by Friday…" });
+    const nextAt = h("input", { type: "date" });
+    const nextWhat = h("input", { type: "text", maxlength: "120", style: "flex:1;min-width:180px",
+      placeholder: "Next move (optional) — send estimate, call back…" });
+    const save = h("button", { class: "btn btn--primary btn--sm" }, "Log it");
+    const cancel = h("button", { class: "btn btn--ghost btn--sm", onclick: () => { busy = false; clear(formHost); } }, "Cancel");
+    save.addEventListener("click", () => {
+      const entry = { id: uid(), at: localToday(), kind: kind.value, note: note.value.trim(), action: d.nextAction || "" };
+      apply({ leadLog: [...(d.leadLog || []), entry], nextActionAt: nextAt.value || "", nextAction: nextWhat.value.trim() }, save);
+    });
+    formHost.append(h("div", { class: "lform", style: "flex-direction:column;align-items:stretch;gap:6px" },
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, kind, note),
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, nextAt, nextWhat),
+      h("div", { style: "display:flex;gap:8px" }, save, cancel)));
+    note.focus();
   });
 
   const touchedBtn = !d.firstTouchAt
@@ -299,7 +344,7 @@ function paintRow(row, id, d) {
   // DOM append() stringifies null (the campaigns lesson) — filter first
   for (const el of [
     d.phone ? h("a", { class: "btn btn--ghost btn--sm", href: "tel:" + digits(d.phone) }, "📞 Call") : null,
-    followBtn, touchedBtn, notesBtn, lostBtn,
+    followBtn, doneBtn, touchedBtn, notesBtn, lostBtn,
   ].filter(Boolean)) actions.append(el);
   row.append(actions, formHost, err);
 }
