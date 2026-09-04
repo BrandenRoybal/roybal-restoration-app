@@ -1,0 +1,692 @@
+/* ============================================================
+   Roybal Field Forms — data model + company constants
+   ============================================================ */
+import { uid, todayISO } from "./core.js";
+
+export const COMPANY = {
+  name: "Roybal Construction, LLC",
+  dba: "Roybal Restoration",
+  address: "2170 Chateau Court, North Pole, AK 99705",
+  phone: "907-371-9868",
+  email: "branden@roybalconstruction.com",
+  web: "roybalconstruction.com",
+  tagline: "General Contracting | Restoration & Mitigation | IICRC WRT Certified",
+  // Credentials — printed in the document footer + cited in the construction narrative.
+  licenses: [
+    "AK GC Lic. #199401",
+    "Bus. Lic. #2177519",
+    "Residential Endorsement #105588",
+    "IICRC WRT #70233261",
+    "EPA RRP #RI8866-26-0533",
+  ],
+  signatory: "Branden Roybal",
+  signatoryTitle: "Owner / IICRC WRT-Certified",
+};
+
+/* The forms shown in the field app. (Invoice moved to the office admin.)
+   `multi` forms can have many instances (a new Drying Log / Moisture Map
+   page per day/area). `types` says which job kinds see the form —
+   restoration (water mitigation) and/or construction (remodel / rebuild);
+   an entry without `types` shows for both. */
+export const FORMS = [
+  { key: "floorPlan",        name: "Floor Plan",         icon: "📏", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "Dimensioned plan — prints FULL PAGE so measurements stay readable" },
+  { key: "supportDocs",      name: "Supporting Docs",    icon: "📎", multi: true,
+    types: ["restoration", "construction"],
+    blurb: "Engineer's reports, estimates, letters — print full page + the AI reads them" },
+  { key: "moistureMaps",     name: "Moisture Map",       icon: "🗺️", multi: true,
+    types: ["restoration"],
+    blurb: "Sketch the affected area + daily MC% readings" },
+  { key: "dryingLogs",       name: "Drying Log",         icon: "💧", multi: true,
+    types: ["restoration"],
+    blurb: "Equipment runtime + psychrometric readings" },
+  { key: "photos",           name: "Job Photos",         icon: "📷", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "Before / during / after pictures" },
+  { key: "contents",         name: "Contents",           icon: "📦", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "Personal property inventory + pack-out" },
+  { key: "workAuth",         name: "Work Authorization", icon: "✍️", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "Sign on device or upload signed copy" },
+  { key: "constructionLogs", name: "Field Report",       icon: "📋", multi: true,
+    types: ["restoration", "construction"],
+    blurb: "Crew → office: notes, issues, materials + photos (internal — not in packet)" },
+  { key: "laborLog",         name: "Labor Log",          icon: "⏱", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "Every job hour from QuickBooks Time — one page for the packet" },
+  { key: "certDrying",       name: "Cert. of Drying",    icon: "✅", multi: false,
+    types: ["restoration"],
+    blurb: "IICRC S500 dry verification + sign-off" },
+  { key: "scopeOfWork",      name: "Scope of Work",      icon: "📐", multi: false,
+    types: ["construction"],
+    blurb: "Per-area line items + allowances" },
+  { key: "preConChecklist",  name: "Pre-Construction",   icon: "🗒️", multi: false,
+    types: ["construction"],
+    blurb: "Contract, deposit, permits, selections" },
+  { key: "selections",       name: "Selections",         icon: "🎨", multi: false,
+    types: ["construction"],
+    blurb: "Owner finish & fixture choices vs. allowances" },
+  { key: "subSchedule",      name: "Sub Schedule",       icon: "👷", multi: false,
+    types: ["construction"],
+    blurb: "Trades, dates, status & COI tracking" },
+  { key: "inspections",      name: "Inspection Log",     icon: "🏛️", multi: true,
+    types: ["construction"],
+    blurb: "Permit inspections, results & corrections" },
+  { key: "punchList",        name: "Punch List",         icon: "🔧", multi: false,
+    types: ["construction"],
+    blurb: "Walkthrough items to closeout + owner sign-off" },
+  { key: "drawSchedule",     name: "Draw Schedule",      icon: "💰", multi: false,
+    types: ["construction"],
+    blurb: "Payment milestones — one tap to invoice a draw" },
+  { key: "certCompletion",   name: "Cert. of Completion", icon: "🏁", multi: false,
+    types: ["construction"],
+    blurb: "Final checklist, warranty + signatures" },
+  { key: "changeOrders",     name: "Change Order",       icon: "🔁", multi: true,
+    types: ["restoration", "construction"],
+    blurb: "Scope / supplement changes — publishable to the portal for e-sign approval" },
+  { key: "invoices",         name: "Construction Invoice", icon: "🧾", multi: true,
+    types: ["restoration", "construction"],
+    blurb: "T&M or contract billing — AI-drafted from the job's documentation or built by hand" },
+  { key: "reconEstimates",   name: "Reconstruction Estimate", icon: "🏗️", multi: true,
+    types: ["restoration"],
+    blurb: "Proposed rebuild scope & pricing — AI-drafted from the documented damage, sends with the packet alongside the mitigation invoice" },
+  { key: "portalShare",      name: "Client Portal",      icon: "🌐", multi: false,
+    types: ["restoration", "construction"],
+    blurb: "The customer's page: status, photos, drying, documents, e-sign change orders, balance & closeout — internal only, never in the packet" },
+];
+
+/* Job kind. Jobs created before this field existed carry no jobType, so
+   always read it through this helper — never the raw field. */
+export const jobType = (p) => (p && p.jobType === "construction" ? "construction" : "restoration");
+
+/* The forms a job shows: its kind's forms, plus any form that already has
+   data — so a job switched between kinds never hides documents it holds
+   (tiles, packet, and old bookmarks all stay reachable). Entries without
+   `types` apply to both kinds. */
+export const formsFor = (p) => {
+  const t = jobType(p);
+  return FORMS.filter((f) => !f.types || f.types.includes(t) || formCount(p, f.key) > 0);
+};
+
+export const CONSTRUCTION_TYPES = [
+  { value: "remodel",          label: "Remodel" },
+  { value: "new_construction", label: "New Construction" },
+  { value: "reconstruction",   label: "Reconstruction" },
+];
+export const constructionTypeLabel = (v) => CONSTRUCTION_TYPES.find((t) => t.value === v)?.label || "";
+
+/* ---------- authorship (Phase 1: individual logins) ----------
+   Set once at boot / sign-in from the session email; factories stamp it so
+   every capture carries who created it. Empty while offline or signed out —
+   an empty `by` merges as ordinary content and never blocks anything. */
+let AUTHOR = "";
+export function setAuthor(email) { AUTHOR = String(email || "").trim(); }
+export const author = () => AUTHOR;
+
+export function newProject() {
+  return {
+    id: uid(),
+    createdBy: AUTHOR,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    archivedAt: "",      // set when filed away from the home list — never deleted, keeps syncing
+    // shared header — entered once, flows into every form
+    workOrderNo: "",
+    claimNo: "",
+    customer: "",
+    address: "",
+    phone: "",
+    email: "",
+    carrier: "",
+    adjuster: "",
+    lossCause: "",
+    dateOfLoss: "",
+    waterCategory: "",   // 1 | 2 | 3
+    waterClass: "",      // 1 | 2 | 3 | 4
+    dryingSystem: "",    // Open | Closed | Hybrid
+    // loss classification beyond water (chips reveal each type's block).
+    // Freeze-up is a WATER loss (cause text) — no type of its own.
+    // Empty on purpose: lossTypesOf() supplies the water default, so a fresh
+    // scaffold stays blank-reclaimable while a DELIBERATE selection (a fire
+    // job with nothing else typed yet) counts as real content.
+    lossTypes: [],         // water | fire | mold | storm — pick all that apply
+    smokeType: "",         // fire: wet | dry | protein | fuel  (residue drives cleaning method)
+    fireDamage: "",        // fire: light | moderate | heavy
+    moldCondition: "",     // IICRC S520: 1 normal | 2 settled spores | 3 actual growth
+    moldExtent: "",        // "<10" | "10-100" | ">100"  (sq ft — remediation sizing)
+    stormCause: "",        // wind | hail | tree | ice-dam | flood
+    envelopeBreached: "",  // storm: yes | no
+    // job kind + construction header (construction jobs only; blank on water jobs)
+    jobType: "restoration",   // "restoration" | "construction"
+    constructionType: "",     // remodel | new_construction | reconstruction
+    contractAmount: "",
+    startDate: "",
+    targetCompletion: "",
+    permitNumbers: "",
+    lender: "",               // optional — lender on draw-schedule jobs
+    linkedRestorationId: "",  // set when converted from a restoration job
+    // project-level job photos (before/during/after, with caption + room)
+    photos: [],
+    // contents / personal property
+    rooms: [],          // shared room list (strings), reused across the app
+    boxes: [],          // pack-out boxes
+    contents: [],       // inventory items
+    // AI construction narrative (packet cover) — markdown prose + date generated
+    narrative: "",
+    narrativeDate: "",
+    // office override: unlocks narrative generation while hard completeness
+    // gaps remain — the chip keeps reporting the gaps; only the lock is skipped
+    narrativeOverride: false,
+    // AI progress update (construction jobs) — weekly owner/adjuster/lender summary
+    progressNarrative: "",
+    progressNarrativeDate: "",
+    // form data
+    workAuth: null,
+    certDrying: null,
+    moistureMaps: [],
+    dryingLogs: [],
+    constructionLogs: [],
+    laborLog: null,
+    changeOrders: [],
+    invoices: [],
+    reconEstimates: [],   // reconstruction estimates (restoration jobs — sent with the claim packet)
+    receipts: [],         // job-level cost log: [{id, vendor, amount, category, date, notes}] — assistant receiptLog + budget flag
+    portalShare: null,    // office config for the customer portal (Client Portal form)
+    // construction / remodel forms
+    scopeOfWork: null,
+    preConChecklist: null,
+    selections: null,
+    subSchedule: null,
+    inspections: [],
+    punchList: null,
+    drawSchedule: null,
+    certCompletion: null,
+  };
+}
+
+export function newPhoto() {
+  return { id: uid(), by: AUTHOR, src: "", caption: "", room: "", stage: "during", ts: new Date().toISOString() };
+}
+
+/* ---------- blank-scaffold detection (sync uses this) ----------
+   A project that holds NO field work — indistinguishable from a fresh
+   "+ New Job" scaffold. Sync lets a server delete reclaim a blank copy even
+   when its bookkeeping says "dirty" (repeat-tap junk must stay deletable);
+   ANY real content — one letter of a name, one photo, one log row — keeps
+   the full never-lose-work protection. Conservative on purpose: unknown or
+   prefilled values count as content. */
+// lossTypes is NOT ignored here: the factory ships it empty (lossTypesOf
+// supplies the water default), so a fresh scaffold is blank while a
+// deliberately toggled classification is protected content like waterCategory
+const BLANK_IGNORED = new Set(["id", "rev", "createdAt", "createdBy", "updatedAt", "archivedAt", "jobType", "photoSize", "photoSort"]);
+
+/* Loss types, read defensively: jobs predate the field. A block with DATA in
+   it always counts as selected (never hide entered data — the formsFor rule);
+   no data + no choice = water, the only classification the card ever showed
+   before this field existed. */
+export function lossTypesOf(p) {
+  const s = new Set(Array.isArray(p.lossTypes) ? p.lossTypes : []);
+  if (p.waterCategory || p.waterClass || p.dryingSystem) s.add("water");
+  if (p.smokeType || p.fireDamage) s.add("fire");
+  if (p.moldCondition || p.moldExtent) s.add("mold");
+  if (p.stormCause || p.envelopeBreached) s.add("storm");
+  if (!s.size) s.add("water");
+  return [...s];
+}
+function emptyDeep(v) {
+  if (v == null || v === "" || v === false) return true;
+  if (Array.isArray(v)) return v.length === 0;   // any element at all is content
+  if (typeof v === "object") {
+    // `id` is identity, not content — an opened-but-untouched form slot is a
+    // factory blank of {id + empty fields} and must still read as blank
+    return Object.entries(v).every(([k, x]) => k === "id" || emptyDeep(x));
+  }
+  return false;   // numbers (even 0) and non-empty strings are content
+}
+export function isBlankProject(p) {
+  if (!p || typeof p !== "object") return false;
+  return Object.entries(p).every(([k, v]) => BLANK_IGNORED.has(k) || emptyDeep(v));
+}
+
+/* ---------- Contents (personal property) ---------- */
+export const CONDITIONS = ["New", "Good", "Fair", "Poor", "Damaged", "Destroyed"];
+export const DISPOSITIONS = [
+  { value: "salvageable", label: "Salvageable", short: "Salv." },
+  { value: "non-salvageable", label: "Non-Salvageable (Loss)", short: "LOSS" },
+  { value: "cleaned", label: "Cleaned", short: "Cleaned" },
+  { value: "disposed", label: "Disposed", short: "Disposed" },
+];
+export const dispositionLabel = (v) => DISPOSITIONS.find((d) => d.value === v)?.label || "";
+export const dispositionShort = (v) => DISPOSITIONS.find((d) => d.value === v)?.short || "";
+export const CONTENT_CATEGORIES = [
+  "Furniture", "Electronics", "Appliance", "Clothing", "Kitchenware", "Décor",
+  "Bedding / Linens", "Tools", "Documents", "Toys", "Sporting / Outdoor", "Other",
+];
+export const BOX_DESTINATIONS = ["On-site", "Storage", "Cleaning", "Returned", "Disposed"];
+
+/* Porous categories — IICRC S500: generally non-restorable in Cat 3 losses */
+export const POROUS_CATEGORIES = ["Clothing", "Bedding / Linens", "Documents", "Toys"];
+
+export function newContentsItem() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    name: "", qty: "1", category: "", room: "", boxId: "",
+    noBox: false, destination: "",   // large/loose items ship unboxed with their own destination
+    condition: "", disposition: "salvageable",
+    value: "",                       // estimated unit replacement cost (RCV)
+    brand: "", model: "", age: "",   // for depreciation / loss claims
+    lossJust: "",                    // one-line total-loss justification (AI-drafted, editable)
+    notes: "", photos: [],
+    returned: false, returnedDate: "", // pack-back tracking
+  };
+}
+
+/* IICRC/insurance-style useful life (years) by category — drives ACV depreciation */
+export const USEFUL_LIFE = {
+  "Furniture": 15, "Electronics": 5, "Appliance": 10, "Clothing": 5,
+  "Kitchenware": 10, "Décor": 10, "Bedding / Linens": 5, "Tools": 10,
+  "Documents": 0, "Toys": 5, "Sporting / Outdoor": 8, "Other": 8,
+};
+const MAX_DEPRECIATION = 0.8;        // never depreciate below 20% salvage value
+
+/* Replacement Cost (RCV), depreciation %, and Actual Cash Value (ACV) for an item */
+export function depreciation(item) {
+  const unit = Number(item.value) || 0;
+  const qty = Number(item.qty) || 1;
+  const rcv = unit * qty;
+  const life = USEFUL_LIFE[item.category] ?? 10;
+  const age = Number(item.age);
+  let rate = 0;
+  if (rcv && life > 0 && isFinite(age) && age > 0) rate = Math.min(age / life, MAX_DEPRECIATION);
+  const acv = rcv * (1 - rate);
+  return { rcv, rate, acv, dep: rcv - acv };
+}
+export function newBox(n) {
+  return { id: uid(), by: AUTHOR, label: "Box " + n, room: "", destination: "Storage", packedBy: "", packedDate: todayISO(),
+    aiContents: "" };   // AI-listed contents from a box snapshot (editable text)
+}
+
+export const formByKey = (k) => FORMS.find((f) => f.key === k);
+
+/* count of completed/started instances for the project home tiles */
+export function formCount(project, key) {
+  const v = project[key];
+  if (Array.isArray(v)) return v.length;
+  return v ? 1 : 0;
+}
+
+/* Factory builders for multi-instance forms */
+export function newMoistureMap() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    label: "", material: "", dryGoal: "", meter: "",
+    ambientTemp: "", ambientRH: "", equipmentOnSite: "", technician: "",
+    sketch: "",                                  // flattened composite (bg + drawing) for print
+    floorPlan: "",                               // imported floor-plan background (PDF/image → image)
+    strokes: "",                                 // drawing layer only (PNG)
+    markerNext: 1,                               // next reading-location marker number
+    equipmentPlan: [],                           // placed equipment icons [{id,type,x,y,angle}] over the floor plan
+    equipmentPlanImg: "",                        // flattened equipment-plan composite for print
+    photos: [],                                  // alt: photos of the area
+    page: "", pageOf: "",
+    // reading grid: rows are dates; locations 1..13
+    readings: [ blankReadingRow() ],
+  };
+}
+export function blankReadingRow() {
+  return { date: todayISO(), values: Array(13).fill(""), notes: "" };
+}
+
+export function newDryingLog() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    dryoutStart: "", dryoutFinish: "", techSupervisor: "",
+    equipment: [ blankEquipRow() ],
+    readings: [ blankPsychroRow() ],
+  };
+}
+export function blankEquipRow() {
+  return { asset: "", type: "", location: "", placed: "", removed: "", hours: "", notes: "" };
+}
+export function blankPsychroRow() {
+  return {
+    date: todayISO(), time: "",
+    outT: "", outRH: "", outGPP: "",
+    refT: "", refRH: "", refGPP: "",
+    affT: "", affRH: "", affGPP: "",
+    gd: "", dehu: "", am: "", scrub: "", tech: "", notes: "",
+  };
+}
+
+export function newConstructionLog() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    date: todayISO(),
+    rows: [],                                    // legacy work-log rows (form no longer collects them)
+    notes: "", issues: "", materials: "", photos: [],
+    completedBy: "", signature: "", signDate: todayISO(),
+  };
+}
+export function blankWorkRow() {
+  return { employee: "", task: "", start: "", finish: "", hours: "" };
+}
+
+export function newLaborLog() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    syncedAt: "",       // last QuickBooks Time pull
+    startDate: "",      // count labor from this date (separates reconstruction from mitigation hours)
+    entries: [],        // snapshot: [{ date, employee, start, finish, hours, task, qbId }]
+  };
+}
+
+export function newChangeOrder() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    coNo: "", coDate: todayISO(),
+    reasons: {},                 // checkbox map
+    description: "",
+    items: [ blankLineItem() ],
+    daysAdded: "", origCompletion: "", revisedCompletion: "", effectiveDate: "",
+    origAmount: "", prevCO: "",
+    sigOwner: "", sigContractor: "", sigAdjuster: "",
+    sigOwnerDate: "", sigContractorDate: "", sigAdjusterDate: "",
+  };
+}
+export function newInvoice() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    invoiceNo: "", invoiceDate: todayISO(), dueDate: "", terms: "Due on receipt",
+    lossSummary: "",
+    items: [ blankLineItem() ],
+    billingModel: "tm",                   // "tm" (hourly + materials) | "contract" (set amount)
+    contractAmount: "",                   // the agreed figure when billingModel = contract
+    opMode: "pct",                        // "pct" = O&P as % of line items | "amount" = fixed $ (imported Xactimate O&P)
+    opAuto: true,                         // GC O&P rule: auto-set 10&10 only when a sub is on the job, else 0 — turns false once the user edits an O&P %
+    scopeInterview: null,                 // { narration, answers:[{question,answer}], summary } from Verify Scope — seeds the AI rebuild draft
+    overheadPct: "10", profitPct: "10",   // Xactimate-style 10 & 10 O&P (% mode) — overwritten on open while opAuto is true
+    overheadAmount: "", profitAmount: "", // fixed O&P dollars (amount mode)
+    deductible: "", previousPayments: "", taxRate: "",
+    notes: "",
+    attachments: [],   // supporting docs: [{ label, pages: [dataURL…] }]
+  };
+}
+/* Line items carry a stable id. The editor splices new lines into the MIDDLE
+   of inv.items (forms.js "+ line"), so array position is not an identity —
+   anything that references a line from outside the array (a customer
+   selection, a change order) must key on this id, never on the index. */
+export function blankLineItem() {
+  return { id: uid(), room: "", desc: "", qty: "", unit: "", price: "" };
+}
+
+/* Backfill ids on line items saved before they had one. Safe to call on every
+   load: it only fills blanks and never renumbers an existing id. */
+export function ensureLineItemIds(items) {
+  if (!Array.isArray(items)) return items;
+  for (const it of items) if (it && !it.id) it.id = uid();
+  return items;
+}
+
+/* Reconstruction estimate — same shape as an invoice (shared editor/AI
+   machinery) flagged kind:"estimate": proposed rebuild scope priced line
+   by line + O&P, not billing for performed work. */
+export function newReconEstimate() {
+  const e = newInvoice();
+  e.kind = "estimate";
+  e.terms = "";
+  return e;
+}
+
+/* ---------- Client Portal (office share config) ----------
+   The customer-facing milestone journey a restoration/reconstruction job
+   moves through. The office marks which one is "current"; the portal shows
+   the timeline. Keys are stable (stored); labels are what the customer sees. */
+export const PORTAL_MILESTONES = [
+  { key: "scheduled",   label: "Scheduled" },
+  { key: "mitigation",  label: "Water mitigation" },
+  { key: "drying",      label: "Structural drying" },
+  { key: "approved",    label: "Repairs approved" },
+  { key: "reconstruction", label: "Reconstruction" },
+  { key: "final",       label: "Final walkthrough" },
+  { key: "complete",    label: "Job complete" },
+];
+export const portalMilestoneLabel = (k) => PORTAL_MILESTONES.find((m) => m.key === k)?.label || "";
+
+/* Friendly, customer-facing lines announcing a milestone — posted to the
+   portal thread when the office advances the status (a proactive nudge).
+   Plain, warm, no dates or promises. */
+export const PORTAL_MILESTONE_NUDGES = {
+  scheduled:      "Good news — your project is on our schedule. We'll keep you posted right here as things move along.",
+  mitigation:     "We've started water mitigation at your property — removing standing water and affected materials to stop further damage.",
+  drying:         "Your project is now in structural drying. We've set up equipment to dry things out, and we'll monitor it until it's fully dry.",
+  approved:       "Your repairs are approved — we're getting everything lined up to begin the rebuild.",
+  reconstruction: "Reconstruction is underway! We've started putting your space back together.",
+  final:          "We're at the final walkthrough stage — nearly done. We'll go over everything to make sure it's just right.",
+  complete:       "Your project is complete. Thank you for trusting Roybal Construction — please reach out any time if you need anything.",
+};
+export const portalMilestoneNudge = (k) => PORTAL_MILESTONE_NUDGES[k] || "";
+
+export function newPortalShare() {
+  return {
+    id: uid(),                 // stable portal_jobs primary key (upsert target)
+    enabled: false,
+    shareToken: "",            // set on first enable — the Phase-A credential
+    status: "scheduled",       // current milestone key
+    sharedPhotoIds: [],        // which project.photos are shown to the customer
+    sharedDocIds: [],          // which project.supportDocs are shown (CF-2 documents)
+    shareDrying: false,        // publish the readings-only drying summary (CF-2)
+    publishedAt: "",           // last publish to the portal
+    notifyOnStatus: true,      // auto-post a nudge to the thread when status advances
+    selectionsSource: null,    // {file, importedAt, decisions, ...} once an estimate is imported
+    lastNotifiedStatus: "",    // the milestone the customer was last notified of
+  };
+}
+
+/* Supporting document — engineer's report, hygienist report, adjuster
+   estimate, permit letter… Pages print FULL PAGE in the packet; the AI
+   digest (aiDigest, tech-editable) rides the facts so the narrative,
+   invoice, rebuild scope and assistant can cite it. */
+export function newSupportDoc() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    title: "", docType: "", mode: "upload", uploadedPages: [], aiDigest: "",
+  };
+}
+
+/* Floor plan — an uploaded dimensioned plan (PDF/photo) whose pages print
+   FULL PAGE in the packet; mode stays "upload" so the packet's uploaded-
+   document path renders it instead of a form. */
+export function newFloorPlan() {
+  return { createdAt: new Date().toISOString(), mode: "upload", uploadedPages: [] };
+}
+
+export function newWorkAuth() {
+  return {
+    date: todayISO(),
+    scope: {                     // pre-checked authorized scope items
+      0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
+    },
+    mode: "sign",                // "sign" | "upload"
+    smsConsent: false,           // owner opts in to job text messages (affirmative, optional)
+    ownerSig: "", ownerName: "", ownerDate: todayISO(),
+    repSig: "", repName: "", repDate: todayISO(),
+    uploadedDoc: "",             // legacy: single dataURL of a wet-signed scan/photo
+    uploadedPages: [],           // dataURL per page of an uploaded signed PDF/scan
+  };
+}
+
+export function newCertDrying() {
+  return {
+    certNo: "", issueDate: todayISO(), dryingDays: "",
+    dryStart: "", dryComplete: "",
+    affectedAreas: "",
+    verification: [ blankVerifyRow() ],
+    dehuDays: "", amDays: "", scrubDays: "", heaterDays: "",
+    mode: "sign",                // "sign" | "upload"
+    uploadedDoc: "", uploadedPages: [],   // an uploaded signed Cert of Drying PDF/scan
+    sigTech: "", sigTechName: "", sigTechDate: todayISO(),
+    sigOwner: "", sigOwnerName: "", sigOwnerDate: todayISO(),
+    sigAdjuster: "", sigAdjusterName: "", sigAdjusterDate: "",
+  };
+}
+export function blankVerifyRow() {
+  return { material: "", meter: "", goal: "", final: "", reference: "", dry: false };
+}
+
+export const SCOPE_ITEMS = [
+  "Emergency water extraction and surface drying.",
+  "Moisture mapping, readings, and documentation per IICRC S500 standard.",
+  "Placement and daily monitoring of drying equipment (air movers, dehumidifiers, HEPA scrubbers as needed).",
+  "Removal of unsalvageable materials (flood cuts, flooring, insulation) as warranted by moisture readings.",
+  "Application of EPA-registered antimicrobial / antifungal treatment to affected structural surfaces.",
+  "Photo documentation and drying logs for insurance carrier submission.",
+  "Additional scope items identified during mitigation — owner / adjuster notified before execution.",
+];
+
+export const CHANGE_REASONS = [
+  "Concealed / Unforeseen Condition",
+  "Owner-Directed Scope Change",
+  "Carrier Supplement / Insurance-Approved",
+  "Code / Permit Requirement",
+  "Scope Clarification",
+  "Material / Unit Price Adjustment",
+];
+
+/* ============================================================
+   Construction / remodel forms (jobType "construction")
+   ============================================================ */
+export const TRADES = [
+  "Demo", "Framing", "Electrical", "Plumbing", "HVAC", "Insulation",
+  "Drywall", "Paint", "Flooring", "Trim / Doors", "Cabinets / Counters", "Roofing", "Other",
+];
+export const SELECTION_STATUSES = ["pending", "ordered", "delivered", "installed"];
+export const SUB_STATUSES = ["scheduled", "on-site", "done", "no-show"];
+export const PUNCH_STATUSES = ["open", "in-progress", "done", "verified"];
+export const PUNCH_PRIORITIES = ["low", "normal", "high"];
+export const INSPECTION_TYPES = [
+  "Footing / Foundation", "Framing", "Rough Electrical", "Rough Plumbing", "Rough Mechanical",
+  "Insulation", "Drywall / Nailing", "Final Electrical", "Final Plumbing", "Final Mechanical", "Final / CO",
+];
+export const INSPECTION_RESULTS = ["pass", "fail", "partial"];
+
+export function newScopeOfWork() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    date: todayISO(),
+    summary: "",
+    areas: [ blankScopeArea() ],
+    allowances: [ blankAllowanceRow() ],
+    exclusions: "",
+    referencePlans: [],   // floor plans / sketches (carried over from a linked restoration job)
+  };
+}
+export function blankScopeArea() {
+  return { id: uid(), name: "", items: [ blankScopeItem() ] };
+}
+export function blankScopeItem() {
+  return { trade: "", desc: "", qty: "", unit: "", notes: "" };
+}
+export function blankAllowanceRow() {
+  return { item: "", amount: "", notes: "" };
+}
+
+/* Pre-construction checklist items — completeness gates on the indexes below. */
+export const PRECON_ITEMS = [
+  "Contract signed",
+  "Deposit received",
+  "Permits pulled (list below)",
+  "HOA / covenant approval (if required)",
+  "Utilities located (dig line called)",
+  "Selections finalized with owner",
+  "Material lead times confirmed",
+  "Pre-construction photos taken",
+];
+export const PRECON_CONTRACT = 0;
+export const PRECON_PERMITS = 2;
+
+export function newPreConChecklist() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    items: {},           // checkbox map keyed by PRECON_ITEMS index
+    permits: [ blankPermitRow() ],
+    notes: "",
+  };
+}
+export function blankPermitRow() {
+  return { type: "", number: "", pulled: "", notes: "" };
+}
+
+export function newSelections() {
+  return { id: uid(), createdAt: new Date().toISOString(), rows: [ blankSelectionRow() ], notes: "" };
+}
+export function blankSelectionRow() {
+  return {
+    area: "", item: "", spec: "", allowance: "", actual: "", status: "pending",
+    leadWeeks: "", neededBy: "", decidedDate: "", ownerInit: "",
+  };
+}
+
+export function newSubSchedule() {
+  return { id: uid(), createdAt: new Date().toISOString(), rows: [ blankSubRow() ], notes: "" };
+}
+export function blankSubRow() {
+  return {
+    trade: "", company: "", contact: "", schedStart: "", schedEnd: "",
+    actStart: "", actEnd: "", status: "scheduled", coi: false, notes: "",
+  };
+}
+
+export function newInspection() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    type: "", scheduled: "", inspector: "", result: "",
+    corrections: "", reinspection: "", notes: "",
+  };
+}
+
+export function newPunchList() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    rows: [ blankPunchRow() ],
+    walkthroughDate: "",
+    sigOwner: "", sigOwnerName: "", sigOwnerDate: "",
+  };
+}
+export function blankPunchRow() {
+  return {
+    area: "", item: "", trade: "", priority: "normal", status: "open",
+    photos: [], completedBy: "", completedDate: "",
+  };
+}
+
+export function newDrawSchedule() {
+  return { id: uid(), createdAt: new Date().toISOString(), rows: [ blankDrawRow() ], notes: "" };
+}
+export function blankDrawRow() {
+  return { desc: "", pct: "", amount: "", invoicedDate: "", paidDate: "", invoiceId: "" };
+}
+
+/* Certificate of Completion checklist — mirrors certDrying's structure. */
+export const COMPLETION_ITEMS = [
+  "All contracted scope complete",
+  "Punch list cleared & verified",
+  "Final inspections passed / CO issued (if required)",
+  "Site cleaned & debris removed",
+  "Owner walkthrough completed",
+  "Manuals / warranties / registrations delivered",
+  "Final invoice issued",
+];
+export function newCertCompletion() {
+  return {
+    id: uid(), createdAt: new Date().toISOString(),
+    certNo: "", issueDate: todayISO(), completionDate: "",
+    scopeSummary: "",
+    checklist: {},        // keyed by COMPLETION_ITEMS index
+    warrantyWorkmanship: "1 year", warrantyNotes: "",
+    mode: "sign", uploadedDoc: "", uploadedPages: [],
+    sigContractor: "", sigContractorName: "", sigContractorDate: todayISO(),
+    sigOwner: "", sigOwnerName: "", sigOwnerDate: todayISO(),
+  };
+}
