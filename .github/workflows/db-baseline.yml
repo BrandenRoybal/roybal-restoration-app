@@ -1,0 +1,116 @@
+name: DB baseline
+
+# ============================================================================
+# P1's first step (03-TARGET-ARCHITECTURE-AND-ROADMAP.md §7.3): dump the live
+# schema so it can be reviewed and committed as the one replayable baseline,
+# replacing 72 journal files that no longer describe how to build this
+# database.
+#
+# WHY THIS RUNS HERE AND NOT ON A LAPTOP
+# `supabase db dump` shells out to pg_dump inside Docker. The owner's Mac has
+# neither Docker nor Postgres client tools, and the newest CLI (2.116) still
+# requires them. GitHub's runners have both. This is also where P1 is going
+# anyway: from P1 on, schema reaches a database by `db push` from CI after
+# staging passes — never from the SQL editor, never from MCP apply_migration,
+# never by hand. This workflow is the first piece of that pipeline.
+#
+# WHY IT DOES NOT COMMIT WHAT IT DUMPS
+# It uploads an artifact and stops. A baseline is the file every future
+# migration replays on top of; one that lands unreviewed is a baseline nobody
+# can trust. A human (or an agent with a human watching) reads it, diffs it
+# against what the journal claims, and commits it in its own PR.
+#
+# WHY IT IS MANUAL
+# Nothing about a baseline is routine. It is taken deliberately, at a known
+# moment, against a database nobody is mid-migration on.
+#
+# THE DRIFT THIS EXISTS TO FIX, measured 2026-09-07:
+#   supabase db push --dry-run  ->  refuses outright
+#   "Remote migration versions not found in local migrations directory"
+#   48 versions recorded remotely under names no local file carries; 46 local
+#   files the remote has no record of. Same changes, different names, recorded
+#   over six months of SQL-editor applies. A forced push would try to re-run
+#   46 old scripts — including non-idempotent `create policy` — against live
+#   production data.
+#
+# REQUIRED SECRET
+#   SUPABASE_ACCESS_TOKEN — a personal access token from
+#   https://supabase.com/dashboard/account/tokens
+#   This is NOT a database password. `db dump --project-ref` uses the
+#   Management API to mint a short-lived login role, which is why no database
+#   password appears in this workflow or in any secret it reads.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_ref:
+        description: "Project ref to dump (default: production)"
+        required: false
+        default: djpgvcvhvgrzgaziruze
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      # The ref is passed through env rather than interpolated into the shell:
+      # a workflow_dispatch input is attacker-controlled in the general case,
+      # and `run:` interpolation is script injection.
+      - name: Dump schema and roles
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ inputs.project_ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set. Create one at" \
+                 "https://supabase.com/dashboard/account/tokens and add it under" \
+                 "Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          case "$PROJECT_REF" in
+            *[!a-z0-9]*|"") echo "::error::project_ref must be lowercase alphanumeric"; exit 1 ;;
+          esac
+          supabase db dump --project-ref "$PROJECT_REF" -f baseline_schema.sql
+          supabase db dump --project-ref "$PROJECT_REF" --role-only -f baseline_roles.sql
+
+      # Printed into the run summary so the shape of the dump is visible before
+      # anyone downloads it — a baseline that is suspiciously small is the
+      # failure worth catching early.
+      - name: Summarise the dump
+        env:
+          PROJECT_REF: ${{ inputs.project_ref }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Baseline dump — \`$PROJECT_REF\`"
+            echo ""
+            echo "| | count |"
+            echo "|---|---|"
+            echo "| lines | $(wc -l < baseline_schema.sql) |"
+            echo "| CREATE TABLE | $(grep -c '^CREATE TABLE' baseline_schema.sql || true) |"
+            echo "| CREATE POLICY | $(grep -c '^CREATE POLICY' baseline_schema.sql || true) |"
+            echo "| CREATE FUNCTION | $(grep -c '^CREATE FUNCTION' baseline_schema.sql || true) |"
+            echo "| CREATE TRIGGER | $(grep -c '^CREATE TRIGGER' baseline_schema.sql || true) |"
+            echo "| CREATE INDEX | $(grep -c '^CREATE INDEX' baseline_schema.sql || true) |"
+            echo "| roles file lines | $(wc -l < baseline_roles.sql) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A schema dump names tables, policies and functions. It carries no rows,
+      # and --role-only carries role definitions without passwords. Still worth
+      # saying out loud: this artifact describes the shape of the business's
+      # database and should not be handed around.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-baseline
+          path: baseline_*.sql
+          retention-days: 7
