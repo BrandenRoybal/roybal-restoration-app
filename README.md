@@ -37,7 +37,6 @@ step, no framework. The marketing site is the one exception (Astro).
 | Marketing site | Astro 5 |
 | Backend | Supabase (Postgres + Auth + Storage + Edge Functions) |
 | Phone agent | Node on Fly.io + Twilio |
-| Floor plans | Magicplan REST API + webhook |
 
 ### Brand
 
@@ -112,8 +111,11 @@ function. See [`apps/portal/README.md`](apps/portal/README.md).
 ```bash
 supabase login
 supabase link --project-ref your-project-ref
-supabase functions deploy magicplan-webhook
+supabase functions deploy roybal-brief
 ```
+
+Deploy one slug at a time. `supabase/config.toml` pins each function's
+`verify_jwt`; read its header before deploying.
 
 **Phone agent** deploys to Fly from the repo root (the Dockerfile pulls shared files in at
 their repo-relative paths, so the build context must be the root):
@@ -128,9 +130,9 @@ fly deploy --config services/phone-agent/fly.toml --dockerfile services/phone-ag
 
 - Never expose `SUPABASE_SERVICE_ROLE_KEY` in frontend code — it belongs only in the Edge
   Function environment, where Supabase injects it automatically.
-- Magicplan and QuickBooks credentials live in Supabase secrets, not in the repo:
+- QuickBooks, Gmail, Twilio and LLM credentials live in Supabase secrets, not in the repo:
   ```bash
-  supabase secrets set MAGICPLAN_API_KEY=your-key
+  supabase secrets set QBO_CLIENT_SECRET=your-secret
   ```
 
 ---
@@ -160,7 +162,6 @@ August 2026 — the code remains in git history if you ever need it.
 ## Support
 
 For Supabase issues: https://supabase.com/docs
-For Magicplan API: https://app.magicplan.app/api/docs
 
 ---
 

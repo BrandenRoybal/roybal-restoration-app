@@ -27,6 +27,28 @@
  *                  just retries the next night). One capture_events row per
  *                  run; the morning brief reads the recorded payments.
  *
+ * AUTH — the per-action gate (findings.json F-003, Critical, E0)
+ *   verify_jwt=true on this function is NOT a caller check: the gateway
+ *   admits the publishable key that ships in apps/field/js/config.js:8 and
+ *   is served on the public site, so until now `curl` with that key could
+ *   push an invoice into QuickBooks, swap the OAuth code, or drop the
+ *   company's tokens. Every action is now declared in ACTION_AUTH below and
+ *   checked BEFORE dispatch, default-deny: an action missing from the table
+ *   is refused, so a new one cannot ship ungated by accident.
+ *     getStatus     any signed-in user (it only reports connected/not)
+ *     pushInvoice   staff JWT (admin|office|tech) — the field app's invoice
+ *                   tab is the only caller and techs reach it; narrowing to
+ *                   admin|office is a one-word change (STAFF_ROLES→OFFICE_ROLES)
+ *                   if the office ever wants invoicing fenced to itself
+ *     invoiceLink   staff JWT (unchanged — this action already gated itself)
+ *     exchangeCode  admin|office JWT — mutates the company's QBO connection.
+ *                   Still the admin page's own signed-in OAuth redirect flow.
+ *     disconnect    admin|office JWT
+ *     pullPayments  the cron secret ONLY (unchanged)
+ *
+ *   Regression guard: supabase/functions/qb-time-proxy/authgate.test.mjs
+ *   (npm run fn:test) fails if an action is dispatched without a line here.
+ *
  * Secrets: QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_REDIRECT_URI
  * Optional: QBO_BASE_URL (default production; sandbox:
  *           https://sandbox-quickbooks.api.intuit.com)
@@ -191,23 +213,94 @@ async function ensureCustomer(
   return qboId;
 }
 
-/* Is the caller a signed-in office user (admin/office/tech)? The CRM spine
-   write in ensureCustomer runs p_trusted, so it must never be reachable with
-   just the published anon key. Returns the caller's role, or null. */
-async function callerRole(req: Request, sb: ReturnType<typeof createClient>): Promise<string | null> {
+/* ============================================================
+   Caller identity + the per-action gate — F-003
+   ============================================================ */
+const OFFICE_ROLES = ["admin", "office"];            // moves money / mutates the connection
+const STAFF_ROLES = ["admin", "office", "tech"];     // the signed-in crew (same band ensureCustomer trusts)
+
+/** Which callers each action admits. DEFAULT-DENY: an action that is not
+    listed here is refused before dispatch (see authorize), so adding a new
+    action to the handler without a line here fails closed instead of open. */
+type AuthKind = "user" | "staff" | "office" | "cron";
+const ACTION_AUTH: Record<string, AuthKind[]> = {
+  getStatus: ["user"],
+  exchangeCode: ["office"],
+  disconnect: ["office"],
+  pushInvoice: ["staff"],
+  invoiceLink: ["staff"],
+  pullPayments: ["cron"],
+};
+
+/** The caller's bearer token, or "" when it is not a user JWT at all.
+    The published publishable key (config.js:8) and the legacy anon key both
+    get past the gateway, so they are rejected here by shape: an identity is
+    a three-segment JWT, never an `sb_publishable_…` / `sb_secret_…` key. */
+function userJwt(req: Request): string {
+  const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  if (!token || token === Deno.env.get("SUPABASE_ANON_KEY")) return "";
+  return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(token) ? token : "";
+}
+
+/** Who is calling? { uid, role } for a real signed-in user, nulls otherwise.
+    Resolution order is deliberate: supabase.auth.getUser on the service-role
+    client first (qb-time-proxy's requireUser idiom — it does not depend on
+    SUPABASE_ANON_KEY, which the legacy-JWT sunset made unreliable), falling
+    back to the original /auth/v1/user probe so a getUser hiccup cannot lock
+    the office out of the invoice link it already had. */
+async function callerIdentity(
+  req: Request,
+  sb: ReturnType<typeof createClient>,
+): Promise<{ uid: string | null; role: string | null }> {
+  const token = userJwt(req);
+  if (!token) return { uid: null, role: null };
+  let uid: string | null = null;
   try {
-    const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-    if (!token || token === Deno.env.get("SUPABASE_ANON_KEY")) return null;
-    const u = await fetch(`${Deno.env.get("SUPABASE_URL")}/auth/v1/user`, {
-      headers: { apikey: Deno.env.get("SUPABASE_ANON_KEY")!, Authorization: `Bearer ${token}` },
-    });
-    if (!u.ok) return null;
-    const uid = (await u.json().catch(() => null))?.id;
-    if (!uid) return null;
+    const { data, error } = await sb.auth.getUser(token);
+    if (!error && data?.user?.id) uid = String(data.user.id);
+  } catch (_) { /* fall through to the REST probe */ }
+  if (!uid) {
+    try {
+      const u = await fetch(`${Deno.env.get("SUPABASE_URL")}/auth/v1/user`, {
+        headers: { apikey: Deno.env.get("SUPABASE_ANON_KEY")!, Authorization: `Bearer ${token}` },
+      });
+      if (u.ok) uid = (await u.json().catch(() => null))?.id ?? null;
+    } catch (_) { /* stays anonymous */ }
+  }
+  if (!uid) return { uid: null, role: null };
+  try {
     const { data } = await sb.from("profiles").select("role").eq("id", uid).maybeSingle();
-    const role = data?.role ? String(data.role) : null;
-    return role;
-  } catch (_) { return null; }
+    return { uid, role: data?.role ? String(data.role) : null };
+  } catch (_) { return { uid, role: null }; }
+}
+
+/** Is this the cron? Same hand-check the crons have always sent (migration
+    207 posts x-cron-secret). */
+function viaCronSecret(req: Request): boolean {
+  const secret = Deno.env.get("CRON_SECRET") ?? "";
+  return !!secret && req.headers.get("x-cron-secret") === secret;
+}
+
+/** The gate. Returns a refusal Response, or the caller it resolved (so the
+    handler does not have to look the role up a second time). */
+async function authorize(
+  action: string,
+  req: Request,
+  sb: ReturnType<typeof createClient>,
+): Promise<{ deny: Response | null; role: string | null; cron: boolean }> {
+  const allowed = ACTION_AUTH[action];
+  if (!allowed) return { deny: err(`Unknown action: ${action}`, 404), role: null, cron: false };
+  if (allowed.includes("cron") && viaCronSecret(req)) return { deny: null, role: null, cron: true };
+  if (!allowed.some((a) => a !== "cron")) return { deny: err(`${action} is cron-only`, 401), role: null, cron: false };
+
+  const { uid, role } = await callerIdentity(req, sb);
+  if (!uid) return { deny: err("Sign in to use the QuickBooks connection", 401), role: null, cron: false };
+  const passes =
+    allowed.includes("user") ||
+    (allowed.includes("staff") && !!role && STAFF_ROLES.includes(role)) ||
+    (allowed.includes("office") && !!role && OFFICE_ROLES.includes(role));
+  if (!passes) return { deny: err("Not authorized — office or admin only", 403), role, cron: false };
+  return { deny: null, role, cron: false };
 }
 
 /** Find-or-create the generic service item. Returns the item Id.
@@ -246,6 +339,16 @@ serve(async (req) => {
   let body: Record<string, unknown> = {};
   try { body = await req.json(); } catch { return err("Invalid JSON body"); }
   const action = body.action as string;
+
+  // ── the gate (F-003) — before any dispatch, default-deny ────────────────
+  let gate: { deny: Response | null; role: string | null; cron: boolean };
+  try {
+    gate = await authorize(action, req, supabase);
+  } catch (e) {
+    // an identity lookup that throws must refuse, never fall through open
+    return err(e instanceof Error ? e.message : "Authorization failed", 401);
+  }
+  if (gate.deny) return gate.deny;
 
   try {
     // ── getStatus ─────────────────────────────────────────────────────────
@@ -306,9 +409,10 @@ serve(async (req) => {
       if (!customer?.name) return err("Missing customer name (set the job's Customer field first).");
 
       const { accessToken, realmId } = await getConnection(supabase);
-      // CRM linkage runs ONLY for a verified office caller; an anon/machine
-      // push falls back to the pre-CRM DisplayName find-or-create untouched.
-      const role = await callerRole(req, supabase);
+      // CRM linkage runs ONLY for a verified office caller. Since F-003 the
+      // gate above already proved that (pushInvoice is staff-only), so this
+      // reuses the role it resolved instead of a second auth round-trip.
+      const role = gate.role;
       const trustedSb = (role === "admin" || role === "office" || role === "tech") ? supabase : undefined;
       const customerId = await ensureCustomer(realmId, accessToken, customer, trustedSb);
       const itemId = await ensureServiceItem(realmId, accessToken);
@@ -363,7 +467,8 @@ serve(async (req) => {
     if (action === "invoiceLink") {
       const invoiceId = String(body.invoiceId ?? "").trim();
       if (!invoiceId) return err("Missing invoiceId");
-      const role = await callerRole(req, supabase);
+      // (belt and braces: the gate already refused anyone outside STAFF_ROLES)
+      const role = gate.role;
       if (!(role === "admin" || role === "office" || role === "tech")) return err("Sign in to fetch payment links", 403);
       const { accessToken, realmId } = await getConnection(supabase);
       const data = await qboFetch(realmId, accessToken, `/invoice/${encodeURIComponent(invoiceId)}?include=invoiceLink`);

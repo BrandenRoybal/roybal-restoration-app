@@ -3,8 +3,7 @@
 Online-only voice-capture brain (handoff **Step C**): audio → text → structured
 candidate fields, written to `capture_events`, metered against a monthly spend cap
 via the `ai_usage` ledger. **No API keys live in the client** — they are Supabase
-function secrets, set with the commands below. Mirrors `magicplan-proxy` /
-`qb-time-proxy`.
+function secrets, set with the commands below. Mirrors `qb-time-proxy`.
 
 ## Prerequisites (run once)
 

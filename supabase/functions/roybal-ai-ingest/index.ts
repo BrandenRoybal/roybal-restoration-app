@@ -12,8 +12,9 @@
  *   6. returns { capture_event_id, transcript, candidates }.
  *
  * NO API KEYS LIVE IN THE CLIENT. They are Supabase function secrets
- * (STT_API_KEY, LLM_API_KEY). Mirrors the existing magicplan-proxy /
- * qb-time-proxy pattern (raw fetch, CORS, { ok, ... } envelope).
+ * (STT_API_KEY, LLM_API_KEY). Mirrors the existing qb-time-proxy pattern
+ * (raw fetch, CORS, { ok, ... } envelope). (The magicplan-proxy this once
+ * also cited was deleted 2026-09-06 — findings.json F-049.)
  *
  * Deploy:  supabase functions deploy roybal-ai-ingest
  * Secrets: see ./README.md

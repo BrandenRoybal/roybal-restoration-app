@@ -12,13 +12,21 @@
 # ⚠️ The Supabase MCP deploy tool does NOT read this file. After any MCP or
 # dashboard-driven redeploy, re-check with:
 #   supabase functions list --project-ref djpgvcvhvgrzgaziruze -o json
-# and confirm verify_jwt is still false on the six functions marked below.
+# and confirm verify_jwt is still false on every function marked below.
 #
 # verify_jwt=false is NOT "unprotected": each of those functions self-protects
 # (CORS allowlist, honeypot, per-IP/global rate caps, spend ceiling, or its
 # own secret check) — they exist to be called by anonymous browsers/webhooks.
 #
-# Values below mirror production as read live on 2026-08-14.
+# Values below mirror production as read live on 2026-08-14, minus the two
+# Magicplan pins removed on 2026-09-06 (E0 / findings.json F-049): the
+# integration is dead — zero callers in apps/, services/ or .github/ — yet
+# magicplan-proxy ran verify_jwt=false with no auth check of any kind, so
+# anyone with the URL could spend the company's MAGICPLAN_API_KEY and create
+# projects in the vendor account, while magicplan-webhook ran verify_jwt=true
+# and could therefore never be reached by the vendor's (JWT-less) webhook at
+# all. Both function directories are deleted; the code stays in git history
+# if Magicplan is ever revived.
 
 project_id = "djpgvcvhvgrzgaziruze"
 
@@ -29,9 +37,6 @@ verify_jwt = false # the www quote form posts here with no session
 
 [functions.roybal-web-agent]
 verify_jwt = false # the www AI receptionist panel calls here with no session
-
-[functions.magicplan-proxy]
-verify_jwt = false
 
 [functions.roybal-ai-ingest]
 verify_jwt = false
@@ -59,9 +64,6 @@ verify_jwt = false # customers call with a share token, no session — in-code a
 # ── Authenticated functions — verify_jwt stays true ──────────────────────
 
 [functions.gmail-proxy]
-verify_jwt = true
-
-[functions.magicplan-webhook]
 verify_jwt = true
 
 [functions.qb-time-proxy]

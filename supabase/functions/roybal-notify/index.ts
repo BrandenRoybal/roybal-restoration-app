@@ -20,6 +20,35 @@
  *   text from the company number (never back to the sender, never past the
  *   monthly cap). Responds with empty TwiML so no auto-reply goes out.
  *
+ * Status (POST …/roybal-notify/status):   [F-034, High]
+ *   Twilio's DELIVERY status callback — the answer to "did it arrive?".
+ *   Until this route existed, sendSms() stored the status from the immediate
+ *   Twilio API response ('queued'/'accepted' — "we took your API call"), and
+ *   nothing ever corrected it: 174 of the 175 outbound rows in the live table
+ *   were frozen at 'queued', while supabase/config.toml:53-54 already claimed
+ *   this function received status callbacks. The table is claim documentation
+ *   (migration 106), so "we texted them" must mean the carrier delivered it.
+ *
+ *   Same auth as /inbound — one X-Twilio-Signature check (twilioSignatureValid,
+ *   shared, route-parameterized), then the service-role key PATCHes the
+ *   sms_messages row matched by twilio_sid. Twilio callbacks are unordered and
+ *   re-delivered, so the write is guarded by rank (status.mjs): a callback may
+ *   only overwrite strictly lower states, which makes a replay a no-op and
+ *   stops a late 'queued' from un-delivering a delivered row. The guard rides
+ *   inside the UPDATE's filter, so two racing callbacks can't clobber each
+ *   other. An unknown sid or unknown status is logged and ACKed 204 — never
+ *   thrown — because a non-2xx makes Twilio retry a callback we can't use.
+ *   Only DB failures answer 5xx, where a retry actually helps.
+ *   sms_messages.status is unconstrained text (migration 106 line 21); the
+ *   allowed values are documented in status.mjs rather than added as a CHECK
+ *   here, because the E0 migration is owned elsewhere. Two follow-ups that are
+ *   deliberately NOT in this change: (1) a unique index on twilio_sid — the
+ *   PATCH is written to be correct without one; (2) the monthly cap
+ *   (monthCount) still counts every outbound row, including ones that never
+ *   reached a handset. Now that delivery is reconciled, the cap should count
+ *   non-failed rows (`&status=neq.failed`) — left unchanged here so this
+ *   change is purely additive to spending behaviour.
+ *
  * Secrets:  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM (+1XXXXXXXXXX)
  *           SMS_MONTHLY_CAP (optional, default 500 messages / month)
  *           SMS_RESERVE     (optional, default 150 — the tail of the monthly
@@ -36,8 +65,12 @@
  * Deploy:   supabase functions deploy roybal-notify --no-verify-jwt
  *   (--no-verify-jwt required for browser CORS preflight + the Twilio
  *    webhook; the function self-protects — sendSms runs its DB ops under
- *    the caller's JWT and /inbound demands a valid Twilio signature, so an
- *    unauthenticated caller can never reach a paid Twilio call.)
+ *    the caller's JWT and /inbound + /status demand a valid Twilio signature,
+ *    so an unauthenticated caller can never reach a paid Twilio call.)
+ *   After deploying, point the Twilio number's messaging STATUS CALLBACK at
+ *   https://<project-ref>.supabase.co/functions/v1/roybal-notify/status
+ *   (Console → Phone Numbers → the company number → Messaging). Without that
+ *   URL set, this route is simply never called and rows stay at 'queued'.
  *
  * Success (200): { ok:true, sid, status, month_count }
  * Error   (400): { ok:false, error }
@@ -46,6 +79,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard } from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
+import { mapTwilioStatus, blockedStatuses } from "./status.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -373,14 +407,17 @@ async function sendSms(body: Record<string, unknown>, jwt: string) {
 /* Twilio webhook auth: base64(HMAC-SHA1(auth token, URL + params sorted by
    name)). The URL must be byte-identical to the one configured in Twilio;
    req.url is the URL Twilio actually hit, with the SUPABASE_URL form as a
-   fallback in case the edge runtime ever rewrites the host. */
-async function twilioSignatureValid(req: Request, params: URLSearchParams): Promise<boolean> {
+   fallback in case the edge runtime ever rewrites the host.
+   ONE check for every Twilio route (F-034 added /status): `route` only names
+   which fallback URL to rebuild — /inbound's behaviour is unchanged by the
+   default, and a second copy of this crypto is exactly what we don't want. */
+async function twilioSignatureValid(req: Request, params: URLSearchParams, route = "inbound"): Promise<boolean> {
   const sig = req.headers.get("X-Twilio-Signature") ?? "";
   if (!sig || !TWILIO_AUTH) return false;
   const payload = [...new Set(params.keys())].sort().map((n) => n + (params.get(n) ?? "")).join("");
   const key = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(TWILIO_AUTH), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
-  for (const url of new Set([req.url, `${SUPABASE_URL}/functions/v1/roybal-notify/inbound`])) {
+  for (const url of new Set([req.url, `${SUPABASE_URL}/functions/v1/roybal-notify/${route}`])) {
     const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(url + payload)));
     if (btoa(String.fromCharCode(...mac)) === sig) return true;
   }
@@ -640,10 +677,70 @@ async function handleInbound(req: Request): Promise<Response> {
     { headers: { "Content-Type": "text/xml" } });
 }
 
+/* ---------- status: Twilio delivery-status callback (F-034) ----------
+   Settle the row Twilio is reporting on. Signature-checked exactly like
+   /inbound (same helper), then a rank-guarded PATCH by twilio_sid under the
+   service role — Twilio has no user session, and only this verified path may
+   change a delivery claim.
+
+   Two shapes of ACK, and the difference matters:
+     204 — nothing to do (unknown sid, unknown status, already at/past this
+           state). Twilio retries non-2xx, and retrying a callback we can't
+           use would just repeat forever.
+     5xx — our database refused the write. That IS worth a retry.
+
+   Known gap, deliberate: a 'queued' callback can beat sendSms's own PATCH that
+   writes twilio_sid, in which case no row matches yet and the callback is
+   dropped — the later 'sent'/'delivered' callbacks settle the row. Rows whose
+   send died before the sid was stored (status 'pending'/'failed', twilio_sid
+   null) are unreachable from here by construction; they are the one-time
+   backfill's job, not this route's. */
+async function handleStatus(req: Request): Promise<Response> {
+  const params = new URLSearchParams(await req.text());
+  if (!(await twilioSignatureValid(req, params, "status")))
+    return new Response("signature mismatch", { status: 403 });
+
+  // MessageSid/MessageStatus are the SMS API's names; SmsSid/SmsStatus are the
+  // legacy aliases Twilio still sends on some accounts. Accept both.
+  const sid = String(params.get("MessageSid") ?? params.get("SmsSid") ?? "").trim();
+  const raw = String(params.get("MessageStatus") ?? params.get("SmsStatus") ?? "").trim();
+  const mapped = mapTwilioStatus(raw);
+  if (!sid || !mapped) {
+    console.error("status callback ignored: unusable payload", { sid, status: raw });
+    return new Response(null, { status: 204 });
+  }
+
+  const code = String(params.get("ErrorCode") ?? "").trim();
+  const emsg = String(params.get("ErrorMessage") ?? "").trim();
+  const patch: Record<string, unknown> = { status: mapped.status, updated_at: new Date().toISOString() };
+  // Only stamp `error` when Twilio names a code — a delivered callback must
+  // not blank the send-time error that explains an earlier failure.
+  if (code) patch.error = `twilio ${code}${emsg ? ": " + emsg : ""}`.slice(0, 500);
+
+  // The ordering guard lives in the filter, not in a read-then-write: an
+  // out-of-order or re-delivered callback matches zero rows instead of racing.
+  const blocked = blockedStatuses(mapped.rank) as string[];
+  const guard = blocked.length ? `&status=not.in.(${blocked.join(",")})` : "";
+  const admin = (path: string, opts: RequestInit = {}) => db(path, SERVICE_KEY, opts, SERVICE_KEY);
+  const res = await admin(
+    `sms_messages?twilio_sid=eq.${encodeURIComponent(sid)}&direction=eq.outbound${guard}`,
+    { method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify(patch) });
+
+  if (!res.ok) {
+    console.error("status patch failed", res.status, await res.text().catch(() => ""));
+    return new Response("status patch failed", { status: 500 });   // 5xx so Twilio retries
+  }
+  const rows = (await res.json().catch(() => [])) as unknown[];
+  if (!rows.length) console.log(`status ${sid} -> ${mapped.status}: no row updated (unknown sid, or already settled)`);
+  return new Response(null, { status: 204 });
+}
+
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
-  if (/\/inbound\/?$/.test(new URL(req.url).pathname)) return handleInbound(req);
+  const path = new URL(req.url).pathname;
+  if (/\/inbound\/?$/.test(path)) return handleInbound(req);
+  if (/\/status\/?$/.test(path)) return handleStatus(req);
   const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
   if (!jwt) return json({ ok: false, error: "Missing Authorization bearer token" }, 401);
   try {
