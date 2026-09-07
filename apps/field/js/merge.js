@@ -102,6 +102,15 @@ export const FORM_SLOTS = [
   "portalShare", "floorPlan",
 ];
 
+/* keys mergeProjects resolves with a rule of their own — everything else at the
+   top level is a scalar, and scalars use filled-beats-empty (see the loop at the
+   end of mergeProjects). `deleted`/`rev`/`updatedAt`/`id` are sync bookkeeping,
+   never content. */
+const SCALAR_SKIP = new Set([
+  ...ID_COLLECTIONS, ...FORM_SLOTS, "rooms", "lossTypes",
+  "id", "rev", "updatedAt", "deleted", DELETED_IDS,
+]);
+
 const clone = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 const isObj = (v) => v != null && typeof v === "object" && !Array.isArray(v);
 
@@ -208,6 +217,32 @@ export function mergeProjects(a, b) {
     const stats = { recovered: 0 };
     merged[key] = mergeForm(merged[key], older[key], stats);
     if (stats.recovered) { filledForms++; notes.push(key); }
+  }
+
+  // TOP-LEVEL SCALARS: filled beats empty — the SAME rule mergeForm already
+  // applies to every field inside every form (:120). Without it, `clone(newer)`
+  // above hands every scalar to whichever blob carries the larger `updatedAt`,
+  // and that stamp is not always an observed edit time: a server-side union is
+  // stamped greatest(both inputs)+1ms and then FLOORED AT THE SERVER CLOCK
+  // (218:258-260, 241:270-272). A tablet whose clock trails the server loses
+  // text it genuinely typed later — notes, customer, address, claim number,
+  // contract amount — and because the lossy union then equals the server copy,
+  // sync's self-echo guard adopts it CLEAN and the edit is never re-pushed.
+  // That is silent data loss on the one promise this engine exists to keep.
+  //
+  // Only a BLANK ever loses here, so this is not "older wins": a real edit on
+  // the newer side still beats an older value, and two devices that both filled
+  // the same field still resolve newer-wins. The accepted trade-off is the one
+  // mergeForm already accepts — deliberately CLEARING a scalar can be undone by
+  // a merge that carries the old text. Losing a clear is recoverable by
+  // clearing again; losing typing is not.
+  for (const key of Object.keys(older)) {
+    if (SCALAR_SKIP.has(key)) continue;
+    if (isEmptyish(merged[key]) && !isEmptyish(older[key])) {
+      merged[key] = clone(older[key]);
+      added++;
+      notes.push(key);
+    }
   }
 
   return { merged, added, filledForms, removed, notes };

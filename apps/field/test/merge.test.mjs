@@ -211,7 +211,16 @@ test("tombstoneItems is idempotent and keeps the first stamp", () => {
 test("the tombstone map is capped, dropping the OLDEST marks", () => {
   const p = { id: "j" };
   const marks = {};
-  for (let i = 0; i < 2050; i++) marks[`id${String(i).padStart(4, "0")}`] = `2026-01-01T00:${String(i % 60).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.${String(i).padStart(4, "0")}Z`;
+  // Seed RELATIVE TO NOW. tombstoneItems stamps "fresh" with the real clock
+  // (merge.js:74) and capTombstones sorts the stamps as strings (merge.js:93-99),
+  // so a hard-coded literal (this was "2026-01-01T00:…") quietly makes the
+  // assertion depend on the machine's clock having moved past that date. It
+  // passed only because the calendar had. Any runner with a skewed or unset
+  // clock — a container booting at the epoch, a rerun on a machine set earlier —
+  // turned it red. That is the exact real-clock-in-a-stamp class this suite
+  // exists to catch, so it must not be in the fixture itself.
+  const base = Date.now() - 86_400_000;                       // yesterday, whatever today is
+  for (let i = 0; i < 2050; i++) marks[`id${String(i).padStart(4, "0")}`] = new Date(base + i).toISOString();
   p[DELETED_IDS] = marks;
   tombstoneItems(p, "fresh");
   assert.equal(Object.keys(p[DELETED_IDS]).length, 2000);
@@ -238,6 +247,41 @@ test("lossTypes union like rooms: concurrent chip toggles are both kept", () => 
     "one device's Fire chip must survive the other's Storm push");
   // detail scalars keep the newer-wins rule of every other header scalar
   assert.equal(merged.stormCause, "wind");
+});
+
+/* ---------- top-level scalars: filled beats empty ----------
+   These three describe the 2026-09-07 data-loss bug and the two ways a fix for
+   it can go wrong. A server-side union is stamped greatest(inputs)+1ms FLOORED
+   AT THE SERVER CLOCK (218:258-260, 241:270-272), so it routinely outranks an
+   edit a tablet genuinely made later — and `merged = clone(newer)` then handed
+   it every scalar. The lossy union equalled the server copy, sync's self-echo
+   guard adopted it CLEAN, and the typing was neither kept nor ever re-pushed. */
+
+test("an unsynced scalar edit survives a union stamped later by the server", () => {
+  // the tablet typed `notes`; the server's union never saw it and carries the
+  // bigger (fabricated) stamp
+  const local  = { id: "j", updatedAt: T1, notes: "typed during merge" };
+  const server = { id: "j", updatedAt: T2 };
+  const { merged } = mergeProjects(local, server);
+  assert.equal(merged.notes, "typed during merge", "a key the newer side never carried is not a conflict");
+});
+
+test("…and an EMPTY slot on the newer side never beats filled text", () => {
+  // the production shape: model.js initialises header scalars to "", so the
+  // key is present-and-blank rather than absent
+  const local  = { id: "j", updatedAt: T1, permitNumbers: "P-7714" };
+  const server = { id: "j", updatedAt: T2, permitNumbers: "" };
+  assert.equal(mergeProjects(local, server).merged.permitNumbers, "P-7714");
+});
+
+test("…without reverting a genuinely newer edit from a THIRD device", () => {
+  // the trap: a fix that simply lets the dirty side win swaps the victim —
+  // the office's committed rename is silently reverted instead. Both must live.
+  const local  = { id: "j", updatedAt: T1, customer: "Orig-Cust", notes: "typed during merge" };
+  const server = { id: "j", updatedAt: T2, customer: "Renamed-By-Office" };
+  const { merged } = mergeProjects(local, server);
+  assert.equal(merged.customer, "Renamed-By-Office", "a real newer edit still wins — only a blank ever loses");
+  assert.equal(merged.notes, "typed during merge", "…and the unsynced typing survives alongside it");
 });
 
 console.log(`\n${pass} merge checks passed.`);

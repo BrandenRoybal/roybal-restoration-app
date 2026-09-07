@@ -2,17 +2,24 @@ name: CI
 
 # The test gate the repo did not have. Until this existed, the only workflow was
 # a deploy (deploy-field.yml) with no test step, so `main` could be — and on
-# 2026-09-04 was — red and published at the same time: PR #181 bumped
-# apps/field/sw.js without apps/field/js/config.js, apps/field/test/build.test.mjs
-# started failing, and because the field suite is one `&&` chain that failure
-# also silenced the 26 field files, the board suite and the edge-function suite
-# behind it.
+# 2026-09-04 was — red and published at the same time.
 #
-# Two rules this workflow exists to enforce:
+# Three rules this workflow exists to enforce:
 #   1. Every suite runs on every pull request, and each suite is its own step so
-#      one red suite cannot hide the others (the `&&` chain's failure mode).
-#   2. The phone agent's tests run too — they are outside the root `npm test`
-#      chain and have never run in CI.
+#      one red suite cannot hide the others.
+#   2. NOTHING SHORT-CIRCUITS INSIDE A SUITE EITHER. The first version of this
+#      file ran `npm run test --workspace=apps/field`, which was a 28-file `&&`
+#      chain — so the first red file still hid the 27 behind it. Every suite now
+#      runs through `node --test` over a glob: each file is its own child
+#      process, all of them run, and every failure is reported.
+#   3. The file list is DISCOVERED, not hand-maintained. The old chain was a
+#      literal list in package.json plus a second list here for the files that
+#      had drifted out of it (dryingcalc, sms, calibration). A new test file
+#      landing in the directory is now in CI automatically.
+#
+# `--test-concurrency=1` is deliberate: several suites are timing-sensitive, and
+# CPU contention between parallel test processes is a flake source. These suites
+# finish in well under a minute serially.
 
 on:
   pull_request:
@@ -49,12 +56,16 @@ jobs:
         if: '!cancelled()'
         run: npm run test --workspace=apps/field
 
-      - name: Field app tests not in the workspace chain
+      # The sync harness models the server's merge stamp, which production
+      # floors at the SERVER clock. The default run skews that clock ahead of
+      # the tablet, which is what the field looks like and what hid a data-loss
+      # bug until 2026-09-07. This second run restores the equal-clock case, so
+      # a regression that only shows when the two clocks agree still gets caught.
+      - name: Field sync tests, equal-clock regime
         if: '!cancelled()'
-        run: |
-          node apps/field/test/dryingcalc.test.mjs
-          node apps/field/test/sms.test.mjs
-          node --test apps/field/js/calibration.test.mjs
+        env:
+          SYNC_SERVER_SKEW_MS: "0"
+        run: node apps/field/test/sync.mjs
 
       - name: Board tests
         if: '!cancelled()'
