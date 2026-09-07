@@ -91,7 +91,7 @@ Described by intent. **Read each file's own header block before you deploy it** 
 | 4 | **Reconnect QB Time** | ✗ impossible | ✅ **DONE by owner ~00:03Z 9/7.** Was down ALL of 9/6 — every sweep + the 14:00 pull returned 400 `refresh_token is invalid` while cron reported *succeeded*. ⚠️ **payroll gap: work dates 9/4, 9/5, 9/6 were never pulled** (last captured 9/3). Backfill per job with the board's **⤓ Sync hours** button | 5 |
 | 5 | Gate the proxy actions | ✅ three functions | ✅ **DEPLOYED** 00:31Z via CLI. Verified: publishable key 401s, unknown action 404s, and cron still passes (`pullAllLinked`/`clockinSweep` are `["cron","user"]`) | 6 |
 | 6 | Sweep the zombie proposals + expiry filter | ✅ sweep = migration 247 §4; filter = `qb-time-proxy/index.ts:615-620` | sweep applied in step 3; the filter ships with the **qb-time-proxy deploy** here — both halves are needed, the sweep alone only clears today's jam | 6 |
-| 7 | Twilio status callback + reconcile | ✅ route + pure module | ✅ **DEPLOYED** 9/7 via CLI (config.toml `verify_jwt=false` respected — an unsigned POST returns 403 *signature mismatch*, not 401). **Still yours: set the Twilio StatusCallback URL.** Until then nothing settles; backlog is now **177** queued and still growing | 7 |
+| 7 | Twilio status callback + reconcile | ✅ route + pure module + the `StatusCallback` parameter (#186) | ✅ **DONE 9/7** — route deployed via CLI, then the parameter (version 67, `verify_jwt` still false, param confirmed at deployed `index.ts:289`). There was never a console setting to make: see 7b. **Reconcile still open** — the backlog, now **181**, predates the callback and stays `queued` | 7 |
 | 8 | Delete Magicplan | ✅ files deleted **and merged** | **STILL YOURS** — both remain ACTIVE on the platform (`magicplan-proxy` still `verify_jwt=false`, i.e. publicly reachable with the API key behind it). No MCP delete tool exists; use the CLI in step 8 | 8 |
 | 9 | Arm `min_field_build` | ✗ app state | **STILL YOURS** — still `0`. v166 is live as of 9/7, so arm it at 166 from 9/8 once devices have picked it up | 9 |
 | 10 | Cron secrets out of `cron.job` | ⚠️ **deferred to P1** | decide: rotate now, or accept | 10 / §4 |
@@ -366,14 +366,27 @@ supabase functions deploy roybal-notify --no-verify-jwt --project-ref djpgvcvhvg
 https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-notify/status
 ```
 
-`sendSms` posts directly to the Messages API with a bare `From` number — no Messaging Service — so the primary mechanism is the per-message `StatusCallback` parameter that the deployed code now sends. **Read the deployed `roybal-notify/index.ts` header block**: if it reads the URL from a secret rather than deriving it from `SUPABASE_URL`, set that secret now:
+**Corrected 2026-09-07 — this step is not console work, and this file said otherwise.** The
+sentence here used to read "the per-message `StatusCallback` parameter that the deployed code now
+sends," and the checklist below sent you to a Console field. Both were wrong: the code did **not**
+send that parameter until #186, and there is no phone-number field that adds one. Per Twilio's own
+docs the console-configurable callback is a **Messaging Service** feature (Messaging → Services →
+*service* → Integration → Delivery Status Callback). `sendSms` posts to the Messages API with a
+bare `From` number and no Messaging Service, so the per-message `StatusCallback` parameter on the
+create call is the *only* mechanism — which is why 181 rows sat at `queued` with a correct, armed,
+never-called `/status` route.
 
-```bash
-supabase secrets set TWILIO_STATUS_CALLBACK_URL="https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-notify/status" \
-  --project-ref djpgvcvhvgrzgaziruze
-```
+The phone number's "A MESSAGE COMES IN" webhook is `/inbound` — that is approve-by-text, and it is
+unrelated to delivery receipts. Do not touch it.
 
-Then set the same URL in the Twilio Console as a backstop, so a message sent by any path other than `sendSms` still settles: **Twilio Console → Phone Numbers → Manage → the company number → Messaging → Status callback URL**. Leave the existing "A message comes in" webhook pointing at `…/roybal-notify/inbound` — do not overwrite it. Also fix the doc drift while you are here: `supabase/config.toml:53-54` has claimed this handler existed since before it did; that claim is finally true.
+**Fixed in #186** by adding the parameter in `twilioPost`, the one place all four send sites funnel
+through. No secret is involved: the URL derives from `SUPABASE_URL`. It must stay byte-identical to
+the URL `twilioSignatureValid` rebuilds — Twilio signs over the URL it posted to, so a query string
+or a trailing slash turns every callback into a silent 403 — and `status.test.mjs` now asserts the
+two against each other so they cannot drift apart unnoticed.
+
+Nothing is left for your hands in 7b. `supabase/config.toml:53-54` has claimed this handler existed
+since before it did; that claim is finally true.
 
 **7c — reconcile the 174 historical rows.** Those rows predate the callback and will never receive one; their true status has to be fetched from Twilio once. Run the one-time reconcile the status-callback PR ships — its name and invocation are in the function header. If it is a cron-secret action:
 
@@ -553,7 +566,7 @@ Everything an agent, a script or CI cannot do, in one place. If you read nothing
 |---|---|---|---|
 | 1 | **Reconnect Gmail** | admin → Settings → Gmail card → Disconnect, Connect, approve both scopes | Google's consent screen needs an interactive session as you. No service account, no headless path. |
 | 2 | **Reconnect QuickBooks Time** | admin → Settings → QB Time card → Disconnect, Connect, approve | Same: Intuit/TSheets consent screen. |
-| 3 | **Set the Twilio StatusCallback URL** | Twilio Console → Phone Numbers → the company number → Messaging → Status callback URL = `https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-notify/status` | Twilio Console credentials. Do not overwrite the inbound webhook. |
+| 3 | ~~**Set the Twilio StatusCallback URL**~~ — **withdrawn 9/7: there was no such console field.** The callback is a per-message API parameter, shipped in #186 and deployed. See §7b | — | Nobody needed to: this row was wrong. Kept, struck through, so the correction is visible to whoever reads the checklist next. |
 | 4 | **Delete the two deployed Magicplan functions** | `supabase functions delete magicplan-proxy` / `magicplan-webhook` | Deleting the directory does not undeploy the function. Requires a CLI session logged into the project. |
 | 5 | **Unset `MAGICPLAN_*` and revoke the key** | `supabase secrets unset …`, then the Magicplan account itself | The platform secret store and the vendor account are both outside the repo. |
 | 6 | **Arm `min_field_build`** | SQL Editor: `update public.app_settings set value = to_jsonb(165) where key = 'min_field_build';` | It is app state, not code. And it needs a day of telemetry judgement first. |
