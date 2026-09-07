@@ -80,17 +80,36 @@ jobs:
           case "$PROJECT_REF" in
             *[!a-z0-9]*|"") echo "::error::project_ref must be lowercase alphanumeric"; exit 1 ;;
           esac
-          # `link` before `dump`, and then --linked rather than --project-ref.
+          # Prove the token before doing anything else, so a credential problem
+          # reports itself as a credential problem. Run 34162358394 failed with
+          # "Your account does not have the necessary privileges to access this
+          # endpoint", which is what a wrong-kind or narrow-scope credential
+          # looks like several steps into a dump.
+          if ! supabase projects list > /dev/null 2>&1; then
+            echo "::error::SUPABASE_ACCESS_TOKEN was rejected by the Management API."
+            echo "::error::It must be a PERSONAL ACCESS TOKEN from"
+            echo "::error::https://supabase.com/dashboard/account/tokens (starts with 'sbp_')."
+            echo "::error::A project API key (anon / publishable / service_role) is a"
+            echo "::error::different thing and will fail exactly this way, as will a"
+            echo "::error::token created with restricted scopes."
+            supabase projects list || true
+            exit 1
+          fi
+          echo "Token accepted; visible projects:"
+          supabase projects list
+
+          # Then link, and dump with --linked rather than --project-ref.
           # GitHub runners are IPv4-only; a project's direct database host is
           # IPv6-only, so --project-ref alone dies with "IPv6 is not supported
           # on your current network" (run 34162207801). Linking resolves the
           # IPv4 pooler (Supavisor) and caches it in supabase/.temp, which is
           # what --linked then dials.
           #
-          # No --password: link stores the pooler HOST, not credentials (the
-          # cached pooler-url carries none), and `db dump` still mints its own
-          # short-lived login role through the Management API. A database
-          # password is deliberately absent from this pipeline.
+          # No --password anywhere: link stores the pooler HOST, not credentials
+          # (the cached pooler-url is a bare postgresql://postgres.<ref>@<pooler
+          # host> with no secret in it), and `db dump` mints its own short-lived
+          # login role through the Management API. A database password is
+          # deliberately absent from this pipeline.
           supabase link --project-ref "$PROJECT_REF"
           supabase db dump --linked -f baseline_schema.sql
           supabase db dump --linked --role-only -f baseline_roles.sql
