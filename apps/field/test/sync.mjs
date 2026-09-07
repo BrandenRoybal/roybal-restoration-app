@@ -41,8 +41,30 @@ globalThis.fetch = async (url, opts = {}) => {
   /* ---- sync RPCs: the server-side merge authority (migrations 217/218).
      Mirrors the SQL exactly, including the "strictly newer than both inputs
      and never behind the server clock" merge stamp. ---- */
+  // DETERMINISTIC SERVER CLOCK, still a faithful mirror of the SQL. Production
+  // is greatest(both inputs)+1ms FLOORED AT now() (218:258-260, 241:270-272) —
+  // both halves are kept below; only the clock term is skewed, to model what
+  // the field actually looks like: a server whose clock leads a tablet that
+  // stamped an edit moments earlier. Reading the bare wall clock here made
+  // which branch ran depend on whether a millisecond boundary happened to fall
+  // inside the gap between the mid-flight edit and this call, so the case below
+  // exercised the dangerous branch only sometimes — rarely on an idle laptop,
+  // far more often on a loaded CI runner, which is why CI found it first.
+  // This STRENGTHENS the suite: do NOT "fix" a failure here by removing the
+  // skew, which pins the test to the branch that accidentally passes and hides
+  // a live data-loss path.
+  // 37s, not 60s/120s — those two are already used as hand-set row stamps
+  // further down this file, and reusing them would couple unrelated scenarios.
+  // Overridable so BOTH clock regimes stay covered: CI runs this file again with
+  // SYNC_SERVER_SKEW_MS=0, which restores the equal-clock case (union stamp lands
+  // exactly one ms past the newest input, the pull tie-guard's boundary) that a
+  // fixed skew would otherwise retire. 0 is safe because the `+ 1` below is
+  // unconditional, exactly as the SQL is — the fake server can never emit a stamp
+  // EQUAL to an input, which the real one cannot do either.
+  const SERVER_AHEAD_MS = Number(process.env.SYNC_SERVER_SKEW_MS ?? 37_000);
   const mergeStamp = (a, b) =>
-    new Date(Math.max(Math.max(Date.parse(a) || 0, Date.parse(b) || 0) + 1, Date.now())).toISOString();
+    new Date(Math.max(Math.max(Date.parse(a) || 0, Date.parse(b) || 0) + 1,
+                      Date.now() + SERVER_AHEAD_MS)).toISOString();
   // a real request/response crosses the wire as JSON: neither side may hold a
   // reference into the other's objects (the client mutates what it receives)
   const wire = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));

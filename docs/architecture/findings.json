@@ -360,7 +360,7 @@
         "d02-datamodel"
       ],
       "severity": "High",
-      "title": "Room, material, equipment asset and reading location have no identity: room is free text in six places, readings are positional string arrays whose location is a pixel, equipment is per-day count strings classified by regex",
+      "title": "Room, material, equipment asset and reading location have no identity: room is free text in six places, readings are positional string arrays whose location is a pixel, and per-unit equipment rows carry a freehand asset number that collides across fleet classes",
       "evidence": [
         "apps/field/js/model.js:173,210,275,324,421,586 (room as string on rooms[], photos, contents, moisture map label, line items, plan dimensions)",
         "apps/field/js/forms.js:2019-2024,2628 (case-insensitive room comparator; plan dimensions rooms by name); merge.js:180-185 and 243_losstypes_merge_union.sql:100-125 (rooms unioned by string value)",
@@ -368,9 +368,12 @@
         "apps/field/js/model.js:330,346-361 (equipmentPlan icons vs free-text equipment rows vs per-day dehu/am/scrub count strings); dryingcalc.js:152-163 (type recovered by regex)",
         "apps/field/js/model.js:520-535 (certificate verification rows are re-typed strings)",
         "supabase/migrations/001_initial_schema.sql:137-146,166-215 (era-0 rooms, moisture_readings, equipment_logs already modelled these — dead)",
-        "(live) moistureMaps[0]: 52 positional strings, label 'Drywall' vs material 'Framing / Wood / Subfloor' with one goal per map; dryingLogs[0]: dehu '2', am '20', scrub '1', no unit rows; invoices[0] qty '215' air-mover-days typed"
+        "(live) moistureMaps[0]: 52 positional strings, label 'Drywall' vs material 'Framing / Wood / Subfloor' with one goal per map; invoices[0] qty '215' air-mover-days typed",
+        "CORRECTED 2026-09-07 (live, whole-table): the original evidence generalised from dryingLogs[0], which happened to have no unit rows. Across all jobs, field_projects.data.dryingLogs[].equipment[] holds 116 per-unit rows over 7 jobs and 113 are COMPLETE (asset, type, location, placed, removed, hours) — e.g. {\"type\":\"Axial Air Mover\",\"asset\":\"101\",\"hours\":95,\"placed\":\"2026-04-25T09:30\",\"removed\":\"2026-04-29T08:30\",\"location\":\"Kitchen\"}. Per-unit placement/removal capture is an EXISTING crew habit, not a missing behaviour.",
+        "(live) the real equipment defect is identity, not absence: asset '101' appears on four jobs typed 'Air mover', 'Air mover   ', 'Axial Air Mover' and 'Dehumidifier Dry-Eaze Xi7000'; assets 102-110 each span three jobs with three spellings of one type. 'location' is free text with no link to rooms[]. There is no serial-number field. The normalised equipment_logs table is dead (5 rows, March 2026, zero removals).",
+        "ROOT CAUSE of the asset collisions (apps/field/js/forms.js:643-647 bumpAsset, :650-680 attachFill): the equipment table's Excel-style fill handle AUTO-INCREMENTS the asset column rather than copying it — `d.equipment[idx][key] = key === \"asset\" ? bumpAsset(src, k + 1) : src`. A crew dragging from '101' generates '101'-'110' on every job independently, which is exactly the live pattern. These are row indexes wearing the costume of fleet asset tags; presenting them to a carrier as unit identity is a credibility risk, not just a data-quality one."
       ],
-      "recommendation": "P3: rooms, equipment_units, equipment_placements (place/remove events with asset id, location and photo), moisture_locations (material + dry goal), moisture_readings (one row per location per date) and dry_standards as tables; `roomIds: [{id,name,aliases[]}]` added to the blob beside rooms[] (never rewritten) and registered in ID_COLLECTIONS and id_cols under the parity test; QR/Code-128 labels per asset_tag with an optional scan screen; unit-days derived from placements.",
+      "recommendation": "P3: rooms, equipment_units, equipment_placements (place/remove events with asset id, location and photo), moisture_locations (material + dry goal), moisture_readings (one row per location per date) and dry_standards as tables; `roomIds: [{id,name,aliases[]}]` added to the blob beside rooms[] (never rewritten) and registered in ID_COLLECTIONS and id_cols under the parity test; QR/Code-128 labels per asset_tag with an optional scan screen; unit-days derived from placements. CORRECTED SCOPE 2026-09-07: because per-unit placement/removal is already captured, the equipment half of this finding is cheaper than first stated — enum the type, make asset tags unique per fleet class, and bind location to a room id. No new crew behaviour is required, which moves carrier-grade equipment justification earlier than the roadmap assumed.",
       "roadmap_phase": "P3",
       "automation_impact": "blocks",
       "growth_ceiling": true
@@ -1447,6 +1450,30 @@
       "roadmap_phase": "P1",
       "automation_impact": "neutral",
       "growth_ceiling": false
+    },
+    {
+      "id": "F-067",
+      "dimension": "5. Business logic placement; 7/8. UI and component system; documents and PDF/print pipeline",
+      "dimension_keys": [
+        "d05-logic",
+        "d0708-ui-documents"
+      ],
+      "severity": "High",
+      "title": "Eleven small code changes would each DELETE a rule seven technicians are otherwise asked to remember — and the list exists only inside a training document, not in any engineering backlog",
+      "evidence": [
+        "docs/architecture/05-CREW-CAPTURE-SOP.md §12.6 enumerates all eleven, sized by the SOP's author: eight Small or One line, two Medium. Nine of the eleven appear NOWHERE in this findings file; only the fill handle and the Dry Goal overwrite are touched, and only via F-014's 2026-09-07 correction.",
+        "The mechanism that manufactured every duplicate asset number is the fill handle auto-incrementing rather than copying — `key === \"asset\" ? bumpAsset(src, k + 1) : src` (apps/field/js/forms.js:643-647, :650-680). Removing it from Asset/Removed/Hrs retires THREE lines from the laminated field card at once.",
+        "`gpp()` computes through a blank pair rather than returning null, because Number('') === 0 and 0 is finite (apps/field/js/core.js:705-716) — so a blank Unaffected column prints 0 GPP and a large false-negative grain depression on a document that goes to a carrier. The SOP sizes the fix as one line.",
+        "`↺ Clear drawing` wipes strokes and markers, resets numbering to 1, kills the undo stack and saves immediately, with NO confirm (apps/field/js/core.js:517) — while the column-delete button beside it DOES confirm, and only when data is present (apps/field/js/forms.js:365-366). The inconsistency is the whole defect.",
+        "`⤓ Sync labor from QuickBooks` replaces the entries array wholesale, destroying hours transcribed from the paper lane — the one lane a crew member who refuses apps depends on entirely (see the leonard-sheldon-off-app constraint).",
+        "The narrative groups equipment on the trimmed type string (apps/field/js/narrative.js:62) while the sizing worksheet lowercases and regex-classifies (apps/field/js/dryingcalc.js:152-162), so `Air mover` and `Axial Air Mover` print as two line items in one packet document and one combined total in another. De-duplicating on the asset tag fixes both that and the move double-count.",
+        "A room list with a picker on map Room/Area, photo Room and equipment Location is the single largest item: the SOP estimates it retires 'roughly half of what this SOP asks a human to enforce by spelling', and it unblocks the `mm_label_room` and `ph_room` completeness rules that §12.5 had to drop from Wave 0 because they would have blocked billing on nearly every job.",
+        "Related and newly found 2026-09-07: `project.rooms` has two writers (apps/field/js/app.js:1997, :2090) and NO delete path — `deleteItem` (app.js:2293-2300) tombstones the contents item and never touches `rooms`, so a misspelled room is permanent on that job. Whoever builds the room manager needs to know that field currently has two writers, no reader that prints, and no delete."
+      ],
+      "recommendation": "Treat SOP §12.6 as an engineering backlog, not a training appendix, and schedule the eight Small/One-line items before the crew SOP is trained rather than after. Each one converts a rule that depends on seven people remembering into a system that cannot produce the wrong number, which is the cheapest reliability available anywhere in this codebase — and every one of them also deletes a line from a laminated card that is currently too long. Sequence the two Medium items (dryingwatch flags on the Job Board; the room list with pickers) into P3 alongside the rooms/locations data model, since the room list is the same work seen from the UI side.",
+      "roadmap_phase": "E1 for the eight small items; P3 for the room list and the board flags",
+      "automation_impact": "unlocks",
+      "growth_ceiling": "yes — every one of these is a control currently implemented as human memory, and human memory does not scale from 7 technicians to 100"
     }
   ]
 }

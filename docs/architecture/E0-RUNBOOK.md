@@ -85,15 +85,15 @@ Described by intent. **Read each file's own header block before you deploy it** 
 
 | # | E0 item (roadmap §7.2) | Agent | Your hands | Step |
 |---|---|---|---|---|
-| 1 | CI test gate + BUILD/SW lockstep | ✅ done on disk | merge the PR | 2 |
-| 2 | `integration_health_v0` + owner SMS | ✅ migration 247 | apply it | 3 |
-| 3 | **Reconnect Gmail** | ✗ impossible | **OAuth consent in your browser** | 4 |
-| 4 | **Reconnect QB Time** | ✗ impossible | **OAuth consent in your browser** | 5 |
-| 5 | Gate the proxy actions | ✅ three functions | deploy them | 6 |
+| 1 | CI test gate + BUILD/SW lockstep | ✅ **SHIPPED** — PR #182 merged 2026-09-07 00:53Z; live app + service worker both report `v166` | done | 2 |
+| 2 | `integration_health_v0` + owner SMS | ✅ **APPLIED** to prod 2026-09-07 | done. ⚠️ `integration_runs` has 0 rows — nothing writes to it until the P1 adapters, so the view is empty, not green | 3 |
+| 3 | **Reconnect Gmail** | ✗ impossible | ✅ **DONE by owner ~00:15Z 9/7.** Was `invalid_grant / Token has been expired or revoked`. ⚠️ every pull since now exceeds pg_net's 5 s timeout (`timed_out=true`) while still finishing its work — real failures are now indistinguishable from normal | 4 |
+| 4 | **Reconnect QB Time** | ✗ impossible | ✅ **DONE by owner ~00:03Z 9/7.** Was down ALL of 9/6 — every sweep + the 14:00 pull returned 400 `refresh_token is invalid` while cron reported *succeeded*. ⚠️ **payroll gap: work dates 9/4, 9/5, 9/6 were never pulled** (last captured 9/3). Backfill per job with the board's **⤓ Sync hours** button | 5 |
+| 5 | Gate the proxy actions | ✅ three functions | ✅ **DEPLOYED** 00:31Z via CLI. Verified: publishable key 401s, unknown action 404s, and cron still passes (`pullAllLinked`/`clockinSweep` are `["cron","user"]`) | 6 |
 | 6 | Sweep the zombie proposals + expiry filter | ✅ sweep = migration 247 §4; filter = `qb-time-proxy/index.ts:615-620` | sweep applied in step 3; the filter ships with the **qb-time-proxy deploy** here — both halves are needed, the sweep alone only clears today's jam | 6 |
-| 7 | Twilio status callback + reconcile 174 rows | ✅ route + pure module | **deploy, set the Twilio StatusCallback URL, run the reconcile** | 7 |
-| 8 | Delete Magicplan | ✅ files deleted | **delete the two deployed functions, unset the secrets** | 8 |
-| 9 | Arm `min_field_build` | ✗ app state | **one UPDATE, a day after the app deploy** | 9 |
+| 7 | Twilio status callback + reconcile | ✅ route + pure module | ✅ **DEPLOYED** 9/7 via CLI (config.toml `verify_jwt=false` respected — an unsigned POST returns 403 *signature mismatch*, not 401). **Still yours: set the Twilio StatusCallback URL.** Until then nothing settles; backlog is now **177** queued and still growing | 7 |
+| 8 | Delete Magicplan | ✅ files deleted **and merged** | **STILL YOURS** — both remain ACTIVE on the platform (`magicplan-proxy` still `verify_jwt=false`, i.e. publicly reachable with the API key behind it). No MCP delete tool exists; use the CLI in step 8 | 8 |
+| 9 | Arm `min_field_build` | ✗ app state | **STILL YOURS** — still `0`. v166 is live as of 9/7, so arm it at 166 from 9/8 once devices have picked it up | 9 |
 | 10 | Cron secrets out of `cron.job` | ⚠️ **deferred to P1** | decide: rotate now, or accept | 10 / §4 |
 | — | Ledgers insert-only; `capture_events` retention | ✅ migration 247 | applied in step 3 | 3 |
 
