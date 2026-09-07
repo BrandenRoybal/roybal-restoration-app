@@ -54,6 +54,14 @@ isolation you don't have for project-level isolation you get for free.
 It costs more to operate per customer, so you price for it. It breaks somewhere north of 30–50
 tenants — by which point you have revenue to fund the backbone the review already scoped.
 
+> **SUPERSEDED 2026-09-07 — see [architecture/07-MULTI-TENANCY-AND-BILLING.md](architecture/07-MULTI-TENANCY-AND-BILLING.md).**
+> The owner chose true multi-tenancy instead: one database, `org_id` on all 54 tables, RLS against
+> `current_org()`, and Stripe subscriptions. The reasoning above was correct for a 90-day gate with
+> no schema budget; it stops being correct once there is one, because the backfill is ~12,000 rows
+> today and grows with every customer. **The rest of this plan — the wedge, the pricing, the ICP,
+> the founder-hours split — stands unchanged.** Only the isolation mechanism moved, and the Week
+> 1–3 gate now carries the tenancy migration instead of `provision.sh`.
+
 ---
 
 ## 3. What you are actually selling
