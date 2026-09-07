@@ -23,6 +23,26 @@
  *                  Replies thread properly (In-Reply-To + threadId) and
  *                  land in the Gmail Sent folder like any other mail.
  *
+ * AUTH — the per-action gate (findings.json F-003, Critical, E0)
+ *   verify_jwt=true is NOT a caller check: the gateway admits the publishable
+ *   key committed at apps/field/js/config.js:8 and served on the public site,
+ *   so until now `curl` with that key could read whether the owner's mailbox
+ *   was connected, swap a Google OAuth code, or REVOKE AND DELETE the stored
+ *   Gmail tokens. Every action is declared in ACTION_AUTH below and checked
+ *   BEFORE dispatch, default-deny: an action missing from the table is
+ *   refused, so a new one cannot ship ungated by accident.
+ *     getStatus     any signed-in user (it only reports connected/not)
+ *     exchangeCode  admin|office JWT — mutates the mailbox connection. Still
+ *                   the admin page's own signed-in OAuth redirect flow.
+ *     disconnect    admin|office JWT
+ *     pullInbox     cron secret OR any signed-in user (unchanged)
+ *     sendEmail     cron secret + an approved pending_actions row, OR a
+ *                   signed-in human — the action's own two-layer check below
+ *                   stays authoritative; the gate only bars the key
+ *
+ *   Regression guard: supabase/functions/qb-time-proxy/authgate.test.mjs
+ *   (npm run fn:test) fails if an action is dispatched without a line here.
+ *
  * Secrets: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REDIRECT_URI
  *          (a Google Cloud OAuth web client with the Gmail API enabled,
  *          scopes gmail.readonly + gmail.send; Internal consent screen)
@@ -105,6 +125,91 @@ async function callerEmail(req: Request): Promise<string | null> {
 }
 const isMachine = (email: string) => email.startsWith("office-brief@");
 
+/* ============================================================
+   The per-action gate — F-003
+   ============================================================ */
+const OFFICE_ROLES = ["admin", "office"];   // mutates the mailbox connection
+
+/** Which callers each action admits. DEFAULT-DENY: an action that is not
+    listed here is refused before dispatch (see authorize), so adding a new
+    action to the handler without a line here fails closed instead of open. */
+type AuthKind = "user" | "office" | "cron";
+const ACTION_AUTH: Record<string, AuthKind[]> = {
+  getStatus: ["user"],
+  exchangeCode: ["office"],
+  disconnect: ["office"],
+  pullInbox: ["cron", "user"],
+  sendEmail: ["cron", "user"],
+};
+
+/** The caller's bearer token, or "" when it is not a user JWT at all. The
+    published publishable key (config.js:8) and the legacy anon key both get
+    past the gateway, so they are rejected here by shape: an identity is a
+    three-segment JWT, never an `sb_publishable_…` / `sb_secret_…` key. */
+function userJwt(req: Request): string {
+  const token = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  if (!token || token === Deno.env.get("SUPABASE_ANON_KEY")) return "";
+  return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(token) ? token : "";
+}
+
+/** Who is calling? { uid, role } for a real signed-in user, nulls otherwise.
+    supabase.auth.getUser on the service-role client (qb-time-proxy's
+    requireUser idiom) does not depend on SUPABASE_ANON_KEY, which the
+    legacy-JWT sunset made unreliable; callerEmail's REST probe is kept as the
+    fallback so a getUser hiccup cannot lock the office out of its own mail. */
+async function callerIdentity(
+  req: Request,
+  sb: ReturnType<typeof serviceDb>,
+): Promise<{ uid: string | null; role: string | null }> {
+  const token = userJwt(req);
+  if (!token) return { uid: null, role: null };
+  let uid: string | null = null;
+  try {
+    const { data, error } = await sb.auth.getUser(token);
+    if (!error && data?.user?.id) uid = String(data.user.id);
+  } catch (_) { /* fall through to the REST probe */ }
+  if (!uid) {
+    try {
+      const u = await fetch(`${Deno.env.get("SUPABASE_URL")}/auth/v1/user`, {
+        headers: { apikey: Deno.env.get("SUPABASE_ANON_KEY")!, Authorization: `Bearer ${token}` },
+      });
+      if (u.ok) uid = (await u.json().catch(() => null))?.id ?? null;
+    } catch (_) { /* stays anonymous */ }
+  }
+  if (!uid) return { uid: null, role: null };
+  try {
+    const { data } = await sb.from("profiles").select("role").eq("id", uid).maybeSingle();
+    return { uid, role: data?.role ? String(data.role) : null };
+  } catch (_) { return { uid, role: null }; }
+}
+
+/** Is this the cron (migration 209) or the approve-by-text webhook? Same
+    x-cron-secret hand-check the actions below already use. */
+function viaCronSecret(req: Request): boolean {
+  const secret = Deno.env.get("CRON_SECRET") ?? "";
+  return !!secret && req.headers.get("x-cron-secret") === secret;
+}
+
+/** The gate. Returns a refusal Response, or the caller it resolved. */
+async function authorize(
+  action: string,
+  req: Request,
+  sb: ReturnType<typeof serviceDb>,
+): Promise<{ deny: Response | null; role: string | null; cron: boolean }> {
+  const allowed = ACTION_AUTH[action];
+  if (!allowed) return { deny: err(`Unknown action: ${action}`, 404), role: null, cron: false };
+  if (allowed.includes("cron") && viaCronSecret(req)) return { deny: null, role: null, cron: true };
+  if (!allowed.some((a) => a !== "cron")) return { deny: err(`${action} is cron-only`, 401), role: null, cron: false };
+
+  const { uid, role } = await callerIdentity(req, sb);
+  if (!uid) return { deny: err("Sign in to use the email lane", 401), role: null, cron: false };
+  const passes =
+    allowed.includes("user") ||
+    (allowed.includes("office") && !!role && OFFICE_ROLES.includes(role));
+  if (!passes) return { deny: err("Not authorized — office or admin only", 403), role, cron: false };
+  return { deny: null, role, cron: false };
+}
+
 /* ---------- token management (gmail_tokens, service role only) ---------- */
 async function getConnection(supabase: ReturnType<typeof serviceDb>) {
   const { data: row, error } = await supabase
@@ -151,6 +256,15 @@ serve(async (req) => {
   let body: Blob = {};
   try { body = await req.json(); } catch { return err("Invalid JSON body"); }
   const action = body.action as string;
+
+  // ── the gate (F-003) — before any dispatch, default-deny ────────────────
+  try {
+    const gate = await authorize(action, req, supabase);
+    if (gate.deny) return gate.deny;
+  } catch (e) {
+    // an identity lookup that throws must refuse, never fall through open
+    return err(e instanceof Error ? e.message : "Authorization failed", 401);
+  }
 
   try {
     // ── getStatus ─────────────────────────────────────────────────────────

@@ -13,6 +13,34 @@
  *   getUsers       — list employees
  *   getCurrentTotals — who is currently clocked in
  *   clockinSweep   — cron: fire the portal crew line on today's first clock-in
+ *
+ * AUTH — the per-action gate (findings.json F-003, Critical, E0)
+ *   verify_jwt=true is NOT a caller check: the gateway admits the publishable
+ *   key committed at apps/field/js/config.js:8 and served on the public site,
+ *   so until now `curl` with that key could dump every employee and every
+ *   timesheet, see who was on the clock, or delete the company's QB Time
+ *   tokens. Only pullDay/pullRange/pullAllLinked/rematchAll/clockinSweep ever
+ *   checked. Every action is now declared in ACTION_AUTH below and checked
+ *   BEFORE dispatch, default-deny: an action missing from the table is
+ *   refused, so a new one cannot ship ungated by accident.
+ *     getStatus        any signed-in user (it only reports connected/not)
+ *     pullDay,
+ *     pullRange        any signed-in user (unchanged — requireUser)
+ *     pullAllLinked,
+ *     rematchAll,
+ *     clockinSweep     cron secret OR any signed-in user (unchanged)
+ *     exchangeCode,
+ *     disconnect,
+ *     syncJobcodes     admin|office JWT — they mutate the QB Time connection
+ *     getTimesheets,
+ *     getUsers,
+ *     getCurrentTotals admin|office JWT — employee and timesheet data. NOTE
+ *                      the board's "link crew member to a QB employee" picker
+ *                      (apps/board → pickQbUser → getUsers) now needs an
+ *                      admin|office login; widen with OFFICE_ROLES if a tech
+ *                      is ever expected to do that mapping.
+ *   Regression guard: supabase/functions/qb-time-proxy/authgate.test.mjs
+ *   (npm run fn:test) fails if an action is dispatched without a line here.
  */
 
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
@@ -94,6 +122,90 @@ async function requireUser(
   if (!token) return false;
   const { data, error } = await supabase.auth.getUser(token);
   return !error && !!data?.user;
+}
+
+/* ============================================================
+   Caller identity + the per-action gate — F-003
+   ============================================================ */
+const OFFICE_ROLES = ["admin", "office"];   // employee data / connection changes
+
+/** Which callers each action admits. DEFAULT-DENY: an action that is not
+    listed here is refused before dispatch (see authorize), so adding a new
+    action to the handler without a line here fails closed instead of open. */
+type AuthKind = "user" | "office" | "cron";
+const ACTION_AUTH: Record<string, AuthKind[]> = {
+  exchangeCode: ["office"],
+  getStatus: ["user"],
+  disconnect: ["office"],
+  syncJobcodes: ["office"],
+  getTimesheets: ["office"],
+  getUsers: ["office"],
+  getCurrentTotals: ["office"],
+  pullDay: ["user"],
+  pullRange: ["user"],
+  pullAllLinked: ["cron", "user"],
+  rematchAll: ["cron", "user"],
+  clockinSweep: ["cron", "user"],
+};
+
+/** The caller's bearer token, or "" when it is not a user JWT at all. The
+    published publishable key (config.js:8) and the legacy anon key both get
+    past the gateway, so they are rejected here by shape: an identity is a
+    three-segment JWT, never an `sb_publishable_…` / `sb_secret_…` key.
+    (requireUser would already reject those — supabase.auth.getUser fails on a
+    non-JWT — but saying so here keeps the refusal cheap and explicit.) */
+function userJwt(req: Request): string {
+  const token = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  if (!token || token === Deno.env.get("SUPABASE_ANON_KEY")) return "";
+  return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(token) ? token : "";
+}
+
+/** Who is calling? { uid, role } for a real signed-in user, nulls otherwise.
+    Same auth.getUser resolution requireUser has always used; the role comes
+    from profiles, the boundary migration 216 made authoritative. */
+async function callerIdentity(
+  supabase: ReturnType<typeof createClient>,
+  req: Request,
+): Promise<{ uid: string | null; role: string | null }> {
+  const token = userJwt(req);
+  if (!token) return { uid: null, role: null };
+  let uid: string | null = null;
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+    if (!error && data?.user?.id) uid = String(data.user.id);
+  } catch (_) { /* stays anonymous */ }
+  if (!uid) return { uid: null, role: null };
+  try {
+    const { data } = await supabase.from("profiles").select("role").eq("id", uid).maybeSingle();
+    return { uid, role: data?.role ? String(data.role) : null };
+  } catch (_) { return { uid, role: null }; }
+}
+
+/** Is this a cron? Exactly the hand-check the cron-gated actions already do
+    (header from migrations 202/236; the body form is kept for manual runs). */
+function viaCronSecret(req: Request, body: Record<string, unknown>): boolean {
+  const secret = Deno.env.get("CRON_SECRET");
+  const provided = (body.cronSecret as string) ?? req.headers.get("x-cron-secret") ?? "";
+  return !!secret && provided === secret;
+}
+
+/** The gate. Returns a refusal Response, or the caller it resolved. */
+async function authorize(
+  action: string,
+  req: Request,
+  body: Record<string, unknown>,
+  supabase: ReturnType<typeof createClient>,
+): Promise<{ deny: Response | null; role: string | null; cron: boolean }> {
+  const allowed = ACTION_AUTH[action];
+  if (!allowed) return { deny: err(`Unknown action: ${action}`, 404), role: null, cron: false };
+  if (allowed.includes("cron") && viaCronSecret(req, body)) return { deny: null, role: null, cron: true };
+  if (!allowed.some((a) => a !== "cron")) return { deny: err(`${action} is cron-only`, 401), role: null, cron: false };
+
+  const { uid, role } = await callerIdentity(supabase, req);
+  if (!uid) return { deny: err("Not authorized", 401), role: null, cron: false };
+  const passes = allowed.includes("user") || (allowed.includes("office") && !!role && OFFICE_ROLES.includes(role));
+  if (!passes) return { deny: err("Not authorized — office or admin only", 403), role, cron: false };
+  return { deny: null, role, cron: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -491,11 +603,21 @@ async function enrichJobcode(
 
     // ---- propose a phase for work nothing covers ----
     // Nothing new while a queue is already waiting on the owner.
+    //
+    // The expiry filter is load-bearing (E0, migration 247 §4). A row is
+    // 'pending' forever unless something approves, declines or sweeps it —
+    // expires_at is enforced on READ (migration 210), never written back — so
+    // counting status alone counted rows nobody could still act on. Three
+    // boardEdit rows expired 2026-07-26 and pinned this counter at
+    // MAX_LIVE_PROPOSALS = 3, silently proposing nothing for six weeks.
+    // Migration 247's one-time sweep clears those three; THIS filter is what
+    // stops the next three from doing it again.
     const { count: liveCount } = await supabase
       .from("pending_actions")
       .select("id", { count: "exact", head: true })
       .eq("kind", "boardEdit")
-      .eq("status", "pending");
+      .eq("status", "pending")
+      .gt("expires_at", new Date().toISOString());
     if (propose && left.length && (liveCount ?? 0) < MAX_LIVE_PROPOSALS) {
       const clusters = clusterUnmatched(
         left.map((r) => ({
@@ -742,6 +864,15 @@ serve(async (req) => {
   }
 
   const action = body.action as string;
+
+  // ── the gate (F-003) — before any dispatch, default-deny ─────────────────
+  try {
+    const gate = await authorize(action, req, body, supabase);
+    if (gate.deny) return gate.deny;
+  } catch (e) {
+    // an identity lookup that throws must refuse, never fall through open
+    return err(e instanceof Error ? e.message : "Authorization failed", 401);
+  }
 
   // ── exchangeCode ──────────────────────────────────────────────────────────
   if (action === "exchangeCode") {

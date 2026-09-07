@@ -1,0 +1,1452 @@
+{
+  "_meta": {
+    "generated": "2026-09-06",
+    "repo": "roybal-restoration-app",
+    "head": "1e04694",
+    "source": "docs/architecture/01-ARCHITECTURE-REVIEW.md (Part II) and 02-CAPABILITY-GAP-MATRIX.md; 132 verified section findings merged into 66",
+    "severity_legend": {
+      "Critical": "actively wrong or exposed in production, or blocks the north star outright",
+      "High": "structural; must change before the automation backbone",
+      "Medium": "real cost, fixable incrementally",
+      "Low": "hygiene"
+    },
+    "automation_impact_legend": {
+      "blocks": "fixing it is required to move toward the north star",
+      "neutral": "does not change the north-star distance",
+      "enables": "already a foundation to build on"
+    },
+    "growth_ceiling_legend": "true only when the structure itself caps company size without re-architecture",
+    "roadmap_phases": {
+      "E0": "Fix production now (weeks 1-2)",
+      "P1": "Thin backbone and smoke test (weeks 3-6)",
+      "P2": "First new capability: billing reconciliation v0 (weeks 7-10)",
+      "P3": "Domain tables and projections (weeks 11-18)",
+      "P4": "Documents (weeks 19-26)",
+      "P5": "Office UI strangling (weeks 27-34)",
+      "P6": "Communications, carrier learning and scope detection (weeks 35-44)",
+      "P7": "Scheduling proposals and MCP (weeks 45-56)"
+    },
+    "counts": {
+      "Critical": 5,
+      "High": 33,
+      "Medium": 21,
+      "Low": 7
+    }
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "dimension": "1. System boundaries and module structure; 5. Business logic placement; 17. AI-operability and automation readiness; 3/6. Data access layer; state management and data fetching",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d05-bizlogic",
+        "d17-ai-operability",
+        "d03-dataaccess-state"
+      ],
+      "severity": "Critical",
+      "title": "The domain executes only inside browser tabs: no headless operation layer, 14 of 17 assistant actions have no server path, and audit, permission and idempotency have no hook point",
+      "evidence": [
+        "supabase/functions/roybal-ai-office/index.ts:1570-1578 (proposals returned to the client: 'each runs only if the user taps it')",
+        "supabase/functions/roybal-ai-office/personas.ts:248-362 (ACTION_DEFS: 17 write actions whose contracts are prose desc strings; index.ts:1483-1507 params is an untyped object)",
+        "apps/field/js/assist.js:179-193 (provider.executeAction runs synchronously in the page; :211-223 audit is a best-effort PATCH that 'never blocks the chip')",
+        "apps/admin/js/finactions.js:109,152,218,271,303 (estimates/invoices/COs/receipts written to IndexedDB by the tab; only receiptLog stamps an author)",
+        "apps/admin/js/campaigns.js:211,217-232 (campaign = browser for-loop behind confirm())",
+        "apps/board/js/board.js:226-255 (schedule recompute + N sequential saves from the client; server has no scheduling authority)",
+        "apps/board/js/actions.js:399-414 (board executor; legacy moveJob/logHours at :409-411 absent from ACTION_DEFS)",
+        "supabase/functions/roybal-notify/index.ts:396-525 (server executes only emailSend/sendText/boardEdit via pending_actions)",
+        "supabase/migrations/216_individual_logins.sql:110-146 and 215_blob_history.sql:86-184 (the only write choke points see whole blobs: who, not what or why)",
+        "grep pending_actions apps/ → 0 hits vs supabase/migrations/210_pending_actions.sql:17-18 ('the admin shows the queue')",
+        "grep 'rest(' = 51 sites in 14 field files, 25 in 6 admin files, 6 in board data.js (measured): 81 client call sites hand-build PostgREST strings; no generated types, no supabase-js in any client",
+        "(live) 3 boardEdit pending_actions rows pending since 2026-07-25 count against MAX_LIVE_PROPOSALS=3 because no surface shows the queue"
+      ],
+      "recommendation": "Create packages/domain with an ops registry (defineOp: JSON-schema input, role matrix, idempotency key, events row) served by one roybal-ops function whose route table is generated from the registry. Ship proposal.approve, proposal.decline, email.send, sms.send and job.set_stage at P1, then lift finactions.js, board actions.js, the boardpush.js tile lifecycle, the campaign loop and schedule recompute into ops so browsers, crons, the worker and agents call the same door and every call writes an events row.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-002",
+      "dimension": "2. Data model",
+      "dimension_keys": [
+        "d02-datamodel"
+      ],
+      "severity": "Critical",
+      "title": "The claim side of the business has no model: claim, carrier, adjuster, policy, submittal, carrier response, rejection reason and supplement are free text or absent",
+      "evidence": [
+        "apps/field/js/model.js:137-143 (claimNo, carrier, adjuster as strings)",
+        "supabase/migrations/200_ai_backbone.sql:84-108 (unified_jobs: 20 nullable text columns, no carrier/policy entity, no FK)",
+        "supabase/migrations/228_contacts.sql:54,549 (contacts.role='adjuster' exists, but unified_jobs.contact_id is the owner)",
+        "apps/field/js/spine.js:49-58 and supabase/functions/gmail-proxy/emailmatch.ts:51-75 (claim match = strip to alphanumerics; adjuster mail files only when the claim # appears in text)",
+        "apps/field/js/model.js:385-397,548-555 (supplement = changeOrders reasons checkbox + free-text description)",
+        "supabase/migrations/208_email_lane.sql:33-51 (outbound email is the closest record of a submission; no attachment list, job_id text)",
+        "apps/field/js/app.js:1437-1494 and apps/field/js/photoshare.js:284-296 (a packet is a print or a DOM snapshot; nothing records what was sent to whom or when)",
+        "grep policy|submittal|rejection|pushback|carrier_response across apps/, supabase/, services/ → 0 domain hits",
+        "(live) changeOrders[0]: coNo blank, items unpriced, scope as five paragraphs of prose"
+      ],
+      "recommendation": "Add carriers, claims (policy, deductible, adjuster contact_id), claim_adjusters, submittals (document version, recipient, sent_at, channel), carrier_responses (outcome + structured rejection_reason linked to the submittal and line items) and supplements (linked to the response they answer); FK the job spine to carrier and adjuster contact. Write the submittals row from the P1 email.send op first; land the rest of the cluster at P3 as pure additions.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-003",
+      "dimension": "4. Auth and authorization; 11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d04-auth",
+        "d11-12-integrations-obs"
+      ],
+      "severity": "Critical",
+      "title": "The committed publishable key is a credential on the verify_jwt=true proxies: pushInvoice, OAuth disconnect/exchangeCode and timesheet dumps sit behind no further check",
+      "evidence": [
+        "(live) cron.job commands for jobids 2/5/7/15 authenticate with 'Authorization: Bearer sb_publishable_…' + x-cron-secret and succeed (qbo-payment-pull 2026-09-05 14:30Z) — the gateway admits the key",
+        "apps/field/js/config.js:8 (the same key is served on the public site)",
+        "supabase/functions/qbo-proxy/index.ts:297-357 (pushInvoice: no in-code auth; role only decides CRM linkage at 309-313); 259-294 (exchangeCode/disconnect ungated)",
+        "supabase/functions/qb-time-proxy/index.ts:747-978 (exchangeCode, getStatus, disconnect, syncJobcodes, getTimesheets, getUsers, getCurrentTotals ungated)",
+        "supabase/functions/gmail-proxy/index.ts:157-203 (getStatus/exchangeCode/disconnect ungated)",
+        "supabase/config.toml:59-73 (verify_jwt pins are the only gate on these actions)",
+        "apps/field/js/supa.js:278-285; roybal-portal/index.ts:118,452-456; qb-time-proxy/index.ts:1273-1280; roybal-notify/index.ts:448-457; services/phone-agent/tools.mjs:159-164; roybal-brief/index.ts:62-71 (five caller-identity conventions; x-cron-secret hand-checked at 8 sites)"
+      ],
+      "recommendation": "Now: a one-line guard per action in qbo-proxy, qb-time-proxy and gmail-proxy that requires a user JWT resolved to admin/office (existing callerRole/requireUser helpers) or the cron secret where a cron is the caller, so curl with the publishable key to pushInvoice or getTimesheets returns 401. Then fold into one shared requireCaller() returning a typed principal from exactly two conventions (user JWT; service key + x-cron-secret), rotate the publishable key after the crons move, and let current_principal() replace verify_jwt at P1.",
+      "roadmap_phase": "E0",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-004",
+      "dimension": "4. Auth and authorization",
+      "dimension_keys": [
+        "d04-auth"
+      ],
+      "severity": "Critical",
+      "title": "Any crew login can PATCH/DELETE the AI cost ledger, the audit log, payroll hours, board, portal and adjuster-share tables over plain REST — 18 tables are 'for all to authenticated using(true)'",
+      "evidence": [
+        "supabase/migrations/200_ai_backbone.sql:229-240 (capture_events for all to authenticated using(true))",
+        "supabase/migrations/201_ai_usage.sql:78-79 (ai_usage_all)",
+        "supabase/migrations/102_time_entries.sql:30-34 (payroll hours writable/deletable by any login)",
+        "supabase/migrations/101_coordination.sql:44-48,69-73 (coordination_jobs, crew_members)",
+        "supabase/migrations/107_portal_jobs.sql:61-65; 108_portal_messages.sql:41-45; 212_portal_selections.sql:86-90; 245_photo_shares.sql:53-57",
+        "supabase/migrations/216_individual_logins.sql:26-33 (public signup on; a tech gets full read/write)",
+        "supabase/migrations/106_sms_messages.sql:33-47 (the one table with no DELETE by design — the precedent)",
+        "(live) profiles admin 2 / tech 7 / viewer 2; field-media 1,881 objects / 418 MB under field_media_rw FOR ALL to authenticated"
+      ],
+      "recommendation": "E0: revoke UPDATE/DELETE from authenticated on ai_usage and capture_events; revoke DELETE on time_entries and gate UPDATE to admin/office (the board's manual-hours editor is an office surface); remove DELETE from crew_members, portal_* and photo_shares; scope storage delete to admin. Structurally (P5): revoke direct writes table by table and route them through typed ops, as migration 219 did for field_projects.",
+      "roadmap_phase": "E0",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-005",
+      "dimension": "11/12. Integrations; error handling, logging, observability; 17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d11-12-integrations-obs",
+        "d17-ai-operability"
+      ],
+      "severity": "Critical",
+      "title": "Two OAuth lanes are dead in production and nothing alerts: cron reports success, the Gmail card shows green, and automation has no health surface at all",
+      "evidence": [
+        "(live) net._http_response 6h window: 13× HTTP 500 'Gmail token refresh failed: invalid_grant' from gmail-inbox-pull; 23× HTTP 400 'That refresh_token is invalid' from qb-clockin-sweep; gmail_tokens.expires_at 2026-09-01 04:15Z; qb_time_tokens.expires_at 2026-09-04 19:38Z",
+        "(live) cron.job_run_details reports 288 + 288 'succeeded' for both dead jobs because net.http_post is asynchronous; net._http_response is purged after ~6 h",
+        "supabase/functions/gmail-proxy/index.ts:125,387-389 and qb-time-proxy/index.ts:139-142,1283-1285 (refresh failure thrown, caught, returned as an HTTP error nobody reads)",
+        "supabase/functions/gmail-proxy/index.ts:157-161 and qbo-proxy/index.ts:252-256 (getStatus = connected: !!data, a row-exists check); apps/admin/js/gmailconnect.js:64-68 renders '● Connected'",
+        "supabase/functions/qb-time-proxy/index.ts:800-808 (comment recording the prior 19-day green-while-dead incident); grep needsReconnect|reconnect across supabase/functions hits only qb-time-proxy:838",
+        "grep gmail|token|expired|reconnect in roybal-brief/index.ts and digest.ts → no integration-health line in the morning brief",
+        "console.* count: roybal-ai-office 0, roybal-ai-ingest 0, roybal-ai-narrative 0 (measured); roybal-ai-office/index.ts:1683 (fieldAssist summary = counts only, no tool traces)"
+      ],
+      "recommendation": "E0: re-authorise Gmail and QB Time; add an integration_health view keyed by lane (token row + last successful pull) written by every getConnection/getValidToken; make every getStatus prove the credential by using it (copy qb-time-proxy:811-846); a 15-minute check that texts the owner through sendSms with a 24 h resend-guard row; the brief and the admin Today tab read integration_health. At P1 record HTTP outcome per queue run and persist a trace row per model call so a dead lane can never look green.",
+      "roadmap_phase": "E0",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-006",
+      "dimension": "1. System boundaries and module structure; 4. Auth and authorization; 17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d04-auth",
+        "d17-ai-operability"
+      ],
+      "severity": "High",
+      "title": "Two disjoint proposal/approval spines: the server one covers 3 kinds, one approver by phone number, records no approver, has mutable rows and has been jammed by zombie rows since 2026-07-26",
+      "evidence": [
+        "supabase/migrations/210_pending_actions.sql:24-38,46-55 (no approver column; code int without unique; expired only in CHECK; clients SELECT + INSERT-pending only)",
+        "supabase/functions/roybal-notify/index.ts:396-403 (approver = OWNER_CELL only), :438-443 (guarded approve), :460-521 (executors)",
+        "supabase/functions/gmail-proxy/index.ts:317-326,376-381 (executor re-verifies and consumes — the pattern to keep)",
+        "supabase/functions/qb-time-proxy/index.ts:284-285,494-499 (MAX_LIVE_PROPOSALS=3 counted with no expiry filter); :345-356 and roybal-brief/index.ts:262-266 (two app-side code allocators)",
+        "apps/field/js/assist.js:179-223 (chip lane: tap-to-confirm, executes client-side, audit = best-effort PATCH of capture_events.result.executed)",
+        "supabase/functions/roybal-ai-office/personas.ts:246-362 (prose param contracts for chips)",
+        "supabase/functions/roybal-brief/weekly.ts:46 (weekly report counts source_type 'assist_action' which no code writes)",
+        "(live) pending_actions = 3 rows, all pending, created 2026-07-25, expired 2026-07-26, kind boardEdit; no boardEdit proposal since"
+      ],
+      "recommendation": "E0: set the three rows expired, count only status='pending' and expires_at > now(), add a 5-minute expiry sweep. P1: a proposals table (pending_actions kept behind a compatibility view until P2) with approved_by principal, approved_at, required capability per kind, DB-side code allocation, an append-only events transition log, op_approve/op_decline RPCs, and an Approvals inbox in the admin beside 'text YES 12'; route chip executions through it so result.executed disappears.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-007",
+      "dimension": "1. System boundaries and module structure; 13/14. Type safety, testing, CI; dependencies and tooling health; 16. AI-maintainability; 3/6. Data access layer; state management and data fetching",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d13-14-quality-deps",
+        "d16-maintainability",
+        "d03-dataaccess-state"
+      ],
+      "severity": "High",
+      "title": "Shared code travels by URL path, byte copy, Docker COPY, SQL re-implementation and prose — no package, the only drift guard never runs in CI, and the admin is a full replica client of the field app",
+      "evidence": [
+        "56 static '../../js/*.js' import lines across 16 files in apps/admin/js + apps/board/js (measured; 0 dynamic); package.json:5-8 (workspaces share no code; admin/portal have no manifest)",
+        "apps/admin/js/admin.js:8-11,34,235 (imports field core/config/supa/sync/assist; boots the field sync engine; reads jobs from the field IndexedDB)",
+        "apps/field/js/myweekcalc.js:17-18 (reverse import of the board's schedule engine); apps/field/sw.js:27 (field SW precaches board files)",
+        "apps/board/js/schedule.js ≡ supabase/functions/roybal-brief/schedule.js (md5 23189e1e…); services/phone-agent/Dockerfile:8-9 (COPY personas.ts + schedule.js, unguarded)",
+        "apps/portal/js/zip.js:3-5 ('VERBATIM COPY … keep the two files identical'); apps/portal/js/portal.js:10-39, packet.js:13-41, photos.js:14-42 (helper trio triplicated)",
+        "apps/field/js/merge.js:32-36 vs supabase/migrations/217:115, 241:41,170, 243:16-19 (collection list hand-mirrored; 0 tests read any .sql)",
+        "supabase/functions/roybal-brief/crewdigest.test.mjs:18-23 (the only cross-copy guard; never run in CI); grep: 47 keep-in-sync/lockstep comments",
+        "apps/field/js/narrative.js:391-393, officeai.js:41-47, voice.js:58-64 (raw fetches bypass the wrapper); supa.js:101-111 (rpc() adds p_build; rest('rpc/…') does not)",
+        ".github/workflows/deploy-field.yml:36-38 (cp -r field→/, admin→/admin, board→/board); apps/admin/serve.mjs:2-5,11-12 (local remaps that fake the layout)"
+      ],
+      "recommendation": "Collapse to one mechanism at P1: packages/domain and packages/integrations as workspace packages, esbuild bundling per app, BUILD generated from the git SHA, the service-worker precache generated from the bundle graph; delete the schedule/zip/persona copies and the Docker COPY; route every edge-function and RPC call through callFunction()/rpc(). Give the admin its own paged server reads (P5) instead of the field sync engine.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-008",
+      "dimension": "1. System boundaries and module structure; 3/6. Data access layer; state management and data fetching; 11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d03-dataaccess-state",
+        "d11-12-integrations-obs"
+      ],
+      "severity": "High",
+      "title": "Fourteen edge functions share no code and expose no connector abstraction: CORS, auth, envelope, DB access, price tables and quiet hours are re-implemented per function, and no named operation exists for an agent to call",
+      "evidence": [
+        "ls supabase/functions → 14 dirs, no _shared/; Access-Control-Allow-Origin in 11 of 14 index.ts (9 '*', 2 allowlists)",
+        "x-cron-secret check hand-written in 6 index.ts files; two response envelopes (qb-time-proxy:49-55 {ok,data} vs roybal-notify:74-75 flattened); std@0.168.0 ×11 vs 0.177.0 ×3",
+        "supabase-js in 4 functions vs raw PostgREST fetch in 10 (roybal-portal/index.ts has 38 rest/v1 sites; qbo-proxy uses both at 68-72 and 432-442)",
+        "supabase/functions/roybal-ai-office/index.ts:98-126; roybal-ai-narrative/index.ts:69-72; services/phone-agent/supa.mjs:47-91 (five copies of db()/insertRow()/monthSpend())",
+        "apps/field/js/qbo.js:13-27, gmail.js:13-36, qbtime.js:19-30 (1:1 pass-through wrappers: proxy(action, payload))",
+        "grep of roybal-ai-office/index.ts for qbo-proxy|gmail-proxy|roybal-notify|pending_actions = 0 (the assistant cannot reach any integration)",
+        "Raw provider fetches: api.anthropic.com in 7 files, api.deepgram.com in 2; LLM price table copied in 6 files"
+      ],
+      "recommendation": "P1: supabase/functions/_shared/ (cors, envelope, requireCaller/current_principal, db client in caller-JWT and service-role variants, prices, quietHours, monthSpend) and packages/integrations with one connector per provider exposing named JSON-schema operations (email.send, sms.send, quickbooks.syncInvoice, time.pullDay) that are the same objects registered as agent tools; migrate each of the seven live functions as it is next touched; packages/integrations/llm/client.ts is the one file that names a model.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-009",
+      "dimension": "1. System boundaries and module structure; 13/14. Type safety, testing, CI; dependencies and tooling health; 16. AI-maintainability",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d13-14-quality-deps",
+        "d16-maintainability"
+      ],
+      "severity": "High",
+      "title": "No CI gate: a deploy-only workflow with no PR checks, && test chains that stop at the second file, and main is red with the red state deployed to production",
+      "evidence": [
+        ".github/workflows/deploy-field.yml:10-19 (push-to-main deploy; no pull_request trigger; no test step; still lists the deleted branch); :52 (force-push gh-pages)",
+        "apps/field/js/config.js:25 (BUILD 'v165') vs apps/field/sw.js:6 ('roybal-field-v166'); apps/field/test/build.test.mjs:17 fails at HEAD; commit 211abb4 (PR #181) touched sw.js without config.js",
+        "package.json:11 (test = field && board && fn; phone-agent excluded) and apps/field/package.json:10 (28 files in one && chain — build.test is link 2, so one failure silences 26 field + 4 board + 13 function files)",
+        "origin/gh-pages deploy commit 6453780: js/config.js:25 = v165, sw.js:6 = v166 (the red state is live)",
+        "apps/field/test/dryingcalc.test.mjs, test/sms.test.mjs, js/calibration.test.mjs on disk but wired into no script; 27 files hand-roll ok()/check() vs 3 using node:test",
+        "supabase/functions/roybal-brief/crewdigest.test.mjs:18-23 and apps/field/test/merge.test.mjs:224-226 (the only drift guards; never run in CI)",
+        "tsconfig.base.json (0 references); 0 @ts-check / 0 JSDoc tags across app JS; functions run under --experimental-strip-types, never checked"
+      ],
+      "recommendation": "E0: fix the BUILD/CACHE pair; add a pull_request workflow running every suite under a single node --test glob runner (phone agent included, no && chains) with build.test.mjs a required check, and make the deploy job depend on it. P1: add tsc --checkJs on the four apps and deno check on functions to the same job, and the merge-parity and no-direct-table-write checks required by roadmap rule 3.",
+      "roadmap_phase": "E0",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-010",
+      "dimension": "1. System boundaries and module structure; 5. Business logic placement; 9/10. Offline and sync; file and photo storage",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d05-bizlogic",
+        "d09-10-offline-storage"
+      ],
+      "severity": "High",
+      "title": "The single write door to the system of record depends on a hand-kept JS↔plpgsql twin of the merge protocol: the 12-key collection registry is copied five times and parity is asserted by comment, not CI",
+      "evidence": [
+        "apps/field/js/merge.js:32-36 (ID_COLLECTIONS) vs supabase/migrations/217_push_project_rpc.sql:115, 241_merge_delete_tombstones.sql:41,170, 243_losstypes_merge_union.sql:16-23 (four SQL copies)",
+        "apps/field/js/merge.js:142-214 vs supabase/migrations/241_merge_delete_tombstones.sql:37-190 (merge_project_blobs, redefined in 217/241/243)",
+        "supabase/migrations/243_losstypes_merge_union.sql:30-36 ('proven byte-equal over 2033 randomized cases' — in a comment; the harness is not in the tree)",
+        "apps/field/test/merge.test.mjs:224-226 (cross-checks only the JS registry against FORMS); apps/field/test/sync.mjs:4 (the fake server reuses the JS merge, so the SQL is never exercised)",
+        "supabase/migrations/241_merge_delete_tombstones.sql:193-280 (push_project is the only door into field_projects)",
+        "(live) push_project / merge_project_blobs bodies match 241/243 — verified by hand, not by a test"
+      ],
+      "recommendation": "P1: recover the 2,033-case harness from PR history, emit the collection registry from packages/domain, generate the SQL arrays from it in a build step, and run a JS-vs-SQL parity test against a Postgres branch in CI (roadmap rule 3); at P3 the ID_COLLECTIONS/id_cols pair changes only under that test. Longer term make the server the only merge engine as sections move to rows.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-011",
+      "dimension": "1. System boundaries and module structure; 2. Data model; 3/6. Data access layer; state management and data fetching; 9/10. Offline and sync; file and photo storage",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d02-datamodel",
+        "d03-dataaccess-state",
+        "d09-10-offline-storage"
+      ],
+      "severity": "High",
+      "title": "coordination_jobs and field_projects are written under three concurrency protocols and five hand-rolled rev guards by 22 files in five runtimes; a service-role PATCH in qbo-proxy bypasses the merge and tombstone sweep; board delete is unguarded; the tile lifecycle is split across two apps",
+      "evidence": [
+        "grep coordination_jobs (non-test): 12 client files in field/board/admin, 9 edge-function files, services/phone-agent/tools.mjs",
+        "apps/board/js/data.js:110-132 (rev guard #1; :116 every save forces deleted:false), :208-214 (delete at the same rev, unguarded), :220-245 (crew read-merge-write, no rev)",
+        "apps/field/js/boardpush.js:302-322,495-527 (#2, same code, different semantics: same-rev 'annotation' writes); :730-773 (ensureBoardTile creates/respawns tiles from field code)",
+        "supabase/functions/roybal-notify/index.ts:501-510 (#3); supabase/functions/qbo-proxy/index.ts:429-444 (#4: service-role PATCH on field_projects around push_project) vs 219_revoke_direct_field_writes.sql:17-18",
+        "supabase/migrations/246_lead_triage_grant.sql:26-78 (#5: coordination_job_patch shallow-merges top-level keys only; sole caller apps/admin/js/leads.js:80)",
+        "supabase/migrations/241_merge_delete_tombstones.sql:211 (tombstone sweep lives only inside push_project)",
+        "supabase/migrations/216_individual_logins.sql:110-138 (updated_by stamps the whole merged row); 215_blob_history.sql:53-70 (history = lz4 pre-images)",
+        "services/phone-agent/tools.mjs:131 writes type 'mitigation' absent from apps/board/js/board.js:30-38"
+      ],
+      "recommendation": "P2: route qbo-proxy's payment write-back through push_project as a key-owner write (read rev, set only invoices, retry once on merged). P3-P5: one server-side job service — coordination_job_patch extended to collections (subtasks, dayCrew, leadLog) and deletes, create/adopt/patch owned by ops — becomes the only path for browsers, functions and the phone agent; delete the four client/edge rev guards; give crew_members and time_entries a rev or move them under the same RPC; add a transactional schedule.apply for multi-job writes.",
+      "roadmap_phase": "P5",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-012",
+      "dimension": "2. Data model; 3/6. Data access layer; state management and data fetching; 9/10. Offline and sync; file and photo storage; 15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d02-datamodel",
+        "d03-dataaccess-state",
+        "d09-10-offline-storage",
+        "d15-scale"
+      ],
+      "severity": "High",
+      "title": "The whole job blob is the unit of storage, transfer, audit and the only write door: every save rewrites 50–227 kB through a 5–7 trigger stack, and every device and the office browser pull every changed job and every photo in it",
+      "evidence": [
+        "supabase/migrations/100_field_projects.sql:11-19; apps/field/js/model.js:128-206 (one JSONB document; 80 top-level keys, 13 written outside the factory per docs/architecture/00-SYSTEM-INVENTORY.md §9)",
+        "supabase/migrations/241_merge_delete_tombstones.sql:193-282 (push_project: FOR UPDATE + merge + whole-row update; :252-259 no-op rewrites were the Jul-2026 disk-IO burn)",
+        "supabase/migrations/100:32; 216:139; 214:46; 215:179; 224:216-219 (trigger stack per blob write)",
+        "apps/field/js/supa.js:268-273 (fetchSince has no job/crew filter); apps/field/js/sync.js:435-482 (pull inflates every media marker); sync.js:48,261 (5 MB row backstop); sync.js:225 (device remembers only 3,000 uploaded hashes)",
+        "apps/admin/js/admin.js:11,34 (admin runs the field sync engine and inflates every photo into the office browser)",
+        "(live) field_projects.data avg 50 kB, max 227 kB; 729 photos, 180 contents items, 14 moisture maps across 15 live jobs; field-media 1,881 objects / 418 MB",
+        "(live) pg_stat_statements: INSERT field_projects 4,254 calls @ 207 ms mean, 883 s total; push_project 2,064 @ 190 ms"
+      ],
+      "recommendation": "P3: `jobs` spine plus rooms, equipment, moisture, crew tables as the owners of agent-read facts, projected from the blob by the worker's job.project (pure extractProject(), enqueued by an AFTER UPDATE trigger with a 30 s coalescing window) and backfilled from blob_history with count parity; push_project stays the single door so no crew device cuts over; no new blob keys once a section has an owner in rows (rule 3). Scope fetchSince by crew assignment as the first step.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-013",
+      "dimension": "2. Data model",
+      "dimension_keys": [
+        "d02-datamodel"
+      ],
+      "severity": "High",
+      "title": "One job has four live identities linked by soft ids and look-alike heuristics; zero FKs on every core table; the FK-anchored spine is itself soft-linked and its status is never written",
+      "evidence": [
+        "supabase/migrations/200_ai_backbone.sql:103-105 (field_project_id / coordination_job_id soft; 'intentionally no hard FK')",
+        "supabase/migrations/107_portal_jobs.sql:24-27; 245_photo_shares.sql:19-21; 212_portal_selections.sql:27-29; 221_field_photos_table.sql:62-64 (soft links 'on purpose')",
+        "supabase/migrations/208_email_lane.sql:44 and 210_pending_actions.sql:30 (job_id text)",
+        "apps/field/js/boardpush.js:262,730-773 (tile↔job identity by claim/customer heuristics; two look-alikes = don't guess)",
+        "apps/field/js/spine.js:23-40 (spine writer maps 11 header scalars + 2 link ids; never status); roybal-ai-office/index.ts:1350 and services/phone-agent/tools.mjs:57 read unified_jobs.status",
+        "(live) unified_jobs: 33 rows, all status='new'; 64 of 80 coordination tiles carry data.fieldJobId",
+        "docs/architecture/00-SYSTEM-INVENTORY.md §6.1 (75 FK constraints exist; zero on field_projects, coordination_jobs, crew_members, time_entries, pending_actions, price_list, blob_history, photo_shares, portal_selections)"
+      ],
+      "recommendation": "P3: a `jobs` table as the physical spine (unified_jobs becomes a read-only view with identical columns); every job-scoped table references it by uuid FK; text job_id columns replaced; the field↔board link becomes a column with a unique constraint; spine.js is repointed at an op in the same PR as the view so old builds get a 4xx that spine.js:83 already swallows.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-014",
+      "dimension": "2. Data model",
+      "dimension_keys": [
+        "d02-datamodel"
+      ],
+      "severity": "High",
+      "title": "Room, material, equipment asset and reading location have no identity: room is free text in six places, readings are positional string arrays whose location is a pixel, equipment is per-day count strings classified by regex",
+      "evidence": [
+        "apps/field/js/model.js:173,210,275,324,421,586 (room as string on rooms[], photos, contents, moisture map label, line items, plan dimensions)",
+        "apps/field/js/forms.js:2019-2024,2628 (case-insensitive room comparator; plan dimensions rooms by name); merge.js:180-185 and 243_losstypes_merge_union.sql:100-125 (rooms unioned by string value)",
+        "apps/field/js/model.js:321-340 (readings = {date, values: Array(13).fill('')}; location = marker index); forms.js:284-289,306 (goal parsed by regex; 13-column blocks)",
+        "apps/field/js/model.js:330,346-361 (equipmentPlan icons vs free-text equipment rows vs per-day dehu/am/scrub count strings); dryingcalc.js:152-163 (type recovered by regex)",
+        "apps/field/js/model.js:520-535 (certificate verification rows are re-typed strings)",
+        "supabase/migrations/001_initial_schema.sql:137-146,166-215 (era-0 rooms, moisture_readings, equipment_logs already modelled these — dead)",
+        "(live) moistureMaps[0]: 52 positional strings, label 'Drywall' vs material 'Framing / Wood / Subfloor' with one goal per map; dryingLogs[0]: dehu '2', am '20', scrub '1', no unit rows; invoices[0] qty '215' air-mover-days typed"
+      ],
+      "recommendation": "P3: rooms, equipment_units, equipment_placements (place/remove events with asset id, location and photo), moisture_locations (material + dry goal), moisture_readings (one row per location per date) and dry_standards as tables; `roomIds: [{id,name,aliases[]}]` added to the blob beside rooms[] (never rewritten) and registered in ID_COLLECTIONS and id_cols under the parity test; QR/Code-128 labels per asset_tag with an optional scan screen; unit-days derived from placements.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-015",
+      "dimension": "2. Data model; 15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d02-datamodel",
+        "d15-scale"
+      ],
+      "severity": "High",
+      "title": "Crew, skills, certs, availability, assignment, phases and dependencies are JSON layers resolved only in JS; time entries carry ids from either job table with no unique key; the people model cannot represent the target org",
+      "evidence": [
+        "supabase/migrations/101_coordination.sql:51-58 (crew_members = JSONB blob, LWW, '9-person crew'); apps/board/js/crewmerge.js:7-16 (last-write-wins, email is the login link)",
+        "apps/board/js/board.js:2783-2792,2843-2857 (crew fields: name/phone/email/free-text role/rate/active/outDays/bio; bioCerts one string); (live) crew_members keys hold no skills, teams, leads or capacity",
+        "apps/board/js/schedule.js:14,56-67,436-468 (one global hoursPerDay; crewIds → crewSpans → dayCrew resolved in JS); board.js:2036,2062-2067 (deps and subtasks written into the tile blob)",
+        "supabase/migrations/200_ai_backbone.sql:32-78,123-138 (typed phase model: 0 rows, 0 app references)",
+        "supabase/functions/qb-time-proxy/index.ts:221-222,1040-1050 (jobId/fieldProjectId = whichever table claimed the jobcode first); (live) time_entries sample jobId equals a coordination_jobs id vs 103_qb_time_field.sql:63-80",
+        "supabase/migrations/102_time_entries.sql:27 (only updated_at indexed; no unique on qbTimesheetId)",
+        "apps/field/js/dryingwatch.js:48-76 (flags only); supabase/migrations/231_portal_drying.sql:8-14 (trend excluded by design)"
+      ],
+      "recommendation": "P3: crews, crew_members (principal_id, contact_id, contact_prefs{digestOptOut, appOptOut, paperTimesheet}), skills, crew_member_skills, certifications, availability_patterns/exceptions, phase_skill_requirements, job_assignments as rows; time_entries gains real columns beside data, a real job FK and a unique (source, external_id); phase_templates/phase_instances adopted or dropped. These feed schedule.propose at P7.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-016",
+      "dimension": "2. Data model; 15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d02-datamodel",
+        "d15-scale"
+      ],
+      "severity": "High",
+      "title": "No organizational dimension exists: GC vs restoration is a per-job form flag conflated with loss type, and there is one company const, one settings row, one calendar, one QBO company, one mailbox, one Twilio number, one region and one phone number hard-coded across the tree",
+      "evidence": [
+        "apps/field/js/model.js:100-111,162 (jobType 'restoration'|'construction' selects forms); spine.js:36 (loss_type = 'construction' or 'water'); board.js:30-38 (TYPES mixes remodel, new_build, restoration, water, fire, mold, other)",
+        "services/phone-agent/tools.mjs:131 (writes type 'mitigation', not in TYPES) and apps/board/js/board.js:127 (renders as Other)",
+        "apps/field/js/model.js:6-22 (COMPANY const); apps/field/js/forms.js:1894-1899 (literals re-typed); 19 literal phone sites across apps/portal and roybal-portal/index.ts:87",
+        "America/Anchorage hard-coded in 9 files; roybal-ai-office/personas.ts:17,32,45 and roybal-web-agent/persona.ts:44-49 (Fairbanks/North Pole)",
+        "apps/board/js/settingsync.js:19-25 (settings uuid 00000000-…-01 hard-coded in 7 files); schedule.js:14,634 (global hoursPerDay); (live) one settings row",
+        "supabase/migrations/104_qbo_tokens.sql:10-27 and 208_email_lane.sql:13-29 (one token row per provider, .limit(1).single()); qbo-proxy/index.ts:52-54,316-321 (one service item); roybal-notify/index.ts:55 (one TWILIO_FROM)",
+        "grep division|cost_center|company_id|tenant|location_id across migrations and apps: 0"
+      ],
+      "recommendation": "P1: a divisions table with one row (and org_id defaulted on the new contract tables if the owner takes the tenancy recommendation). P3: division_id on jobs, crews, crew members, equipment units, proposals, settings and connections; job kind split from loss type as two fields; TYPES/STAGES driven from a reference table; COMPANY constants and the timezone moved into scoped settings; approvers, phone numbers and QBO item mapping keyed by scope.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-017",
+      "dimension": "2. Data model; 7/8. UI and component system; documents and PDF/print pipeline; 17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d02-datamodel",
+        "d07-08-ui-docs",
+        "d17-ai-operability"
+      ],
+      "severity": "High",
+      "title": "The invoice line item is {room, desc, qty, unit, price}: the AI's code, basis and justification are discarded on apply, the unbilled-item audit runs only on a click, and photo AI tags are consumed by nothing",
+      "evidence": [
+        "apps/field/js/model.js:420-422 (blankLineItem has no justification field)",
+        "apps/field/js/forms.js:1484-1488 (stores room/desc/qty/unit/price/code/priced/flag only) vs :1505 (basis rendered once into a transient panel) and :1535 (audit reason dropped)",
+        "supabase/functions/roybal-ai-office/index.ts:369-393 (DRAFT_SCHEMA requires basis, category, code, priceBasis on every line)",
+        "supabase/functions/roybal-ai-office/index.ts:604-661,626 (invoiceAudit: 'Unbilled logged hours are lost revenue' — runs only on a human click; officeai.js:173-179 facts digest assembled client-side)",
+        "supabase/functions/qbo-proxy/index.ts:316-321 (every line flattened to one ItemRef, so the accounting copy cannot recover it either)",
+        "docs/Estimating_Rules_Draft.md:104,114 ('Attach the justification text above to the line so it survives adjuster review')",
+        "(live) invoices[0].items carry no code and no justification; photos[0].ai carries damage/equipment/materials arrays nothing consumes for billing"
+      ],
+      "recommendation": "P2: billing.reconcile v0 as a nightly worker job over a server-built facts digest that files one invoice.review_gaps proposal per job with dates, counts and entry ids; execution appends flagged lines to the office-owned invoices[] by key-owner write-back. P4: line_items rows with category, code, price_basis, justification and evidence refs (photo, reading, placement ids); persist li.basis on apply and render it as a footnote block in the template.",
+      "roadmap_phase": "P2",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-018",
+      "dimension": "2. Data model",
+      "dimension_keys": [
+        "d02-datamodel"
+      ],
+      "severity": "High",
+      "title": "Materials consumed are never captured: the daily log materials field is free text and empty live, receipts are empty, and QBO sees one service item",
+      "evidence": [
+        "apps/field/js/model.js:363-371 (constructionLogs materials free text) and (live) materials:''",
+        "apps/board/js/board.js:39-43 (board 'materials' = ordered/received status only)",
+        "apps/field/js/model.js:195 and (live) receipts 0 rows",
+        "supabase/functions/qbo-proxy/index.ts:316-321 (every line ItemRef = one item)"
+      ],
+      "recommendation": "P3: a materials/consumables capture on the daily log (item, qty, unit, receipt ref; voice-friendly) stored as rows keyed to job and room, plus an item_map from app category to QBO ItemRef with the generic item as fallback so billing.reconcile can see the class and QBO reporting can categorise it.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-019",
+      "dimension": "3/6. Data access layer; state management and data fetching; 11/12. Integrations; error handling, logging, observability; 9/10. Offline and sync; file and photo storage",
+      "dimension_keys": [
+        "d03-dataaccess-state",
+        "d11-12-integrations-obs",
+        "d09-10-offline-storage"
+      ],
+      "severity": "High",
+      "title": "Client-side failure is silent by design: rest() returns the raw Response so 81 call sites invent error semantics, 85 empty catch blocks, every error reads as 'offline', queued writes retry forever, and sync observability is a coloured dot",
+      "evidence": [
+        "apps/field/js/supa.js:81-85 (any HTTP response incl. 4xx counts as network OK); :292-294",
+        "Measured: console.* = 1 in apps/field/js (core.js:207), 0 in board/admin/portal; 59 empty catch blocks in apps/field/js + 26 in board/admin/portal; 33 .catch(() => {}|null|[]|false) swallowers; 0 onerror/unhandledrejection handlers",
+        "apps/field/js/boardpush.js:292-299, spine.js:143-145, tech.js:71-78 (integration reads return null/[]/{skipped:true} on any error)",
+        "apps/board/js/board.js:210-221 (any thrown error → setSync('offline')); apps/board/js/data.js:72-93 (offline queue re-tries every item on every pull, no dead-letter)",
+        "apps/board/js/settingsync.js:8-13 (the '__settings__' 22P02 write retried for months unnoticed)",
+        "apps/field/js/app.js:256-278; apps/admin/js/admin.js:36-41; apps/board/js/board.js:257-265 (status = a dot); supabase/migrations/226_sync_client_telemetry.sql:69-76 (sync_clients records build and last_seen only)",
+        "supabase/migrations/215_blob_history.sql:212-215 (48 versions / 30 days); apps/field/js/merge.js:64 (2,000 tombstone cap)"
+      ],
+      "recommendation": "P1: give the wrapper a Result type (ok | offline | refused | conflict | failed with status and message) consumed by call sites; one report(err, ctx) helper batching to a client_errors table (build, route, user, message) plus a global unhandledrejection hook; extend sync_clients with pending count, last error and last cursor per device; give the board queue a dead-letter state after N failures with a visible badge; remove the 4xx-is-OK rule from api().",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-020",
+      "dimension": "3/6. Data access layer; state management and data fetching; 9/10. Offline and sync; file and photo storage; 15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d03-dataaccess-state",
+        "d09-10-offline-storage",
+        "d15-scale"
+      ],
+      "severity": "High",
+      "title": "Refresh is poll-everything into browsers: the board re-reads three tables every 20 s per tab into a localStorage cache with a silent 20,000-row cap, the admin replicates every blob with media, agent read tools are unpaged, and nothing uses Realtime",
+      "evidence": [
+        "apps/board/js/board.js:205-208 (setInterval 20000), 210-221 (refresh = pull + applySchedule); apps/board/js/data.js:150-163 (getAll 20×1,000, silent stop), 168-187 (three tables, all time_entries cached in localStorage), 25-29",
+        "apps/admin/js/admin.js:28-34,235 (field sync engine + Store.all per paint); apps/field/js/sync.js:478-482 and media.js:102-114 (every photo inflated into the office browser)",
+        "apps/field/js/boardpush.js:206-209 and myweek.js:87 (field reads all coordination_jobs)",
+        "supabase/functions/roybal-ai-office/index.ts:1363-1364,1372,1409-1411 (boardRows default 300, no order/offset; time_entries 1000)",
+        "grep realtime|.channel(|subscribe( in apps/*/js = 0",
+        "apps/board/index.html:34-48 (3.5 s force-reload guard); no service worker or build tag of the board's own",
+        "(live) pg_stat_statements: SELECT coordination_jobs 24,847 calls, crew_members 24,846, field_projects id,data,deleted,updated_at 111,629, time_entries 31,255 @ 22 ms (679 s)"
+      ],
+      "recommendation": "P5: one changes feed (Realtime on the events table or a single updated_at cursor across tables) replacing the three pollers; paged views/RPCs (job summary, hours by job, board snapshot, Today/analytics computed in SQL) used by board, admin and the AI read tools alike; the admin tabs move onto ops and drop the field replica; the board gets the field outbox, per-table cursor and build tag or becomes a route of the field PWA.",
+      "roadmap_phase": "P5",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-021",
+      "dimension": "3/6. Data access layer; state management and data fetching; 9/10. Offline and sync; file and photo storage",
+      "dimension_keys": [
+        "d03-dataaccess-state",
+        "d09-10-offline-storage"
+      ],
+      "severity": "High",
+      "title": "Only the job blob has an offline path: a dozen cross-table side effects a job edit should trigger are online-only fire-and-forget from page renders with no queue, retry, idempotency or indicator",
+      "evidence": [
+        "apps/field/js/sync.js:250-425 (the only queued/retried write path)",
+        "apps/field/js/boardpush.js:204 (ready() gate; ensureBoardTile/pushActuals/adoptBoardJobs skip silently), :292-299, :527-529",
+        "apps/field/js/spine.js:83,141-145 (syncSpine returns {skipped:true})",
+        "apps/field/js/photoshare.js:88-91,128,285 (requireOnline throws); apps/field/js/portal.js:126-185 (publishPortal upsert, no queue)",
+        "apps/field/js/qbo.js:14-15; gmail.js:14-15; officeai.js:24,31; voice.js:108; forms.js:2428; app.js:1308,1381,1384,548-557 (fired from projectHome and the jobs list)",
+        "apps/board/js/settingsync.js:8-13; apps/admin/js/finactions.js:109 (financial writes ride the blob sync with no server record of intent)",
+        "apps/admin/js/campaigns.js:217-232 (campaign loop runs in a browser tab; a closed tab halts it)"
+      ],
+      "recommendation": "P1: an outbox table delivered by roybal-worker (Fly, lease columns, heartbeat) under idempotency keys — email through the Gmail adapter, SMS through Twilio — and sendSms becomes an outbox row. P3: an IndexedDB outbox store in the field app for non-blob ops (tile, spine, portal, share, equipment.place/remove) drained after each successful pull through the ops door; clients stop calling boardpush/spine/portal writes directly.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-022",
+      "dimension": "3/6. Data access layer; state management and data fetching; 11/12. Integrations; error handling, logging, observability; 17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d03-dataaccess-state",
+        "d11-12-integrations-obs",
+        "d17-ai-operability"
+      ],
+      "severity": "High",
+      "title": "No idempotency on the three side effects an automation will retry — sendSms, sendEmail, pushInvoice — none on time_entries ingestion, and no server-side validation of any write",
+      "evidence": [
+        "supabase/functions/roybal-notify/index.ts:334-368 (insert then Twilio, no client key; only kind 'campaign' dedupes at 316-324)",
+        "supabase/functions/gmail-proxy/index.ts:340-349 (browser sendEmail sends with no key) vs :376-380 (only the approval path consumes a pending_actions row)",
+        "supabase/functions/qbo-proxy/index.ts:345-356 (a new QBO invoice is created whenever qboInvoiceId is absent; no DocNumber lookup)",
+        "supabase/functions/qb-time-proxy/index.ts:608-611 (dedupe by in-memory qbTimesheetId map); supabase/migrations/102_time_entries.sql:14-36 (no unique index on data->>qbTimesheetId)",
+        "apps/field/js/sms.js:121-133 (chip send path with no key)",
+        "supabase/functions/roybal-ai-office/personas.ts:78-146,166-221 (11 JSON-schema read/phone tools — the good half; the 17 write actions have none)"
+      ],
+      "recommendation": "P1: every side-effecting op carries an idempotency_key (client-supplied for chips, proposal id for approvals) with a unique index on outbox, sms_messages and outbound email_messages, returning the existing row on replay, and a JSON schema validated server-side before execution; pushInvoice looks up DocNumber before creating. P2: a unique expression index on time_entries ((data->>'qbTimesheetId')) with on_conflict upsert.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-023",
+      "dimension": "4. Auth and authorization; 17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d04-auth",
+        "d17-ai-operability"
+      ],
+      "severity": "High",
+      "title": "The permission model has no propose/approve/execute dimension: a 4-value role enum consulted in three RLS surfaces and six RPCs, everything else using(true), machine agents fenced by 26 literal-email policies, no 'office' member live, new accounts default to tech, no client has a role concept",
+      "evidence": [
+        "supabase/migrations/001_initial_schema.sql:42,50 and 216_individual_logins.sql:1-48,50,66-80 (roles; header admits a stranger as tech gets full read/write; public signup on)",
+        "supabase/migrations/226_sync_client_telemetry.sql:45-49; 246_lead_triage_grant.sql:44-52; 228_contacts.sql:260-270; 218_sync_rpcs_and_build_gate.sql:67-72 (the handful of role gates)",
+        "supabase/migrations/204_phone_agent_rls.sql:12-31; 205_brief_machine_rls.sql:11-24; 208_email_lane.sql:68-72; 228_contacts.sql:105-114,267 (restrictive policies on coalesce(auth.email(),'') <> '<literal>')",
+        "services/phone-agent/config.mjs:18, supa.mjs:30-33; roybal-brief/index.ts:46-47,62-71; gmail-proxy/index.ts:106 (in-function email string checks)",
+        "supabase/migrations/210_pending_actions.sql:49-52 (the only 'propose' right in the system)",
+        "apps/field/js/app.js:1125; apps/admin/js/admin.js:91,206; apps/board/js/board.js:293,3009; apps/admin/js/contacts.js:151-153,243-244; leads.js:79-87 (clients have no role concept; refused writes report success; 'shared crew account' copy)",
+        "(live) profiles: admin 2, tech 7, viewer 2 (both machine users), office 0; 26 restrictive policies name phone-agent@ / office-brief@ by email"
+      ],
+      "recommendation": "P1: role_permissions (action × read/propose/approve/execute × role), agents + agent_authority as a principal kind, approval_policies; the role-enum migration in three steps (add values; one transaction redefining _sync_guard and every gate to accept both vocabularies and remapping profiles.role; drop old names a week later) and the Custom Access Token hook adding app_role and division_ids so clients can hide what will be refused; rewrite the 26 restrictive policies as one predicate on kind/capability; default new principals to least privilege; seed the office role; disable public signup.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-024",
+      "dimension": "4. Auth and authorization",
+      "dimension_keys": [
+        "d04-auth"
+      ],
+      "severity": "High",
+      "title": "Authorization logic is spread across ten mechanisms in four runtimes with no single decision point; the drift is already visible",
+      "evidence": [
+        "supabase/migrations/004_manual_floor_plan.sql:46-64 (era-0 policies that can never match)",
+        "supabase/migrations/226_sync_client_telemetry.sql:45-49; 216_individual_logins.sql:236-244; 246_lead_triage_grant.sql:19-21,50-52 (three SQL gate styles)",
+        "supabase/functions/qbo-proxy/index.ts:197-211; gmail-proxy/index.ts:95-106,328-331; qb-time-proxy/index.ts:88-97; roybal-notify/index.ts:93-99,400-401,647-648 (per-function helpers, each different)",
+        "supabase/functions/roybal-portal/index.ts:118-130; roybal-web-agent/index.ts:98,173-181; roybal-lead/index.ts:56,409-413 (service-role gateways with in-code checks)",
+        "supabase/config.toml:1-21,45-57 (verify_jwt pins as a gate); services/phone-agent/server.mjs:73-79"
+      ],
+      "recommendation": "P1: one shared caller-resolution helper in supabase/functions/_shared (JWT → principal with role and division_ids; cron secret → 'cron'; approved proposal → 'approval') and one DB-side current_principal()/can(action, verb) gate that every RPC, policy and op consults; delete the 004 policies with the era-0 tables at P3.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-025",
+      "dimension": "4. Auth and authorization; 9/10. Offline and sync; file and photo storage; 15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d04-auth",
+        "d09-10-offline-storage",
+        "d15-scale"
+      ],
+      "severity": "High",
+      "title": "field-media: any authenticated login can overwrite or delete any of 1,881 objects, no delete/GC path exists, objects are text/plain data-URLs in a flat sha256 namespace, era-0 buckets are public, and the portal inlines media via N+1 fetches",
+      "evidence": [
+        "supabase/migrations/100_field_projects.sql:54-58 (field_media_rw FOR ALL to authenticated) and (live) storage policies; 238_crew_photos_bucket.sql:24-41",
+        "apps/field/js/supa.js:208-222 (key = sha256 of the data-URL string, Content-Type text/plain, x-upsert); apps/field/js/media.js:35-37",
+        "supabase/migrations/214_field_projects_trash.sql:9-10 and 221_field_photos_table.sql:62-64 (recoverability assumes media is never deleted)",
+        "grep of apps/, supabase/functions, migrations: no storage DELETE anywhere; no list call anywhere",
+        "supabase/functions/roybal-portal/index.ts:5-7,61-63,137-143,242-256 (header promises signed URLs; gateway downloads and inlines up to 24 photos + 48 pages per view)",
+        "(live) field-media private 1,881 objects / 418 MB; job-photos and floor-plans public; profiles viewer=2 (machine users) share the same policy"
+      ],
+      "recommendation": "Split the storage policy now alongside the E0 ledger PR (authenticated INSERT/SELECT, admin-only DELETE, era-0 buckets private or dropped). P3: store binary JPEG with a real Content-Type, a media table (hash, mime, bytes, w, h, job_id, uploaded_by) as the join point with RLS derived from job assignment/role, a refcount GC job, and signed URLs with image transforms instead of base64 in JSON.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-026",
+      "dimension": "5. Business logic placement",
+      "dimension_keys": [
+        "d05-bizlogic"
+      ],
+      "severity": "High",
+      "title": "Money math is four totals ladders, four subtotals and two O&P rules with parity by comment — and the QuickBooks push already diverges",
+      "evidence": [
+        "apps/field/js/fincalc.js:20-38,51-63 (the pure ladder; apps/field/test/fincalc.test.mjs:1-6)",
+        "apps/field/js/forms.js:1432-1450 (invoice recalc re-implements it inline); :1255-1259, :1363-1376 (GC 10&10 rule), :3050-3062",
+        "apps/field/js/formkit.js:240-248 (third copy); supabase/functions/roybal-brief/digest.ts:16-25 (fourth)",
+        "supabase/functions/qbo-proxy/index.ts:316-330 (flattens every line to one item, tax as a pseudo-line — diverges); apps/field/js/qbo.js:52-54",
+        "apps/field/js/narrative.js:307-314"
+      ],
+      "recommendation": "P1: move fincalc.js verbatim into packages/domain and have forms.js recalc, digest.ts and qbo-proxy import it (or its bundled twin); one fixture-based parity test running every consumer against the same invoice; delete the inline copies.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-027",
+      "dimension": "5. Business logic placement",
+      "dimension_keys": [
+        "d05-bizlogic"
+      ],
+      "severity": "High",
+      "title": "The billable gate is executable only in the browser; the SQL copy a comment calls canonical is 28 inert rows with no evaluator, no construction matrix and zero readers",
+      "evidence": [
+        "apps/field/js/completeness.js:9-12,49-135,205-231 (29 JS rules; evaluateProject pure and tested)",
+        "apps/field/js/completeness.js:63-64,133-134 (hard gate on cat3Justification; grep shows no writer)",
+        "supabase/migrations/200_ai_backbone.sql:279-315,283 ('DB is canonical'); 105_labor_log_billing_gate.sql:10-25",
+        "apps/field/js/app.js:1646-1659 (the only caller: a browser panel)",
+        "(live) phase_instances 0 rows, completeness_state 0 rows, required_forms 9, field_requirements 28"
+      ],
+      "recommendation": "P1: completeness.js moves into packages/domain and evaluateProject becomes an op the worker and billing.reconcile call; either give required_forms/field_requirements an evaluator reading the same rule ids or drop the tables and the 'DB is canonical' comment at P3 with the era-2 cleanup.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-028",
+      "dimension": "5. Business logic placement; 2. Data model",
+      "dimension_keys": [
+        "d05-bizlogic",
+        "d02-datamodel"
+      ],
+      "severity": "High",
+      "title": "No lifecycle or state machine exists for job, claim, invoice or drying — transitions are unvalidated UI handlers and the spine's status is never written",
+      "evidence": [
+        "apps/board/js/board.js:943-951,2282-2287,2304-2319,567-576 (stage moves are click handlers)",
+        "apps/field/js/spine.js:23-39 (never writes status); (live) unified_jobs: all 33 rows status='new'",
+        "apps/admin/js/finactions.js:167-227 (invoice status set client-side); supabase/functions/qbo-proxy/payments.ts:37-65 (paid status derived on pull)",
+        "apps/field/js/fincalc.js:15-16 (status enums exist but are never written by the field app)",
+        "apps/field/js/dryingwatch.js:30-33; apps/field/js/model.js:446-454 (drying state is a computed flag)"
+      ],
+      "recommendation": "P1: job.set_stage as an op that validates the transition table and writes an events row and unified_jobs.status. P3/P4: claim, invoice and drying lifecycles as explicit transition tables in packages/domain enforced by the ops that move them.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-029",
+      "dimension": "5. Business logic placement; 15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d05-bizlogic",
+        "d15-scale"
+      ],
+      "severity": "High",
+      "title": "The scheduling engine is pure and tested but runs as three byte-copies with three rules re-implemented outside it; schedule and campaign work run in browser tabs, so dates on disk are whatever the last tab computed",
+      "evidence": [
+        "apps/board/js/schedule.js:8-11 ≡ supabase/functions/roybal-brief/schedule.js; services/phone-agent/Dockerfile:9; apps/field/js/myweekcalc.js:15-18 (three runtime copies synced by cp)",
+        "apps/board/js/board.js:139-152 (re-implements scopedEntriesOfJob); board.js:462,467,1855 (UI fallback 8 vs engine 10); roybal-portal/crewtoday.mjs:50-63 (re-implements effCrew/spanCrew)",
+        "apps/board/js/board.js:226-246 (applySchedule mutates jobs client-side), 247-255 (recomputeAndPersist saves each moved job sequentially), 187-191 (conflict re-enters refresh mid-loop)",
+        "apps/board/js/actions.js:326-331 (half-applied crew swap acknowledged)",
+        "apps/admin/js/campaigns.js:217-232 (sequential send loop in the browser; a closed tab halts the campaign)"
+      ],
+      "recommendation": "P1: schedule.js imported from packages/domain everywhere (copies and Docker COPY deleted); campaigns become outbox rows. P5: schedule.apply as a server op landing a plan atomically under one lock with the board as a viewer. P7: schedule.propose over skills/certs/availability/equipment/drying/travel with crew-lead approvals.",
+      "roadmap_phase": "P5",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-030",
+      "dimension": "7/8. UI and component system; documents and PDF/print pipeline; 17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d07-08-ui-docs",
+        "d17-ai-operability"
+      ],
+      "severity": "High",
+      "title": "No headless document pipeline: every carrier-facing document is a live browser DOM printed by a person; the server cannot render, attach, send or archive one",
+      "evidence": [
+        "apps/field/js/app.js:1552,1625,1936,2400,2413,2458 (window.print() call sites); apps/board/js/board.js:491; apps/portal/js/packet.js:78-81 (iframe print)",
+        "apps/field/js/pdf.js:12 (pdf.js loaded for import only; no PDF library); apps/field/js/core.js:8-9 (h() requires document.createElement)",
+        "apps/field/js/photoshare.js:194-296 (packet-share HTML built in the browser and uploaded); roybal-portal/index.ts:199-209 (server only fetches stored HTML text)",
+        "supabase/functions/gmail-proxy/emailmatch.ts:104 (Content-Type text/plain; no attachment path)",
+        "supabase/functions/roybal-ai-office/index.ts:814 (prompt: 'the letterhead and sign-off are added by the document')",
+        "apps/field/test/smoke.mjs:26,30,36-38,159 (jsdom only with stubbed canvas/print)"
+      ],
+      "recommendation": "P4: one render(kind, data, template) → HTML → PDF process callable from the worker, ops and the app — HTML/CSS templates with a headless-Chrome render service preserving print.css nearly verbatim (the alternative, a Deno PDF library, re-expresses print.css by hand); six templates; a multipart/mixed builder in the Gmail adapter so rendered versions attach to email.send.",
+      "roadmap_phase": "P4",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-031",
+      "dimension": "7/8. UI and component system; documents and PDF/print pipeline",
+      "dimension_keys": [
+        "d07-08-ui-docs"
+      ],
+      "severity": "High",
+      "title": "There is no document model: renderer functions fuse data binding, autosave, network calls, AI orchestration and print layout in single closures, and the component layer is welded to persistence",
+      "evidence": [
+        "apps/field/js/forms.js:1378-1912 (invoice(): ~530 lines; :1640-1656 QuickBooks push inside the renderer; :1484-1488 AI draft replaces inv.items inside the renderer)",
+        "apps/field/js/forms.js:3336-3910 (portalShareForm(): ~573 lines; :3567-3684 PostgREST reads/patches, RPC, roybal-notify and qbo-proxy calls inside a renderer)",
+        "apps/field/js/forms.js (100 commit() autosave calls; 257 inline style attributes; 117 app-only markers)",
+        "apps/field/js/formkit.js:10-13,23-34,215-228 (module-level CTX; every input helper writes through a save context)",
+        "apps/field/js/core.js:8 (single h() helper); apps/portal/js/portal.js:10, packet.js:13, photos.js:14 (three private h copies)",
+        "apps/field/js/app.js:1439 and :1902 (UPLOAD_REPLACES map duplicated)"
+      ],
+      "recommendation": "P4: three layers — a documents data model (typed record + line_items), pure template functions (data → HTML string, no DOM APIs, no commit(), no fetch) in a package the portal, admin and the render process import, and thin editors binding to the model with formkit.js as the editor-only layer; QBO push, portal REST and AI flows move out of renderers into ops.",
+      "roadmap_phase": "P4",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-032",
+      "dimension": "7/8. UI and component system; documents and PDF/print pipeline; 5. Business logic placement",
+      "dimension_keys": [
+        "d07-08-ui-docs",
+        "d05-bizlogic"
+      ],
+      "severity": "High",
+      "title": "No document numbering, version, revision or issued/locked state: three client-side numbering mechanisms, none unique, array-length counters that repeat after delete, and a live change order with a blank number",
+      "evidence": [
+        "apps/field/js/forms.js:1866,1211,1146 (invoiceNo/coNo/certNo are plain text inputs); :3258 (only auto-fill: 'DRAW-'+(i+1))",
+        "apps/admin/js/finactions.js:89,137,250 (EST-/INV-/CO-${array.length+1})",
+        "supabase/functions/qbo-proxy/index.ts:336 (DocNumber = invoiceNo.slice(0,21))",
+        "supabase/migrations/001_initial_schema.sql:78,107-119 (the only sequence belongs to the dead era-0 jobs table)",
+        "apps/field/js/model.js:385-397,398-415,520-530 (factories carry no status/version/issued/locked field)",
+        "(live) changeOrders[0] created 2026-09-04 has coNo '' and unpriced blank items"
+      ],
+      "recommendation": "P4: documents, document_versions, document_sequences and signatures tables; numbers issued from a server sequence inside issue ops; issued state freezes content as a new version row with rendered hash and storage path; QBO pushed by version.",
+      "roadmap_phase": "P4",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-033",
+      "dimension": "9/10. Offline and sync; file and photo storage",
+      "dimension_keys": [
+        "d09-10-offline-storage"
+      ],
+      "severity": "High",
+      "title": "Photo linkage is positional free text inside the blob, five separate photo arrays coexist, and the one per-photo table (field_photos, 748 rows) has zero readers",
+      "evidence": [
+        "apps/field/js/model.js:209-211 (photo = {id,by,src,caption,room free text,stage,ts}), :281 (contents photos as bare strings), :332 (moisture map photos), :368 (field report photos), :660 (punch row photos)",
+        "supabase/migrations/221_field_photos_table.sql:42-67; 224_photo_projection_trustworthy.sql:195-250 (trigger + nightly repair); grep: 0 references outside migrations",
+        "docs/Sync_Rearchitecture_Plan.md:310-315 ('recommended stopping point')",
+        "apps/field/js/media.js:37 vs apps/field/js/photoexport.js:14-17 (media:<sha> marker and bare cloud hash for the same object)",
+        "(live) sample photos[0] has room '' and AI tags nothing consumes"
+      ],
+      "recommendation": "P3: flip readers (portal, packet, AI, billing.reconcile) to field_photos; add room_id / line_item_id / reading_id / placement_id columns as those become rows; collapse the five arrays into one table with a role column; standardise on the hash as the object reference; keep the SQL trigger until the worker projection is zero-diff for 30 days.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-034",
+      "dimension": "11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d11-12-integrations-obs"
+      ],
+      "severity": "High",
+      "title": "SMS delivery is never reconciled: no Twilio status-callback route, 174 of 175 outbound rows frozen at 'queued'",
+      "evidence": [
+        "supabase/functions/roybal-notify/index.ts:247-260 (twilioPost sends no StatusCallback), 362-365 (status stored from the immediate API response), 643-658 (router serves only /inbound and sendSms)",
+        "supabase/config.toml:53-54 (claims the function receives Twilio status callbacks — no handler exists)",
+        "supabase/migrations/106_sms_messages.sql:33-34 (calls the table 'claim documentation')",
+        "(live) sms_messages: 174 outbound rows status='queued', 1 'failed'"
+      ],
+      "recommendation": "E0: a /status route on roybal-notify verified by X-Twilio-Signature, StatusCallback on every send, PATCH sms_messages.status/error by twilio_sid under a unique index, a one-time reconcile of the 174 rows against Twilio, and failed/undelivered surfaced in the job SMS panel and the brief; the route moves into roybal-webhooks at P1.",
+      "roadmap_phase": "E0",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-035",
+      "dimension": "13/14. Type safety, testing, CI; dependencies and tooling health",
+      "dimension_keys": [
+        "d13-14-quality-deps"
+      ],
+      "severity": "High",
+      "title": "Zero type-checking anywhere: the TS artifacts are dead weight and the domain schema has no compile-time shape in any runtime",
+      "evidence": [
+        "tsconfig.base.json:1-14 (strict settings) — zero references; package.json:23 typescript@^5.4.5 invoked by nothing",
+        "0 @ts-check directives and 0 JSDoc type tags across the 69 JS files in apps/field, apps/admin, apps/board, apps/portal",
+        "package.json:12 and services/phone-agent/package.json:7-8 run the 26 Deno .ts files with node --experimental-strip-types (strips, never checks); no deno.json; deno.lock has no consumer",
+        "apps/site/package.json:11 (astro check cannot run — @astrojs/check absent)",
+        "No `supabase gen types` output anywhere; roybal-ai-office/personas.ts:246-362 (17 write actions are prose; only the read tools are JSON-schema)"
+      ],
+      "recommendation": "P1: a root tsconfig.json extending tsconfig.base.json with checkJs + allowJs over the apps and packages, JSDoc typedefs added incrementally; deno check on every index.ts in CI; `supabase gen types typescript` committed to supabase/functions/_shared/db.types.ts and imported by functions and (as typedefs) clients; op input schemas generated from the registry.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-036",
+      "dimension": "13/14. Type safety, testing, CI; dependencies and tooling health; 7/8. UI and component system; documents and PDF/print pipeline",
+      "dimension_keys": [
+        "d13-14-quality-deps",
+        "d07-08-ui-docs"
+      ],
+      "severity": "High",
+      "title": "Tests cover pure modules only: zero tests import any edge-function index.ts, zero read SQL or RLS, board/admin/portal renderers and every document have none",
+      "evidence": [
+        "49 test files / 8,208 LOC on disk; grep for index.ts across *.test.mjs: only roybal-web-agent/guards.test.mjs:318-321 (source-grep) — 8,460 LOC across 14 index.ts handlers untested",
+        "apps/field/test/sync.mjs:20-25,41-44 (fake server re-implements push_project in JS: 'Mirrors the SQL exactly'); 0 test files reference any .sql",
+        "apps/field/test/smoke.mjs:3-5,13,58 (boots app.js in jsdom, 105 assertions — the only renderer coverage); board.js (3,042 lines), actions.js, data.js, all of apps/admin (2,841 lines) and apps/portal (1,123 lines) imported by no test",
+        "field modules with no test import: assist.js (769), formkit.js, officeai.js, voice.js, qbtime.js, qbo.js, gmail.js, pdf.js, photoexport.js, dictate.js",
+        "apps/field/test/*.mjs: only fincalc.test.mjs mentions forms.js, in a comment; print.css:238-259 (pagination behaviours recorded as comments, verified by hand)"
+      ],
+      "recommendation": "P1: split each index.ts into a pure handler module (the roybal-web-agent/roybal-brief pattern) tested with an injected fetch; a Postgres-backed lane (supabase db reset on the baseline, then a branch) exercising push_project, merge_project_blobs and the RLS deny policies; fixture job → rendered HTML diff per document kind with a page-count assertion once the P4 render process exists.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-037",
+      "dimension": "15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d15-scale"
+      ],
+      "severity": "High",
+      "title": "Every server-side and office reader has a silent hard cap (300/500/1000 rows, 20 pages, 50 jobs, 5 MB, 2,000 tombstones); time_entries already exceeds one",
+      "evidence": [
+        "supabase/functions/roybal-ai-office/index.ts:1363-1364 (boardRows default 300, no order/offset), 1372, 1410 (time_entries 1000); (live) time_entries = 1,193 rows",
+        "supabase/functions/roybal-brief/index.ts:130-131,218-219; services/phone-agent/tools.mjs:38-44,69-70 (300/100/1000)",
+        "apps/admin/js/leads.js:94,152,336-337; apps/admin/js/analytics.js:51,58-66 (200/100/500/5×1000)",
+        "supabase/functions/roybal-notify/index.ts:555 (500 unified_jobs scanned in memory); qbo-proxy/index.ts:381-382 (500 blobs); roybal-portal/index.ts:321",
+        "apps/board/js/data.js:150-163 (20-page cap); assistctx.js:19,29 (50 jobs); sync.js:48,261 (5 MB); merge.js:59-64 and 243:46-62 (2,000 tombstones)",
+        "supabase/functions/roybal-ai-narrative/index.ts:69-73 (monthSpend unpaged) vs roybal-ai-office/index.ts:110-126 (paged); apps/field/js/myweek.js:60-72 (the correct loop)"
+      ],
+      "recommendation": "P1: one shared paged reader in packages/integrations (the myweek.js:60-72 loop) with an explicit hasMore/truncated flag used by every function, office page and agent tool; filtering and aggregation (hours by job, leads by stage) pushed into SQL views; tombstone and row caps raised to explicit errors rather than silent drops.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-038",
+      "dimension": "17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d17-ai-operability"
+      ],
+      "severity": "High",
+      "title": "No job queue or event-driven execution: pg_cron fire-and-forget http_post with no retry, dead-letter or status, and nothing ever invokes an AI function except a browser",
+      "evidence": [
+        "supabase/migrations/206_morning_brief_cron.sql:27-40, 211_weekly_report_cron.sql:22-35, 244_crew_digest_cron.sql:45-59 (three crons → LLM-free brief); grep net.http_post = 8 cron bodies; triggers calling http_post = 0",
+        "grep of supabase/migrations for roybal-ai-office|roybal-ai-ingest|roybal-ai-narrative|roybal-web-agent = comments only",
+        "apps/field/js/officeai.js:40-59 (every office AI call is a browser fetch with no 401 retry)",
+        "(live) cron.job_run_details reports 288+288 'succeeded' for two dead lanes because net.http_post is asynchronous"
+      ],
+      "recommendation": "P1: jobs_queue (kind, payload, status, attempts, run_after, last_error, idempotency key) with enqueue/claim_job and lease columns, drained by roybal-worker on Fly with a heartbeat; row inserts and proposal transitions enqueue jobs; the migrated lanes' cron rows become SQL-only jobs_queue inserts; HTTP outcome recorded per run. P2: billing.reconcile and the QB Time pull as queue kinds.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-039",
+      "dimension": "1. System boundaries and module structure; 5. Business logic placement; 16. AI-maintainability",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d05-bizlogic",
+        "d16-maintainability"
+      ],
+      "severity": "Medium",
+      "title": "Business vocabularies, record factories and policy constants have no home: stages, types, quiet hours, LLM prices, monthSpend and the settings uuid are hand-mirrored across runtimes with 'keep in sync' comments, and off-list values are already being written",
+      "evidence": [
+        "apps/board/js/board.js:22-77; actions.js:34-37 ('keep in sync with board.js'); boardpush.js:325-330; app.js:362-370; roybal-ai-office/personas.ts:258; roybal-brief/digest.ts:176; roybal-portal/crewtoday.mjs:45 (stage list at 7 sites)",
+        "services/phone-agent/tools.mjs:131 (type 'mitigation' not in TYPES) vs board.js:127 (rendered 'Other'); roybal-web-agent/index.ts:335; roybal-lead/index.ts:395-413 (lead factories per runtime)",
+        "quiet hours: roybal-notify/index.ts:217-232 (hourCycle h23); qb-time-proxy/index.ts:1186-1196 (hour12:false); roybal-voice/index.ts:126-136; roybal-web-agent/index.ts:207-212; apps/admin/js/campaigns.js:36-39 (hard-coded 7/20)",
+        "LLM_PRICES in roybal-ai-office/index.ts:83-87, roybal-ai-ingest:57-61, qb-time-proxy:294-298, roybal-portal:79-83, services/phone-agent/config.mjs:55-58, roybal-web-agent/guards.ts:253-257; monthSpend ×6; SPEND_CAP_USD read in 7 files",
+        "settings uuid 00000000-…-01 hard-coded in 7 non-test files; apps/field/js/model.js:565 vs roybal-ai-ingest/index.ts:227 (sub-status enum)",
+        "grep: 47 keep-in-sync/lockstep comments"
+      ],
+      "recommendation": "P1: vocabularies and policy constants as data (with JSON schema) in packages/domain, consumed by every runtime including the persona prompt; quietHours(), priceFor(), monthSpend() once in _shared; caps and windows read from one app_settings row; the job and lead ops validate writes against the vocabulary.",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-040",
+      "dimension": "1. System boundaries and module structure; 2. Data model",
+      "dimension_keys": [
+        "d01-boundaries",
+        "d02-datamodel"
+      ],
+      "severity": "Medium",
+      "title": "Three abandoned designs remain deployed with zero readers: era-0 normalized tables, the era-2 phase/completeness spine, and the field_photos projection",
+      "evidence": [
+        "supabase/migrations/001_initial_schema.sql:83-252 (jobs, rooms, photos, moisture_readings, equipment_logs, line_items, floor_plans); (live) era-0 rows: jobs 2, rooms 6, photos 9, moisture_readings 6, equipment_logs 5, line_items 2, invoices 1 — March 2026; 8 more live era-0 tables have no DDL in the repo",
+        "supabase/migrations/200_ai_backbone.sql:32-78,123-138,253-315 (phase_templates, required_forms, field_requirements seeded; phase_instances, completeness_state) — 0 app references; (live) unified_jobs all 33 rows status='new'",
+        "supabase/migrations/221_field_photos_table.sql:42-67 and 224_photo_projection_trustworthy.sql (748 rows, 5 triggers, nightly repair) — 0 readers",
+        "package-lock.json:31,79,7434 (extraneous entries for deleted apps/web, apps/mobile, packages/shared); docs/QB_Time_Daily_Log_Plan.md:70; 103_qb_time_field.sql:4 (still describe apps/web)",
+        "apps/board/js/board.js:293,3009; apps/admin/js/admin.js:206 ('shared crew account' copy after 216_individual_logins.sql)"
+      ],
+      "recommendation": "P3: move the March tables that collide by name (jobs, rooms, moisture_readings, equipment_logs, line_items, invoices, photos, documents) with their triggers and the 18-value job_status enum to schema `legacy` in the migration that creates the new tables; adopt field_photos as the projection prototype and either give the era-2 completeness tables an evaluator or drop them; mine the era-0 DDL for the target design first.",
+      "roadmap_phase": "P3",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-041",
+      "dimension": "2. Data model",
+      "dimension_keys": [
+        "d02-datamodel"
+      ],
+      "severity": "Medium",
+      "title": "Blob content has no schema or constraints: nullable by construction, numbers as strings, unconstrained status text on five typed tables, completeness rules diverged JS vs SQL, and a hard gate on a field nothing writes",
+      "evidence": [
+        "apps/field/js/model.js:223-250 (BLANK_IGNORED, emptyDeep, isBlankProject exist because '' is the universal default)",
+        "apps/field/js/model.js:420-422 and (live) invoices[0] qty '215', price '32.25'; dryingLogs[0] dehu '2' (strings)",
+        "supabase/migrations/106_sms_messages.sql:21; 107_portal_jobs.sql:32; 200_ai_backbone.sql:100,128,158 (status unconstrained text)",
+        "apps/field/js/completeness.js:49-135 vs supabase/migrations/200_ai_backbone.sql:253-315 and 105_labor_log_billing_gate.sql:10-25 (29 JS rules vs 28 SQL rows, diverged); completeness.js:133-134 (cat3Justification read; no writer)",
+        "apps/field/js/spine.js:23-40 (hand-written snake_case↔camelCase mapping); no generated types anywhere"
+      ],
+      "recommendation": "P3: one JSON Schema for the job document generated from the factories and validated in push_project; check constraints on every status column; the completeness rule set a single source consumed by app and worker; numbers stored as numbers in the row projections.",
+      "roadmap_phase": "P3",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-042",
+      "dimension": "2. Data model; 4. Auth and authorization",
+      "dimension_keys": [
+        "d02-datamodel",
+        "d04-auth"
+      ],
+      "severity": "Medium",
+      "title": "Lifecycle, actor and naming idioms are inconsistent: six soft-delete idioms, four actor idioms (mostly free text; only updated_by server-stamped), three job-reference types, two direction enums, two clocks per row, three PK styles and hand-mapped snake/camel case",
+      "evidence": [
+        "supabase/migrations/100:16; 101:31; 102:17 (deleted bool) vs 221:58-59 and 224:51 (deleted_at + purged_at) vs 228:67 (merged_into) vs 232:45 (revoked_at) vs 107:29 and 245:23 (enabled) vs 241:17-19 (JSON deletedIds) and (live) data.archived on 11 tiles",
+        "supabase/migrations/216_individual_logins.sql:110-138 (auth.uid) vs 106:19 sent_by email vs 103:78 'quickbooks-time' vs connected_by uuid in 003:12 and text in 104:16/208:21; 200:157 and 210:31 (free-text actor)",
+        "apps/field/js/tech.js:17,53-60,101-106; model.js:125-131 (device tech pick is free text)",
+        "supabase/migrations/208:44 and 210:30 (job_id text) vs uuid elsewhere; 106:14 vs 108:25 and 208:37 (inbound/outbound vs in/out); 229_contact_links.sql:52 normalizes",
+        "supabase/migrations/100:22-34 (trigger updated_at) vs 241:270 (server-rewritten data.updatedAt merge clock); model.js:209-211,272-274,385-389,398-401 (ts, createdAt, coDate, invoiceDate)",
+        "supabase/migrations/100:14 and 101:29 (client-generated uuid PK) vs 200:85 (gen_random_uuid) vs 109:11 and 215:54 (bigint identity); 107:27 and 245:22 (share_token text as the credential) vs 232:43 (token_hash)"
+      ],
+      "recommendation": "P3, table by table as each is touched: deleted_at + deleted_by, actor_id uuid + actor_kind stamped by BEFORE INSERT triggers from current_principal(), uuid job refs, one direction enum, one authoritative updated_at with data.updatedAt exposed as an explicit merge_clock column, gen_random_uuid defaults, hashed tokens, snake_case at the API boundary with a generated mapping; the device tech pick resolves to a principal id at sign-in.",
+      "roadmap_phase": "P3",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-043",
+      "dimension": "2. Data model; 11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d02-datamodel",
+        "d11-12-integrations-obs"
+      ],
+      "severity": "Medium",
+      "title": "Correspondence is three tables with three direction enums and two job-reference types, filed to jobs by heuristics; adjuster mail without the claim number never enters the system",
+      "evidence": [
+        "supabase/migrations/106_sms_messages.sql:14 ('outbound'/'inbound') vs 208_email_lane.sql:37 and 108_portal_messages.sql:25 ('in'/'out')",
+        "supabase/migrations/208_email_lane.sql:44 and 210_pending_actions.sql:30 (job_id text) vs 107_portal_jobs.sql:26 (uuid)",
+        "supabase/functions/gmail-proxy/emailmatch.ts:51-75 (adjuster mail files only when the claim # appears in text)",
+        "(live) Gmail lane dead since 09-01; 174/175 SMS frozen 'queued'"
+      ],
+      "recommendation": "P6: threads and messages tables keyed by claim/submittal with a shared direction enum and uuid refs, the three existing tables read through them; adjuster mail filed by adjuster contact (claim_adjusters) rather than claim regex; draft replies filed as email.send proposals.",
+      "roadmap_phase": "P6",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-044",
+      "dimension": "2. Data model",
+      "dimension_keys": [
+        "d02-datamodel"
+      ],
+      "severity": "Medium",
+      "title": "Scope changes are free-text change orders with a checkbox-index reason and no lineage to an original line, an approved baseline or a carrier decision",
+      "evidence": [
+        "apps/field/js/model.js:385-397 (newChangeOrder), 548-555 (CHANGE_REASONS incl. 'Carrier Supplement / Insurance-Approved')",
+        "apps/admin/js/finactions.js:237-239 (approvalStatus without reason/date)",
+        "apps/field/js/model.js:435-440 (reconEstimate = invoice shape, no approved snapshot)",
+        "supabase/functions/roybal-ai-office/index.ts:646-647 (the only diff engine is a prompt)",
+        "(live) changeOrders[0]: items blank, coNo blank, reasons {'4':true}, five-paragraph description"
+      ],
+      "recommendation": "P6: the approved estimate snapshotted as a document version (baseline); supplements as coded line_items with justification, evidence refs and a carrier_responses link; observations recorded against the baseline so unforeseen-scope detection has something to diff.",
+      "roadmap_phase": "P6",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-045",
+      "dimension": "3/6. Data access layer; state management and data fetching; 9/10. Offline and sync; file and photo storage",
+      "dimension_keys": [
+        "d03-dataaccess-state",
+        "d09-10-offline-storage"
+      ],
+      "severity": "Medium",
+      "title": "Field sync bookkeeping (cursor, revs, pushed, deletes) lives in localStorage apart from the IndexedDB data and is wiped on sign-out, forcing every row through the merge path; recovery is per-device manual UI and an admin photo restore can still be undone by one dirty device",
+      "evidence": [
+        "apps/field/js/sync.js:43-47 (K_CURSOR/K_PUSHED/K_REVS/K_DELETES/K_MEDIA in localStorage), :631-639 (resetSync), :567-580 (comment: resetSync forces the merge path and resurrects on old builds), :476 (local wins ties), :500-503 (rev stripped from the stored blob)",
+        "apps/field/js/app.js:333-340 (doSignOut), :1126-1172 (backups union-restore), :1181-1208 (Take the cloud's copy)",
+        "supabase/migrations/242_restore_photo_clears_tombstone.sql:16-25 (KNOWN LIMIT: a dirty device re-strips a restored photo)",
+        "apps/field/js/core.js:186-202 (10 snapshots per job, shed to 2 on quota)",
+        "(live) sync_clients shows six devices at three builds (v165 ×4, v155, v153)"
+      ],
+      "recommendation": "P3, with the field outbox: rev, pushed-at and cursor stored alongside the row in an IndexedDB sync_state store keyed per user so bookkeeping survives sign-out and is transactional with the data; resetSync an explicit escape hatch; the unconditional tombstone replaced by a stamped restoredIds/deletedIds comparison (as 242 proposes); diverged-job repair exposed as job.project_repair.",
+      "roadmap_phase": "P3",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-046",
+      "dimension": "4. Auth and authorization",
+      "dimension_keys": [
+        "d04-auth"
+      ],
+      "severity": "Medium",
+      "title": "Customer and public identity exist only in-code inside service-role gateways: roybal-portal runs 38 service-role REST sites behind a bearer share token with no DB backstop",
+      "evidence": [
+        "supabase/functions/roybal-portal/index.ts:118-130,363-404,441-444 (38 rest/v1 sites under the service key gated by an in-code share-token check)",
+        "supabase/migrations/107_portal_jobs.sql:10-17; 232_contact_sessions.sql:52-55; (live) contact_sessions 0 rows ever",
+        "supabase/functions/roybal-lead/index.ts:56,409-413; roybal-web-agent/index.ts:173-181; 227_web_receptionist.sql:349-359 (the definer-RPC posture the portal lacks)"
+      ],
+      "recommendation": "P5: external parties (customer, adjuster, PM) modelled as principals with a scoped capability set; portal reads/writes moved behind per-action definer RPCs taking the resolved principal (the web-agent posture) so a forgotten in-code check fails closed; roybal-lead given the same RPC-only treatment.",
+      "roadmap_phase": "P5",
+      "automation_impact": "neutral",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-047",
+      "dimension": "7/8. UI and component system; documents and PDF/print pipeline",
+      "dimension_keys": [
+        "d07-08-ui-docs"
+      ],
+      "severity": "Medium",
+      "title": "Design tokens and the print/letterhead specification are split across ten locations: two production navies born the same day, the design-system gallery documents values the apps do not use, and dead COMPANY spec data",
+      "evidence": [
+        "apps/field/css/app.css:29 (--navy #16395a; commit 3f367af 2026-06-18) vs design-system/field-office/tokens/index.html:9 (--navy #0f1b2d; commit 6962a19 same day) vs apps/board/css/board.css:5 (asserts app.css defines #0f1b2d; false)",
+        "apps/portal/css/portal.css:3-10 (hand-copied subset); apps/site/src/styles/brand.css:7-49 (own 30-token scale); apps/field/terms.html, privacy.html, sms-consent.html:12-13 (inline :root copies)",
+        "apps/field/css/print.css (13 hardcoded #0f1b2d) and app.css (6); #f26a21 literal in 20 files / 51 sites; inline style attributes: forms.js 257, app.js 196, board.js 118, admin 106",
+        "apps/field/js/formkit.js:290-307 (letterhead DOM with inline orange); model.js:6-24 (COMPANY.licenses 'printed in the document footer' — zero consumers); print.css:33-55; app.css:476-488; photoshare.js:266-279; board.css:356-390 (six print-spec locations)",
+        "apps/field/js/app.js:1439 and :1902 (UPLOAD_REPLACES duplicated)"
+      ],
+      "recommendation": "P4, with the template layer: one tokens.css imported by every app and by the document templates (one navy); one letterhead template fed by one company record; one print stylesheet consumed by the app, the share builder and the render process; COMPANY.licenses promoted to a printed footer line; design-system/ regenerated from the real tokens or retired.",
+      "roadmap_phase": "P4",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-048",
+      "dimension": "9/10. Offline and sync; file and photo storage; 16. AI-maintainability",
+      "dimension_keys": [
+        "d09-10-offline-storage",
+        "d16-maintainability"
+      ],
+      "severity": "Medium",
+      "title": "Build and cache versioning is five hand-bumped constants with one guard: the v165/v166 miss shipped, the precache omits two statically imported modules, one SW serves three apps, and min_field_build is unarmed while two devices run old builds",
+      "evidence": [
+        "apps/field/js/config.js:19-25 (BUILD, 'bump in lockstep') vs apps/field/sw.js:6 (CACHE); apps/board/index.html:53 (board.js?v=64) and :16 (board.css?v=39); apps/field/js/app.js:577 (APP_VERSION 'v36' fallback)",
+        "git log -10 -- apps/field/sw.js: 9 of 10 bumps carried config.js; 211abb4 did not; PR #181 body lists three manual cache busts",
+        "apps/field/sw.js:8-32 (CORE list) vs app.js:20, forms.js:24 (photoshare.js) and assist.js:36 (calibration.js) not precached; sw.js:19 precaches deprecated pricing.js; sw.js:51-57 (activate deletes every other cache); sw.js:89-92 (stale-while-revalidate covers /board/* and /admin/*)",
+        "supabase/migrations/218_sync_rpcs_and_build_gate.sql:55 (min_field_build seeded 0), :82-85 (P0002 'update required'); 219:32 (the recipe)",
+        "(live) app_settings.min_field_build = 0; sync_clients v165 ×4, v155, v153"
+      ],
+      "recommendation": "E0: fix the pair, make build.test.mjs a required check, set min_field_build to 163 so the two stale devices self-update. P1: BUILD generated from the git SHA and the precache list from the bundle graph at deploy (stamping sw.js, config.js and the ?v= strings), APP_VERSION deleted, and the board and admin given their own tag or a shared manifest-driven SW.",
+      "roadmap_phase": "E0",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-049",
+      "dimension": "11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d11-12-integrations-obs"
+      ],
+      "severity": "Medium",
+      "title": "Magicplan is dead but still deployed: an unauthenticated public relay into the vendor account and an unreachable webhook with a placeholder signature check",
+      "evidence": [
+        "grep magicplan-proxy|magicplan-webhook across apps/, services/, .github/ = 0 callers",
+        "supabase/config.toml:33-34 (magicplan-proxy verify_jwt=false); supabase/functions/magicplan-proxy/index.ts:44-70 (no auth, no rate limit; createProject writes to the vendor account with MAGICPLAN_API_KEY at 19-20)",
+        "supabase/functions/magicplan-webhook/index.ts:208-213 (verifySignature accepts any non-empty header); config.toml:64-65 verify_jwt=true so a vendor webhook is rejected; writes era-0 jobs/floor_plans (159-181)"
+      ],
+      "recommendation": "E0: delete both functions, their config.toml pins and the MAGICPLAN_* secrets so `supabase functions list` shows 12; rebuild as a connector under packages/integrations if Magicplan returns.",
+      "roadmap_phase": "E0",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-050",
+      "dimension": "11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d11-12-integrations-obs"
+      ],
+      "severity": "Medium",
+      "title": "QBO sync is invoice-out/balance-in only, bills every line to one generic service item, and its payment write bypasses the field_projects merge RPC",
+      "evidence": [
+        "supabase/functions/qbo-proxy/index.ts:252,259,283,297,363,375 (the six actions)",
+        "supabase/functions/qbo-proxy/index.ts:52-54 (SERVICE_ITEM_NAME), 218-237 (ensureServiceItem), 316-321 (every line ItemRef = the one item), 324-330 (tax as a pseudo-line)",
+        "supabase/functions/qbo-proxy/index.ts:429-444 (pullPayments writes field_projects with a service-role rev-guarded PATCH) vs 219_revoke_direct_field_writes.sql:17-18; 448-453 (pullPayments writes a receipt; pushInvoice writes none)"
+      ],
+      "recommendation": "P2: pullPayments routed through push_project as a key-owner write-back and a receipt row for pushInvoice. P4: invoices pushed by document version with line items mapped through a small item_map (app category → QBO ItemRef, generic item as fallback); customer/estimate/bill sync deferred until the connector kernel exists.",
+      "roadmap_phase": "P4",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-051",
+      "dimension": "11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d11-12-integrations-obs"
+      ],
+      "severity": "Medium",
+      "title": "Credential model: one plaintext token row per provider with latest-row-wins, vault unused, and cron auth that exists only as literals inside cron.job",
+      "evidence": [
+        "supabase/migrations/104_qbo_tokens.sql:10-19, 208_email_lane.sql:13-24, 103_qb_time_field.sql:20-28 (access_token/refresh_token text, one row per realm/account)",
+        "supabase/functions/gmail-proxy/index.ts:110-111, qbo-proxy/index.ts:76-77, qb-time-proxy/index.ts:107-112 (.order(created_at desc).limit(1).single())",
+        "grep 'vault.' in supabase/migrations and supabase/functions = 0 (extension installed, unused)",
+        "supabase/migrations/202:36, 206:35, 207:37-39, 209:35-37, 211:30 (__CRON_SECRET__/__ANON_KEY__ placeholders); 233:45-51, 236:38-43 and 244:33-38 (scrape headers from the live morning-brief row, raise on a fresh DB); the '237' rotation is not on main",
+        "(live) nine cron.job.command strings carry the cron secret and publishable key as literal text; CRON_SECRET read by 6 functions, OWNER_CELL by 6, SPEND_CAP_USD by 5"
+      ],
+      "recommendation": "E0: store CRON_SECRET and the service key in Vault and re-register each HTTP cron with a SQL wrapper reading vault.decrypted_secrets at call time so `select command from cron.job` contains no Bearer or cron_ literal; bring the 237 rotation onto main. P3: a connections table keyed by (provider, entity, division_id) with encrypted token columns read by connection id, not 'latest'.",
+      "roadmap_phase": "E0",
+      "automation_impact": "neutral",
+      "growth_ceiling": true
+    },
+    {
+      "id": "F-052",
+      "dimension": "11/12. Integrations; error handling, logging, observability; 17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d11-12-integrations-obs",
+        "d17-ai-operability"
+      ],
+      "severity": "Medium",
+      "title": "Server-side observability is ledger-only: the core AI functions emit no logs or tool-call traces, receipts exist for successes but not failures, the ledgers are mutable and triple-purposed, and retention is ~24 h / ~6 h",
+      "evidence": [
+        "Measured console.* = 0 in roybal-ai-office, roybal-ai-ingest, roybal-ai-narrative, qbo-proxy, gmail-proxy; 21 .catch(()=>{}) swallow sites across 6 function files",
+        "supabase/functions/roybal-ai-office/index.ts:1817-1838 (failures live only as capture_events.error and ai_usage.note); :1683 (fieldAssist summary = counts only); roybal-web-agent/index.ts:52-54 (a dead LLM key was diagnosed by reading the ledger)",
+        "capture_events source_type values written: crew_digest, daily_brief, email_pull, email_send, narrative, office_ai, phone_call, qbo_payments, voice, weekly_report — none for pushInvoice, none for a failed pull; roybal-brief/weekly.ts:25-58 counts successes only",
+        "supabase/migrations/227_web_receptionist.sql:177-182,253-257 (capture_events doubles as mutable web-agent rate-limit state)",
+        "(live) Supabase log window ~24 h; net._http_response ~6 h TTL; capture_events 4,504 rows of which 3,500 are emailPull heartbeats"
+      ],
+      "recommendation": "P1: agent_runs rows for every worker/connector call including failures (status, error, latency, external ids, tool calls) with prompt id; a minimal structured log line (function, action, principal, status, ms) at each function's outer catch; web-agent rate state moved to its own table; E0 makes the ledgers insert-only and purges emailPull heartbeats older than 30 days.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-053",
+      "dimension": "13/14. Type safety, testing, CI; dependencies and tooling health; 16. AI-maintainability",
+      "dimension_keys": [
+        "d13-14-quality-deps",
+        "d16-maintainability"
+      ],
+      "severity": "Medium",
+      "title": "Single environment and five manual deploy mechanisms with no deploy record for four of five surfaces; the agent's own MCP deploy tool ignores config.toml's verify_jwt pins",
+      "evidence": [
+        "supabase/config.toml:23 (one project id); no staging/local-stack references outside apps/site/CUTOVER.md",
+        "supabase/config.toml:3-15 (the 2026-08-13 outage; 'The Supabase MCP deploy tool does NOT read this file'); :27-31 (roybal-lead / roybal-web-agent must stay verify_jwt=false); apps/site/src/components/QuoteForm.astro:130-134",
+        "README.md:110-116 (functions by CLI/MCP), apps/site/CUTOVER.md:6-7 (manual wrangler pages deploy) vs wrangler.jsonc:19-21 (unused Workers project), apps/portal/README.md:14-18 (Vercel import), services/phone-agent/Dockerfile:1-3 (fly deploy from root)"
+      ],
+      "recommendation": "P1: a second Supabase project seeded from a scrubbed pg_dump as staging; CI jobs for `supabase db push` (after staging passes), `supabase functions deploy` with config.toml, `wrangler pages deploy` and the Fly worker, all gated on green; a post-deploy check asserting verify_jwt per config.toml; manual paths kept as break-glass only.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-054",
+      "dimension": "15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d15-scale"
+      ],
+      "severity": "Medium",
+      "title": "JSON-key filters have no expression indexes and append-only ledgers have no retention or partitioning",
+      "evidence": [
+        "supabase/migrations/102_time_entries.sql:27 (only updated_at index); 101_coordination.sql:41,66; 100_field_projects.sql:36; 227_web_receptionist.sql:321-338 (the only jsonb expression/partial indexes)",
+        "supabase/functions/qb-time-proxy/index.ts:371-376,601-606 (filter data->>qbJobcodeId / data->>date), 608-611 (app-side dedupe); apps/admin/js/leads.js:94 (data->>stage); 230_coordination_job_patch.sql:144-146 (data->>contactId scan)",
+        "(live) capture_events 4,504 rows, 3,500 emailPull (one per 15-min tick); ai_usage 998; grep for purge of capture_events/ai_usage: 0; 215_blob_history.sql:199-218 (the one purge that exists)"
+      ],
+      "recommendation": "E0: a nightly purge of emailPull capture_events older than 30 days in the shape of the blob_history purge. P2: a unique expression index on time_entries ((data->>'qbTimesheetId')) plus expression indexes on qbJobcodeId and date, and on coordination_jobs (stage, fieldJobId, contactId); monthly partitions or a purge policy for capture_events and ai_usage.",
+      "roadmap_phase": "P2",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-055",
+      "dimension": "15. Performance and scalability (two horizons; organizational); 4. Auth and authorization",
+      "dimension_keys": [
+        "d15-scale",
+        "d04-auth"
+      ],
+      "severity": "Medium",
+      "title": "RLS evaluates auth.email() per row in 26 restrictive machine-user policies (36 initplan warnings) and stacks 255 multiple-permissive policies",
+      "evidence": [
+        "supabase/migrations/204_phone_agent_rls.sql:12-31 (5 policies on coalesce(auth.email(),'')); 205_brief_machine_rls.sql:16-23 (do-loop minting 18 policies); 228_contacts.sql:105-114,267",
+        "supabase/migrations/216_individual_logins.sql:236-244 (admin_only_hard_delete via is_admin())",
+        "(live) advisors: auth_rls_initplan 36, multiple_permissive_policies 255"
+      ],
+      "recommendation": "P1, in the role-enum migration: wrap auth.email()/auth.uid() in (select …) in every policy, drop the duplicate era-0 policies, and replace the email deny-lists with one role/kind allow-list predicate once agents are a principal kind.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-056",
+      "dimension": "16. AI-maintainability",
+      "dimension_keys": [
+        "d16-maintainability"
+      ],
+      "severity": "Medium",
+      "title": "An agent cannot rehearse a schema change: the migration directory is unreplayable and the live SQL definition is only knowable by finding the last file",
+      "evidence": [
+        "supabase/migrations/105_labor_log_billing_gate.sql:10-14 (depends on 200); 233_portal_crew_lines.sql:45-51 (scrapes cron.job; raises on a fresh DB)",
+        "supabase/migrations/005_remote_placeholder.sql:1 and 20260713231439_price_list_ddl.sql:1 (SQL never committed); 8 live era-0 tables have no DDL in the repo",
+        "merge_project_blobs defined in 217, 241, 243; push_project in 217, 218, 241; (live) bodies match 241/243/246",
+        "22 headers say 'SQL editor', 001:3-4 says db push"
+      ],
+      "recommendation": "P1: `supabase db dump` of production into 0000_baseline.sql, the 70 journal files archived, `supabase migration repair` marking every live entry reverted and the baseline applied; `supabase db reset` on the baseline as the CI replay test; current SQL function bodies kept in one directory migrations include; from then on schema reaches production only by db push from CI (rule 2).",
+      "roadmap_phase": "P1",
+      "automation_impact": "blocks",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-057",
+      "dimension": "16. AI-maintainability; 7/8. UI and component system; documents and PDF/print pipeline; 11/12. Integrations; error handling, logging, observability",
+      "dimension_keys": [
+        "d16-maintainability",
+        "d07-08-ui-docs",
+        "d11-12-integrations-obs"
+      ],
+      "severity": "Medium",
+      "title": "No in-repo map: the entry-point docs invert the security model, describe a 7-form app, promise handlers that do not exist, and the operating rules live in a memory file outside the tree",
+      "evidence": [
+        "find at root: no CLAUDE.md / ARCHITECTURE.md / CONTRIBUTING.md / AGENTS.md; .gitignore:18 (.claude/ ignored)",
+        "README.md:15 ('no login'); apps/field/README.md:7-8; apps/field/package.json:5 vs apps/field/js/supa.js:34 and app.js:138; README.md:84 (25 tests) vs 30 on disk; apps/field/README.md:15,29-30,136 + forms.js:2 (7 forms) vs model.js:31-98 (29)",
+        "apps/field/README.md:147-148 (deploy to Vercel) vs .github/workflows/deploy-field.yml:1-8; docs/Claude_Code_Handoff_Phase1.md:5 (read-first file does not exist); 10 of 16 docs untouched since before August",
+        "supabase/config.toml:53-54 ('Twilio webhooks (status callbacks…)') vs roybal-notify/index.ts:643-658; docs/QB_Time_Phase_Matching_Plan.md:5 'BUILT (not yet deployed)' vs (live) 63 ai_usage qbtime_phase rows; docs/QB_Time_Daily_Log_Plan.md:61,87 describe a 'qb-time-daily' function that lives in qb-time-proxy",
+        "docs/Construction_Mode_Prompt.md:15,34,66 (codifies the fused renderer pattern as the required way to add forms)",
+        "grep 0 hits in tree for the live Vercel project name, 'deploy-diff', 'airplane mode', the crew opt-out rule — rules that exist only in ~/.claude/…/memory/MEMORY.md"
+      ],
+      "recommendation": "P1: CLAUDE.md (or docs/ARCHITECTURE.md) seeded from 00-SYSTEM-INVENTORY.md — bundle layout, package list, deploy paths, the one verify command, the memory file's repo-relevant rules; fix the two READMEs, package.json:5 and the config.toml comment; mark the QB Time docs and the construction prompt superseded with a status line on every remaining doc.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-058",
+      "dimension": "17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d17-ai-operability"
+      ],
+      "severity": "Medium",
+      "title": "The spend-cap ledger is user-writable and summed under the caller's JWT; four monthSpend implementations disagree; reserve-before-spend exists only on the web lane",
+      "evidence": [
+        "supabase/migrations/201_ai_usage.sql:78-79 (ai_usage_all for all to authenticated using(true))",
+        "supabase/functions/roybal-ai-office/index.ts:111-126 (paged sum under user JWT); roybal-ai-narrative/index.ts:69-73 (unpaged); qb-time-proxy/index.ts:303-311 (.limit(5000)); roybal-portal/index.ts:608-613 (returns 0 on read failure)",
+        "supabase/migrations/227_web_receptionist.sql:167-173,204-211 (reserve/settle — web lane only)",
+        "(live) ai_usage 998 rows, $51.09"
+      ],
+      "recommendation": "P1: ai_reserve/ai_settle as SECURITY DEFINER RPCs (the web lane's pattern) that check the cap and insert the ledger row for every lane; client UPDATE/DELETE on ai_usage revoked at E0; the three private monthSpend copies deleted.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-059",
+      "dimension": "17. AI-operability and automation readiness",
+      "dimension_keys": [
+        "d17-ai-operability"
+      ],
+      "severity": "Medium",
+      "title": "No prompt registry, no prompt version on any ledger row, no evaluation; model routing is ten env knobs across seven files with six price tables",
+      "evidence": [
+        "grep prompt_version|promptVersion|persona_version across apps/ supabase/ services/ = 0; apps/field/js/officeai.js:104 (PHOTO_AI_VERSION=1, client-only)",
+        "supabase/migrations/201_ai_usage.sql:27-30 (llm_model recorded, no prompt id)",
+        "roybal-ai-office/index.ts:63-68; roybal-ai-ingest/index.ts:51; roybal-ai-narrative/index.ts:28; roybal-web-agent/index.ts:129; qb-time-proxy/index.ts:292; roybal-portal/index.ts:76; services/phone-agent/config.mjs:21 (model knobs)",
+        "LLM_PRICES at six sites; roybal-web-agent/guards.ts:253-257 names claude-sonnet-5/opus-5 used nowhere else",
+        "ls supabase/functions/roybal-ai-office/ = index.ts + personas.ts (13 inline prompts, 14 forcedTool sites, zero tests; dead chatText at :172)"
+      ],
+      "recommendation": "P1: packages/integrations/llm/client.ts as the one file that names a model, with model_routes and model_prices tables; a prompts table (key, version, text) whose id is stamped on ai_usage and agent_runs; a small golden set per document action run in CI before deploy.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-060",
+      "dimension": "2. Data model; 5. Business logic placement; 7/8. UI and component system; documents and PDF/print pipeline",
+      "dimension_keys": [
+        "d02-datamodel",
+        "d05-bizlogic",
+        "d07-08-ui-docs"
+      ],
+      "severity": "Low",
+      "title": "Seeds worth preserving: the pure Node-tested rule modules, the contacts/price_list/pending_actions shapes and tombstone rule, and the explicit carrier-facing document conventions should move into the domain and template layers unchanged",
+      "evidence": [
+        "apps/field/js/fincalc.js:20-63; dryingcalc.js:45-148; completeness.js:205-231; calibration.js:41-63; core.js:705-734; model.js:287-305; qb-time-proxy/phasematch.ts:186-187; qbo-proxy/payments.ts:37-65 (pure, single-source, tested)",
+        "supabase/migrations/228_contacts.sql:51-72 (typed, generated phone_norm/email_norm, merged_into, resolve ladder); 109_price_list.sql:10-24 (unique (market,category,code), trigram indexes)",
+        "apps/field/js/merge.js:59-64 and 243_losstypes_merge_union.sql:46-62 (delete as a recorded fact that beats a union); 241:257-274 (self-echo guard; strictly-newer stamping); 210_pending_actions.sql:24-38 (code, kind, params, status machine, expiry, result)",
+        "apps/field/js/forms.js:1390-1416 (Recap by Room, first-appearance order), :1261-1268 (room-sectioned charges 'matches how Xactimate walks the sketch'), :1363-1376 and docs/Estimating_Rules_Draft.md:29-39 (GC 10&10 only with a sub), :64-114 (moistureChartSvg pure string builder)",
+        "apps/field/js/app.js:1437-1494 (packet order, exclusions); apps/field/css/print.css:6,20,25-30,82-87,111,238-259 (pagination rules)"
+      ],
+      "recommendation": "P1: move the pure modules verbatim into packages/domain and re-point importers before building ops on them; use contacts as the template for carriers/claims/adjusters and pending_actions as the template for proposals; carry the tombstone rule forward as an event; treat the forms.js conventions plus the rules document as the acceptance spec for the P4 templates.",
+      "roadmap_phase": "P1",
+      "automation_impact": "enables",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-061",
+      "dimension": "4. Auth and authorization",
+      "dimension_keys": [
+        "d04-auth"
+      ],
+      "severity": "Low",
+      "title": "Dead and live-only auth artifacts: policies that can never match, an anon-executable SECURITY DEFINER function with no repo DDL and no callers, unused helpers, leaked-password protection off",
+      "evidence": [
+        "supabase/migrations/004_manual_floor_plan.sql:46-64; 001_initial_schema.sql:296-303 (is_assigned_to_job unused)",
+        "(live) get_portal_data is SECURITY DEFINER and executable by anon; no DDL in supabase/migrations; grep of apps/, services/, supabase/functions finds no caller",
+        "(live) advisors: anon_security_definer_function_executable 6, auth_leaked_password_protection off",
+        "supabase/migrations/216_individual_logins.sql:26-33 (public signup rollout step 0 unverified)"
+      ],
+      "recommendation": "E0, one migration: drop get_portal_data and is_assigned_to_job, revoke anon EXECUTE on the remaining definer functions, confirm public signup is off, enable leaked-password protection; the 004 policies go with the era-0 tables at P3.",
+      "roadmap_phase": "E0",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-062",
+      "dimension": "13/14. Type safety, testing, CI; dependencies and tooling health",
+      "dimension_keys": [
+        "d13-14-quality-deps"
+      ],
+      "severity": "Low",
+      "title": "Dependency hygiene: pdf.js two majors stale, no LICENSE files, split Deno std, major-only supabase-js pin, phantom lock entries, and the Astro build chain carries 8 high advisories",
+      "evidence": [
+        "apps/field/assets/vendor/pdfjs/pdf.min.mjs contains '4.10.38' (latest 6.3.289 on 2026-09-05; CVE-2026-16633 affects 5.6.83 ≤ v < 6.2.108 so 4.10.38 is outside it)",
+        "find . -iname 'LICENSE*' outside node_modules → none",
+        "grep deno.land/std@ across supabase/functions: 0.168.0 ×11, 0.177.0 ×3, all importing the deprecated serve; esm.sh/@supabase/supabase-js@2 (major-only) ×4",
+        "npm audit --package-lock-only (2026-09-05): root 8 high / 1 low (astro, vite, sharp, postcss, js-yaml, picomatch, form-data, esbuild, ws as a jsdom transitive); build-machine exposure only — apps/site is static",
+        "package-lock.json:31,79,7434 still resolve deleted apps/mobile, apps/web, packages/shared; no .github/dependabot.yml"
+      ],
+      "recommendation": "P1, with the build step: dependabot.yml for the three lockfiles and the workflow; `npm audit --package-lock-only` in CI as a warning; pdf.js bumped to 6.x with LICENSE files beside vendor; supabase-js pinned exactly and every function on one std (or Deno.serve); one `npm install` to drop the extraneous lock entries.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-063",
+      "dimension": "13/14. Type safety, testing, CI; dependencies and tooling health",
+      "dimension_keys": [
+        "d13-14-quality-deps"
+      ],
+      "severity": "Low",
+      "title": "The field app loads 44 modules (924 KB raw / 276 KB gzip) eagerly at boot and precaches 1.78 MB of vendor on install; no minify or code-split lever exists",
+      "evidence": [
+        "apps/field/index.html:39 loads js/app.js; app.js has 28 static imports and 0 dynamic; static closure reaches 42 of 44 field modules plus board schedule.js/schedulewatch.js via myweekcalc.js:17-18",
+        "measured: 44 boot files = 923,584 B raw / 275,842 B gzip; forms.js 227,248 B, app.js 147,835 B",
+        "apps/field/js/pdf.js:10-14 lazy-imports pdf.js at runtime, but apps/field/sw.js:34-36 precaches all three vendor files; sw.js:89-92 means a deploy lands on the second open"
+      ],
+      "recommendation": "P1, with esbuild bundling: office-only modules (assist.js, voice.js, xactimate.js, xlsx.js, officeai.js) behind dynamic imports at their entry points; vendor moved from install-time precache to runtime caching; minification comes free with the bundle step.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-064",
+      "dimension": "13/14. Type safety, testing, CI; dependencies and tooling health",
+      "dimension_keys": [
+        "d13-14-quality-deps"
+      ],
+      "severity": "Low",
+      "title": "No lint or format tooling; conventions live only in header comments; silent failure paths accumulate",
+      "evidence": [
+        "no .eslintrc*/eslint.config.*/.prettierrc*/biome.json/.editorconfig/.nvmrc anywhere",
+        "26 empty catch blocks in apps/field/js and 5 in apps/board/js; 0 console.* calls in board, admin and portal JS",
+        "docs/architecture/00-SYSTEM-INVENTORY.md §10: dead chatText() in ai-office, unused imports in board and contacts.js, legacy chip names — all things a linter reports for free"
+      ],
+      "recommendation": "P1: biome (one binary) with `lint` and `format --check` in the CI job, no-empty-block and no-unused-imports enabled, plus the no-direct-table-write lint from roadmap rule 3; .editorconfig and .nvmrc (22).",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-065",
+      "dimension": "15. Performance and scalability (two horizons; organizational)",
+      "dimension_keys": [
+        "d15-scale"
+      ],
+      "severity": "Low",
+      "title": "Phone agent rate limits are process memory on one Fly machine; HA is forbidden by design",
+      "evidence": [
+        "services/phone-agent/tools.mjs:19-27 (in-memory Map, resets on deploy)",
+        "services/phone-agent/fly.toml:10-12 (min_machines_running=1); services/phone-agent/README.md:64-65 (--ha=false on purpose)",
+        "supabase/migrations/227_web_receptionist.sql:60-110 (DB-serialized caps under an advisory lock — the contrast)"
+      ],
+      "recommendation": "P1, when roybal-worker lands on Fly: per-caller limits in a SECURITY DEFINER RPC using the 227 pattern so HA becomes a flag for both machines.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    },
+    {
+      "id": "F-066",
+      "dimension": "16. AI-maintainability; 13/14. Type safety, testing, CI; dependencies and tooling health; 3/6. Data access layer; state management and data fetching",
+      "dimension_keys": [
+        "d16-maintainability",
+        "d13-14-quality-deps",
+        "d03-dataaccess-state"
+      ],
+      "severity": "Low",
+      "title": "Repo noise misleads discovery: dead TS/Deno artifacts, phantom lock entries, stale branches and worktrees, an unused design-system, a dead legacy direct-write path still precached, and tests, READMEs and dev servers shipped to the public origin",
+      "evidence": [
+        "tsconfig.base.json (0 references); deno.lock (0 consumers); package.json:23 (typescript installed, never invoked); package-lock.json:31,79,7434 (extraneous entries for deleted apps)",
+        ".github/workflows/deploy-field.yml:13 (deleted branch); git: 33 merged local branches, 13 unmerged, two detached worktrees (26 MB each) under .claude/worktrees; README.md:44 → design-system/ (nothing imports it)",
+        "apps/field/js/supa.js:133-194 (legacy direct-write path) behind config.js:17 (SYNC_VIA_RPC) vs 219_revoke_direct_field_writes.sql:44-46 (the table refuses it); apps/board/js/data.js:11 (header documents the wrong concurrency model)",
+        ".github/workflows/deploy-field.yml:36-38 (cp -r apps/field/. — apps/field/test 320 KB and apps/board/test 64 KB published to app.roybalconstruction.com); apps/field/js/calibration.test.mjs sits in js/ and is wired into no script",
+        "design-system/brand/logo/index.html:8 and 11 other pages load cdn.tailwindcss.com / unpkg lucide@latest unpinned with no integrity="
+      ],
+      "recommendation": "P1, with the bundle step: delete the legacy path and SYNC_VIA_RPC, tsconfig.base.json/deno.lock/typescript (or make them real), prune the lockfile, branches and worktrees, remove the dead trigger branch; the deploy assembles from the bundle output so test/, README.md, package.json and serve.mjs never ship; calibration.test.mjs moves into test/; era-0 tables and design-system marked retired in the map.",
+      "roadmap_phase": "P1",
+      "automation_impact": "neutral",
+      "growth_ceiling": false
+    }
+  ]
+}
