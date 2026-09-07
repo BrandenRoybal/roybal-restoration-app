@@ -1450,6 +1450,30 @@
       "roadmap_phase": "P1",
       "automation_impact": "neutral",
       "growth_ceiling": false
+    },
+    {
+      "id": "F-067",
+      "dimension": "5. Business logic placement; 7/8. UI and component system; documents and PDF/print pipeline",
+      "dimension_keys": [
+        "d05-logic",
+        "d0708-ui-documents"
+      ],
+      "severity": "High",
+      "title": "Eleven small code changes would each DELETE a rule seven technicians are otherwise asked to remember — and the list exists only inside a training document, not in any engineering backlog",
+      "evidence": [
+        "docs/architecture/05-CREW-CAPTURE-SOP.md §12.6 enumerates all eleven, sized by the SOP's author: eight Small or One line, two Medium. Nine of the eleven appear NOWHERE in this findings file; only the fill handle and the Dry Goal overwrite are touched, and only via F-014's 2026-09-07 correction.",
+        "The mechanism that manufactured every duplicate asset number is the fill handle auto-incrementing rather than copying — `key === \"asset\" ? bumpAsset(src, k + 1) : src` (apps/field/js/forms.js:643-647, :650-680). Removing it from Asset/Removed/Hrs retires THREE lines from the laminated field card at once.",
+        "`gpp()` computes through a blank pair rather than returning null, because Number('') === 0 and 0 is finite (apps/field/js/core.js:705-716) — so a blank Unaffected column prints 0 GPP and a large false-negative grain depression on a document that goes to a carrier. The SOP sizes the fix as one line.",
+        "`↺ Clear drawing` wipes strokes and markers, resets numbering to 1, kills the undo stack and saves immediately, with NO confirm (apps/field/js/core.js:517) — while the column-delete button beside it DOES confirm, and only when data is present (apps/field/js/forms.js:365-366). The inconsistency is the whole defect.",
+        "`⤓ Sync labor from QuickBooks` replaces the entries array wholesale, destroying hours transcribed from the paper lane — the one lane a crew member who refuses apps depends on entirely (see the leonard-sheldon-off-app constraint).",
+        "The narrative groups equipment on the trimmed type string (apps/field/js/narrative.js:62) while the sizing worksheet lowercases and regex-classifies (apps/field/js/dryingcalc.js:152-162), so `Air mover` and `Axial Air Mover` print as two line items in one packet document and one combined total in another. De-duplicating on the asset tag fixes both that and the move double-count.",
+        "A room list with a picker on map Room/Area, photo Room and equipment Location is the single largest item: the SOP estimates it retires 'roughly half of what this SOP asks a human to enforce by spelling', and it unblocks the `mm_label_room` and `ph_room` completeness rules that §12.5 had to drop from Wave 0 because they would have blocked billing on nearly every job.",
+        "Related and newly found 2026-09-07: `project.rooms` has two writers (apps/field/js/app.js:1997, :2090) and NO delete path — `deleteItem` (app.js:2293-2300) tombstones the contents item and never touches `rooms`, so a misspelled room is permanent on that job. Whoever builds the room manager needs to know that field currently has two writers, no reader that prints, and no delete."
+      ],
+      "recommendation": "Treat SOP §12.6 as an engineering backlog, not a training appendix, and schedule the eight Small/One-line items before the crew SOP is trained rather than after. Each one converts a rule that depends on seven people remembering into a system that cannot produce the wrong number, which is the cheapest reliability available anywhere in this codebase — and every one of them also deletes a line from a laminated card that is currently too long. Sequence the two Medium items (dryingwatch flags on the Job Board; the room list with pickers) into P3 alongside the rooms/locations data model, since the room list is the same work seen from the UI side.",
+      "roadmap_phase": "E1 for the eight small items; P3 for the room list and the board flags",
+      "automation_impact": "unlocks",
+      "growth_ceiling": "yes — every one of these is a control currently implemented as human memory, and human memory does not scale from 7 technicians to 100"
     }
   ]
 }
