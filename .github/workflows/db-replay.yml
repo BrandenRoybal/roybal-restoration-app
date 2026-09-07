@@ -1,0 +1,128 @@
+name: DB replay
+
+# ============================================================================
+# The test that turns the baseline from a theory into a fact (P1, roadmap
+# §7.3: "supabase db reset on the baseline is the CI replay test").
+#
+# It builds a database from nothing but supabase/migrations/ and then counts
+# what came out, comparing against the object census taken from production on
+# 2026-09-07. A baseline that has never been replayed is a guess about how to
+# rebuild the business's database; this is the only thing that makes it a
+# claim you can lean on.
+#
+# WHY COUNTS AND NOT A DIFF
+# `supabase db diff` against production would be the stronger check, but it
+# needs production credentials on a PR runner — including for pull requests
+# from forks. Counting object classes catches what actually goes wrong when a
+# dump is replayed: a policy that silently fails to create, an extension that
+# is not available locally, a function lost to a quoting bug. The numbers came
+# from pg_catalog on the live database, not from the dump, so this compares
+# the rebuild against production rather than against itself.
+#
+# The two "gaps" encoded below are accounting, not loss, and are reconciled in
+# the baseline PR: pg_dump writes primary-key and unique constraints as ALTER
+# TABLE rather than CREATE INDEX (73 of them), and omits functions owned by an
+# extension (31, from pg_trgm and pg_net) because CREATE EXTENSION recreates
+# them. Hence EXPECT_FUNCTIONS counts only functions no extension owns.
+# ============================================================================
+
+on:
+  pull_request:
+    paths:
+      - "supabase/migrations/**"
+      - ".github/workflows/db-replay.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Census of production public schema, read from pg_catalog 2026-09-07.
+  # If a migration legitimately changes one of these, change it here in the
+  # same PR — that is the point: the number is a decision, not a reading.
+  EXPECT_TABLES: 54
+  EXPECT_POLICIES: 114
+  EXPECT_TRIGGERS: 33
+  EXPECT_VIEWS: 5
+  EXPECT_ENUMS: 7
+  EXPECT_FUNCTIONS: 48
+  EXPECT_PKUNIQUE: 73
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      # Only postgres and gotrue are needed: the baseline's policies call
+      # auth.uid(), so the auth schema has to exist. Everything else is UI and
+      # edge services that would only add pull time.
+      - name: Start a local Supabase database
+        run: |
+          set -euo pipefail
+          supabase start \
+            -x studio,mailpit,imgproxy,edge-runtime,logflare,vector \
+            -x supavisor,postgres-meta,realtime,storage-api,kong,postgrest
+
+      # This is the replay. It drops the database and applies everything in
+      # supabase/migrations/ from scratch. If the baseline cannot rebuild the
+      # schema, this is where it fails.
+      - name: Replay the baseline from scratch
+        run: supabase db reset --no-seed
+
+      - name: Census the rebuilt database
+        run: |
+          set -euo pipefail
+          DB="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          q() { psql "$DB" -tAc "$1" | tr -d '[:space:]'; }
+
+          TABLES=$(q "select count(*) from pg_tables where schemaname='public'")
+          POLICIES=$(q "select count(*) from pg_policies where schemaname='public'")
+          TRIGGERS=$(q "select count(*) from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and not t.tgisinternal")
+          VIEWS=$(q "select count(*) from pg_views where schemaname='public'")
+          ENUMS=$(q "select count(distinct t.typname) from pg_type t join pg_namespace n on n.oid=t.typnamespace where n.nspname='public' and t.typtype='e'")
+          FUNCTIONS=$(q "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and not exists (select 1 from pg_depend d where d.objid=p.oid and d.deptype='e')")
+          PKUNIQUE=$(q "select count(*) from pg_constraint c join pg_namespace n on n.oid=c.connamespace where n.nspname='public' and c.contype in ('p','u')")
+
+          fail=0
+          check() {
+            local name="$1" got="$2" want="$3"
+            if [ "$got" = "$want" ]; then
+              printf '| %-12s | %5s | %5s | ok |\n' "$name" "$got" "$want" >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf '| %-12s | %5s | %5s | **MISMATCH** |\n' "$name" "$got" "$want" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::$name rebuilt as $got, production has $want"
+              fail=1
+            fi
+          }
+
+          {
+            echo "### Replay census — rebuilt from \`supabase/migrations/\` alone"
+            echo ""
+            echo "| object | rebuilt | production | |"
+            echo "|---|---:|---:|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          check tables    "$TABLES"    "$EXPECT_TABLES"
+          check policies  "$POLICIES"  "$EXPECT_POLICIES"
+          check triggers  "$TRIGGERS"  "$EXPECT_TRIGGERS"
+          check views     "$VIEWS"     "$EXPECT_VIEWS"
+          check enums     "$ENUMS"     "$EXPECT_ENUMS"
+          check functions "$FUNCTIONS" "$EXPECT_FUNCTIONS"
+          check pk_unique "$PKUNIQUE"  "$EXPECT_PKUNIQUE"
+
+          if [ "$fail" -ne 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The baseline does not rebuild production's schema. Do NOT run \`migration repair\` against production until this is green." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "replay census matches production on every object class"
+
+      - name: Stop the local stack
+        if: always()
+        run: supabase stop --no-backup || true
