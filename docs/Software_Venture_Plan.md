@@ -137,18 +137,37 @@ $450/mo for the thing that gets their claims paid will not do the work to use it
 | 5 | Reserve | **$1,500** | — |
 | | **Total** | **$10,000** | |
 
-### 1 · Security remediation + provisioning — $3,000
+### 1 · Provisioning + the last of the gate — $3,000
 
-Contract backend help, roughly 25–30 hours. You are not hands-on for this. Narrow scope — this
-is hardening plus a script, **not** the backbone rebuild:
+Contract backend help, roughly 25–30 hours. You are not hands-on for this.
 
-1. Close the two open production exposures (gate the proxy actions on a real caller; make the
-   ledgers insert-only). Your review's own "week one, regardless of anything else" list.
-2. Fix CI so `main` is green — the flaky sync assertion is a real data-loss bug, diagnosed in
-   PR #183. You cannot ship software to paying customers off a red main.
-3. Build `provision.sh`: new Supabase project → migrations → seed → deploy field/admin/portal to
-   a per-tenant origin → Twilio number → smoke test. **It must run twice in a row, clean.**
-4. Add refresh-failure alerting so a dead integration pages you instead of reporting green.
+**Start from what E0 already did.** The architecture review was written at `1e04694`; commit
+`0da217b` (PR #182) landed after it and closed most of what this bucket was originally scoped
+for — verified in production:
+
+- The publishable-key hole (F-003, F-004) is **closed**: every action on `qbo-proxy`,
+  `qb-time-proxy` and `gmail-proxy` is declared in an `ACTION_AUTH` table and checked before
+  dispatch, default-deny, with `authgate.test.mjs` failing if a dispatched action has no policy.
+- Migration 247 made `ai_usage` and `capture_events` **append-only**, revoked DELETE on
+  `time_entries`, and swept the zombie proposals that had capped board phase proposals for six weeks.
+- `integration_runs` + `integration_health` **already exist** — the surface that would have shown
+  Gmail dead since 09-01 and QB Time since 09-04 while cron reported success.
+- `ci.yml` already runs every suite as its own step, phone agent included.
+
+So the remaining scope is narrower than the review alone suggests:
+
+1. **Finish the E0 runbook** — the four steps it deliberately left to a human: deploy
+   `roybal-notify` and set the Twilio callback URL, delete the two magicplan functions from the
+   platform, unset `MAGICPLAN_*`, arm `min_field_build`. Hours, not days. See
+   `docs/architecture/E0-RUNBOOK.md`.
+2. **Fix the sync data-loss bug** — the flaky assertion at `apps/field/test/sync.mjs:602` is a
+   real bug, diagnosed in PR #183: an edit typed during a push is dropped by the next pull-merge
+   and never re-pushes. It needs a deterministic test that pins the stamp ordering instead of
+   racing the clock. You cannot ship to paying customers off a `main` that fails its own suite.
+3. **Build `provision.sh`** — new Supabase project → migrations → seed → deploy field/portal to a
+   per-tenant origin → Twilio number → smoke test. **It must run twice in a row, clean.** This is
+   now the bulk of the bucket, and it is the one piece E0 did not touch.
+4. **Wire an alert to `integration_health`** — the table exists; nothing pages you off it yet.
 
 ### 2 · Legal, entity, insurance — $2,000
 
@@ -186,14 +205,15 @@ First-customer support surprises and per-tenant infrastructure overage.
 
 ## 7. The 90-day sequence
 
-**Weeks 1–4 — the gate.** Nothing customer-facing ships until these are done.
-- [ ] Close the two production exposures
-- [ ] Green CI on `main`
+**Weeks 1–3 — the gate.** Nothing customer-facing ships until these are done. Shorter than
+originally scoped, because E0 already closed the exposures.
+- [ ] Finish the four manual steps in `E0-RUNBOOK.md`
+- [ ] Fix the sync data-loss bug; green CI on `main`
 - [ ] `provision.sh` runs clean twice
 - [ ] LLC formed, ToS + DPA drafted, E&O quoted and bound
 - [ ] Demo environment seeded with a realistic loss
 
-**Weeks 5–8 — first blood.**
+**Weeks 4–8 — first blood.**
 - [ ] Landing page + demo video live
 - [ ] 30 targeted outreach conversations; book 10 demos
 - [ ] **Close 2 design partners at $2,500 setup + $450/mo**
@@ -204,6 +224,25 @@ First-customer support surprises and per-tenant infrastructure overage.
 - [ ] First renewal conversations; ask every partner the only question that matters: *did this
       get a claim paid faster?*
 - [ ] Write down what broke. That list is your backbone spec.
+
+---
+
+### Where your ten hours go
+
+Once the gate closes, the contract dev owns the code and your hours move to the thing only you
+can do. A rough split of ten:
+
+| Hours | On | Why |
+|---:|---|---|
+| **6** | Customer development — outreach, demos, pilot calls | The unproven muscle. Nobody else can sell peer-to-peer to a restoration owner; you *are* the customer. |
+| **2** | Product decisions from pilot feedback | Deciding what not to build is worth more here than building. |
+| **1** | Onboarding and support for live pilots | Also the measurement — if this exceeds 1 hr/customer/week, the model is wrong. |
+| **1** | The demo environment and sales collateral | It decays; keep it real. |
+
+**The weekly metric is not commits.** It is demos booked. If a week ends with new features and no
+new conversations, the venture went backwards regardless of what shipped. Track that number where
+you can see it, because the last five weeks prove exactly how easy it is to spend ten good hours
+on the wrong axis.
 
 ---
 
@@ -231,9 +270,15 @@ the ceiling is somewhere no amount of drying equipment reaches.
 
 ## 9. Risks, ranked
 
-1. **Your time.** You run a GC business with 7+ employees. Founder attention is the binding
-   constraint, not the $10,000. If you cannot give this ~10 hours a week, it will not happen —
-   and the honest move is to say so now rather than spend the money.
+1. **Your aim, not your time.** Time is settled: 88 commits in the five weeks to Sept 7, a
+   commissioned architecture review, and E0 shipped off the back of it. The capacity is real and
+   demonstrated. **The risk is where it points.** Of the last eighteen commits, roughly one is on
+   this plan's gate list; the rest are CRM home, the leads inbox, analytics, the estimator,
+   campaigns, board scheduling, office admin tabs — almost entirely the office breadth §3 says to
+   hold *back* from the product. The wedge you would actually sell was built earlier and is
+   comparatively stable. You have months of evidence you can build and none that you can sell
+   software. Ten hours a week aimed at building is the failure mode here, precisely because it is
+   the comfortable muscle.
 2. **Support burden.** Single-tenant means N deployments to babysit. When a crew cannot document
    a loss at 11 p.m., they call *you*. Cap the pilot at five customers until you know that cost.
 3. **Architecture debt compounds.** Every customer onboarded before the backbone exists is
