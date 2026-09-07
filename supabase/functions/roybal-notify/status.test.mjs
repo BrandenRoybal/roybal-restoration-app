@@ -57,4 +57,24 @@ ok("the guard list is never empty (an empty PostgREST not.in.() is invalid)",
 ok("the guard list is stable/sorted",
   blockedStatuses(3).join(",") === blockedStatuses(3).slice().sort().join(","));
 
+/* ---- F-034 drift guard: the URL we hand Twilio vs the URL we verify against ----
+   Twilio signs the callback over the exact URL it posted to. twilioPost names
+   that URL when it sends; twilioSignatureValid rebuilds it when the callback
+   arrives. They live in different functions, so nothing but this test stops the
+   two from drifting apart — and if they drift, every callback 403s silently and
+   the rows go back to sitting at 'queued'. Asserted against the source text. */
+import { readFileSync } from "node:fs";
+const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+const sent = src.match(/StatusCallback:\s*`([^`]+)`/)?.[1];
+
+ok("the outbound send asks Twilio for a status callback at all", !!sent);
+ok("the callback URL is the one the signature check rebuilds for route='status'",
+  sent === "${SUPABASE_URL}/functions/v1/roybal-notify/status");
+ok("the signature check still rebuilds that same shape",
+  src.includes("`${SUPABASE_URL}/functions/v1/roybal-notify/${route}`"));
+ok("no query string on the callback URL — it would change what Twilio signs",
+  !!sent && !sent.includes("?"));
+ok("no trailing slash on the callback URL — same reason",
+  !!sent && !sent.endsWith("/"));
+
 console.log(`\nstatus.test.mjs: ${pass} assertions passed`);

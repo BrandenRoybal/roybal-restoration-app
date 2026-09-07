@@ -279,7 +279,15 @@ async function monthCount(token: string, apikey = ANON_KEY, extra = ""): Promise
 /* Bare Twilio REST send. Resolves with the parsed outcome; rejects only on a
    network-level failure (DNS/TLS/reset) so callers decide what failure means. */
 async function twilioPost(to: string, text: string, media: string[] = []) {
-  const form = new URLSearchParams({ To: to, From: TWILIO_FROM, Body: clip(text) });
+  const form = new URLSearchParams({
+    To: to, From: TWILIO_FROM, Body: clip(text),
+    // Ask Twilio to report delivery back to /status. We send with a bare `From`
+    // number, not a Messaging Service, so this parameter is the ONLY thing that
+    // produces delivery callbacks — there is no console setting that does it
+    // (F-034). The URL must stay byte-identical to the one twilioSignatureValid
+    // rebuilds below: no query string, no trailing slash, or every callback 403s.
+    StatusCallback: `${SUPABASE_URL}/functions/v1/roybal-notify/status`,
+  });
   for (const u of media) form.append("MediaUrl", u);
   const tw = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`, {
     method: "POST",
