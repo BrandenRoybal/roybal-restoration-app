@@ -276,6 +276,52 @@ const { tombstoneItems } = await import("../js/merge.js");
     ok(mediaGets > getsBefore, "…and it DID go to the network — the cache never starves a real fetch");
   }
 
+  /* ---------- STAGE 2: a photo this device lacks arrives as a PREVIEW ----------
+     The number this exists for: a fresh iPad pulling 748 photos moved ~170 MB
+     before it was usable. It now takes the ~12 KB thumbnail stage 1 put in the
+     bucket and stops there; full resolution is fetched on demand by machinery
+     that already shipped (photoFullSrc / the lightbox / ZIP export, all keyed
+     on `cloud`).
+
+     The second half is the one that matters more. A device holding stand-ins
+     must be incapable of publishing them: whatever it pushes for that photo
+     has to be byte-identical to what it received, or a 320px copy ends up
+     standing in for the only documentation of the inside of someone's house. */
+  {
+    const FULL = "data:image/jpeg;base64," + "R".repeat(228_000);
+    const PREVIEW = "data:image/jpeg;base64," + "r".repeat(12_000);
+    const { deflateProject, sha256Hex } = await import("../js/media.js");
+    const { media } = await deflateProject({ id: "tmp", photos: [{ id: "y", src: FULL }] });
+    const hash = media[0].hash;
+    mediaStore.set(hash, FULL);
+    mediaStore.set("thumb_" + hash, PREVIEW);          // stage 1's writer already ran
+    const marker = `media:${hash}:${FULL.length}`;
+    serverRows.set("p7", {
+      id: "p7",
+      data: { id: "p7", customer: "Golf", photos: [{ id: "y", src: marker, caption: "north wall" }], updatedAt: new Date().toISOString() },
+      deleted: false, updated_at: nowIso(),
+    });
+
+    await syncNow();
+    const got = await Store.get("p7");
+    ok(got.photos[0].src === PREVIEW, "a photo this device lacks arrives as the preview, not the original");
+    ok(got.photos[0].cloud === hash, "…with the full-res hash where the shipped viewer looks for it");
+    ok(got.photos[0].previewOf === `thumb:${hash}:${FULL.length}`, "…labelled as a stand-in, in a shape the marker walk cannot resolve");
+    ok(!JSON.stringify(got).includes("RRRRRRRRRR"), "the 228 KB original never came down");
+    ok(got.photos[0].caption === "north wall", "the rest of the photo entry is untouched");
+
+    // now edit the job on the preview-holding device and push
+    await Store.put({ ...got, customer: "Golf-EDITED", updatedAt: new Date(Date.now() + 12e5).toISOString() });
+    await syncNow();
+    const row7 = serverRows.get("p7");
+    ok(row7.data.customer === "Golf-EDITED", "the local edit reaches the server");
+    ok(row7.data.photos[0].src === marker, "…and the photo is STILL the original marker — no preview was published");
+    ok(!("previewOf" in row7.data.photos[0]) && !("cloud" in row7.data.photos[0]),
+      "…with none of the stand-in bookkeeping left on the row");
+    ok(row7.data.photos[0].caption === "north wall", "…and the entry is otherwise intact");
+    ok(!mediaStore.has(await sha256Hex(PREVIEW)), "the preview bytes were never uploaded as if they were a photo");
+  }
+
   // ---------- clobber protection ----------
   // equal timestamps: local wins the tie, remote is NOT applied
   const p1 = await Store.get("p1");
