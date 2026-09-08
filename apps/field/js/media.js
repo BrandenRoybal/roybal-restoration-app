@@ -95,20 +95,50 @@ export async function deflateProject(project) {
   return { slim: map.size ? replaceStrings(project, map) : project, media };
 }
 
+/* How many media objects may be in flight at once.
+
+   This used to be 1 — every marker awaited in turn — and that, not bandwidth,
+   is what made a fresh device's first sync take fifteen minutes. Measured on
+   2026-09-08: 860 objects fetched one at a time, ~1.7 per second, while the
+   server answered each in 136-330 ms. Every authorized GET also costs a CORS
+   preflight, so each object is two round trips of mostly waiting.
+
+   Raising it is safe because media is CONTENT-ADDRESSED and immutable: the
+   object at hash H is the same bytes whenever and in whatever order it
+   arrives, results are collected into a map before any substitution, and
+   `replaceStrings` is order-independent. Nothing here races anything.
+
+   Six, not sixty. The 2026-09-07 outage was a storage storm exhausting the
+   connection pool, and while this changes no REQUEST COUNT — the same objects
+   are fetched exactly once either way, only sooner — a device is not the only
+   client of that pool. Six is well inside what a browser opens for an ordinary
+   page and still turns nine minutes of waiting into about ninety seconds. */
+export const MEDIA_CONCURRENCY = 6;
+
 /* slim → full. download(hash) resolves to the original string, or null
    when the object no longer exists on the server (marker stays, counted
    in `missing`). A thrown download (network) propagates so the caller
-   can retry the row on the next sync cycle. */
-export async function inflateProject(slim, download) {
-  const markers = findMarkers(slim);
-  if (!markers.size) return { project: slim, missing: 0 };
+   can retry the row on the next sync cycle — the FIRST error is thrown and
+   the remaining workers stop, so one network blip cannot leave a rejected
+   promise unhandled behind it. */
+export async function inflateProject(slim, download, concurrency = MEDIA_CONCURRENCY) {
+  const markers = [...findMarkers(slim)];
+  if (!markers.length) return { project: slim, missing: 0 };
   const map = new Map();
-  let missing = 0;
-  for (const marker of markers) {
-    const hash = MARKER_RE.exec(marker)[1];
-    const text = await download(hash);
-    if (text == null) { missing++; continue; }
-    map.set(marker, text);
-  }
+  let missing = 0, next = 0, failure = null;
+  const worker = async () => {
+    while (failure === null) {
+      const i = next++;
+      if (i >= markers.length) return;
+      const marker = markers[i];
+      try {
+        const text = await download(MARKER_RE.exec(marker)[1]);
+        if (text == null) missing++; else map.set(marker, text);
+      } catch (e) { failure = failure || e; return; }
+    }
+  };
+  const lanes = Math.max(1, Math.min(concurrency | 0 || 1, markers.length));
+  await Promise.all(Array.from({ length: lanes }, worker));
+  if (failure) throw failure;
   return { project: map.size ? replaceStrings(slim, map) : slim, missing };
 }
