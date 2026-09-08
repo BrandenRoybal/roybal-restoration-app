@@ -125,6 +125,8 @@ export async function makeThumb(text, shrink) {
    thumbnail. That is the one path here that could actually lose a photo.
    ============================================================ */
 
+import { MEDIA_CONCURRENCY } from "./media.js";
+
 /** Element field naming the marker a preview stands in for. Present ⇒ this
     entry's `src` and `cloud` are sync's to manage, not the owner's. */
 export const PREVIEW_OF = "previewOf";
@@ -162,27 +164,53 @@ const PREVIEW_RE = /^thumb:([0-9a-f]{64}):(\d+)$/;
     before. Photos only: they are 68.6% of blob bytes and the only collection
     whose consumers already know how to fetch full-res on demand. Pure apart
     from `getPreview`; the input is never mutated. */
-export async function previewPhotos(slim, getPreview) {
+export async function previewPhotos(slim, getPreview, concurrency = MEDIA_CONCURRENCY) {
   const photos = slim && Array.isArray(slim.photos) ? slim.photos : null;
   if (!photos || typeof getPreview !== "function") return { project: slim, previewed: 0 };
-  let out = null, previewed = 0;
+
+  /* which entries are ours to preview — decided before any fetching, so the
+     concurrent part below is pure I/O over a fixed list */
+  const jobs = [];
   for (let i = 0; i < photos.length; i++) {
     const ph = photos[i];
     if (!ph || typeof ph !== "object") continue;
     const m = typeof ph.src === "string" ? MARKER.exec(ph.src) : null;
     if (!m) continue;                 // inline bytes, already previewed, or empty
     if (ph.cloud) continue;           // ARCHIVED on purpose — never restyle the owner's copy
-    let preview = null;
-    try { preview = await getPreview(m[1]); } catch { preview = null; }
-    if (typeof preview !== "string" || !preview.startsWith("data:image/")) continue;
-    // A stand-in that isn't smaller than the marker it replaces is not worth
-    // storing, and one bigger than the photo would defeat the whole point.
-    if (preview.length >= Number(m[2])) continue;
-    if (!out) out = { ...slim, photos: photos.slice() };
-    out.photos[i] = { ...ph, src: preview, cloud: m[1], [PREVIEW_OF]: `thumb:${m[1]}:${m[2]}` };
-    previewed++;
+    jobs.push({ i, hash: m[1], len: m[2] });
   }
-  return { project: out || slim, previewed };
+  if (!jobs.length) return { project: slim, previewed: 0 };
+
+  /* Fetched with the same bounded concurrency as inflateProject and for the
+     same reason: one at a time is what made the first sync take fifteen
+     minutes. Each thumbnail is independent and content-addressed, and the
+     results are applied below by index, so arrival order changes nothing. */
+  const got = new Map();
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const k = next++;
+      if (k >= jobs.length) return;
+      const job = jobs[k];
+      let preview = null;
+      try { preview = await getPreview(job.hash); } catch { preview = null; }
+      if (typeof preview !== "string" || !preview.startsWith("data:image/")) continue;
+      // A stand-in that isn't smaller than the photo it replaces is not worth
+      // storing — re-encoding a small source can do that.
+      if (preview.length >= Number(job.len)) continue;
+      got.set(job.i, preview);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency | 0 || 1, jobs.length)) }, worker));
+  if (!got.size) return { project: slim, previewed: 0 };
+
+  const out = { ...slim, photos: photos.slice() };
+  for (const job of jobs) {
+    const preview = got.get(job.i);
+    if (!preview) continue;
+    out.photos[job.i] = { ...photos[job.i], src: preview, cloud: job.hash, [PREVIEW_OF]: `thumb:${job.hash}:${job.len}` };
+  }
+  return { project: out, previewed: got.size };
 }
 
 /** Undo previewPhotos: every stand-in becomes the marker it stands for again.

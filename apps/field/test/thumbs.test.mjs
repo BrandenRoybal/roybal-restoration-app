@@ -7,7 +7,7 @@ import {
   THUMB_MIN_SOURCE, THUMB_MAX_DIM, THUMB_QUALITY,
   previewPhotos, restorePhotoMarkers, isPreviewEntry,
 } from "../js/thumbs.js";
-import { MARKER_RE, isMediaMarker } from "../js/media.js";
+import { MARKER_RE, isMediaMarker, MEDIA_CONCURRENCY } from "../js/media.js";
 
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); console.log("  ✓ " + name); pass++; };
@@ -159,6 +159,24 @@ ok("rubbish entries do not crash the walk",
 }
 ok("restore is a no-op on a row with nothing to restore",
   restorePhotoMarkers({ id: "j", photos: [] }).photos.length === 0);
+
+/* ---------- previews are fetched in parallel too ---------- */
+{
+  const row = { photos: Array.from({ length: 30 }, (_, i) => ({ id: "p" + i, src: `media:${String(i).padStart(64, "0")}:900000` })) };
+  let inFlight = 0, peak = 0;
+  const slow = async () => {
+    inFlight++; peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight--;
+    return preview;
+  };
+  const par = await previewPhotos(row, slow);
+  ok("thumbnails are fetched concurrently, bounded", peak > 1 && peak <= MEDIA_CONCURRENCY);
+  ok("every photo still gets its stand-in", par.previewed === 30);
+  peak = 0;
+  const ser = await previewPhotos(row, slow, 1);
+  ok("…and serial produces the identical row", JSON.stringify(par.project) === JSON.stringify(ser.project) && peak === 1);
+}
 
 /* ---------- the source assertion that replaces write-only ----------
    Stage 2's safety now rests on one property: NOTHING on the sync path

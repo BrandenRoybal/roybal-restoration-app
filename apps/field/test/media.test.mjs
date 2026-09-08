@@ -1,7 +1,7 @@
 /* Media offload for cloud sync — pure logic, no DOM/network.
    Run: node apps/field/test/media.test.mjs   (from repo root) */
 import assert from "node:assert";
-import { MEDIA_MIN, MARKER_RE, isMediaMarker, sha256Hex, findMedia, findMarkers, replaceStrings, deflateProject, inflateProject } from "../js/media.js";
+import { MEDIA_MIN, MEDIA_CONCURRENCY, MARKER_RE, isMediaMarker, sha256Hex, findMedia, findMarkers, replaceStrings, deflateProject, inflateProject } from "../js/media.js";
 
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); console.log("  ✓ " + name); pass++; };
@@ -126,6 +126,61 @@ const dataUrl = (n, tag = "x") => "data:image/jpeg;base64," + tag.repeat(Math.ce
   const round = await inflateProject(slim, async (h) => bucket2.get(h) ?? null);
   ok("every offloaded image round-trips exactly", JSON.stringify(round.project) === JSON.stringify(realistic));
   ok("nothing missing on the round trip", round.missing === 0);
+}
+
+/* ---------- bounded-concurrency fetching ----------
+   One-at-a-time fetching, not bandwidth, is what made a fresh device's first
+   sync take fifteen minutes: 860 objects at ~1.7/sec while the server answered
+   each in under a third of a second. These pin the speedup AND the ceiling. */
+{
+  const many = { id: "j", photos: Array.from({ length: 40 }, (_, i) => ({ id: "p" + i, src: `media:${String(i).padStart(64, "0")}:99999` })) };
+  const bytes = (h) => "data:image/jpeg;base64," + h.slice(-4);
+
+  let inFlight = 0, peak = 0, calls = 0;
+  const slowDownload = async (h) => {
+    inFlight++; calls++; peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight--;
+    return bytes(h);
+  };
+
+  const t0 = Date.now();
+  const par = await inflateProject(many, slowDownload);
+  const parMs = Date.now() - t0;
+  ok("every object is still fetched exactly once", calls === 40);
+  ok("fetching is actually concurrent", peak > 1);
+  ok("…and never exceeds the declared ceiling", peak <= MEDIA_CONCURRENCY);
+  ok("nothing goes missing when fetched in parallel", par.missing === 0);
+
+  // serial is the same answer, just slower — order cannot matter for
+  // content-addressed bytes, and this is what says so
+  inFlight = 0; peak = 0; calls = 0;
+  const t1 = Date.now();
+  const ser = await inflateProject(many, slowDownload, 1);
+  const serMs = Date.now() - t1;
+  ok("concurrency: 1 still works (the old behaviour, on request)", peak === 1);
+  ok("parallel and serial produce IDENTICAL output",
+    JSON.stringify(par.project) === JSON.stringify(ser.project));
+  ok(`…and parallel is faster (${parMs}ms vs ${serMs}ms serial)`, parMs < serMs);
+}
+
+/* A failure mid-flight must still reach the caller so the row retries, and it
+   must not leave a rejected promise behind it — an unhandled rejection can
+   take the whole page down in a PWA. */
+{
+  const rejections = [];
+  const onUnhandled = (e) => rejections.push(e);
+  process.on("unhandledRejection", onUnhandled);
+
+  const many = { id: "j", photos: Array.from({ length: 20 }, (_, i) => ({ id: "p" + i, src: `media:${String(i).padStart(64, "0")}:99999` })) };
+  let threw = null;
+  try {
+    await inflateProject(many, async () => { await new Promise((r) => setTimeout(r, 2)); throw new Error("offline"); });
+  } catch (e) { threw = e; }
+  ok("a network failure still propagates from a parallel fetch", threw && threw.message === "offline");
+  await new Promise((r) => setTimeout(r, 20));
+  ok("…and leaves no unhandled rejection behind", rejections.length === 0);
+  process.off("unhandledRejection", onUnhandled);
 }
 
 console.log(`\n${pass} media-offload checks passed.`);
