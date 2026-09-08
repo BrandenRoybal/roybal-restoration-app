@@ -37,6 +37,8 @@ import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSin
          pushProject, tombstoneProject, reviveProject } from "./supa.js";
 import { SYNC_VIA_RPC } from "./config.js";
 import { deflateProject, inflateProject } from "./media.js";
+import { thumbKey, makeThumb } from "./thumbs.js";
+import { shrinkDataURL } from "./core.js";
 import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "./merge.js";
 import { isBlankProject } from "./model.js";
 
@@ -45,6 +47,7 @@ const K_PUSHED = "roybal-sync-pushed";     // { projectId: updatedAt last pushed
 const K_REVS = "roybal-sync-revs";         // { projectId: server rev this device is based on }
 const K_DELETES = "roybal-sync-deletes";   // [ids pending delete on server ]
 const K_MEDIA = "roybal-media-pushed";     // [sha256 hashes known to be in the bucket]
+const K_THUMBS = "roybal-thumbs-done";     // [sha256 hashes whose thumbnail is settled]
 const MAX_ROW = 5_000_000;                 // slimmed rows are ~KBs; this is a last-ditch backstop
 const STALL_CYCLES = 3;                    // media-missing retries before the status light goes red
 
@@ -53,6 +56,8 @@ let pushed = load(K_PUSHED, {});
 let revs = load(K_REVS, {});
 let deletes = loadDeletes();               // Map: projectId -> ISO time the delete was queued
 let mediaPushed = new Set(load(K_MEDIA, []));
+let thumbsDone = new Set(load(K_THUMBS, []));   // "settled" = uploaded, or not thumbnailable
+let thumbSweepRan = false;                      // one backfill pass per session
 let mediaWait = new Map();                 // projectId -> consecutive cycles blocked on missing bucket media
 let statusCb = () => {};
 let mergeCb = () => {};                    // fires after a two-device merge (app shows a toast)
@@ -223,6 +228,59 @@ const saveRevs = () => localStorage.setItem(K_REVS, JSON.stringify(revs));
 const saveDeletes = () => localStorage.setItem(K_DELETES, JSON.stringify(Object.fromEntries(deletes)));
 const saveCursor = () => localStorage.setItem(K_CURSOR, cursor);
 const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-3000)));
+const saveThumbsDone = () => localStorage.setItem(K_THUMBS, JSON.stringify([...thumbsDone].slice(-5000)));
+
+/* ---------- thumbnails (STAGE 1: write-only) ----------
+   Nothing reads these yet (thumbs.js explains why). This exists so that when
+   the consuming side lands, the bucket already has a thumbnail beside every
+   photo instead of needing a fleet-wide backfill on the day it ships.
+
+   Three rules this must never break, in order of importance:
+     1. It can never fail a sync. Every path swallows its own errors and a
+        failure marks the hash settled rather than retrying forever.
+     2. It can never race the real work. Thumbnails are uploaded one at a time
+        with a pause between them — the storm that took production's connection
+        pool down on 2026-09-07 was ~1,700 storage requests in 40 minutes, and
+        this must never look like that.
+     3. It only ever WRITES. No pull path consults thumbKey(); no local row
+        learns a thumbnail exists. A device cannot end up holding a preview it
+        believes is the photo, which is the failure that loses originals. */
+const THUMB_PAUSE_MS = 150;      // ~7 uploads/sec worst case, one at a time
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* Settle one source object: upload its thumbnail, or record that it will never
+   have one. Returns true when a byte actually went up. */
+async function settleThumb(hash, text) {
+  if (thumbsDone.has(hash)) return false;
+  let uploaded = false;
+  try {
+    const thumb = await makeThumb(text, shrinkDataURL);
+    if (thumb) { await uploadMedia(thumbKey(hash), thumb); uploaded = true; }
+  } catch { /* a thumbnail is never worth surfacing to the user */ }
+  // Settled either way: a source that cannot be rendered (signature, PDF page,
+  // no DOM) must not be reconsidered on every cycle for the life of the device.
+  thumbsDone.add(hash); saveThumbsDone();
+  return uploaded;
+}
+
+/* Photos this device already holds, one job at a time. Runs once per session,
+   in the background, after a cycle has proven the network works. Deflating is
+   the only way to learn a local photo's hash, and it is why this walks jobs
+   rather than holding every photo in memory at once. */
+async function sweepThumbs() {
+  if (thumbSweepRan || !isSignedIn()) return;
+  thumbSweepRan = true;
+  try {
+    for (const p of await Store.all()) {
+      let media;
+      try { ({ media } = await deflateProject(p)); } catch { continue; }
+      for (const m of media) {
+        if (thumbsDone.has(m.hash)) continue;
+        if (await settleThumb(m.hash, m.text)) await sleep(THUMB_PAUSE_MS);
+      }
+    }
+  } catch { /* best effort, always */ }
+}
 function bumpCursor(ts) { if (ts && ts > cursor) { cursor = ts; saveCursor(); } }
 
 function setStatus(state, extra = {}) { statusCb({ state, pending: pendingCount(), skipped, updateRequired, ...extra }); }
@@ -271,6 +329,9 @@ async function uploadNewMedia(media) {
     if (mediaPushed.has(m.hash)) continue;           // already in the bucket
     await uploadMedia(m.hash, m.text);
     mediaPushed.add(m.hash); saveMediaPushed();
+    // The bytes are in hand and already hashed — the cheapest moment this
+    // photo will ever have a thumbnail made. Best-effort by construction.
+    await settleThumb(m.hash, m.text);
   }
 }
 
@@ -574,7 +635,10 @@ export async function syncNow(opts = {}) {
     if (skipped > 0) problems.push(`${skipped} job(s) too large to back up — remove some inline attachments`);
     if (stalled > 0) problems.push(`${stalled} job(s) waiting on photos another device hasn't finished uploading`);
     if (problems.length) setStatus("error", { message: problems.join("; ") });
-    else setStatus("synced", { lastSync: Date.now() });
+    else {
+      setStatus("synced", { lastSync: Date.now() });
+      sweepThumbs();   // deliberately not awaited — status must not wait on it
+    }
   } catch (e) {
     // push() rethrows the cycle's last error, so a build rejection lands here
     // fetch() rejects (TypeError) when the request never reached the network —
