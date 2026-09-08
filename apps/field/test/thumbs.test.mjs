@@ -149,6 +149,14 @@ ok("rubbish entries do not crash the walk",
   ok("a deliberate archive is left exactly as the owner left it",
     JSON.stringify(out.photos[0]) === JSON.stringify(archived));
 }
+/* The deliberate asymmetry: the merge check is loose (any mark means "not the
+   real bytes"), the restore is strict (it has to parse the mark). */
+{
+  const bad = { id: "p1", src: "data:image/jpeg;base64,PREVIEW", cloud: "aaaa", previewOf: "thumb:aaaa:1" };
+  ok("a malformed mark still reads as a stand-in — the SQL twin agrees", isPreviewEntry(bad));
+  ok("…but it is never restored to a marker it cannot rebuild",
+    JSON.stringify(restorePhotoMarkers({ photos: [bad] }).photos[0]) === JSON.stringify(bad));
+}
 ok("restore is a no-op on a row with nothing to restore",
   restorePhotoMarkers({ id: "j", photos: [] }).photos.length === 0);
 
