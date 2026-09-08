@@ -129,9 +129,22 @@ export async function makeThumb(text, shrink) {
     entry's `src` and `cloud` are sync's to manage, not the owner's. */
 export const PREVIEW_OF = "previewOf";
 
-/** Is this photos[] entry holding a stand-in rather than the real bytes? */
+/** Is this photos[] entry holding a stand-in rather than the real bytes?
+
+    Deliberately looser than PREVIEW_RE: the question a merge asks is "are
+    these the real bytes?", and a mark of ANY shape answers no. The SQL twin
+    asks it the same way — jsonb_exists(el, 'previewOf') — and the two engines
+    must give the same answer or merge_project_blobs stops being a twin. A
+    strict test here diverged from it on a malformed mark.
+
+    restorePhotoMarkers stays strict, because it has a harder job: it must
+    PARSE the mark to rebuild the marker. So a malformed mark loses a merge to
+    the real bytes (safe, and it is cleaned up in passing) but cannot be
+    restored on its own. Nothing writes one — previewPhotos is the only author
+    and always well-formed — which is why the gap is acceptable rather than
+    closed with a second format. */
 export function isPreviewEntry(ph) {
-  return !!(ph && typeof ph === "object" && PREVIEW_RE.test(ph[PREVIEW_OF]));
+  return !!(ph && typeof ph === "object" && typeof ph[PREVIEW_OF] === "string" && ph[PREVIEW_OF] !== "");
 }
 
 /* `media:<64 hex>:<len>` — the marker format, matched here rather than

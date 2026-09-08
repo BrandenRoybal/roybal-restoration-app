@@ -358,4 +358,24 @@ test("photos other collections carry are untouched by the rule", () => {
   assert.equal(merged.contents[0].src, "x", "photos only — contents keep plain newer-wins");
 });
 
+test("a MALFORMED preview mark still loses to the real photo — SQL parity", () => {
+  // merge_project_blobs decides this with jsonb_exists(el,'previewOf'), which
+  // has no opinion on the mark's shape. isPreviewEntry must not be stricter or
+  // the two engines answer differently on the same row — verified against the
+  // deployed function, which upgrades this entry.
+  const { merged, upgraded } = mergeProjects(
+    { id: "j", updatedAt: T2, photos: [{ id: "P", src: "data:image/jpeg;base64,PREVIEW", cloud: "aaaa", previewOf: "thumb:aaaa:1" }] },
+    { id: "j", updatedAt: T1, photos: [real()] });
+  assert.equal(merged.photos[0].src, "data:image/jpeg;base64,REALBYTES");
+  assert.equal(upgraded, 1);
+  assert.ok(!("previewOf" in merged.photos[0]), "…and the bad mark is cleaned up in passing");
+});
+
+test("an empty previewOf is not a mark at all", () => {
+  const { upgraded } = mergeProjects(
+    { id: "j", updatedAt: T2, photos: [{ id: "P", src: "data:image/jpeg;base64,X", previewOf: "" }] },
+    { id: "j", updatedAt: T1, photos: [real()] });
+  assert.equal(upgraded, 0);
+});
+
 console.log(`\n${pass} merge checks passed.`);
