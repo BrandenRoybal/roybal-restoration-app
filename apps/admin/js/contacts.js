@@ -117,17 +117,18 @@ function contactRow(c) {
 /* Every open merge suggestion in one queue (doc §13.2 — until now they only
    surfaced on the individual contact pages they involve). A pair offers
    Keep-this-one in BOTH directions via the same office-gated contact_merge
-   RPC the contact page uses; a field-change proposal informs + dismisses. */
+   RPC the contact page uses; a field proposal offers the value on both
+   sides — see fieldProposalBody. */
 async function paintMergeQueue(host) {
   let sugg = [];
   const people = {};
   try {
-    const rs = await rest("contact_merge_suggestions?status=eq.open&select=id,contact_a,contact_b,reason,detail&limit=50", { method: "GET" });
+    const rs = await rest("contact_merge_suggestions?status=eq.open&select=id,contact_a,contact_b,reason,detail,source&limit=50", { method: "GET" });
     if (!rs.ok) return;
     sugg = await rs.json();
     const ids = [...new Set(sugg.flatMap((s) => [s.contact_a, s.contact_b]).filter(Boolean))];
     if (ids.length) {
-      const rc = await rest(`contacts?id=in.(${ids.join(",")})&select=id,name,phone,email,role`, { method: "GET" });
+      const rc = await rest(`contacts?id=in.(${ids.join(",")})&select=id,name,phone,email,address,company,role`, { method: "GET" });
       if (rc.ok) for (const c of await rc.json()) people[c.id] = c;
     }
   } catch (_) { return; }
@@ -136,24 +137,186 @@ async function paintMergeQueue(host) {
   card.append(
     h("div", { style: "font-weight:700" }, `⚠ Merge review — ${sugg.length} waiting`),
     h("p", { class: "muted", style: "font-size:13px;margin:4px 0 2px" },
-      "The system thinks these might be the same person. Merging moves every job, text, email, and portal link to the one you keep and retires the duplicate — it can't be undone from the app."));
+      "Two kinds of question live here. Where two records might be one person, keeping one moves every job, text, email, and portal link onto it and retires the other — that can't be undone from the app. Where the person is already known and only a value is in question, pick the right one and save."));
   for (const s of sugg) card.append(queueRow(s, people));
   host.append(card);
 }
 
 const matchedBy = (r) => "Matched by " + (r === "email" ? "shared email" : r === "name-address" ? "name + address" : r === "name" ? "name only" : r);
 
+/* ---------- field proposals: reason 'conflict' / 'untrusted-fill' ----------
+   These carry a different question from a pair suggestion. A pair asks "are
+   these two records the same person?" and has always had an answer on both
+   sides. A field proposal knows who the person is; all it asks is which
+   spelling of one value is right — and it shipped with one button, "Not a
+   match", which answers a question nobody asked. There was no way to say yes,
+   so an office staring at "Ave." vs "Ave" could only dismiss it. Both answers
+   now, one field at a time, and nothing is written until Save. */
+
+const FIELD_LABEL = { name: "Name", company: "Company", phone: "Phone", email: "Email", address: "Address" };
+
+/* source is a machine token the resolver stamps on the row ('field',
+   'web-form', 'ai-chat', 'backfill'); the office reads plain English. */
+const SOURCE_NAME = { field: "the field app", "web-form": "the website form",
+  "ai-chat": "the website chat", backfill: "an older record", phone: "a phone call" };
+const cameFrom = (src) => (src ? ` from ${SOURCE_NAME[src] || src}` : "");
+
+const last10 = (p) => String(p || "").replace(/\D/g, "").slice(-10);
+const flatten = (s) => String(s || "").toLowerCase().replace(/[.,#]/g, " ").replace(/\s+/g, " ").trim();
+const STREET = [[/\b(?:street|str|st)\b/g, "st"], [/\b(?:avenue|ave|av)\b/g, "av"], [/\b(?:circle|cir)\b/g, "cir"],
+  [/\b(?:road|rd)\b/g, "rd"], [/\b(?:drive|drv|dr)\b/g, "dr"], [/\b(?:lane|ln)\b/g, "ln"],
+  [/\b(?:boulevard|blvd)\b/g, "blvd"], [/\b(?:court|ct)\b/g, "ct"], [/\b(?:place|pl)\b/g, "pl"],
+  [/\b(?:highway|hwy)\b/g, "hwy"], [/\b(?:suite|ste)\b/g, "ste"], [/\b(?:apartment|apt)\b/g, "apt"]];
+const addrKey = (s) => STREET.reduce((t, [re, to]) => t.replace(re, to), flatten(s));
+
+/* Mirrors public.contact_same_value() (migration 0001). The resolver no longer
+   raises a difference that is only formatting; a proposal written before it
+   shouldn't keep asking about one either. */
+function sameValue(field, a, b) {
+  if (field === "phone") return last10(a) !== "" && last10(a) === last10(b);
+  if (field !== "address") return flatten(a) === flatten(b);
+  const x = addrKey(a), y = addrKey(b);
+  if (!x || !y || x === y) return x === y;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  return short.length >= 8 && long.startsWith(short + " ");   // "3018 nate cir" inside "3018 nate cir north pole ak 99705"
+}
+
+/* detail is machine-written JSON, and a saved proposal PATCHes a column — so
+   only these five keys are ever read out of it. */
+function proposedFields(s, live) {
+  const d = s.detail && typeof s.detail === "object" ? s.detail : {};
+  const out = [];
+  for (const field of Object.keys(FIELD_LABEL)) {
+    const v = d[field];
+    const got = String((v && typeof v === "object" ? v.got : typeof v === "string" ? v : "") || "").trim();
+    if (!got) continue;
+    const now = String(live[field] || "").trim();
+    if (!sameValue(field, now, got)) out.push({ field, now, got });
+  }
+  return out;
+}
+
+/* The status write is office-gated (contact_suggest_update wants is_admin()).
+   It used to be fire-and-forget with the row taken off screen either way, so a
+   refused write looked exactly like a cleared one until the next reload. */
+async function resolveSuggestion(s, status) {
+  try {
+    const res = await rest(`contact_merge_suggestions?id=eq.${s.id}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status, resolved_at: new Date().toISOString() }) });
+    return res.ok && (await res.json().catch(() => [])).length > 0;
+  } catch (_) { return false; }
+}
+
+function clearButton(s, label, onDone) {
+  const btn = h("button", { class: "btn btn--ghost btn--sm" }, label);
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    if (await resolveSuggestion(s, "dismissed")) onDone();
+    else { btn.disabled = false; alert("Couldn't clear this review — it needs an office login."); }
+  });
+  return btn;
+}
+
+/* Returns the nodes for one field proposal; the caller owns the container
+   (a row in the queue, a card on the contact page) and removes it in onDone. */
+function fieldProposalBody(s, live, onDone) {
+  const who = (live && live.name) || "this contact";
+  const from = cameFrom(s.source);
+  if (!live) {
+    return [h("p", { class: "muted", style: "font-size:13px;margin:4px 0 8px" },
+      "Couldn't load the contact this is about."), h("div", { class: "fpact" }, clearButton(s, "Clear this", onDone))];
+  }
+
+  const rows = proposedFields(s, live);
+  if (!rows.length) {
+    return [h("div", { style: "font-weight:700" }, "✓ Nothing left to decide"),
+      h("p", { class: "muted", style: "font-size:13px;margin:4px 0 8px" },
+        `${who} already carries the value that came in${from}.`),
+      h("div", { class: "fpact" }, clearButton(s, "Clear this", onDone))];
+  }
+
+  const adding = rows.every((f) => !f.now);
+  const out = [h("div", { style: "font-weight:700" }, adding ? "✎ Add this?" : "✎ Which value is right?"),
+    h("p", { class: "muted", style: "font-size:13px;margin:4px 0 8px" }, adding
+      ? `A value came in${from} for ${rows.length > 1 ? "fields" : "a field"} ${who} has empty. Take it, or leave it blank.`
+      : `A different value came in${from} for ${who}. Pick the one that's right — nothing changes until you save.`)];
+
+  const picks = {};
+  const save = h("button", { class: "btn btn--primary btn--sm" });
+  const relabel = () => {
+    const n = rows.filter((f) => picks[f.field] === "theirs").length;
+    save.textContent = n === 0 ? (adding ? "Leave it blank" : "Keep what I have")
+      : n === 1 ? "Save change" : `Save ${n} changes`;
+  };
+  for (const f of rows) {
+    picks[f.field] = "mine";                                  // the safe default is always "change nothing"
+    const mine = h("button", { class: "fpopt is-on", type: "button" },
+      h("span", { class: "fpval" }, f.now || "— nothing —"),
+      h("span", { class: "fpcap" }, f.now ? "on file now" : "leave blank"));
+    const theirs = h("button", { class: "fpopt", type: "button" },
+      h("span", { class: "fpval" }, f.got), h("span", { class: "fpcap" }, "came in"));
+    const choose = (which) => () => {
+      picks[f.field] = which;
+      mine.classList.toggle("is-on", which === "mine");
+      theirs.classList.toggle("is-on", which === "theirs");
+      relabel();
+    };
+    mine.addEventListener("click", choose("mine"));
+    theirs.addEventListener("click", choose("theirs"));
+    out.push(h("div", { class: "fpfield" },
+      h("div", { class: "fplabel" }, FIELD_LABEL[f.field]),
+      h("div", { class: "fpopts" }, mine, theirs)));
+  }
+  relabel();
+  save.addEventListener("click", () => saveProposal(s, rows, picks, save, onDone));
+  out.push(h("div", { class: "fpact" }, save));
+  return out;
+}
+
+async function saveProposal(s, rows, picks, btn, onDone) {
+  const take = rows.filter((f) => picks[f.field] === "theirs");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = take.length ? "Saving…" : "Clearing…";
+  const stop = (msg) => { btn.disabled = false; btn.textContent = label; alert(msg); };
+  try {
+    if (take.length) {
+      // These reviews sit for weeks. Re-read before writing so a stale "came
+      // in" value can't quietly undo an edit someone made in the meantime.
+      const cols = take.map((f) => f.field).join(",");
+      const rc = await rest(`contacts?id=eq.${s.contact_a}&select=${cols}&limit=1`, { method: "GET" });
+      const fresh = rc.ok ? (await rc.json().catch(() => []))[0] : null;
+      if (!fresh) return stop("Couldn't re-read this contact — nothing was saved.");
+      for (const f of take) {
+        if (String(fresh[f.field] || "").trim() !== f.now)
+          return stop(`${FIELD_LABEL[f.field]} is now "${fresh[f.field]}" — it changed after this review came up, so nothing was saved. Reload contacts to see it fresh.`);
+      }
+      const patch = {};
+      for (const f of take) patch[f.field] = f.got;
+      const res = await rest(`contacts?id=eq.${s.contact_a}`, { method: "PATCH",
+        headers: { Prefer: "return=representation" }, body: JSON.stringify(patch) });
+      if (!res.ok || !(await res.json().catch(() => [])).length)
+        return stop("That didn't save — the contact wasn't updated.");
+      toast(take.length === 1 ? `${FIELD_LABEL[take[0].field]} updated.` : "Contact updated.");
+    }
+    if (await resolveSuggestion(s, take.length ? "merged" : "dismissed")) onDone();
+    else if (take.length) { btn.disabled = false; btn.textContent = label;
+      alert("Saved — but this review needs an office login to clear, so it will come back."); }
+    else stop("Couldn't clear this review — it needs an office login.");
+  } catch (_) { stop("That didn't save — check the connection."); }
+}
+
 function queueRow(s, people) {
   const row = h("div", { class: "mqrow" });
-  const dismiss = h("button", { class: "btn btn--ghost btn--sm" }, "Not a match");
-  dismiss.addEventListener("click", async () => {
-    dismiss.disabled = true;
-    await rest(`contact_merge_suggestions?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" },
-      body: JSON.stringify({ status: "dismissed", resolved_at: new Date().toISOString() }) }).catch(() => {});
-    row.remove();
-  });
   const a = people[s.contact_a], b = people[s.contact_b];
   if (s.contact_b && a && b) {
+    const dismiss = h("button", { class: "btn btn--ghost btn--sm" }, "Not a match");
+    dismiss.addEventListener("click", async () => {
+      dismiss.disabled = true;
+      if (await resolveSuggestion(s, "dismissed")) row.remove();
+      else { dismiss.disabled = false; alert("Couldn't clear this review — it needs an office login."); }
+    });
     const side = (winner, loser) => {
       const btn = h("button", { class: "btn btn--ghost btn--sm" }, "Keep this one");
       btn.addEventListener("click", async () => {
@@ -176,15 +339,11 @@ function queueRow(s, people) {
       h("div", { class: "mqpair" }, side(a, b), h("span", { class: "muted" }, "↔"), side(b, a)),
       dismiss);
   } else {
-    // a field-change proposal (untrusted-fill / conflict) — informational
-    const c = a || b;
-    row.append(
-      h("div", { class: "mqreason" }, s.reason === "conflict"
-        ? "A different value came in on another channel" : "A public lead offered new contact info"),
-      h("div", { class: "mqpair" }, h("div", { class: "mqside" },
-        c ? h("a", { class: "mqname", href: "#/c/" + c.id }, c.name || "—") : h("span", { class: "muted" }, "(contact)"),
-        h("code", { style: "font-size:12px;overflow-wrap:anywhere" }, JSON.stringify(s.detail || {}).slice(0, 160)))),
-      dismiss);
+    const c = a || b || null;
+    row.append(h("div", { class: "mqreason" },
+      s.reason === "conflict" ? "One person, two values" : "New value offered"));
+    if (c) row.append(h("a", { class: "mqname", href: "#/c/" + c.id }, c.name || "—"));
+    row.append(...fieldProposalBody(s, c, () => row.remove()));
   }
   return row;
 }
@@ -204,7 +363,7 @@ export async function renderContactPage(view, id) {
       rest(`unified_jobs?contact_id=eq.${id}&select=id,owner_name,property_address,status,loss_type,claim_number,field_project_id&order=created_at.desc`, { method: "GET" }),
       rest(`coordination_jobs?deleted=eq.false&data->>contactId=eq.${id}&select=id,data`, { method: "GET" }),
       rest(`contact_timeline?contact_id=eq.${id}&select=lane,at,direction,body,ref&order=at.desc&limit=120`, { method: "GET" }),
-      rest(`contact_merge_suggestions?status=eq.open&or=(contact_a.eq.${id},contact_b.eq.${id})&select=id,contact_a,contact_b,reason,detail`, { method: "GET" }),
+      rest(`contact_merge_suggestions?status=eq.open&or=(contact_a.eq.${id},contact_b.eq.${id})&select=id,contact_a,contact_b,reason,detail,source`, { method: "GET" }),
     ]);
     contact = rc.ok ? (await rc.json())[0] : null;
     spine = ru.ok ? await ru.json() : [];
@@ -223,27 +382,28 @@ export async function renderContactPage(view, id) {
   if (contact.merged_into) host.append(h("div", { class: "warn" }, "This contact was merged into another. ",
     h("a", { href: "#/c/" + contact.merged_into }, "Open the surviving contact →")));
 
-  host.append(mergeBanner(id, suggestions, others));
+  host.append(mergeBanner(contact, suggestions, others));
   host.append(identityCard(contact));
   host.append(statRow(contact, spine, board, timeline));
   host.append(jobsCard(spine, board));
   host.append(timelineCard(timeline));
 }
 
-function mergeBanner(id, suggestions, others) {
+function mergeBanner(contact, suggestions, others) {
+  const id = contact.id;
   const wrap = h("div");
   for (const s of suggestions) {
     const pair = !!s.contact_b;
     const otherId = s.contact_a === id ? s.contact_b : s.contact_a;
     const other = others[otherId];
     const card = h("div", { class: "card mergecard" });
-    const dismiss = h("button", { class: "btn btn--ghost btn--sm" }, "Not a match");
-    dismiss.addEventListener("click", async () => {
-      dismiss.disabled = true;
-      await rest(`contact_merge_suggestions?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "dismissed", resolved_at: new Date().toISOString() }) }).catch(() => {});
-      card.remove();
-    });
     if (pair && other) {
+      const dismiss = h("button", { class: "btn btn--ghost btn--sm" }, "Not a match");
+      dismiss.addEventListener("click", async () => {
+        dismiss.disabled = true;
+        if (await resolveSuggestion(s, "dismissed")) card.remove();
+        else { dismiss.disabled = false; alert("Couldn't clear this review — it needs an office login."); }
+      });
       const merge = h("button", { class: "btn btn--primary btn--sm" }, "Merge — same person");
       merge.addEventListener("click", async () => {
         if (!confirm(`Merge "${other.name}" into this contact?\n\nEverything linked to them — jobs, texts, emails — moves here, and the duplicate is retired. This can't be undone from the app.`)) return;
@@ -263,14 +423,8 @@ function mergeBanner(id, suggestions, others) {
           other.phone || other.email ? ` · ${[other.phone, other.email].filter(Boolean).join(" · ")}` : ""),
         h("div", { style: "display:flex;gap:8px" }, merge, dismiss));
     } else {
-      // a field-change proposal (untrusted-fill / conflict) — informational
-      const d = s.detail || {};
-      const desc = s.reason === "conflict" ? "A different value came in on another channel." : "A public lead offered new contact info.";
-      card.append(
-        h("div", { style: "font-weight:700" }, "ℹ Review suggested"),
-        h("p", { class: "muted", style: "font-size:13px;margin:4px 0 8px" }, desc + " ",
-          h("code", { style: "font-size:12px" }, JSON.stringify(d).slice(0, 160))),
-        h("div", {}, dismiss));
+      // a field proposal — the same both-answers review the queue shows
+      card.append(...fieldProposalBody(s, contact, () => card.remove()));
     }
     wrap.append(card);
   }

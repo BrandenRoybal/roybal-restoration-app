@@ -170,6 +170,26 @@ table.minitable tr:last-child td { border-bottom: 0; }
 .mqside { display: flex; flex-direction: column; gap: 4px; min-width: 180px; align-items: flex-start; }
 .mqname { font-weight: 700; color: var(--navy, #16395a); text-decoration: none; }
 .mqname:hover { text-decoration: underline; }
+/* A field review asks which of two spellings of one value is right. That is a
+   pick, not a yes/no, so each side is a real target you can click — and the
+   one already on file is selected, because "change nothing" is the safe
+   default for a queue somebody is clearing quickly. */
+.fpfield { align-self: stretch; border-top: 1px solid var(--line, #e2e6ec);
+  padding-top: 8px; margin-top: 8px; }
+.fplabel { font-size: 11.5px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
+  color: var(--muted, #5f6b7a); }
+.fpopts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 5px; }
+.fpopt { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left;
+  flex: 1 1 210px; min-width: 0; padding: 7px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line, #e2e6ec); background: #fff; font: inherit; color: inherit; }
+.fpopt:hover { border-color: var(--navy, #16395a); }
+.fpopt.is-on { border-color: var(--navy, #16395a); background: #eef4fa;
+  box-shadow: inset 0 0 0 1px var(--navy, #16395a); }
+.fpval { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.fpcap { font-size: 11px; color: var(--muted, #5f6b7a); }
+.fpopt.is-on .fpcap { color: var(--navy, #16395a); font-weight: 600; }
+.fpact { align-self: stretch; display: flex; gap: 8px; margin-top: 10px; }
+
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } .crow__k { flex-basis: 74px; } }
 
