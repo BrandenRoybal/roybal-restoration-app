@@ -45,7 +45,7 @@ env:
   EXPECT_TRIGGERS: 33
   EXPECT_VIEWS: 5
   EXPECT_ENUMS: 7
-  EXPECT_FUNCTIONS: 48
+  EXPECT_FUNCTIONS: 49   # +1: contact_same_value (migration 0001)
   EXPECT_PKUNIQUE: 73
 
 jobs:
