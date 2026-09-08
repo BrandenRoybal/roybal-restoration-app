@@ -37,7 +37,7 @@ import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSin
          pushProject, tombstoneProject, reviveProject } from "./supa.js";
 import { SYNC_VIA_RPC } from "./config.js";
 import { deflateProject, inflateProject } from "./media.js";
-import { thumbKey, makeThumb } from "./thumbs.js";
+import { thumbKey, makeThumb, previewPhotos, restorePhotoMarkers } from "./thumbs.js";
 import { shrinkDataURL } from "./core.js";
 import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "./merge.js";
 import { isBlankProject } from "./model.js";
@@ -146,11 +146,15 @@ async function absorb(localRef, serverFull, why) {
    re-push. Bumping here would re-dirty a row that already matches the server,
    and two devices would feed each other rev bumps forever (the Jul 2026
    disk-IO incident). Returns true when the union landed locally. */
-async function adoptServerMerge(localRef, res, fetchMedia) {
+async function adoptServerMerge(localRef, res, fetchMedia, have) {
   const id = localRef.id;
   let full, missing;
   try {
-    ({ project: full, missing } = await inflateProject(res.data, fetchMedia || downloadRemembered));
+    // The union may reference photos this device has never held; take their
+    // previews rather than pulling every original back down (stage 2). `have`
+    // is the map the caller already deflated, so this costs no extra hashing.
+    const { project: shown } = await previewPhotos(res.data, previewFirst(have || localRef));
+    ({ project: full, missing } = await inflateProject(shown, fetchMedia || downloadRemembered));
   } catch {
     return "media-fetch-failed";                   // caller raises it: green status would be a lie
   }
@@ -230,10 +234,20 @@ const saveCursor = () => localStorage.setItem(K_CURSOR, cursor);
 const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-3000)));
 const saveThumbsDone = () => localStorage.setItem(K_THUMBS, JSON.stringify([...thumbsDone].slice(-5000)));
 
-/* ---------- thumbnails (STAGE 1: write-only) ----------
-   Nothing reads these yet (thumbs.js explains why). This exists so that when
-   the consuming side lands, the bucket already has a thumbnail beside every
-   photo instead of needing a fleet-wide backfill on the day it ships.
+/* EVERY deflate on the sync path goes through here, and that is the whole
+   safety argument for stage-2 previews: a pulled row may hold a 320px
+   stand-in in photos[].src, and restorePhotoMarkers puts the original marker
+   back before anything is hashed, uploaded or pushed. So the row this device
+   sends is byte-identical to the row it received, and a preview cannot reach
+   the server, an older build, or another device. thumbs.test.mjs asserts no
+   bare deflateProject survives in this file. */
+function deflateSynced(project) { return deflateProject(restorePhotoMarkers(project)); }
+
+/* ---------- thumbnails ----------
+   Stage 1 filled the bucket; stage 2 reads it (previewFirst below). The
+   write side below is unchanged and still keeps new captures thumbnailed at
+   the cheapest possible moment, and still sweeps whatever backlog a device
+   holds, so a photo taken today has a preview before any device needs one.
 
    Three rules this must never break, in order of importance:
      1. It can never fail a sync. Every path swallows its own errors and a
@@ -242,9 +256,13 @@ const saveThumbsDone = () => localStorage.setItem(K_THUMBS, JSON.stringify([...t
         with a pause between them — the storm that took production's connection
         pool down on 2026-09-07 was ~1,700 storage requests in 40 minutes, and
         this must never look like that.
-     3. It only ever WRITES. No pull path consults thumbKey(); no local row
-        learns a thumbnail exists. A device cannot end up holding a preview it
-        believes is the photo, which is the failure that loses originals. */
+     3. A DEVICE MUST NEVER BELIEVE A PREVIEW IS THE PHOTO. Stage 1 held this
+        by refusing to read thumbnails at all. Stage 2 reads them, so the
+        guarantee moves rather than disappears: a stand-in is always labelled
+        (thumbs.js PREVIEW_OF), it is always undone before a push
+        (deflateSynced), and it always loses a merge to the real bytes
+        (merge.js preferFullPhotos, and its SQL twin). Those three are what
+        stop a 320px copy from overwriting an original. */
 const THUMB_PAUSE_MS = 150;      // ~7 uploads/sec worst case, one at a time
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -273,7 +291,7 @@ async function sweepThumbs() {
   try {
     for (const p of await Store.all()) {
       let media;
-      try { ({ media } = await deflateProject(p)); } catch { continue; }
+      try { ({ media } = await deflateSynced(p)); } catch { continue; }
       for (const m of media) {
         if (thumbsDone.has(m.hash)) continue;
         if (await settleThumb(m.hash, m.text)) await sleep(THUMB_PAUSE_MS);
@@ -311,15 +329,44 @@ async function downloadRemembered(hash) {
    carries markers, and the map is built on the first miss. Hashing bytes that
    are already in memory is orders of magnitude cheaper than fetching them, and
    a deflate failure degrades to the old behaviour rather than breaking a pull. */
-function localFirstMedia(local) {
-  if (!local) return downloadRemembered;
+function localMediaIndex(local) {
   let map = null;
-  return async (hash) => {
+  return async () => {
     if (!map) {
-      try { map = new Map((await deflateProject(local)).media.map((m) => [m.hash, m.text])); }
+      try { map = new Map((await deflateSynced(local)).media.map((m) => [m.hash, m.text])); }
       catch { map = new Map(); }
     }
+    return map;
+  };
+}
+function localFirstMedia(local) {
+  if (!local) return downloadRemembered;
+  const index = localMediaIndex(local);
+  return async (hash) => {
+    const map = await index();
     return map.has(hash) ? map.get(hash) : downloadRemembered(hash);
+  };
+}
+
+/* PREVIEW-FIRST (stage 2): what a pulled photo marker resolves to when this
+   device does not already hold the bytes — the ~12 KB thumbnail rather than
+   the ~228 KB photo. Returns null to mean "no preview, use the normal path":
+   when we hold the real photo locally (it is free and it is better), and when
+   the bucket has no thumbnail yet (the backlog is still being swept, or the
+   source was a signature or PDF page that never earns one). downloadMedia
+   answers 404 with null, so a missing thumbnail is not an error; a real
+   network failure throws and previewPhotos leaves the entry for inflate,
+   which degrades to exactly the pre-stage-2 behaviour.
+
+   `have` is either the local project or an already-built hash→bytes Map, so
+   the push path can reuse the map it just deflated instead of hashing every
+   photo on the job a second time. */
+function previewFirst(have) {
+  const index = have instanceof Map ? async () => have
+    : (have ? localMediaIndex(have) : null);
+  return async (hash) => {
+    if (index && (await index()).has(hash)) return null;
+    return downloadMedia(thumbKey(hash));
   };
 }
 
@@ -342,7 +389,7 @@ async function push() {
   for (const p of all) {
     if (pushed[p.id] === p.updatedAt) continue;        // already up to date
     try {
-      const { slim, media } = await deflateProject(p);
+      const { slim, media } = await deflateSynced(p);
       await uploadNewMedia(media);
       const base = Number(revs[p.id] ?? p.rev) || 0;   // p.rev: legacy fallback for rows pulled before K_REVS
       const next = { ...slim, rev: base + 1 };
@@ -374,7 +421,7 @@ async function push() {
           // 'merged'  — the server committed the union; adopt it clean.
           // 'current' — our push added nothing the server lacked (self-echo);
           //             it wrote nothing, so adopt its copy and go clean.
-          const why = await adoptServerMerge(p, res, resolveMedia);
+          const why = await adoptServerMerge(p, res, resolveMedia, localMedia);
           if (why === "media-fetch-failed") lastErr = new Error("merge media fetch failed");
           if (why !== true) needsAnotherPass = true;   // retry in 1.5s, not 45s
           continue;
@@ -443,7 +490,7 @@ async function push() {
         // against the first's copy next cycle instead of clobbering it)
         merged.updatedAt = laterThan(cur.updatedAt, serverFull.updatedAt);
         if (!(await Store.putIf(merged, cur.updatedAt))) continue;   // an edit just landed — retry next cycle
-        const { slim: reviveSlim, media: reviveMedia } = await deflateProject(merged);
+        const { slim: reviveSlim, media: reviveMedia } = await deflateSynced(merged);
         await uploadNewMedia(reviveMedia);
         const nextRev = (Number(serverBlob && serverBlob.rev) || 0) + 1;
         let revivedRev = nextRev;
@@ -492,7 +539,7 @@ async function push() {
         const snaps = await Store.backups(id);
         const snap = snaps.length ? snaps[0].data : null;
         if (snap && snap.id === id) {
-          const { slim, media } = await deflateProject(snap);
+          const { slim, media } = await deflateSynced(snap);
           await uploadNewMedia(media);
           const { rev, ...content } = slim;
           if (JSON.stringify(content).length <= MAX_ROW) data = content;
@@ -566,7 +613,12 @@ async function pull() {
     if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bump(row.updated_at); continue; }
     let full, missing;
     try {
-      ({ project: full, missing } = await inflateProject(remote, localFirstMedia(local)));
+      // STAGE 2: photos this device lacks resolve to their thumbnail, not the
+      // original — ~12 KB instead of ~228 KB each. Anything without a preview
+      // (no thumbnail yet, signatures, PDF pages) falls through to inflate and
+      // downloads in full exactly as before.
+      const { project: shown } = await previewPhotos(remote, previewFirst(local));
+      ({ project: full, missing } = await inflateProject(shown, localFirstMedia(local)));
     } catch {
       break;   // media fetch failed (network) — retry this row from the same cursor next cycle
     }
@@ -683,7 +735,8 @@ export async function reloadFromCloud(id) {
   // already here is identical to refetching them and spares the download that
   // makes this recovery painful on a job site.
   const local = await Store.get(id);
-  const { project: full, missing } = await inflateProject(row.data, localFirstMedia(local));
+  const { project: shown } = await previewPhotos(row.data, previewFirst(local));
+  const { project: full, missing } = await inflateProject(shown, localFirstMedia(local));
   if (missing > 0) {
     // storing markers-as-photos is how second devices used to end up with
     // garbage images — refuse rather than write a corrupt copy

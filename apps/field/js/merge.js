@@ -26,6 +26,8 @@
    module only reconciles content.
    ============================================================ */
 
+import { PREVIEW_OF, isPreviewEntry } from "./thumbs.js";
+
 /* every multi-instance collection whose elements carry a stable `id`
    (see model.js factories) — safe to union. merge.test.mjs cross-checks
    this registry against model.js FORMS so a new form can't be forgotten. */
@@ -144,7 +146,8 @@ function mergeForm(newerV, olderV, stats) {
 }
 
 /** Merge two copies of the same project. Returns
-    { merged, added, filledForms, removed, notes } — `added` counts elements
+    { merged, added, filledForms, removed, upgraded, notes } — `upgraded`
+    counts previews replaced by the real photo, `added` counts elements
     recovered from the older copy, `removed` counts elements the tombstones
     kept out — both dropped from the newer copy and blocked from coming back
     off the older one — and `notes` is a short human list. */
@@ -183,6 +186,39 @@ export function mergeProjects(a, b) {
         notes.push(`${key} −${nl.length - kept.length}`);
         merged[key] = kept;
       }
+    }
+  }
+
+  // ---------- a preview is never the photograph ----------
+  // A photos[] entry carrying `previewOf` holds a ~320px stand-in plus the
+  // hash of the real bytes, not the photograph (thumbs.js). When both copies
+  // carry the same photo id and one of them holds the real thing, the real
+  // thing wins — REGARDLESS of which copy is newer. "Newer" says when a device
+  // last touched the job, not which copy of a photo is better, and a device
+  // that pulled previews and then fixed a caption would otherwise push a 320px
+  // stand-in over the only documentation of the inside of someone's house.
+  //
+  // Field-granular, like mergeForm: the newer copy keeps its caption, room and
+  // stage edits and takes only the image from the older one. `cloud` moves
+  // with `src` because they describe the same bytes — a preview's cloud hash
+  // is sync's bookkeeping and must not outlive the preview it belonged to.
+  let upgraded = 0;
+  if (Array.isArray(merged.photos) && Array.isArray(older.photos)) {
+    const real = new Map();
+    for (const el of older.photos) {
+      if (el && el.id && !isPreviewEntry(el) && !gone.has(el.id)) real.set(el.id, el);
+    }
+    if (real.size) {
+      merged.photos = merged.photos.map((el) => {
+        if (!isPreviewEntry(el) || !real.has(el.id)) return el;
+        const full = real.get(el.id);
+        const { [PREVIEW_OF]: _mark, cloud: _hash, ...rest } = el;
+        const out = { ...rest, src: clone(full.src) };
+        if (full.cloud) out.cloud = full.cloud;
+        upgraded++;
+        return out;
+      });
+      if (upgraded) notes.push(`photos ↑${upgraded}`);
     }
   }
 
@@ -245,5 +281,5 @@ export function mergeProjects(a, b) {
     }
   }
 
-  return { merged, added, filledForms, removed, notes };
+  return { merged, added, filledForms, removed, upgraded, notes };
 }

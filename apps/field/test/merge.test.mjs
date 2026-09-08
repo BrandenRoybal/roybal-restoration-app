@@ -284,4 +284,78 @@ test("…without reverting a genuinely newer edit from a THIRD device", () => {
   assert.equal(merged.notes, "typed during merge", "…and the unsynced typing survives alongside it");
 });
 
+/* ---------- stage-2 previews: the real photograph always wins ----------
+   A photos[] entry carrying `previewOf` holds a ~320px stand-in, not the
+   photograph. The union above resolves an id clash in favour of the NEWER
+   copy, and that is exactly wrong here: "newer" says when a device last
+   touched the job, not which copy of a photo is better. */
+const MARK = "thumb:" + "a".repeat(64) + ":228000";
+const stand = (over = {}) => ({ id: "P", src: "data:image/jpeg;base64,PREVIEW", cloud: "a".repeat(64), previewOf: MARK, ...over });
+const real = (over = {}) => ({ id: "P", src: "data:image/jpeg;base64,REALBYTES", ...over });
+
+test("the real photo beats a preview even when the preview is NEWER", () => {
+  const previewing = { id: "j", updatedAt: T2, photos: [stand()] };
+  const holding = { id: "j", updatedAt: T1, photos: [real()] };
+  const { merged, upgraded } = mergeProjects(previewing, holding);
+  assert.equal(merged.photos[0].src, "data:image/jpeg;base64,REALBYTES");
+  assert.equal(upgraded, 1);
+  assert.ok(!("previewOf" in merged.photos[0]), "the stand-in mark does not survive");
+  assert.ok(!("cloud" in merged.photos[0]), "…nor the hash previewPhotos put beside it");
+});
+
+test("…while the newer copy keeps the caption it just typed", () => {
+  // the whole point of merging field-by-field rather than taking the older
+  // element wholesale: the crew fixed the caption on the device that only
+  // holds previews, and that edit is real work
+  const previewing = { id: "j", updatedAt: T2, photos: [stand({ caption: "north wall, day 3" })] };
+  const holding = { id: "j", updatedAt: T1, photos: [real({ caption: "" })] };
+  const { merged } = mergeProjects(previewing, holding);
+  assert.equal(merged.photos[0].src, "data:image/jpeg;base64,REALBYTES");
+  assert.equal(merged.photos[0].caption, "north wall, day 3");
+});
+
+test("two previews of the same photo stay a preview", () => {
+  const { merged, upgraded } = mergeProjects(
+    { id: "j", updatedAt: T2, photos: [stand()] },
+    { id: "j", updatedAt: T1, photos: [stand()] });
+  assert.equal(upgraded, 0);
+  assert.equal(merged.photos[0].previewOf, MARK);
+});
+
+test("a preview never displaces the real photo on the NEWER side either", () => {
+  const { merged, upgraded } = mergeProjects(
+    { id: "j", updatedAt: T2, photos: [real()] },
+    { id: "j", updatedAt: T1, photos: [stand()] });
+  assert.equal(merged.photos[0].src, "data:image/jpeg;base64,REALBYTES");
+  assert.equal(upgraded, 0, "nothing to upgrade — the newer copy already holds it");
+});
+
+test("a DELETED photo is not resurrected by the preview rule", () => {
+  // the tombstone outranks everything, including this
+  const previewing = { id: "j", updatedAt: T2, photos: [stand()], [DELETED_IDS]: { P: T1 } };
+  const holding = { id: "j", updatedAt: T1, photos: [real()] };
+  const { merged, upgraded } = mergeProjects(previewing, holding);
+  assert.equal(merged.photos.length, 0, "the delete still wins");
+  assert.equal(upgraded, 0);
+});
+
+test("an archived photo is not a preview and is left alone", () => {
+  // archivePhotos() produces {src: thumbnail, cloud: hash} deliberately — the
+  // owner moved those bytes out and that decision is theirs to keep
+  const archived = { id: "P", src: "data:image/jpeg;base64,THUMB", cloud: "b".repeat(64) };
+  const { merged, upgraded } = mergeProjects(
+    { id: "j", updatedAt: T2, photos: [archived] },
+    { id: "j", updatedAt: T1, photos: [real()] });
+  assert.equal(merged.photos[0].src, "data:image/jpeg;base64,THUMB");
+  assert.equal(merged.photos[0].cloud, "b".repeat(64));
+  assert.equal(upgraded, 0);
+});
+
+test("photos other collections carry are untouched by the rule", () => {
+  const { merged } = mergeProjects(
+    { id: "j", updatedAt: T2, contents: [{ id: "C", previewOf: MARK, src: "x" }] },
+    { id: "j", updatedAt: T1, contents: [{ id: "C", src: "real" }] });
+  assert.equal(merged.contents[0].src, "x", "photos only — contents keep plain newer-wins");
+});
+
 console.log(`\n${pass} merge checks passed.`);
