@@ -24,6 +24,7 @@ const nowIso = () => new Date(1700000000000 + clock++ * 1000).toISOString();
 const resp = (status, body) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
 
 const mediaStore = new Map();   // field-media bucket: hash -> text
+let mediaGets = 0;              // GETs that actually went to the "network"
 
 globalThis.fetch = async (url, opts = {}) => {
   const u = new URL(url);
@@ -31,6 +32,7 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.pathname.startsWith("/storage/v1/object/field-media/")) {
     const hash = u.pathname.split("/").pop();
     if (method === "POST" || method === "PUT") { mediaStore.set(hash, opts.body); return resp(200, {}); }
+    mediaGets++;   // counted so a test can prove a pull downloaded NOTHING
     if (mediaStore.has(hash)) return { ok: true, status: 200, json: async () => ({}), text: async () => mediaStore.get(hash) };
     return resp(404, {});
   }
@@ -221,6 +223,58 @@ const { tombstoneItems } = await import("../js/merge.js");
   serverRows.set("p4", { id: "p4", data: { ...row3.data, id: "p4", customer: "Delta", updatedAt: new Date().toISOString() }, deleted: false, updated_at: nowIso() });
   await syncNow();
   ok((await Store.get("p4")).photos[0].src === BIG, "pulled marker re-inflates to the original photo");
+
+  /* ---------- a re-pull resolves photos from THIS device, not the network ----------
+     The bug this guards: signing out clears the sync cursor, so signing back in
+     re-pulls every row. Each row's markers were resolved with downloadRemembered,
+     which always hits the bucket — so a sign-out and back in re-downloaded every
+     photo already sitting in the local store. In production that meant hundreds
+     of megabytes (418 MB across 1,881 objects, avg 228 KB) and on 2026-09-07 it
+     exhausted the connection pool and took password sign-in down for everyone.
+
+     Media is content-addressed, so the bytes for a hash are the same bytes
+     wherever they come from: the local copy is a legitimate source. */
+  {
+    // p4 is already on this device, photo bytes and all, from the pull above.
+    const before = await Store.get("p4");
+    ok(before && before.photos[0].src === BIG, "precondition: the device holds the photo inline");
+
+    // the server moves that row on — a newer edit, same photo
+    const marker = serverRows.get("p4").data.photos[0].src;
+    ok(/^media:[0-9a-f]{64}:\d+$/.test(marker), "precondition: the server row carries a marker, not bytes");
+    serverRows.set("p4", {
+      id: "p4",
+      data: { ...serverRows.get("p4").data, customer: "Delta-NEWER", updatedAt: new Date(Date.now() + 60_000).toISOString() },
+      deleted: false, updated_at: nowIso(),
+    });
+
+    const getsBefore = mediaGets;
+    await syncNow();
+    const after = await Store.get("p4");
+
+    ok(after.customer === "Delta-NEWER", "the newer remote edit still applies");
+    ok(after.photos[0].src === BIG, "…and the photo is intact, resolved from the local copy");
+    ok(mediaGets === getsBefore, `the re-pull downloaded NOTHING (${mediaGets - getsBefore} network fetches, expected 0)`);
+  }
+
+  /* A photo this device has never seen must still come down. The optimisation
+     above must not turn into "never fetch anything". */
+  {
+    const NEW_PHOTO = "data:image/jpeg;base64," + "Q".repeat(80_000);
+    const { deflateProject } = await import("../js/media.js");
+    const { media } = await deflateProject({ id: "tmp", photos: [{ id: "z", src: NEW_PHOTO }] });
+    const { hash } = media[0];
+    mediaStore.set(hash, NEW_PHOTO);
+    serverRows.set("p6", {
+      id: "p6",
+      data: { id: "p6", customer: "Foxtrot", photos: [{ id: "z", src: `media:${hash}:${NEW_PHOTO.length}` }], updatedAt: new Date().toISOString() },
+      deleted: false, updated_at: nowIso(),
+    });
+    const getsBefore = mediaGets;
+    await syncNow();
+    ok((await Store.get("p6")).photos[0].src === NEW_PHOTO, "a genuinely new photo still inflates correctly");
+    ok(mediaGets > getsBefore, "…and it DID go to the network — the cache never starves a real fetch");
+  }
 
   // ---------- clobber protection ----------
   // equal timestamps: local wins the tie, remote is NOT applied

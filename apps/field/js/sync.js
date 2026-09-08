@@ -236,6 +236,35 @@ async function downloadRemembered(hash) {
   return text;
 }
 
+/* Resolve a marker from the copy already on this device before going to the
+   network. Safe because media is CONTENT-ADDRESSED: the object at hash H is H
+   no matter who stored it, so bytes found locally are byte-identical to the
+   ones the bucket would serve.
+
+   The push path has done this since it was written (localMedia/resolveMedia in
+   push()) — "the server's copy references OUR photos too". The pull path never
+   did, and that asymmetry is expensive: signing out clears the cursor
+   (resetSync), so signing back in re-pulls every row and re-downloaded every
+   photo on the device even though the bytes were already in the local store.
+   On 2026-09-07 that storm — ~1,700 storage requests in 40 minutes — exhausted
+   production's connection pool and took password sign-in down for everyone.
+
+   Deflating is LAZY: inflateProject only calls a resolver when a row actually
+   carries markers, and the map is built on the first miss. Hashing bytes that
+   are already in memory is orders of magnitude cheaper than fetching them, and
+   a deflate failure degrades to the old behaviour rather than breaking a pull. */
+function localFirstMedia(local) {
+  if (!local) return downloadRemembered;
+  let map = null;
+  return async (hash) => {
+    if (!map) {
+      try { map = new Map((await deflateProject(local)).media.map((m) => [m.hash, m.text])); }
+      catch { map = new Map(); }
+    }
+    return map.has(hash) ? map.get(hash) : downloadRemembered(hash);
+  };
+}
+
 /* upload any media object not yet known to be in the bucket (content-addressed) */
 async function uploadNewMedia(media) {
   for (const m of media) {
@@ -476,7 +505,7 @@ async function pull() {
     if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bump(row.updated_at); continue; }
     let full, missing;
     try {
-      ({ project: full, missing } = await inflateProject(remote, downloadRemembered));
+      ({ project: full, missing } = await inflateProject(remote, localFirstMedia(local)));
     } catch {
       break;   // media fetch failed (network) — retry this row from the same cursor next cycle
     }
@@ -585,13 +614,17 @@ export async function reloadFromCloud(id) {
   if (!row || row.deleted || !row.data || !row.data.id) {
     throw new Error("The cloud has no copy of this job yet, so there is nothing to take. Let it sync first.");
   }
-  const { project: full, missing } = await inflateProject(row.data, downloadRemembered);
+  // Structure comes from the cloud — that is the whole point of this escape
+  // hatch — but the photo BYTES are content-addressed, so reusing the ones
+  // already here is identical to refetching them and spares the download that
+  // makes this recovery painful on a job site.
+  const local = await Store.get(id);
+  const { project: full, missing } = await inflateProject(row.data, localFirstMedia(local));
   if (missing > 0) {
     // storing markers-as-photos is how second devices used to end up with
     // garbage images — refuse rather than write a corrupt copy
     throw new Error(`${missing} photo${missing === 1 ? "" : "s"} on the cloud copy haven't finished uploading from the other device. Try again in a minute.`);
   }
-  const local = await Store.get(id);
   if (local) await Store.backup(local);       // the discarded copy stays restorable on this device
   full.id = id;
   delete full.rev;                            // revs live in sync bookkeeping, not the blob
