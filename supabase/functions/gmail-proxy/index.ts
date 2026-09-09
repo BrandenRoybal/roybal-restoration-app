@@ -334,6 +334,33 @@ serve(async (req) => {
         .eq("deleted", false).limit(500);
       const projects: Blob[] = (projRows ?? []).filter((r: Blob) => r?.id);
 
+      /* BOARD LEADS ARE CANDIDATES TOO.
+         The matcher only ever saw field_projects, and only unarchived ones. As
+         jobs were archived and new business moved to board leads, that list
+         shrank to four — and on 2026-09-08 a customer replied to a $40,075.20
+         estimate with a signed contract and "how do you want me to get you the
+         deposit?", and it was silently dropped because his lead lives on the
+         board and has no job file. Eight days of mail filed nothing for the
+         same reason.
+
+         DEDUPE IS LOAD-BEARING, not tidiness. A tile carrying `fieldJobId` is
+         the SAME job as a field project already in this list, and
+         matchEmailToJob REFUSES TO FILE on ambiguity (two hits = null). Adding
+         both copies would therefore stop filing mail that files today — a
+         silent regression, in the same shape as the one being fixed. */
+      const BOARD_SETTINGS_ID = "00000000-0000-0000-0000-000000000001";   // reserved settings row, never a job
+      const { data: leadRows } = await supabase
+        .from("coordination_jobs")
+        .select("id, customer:data->>customer, email:data->>email, claimNo:data->>claimNo, fieldJobId:data->>fieldJobId, archived:data->>archived")
+        .limit(500);
+      for (const r of (leadRows ?? []) as Blob[]) {
+        if (!r?.id || r.id === BOARD_SETTINGS_ID) continue;
+        if (r.fieldJobId) continue;                       // its field project is already a candidate
+        if (String(r.archived) === "true") continue;      // archived board tiles are done
+        if (!r.email && !r.claimNo && !r.customer) continue;
+        projects.push({ id: r.id, email: r.email, claimNo: r.claimNo, customer: r.customer, archivedAt: null });
+      }
+
       // pull window: since the last pull (epoch seconds), first run = 3 days back
       const sinceEpoch = Number(row.last_pull_epoch) || Math.floor(Date.now() / 1000) - 3 * 86400;
       const q = `in:inbox -from:me after:${sinceEpoch}`;
