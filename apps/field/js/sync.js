@@ -48,6 +48,7 @@ const K_REVS = "roybal-sync-revs";         // { projectId: server rev this devic
 const K_DELETES = "roybal-sync-deletes";   // [ids pending delete on server ]
 const K_MEDIA = "roybal-media-pushed";     // [sha256 hashes known to be in the bucket]
 const K_THUMBS = "roybal-thumbs-done";     // [sha256 hashes whose thumbnail is settled]
+const K_SWEPT = "roybal-thumbs-swept";     // { projectId: updatedAt of the last COMPLETE sweep }
 const MAX_ROW = 5_000_000;                 // slimmed rows are ~KBs; this is a last-ditch backstop
 const STALL_CYCLES = 3;                    // media-missing retries before the status light goes red
 
@@ -57,7 +58,8 @@ let revs = load(K_REVS, {});
 let deletes = loadDeletes();               // Map: projectId -> ISO time the delete was queued
 let mediaPushed = new Set(load(K_MEDIA, []));
 let thumbsDone = new Set(load(K_THUMBS, []));   // "settled" = uploaded, or not thumbnailable
-let thumbSweepRan = false;                      // one backfill pass per session
+let sweptAt = load(K_SWEPT, {});                // projectId -> updatedAt at its last complete sweep
+let sweeping = false;                           // the sweep is never awaited — this is the overlap guard
 let mediaWait = new Map();                 // projectId -> consecutive cycles blocked on missing bucket media
 let statusCb = () => {};
 let mergeCb = () => {};                    // fires after a two-device merge (app shows a toast)
@@ -233,6 +235,7 @@ const saveDeletes = () => localStorage.setItem(K_DELETES, JSON.stringify(Object.
 const saveCursor = () => localStorage.setItem(K_CURSOR, cursor);
 const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-3000)));
 const saveThumbsDone = () => localStorage.setItem(K_THUMBS, JSON.stringify([...thumbsDone].slice(-5000)));
+const saveSwept = () => localStorage.setItem(K_SWEPT, JSON.stringify(sweptAt));
 
 /* EVERY deflate on the sync path goes through here, and that is the whole
    safety argument for stage-2 previews: a pulled row may hold a 320px
@@ -263,41 +266,94 @@ function deflateSynced(project) { return deflateProject(restorePhotoMarkers(proj
         (deflateSynced), and it always loses a merge to the real bytes
         (merge.js preferFullPhotos, and its SQL twin). Those three are what
         stop a 320px copy from overwriting an original. */
-const THUMB_PAUSE_MS = 150;      // ~7 uploads/sec worst case, one at a time
+/* Pacing and per-cycle budget. Exported as a mutable object ONLY so the sync
+   harness can drive the resume path without waiting minutes of real pacing;
+   production never writes to it. */
+export const sweepTuning = {
+  pauseMs: 150,        // ~7 uploads/sec worst case, one at a time
+  maxPerCycle: 25,     // uploads per sync cycle — the rest resumes next cycle
+  maxFailures: 3,      // consecutive upload failures: the network is gone, stop
+  // The renderer, injected for the same reason thumbs.js takes one: Node has
+  // no canvas, and a sweep that can never produce a thumbnail is untestable.
+  shrink: shrinkDataURL,
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* Settle one source object: upload its thumbnail, or record that it will never
-   have one. Returns true when a byte actually went up. */
+/* Settle one source object. Returns "uploaded", "skipped" (it can never have a
+   thumbnail here), or "failed" (it can, but the network refused).
+
+   That last distinction is new, and it matters. Stage 1 settled a hash either
+   way, which conflated "this is a signature / PDF page / there is no canvas"
+   with "the upload just failed" — so one blip of bad signal marked a photo
+   permanently thumbnail-less ON THAT DEVICE, and since only a device holding
+   the original bytes can make its thumbnail, that gap could never be filled by
+   anyone else. A source that cannot be rendered is still settled forever; an
+   upload that failed is left for the next pass. */
 async function settleThumb(hash, text) {
-  if (thumbsDone.has(hash)) return false;
-  let uploaded = false;
-  try {
-    const thumb = await makeThumb(text, shrinkDataURL);
-    if (thumb) { await uploadMedia(thumbKey(hash), thumb); uploaded = true; }
-  } catch { /* a thumbnail is never worth surfacing to the user */ }
-  // Settled either way: a source that cannot be rendered (signature, PDF page,
-  // no DOM) must not be reconsidered on every cycle for the life of the device.
+  if (thumbsDone.has(hash)) return "skipped";
+  const thumb = await makeThumb(text, sweepTuning.shrink);   // never throws; null = cannot
+  if (!thumb) {
+    thumbsDone.add(hash); saveThumbsDone();
+    return "skipped";
+  }
+  try { await uploadMedia(thumbKey(hash), thumb); }
+  catch { return "failed"; }                            // transient — do NOT settle
   thumbsDone.add(hash); saveThumbsDone();
-  return uploaded;
+  return "uploaded";
 }
 
-/* Photos this device already holds, one job at a time. Runs once per session,
-   in the background, after a cycle has proven the network works. Deflating is
-   the only way to learn a local photo's hash, and it is why this walks jobs
-   rather than holding every photo in memory at once. */
+/* Photos this device already holds, one job at a time, in the background after
+   a cycle has proven the network works. Deflating is the only way to learn a
+   local photo's hash, and it is why this walks jobs rather than holding every
+   photo in memory at once.
+
+   RESUMABLE, not once-per-session. Stage 1 ran this exactly once per tab, and
+   measured on 2026-09-08 that left 771 eligible objects — 136 MB — with no
+   thumbnail: the one pass fires on the first clean cycle, covers only what that
+   device happened to hold at that moment, and dies with the tab. A device that
+   pulls a job afterwards never sweeps it.
+
+   Stage 2 makes that worse rather than better, which is why this is worth
+   fixing now: a device that pulls PREVIEWS no longer holds the original bytes,
+   and previews are excluded from the sweep by construction (deflateSynced
+   restores their markers). So every device that adopts previews is one fewer
+   device able to finish the backlog. The population that can do this work only
+   shrinks.
+
+   Progress is durable, so "resume" needs no cursor: `thumbsDone` (localStorage)
+   remembers settled hashes across reloads, and `sweptAt` remembers the
+   updatedAt at which a job was swept CLEAN so an unchanged job is not deflated
+   again — that check is what keeps this cheap enough to run every cycle rather
+   than once. A job that changes is swept again, because it may have new photos.
+
+   Still bounded by the rules stage 1 set: one upload at a time, paced, and it
+   can never fail a sync. */
 async function sweepThumbs() {
-  if (thumbSweepRan || !isSignedIn()) return;
-  thumbSweepRan = true;
+  if (sweeping || !isSignedIn()) return;
+  sweeping = true;
+  let uploads = 0, failures = 0;
+  const spent = () => uploads >= sweepTuning.maxPerCycle || failures >= sweepTuning.maxFailures;
   try {
     for (const p of await Store.all()) {
+      if (spent()) break;
+      if (sweptAt[p.id] === p.updatedAt) continue;   // unchanged since a clean pass
       let media;
       try { ({ media } = await deflateSynced(p)); } catch { continue; }
+      let complete = true;
       for (const m of media) {
         if (thumbsDone.has(m.hash)) continue;
-        if (await settleThumb(m.hash, m.text)) await sleep(THUMB_PAUSE_MS);
+        if (spent()) { complete = false; break; }
+        const outcome = await settleThumb(m.hash, m.text);
+        if (outcome === "uploaded") { uploads++; failures = 0; await sleep(sweepTuning.pauseMs); }
+        else if (outcome === "failed") { failures++; complete = false; }
       }
+      // Only a job whose every object is settled is stamped — a partial pass
+      // must come back to it, or the budget would silently skip the remainder
+      // forever.
+      if (complete) { sweptAt[p.id] = p.updatedAt; saveSwept(); }
     }
   } catch { /* best effort, always */ }
+  finally { sweeping = false; }
 }
 function bumpCursor(ts) { if (ts && ts > cursor) { cursor = ts; saveCursor(); } }
 
