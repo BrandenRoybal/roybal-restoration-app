@@ -119,4 +119,43 @@ test("headerOf is case-insensitive", () => {
   assert.equal(headerOf(payload, "Subject"), "s");
 });
 
+/* ---------- board leads as candidates (the 2026-09-08 miss) ----------
+   A customer replied to a $40,075.20 estimate with a signed contract and
+   "how do you want me to get you the deposit?" and the lane dropped it: his
+   lead lives on the Job Board and has no field project, and the matcher only
+   ever saw field_projects. These pin the fix and — more importantly — the
+   regression the fix could have caused. */
+const DOUG = {
+  from: "Doug Dawson <doug_d_dawson@yahoo.com>",
+  subject: "Re: Subject: Repair Estimate RC-CHA-0926 — 319 Charles Ave",
+  text: "Here's my signed version. How do you want me to get you the deposit?",
+};
+const LEAD = { id: "board-doug", customer: "Doug D Dawson", email: "doug_d_dawson@yahoo.com", claimNo: "" };
+
+test("a board lead matches the reply that field projects alone could not", () => {
+  assert.equal(matchEmailToJob(DOUG, JOBS), null, "precondition: no job file matches it");
+  const hit = matchEmailToJob(DOUG, [...JOBS, LEAD]);
+  assert.equal(hit?.projectId, "board-doug");
+  assert.equal(hit?.matchedBy, "customer-email");
+});
+
+test("a lead DUPLICATING a job file goes ambiguous — which is why dedupe matters", () => {
+  // A board tile carrying fieldJobId is the same job as a field project. Feed
+  // both and the matcher refuses to file (two hits = null), so mail that files
+  // today would silently stop. index.ts drops tiles with fieldJobId for exactly
+  // this reason; this test is what says why.
+  const dupTile = { id: "board-jeff", customer: "Jeff Hebard", email: "jeff.hebard@gmail.com", claimNo: "" };
+  const fromJeff = { from: "jeff.hebard@gmail.com", subject: "roof question", text: "" };
+  assert.equal(matchEmailToJob(fromJeff, JOBS)?.projectId, "p1", "files against the job file alone");
+  assert.equal(matchEmailToJob(fromJeff, [...JOBS, dupTile]), null, "…and is DROPPED if the tile is added too");
+});
+
+test("an archived board tile is not a candidate", () => {
+  // index.ts filters these out; if one slipped through it would still match,
+  // so the filter is the guard — asserted here so the intent is recorded
+  const archivedLead = { id: "board-old", customer: "Kingston Wells", email: "kingstonwells023@gmail.com", claimNo: "", archivedAt: "2026-08-01" };
+  const fromKingston = { from: "kingstonwells023@gmail.com", subject: "hello", text: "" };
+  assert.equal(matchEmailToJob(fromKingston, [...JOBS, archivedLead]), null, "archivedAt is skipped by the matcher");
+});
+
 console.log(`\n${pass} email-lane checks passed.`);
