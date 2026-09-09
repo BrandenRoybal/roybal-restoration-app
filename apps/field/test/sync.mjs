@@ -25,13 +25,17 @@ const resp = (status, body) => ({ ok: status < 400, status, json: async () => bo
 
 const mediaStore = new Map();   // field-media bucket: hash -> text
 let mediaGets = 0;              // GETs that actually went to the "network"
+let failUploads = false;        // test hook: make the bucket refuse writes
 
 globalThis.fetch = async (url, opts = {}) => {
   const u = new URL(url);
   const method = (opts.method || "GET").toUpperCase();
   if (u.pathname.startsWith("/storage/v1/object/field-media/")) {
     const hash = u.pathname.split("/").pop();
-    if (method === "POST" || method === "PUT") { mediaStore.set(hash, opts.body); return resp(200, {}); }
+    if (method === "POST" || method === "PUT") {
+      if (failUploads) return resp(500, {});          // test hook: storage refuses
+      mediaStore.set(hash, opts.body); return resp(200, {});
+    }
     mediaGets++;   // counted so a test can prove a pull downloaded NOTHING
     if (mediaStore.has(hash)) return { ok: true, status: 200, json: async () => ({}), text: async () => mediaStore.get(hash) };
     return resp(404, {});
@@ -819,6 +823,75 @@ const { tombstoneItems } = await import("../js/merge.js");
 
     globalThis.fetch = realFetch;
     Object.defineProperty(globalThis, "navigator", { value: { onLine: true }, configurable: true });
+  }
+
+  /* ---------- the thumbnail sweep resumes instead of running once ----------
+     Measured on production 2026-09-08: one pass per tab left 771 eligible
+     objects (136 MB) with no thumbnail, because the pass fires on the first
+     clean cycle over whatever that device happens to hold and then dies with
+     the tab. Stage-2 previews make it worse — a device holding stand-ins no
+     longer has the bytes to render from — so the backlog must close itself. */
+  {
+    const { sweepTuning } = await import("../js/sync.js");
+    sweepTuning.pauseMs = 0;            // no real pacing in a test
+    sweepTuning.maxPerCycle = 3;        // small budget so "resume" is observable
+    sweepTuning.shrink = async (src) => "data:image/jpeg;base64," + src.slice(-40);
+
+    const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 5)); };
+    const thumbCount = () => [...mediaStore.keys()].filter((k) => k.startsWith("thumb_")).length;
+    const base = thumbCount();   // earlier scenarios already made some on the push path
+
+    /* The production shape, not a shortcut: photos that arrive from the BUCKET
+       with no thumbnail. Push-time thumbnailing cannot help there — the bytes
+       were never pushed from this device — so only the sweep can close it. */
+    const { deflateProject } = await import("../js/media.js");
+    const backlog = Array.from({ length: 8 }, (_, i) => ({ id: "sw" + i, src: "data:image/jpeg;base64," + String(i).repeat(60_000) }));
+    const { slim, media } = await deflateProject({ id: "sweep1", photos: backlog });
+    for (const m of media) mediaStore.set(m.hash, m.text);      // originals only — no thumb_ siblings
+    serverRows.set("sweep1", {
+      id: "sweep1",
+      data: { ...slim, id: "sweep1", customer: "Sweep", updatedAt: new Date(Date.now() + 30e5).toISOString() },
+      deleted: false, updated_at: nowIso(),
+    });
+
+    await syncNow(); await settle();
+    ok((await Store.get("sweep1")).photos[0].src === backlog[0].src,
+      "precondition: with no thumbnail to take, the originals come down in full");
+    const after1 = thumbCount();
+    ok(after1 === base + 3, `one cycle uploads its budget and stops (+${after1 - base}, expected +3)`);
+
+    await syncNow(); await settle();
+    const after2 = thumbCount();
+    ok(after2 === base + 6, `the next cycle RESUMES where it left off (+${after2 - base}, expected +6)`);
+
+    await syncNow(); await settle();
+    ok(thumbCount() === base + 8, "…until the backlog is finished");
+
+    // a finished job is not swept again — that is what keeps this cheap enough
+    // to run every cycle instead of once
+    const keysBefore = [...mediaStore.keys()].length;
+    await syncNow(); await settle();
+    ok([...mediaStore.keys()].length === keysBefore, "a job already swept clean is not re-uploaded");
+
+    /* An upload that FAILS must not settle the hash. Stage 1 settled either
+       way, so one blip of bad signal marked a photo permanently
+       thumbnail-less on the only device holding its bytes. */
+    const late = { id: "sx", src: "data:image/jpeg;base64," + "z".repeat(60_000) };
+    const lateDef = await deflateProject({ id: "sweep2", photos: [late] });
+    for (const m of lateDef.media) mediaStore.set(m.hash, m.text);
+    serverRows.set("sweep2", {
+      id: "sweep2",
+      data: { ...lateDef.slim, id: "sweep2", customer: "Sweep2", updatedAt: new Date(Date.now() + 31e5).toISOString() },
+      deleted: false, updated_at: nowIso(),
+    });
+
+    failUploads = true;
+    await syncNow(); await settle();
+    ok(thumbCount() === base + 8, "a refused upload produces no thumbnail (as expected)");
+
+    failUploads = false;
+    await syncNow(); await settle();
+    ok(thumbCount() === base + 9, "…and the next cycle RETRIES it instead of giving up forever");
   }
 
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));
