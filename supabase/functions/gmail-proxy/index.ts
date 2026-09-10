@@ -328,11 +328,28 @@ serve(async (req) => {
       // jobs to match against (service role — the matcher only needs headers).
       // Project the five fields matchEmailToJob actually reads instead of the
       // whole job blob: ~1 kB a pull instead of ~400 kB, every 15 minutes.
-      const { data: projRows } = await supabase
+      /* The candidate projection, and a guard on it. This select is ignored-on-
+         error by construction (`const { data }` drops the error), so a
+         projection PostgREST rejects would leave the candidate list empty and
+         silently drop EVERY email — which is exactly the eight-day failure this
+         lane just came out of. The narrow projection is still the point
+         (~1 kB a pull instead of ~400 kB), so the fallback is the same select
+         without the newest field rather than the whole blob. */
+      const BASE_COLS = "id:data->>id, email:data->>email, claimNo:data->>claimNo, customer:data->>customer, archivedAt:data->>archivedAt";
+      const CONVERTED_COL = "convertedFrom:data->mitigationRef->>fromProjectId";
+      let { data: projRows, error: projErr } = await supabase
         .from("field_projects")
-        .select("id:data->>id, email:data->>email, claimNo:data->>claimNo, customer:data->>customer, archivedAt:data->>archivedAt")
+        .select(`${BASE_COLS}, ${CONVERTED_COL}`)
         .eq("deleted", false).limit(500);
+      if (projErr) {
+        // Losing claim-phase collapsing costs one customer's mail; losing the
+        // whole candidate list costs all of it. Degrade, never empty.
+        console.warn("pullInbox: convertedFrom projection rejected, falling back —", projErr.message);
+        ({ data: projRows } = await supabase
+          .from("field_projects").select(BASE_COLS).eq("deleted", false).limit(500));
+      }
       const projects: Blob[] = (projRows ?? []).filter((r: Blob) => r?.id);
+      if (!projects.length) console.warn("pullInbox: NO job candidates — every email will be skipped");
 
       /* BOARD LEADS ARE CANDIDATES TOO.
          The matcher only ever saw field_projects, and only unarchived ones. As
@@ -356,9 +373,14 @@ serve(async (req) => {
       for (const r of (leadRows ?? []) as Blob[]) {
         if (!r?.id || r.id === BOARD_SETTINGS_ID) continue;
         if (r.fieldJobId) continue;                       // its field project is already a candidate
-        if (String(r.archived) === "true") continue;      // archived board tiles are done
         if (!r.email && !r.claimNo && !r.customer) continue;
-        projects.push({ id: r.id, email: r.email, claimNo: r.claimNo, customer: r.customer, archivedAt: null });
+        // An archived tile is a SECOND-TIER candidate, matching how archived
+        // job files are treated (emailmatch.ts): a closed lead can still send
+        // mail, and an active job always outranks it.
+        projects.push({
+          id: r.id, email: r.email, claimNo: r.claimNo, customer: r.customer,
+          archivedAt: String(r.archived) === "true" ? "archived" : null,
+        });
       }
 
       // pull window: since the last pull (epoch seconds), first run = 3 days back
