@@ -181,4 +181,44 @@ test("an archived board tile is a second-tier candidate, like an archived job", 
   assert.equal(matchEmailToJob(fromKingston, [...JOBS, archivedLead])?.projectId, "board-old");
 });
 
+/* ---------- one claim, two phases (the Don Hovda case) ----------
+   A restoration job converted to a reconstruction job (convert.js) carries
+   mitigationRef.fromProjectId back to the original. Both hold the same
+   customer, email and claim number, so every identifier this matcher uses is
+   identical and the mail was refused as ambiguous — forever. They are not two
+   jobs: they are one loss in two phases, and the rebuild is the current one.
+   Merging the records would destroy a certified drying file; this resolves the
+   match instead. */
+const MITIGATION = { id: "mit-1", customer: "Don Hovda", email: "dhovda@gmail.com", claimNo: "100250382", archivedAt: "2026-07-19" };
+const REBUILD    = { id: "rec-1", customer: "Don Hovda", email: "dhovda@gmail.com", claimNo: "100250382", archivedAt: "2026-08-21", convertedFrom: "mit-1" };
+const fromDon = { from: "dhovda@gmail.com", subject: "question about the basement", text: "" };
+
+test("a converted pair files against the RECONSTRUCTION job, not nothing", () => {
+  assert.equal(matchEmailToJob(fromDon, [MITIGATION]) ?.projectId, "mit-1", "precondition: alone, each matches");
+  assert.equal(matchEmailToJob(fromDon, [REBUILD])?.projectId, "rec-1");
+  const hit = matchEmailToJob(fromDon, [MITIGATION, REBUILD]);
+  assert.equal(hit?.projectId, "rec-1", "the successor wins; the pair is one claim");
+});
+
+test("…and the order they arrive in does not matter", () => {
+  assert.equal(matchEmailToJob(fromDon, [REBUILD, MITIGATION])?.projectId, "rec-1");
+});
+
+test("a conversion CHAIN collapses to the last phase", () => {
+  const third = { ...REBUILD, id: "rec-2", convertedFrom: "rec-1" };
+  assert.equal(matchEmailToJob(fromDon, [MITIGATION, REBUILD, third])?.projectId, "rec-2");
+});
+
+test("two lookalike jobs with NO conversion link are still refused", () => {
+  // the guard against over-reach: this only collapses an EXPLICIT mitigationRef
+  // link, never two jobs that merely share a customer
+  const twin = { id: "other", customer: "Don Hovda", email: "dhovda@gmail.com", claimNo: "100250382", archivedAt: "2026-08-21" };
+  assert.equal(matchEmailToJob(fromDon, [MITIGATION, twin]), null);
+});
+
+test("a dangling convertedFrom (predecessor deleted) still matches", () => {
+  const orphan = { ...REBUILD, convertedFrom: "a-job-that-no-longer-exists" };
+  assert.equal(matchEmailToJob(fromDon, [orphan])?.projectId, "rec-1");
+});
+
 console.log(`\n${pass} email-lane checks passed.`);
