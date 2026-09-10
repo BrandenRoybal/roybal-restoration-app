@@ -17,6 +17,18 @@
    Ambiguity refuses to file: two matching jobs = no match, skip.
    (Next pull re-evaluates; a claim # resolves it.)
 
+   ARCHIVED JOBS ARE A SECOND TIER, not invisible. They used to be skipped
+   outright, which silently threw away final invoices, warranty questions and
+   adjuster follow-ups — the mail an archived job actually still receives.
+   Matching now runs against active jobs FIRST and falls back to archived ones
+   only when no active job matched uniquely.
+
+   Tiering rather than one flat list is deliberate. A customer with both a
+   current job and an old one would otherwise match twice and the mail would be
+   dropped as ambiguous — so simply un-skipping archived jobs would have traded
+   one silent loss for another. Precedence also happens to be the right answer:
+   mail from someone you are working for now is about the current job.
+
    Also here: the RFC-2822 builder for outbound sends — pure so the
    header escaping and base64url encoding are Node-testable.
    ============================================================ */
@@ -47,8 +59,18 @@ const normClaim = (v: unknown) => String(v || "").replace(/[^A-Za-z0-9]/g, "").t
 export interface EmailIn { from: string; subject: string; text: string }
 export interface Match { projectId: string; matchedBy: "customer-email" | "claim" | "customer-name" }
 
-/** Match one inbound email against the job list. Null = stays private. */
+/** Match one inbound email against the job list. Null = stays private.
+    Active jobs win; archived jobs are consulted only if no active job matched
+    uniquely (see the tiering note above). */
 export function matchEmailToJob(email: EmailIn, projects: Blob[]): Match | null {
+  const all = projects || [];
+  const active = all.filter((p) => !p?.archivedAt);
+  const archived = all.filter((p) => p?.archivedAt);
+  return matchWithin(email, active) ?? (archived.length ? matchWithin(email, archived) : null);
+}
+
+/** One tier's worth of matching. The archived/active split is the caller's. */
+function matchWithin(email: EmailIn, projects: Blob[]): Match | null {
   const sender = addressOf(email.from);
   const subject = lc(email.subject);
   // claim search space: subject + the first chunk of the body, normalized
@@ -63,7 +85,6 @@ export function matchEmailToJob(email: EmailIn, projects: Blob[]): Match | null 
   };
 
   for (const p of projects || []) {
-    if (p?.archivedAt) continue;
     if (sender && lc(p.email) === sender) { add(p, "customer-email"); continue; }
     const claim = normClaim(p.claimNo);
     if (claim.length >= 4 && haystack.includes(claim)) { add(p, "claim"); continue; }

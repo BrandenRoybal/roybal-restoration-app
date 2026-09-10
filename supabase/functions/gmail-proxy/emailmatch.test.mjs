@@ -49,8 +49,30 @@ test("ambiguity refuses to file", () => {
   assert.equal(matchEmailToJob({ from: "x@y.com", subject: "Jeff Hebard estimate", text: "" }, twins), null);
 });
 
-test("archived jobs never match", () => {
-  assert.equal(matchEmailToJob({ from: "old@x.com", subject: "", text: "" }, JOBS), null);
+/* Archived jobs used to be skipped outright, so a final invoice, a warranty
+   question or an adjuster follow-up on a closed job was thrown away silently.
+   They are a SECOND TIER now, not invisible. */
+test("an archived job DOES receive mail when no active job matches", () => {
+  const hit = matchEmailToJob({ from: "old@x.com", subject: "", text: "" }, JOBS);
+  assert.equal(hit?.projectId, "p4");
+  assert.equal(hit?.matchedBy, "customer-email");
+});
+
+test("an ACTIVE job outranks an archived one for the same customer", () => {
+  // the trap in simply un-skipping archived jobs: this customer would match
+  // twice, ambiguity would refuse to file, and the mail would be lost the same
+  // way it was before — one silent loss traded for another
+  const bothTiers = [...JOBS, { id: "p9", customer: "Old Job", email: "old@x.com", claimNo: "CL-9" }];
+  const hit = matchEmailToJob({ from: "old@x.com", subject: "", text: "" }, bothTiers);
+  assert.equal(hit?.projectId, "p9", "the live job wins, and the mail still files");
+});
+
+test("two ARCHIVED jobs for the same customer are still ambiguous", () => {
+  // Real data: one customer has two identical job records — same email, same
+  // claim, same name, both archived. Tiering does not resolve that and must
+  // not pretend to: duplicate records are a data problem, not a matching one.
+  const dupes = [...JOBS, { id: "p4b", customer: "Old Job", email: "old@x.com", claimNo: "CL-1", archivedAt: "2026-01-02" }];
+  assert.equal(matchEmailToJob({ from: "old@x.com", subject: "", text: "" }, dupes), null);
 });
 
 test("short claim numbers can't false-match", () => {
@@ -150,12 +172,13 @@ test("a lead DUPLICATING a job file goes ambiguous — which is why dedupe matte
   assert.equal(matchEmailToJob(fromJeff, [...JOBS, dupTile]), null, "…and is DROPPED if the tile is added too");
 });
 
-test("an archived board tile is not a candidate", () => {
-  // index.ts filters these out; if one slipped through it would still match,
-  // so the filter is the guard — asserted here so the intent is recorded
+test("an archived board tile is a second-tier candidate, like an archived job", () => {
+  // Consistency with archived job files: a closed lead can still write to you
+  // ("changed my mind about that roof"), and that mail should land somewhere
+  // rather than vanish. An active job would still outrank it.
   const archivedLead = { id: "board-old", customer: "Kingston Wells", email: "kingstonwells023@gmail.com", claimNo: "", archivedAt: "2026-08-01" };
   const fromKingston = { from: "kingstonwells023@gmail.com", subject: "hello", text: "" };
-  assert.equal(matchEmailToJob(fromKingston, [...JOBS, archivedLead]), null, "archivedAt is skipped by the matcher");
+  assert.equal(matchEmailToJob(fromKingston, [...JOBS, archivedLead])?.projectId, "board-old");
 });
 
 console.log(`\n${pass} email-lane checks passed.`);

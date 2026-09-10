@@ -356,9 +356,14 @@ serve(async (req) => {
       for (const r of (leadRows ?? []) as Blob[]) {
         if (!r?.id || r.id === BOARD_SETTINGS_ID) continue;
         if (r.fieldJobId) continue;                       // its field project is already a candidate
-        if (String(r.archived) === "true") continue;      // archived board tiles are done
         if (!r.email && !r.claimNo && !r.customer) continue;
-        projects.push({ id: r.id, email: r.email, claimNo: r.claimNo, customer: r.customer, archivedAt: null });
+        // An archived tile is a SECOND-TIER candidate, matching how archived
+        // job files are treated (emailmatch.ts): a closed lead can still send
+        // mail, and an active job always outranks it.
+        projects.push({
+          id: r.id, email: r.email, claimNo: r.claimNo, customer: r.customer,
+          archivedAt: String(r.archived) === "true" ? "archived" : null,
+        });
       }
 
       // pull window: since the last pull (epoch seconds), first run = 3 days back
