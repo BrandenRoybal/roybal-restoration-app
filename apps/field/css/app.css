@@ -341,6 +341,9 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .photocard__spacer { flex: 1; }
 /* photo-size selector row above the grid */
 .phototools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+/* photo-log PDF parts (one download button per file) — hidden until built */
+.pdfparts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; }
+.pdfparts:empty { display: none; }
 .photosize { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .photosize select { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
 /* editable AI findings under each photo — reads like a label, edits like a field */

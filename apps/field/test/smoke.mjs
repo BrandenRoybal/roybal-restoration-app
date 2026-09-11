@@ -176,6 +176,7 @@ function setInput(el, val) {
   await tick(40);
   ok(/PHOTO REPORT/.test(text()), "job photos renders a Photo Report sheet");
   ok([...view().querySelectorAll("button")].some((b) => /Add photos/.test(b.textContent)), "photos page has an Add photos button");
+  ok([...view().querySelectorAll("button")].some((b) => /Photo log PDF/.test(b.textContent)), "photos page has the emailable photo-log PDF button");
   ok([...view().querySelectorAll("button")].some((b) => /Insurance photo link/.test(b.textContent)),
     "photo log offers the insurance photo link");
 
