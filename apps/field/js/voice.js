@@ -11,7 +11,7 @@
    typed form. With no signal it degrades clearly (a toast) — it never
    blocks manual entry. The audio + AI keys never touch the client.
    ============================================================ */
-import { h, Store, toast } from "./core.js";
+import { h, Store, toast, likelyOffline } from "./core.js";
 import { SUPABASE_URL, SUPABASE_KEY, SYNC_ENABLED } from "./config.js";
 import { isSignedIn, accessToken } from "./supa.js";
 import { getUnifiedJobId } from "./spine.js";
