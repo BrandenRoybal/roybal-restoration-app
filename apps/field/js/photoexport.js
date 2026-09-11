@@ -7,6 +7,14 @@
      date / AI note). Cloud-offloaded photos are fetched from the
      field-media bucket by hash.
 
+   exportPhotoLogPdf(project, onProgress)
+     The file a carrier reviewer can actually open: every photo at
+     full size, two to a page, grouped before/during/after, in PDF
+     parts that each stay under the email cap — because carrier and
+     TPA intake flattens the insured's upload into a PDF, and the
+     portal link on the packet arrives as dead text. Numbering and
+     reachability rules are the ZIP's; the writer is photopdf.js.
+
    archivePhotos(project, onProgress)
      "Move the files out": for each big inline photo, make sure
      the full-res copy is in the field-media bucket (verified,
@@ -21,6 +29,9 @@ import { downloadMedia, uploadMedia, mediaExists } from "./supa.js";
 import { sha256Hex, MEDIA_MIN } from "./media.js";
 import { shrinkDataURL, csvRow } from "./core.js";
 import { zipStore, dataURLToBytes } from "./zip.js";
+import { buildPhotoLogPdf, jpegInfo, PHOTO_ENCODE, PART_MAX_BYTES } from "./photopdf.js";
+import { shareLive, photoShareLink, packetShareLink } from "./photoshare.js";
+import { qrModules } from "./qr.js";
 
 const isInline = (src) => typeof src === "string" && src.startsWith("data:");
 
@@ -79,6 +90,66 @@ export async function exportPhotosZip(project, onProgress = () => {}) {
   }
   entries.push({ name: "photo-index.csv", bytes: new TextEncoder().encode(rows.join("\n") + "\n") });
   return { parts: zipStore(entries), count: entries.length - 1, missing, previews };
+}
+
+/* The photo-log PDF. Same photo set, order and numbering as the ZIP (and
+   therefore the portal share): a photo's number is its position among the
+   photos that exist, and a photo that can't be fetched still keeps its
+   number so the two never drift apart. Full-res is re-encoded on a canvas
+   to PHOTO_ENCODE (1100 px / q0.62 — ~80 KB a photo) before it goes in;
+   an offloaded photo whose original is unreachable falls back to its
+   inline preview and is LABELLED preview-only, like the ZIP. The cover
+   carries whichever insurance links are live — none prints as nothing.
+   `deps` lets the test run this without a canvas or a network. */
+export async function exportPhotoLogPdf(project, onProgress = () => {}, deps = {}) {
+  const fetchFull = deps.fetchFull || photoFullSrc;
+  const shrink = deps.shrink || ((src) => shrinkDataURL(src, PHOTO_ENCODE.maxDim, PHOTO_ENCODE.quality));
+  const qr = deps.qr || qrModules;
+  const photos = (project.photos || []).filter((p) => p.src || p.cloud);
+  if (!photos.length) throw new Error("No photos on this job yet");
+  const items = [];
+  let n = 0, missing = 0, previews = 0;
+  for (const ph of photos) {
+    n++;
+    onProgress(n, photos.length);
+    let src = null, preview = false;
+    if (ph.cloud) {
+      try { src = await fetchFull(ph); } catch { src = null; }
+      if (!src && isInline(ph.src)) { src = ph.src; preview = true; }
+    } else if (isInline(ph.src)) {
+      src = ph.src;
+    }
+    let parsed = null;
+    if (src) {
+      let small = null;
+      try { small = await shrink(src); } catch { small = null; }
+      parsed = (isInline(small) && dataURLToBytes(small)) || dataURLToBytes(src);
+    }
+    if (!parsed || parsed.mime !== "image/jpeg" || !jpegInfo(parsed.bytes)) { missing++; continue; }
+    if (preview) previews++;
+    // unlabeled legacy photos count as "during" everywhere else in the app
+    const stage = ph.stage === "before" || ph.stage === "after" ? ph.stage : "during";
+    items.push({ num: n, stage, room: ph.room || "", caption: ph.caption || "", jpeg: parsed.bytes, preview });
+  }
+  if (!items.length) throw new Error("No photo is reachable from this device yet — sync first, then try again");
+  const links = [];
+  const live = shareLive(project, "photos");
+  if (live) {
+    const url = photoShareLink(live.token);
+    let matrix = null;
+    try { matrix = await qr(url); } catch { matrix = null; }   // offline + vendored lib uncached: link prints without the code
+    links.push({
+      head: "All job photos — full resolution, view & download:", url, qr: matrix,
+      sub: "Open the link (or scan the code) to view every photo full size and download them individually or as one ZIP.",
+    });
+  }
+  const packet = shareLive(project, "packet");
+  if (packet) links.push({ head: "Complete job packet — every sheet, printable:", url: packetShareLink(packet.token) });
+  const out = buildPhotoLogPdf({
+    header: { customer: project.customer, address: project.address, claimNo: project.claimNo, dateOfLoss: project.dateOfLoss },
+    links, photos: items, maxBytes: deps.maxBytes || PART_MAX_BYTES,
+  });
+  return { parts: out.parts, count: out.total, missing: missing + out.skipped.length, previews, linked: !!live };
 }
 
 export async function archivePhotos(project, onProgress = () => {}) {

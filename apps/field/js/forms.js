@@ -3,7 +3,7 @@
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
 import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween } from "./core.js";
-import { exportPhotosZip, archivePhotos, archivableCount, photoFullSrc } from "./photoexport.js";
+import { exportPhotosZip, exportPhotoLogPdf, archivePhotos, archivableCount, photoFullSrc } from "./photoexport.js";
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import { tombstoneItems } from "./merge.js";
 import {
@@ -2421,6 +2421,47 @@ export function photosForm(project) {
     zipBtn.textContent = "⬇ Download all (.zip)";
   });
 
+  /* The emailable photo log — the file a carrier reviewer can actually open.
+     Carrier/TPA intake flattens the insured's upload into a PDF, so the
+     portal link on the packet lands as dead text and the ZIP is far too big
+     to email; this is every photo at full size, two to a page, in parts
+     under the email cap (photoexport.js → photopdf.js). Parts come back as
+     one button each: a second automatic download is blocked on iPad, and
+     the office attaches them one at a time anyway. */
+  const PDF_LABEL = "📄 Photo log PDF (email)";
+  const pdfBtn = h("button", { type: "button", class: "btn btn--sm", style: "margin-left:8px", title: "Every photo full size, two per page, in PDF files small enough to email to the carrier" }, PDF_LABEL);
+  const pdfRow = h("div", { class: "app-only pdfparts" });
+  pdfBtn.addEventListener("click", async () => {
+    if (!(project.photos || []).length) return toast("No photos on this job yet");
+    pdfBtn.disabled = true;
+    pdfRow.replaceChildren();
+    try {
+      const { parts, count, missing, previews, linked } = await exportPhotoLogPdf(project, (n, total) => {
+        pdfBtn.textContent = `📄 Encoding ${n}/${total}…`;
+      });
+      const safe = ((project.customer || "").trim() || "job").replace(/[\\/:*?"<>|]+/g, "");
+      const name = (i) => `${safe} photo log${parts.length > 1 ? ` part ${i + 1} of ${parts.length}` : ""}.pdf`;
+      const blobs = parts.map((p) => new Blob([p.bytes], { type: "application/pdf" }));
+      downloadFile(name(0), blobs[0], "application/pdf");
+      pdfRow.append(
+        h("span", { class: "subtle", style: "font-size:12px" },
+          parts.length > 1 ? `${parts.length} files, each under 10 MB — attach all of them:` : "One file, under 10 MB:"),
+        ...parts.map((p, i) => h("button", {
+          type: "button", class: "btn btn--ghost btn--sm", style: "width:auto",
+          onclick: () => downloadFile(name(i), blobs[i], "application/pdf"),
+        }, `⬇ ${parts.length > 1 ? `Part ${i + 1} of ${parts.length}` : "Photo log"} · ${p.count} photos · ${(p.bytes.length / 1e6).toFixed(1)} MB`)));
+      const bits = [];
+      if (missing) bits.push(`${missing} unavailable`);
+      if (previews) bits.push(`${previews} preview-only — retry online for the originals`);
+      if (!linked) bits.push("no live insurance link on the cover — publish one below and export again to add it");
+      toast(`Photo log ready: ${count} photos in ${parts.length} file${parts.length === 1 ? "" : "s"}` + (bits.length ? ` (${bits.join("; ")})` : ""), 6000);
+    } catch (e) {
+      toast("Photo log failed: " + (e && e.message || e), 4000);
+    }
+    pdfBtn.disabled = false;
+    pdfBtn.textContent = PDF_LABEL;
+  });
+
   const cloudBtn = h("button", { type: "button", class: "btn btn--sm", style: "margin-left:8px" }, "☁ Move photos to cloud");
   cloudBtn.addEventListener("click", async () => {
     const n = archivableCount(project);
@@ -2463,7 +2504,8 @@ export function photosForm(project) {
     sectionTitle("Job Information"),
     jobInfo(project, ["customer", "address", "claimNo", "dateOfLoss"]),
     shareLine,
-    h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, zipBtn, cloudBtn, sortRow, sizeRow, input),
+    h("div", { class: "app-only phototools", style: "margin:10px 0" }, addBtn, aiBtn, zipBtn, pdfBtn, cloudBtn, sortRow, sizeRow, input),
+    pdfRow,
     photoShareControl(project, "photos", paintShareLine),
     filterRow,
     wrap);

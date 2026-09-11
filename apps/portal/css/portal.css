@@ -246,6 +246,13 @@ body {
 .btn-zip { background: var(--brand); color: #fff; border: none; border-radius: 10px;
   padding: 12px 18px; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; }
 .btn-zip:disabled { opacity: .7; cursor: default; }
+/* the emailable photo-log PDF (photos.js pdfButton): a second action under
+   the ZIP, then one download button per part once it's built */
+.pdfwrap { margin-top: 10px; }
+.btn-zip--alt { background: var(--navy); }
+.pdfparts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.pdfparts:empty { display: none; }
+.pdfparts .pcount { margin: 0; flex-basis: 100%; }
 .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
 .pcard { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   overflow: hidden; box-shadow: var(--shadow); }

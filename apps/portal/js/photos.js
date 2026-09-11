@@ -8,6 +8,7 @@
    images listed in that token's row. */
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 import { zipStore, dataURLToBytes } from "./zip.js";
+import { buildPhotoLogPdf, PHOTO_ENCODE } from "./photopdf.js";
 
 const app = document.getElementById("app");
 
@@ -147,6 +148,74 @@ function zipAllButton(share) {
   return btn;
 }
 
+/* ---------- emailable photo log (PDF) ----------
+   Carrier and TPA intake flatten whatever the insured uploads into a PDF,
+   so THIS page's link arrives at the reviewer as dead text; they need
+   files. Same writer as the field app (photopdf.js, verbatim copy): every
+   photo full size, two to a page, grouped before/during/after, in parts
+   under the email cap, this link on every cover. Each photo is re-encoded
+   on a canvas to the writer's target size first (the originals are ~3× the
+   bytes). One download button per part — a second automatic download is
+   blocked on iPhone/iPad. */
+function shrinkJpeg(src, maxDim, quality) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onerror = () => resolve(src);
+    img.onload = () => {
+      const s = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL("image/jpeg", quality));
+    };
+    img.src = src;
+  });
+}
+
+function pdfButton(share) {
+  const LABEL = "📄 Photo log PDF (for email)";
+  const btn = h("button", { class: "btn-zip btn-zip--alt", title: "Every photo full size, two per page, in PDF files small enough to email" }, LABEL);
+  const row = h("div", { class: "pdfparts" });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    row.replaceChildren();
+    try {
+      const items = [];
+      for (let i = 0; i < share.photos.length; i++) {
+        btn.textContent = `📄 Preparing ${i + 1}/${share.photos.length}…`;
+        const p = share.photos[i];
+        const src = await fullSrc(p.hash).catch(() => null);
+        if (!src) continue;                                   // the number is still used — it matches the ZIP's
+        const parsed = dataURLToBytes(await shrinkJpeg(src, PHOTO_ENCODE.maxDim, PHOTO_ENCODE.quality));
+        if (!parsed || parsed.mime !== "image/jpeg") continue;
+        items.push({ num: i + 1, stage: p.stage, room: p.room, caption: p.caption, item: p.item, jpeg: parsed.bytes });
+      }
+      if (!items.length) throw new Error("no photos could be fetched");
+      const noun = share.kind === "contents" ? "All contents item photos" : "All job photos";
+      const { parts } = buildPhotoLogPdf({
+        header: { customer: share.customer_name, address: share.property_address, claimNo: share.claim_no, dateOfLoss: share.date_of_loss },
+        links: [{ head: noun + " — full resolution, view & download:", url: `https://portal.roybalconstruction.com/photos/${token}`,
+                  sub: "Open the link to view every photo full size and download them individually or as one ZIP." }],
+        photos: items,
+      });
+      const base = (slug(share.customer_name) || "job") + (share.kind === "contents" ? " contents" : "") + " photo log";
+      const name = (i) => `${base}${parts.length > 1 ? ` part ${i + 1} of ${parts.length}` : ""}.pdf`;
+      const blobs = parts.map((p) => new Blob([p.bytes], { type: "application/pdf" }));
+      saveBlob(name(0), blobs[0]);
+      row.append(
+        h("span", { class: "pcount" }, parts.length > 1 ? `${parts.length} files, each under 10 MB — attach all of them:` : "One file, under 10 MB:"),
+        ...parts.map((p, i) => h("button", { class: "pcard__dl", onclick: () => saveBlob(name(i), blobs[i]) },
+          `⬇ ${parts.length > 1 ? `Part ${i + 1} of ${parts.length}` : "Photo log"} · ${p.count} photos · ${(p.bytes.length / 1e6).toFixed(1)} MB`)));
+      btn.textContent = `✓ Photo log ready — ${items.length} photos`;
+    } catch (e) {
+      btn.textContent = "Photo log failed — tap to retry";
+    }
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = LABEL; }, 4000);
+  });
+  return h("div", { class: "pdfwrap" }, btn, row);
+}
+
 /* ---------- page ---------- */
 function render(share) {
   const meta = [
@@ -182,8 +251,10 @@ function render(share) {
       meta ? h("p", { class: "addr" }, meta) : null,
       h("p", { class: "pcount" },
         `${share.photos.length} photo${share.photos.length === 1 ? "" : "s"}, full resolution. ` +
-        "Tap any photo to view it; the arrows page through. Download photos individually or all at once."),
-      zipAllButton(share)),
+        "Tap any photo to view it; the arrows page through. Download photos individually or all at once. " +
+        "Sending these to an insurance reviewer by email? Use the photo-log PDF — carriers can't open links."),
+      zipAllButton(share),
+      pdfButton(share)),
     grid);
 }
 
