@@ -77,7 +77,7 @@ export const WEB_TOOL_RULE =
   "loop; you are just the receptionist.";
 
 /* ⚠️ input_schema is copied VERBATIM from PHONE_TOOLS.createLead in
-   supabase/functions/roybal-ai-office/personas.ts. persona.test.mjs asserts
+   supabase/functions/_shared/personas/tools.ts. persona.test.mjs asserts
    they stay identical. If that test fails, reconcile — do not just update the
    expectation, or a web lead and a phone lead stop being the same record. */
 export const CREATE_LEAD_TOOL = {

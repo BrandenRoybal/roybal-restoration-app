@@ -5,7 +5,7 @@ FROM node:22-slim
 WORKDIR /app
 
 # the one-brain registry + the board's pure scheduling engine (server-shared)
-COPY supabase/functions/roybal-ai-office/personas.ts supabase/functions/roybal-ai-office/personas.ts
+COPY supabase/functions/_shared/personas supabase/functions/_shared/personas
 COPY apps/board/js/schedule.js apps/board/js/schedule.js
 
 COPY services/phone-agent services/phone-agent

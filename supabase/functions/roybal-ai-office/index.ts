@@ -26,14 +26,19 @@
  *                   constructionFacts digest.
  *
  * fieldAssist personas: body.app (field | board | admin) picks the persona
- * (server-defined text only, registry in ./personas.ts) and is stamped on
+ * (server-defined text only, registry in ../_shared/personas/) and is stamped on
  * the envelope + ledger. The assistant carries READ tools (priceLookup,
  * jobLookup, boardRead, smsThread, hoursLookup) run server-side through a
  * bounded loop (≤2 rounds, RLS-scoped under the caller's JWT, cap re-checked
  * between rounds). It can also PROPOSE actions (proposeActions tool, per-app
  * ACTIONSETS): proposals return as result.proposedActions and render as
  * tap-to-confirm chips in the client — NOTHING executes server-side, and
- * body.actionResults on the next turn tells the model what the user ran. Voice is metered: Deepgram STT seconds and Aura TTS
+ * body.actionResults on the next turn tells the model what the user ran.
+ * Every action carries a JSON Schema (registry actions.ts): the proposeActions
+ * tool is an anyOf over them (strict on models that support strict tool use),
+ * and takeProposals re-checks each proposal with the same checker the client
+ * runs — a malformed proposal is reported back to the model as a tool result
+ * and never reaches a chip. Voice is metered: Deepgram STT seconds and Aura TTS
  * characters land in ai_usage (audio_seconds/stt_cost_usd,
  * tts_chars/tts_cost_usd — 203) and roll into cost_usd, so the monthly cap
  * governs voice honestly.
@@ -49,9 +54,13 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-// personas + tool schemas live in the shared registry (pure data) — the
-// future phone-receptionist agent imports the same file
-import { PERSONAS, CTX_LABELS, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS, PROPOSE_TOOL_NAME } from "./personas.ts";
+// personas, tool schemas and the 17 action schemas live in the shared
+// registry (pure data + pure functions) — the Fly phone agent imports the
+// same directory, so a change here is a change on the phone line too
+import {
+  PERSONAS, CTX_LABELS, SPOKEN_RULE, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS,
+  PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
+} from "../_shared/personas/index.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -1476,51 +1485,31 @@ async function runTool(name: string, input: Record<string, unknown>, jwt: string
 }
 
 /* ---------- proposed actions (Phase 5) — the propose tool ----------
-   One tool whose description embeds the per-type param contracts from the
-   registry. Calling it EXECUTES NOTHING server-side: chatWithTools collects
-   the proposals and the client renders them as tap-to-confirm chips. */
+   Built by the registry (proposeToolDef): one tool whose input is an anyOf
+   over the actionset's schemas. Calling it EXECUTES NOTHING server-side:
+   chatWithTools collects the proposals and the client renders them as
+   tap-to-confirm chips. */
 type ProposedAction = { type: string; label: string; params: Record<string, unknown> };
-function proposeTool(actionNames: string[]): Record<string, unknown> {
-  return {
-    name: PROPOSE_TOOL_NAME,
-    description:
-      "Propose concrete next-step actions for the user to confirm. Each renders as a tap-to-confirm chip — NOTHING executes " +
-      "unless tapped, so never claim an action already happened. Action types available here:\n" +
-      actionNames.map((n) => `- ${n}: ${ACTION_DEFS[n]?.desc ?? ""}`).join("\n"),
-    input_schema: {
-      type: "object", additionalProperties: false, required: ["actions"],
-      properties: {
-        actions: {
-          type: "array", maxItems: 3,
-          items: {
-            type: "object", additionalProperties: false, required: ["type", "label", "params"],
-            properties: {
-              type: { type: "string", enum: actionNames },
-              label: { type: "string", description: "Short imperative chip label, e.g. 'Text Sarah the ETA'" },
-              params: { type: "object", description: "This action type's params, per the contract in the tool description" },
-            },
-          },
-        },
-      },
-    },
-  };
-}
+type RejectedAction = { type: string; error: string };
 
-/* Validate a propose call against the app's allowlist; cap 3 per turn. */
-function takeProposals(input: unknown, actionNames: string[], already: number): ProposedAction[] {
+/* Validate a propose call against the app's allowlist AND each action's
+   schema; cap 3 per turn. Rejections go back to the model as a tool result
+   (it gets one more round to fix them) and are never shown as chips — the
+   client would only discover the same fault inside the executor. */
+function takeProposals(input: unknown, actionNames: string[], already: number): { taken: ProposedAction[]; rejected: RejectedAction[] } {
   const wanted = Array.isArray((input as { actions?: unknown[] })?.actions) ? (input as { actions: unknown[] }).actions : [];
-  const out: ProposedAction[] = [];
+  const taken: ProposedAction[] = [];
+  const rejected: RejectedAction[] = [];
   for (const a of wanted as Array<Record<string, unknown>>) {
-    if (already + out.length >= 3) break;
+    if (already + taken.length >= 3) break;
     const type = String(a?.type ?? "");
-    if (!actionNames.includes(type)) continue;
-    out.push({
-      type,
-      label: String(a?.label ?? type).slice(0, 80),
-      params: a?.params && typeof a.params === "object" ? (a.params as Record<string, unknown>) : {},
-    });
+    if (!actionNames.includes(type)) { rejected.push({ type, error: "not an action this app can propose" }); continue; }
+    const params = a?.params && typeof a.params === "object" ? (a.params as Record<string, unknown>) : {};
+    const check = checkActionParams(ACTION_DEFS, type, params);
+    if (check.errors.length) { rejected.push({ type, error: check.errors.slice(0, 3).join("; ") }); continue; }
+    taken.push({ type, label: String(a?.label ?? type).slice(0, 80), params });
   }
-  return out;
+  return { taken, rejected };
 }
 
 /* Conversational call WITH server-executed read tools — a bounded agentic
@@ -1568,11 +1557,15 @@ async function chatWithTools(opts: {
         // propose call: collect (validated against the app's actionset) —
         // never executed here; the client renders tap-to-confirm chips
         if (String(tu.name) === PROPOSE_TOOL_NAME) {
-          const taken = takeProposals(tu.input, opts.actionNames ?? [], proposals.length);
+          const { taken, rejected } = takeProposals(tu.input, opts.actionNames ?? [], proposals.length);
           proposals.push(...taken);
           results.push({
             type: "tool_result", tool_use_id: tu.id,
-            content: JSON.stringify({ shown: taken.length, note: "chips shown — each runs only if the user taps it; give your final answer now and reference them naturally" }),
+            content: JSON.stringify({
+              shown: taken.length,
+              ...(rejected.length ? { rejected, note: "the rejected proposals were NOT shown — fix the params and propose again, or leave them out" } : {}),
+              ...(taken.length ? { note: "chips shown — each runs only if the user taps it; give your final answer now and reference them naturally" } : {}),
+            }),
           });
           continue;
         }
@@ -1650,9 +1643,7 @@ async function fieldAssist(body: Record<string, unknown>) {
   const wantSpeak = !!body.speak;
   const model = wantSpeak ? ASSIST_VOICE_MODEL : ASSIST_MODEL;
   // a spoken answer is LISTENED to, not skimmed — long replies are unusable
-  const spokenRule = wantSpeak
-    ? "\n\nSPOKEN MODE: this reply is read aloud by TTS while the tech works. About two short sentences (three max), no lists, no long citations — say the one thing to do, then stop. They'll ask if they want more."
-    : "";
+  const spokenRule = wantSpeak ? SPOKEN_RULE : "";
   const ctxLabel = Object.prototype.hasOwnProperty.call(CTX_LABELS, appKey) ? CTX_LABELS[appKey] : CTX_LABELS.field;
   const context = body.context ? `\n\n${ctxLabel}:\n\`\`\`json\n${JSON.stringify(body.context)}\n\`\`\`` : "";
   const toolNames = Object.prototype.hasOwnProperty.call(TOOLSETS, appKey) ? TOOLSETS[appKey] : TOOLSETS.field;
@@ -1660,7 +1651,9 @@ async function fieldAssist(body: Record<string, unknown>) {
   // per-app actionset (hasOwnProperty for the same prototype-pollution reason
   // as the persona) — unknown apps get NO actions, never a fallback set
   const actionNames = Object.prototype.hasOwnProperty.call(ACTIONSETS, appKey) ? ACTIONSETS[appKey] : [];
-  if (actionNames.length) tools.push(proposeTool(actionNames));
+  // strict only where the model honours it — the registry re-checks every
+  // proposal against the same schema regardless (takeProposals)
+  if (actionNames.length) tools.push(proposeToolDef(actionNames, { strict: supportsStrictTools(model) }));
   const { text, usage, toolCalls, proposals } = await chatWithTools({
     model, system: persona + (tools.length ? TOOL_RULE : "") + (actionNames.length ? ACTION_RULE : "") + spokenRule + context,
     messages: msgs, jwt: String((body as Record<string, unknown>)._jwt ?? ""), tools, actionNames, maxTokens: 1024,

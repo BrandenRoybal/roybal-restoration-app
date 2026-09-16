@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import { CREATE_LEAD_TOOL, WEB_PERSONA, greetingFor, AI_NOTICE } from "./persona.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const REGISTRY = join(here, "..", "roybal-ai-office", "personas.ts");
+const REGISTRY = join(here, "..", "_shared", "personas", "tools.ts");
 
 /** Pull PHONE_TOOLS.createLead's input_schema out of the registry source.
     Parsing the text rather than importing keeps this test from depending on
