@@ -684,5 +684,8 @@ export const ACTIONSETS = {
     "invoiceStatusUpdate",
     "changeOrderWrite",
     "receiptLog"
+  ],
+  "sms": [
+    "sendText"
   ]
 };

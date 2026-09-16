@@ -64,6 +64,11 @@ import {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+// The service role is used on ONE path: the SMS channel (roybal-notify
+// /inbound → fieldAssist with app:"sms"), which has no user session because
+// the caller is Twilio. The door is the cron secret, checked in serve().
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                        // Anthropic (shared)
 // Photos are many + cheap; documents (invoice/email) want better reasoning/prose.
 // Written deliverables run on Opus (quality wins; the office reviews them and a
@@ -103,9 +108,14 @@ const corsHeaders = {
 };
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
-/* ---------- Supabase REST via the caller's JWT (RLS applies) ---------- */
+/* ---------- Supabase REST via the caller's JWT (RLS applies) ----------
+   New-format keys (sb_secret_…) are not JWTs: sent as the bearer beside the
+   legacy anon apikey, PostgREST 401s (roybal-notify learned this the hard
+   way). Pair a new-format token with itself; user JWTs are unaffected. */
+const isNewFormatKey = (t: string) => /^sb_(secret|publishable)_/.test(t);
 function db(path: string, jwt: string, opts: RequestInit = {}) {
-  return fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...opts, headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json", ...(opts.headers || {}) } });
+  const apikey = isNewFormatKey(jwt) ? jwt : ANON_KEY;
+  return fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...opts, headers: { apikey, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json", ...(opts.headers || {}) } });
 }
 async function insertRow(table: string, row: Record<string, unknown>, jwt: string) {
   const res = await db(table, jwt, { method: "POST", headers: { Prefer: "return=representation" }, body: JSON.stringify([row]) });
@@ -1742,12 +1752,32 @@ const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ resul
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
-  const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  if (!jwt) return json({ ok: false, error: "Missing Authorization bearer token" }, 401);
+  let jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  let body: Record<string, unknown> = {};
+  try { body = (await req.json()) ?? {}; } catch (_) { return json({ ok: false, error: "Body must be JSON" }, 400); }
+
+  /* The SMS channel's door (J0). roybal-notify /inbound calls this function
+     on the owner's behalf after Twilio's signature check, with the cron
+     secret and no user session. Deliberately narrow — the x-cron-secret
+     header opens exactly ONE action on ONE surface, and that surface's
+     actionset is the one approve-by-text can execute (smsassist.test.mjs
+     pins all three). Everything else on this function still needs a JWT. */
+  if (!jwt) {
+    const provided = req.headers.get("x-cron-secret") ?? "";
+    const cronOk = !!CRON_SECRET && provided === CRON_SECRET;
+    const action = String(body.action ?? "");
+    const app = String(body.app ?? "");
+    if (!cronOk || action !== "fieldAssist" || app !== "sms" || !SERVICE_KEY)
+      return json({ ok: false, error: "Missing Authorization bearer token" }, 401);
+    jwt = SERVICE_KEY;
+  } else if (String(body.app ?? "") === "sms") {
+    // the sms surface is reachable ONLY through the door above — a browser
+    // with a user JWT does not get to run as "the owner by text"
+    return json({ ok: false, error: "app:sms is not a browser surface" }, 403);
+  }
 
   let captureEventId: string | null = null;
   try {
-    const body = (await req.json()) ?? {};
     // Actions that price against public.price_list need the caller's JWT (RLS
     // lets any authenticated user READ the catalog). Thread it through the body.
     (body as Record<string, unknown>)._jwt = jwt;

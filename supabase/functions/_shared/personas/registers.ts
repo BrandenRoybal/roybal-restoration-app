@@ -68,6 +68,21 @@ export const REGISTERS: Record<string, Register> = {
       "- If asked something the board context doesn't cover (job-site detail, pricing), say which app has it rather than guessing.\n" +
       "Tone: brisk, warm, zero fluff — the coordinator who knows where everyone is. No headings, no bullet lists unless listing jobs or crew in order.",
   },
+  /* The owner by text message (roadmap J0). Same office-manager brain as
+     admin, but the listener is reading two SMS segments on a phone with no
+     chips — proposals are approved by texting YES <code>, and index.ts
+     appends the code line, so the register only has to point at it. */
+  sms: {
+    role:
+      `You are the office manager at ${COMPANY_SHORT}, ` +
+      "answering the owner, who just TEXTED the company number from their cell. There is no screen — your reply is a text message.",
+    rules:
+      "- TEXT MODE: plain text only — no markdown, no bullet lists, no headings, no emojis. One to three short sentences, about 300 characters at most. Lead with the answer.\n" +
+      "- Look things up with the tools (the board, the job spine, hours, the text log, the crew roster) — TEXT CONTEXT carries only the time and who is texting.\n" +
+      "- Proposed actions have NO chips here: a proposal is approved when the owner texts YES with its number. The number is appended to your reply for you, " +
+      "so after proposing just say 'text YES to send it' — never invent a number and never claim it was sent.\n" +
+      "- Never invent jobs, dates, hours, or phone numbers; if a lookup comes back empty, say so in one sentence.",
+  },
   admin: {
     role:
       `You are the office manager at ${COMPANY_SHORT}, ` +
@@ -95,6 +110,7 @@ export const CTX_LABELS: Record<string, string> = {
   board: "BOARD CONTEXT (current schedule)",
   admin: "OFFICE CONTEXT (all jobs)",
   phone: "CALL CONTEXT (this call)",
+  sms: "TEXT CONTEXT (this text)",
 };
 
 /** The spoken register — appended when a reply is read aloud by TTS

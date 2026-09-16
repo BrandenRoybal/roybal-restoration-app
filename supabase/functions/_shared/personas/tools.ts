@@ -92,6 +92,7 @@ export const TOOLSETS: Record<string, string[]> = {
   field: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup", "crewLookup"],
   board: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup", "crewLookup"],
   admin: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup", "crewLookup"],
+  sms: ["priceLookup", "jobLookup", "boardRead", "smsThread", "hoursLookup", "crewLookup"],
   phone: [],
 };
 
