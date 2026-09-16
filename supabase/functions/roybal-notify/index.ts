@@ -49,7 +49,24 @@
  *   non-failed rows (`&status=neq.failed`) — left unchanged here so this
  *   change is purely additive to spending behaviour.
  *
+ * SMS assistant (roadmap J0 — docs/architecture/08 §4):
+ *   A text from the OWNER's cell (OWNER_CELL, falling back to SMS_FORWARD_TO
+ *   exactly as approve-by-text does) that is not a YES/NO gets a turn with the
+ *   office assistant: /inbound ACKs Twilio at once (its webhook window is
+ *   15 s, an LLM turn with lookups can be longer), then in the background
+ *   (EdgeRuntime.waitUntil) calls roybal-ai-office fieldAssist with app:"sms"
+ *   through that function's cron-secret door, mints any proposal as a
+ *   pending_actions row with a code, and texts the answer back — "Text YES 14
+ *   to text Mike…". The turn is READ + PROPOSE only; a YES on the code goes
+ *   through handleApproval like every other proposal, so a spoofed sender can
+ *   at most read the board and queue something the real owner still approves.
+ *   Rules live in smsassist.ts (pure, tested). Rollback: SMS_ASSIST_ENABLED=false
+ *   returns /inbound to log-and-forward for the owner's texts too.
+ *
  * Secrets:  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM (+1XXXXXXXXXX)
+ *           OWNER_CELL      (the owner's cell — approve-by-text + the SMS assistant)
+ *           CRON_SECRET     (opens roybal-ai-office's sms door; already set)
+ *           SMS_ASSIST_ENABLED (optional — "false" turns the SMS assistant off)
  *           SMS_MONTHLY_CAP (optional, default 500 messages / month)
  *           SMS_RESERVE     (optional, default 150 — the tail of the monthly
  *                            cap held for PROTECTED_KINDS. Public lanes
@@ -80,6 +97,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard } from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
 import { mapTwilioStatus, blockedStatuses } from "./status.mjs";
+import { smsAssistEnabled, assistSender, TEXT_EXECUTABLE_KINDS, mintCodes, pendingRowsFor, composeSmsReply, failureText } from "./smsassist.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -88,6 +106,7 @@ const TWILIO_SID = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
 const TWILIO_AUTH = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
 const TWILIO_FROM = Deno.env.get("TWILIO_FROM") ?? "";
 const SMS_FORWARD_TO = Deno.env.get("SMS_FORWARD_TO") ?? "";
+const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 // A non-numeric SMS_MONTHLY_CAP secret (e.g. "500 texts") must NOT silently
 // disable the cap — fall back to the 500 default when it isn't a finite
 // number. A BLANK secret is the same trap: Deno hands back "" and Number("")
@@ -205,6 +224,7 @@ const PUBLIC_KINDS = new Set(["webOwner", "webLead", "portalCode"]);
 // thread). Everything else is customer-numbered and stamps on a single match.
 const OWNER_KINDS = new Set([
   "brief", "phoneOwner", "webOwner", "webLead", "forward", "assistCrew", "approval",
+  "assistant",      // the SMS assistant's replies — always to the owner
   "scheduleCrew",   // crew-numbered — never stamps a customer contact timeline
 ]);
 
@@ -505,6 +525,11 @@ async function handleApproval(
     } else if (act.kind === "sendText") {
       const to = toE164(params.to);
       if (!to) throw new Error("no valid recipient number on the proposal");
+      // A customer text approved at 9pm still waits for morning — the window
+      // sendSms enforces. Only an explicit customer audience is gated (the
+      // SMS assistant's proposals always carry one); crew texts are exempt
+      // exactly as assistCrew is.
+      if (params.audience === "customer") assertSendWindow("assist");
       const r = await twilioPost(to, String(params.message ?? ""));
       if (!r.ok) throw new Error(String(r.body.message ?? `twilio ${r.status}`));
       await admin(`pending_actions?id=eq.${act.id}`, {
@@ -569,6 +594,86 @@ async function handleApproval(
   return true;
 }
 
+/* ---------- the SMS channel (roadmap J0) ----------
+   One turn of the office assistant for the owner's text: ask roybal-ai-office
+   (app:"sms", through its cron-secret door — the only way that surface can be
+   reached), mint the executable proposals as pending_actions rows, text the
+   answer back with the "Text YES n" lines. Every failure becomes a short text
+   rather than silence: the owner sent a message and is looking at the phone. */
+type SmsProposal = { type: string; label: string; params: Record<string, unknown> };
+async function runSmsAssist(
+  from: string, text: string,
+  admin: (path: string, opts?: RequestInit) => Promise<Response>,
+): Promise<void> {
+  const owner = toE164(from);
+  const say = async (msg: string) => {
+    try {
+      // the same monthly cap the forward path honours — the assistant must
+      // not be the lane that spends the last message
+      const used = await monthCount(SERVICE_KEY, SERVICE_KEY);
+      if (SMS_MONTHLY_CAP > 0 && used >= SMS_MONTHLY_CAP) { console.error(`sms assist reply skipped: sms_cap_reached (${used}/${SMS_MONTHLY_CAP})`); return; }
+      const r = await twilioPost(owner, msg);
+      const log = await admin("sms_messages", {
+        method: "POST",
+        body: JSON.stringify([{
+          direction: "outbound", to_number: owner, from_number: TWILIO_FROM,
+          body: clip(msg), kind: "assistant",
+          status: r.ok ? (r.body.status ?? "sent") : "failed",
+          error: r.ok ? null : String(r.body.message ?? `twilio ${r.status}`).slice(0, 500),
+          twilio_sid: r.ok ? (r.body.sid ?? null) : null,
+        }]),
+      });
+      if (!log.ok) console.error("assistant reply log insert failed", log.status, await log.text().catch(() => ""));
+    } catch (e) { console.error("assistant reply failed", e); }
+  };
+
+  let reply = "";
+  let proposals: SmsProposal[] = [];
+  try {
+    if (!CRON_SECRET) throw new Error("CRON_SECRET not set — the office function's sms door is closed");
+    const localTime = new Date().toLocaleString("en-US", {
+      timeZone: "America/Anchorage", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+    });
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/roybal-ai-office`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-cron-secret": CRON_SECRET, apikey: ANON_KEY },
+      body: JSON.stringify({
+        action: "fieldAssist", app: "sms", text: clip(text, 1200), captured_by: "sms:owner",
+        context: { channel: "sms", who: "the owner, texting from their cell", localTime },
+      }),
+    });
+    const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+    if (body.capped) { await say(failureText("capped")); return; }
+    if (!r.ok || body.ok === false) throw new Error(String(body.error || `office ${r.status}`));
+    reply = String(body.reply ?? "");
+    proposals = Array.isArray(body.proposedActions) ? (body.proposedActions as SmsProposal[]) : [];
+  } catch (e) {
+    console.error("sms assist turn failed", e);
+    await say(failureText("error"));
+    return;
+  }
+
+  // proposals → pending_actions rows the owner approves with "YES n". Codes
+  // are unique across every live proposal (the brief and the QB Time sweep
+  // share the queue); only kinds handleApproval can execute are minted.
+  let rows: Array<{ code: number; label: string }> = [];
+  try {
+    const executable = proposals.filter((p) => p && TEXT_EXECUTABLE_KINDS.has(String(p.type))).length;
+    if (executable) {
+      const live = await admin("pending_actions?status=eq.pending&select=code&limit=200", { method: "GET" });
+      const used = live.ok ? ((await live.json()) as Array<{ code: number }>).map((a) => a.code) : [];
+      const minted = pendingRowsFor(proposals, mintCodes(used, executable));
+      const ins = await admin("pending_actions", {
+        method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify(minted),
+      });
+      if (ins.ok) rows = minted;
+      else console.error("sms assist proposals not minted", ins.status, await ins.text().catch(() => ""));
+    }
+  } catch (e) { console.error("sms assist proposal mint failed", e); }
+
+  await say(composeSmsReply(reply, rows));
+}
+
 /* Log the reply, optionally forward it to the office, answer empty TwiML
    (empty <Response> = receive without auto-replying to the customer). */
 async function handleInbound(req: Request): Promise<Response> {
@@ -626,6 +731,21 @@ async function handleInbound(req: Request): Promise<Response> {
         { headers: { "Content-Type": "text/xml" } });
     }
   } catch (e) { console.error("approval handling failed", e); }
+
+  // The SMS channel (roadmap J0): the OWNER texting anything that isn't a
+  // YES/NO gets a turn with the office assistant. Twilio waits at most 15 s
+  // for this webhook and a turn with lookups can take longer, so the empty
+  // TwiML goes back now and the turn finishes in the background; the answer
+  // arrives as its own text. Placed after the approval early-return so a
+  // "YES 12" is an approval, never a question.
+  if (text && smsAssistEnabled(Deno.env.get("SMS_ASSIST_ENABLED")) &&
+      assistSender(from, { ownerCell: Deno.env.get("OWNER_CELL"), forwardTo: SMS_FORWARD_TO }) === "owner") {
+    const turn = runSmsAssist(from, text, admin).catch((e) => console.error("sms assist failed", e));
+    const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+    if (rt && typeof rt.waitUntil === "function") rt.waitUntil(turn); else await turn;
+    return new Response('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+      { headers: { "Content-Type": "text/xml" } });
+  }
 
   // SMS bridge (CF-2 / portal M2, reserved in migration 108 since day one):
   // a text from a portal customer ALSO lands on their job's thread — but only

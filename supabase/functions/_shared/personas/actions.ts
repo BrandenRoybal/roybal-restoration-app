@@ -332,6 +332,10 @@ export const ACTIONSETS: Record<string, string[]> = {
   board: ["sendText", "boardWrite", "jobCreate", "crewAvailabilityWrite", "crewSwap", "hoursWrite", "phaseUpdate"],
   admin: ["sendText", "adjusterEmail", "portalReply", "emailSend", "docRequest", "portalPhotoShare",
     "estimateWrite", "invoiceCreate", "invoiceStatusUpdate", "changeOrderWrite", "receiptLog"],
+  // the owner by text (J0): a proposal here lands in pending_actions for
+  // "YES n", so only kinds roybal-notify's approval executor can run —
+  // smsassist.test.mjs holds this list equal to TEXT_EXECUTABLE_KINDS
+  sms: ["sendText"],
 };
 
 export const PROPOSE_TOOL_NAME = "proposeActions";
