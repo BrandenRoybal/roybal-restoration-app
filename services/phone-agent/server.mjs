@@ -27,7 +27,7 @@
    ============================================================ */
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
-import { PERSONAS, PHONE_TOOLS, PHONE_TOOL_RULE } from "../../supabase/functions/roybal-ai-office/personas.ts";
+import { PERSONAS, PHONE_TOOLS, PHONE_TOOL_RULE } from "../../supabase/functions/_shared/personas/index.ts";
 import { RELAY_TOKEN, OWNER_NAME, PORT, SPEND_CAP_USD, VOICE_MINUTES_CAP, VOICE_PRICE_PER_MIN, PHONE_MODEL, priceFor } from "./config.mjs";
 import { signIn, insertRow, patchCaptureEvent, monthSpend, monthPhoneSeconds } from "./supa.mjs";
 import { runTurn, probeLLM } from "./brain.mjs";

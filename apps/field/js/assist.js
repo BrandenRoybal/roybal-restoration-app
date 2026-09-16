@@ -34,6 +34,10 @@ import { capturedBy } from "./tech.js";
 import { getUnifiedJobId } from "./spine.js";
 import { portalShareLink } from "./portal.js";
 import { fetchCalibration, calibrationContext } from "./calibration.js";
+// generated from supabase/functions/_shared/personas/ — the same schemas and
+// checker the server runs, so a chip fails the same way in both places
+import { ACTION_SCHEMAS } from "./actionschemas.js";
+import { checkActionParams } from "./schemacheck.js";
 
 /* Construction jobs get the construction digest (scope, schedule, inspections,
    selections, draws); water jobs keep the mitigation digest. */
@@ -181,6 +185,17 @@ function runAction(entry, a) {
   if (!provider || typeof provider.executeAction !== "function")
     return toast("This app can't run that action.");
   const key = provider.key;
+  // schema first: a malformed proposal dies here with a readable sentence,
+  // not half-way through an executor. Chip types without a schema (legacy
+  // moveJob/logHours, the admin's portalPost follow-up) pass straight through.
+  const check = checkActionParams(ACTION_SCHEMAS, a.type, a.params || {});
+  if (check.errors.length) {
+    a.state = "failed"; a.detail = ("bad proposal — " + check.errors[0]).slice(0, 140);
+    queueResult(key, { type: a.type, label: a.label, ok: false, detail: a.detail });
+    auditExecution(entry, a, { ok: false, detail: a.detail });
+    paintMessages();
+    return;
+  }
   a.state = "running"; paintMessages();
   // call synchronously: the field Path-1 sms: link must fire inside the
   // tap's synchronous window (iOS) — async executors just return a promise
