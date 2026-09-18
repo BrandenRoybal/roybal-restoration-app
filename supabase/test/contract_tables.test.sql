@@ -1,9 +1,15 @@
 -- ============================================================================
 -- Assertions for 0004_backbone_contract_tables.sql.
 --
--- Run against a database that has had harness.sql and then every file in
--- supabase/migrations/ applied to it; see supabase/test/migrations.test.mjs,
--- which is what CI runs.
+-- Run by the DB replay workflow (.github/workflows/db-replay.yml) against the
+-- database `supabase db reset` has just rebuilt from supabase/migrations/ —
+-- the real baseline, with production's roles and default privileges under it,
+-- which is the only place asserting anything about grants and policies means
+-- something. To run it by hand: `supabase start && supabase db reset --no-seed`,
+-- then `psql -v ON_ERROR_STOP=1 -f supabase/test/contract_tables.test.sql <url>`.
+--
+-- The census step ahead of this one says the right objects came back. This says
+-- they behave. It runs after the census, so the rows it inserts cannot skew it.
 --
 -- Each block raises on failure, so the first broken invariant stops the file
 -- with a message naming it. Nothing here is a smoke test: every assertion below
