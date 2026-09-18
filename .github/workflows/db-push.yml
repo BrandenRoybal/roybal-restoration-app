@@ -1,0 +1,282 @@
+name: DB push
+run-name: "DB push — ${{ inputs.target }} (${{ inputs.apply && 'apply' || 'dry run' }})"
+
+# ============================================================================
+# The hand that moves a merged migration into a database (P1, roadmap §7.3 and
+# Decision record §11: "schema reaches production only by `db push` from CI
+# after staging passes — never the SQL editor, never MCP apply_migration").
+#
+# Merging a PR under supabase/migrations/ changes a file on main. It changes no
+# database. This workflow is the only thing that should: the migration history
+# table on a project stays in step with the files in this repo only when the
+# same tool writes both sides, and the 2026-09-07 repair (migrations-archive/
+# HISTORY-BEFORE-REPAIR.md) is what it cost to get them back in step once.
+#
+# WHAT ONE RUN DOES
+#   1. Proves the token, links the chosen project, prints the project's
+#      migration history beside the local files (`supabase migration list`).
+#   2. `supabase db push --dry-run`: which migrations a push would apply, and
+#      nothing else. Every run does this much, against either target.
+#   3. Only with "apply" ticked: `supabase db push`, the same dry run again
+#      (it must now say the remote is up to date), then a schema dump of the
+#      result counted against the census in db-replay.yml — the same seven
+#      numbers, read from that file so the repo has one census rather than
+#      two that drift — and checked for objects owned by the CLI's temporary
+#      login role instead of postgres.
+#
+# WHO MAY RUN IT WHERE
+#   * staging (efbuagiwowcwwsezkgsw), from any branch: rehearse a PR's
+#     migration before it merges, or main after.
+#   * production (djpgvcvhvgrzgaziruze), apply: from main only, and only with
+#     the word `production` typed into the confirm box. A dry run against
+#     production is allowed from anywhere; it changes nothing.
+#   The project refs are written here, not taken as input, so a run cannot be
+#   pointed at a project nobody reviewed. The job runs under a GitHub
+#   environment named after the target; adding required reviewers to the
+#   `production` environment (Settings -> Environments) makes the apply a
+#   two-person step without touching this file.
+#
+# AUTH: THE SAME TOKEN AS db-baseline.yml, AND NO DATABASE PASSWORD
+#   SUPABASE_ACCESS_TOKEN is a personal access token (sbp_…). For a linked
+#   project the CLI mints a short-lived login role through the Management API;
+#   production carries the trace — role `cli_login_postgres`, NOINHERIT, member
+#   of postgres, valid for two days — from the CLI sessions of 2026-09-07. That
+#   is how `db dump` ran without a password and how `db push` runs here. If a
+#   CLI release ever insists on one, add SUPABASE_DB_PASSWORD as a secret and
+#   this workflow passes it through; until then that secret does not exist and
+#   the pipeline holds no database credential at all.
+#
+# WHAT IT DOES NOT DO YET
+#   Run on merge. The roadmap's end state (§8.6) is merge to main -> staging
+#   push -> tests -> production push, unattended. That lands once this button
+#   has moved a few migrations by hand and staging is a trusted mirror; today
+#   production is a deliberate click.
+#
+# STAGING HAS TO MIRROR PRODUCTION FOR THE REHEARSAL TO MEAN ANYTHING
+#   Its history must read exactly production's (0000..0003 on 2026-09-18) and
+#   its public schema must match. On 2026-09-18 it did not: see
+#   migrations-archive/STAGING-STRAY-0004.md for what was there, how it was
+#   cleared, and how to put staging back if it drifts again.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Database to push to"
+        type: choice
+        required: true
+        default: staging
+        options:
+          - staging
+          - production
+      apply:
+        description: "Apply the pending migrations. Unticked = dry run only."
+        type: boolean
+        required: false
+        default: false
+      confirm:
+        description: "Production apply only: type the word production"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# One push per target at a time; a second click queues instead of racing.
+concurrency:
+  group: db-push-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.target }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      # Empty unless someone has added the secret; see AUTH above.
+      DB_PASSWORD_IF_ANY: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      # Inputs reach the shell through env, never through ${{ }} in a run:
+      # block — a dispatch input is attacker-controlled in the general case.
+      TARGET: ${{ inputs.target }}
+      APPLY: ${{ inputs.apply }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      - name: Decide what this run may do
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            staging)    PROJECT_REF=efbuagiwowcwwsezkgsw ;;
+            production) PROJECT_REF=djpgvcvhvgrzgaziruze ;;
+            *) echo "::error::unknown target '$TARGET'"; exit 1 ;;
+          esac
+          MODE=dry-run
+          if [ "$APPLY" = "true" ]; then
+            if [ "$TARGET" = "production" ]; then
+              if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+                echo "::error::Production takes migrations from main only; this run is on '$GITHUB_REF_NAME'."
+                exit 1
+              fi
+              if [ "$CONFIRM" != "production" ]; then
+                echo "::error::To apply to production, type the word production in the confirm box."
+                exit 1
+              fi
+            fi
+            MODE=apply
+          fi
+          {
+            echo "PROJECT_REF=$PROJECT_REF"
+            echo "MODE=$MODE"
+          } >> "$GITHUB_ENV"
+          {
+            echo "### DB push — $TARGET, $MODE"
+            echo ""
+            echo "Project \`$PROJECT_REF\`, from \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA::7}\`."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Same proof as db-baseline.yml: a credential problem should report
+      # itself as one, not as a failure three steps into a push.
+      - name: Prove the token
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set. Create one at" \
+                 "https://supabase.com/dashboard/account/tokens and add it under" \
+                 "Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          if ! supabase projects list > /dev/null 2>&1; then
+            echo "::error::SUPABASE_ACCESS_TOKEN was rejected by the Management API."
+            echo "::error::It must be a PERSONAL ACCESS TOKEN from"
+            echo "::error::https://supabase.com/dashboard/account/tokens (starts with 'sbp_')."
+            echo "::error::A revoked or expired token fails exactly this way, as does a"
+            echo "::error::project API key (anon / publishable / service_role) or a token"
+            echo "::error::created with restricted scopes. Generate a new one and update"
+            echo "::error::the repository secret."
+            supabase projects list || true
+            exit 1
+          fi
+          echo "Token accepted; visible projects:"
+          supabase projects list
+
+      # GitHub runners are IPv4-only and a project's direct database host is
+      # IPv6-only, so link first: it resolves the IPv4 pooler that --linked
+      # dials (db-baseline.yml records the run that taught this). No password
+      # is passed unless a secret exists; the CLI mints its own login role.
+      - name: Link the project
+        run: |
+          set -euo pipefail
+          if [ -n "${DB_PASSWORD_IF_ANY:-}" ]; then
+            echo "SUPABASE_DB_PASSWORD=$DB_PASSWORD_IF_ANY" >> "$GITHUB_ENV"
+            export SUPABASE_DB_PASSWORD="$DB_PASSWORD_IF_ANY"
+            echo "Using the SUPABASE_DB_PASSWORD secret."
+          else
+            echo "No database password secret; the CLI will use a temporary login role."
+          fi
+          supabase link --project-ref "$PROJECT_REF"
+
+      - name: Migration history and dry run
+        run: |
+          set -euo pipefail
+          supabase migration list --linked 2>&1 | tee history-before.txt
+          supabase db push --linked --dry-run 2>&1 | tee dry-run-before.txt
+          {
+            echo "#### Migration history before"
+            echo '```'
+            cat history-before.txt
+            echo '```'
+            echo "#### Dry run"
+            echo '```'
+            cat dry-run-before.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply
+        if: env.MODE == 'apply'
+        run: |
+          set -euo pipefail
+          supabase db push --linked 2>&1 | tee push.txt
+          supabase migration list --linked 2>&1 | tee history-after.txt
+          supabase db push --linked --dry-run 2>&1 | tee dry-run-after.txt
+          {
+            echo "#### Push"
+            echo '```'
+            cat push.txt
+            echo '```'
+            echo "#### Migration history after"
+            echo '```'
+            cat history-after.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -qi 'up to date' dry-run-after.txt; then
+            echo "::error::After the push, db push --dry-run still reports pending work:"
+            cat dry-run-after.txt
+            exit 1
+          fi
+
+      # The same seven counts db-replay.yml checks on a rebuilt database, taken
+      # here from a dump of the real one. Counting the dump is equivalent to
+      # counting pg_catalog: 0000_baseline.sql, itself a CLI dump of production,
+      # greps to exactly the 2026-09-07 census (54/114/33/5/7/48/73). The
+      # expected values are read from db-replay.yml so a migration bumps them
+      # in one place, and that PR's replay proves the new numbers before this
+      # workflow ever holds a database to them.
+      - name: Census the result against db-replay.yml
+        if: env.MODE == 'apply'
+        run: |
+          set -euo pipefail
+          supabase db dump --linked --schema public -f after.sql
+          want() { sed -nE "s/^[[:space:]]*$1:[[:space:]]*([0-9]+).*/\1/p" .github/workflows/db-replay.yml | head -n1; }
+          count() { grep -cE "$1" after.sql || true; }
+          fail=0
+          check() {
+            local name="$1" got="$2" want="$3"
+            if [ -n "$want" ] && [ "$got" = "$want" ]; then
+              printf '| %-12s | %5s | %5s | ok |\n' "$name" "$got" "$want" >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf '| %-12s | %5s | %5s | **MISMATCH** |\n' "$name" "$got" "${want:-?}" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::$name: the database has $got, db-replay.yml expects ${want:-nothing readable}"
+              fail=1
+            fi
+          }
+          {
+            echo "#### Census after the push — \`$TARGET\` against db-replay.yml"
+            echo ""
+            echo "| object | database | expected | |"
+            echo "|---|---:|---:|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          check tables    "$(count '^CREATE TABLE')"                                       "$(want EXPECT_TABLES)"
+          check policies  "$(count '^CREATE POLICY')"                                      "$(want EXPECT_POLICIES)"
+          check triggers  "$(count '^CREATE( OR REPLACE)? TRIGGER')"                       "$(want EXPECT_TRIGGERS)"
+          check views     "$(count '^CREATE( OR REPLACE)? VIEW')"                          "$(want EXPECT_VIEWS)"
+          check enums     "$(count '^CREATE TYPE .* AS ENUM')"                             "$(want EXPECT_ENUMS)"
+          check functions "$(count '^CREATE( OR REPLACE)? (FUNCTION|PROCEDURE)')"          "$(want EXPECT_FUNCTIONS)"
+          check pk_unique "$(count '^[[:space:]]*ADD CONSTRAINT .* (PRIMARY KEY|UNIQUE)')" "$(want EXPECT_PKUNIQUE)"
+          if grep -E 'OWNER TO "?cli_login' after.sql; then
+            echo "::error::Objects came out owned by the CLI's temporary login role, not postgres."
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The database does not match the census. Read the dump artifact before doing anything else." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "census matches db-replay.yml on every object class"
+
+      # The post-push schema, kept a week so a surprise can be read rather than
+      # remembered. Schema only, no rows; still not a file to hand around.
+      - uses: actions/upload-artifact@v4
+        if: env.MODE == 'apply'
+        with:
+          name: db-push-${{ inputs.target }}-${{ github.run_number }}
+          path: after.sql
+          retention-days: 7
