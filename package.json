@@ -8,8 +8,9 @@
     "apps/site"
   ],
   "scripts": {
-    "test": "npm run field:test && npm run board:test && npm run fn:test",
+    "test": "npm run field:test && npm run board:test && npm run fn:test && npm run db:test",
     "fn:test": "node --test --test-concurrency=1 --experimental-strip-types --no-warnings supabase/functions/*/*.test.mjs",
+    "db:test": "node --test --test-concurrency=1 supabase/test/*.test.mjs",
     "field": "npm run dev --workspace=apps/field",
     "field:test": "npm run test --workspace=apps/field",
     "board": "npm run dev --workspace=apps/board",

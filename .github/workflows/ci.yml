@@ -81,3 +81,42 @@ jobs:
         run: |
           npm install --omit=dev --no-audit --no-fund
           npm test
+
+  # Its own job because it needs a database nothing else does, and because the
+  # file's rule 1 — one red suite must not hide another — applies to suites that
+  # need different machinery too. What this does and deliberately does not cover
+  # is in the header of supabase/test/migrations.test.mjs: `supabase db reset`
+  # against the real baseline is still a P1 item, not this.
+  migrations:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The suite skips itself when no database is reachable, which is right on
+      # a laptop and wrong here — a skipped migration test is how a table ships
+      # writable by anon. The psql line ahead of it fails the job if the service
+      # is not actually up, so the suite cannot skip its way to green.
+      - name: Migration replay and contract assertions
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: |
+          psql "$DATABASE_URL" -c 'select 1' > /dev/null
+          npm run db:test
