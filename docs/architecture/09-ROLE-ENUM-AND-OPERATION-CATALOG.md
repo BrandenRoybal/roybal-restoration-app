@@ -62,7 +62,7 @@ Everything below is in the production dump. This is the list N+1 has to rewrite 
 
 ## 2. Why three, and why this order
 
-**The enum rule.** On PostgreSQL 12 and later `alter type … add value` *may* run inside a transaction block, but the new value cannot be **used** until that transaction commits — referencing it earlier raises `unsafe use of new value of enum type`. The Supabase CLI runs each migration file in its own transaction, so "migration N, then migration N+1" is exactly the commit boundary the rule wants. That is the whole reason N exists as a file of its own; it is not a style choice.
+**The enum rule.** Both projects run PostgreSQL 17 (production `17.6.1.084`, staging `17.6.1.166` — read from the Supabase API 2026-09-18), so `alter type … add value` *may* run inside a transaction block, but the new value cannot be **used** until that transaction commits — referencing it earlier raises `unsafe use of new value of enum type`. The Supabase CLI runs each migration file in its own transaction, so "migration N, then migration N+1" is exactly the commit boundary the rule wants. That is the whole reason N exists as a file of its own; it is not a style choice.
 
 **The sync rule.** `push_project` → `_sync_guard` runs on every sync from every phone in the field (`00-SYSTEM-INVENTORY.md` records the fleet in `sync_clients`). There is no window in which the gate may disagree with the column. Hence N+1 rewrites **before** it remaps, in one transaction: at no instant does a committed state exist where a crew member's role is `crew` and the guard only knows `tech`.
 
