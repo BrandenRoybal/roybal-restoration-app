@@ -102,14 +102,20 @@ begin
   if d !~ '''viewer''' or d ~ '''tech''' then
     raise exception 'handle_new_user() does not seed new signups as viewer';
   end if;
+  if (select pg_get_expr(ad.adbin, ad.adrelid)
+        from pg_attrdef ad join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum
+       where ad.adrelid = 'public.profiles'::regclass and a.attname = 'role') !~ '''viewer''' then
+    raise exception 'profiles.role column default is not viewer';
+  end if;
 
-  -- _sync_guard: goes through role_is, names no old label
+  -- _sync_guard: goes through role_is, and names neither of the two labels
+  -- that are renamed (office and viewer keep their names, so they may appear)
   d := pg_get_functiondef('public._sync_guard(text)'::regprocedure);
   if d !~ 'role_is\(' then
     raise exception '_sync_guard() does not use role_is()';
   end if;
-  if d ~ '''tech''' or d ~ '''admin''' or d ~ '''office''' then
-    raise exception '_sync_guard() still names an old-vocabulary label';
+  if d ~ '''tech''' or d ~ '''admin''' then
+    raise exception '_sync_guard() still names a renamed old-vocabulary label';
   end if;
 
   -- is_admin: owner is the admin of the target vocabulary

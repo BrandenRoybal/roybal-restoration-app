@@ -191,6 +191,11 @@ exception when others then
 end;
 $$;
 
+-- The column default said `tech` too (0000_baseline.sql:3177); a direct
+-- insert that omits role must land on the same read-only default, and 0007's
+-- check constraint would reject `tech` as a default anyway.
+alter table public.profiles alter column role set default 'viewer';
+
 -- 3d. The four long RPCs, bodies verbatim from 0000_baseline.sql, one list each
 --     extended. Generated: do not hand-edit the bodies here; touch the function
 --     in a migration of its own when it changes for its own reasons.
