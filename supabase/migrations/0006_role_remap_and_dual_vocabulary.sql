@@ -84,7 +84,10 @@ $$;
 alter function public.role_is(variadic text[]) owner to postgres;
 comment on function public.role_is(variadic text[]) is
   'True when the caller''s profiles.role, normalised to the target vocabulary (admin→owner, tech→crew, else as held), is one of the given names. The one place the dual-vocabulary rule lives (doc 09 §4.1).';
-revoke all on function public.role_is(variadic text[]) from public;
+-- Default privileges hand EXECUTE on every new function to anon directly, not
+-- only through PUBLIC (the replay database proved it; production's is_admin()
+-- carries the same anon grant). Revoke both.
+revoke all on function public.role_is(variadic text[]) from public, anon;
 grant execute on function public.role_is(variadic text[]) to authenticated, service_role;
 
 
@@ -109,6 +112,8 @@ as $$
       where p.id = (select auth.uid()))
   );
 $$;
+-- 0004 revoked from public only; the same direct anon grant applies here.
+revoke all on function public.current_role_name() from anon;
 
 
 -- ---------------------------------------------------------------------------
