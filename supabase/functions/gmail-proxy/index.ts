@@ -128,7 +128,8 @@ const isMachine = (email: string) => email.startsWith("office-brief@");
 /* ============================================================
    The per-action gate — F-003
    ============================================================ */
-const OFFICE_ROLES = ["admin", "office"];   // mutates the mailbox connection
+const OFFICE_ROLES = ["admin", "office", "owner"];   // mutates the mailbox connection
+// both vocabularies until migration 0007 (docs/architecture/09 §1.2)
 
 /** Which callers each action admits. DEFAULT-DENY: an action that is not
     listed here is refused before dispatch (see authorize), so adding a new

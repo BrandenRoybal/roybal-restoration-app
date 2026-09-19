@@ -216,8 +216,9 @@ async function ensureCustomer(
 /* ============================================================
    Caller identity + the per-action gate — F-003
    ============================================================ */
-const OFFICE_ROLES = ["admin", "office"];            // moves money / mutates the connection
-const STAFF_ROLES = ["admin", "office", "tech"];     // the signed-in crew (same band ensureCustomer trusts)
+const OFFICE_ROLES = ["admin", "office", "owner"];                          // moves money / mutates the connection
+const STAFF_ROLES = ["admin", "office", "tech", "owner", "crew_lead", "crew"]; // the signed-in crew (same band ensureCustomer trusts)
+// both vocabularies until migration 0007 (docs/architecture/09 §1.2)
 
 /** Which callers each action admits. DEFAULT-DENY: an action that is not
     listed here is refused before dispatch (see authorize), so adding a new
@@ -413,7 +414,7 @@ serve(async (req) => {
       // gate above already proved that (pushInvoice is staff-only), so this
       // reuses the role it resolved instead of a second auth round-trip.
       const role = gate.role;
-      const trustedSb = (role === "admin" || role === "office" || role === "tech") ? supabase : undefined;
+      const trustedSb = STAFF_ROLES.includes(role ?? "") ? supabase : undefined;
       const customerId = await ensureCustomer(realmId, accessToken, customer, trustedSb);
       const itemId = await ensureServiceItem(realmId, accessToken);
 
@@ -469,7 +470,7 @@ serve(async (req) => {
       if (!invoiceId) return err("Missing invoiceId");
       // (belt and braces: the gate already refused anyone outside STAFF_ROLES)
       const role = gate.role;
-      if (!(role === "admin" || role === "office" || role === "tech")) return err("Sign in to fetch payment links", 403);
+      if (!STAFF_ROLES.includes(role ?? "")) return err("Sign in to fetch payment links", 403);
       const { accessToken, realmId } = await getConnection(supabase);
       const data = await qboFetch(realmId, accessToken, `/invoice/${encodeURIComponent(invoiceId)}?include=invoiceLink`);
       const link = String((data.Invoice as Record<string, unknown>)?.InvoiceLink ?? "");

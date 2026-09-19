@@ -122,6 +122,8 @@ The normalisation is the one already written in `current_role_name()` (`0004:130
 
 Because `role_is` resolves old **and** new names to the same answer, every one of these is correct both before and after §4.2 runs — which is the property the whole three-step shape exists to buy.
 
+**As written in `0006` (2026-09-19):** the short gates (`_sync_guard`, `is_admin`, the three `field_photos` crew policies, `current_role_name`) use `role_is` exactly as the table says. The four long RPCs — `contact_mark_review_asked`, `contact_merge`, `contact_resolve`, `coordination_job_patch` — do not: their bodies (60 to 180 lines each) are re-emitted verbatim from `0000_baseline.sql` by script, and the one `in (…)` list each carries is extended with the target names, so `contact_merge` reads `in ('admin', 'office', 'owner')` rather than `role_is('owner', 'office')`. A long function copied unchanged is safer than one re-typed, and the answer is identical on both sides of the remap. The old names in those four lists become unreachable after `0007` and are trimmed whenever each function is next touched for its own reasons. `supabase/test/role_enum.test.sql` asserts all of the above on the CI replay, with rows it creates and rolls back.
+
 **The one behaviour change that is not a widening:** `handle_new_user()`. Public signup is on (`00-SYSTEM-INVENTORY.md`), and today a stranger who signs up lands on `tech`, which `_sync_guard` admits — they can write `field_projects`. `viewer` is the least-privilege target role and, after §4.2, is held by nobody, so it is free to take. **Decided by the owner 2026-09-19:** new signups land on `viewer` (read-only) and a real crew member is set to `crew` in the admin the day they are handed a phone. This is the only line in the three migrations that changes what a human experiences.
 
 ### 4.2 Remap the eleven rows
@@ -312,12 +314,12 @@ With §7.1 and §7.2 applied, an approval recorded from the inbox or by SMS reac
 
 ## 8. Order of work
 
-1. Widen `gmail-proxy`, `qb-time-proxy` and `qbo-proxy` to both vocabularies; deploy. Additive, reversible, and independent of everything below. **(§1.2)**
+1. Widen `gmail-proxy`, `qb-time-proxy` and `qbo-proxy` to both vocabularies; deploy. Additive, reversible, and independent of everything below. **(§1.2)** No workflow deploys edge functions: the deploy is a Supabase CLI `functions deploy` for the three names, or the connector's `deploy_edge_function`, run on the owner's word and confirmed by a Gmail or QB Time call from the admin before step 4.
 2. `0005` — add the four enum values. Staging, then production. Inert either way.
-3. Collect the three named people's login emails and review the five `tech → crew` rows with the owner (§5.2); the counts in §5.1 are re-read as an aggregate the day `0006` is written.
+3. Collect the three named people's login emails and review the five `tech → crew` rows with the owner (§5.2); the counts in §5.1 are re-read as an aggregate the day `0006` is written. `0006` ships with `@TODO` placeholders for the three emails and refuses to commit against any database that has profiles while one remains, so it cannot reach staging or production half-filled.
 4. `0006` — rehearse on staging, check the fleet, apply to production in an evening window, check the fleet again an hour later.
 5. Wait a week with the rollback statement written down and the old names still legal.
-6. `0007` — the type swap, with `EXPECT_ENUMS` 7 → 6 in the same PR.
+6. `0007` — the type swap, with `EXPECT_ENUMS` 7 → 6 in the same PR. **Its own PR, merged only after the week:** `supabase db push` applies every migration file not yet in the history, so a `0007` sitting in `supabase/migrations/` on the day `0006` is pushed would run in the same push and close the rollback window before it opened.
 7. `0008`, `0009` — the op spine and the first five operations.
 8. Separately, in the same phase: the 29 email-fence policies become one role/kind predicate now that `agents` exists.
 
