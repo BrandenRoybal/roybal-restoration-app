@@ -4,7 +4,7 @@
 
 **Version:** 1 · **Repo read:** `main` @ `783b79f` · **Companion documents:** [03-TARGET-ARCHITECTURE-AND-ROADMAP.md](03-TARGET-ARCHITECTURE-AND-ROADMAP.md) (cited as "03 §n"), [08-VOICE-CONTROL-ROADMAP.md](08-VOICE-CONTROL-ROADMAP.md), [04-OPEN-QUESTIONS.md](04-OPEN-QUESTIONS.md)
 
-**Basis.** Code was read over docs: `supabase/migrations/0000_baseline.sql` (the production dump), `0004_backbone_contract_tables.sql`, `.github/workflows/db-replay.yml`, and the three edge functions that read `profiles.role`. Citations are `path:line` from the repo root. Three places where the plan of 03 §2.4 / §8.5.3 cannot be executed as written are marked **CORRECTION** and collected in §9. Live row counts are quoted from `00-SYSTEM-INVENTORY.md` §11 (read 2026-09-06); production was not read while writing this page, so §5.1's remap table is a shape with a query beside it, not filled-in data.
+**Basis.** Code was read over docs: `supabase/migrations/0000_baseline.sql` (the production dump), `0004_backbone_contract_tables.sql`, `.github/workflows/db-replay.yml`, and the three edge functions that read `profiles.role`. Citations are `path:line` from the repo root. Three places where the plan of 03 §2.4 / §8.5.3 cannot be executed as written are marked **CORRECTION** and collected in §9. Live row counts were verified against production on 2026-09-19 as an aggregate (`select role, count(*) from profiles group by 1`); reading the eleven people out one row at a time is gated for every session in this project, which is why §4.2 keys the remap on email rather than on uuids that nobody can read out to review.
 
 ---
 
@@ -126,25 +126,33 @@ Because `role_is` resolves old **and** new names to the same answer, every one o
 
 ### 4.2 Remap the eleven rows
 
-Never `update profiles set role = 'owner' where role = 'admin'`. An explicit list, reviewed in the PR (03 §2.4, §8.5.3):
+Never `update profiles set role = 'owner' where role = 'admin'`. 03 §2.4 asks for an explicit `(profile_id, old_role, new_role)` table reviewed in the PR. The table below is that, with one change of key: it names people by **email**, not uuid. Two reasons. A reviewer can check an email against the admin's user list and cannot check a uuid against anything; and reading individual person rows out of production is gated for every session in this project (§5.1), so a uuid-keyed table could never be written by the same hands that write the migration. `auth.users.email` is the join 03 §2.4 itself uses when it says `branden@roybalconstruction.com → owner`.
 
 ```sql
+-- The two admins and the two machine accounts: one explicit row each.
 update public.profiles p
    set role = r.new_role::public.user_role
   from (values
-    ('<uuid>'::uuid, 'admin',  'owner'),   -- branden@roybalconstruction.com
-    ('<uuid>'::uuid, 'admin',  'office'),  -- the second live admin — see C1
-    ('<uuid>'::uuid, 'tech',   'crew'),    -- ×7
-    ('<uuid>'::uuid, 'viewer', 'agent'),   -- phone-agent@roybalconstruction.com
-    ('<uuid>'::uuid, 'viewer', 'agent')    -- office-brief@roybalconstruction.com
-  ) as r(profile_id, old_role, new_role)
- where p.id = r.profile_id
+    ('branden@roybalconstruction.com',      'admin',  'owner'),
+    ('<second admin — see §5.2>',           'admin',  'office'),
+    ('phone-agent@roybalconstruction.com',  'viewer', 'agent'),
+    ('office-brief@roybalconstruction.com', 'viewer', 'agent')
+  ) as r(email, old_role, new_role)
+  join auth.users u on lower(u.email) = lower(r.email)
+ where p.id = u.id
    and p.role::text = r.old_role;   -- a row already moved is skipped, not clobbered
+-- assert: found = 4
+
+-- The seven techs all go the same way (03 §2.4: tech → crew). crew_lead is
+-- not assigned here: the database does not record who runs a crew, and the
+-- owner promotes crew leads in the admin afterwards (§5.2).
+update public.profiles set role = 'crew' where role::text = 'tech';
+-- assert: found = 7
 ```
 
-then a `DO` block asserting `found = 11` and that no profile is left holding `admin` or `tech`. Listing `old_role` in the predicate is what makes the file safe to re-run and what makes a hand-edited row in production fail loudly instead of quietly.
+then a `DO` block asserting the two counts above, that `profiles` still has exactly eleven rows, and that no row is left holding `admin` or `tech`. The count assertions are what make this as safe as a per-row list: if the fleet has changed since the counts in §5.1 were read, the migration stops before it commits and the reviewer re-decides the mapping rather than the migration guessing. Listing `old_role` in each predicate is what makes the file safe to re-run and what makes a hand-edited row in production fail loudly instead of quietly.
 
-The two machine rows also get their `agents` link: `update public.agents set auth_user_id = … where id = '4b3353d3-…'` (`agent:phone`) and `'1af33481-…'` (`agent:brief`) — the fixed ids seeded in `0004:966-973`, which exist precisely so a later migration can name them.
+The two machine rows also get their `agents` link in the same transaction: `update public.agents a set auth_user_id = u.id from auth.users u where a.id = '4b3353d3-…' and lower(u.email) = 'phone-agent@roybalconstruction.com'`, and the same for `'1af33481-…'` with `office-brief@` — the fixed ids seeded in `0004:966-973`, which exist precisely so a later migration can name them.
 
 ### 4.3 Assert the sync path still resolves
 
@@ -195,23 +203,20 @@ Staging first, per the DB-push pipeline: rehearse on `efbuagiwowcwwsezkgsw` befo
 
 ## 5. Data the plan still needs
 
-### 5.1 The remap table
+### 5.1 What production says, and what it will not say
 
-The eleven rows are quoted from `00-SYSTEM-INVENTORY.md` §11 (2026-09-06): **admin 2, tech 7, viewer 2**, the two viewers being the machine accounts. Production was not read from this thread, so the uuids above are placeholders. The query that fills them, to be run read-only when N+1 is written and its output pasted into the PR body:
+Verified on 2026-09-19, read-only, as an aggregate: **admin 2, tech 7, viewer 2 — eleven rows**, unchanged from `00-SYSTEM-INVENTORY.md` §11 (2026-09-06), and **zero `office` rows** — the label exists since migration 216 and nobody has ever held it. The two viewers are the machine accounts (`0000_baseline.sql:630` names `phone-agent@`, and the "brief agent cannot …" fences from `:4761` name `office-brief@`).
 
-```sql
-select p.id, u.email, p.role::text as old_role, p.full_name, u.last_sign_in_at
-  from public.profiles p join auth.users u on u.id = p.id
- order by p.role::text, u.email;
-```
+The per-row read (`select id, email, role from profiles …`) is refused by the permission classifier in **every** session in this project, including the one whose gate is otherwise open for production reads — the trigger is the row grain of a people table, not the columns asked for. That is a fact about how the project is configured, and it is why §4.2 is keyed on email with asserted counts rather than on a uuid list nobody could produce. The migration itself runs as `postgres` through `db-push.yml` and reads whatever it needs; only the *review* had to be reshaped.
 
-Anything other than 11 rows, or a role distribution other than 2/7/2, means the fleet changed since the inventory and the mapping is re-decided before the migration is written — not adjusted inside it.
+Any count other than 2 / 7 / 2 at the time `0006` is written means the fleet changed and the mapping is re-decided before the migration is written — the assertions in §4.2 enforce that, they do not adjust to it.
 
-### 5.2 The one decision that gates arming the claim
+### 5.2 The two decisions, and who makes them
 
-04 §C1 is **deferred to its default**: `branden@roybalconstruction.com → owner`, the second live `admin` → `office`, and the owner confirms both in the admin UI **before the role claim is armed**. Confirming is an act in the app, not a line in a document; the migration ships the default and the confirmation gates the *hook*, not this migration. If the owner rules both admins `owner`, one line of the `values` list changes and nothing else does.
+Neither is a database question. The owner employs these eleven people and is the only source for both.
 
----
+1. **Who is the second `admin` login, and is it a second person or the owner on another account?** 04 §C1 defers to its default — the second admin → `office` — and the owner confirms both mappings in the admin UI **before the role claim is armed**. Confirming is an act in the app, not a line in a document; the migration ships the default and the confirmation gates the *hook*, not this migration. If it is the owner's own second login, that row reads `owner` instead and one line of the `values` list changes.
+2. **Do any of the seven techs run a crew today?** The migration maps all seven to `crew` (03 §2.4 says exactly that; `crew_lead` does not appear in its mapping). Promoting a crew lead is a `profiles.role` change the owner makes in the admin after `0006` lands — it needs no migration and it needs no decision before one. The default is: none at migration time.
 
 ## 6. Step N+2 — `0007_role_enum_to_text.sql`
 
@@ -292,7 +297,7 @@ With §7.1 and §7.2 applied, an approval recorded from the inbox or by SMS reac
 
 1. Widen `gmail-proxy`, `qb-time-proxy` and `qbo-proxy` to both vocabularies; deploy. Additive, reversible, and independent of everything below. **(§1.2)**
 2. `0005` — add the four enum values. Staging, then production. Inert either way.
-3. Read production's eleven profiles; write the remap table into the `0006` PR body for review. **(§5.1)**
+3. Confirm the two decisions in §5.2 with the owner (default: second admin → `office`, no crew leads at migration time); the counts in §5.1 are re-read as an aggregate the day `0006` is written.
 4. `0006` — rehearse on staging, check the fleet, apply to production in an evening window, check the fleet again an hour later.
 5. Wait a week with the rollback statement written down and the old names still legal.
 6. `0007` — the type swap, with `EXPECT_ENUMS` 7 → 6 in the same PR.
