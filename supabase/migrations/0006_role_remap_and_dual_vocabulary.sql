@@ -606,17 +606,19 @@ $$;
 --    email against the admin's user list and cannot check a uuid against
 --    anything. Never a blanket `set role = 'owner' where role = 'admin'`.
 --
---    TODO BEFORE APPLYING (doc 09 §5.2 (2)): the three placeholder emails
---    below end in "@TODO". The guard in step 6 refuses to commit against a
+--    The three lead emails are as the owner supplied them on 2026-09-19
+--    (from the QuickBooks payroll roster). If any of them is not that
+--    person's app login, step 6's "6 named rows moved" assertion fails and
+--    nothing commits. The "@TODO" guard in step 6 refuses to commit against a
 --    database that has profiles while any placeholder remains, so this file
 --    cannot be applied to staging or production by accident.
 -- ---------------------------------------------------------------------------
 create temporary table role_remap (email text, old_role text, new_role text) on commit drop;
 insert into role_remap (email, old_role, new_role) values
   ('branden@roybalconstruction.com',      'admin',  'owner'),      -- Branden Roybal, owner
-  ('cj@TODO',                             'admin',  'crew_lead'),  -- CJ (Clinton Smith), Project Manager; holds the second admin login
-  ('david.jarman@TODO',                   'tech',   'crew_lead'),  -- lead carpenter, runs a crew
-  ('gregory.costa@TODO',                  'tech',   'crew_lead'),  -- lead carpenter, runs a crew
+  ('southernshaman1221@gmail.com',       'admin',  'crew_lead'),  -- CJ (Clinton Smith), Project Manager; holds the second admin login
+  ('davidjarman511@yahoo.com',            'tech',   'crew_lead'),  -- David Jarman, lead carpenter, runs a crew
+  ('gregorypc21@icloud.com',              'tech',   'crew_lead'),  -- Gregory Costa, lead carpenter, runs a crew
   ('phone-agent@roybalconstruction.com',  'viewer', 'agent'),
   ('office-brief@roybalconstruction.com', 'viewer', 'agent');
 
