@@ -129,28 +129,30 @@ Because `role_is` resolves old **and** new names to the same answer, every one o
 Never `update profiles set role = 'owner' where role = 'admin'`. 03 §2.4 asks for an explicit `(profile_id, old_role, new_role)` table reviewed in the PR. The table below is that, with one change of key: it names people by **email**, not uuid. Two reasons. A reviewer can check an email against the admin's user list and cannot check a uuid against anything; and reading individual person rows out of production is gated for every session in this project (§5.1), so a uuid-keyed table could never be written by the same hands that write the migration. `auth.users.email` is the join 03 §2.4 itself uses when it says `branden@roybalconstruction.com → owner`.
 
 ```sql
--- The two admins and the two machine accounts: one explicit row each.
+-- The named people (§5.2) and the two machine accounts: one explicit row each.
 update public.profiles p
    set role = r.new_role::public.user_role
   from (values
-    ('branden@roybalconstruction.com',      'admin',  'owner'),
-    ('<second admin — see §5.2>',           'admin',  'office'),
+    ('branden@roybalconstruction.com',      'admin',  'owner'),      -- Branden Roybal, owner
+    ('<CJ — Clinton Smith>',                '<admin|tech>', 'office'), -- Project Manager; see §5.2 (1)
+    ('<David Jarman>',                      'tech',   'crew_lead'),  -- lead carpenter, runs a crew
+    ('<Gregory Costa>',                     'tech',   'crew_lead'),  -- lead carpenter, runs a crew
     ('phone-agent@roybalconstruction.com',  'viewer', 'agent'),
     ('office-brief@roybalconstruction.com', 'viewer', 'agent')
   ) as r(email, old_role, new_role)
   join auth.users u on lower(u.email) = lower(r.email)
  where p.id = u.id
    and p.role::text = r.old_role;   -- a row already moved is skipped, not clobbered
--- assert: found = 4
+-- assert: found = 6
 
--- The seven techs all go the same way (03 §2.4: tech → crew). crew_lead is
--- not assigned here: the database does not record who runs a crew, and the
--- owner promotes crew leads in the admin afterwards (§5.2).
+-- Everyone still holding tech is a crew member (03 §2.4: tech → crew).
 update public.profiles set role = 'crew' where role::text = 'tech';
--- assert: found = 7
+-- assert: found = 4 if CJ's login is the second admin, 5 if the second admin
+--         is the owner's own second account (§5.2 (1)); the migration states
+--         which and asserts that number, never "some".
 ```
 
-then a `DO` block asserting the two counts above, that `profiles` still has exactly eleven rows, and that no row is left holding `admin` or `tech`. The count assertions are what make this as safe as a per-row list: if the fleet has changed since the counts in §5.1 were read, the migration stops before it commits and the reviewer re-decides the mapping rather than the migration guessing. Listing `old_role` in each predicate is what makes the file safe to re-run and what makes a hand-edited row in production fail loudly instead of quietly.
+then a `DO` block asserting the two counts above, that `profiles` still has exactly eleven rows, that exactly two rows hold `crew_lead`, and that no row is left holding `admin` or `tech`. The count assertions are what make this as safe as a per-row list: if the fleet has changed since the counts in §5.1 were read, the migration stops before it commits and the reviewer re-decides the mapping rather than the migration guessing. Listing `old_role` in each predicate is what makes the file safe to re-run and what makes a hand-edited row in production fail loudly instead of quietly.
 
 The two machine rows also get their `agents` link in the same transaction: `update public.agents a set auth_user_id = u.id from auth.users u where a.id = '4b3353d3-…' and lower(u.email) = 'phone-agent@roybalconstruction.com'`, and the same for `'1af33481-…'` with `office-brief@` — the fixed ids seeded in `0004:966-973`, which exist precisely so a later migration can name them.
 
@@ -211,12 +213,25 @@ The per-row read (`select id, email, role from profiles …`) is refused by the 
 
 Any count other than 2 / 7 / 2 at the time `0006` is written means the fleet changed and the mapping is re-decided before the migration is written — the assertions in §4.2 enforce that, they do not adjust to it.
 
-### 5.2 The two decisions, and who makes them
+### 5.2 The people, as the owner named them
 
-Neither is a database question. The owner employs these eleven people and is the only source for both.
+Answered by the owner on 2026-09-19 (in this thread and, a minute earlier, in another): *"I am the only one in the office at the moment. Branden Roybal, branden@roybalconstruction.com. I have a project manager, Clinton Smith, he goes by CJ. And I have two lead carpenters that run crews, David Jarman and Gregory Costa."* That fixes the mapping:
 
-1. **Who is the second `admin` login, and is it a second person or the owner on another account?** 04 §C1 defers to its default — the second admin → `office` — and the owner confirms both mappings in the admin UI **before the role claim is armed**. Confirming is an act in the app, not a line in a document; the migration ships the default and the confirmation gates the *hook*, not this migration. If it is the owner's own second login, that row reads `owner` instead and one line of the `values` list changes.
-2. **Do any of the seven techs run a crew today?** The migration maps all seven to `crew` (03 §2.4 says exactly that; `crew_lead` does not appear in its mapping). Promoting a crew lead is a `profiles.role` change the owner makes in the admin after `0006` lands — it needs no migration and it needs no decision before one. The default is: none at migration time.
+| Person | Today | Target | Why |
+|---|---|---|---|
+| Branden Roybal, `branden@roybalconstruction.com` | `admin` | **`owner`** | the owner; 03 §2.4 names this row |
+| CJ (Clinton Smith), Project Manager | `admin` or `tech` — see (1) | **`office`** | a PM sets stages on any job in the division, approves crew schedules and sends customer-facing messages; `office` is the role that may do those (`0004:1014`, `:1037`, `:1061`). `crew_lead` may only propose comms (`:1039`) and executes on its own crew's jobs, which is too narrow for a PM. `office` × `money` × `approve` is seeded **off** (`0004:1025`, the 2026-09-06 ruling), so this widens nothing about money |
+| David Jarman, lead carpenter | `tech` | **`crew_lead`** | runs a crew; may execute on own crew's jobs and approve own crew's schedule |
+| Gregory Costa, lead carpenter | `tech` | **`crew_lead`** | same |
+| the remaining techs (4 or 5) | `tech` | **`crew`** | 03 §2.4: tech → crew |
+| `phone-agent@`, `office-brief@` | `viewer` | **`agent`** | the two machine accounts; linked to their `agents` rows in the same transaction |
+
+Nobody maps to `viewer` after N+1. That is what frees it for the signup default in §4.1.
+
+Two details the owner's answer does not settle, both cheap:
+
+1. **Which login is the second `admin`?** There are two `admin` rows (§5.1) and the owner named one of them. If the other is CJ's, his row is `admin → office` and four techs become `crew`. If the other is the owner's own second account, that row is `admin → owner` (two owners, both him), CJ's is `tech → office`, and five techs become `crew`. 04 §C1's default assumed the second admin is a second person; the owner's "I am the only one in the office" makes CJ the likely holder, but the migration asserts the exact count, so this is confirmed before `0006` is written, not guessed inside it. The owner also confirms both `admin` mappings in the admin UI before the role claim is armed, per 04 §C1 — the confirmation gates the *hook*, not this migration.
+2. **The three emails.** CJ's, David's and Gregory's login emails go into the `values` list verbatim. They are visible to the owner in the Supabase dashboard's Auth → Users page and in the admin app; they are not readable from a project thread (§5.1). They are collected when `0006` is written.
 
 ## 6. Step N+2 — `0007_role_enum_to_text.sql`
 
@@ -297,7 +312,7 @@ With §7.1 and §7.2 applied, an approval recorded from the inbox or by SMS reac
 
 1. Widen `gmail-proxy`, `qb-time-proxy` and `qbo-proxy` to both vocabularies; deploy. Additive, reversible, and independent of everything below. **(§1.2)**
 2. `0005` — add the four enum values. Staging, then production. Inert either way.
-3. Confirm the two decisions in §5.2 with the owner (default: second admin → `office`, no crew leads at migration time); the counts in §5.1 are re-read as an aggregate the day `0006` is written.
+3. Collect the two details in §5.2 from the owner (which login holds the second `admin`, and the three named people's login emails); the counts in §5.1 are re-read as an aggregate the day `0006` is written.
 4. `0006` — rehearse on staging, check the fleet, apply to production in an evening window, check the fleet again an hour later.
 5. Wait a week with the rollback statement written down and the old names still legal.
 6. `0007` — the type swap, with `EXPECT_ENUMS` 7 → 6 in the same PR.
