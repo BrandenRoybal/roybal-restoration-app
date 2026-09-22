@@ -18,7 +18,9 @@ So it is three migrations, and the order is forced:
 |---|---|---|---|
 | **N** | `0005_role_enum_add_values.sql` | `alter type user_role add value` × 4. Nothing reads them yet. | its own — the values are unusable until it commits |
 | **N+1** | `0006_role_remap_and_dual_vocabulary.sql` | rewrites every gate to accept **both** vocabularies, then remaps the eleven rows, then asserts `push_project` still resolves `_sync_guard(text)` | **one** — if any part fails, nothing is remapped |
-| **N+2** | `0007_role_enum_to_text.sql` | a week later: `profiles.role` becomes `text` with a check constraint over the six target names, and `user_role` is dropped | its own |
+| **N+2** | `0008_role_enum_to_text.sql` | a week later: `profiles.role` becomes `text` with a check constraint over the six target names, and `user_role` is dropped | its own |
+
+`0007_restore_office_brief_agent.sql` sits between them and is not part of the plan: it is the data repair for the 2026-09-22 login clean-up (the owner hard-deleted the office-brief machine login by mistake, and David Jarman's login on purpose, he had left that day). It puts the recreated office-brief login back on `agent`, relinks agent:brief, and removes the one orphaned `sync_clients` row. It shifted the numbers below by one: the type swap is `0008`, the spine `0009`, the first operations `0010`. The fleet it leaves is **10 logins: 1 owner, 2 crew_lead, 5 crew, 2 agent, 0 office**, and `0008`'s assertions read those numbers, not `0006`'s.
 
 Between N+1 and N+2 the database answers to both vocabularies and every old name is still a legal value, which is the week in which a rollback costs one `update`. After N+2 the old names are gone and the repo's own convention (03 §3.4: *enumerations are `text` with a check constraint, never a Postgres enum*) holds for the last enum that broke it.
 
@@ -122,7 +124,7 @@ The normalisation is the one already written in `current_role_name()` (`0004:130
 
 Because `role_is` resolves old **and** new names to the same answer, every one of these is correct both before and after §4.2 runs — which is the property the whole three-step shape exists to buy.
 
-**As written in `0006` (2026-09-19):** the short gates (`_sync_guard`, `is_admin`, the three `field_photos` crew policies, `current_role_name`) use `role_is` exactly as the table says. The four long RPCs — `contact_mark_review_asked`, `contact_merge`, `contact_resolve`, `coordination_job_patch` — do not: their bodies (60 to 180 lines each) are re-emitted verbatim from `0000_baseline.sql` by script, and the one `in (…)` list each carries is extended with the target names, so `contact_merge` reads `in ('admin', 'office', 'owner')` rather than `role_is('owner', 'office')`. A long function copied unchanged is safer than one re-typed, and the answer is identical on both sides of the remap. The old names in those four lists become unreachable after `0007` and are trimmed whenever each function is next touched for its own reasons. `supabase/test/role_enum.test.sql` asserts all of the above on the CI replay, with rows it creates and rolls back.
+**As written in `0006` (2026-09-19):** the short gates (`_sync_guard`, `is_admin`, the three `field_photos` crew policies, `current_role_name`) use `role_is` exactly as the table says. The four long RPCs — `contact_mark_review_asked`, `contact_merge`, `contact_resolve`, `coordination_job_patch` — do not: their bodies (60 to 180 lines each) are re-emitted verbatim from `0000_baseline.sql` by script, and the one `in (…)` list each carries is extended with the target names, so `contact_merge` reads `in ('admin', 'office', 'owner')` rather than `role_is('owner', 'office')`. A long function copied unchanged is safer than one re-typed, and the answer is identical on both sides of the remap. The old names in those four lists become unreachable after `0008` and are trimmed whenever each function is next touched for its own reasons. `supabase/test/role_enum.test.sql` asserts all of the above on the CI replay, with rows it creates and rolls back.
 
 **The one behaviour change that is not a widening:** `handle_new_user()`. Public signup is on (`00-SYSTEM-INVENTORY.md`), and today a stranger who signs up lands on `tech`, which `_sync_guard` admits — they can write `field_projects`. `viewer` is the least-privilege target role and, after §4.2, is held by nobody, so it is free to take. **Decided by the owner 2026-09-19:** new signups land on `viewer` (read-only) and a real crew member is set to `crew` in the admin the day they are handed a phone. This is the only line in the three migrations that changes what a human experiences.
 
@@ -237,7 +239,7 @@ Three details, all collected when `0006` is written:
 2. **The three emails.** CJ's, David's and Gregory's login emails go into the `values` list verbatim. They are visible to the owner in the Supabase dashboard's Auth → Users page and in the admin app; they are not readable from a project thread (§5.1).
 3. **Nine human logins, four names.** Two `admin` plus seven `tech` is nine human logins; the owner named four people. The other five `tech` rows are the rest of the crew — or some of them are former employees whose logins were never disabled. Today that matters little (`tech` already has staff access through `STAFF_ROLES`); after N+1 it matters exactly as much, because `crew` inherits the same access. So the `tech → crew` statement in §4.2 is not applied blind: the PR for `0006` lists the emails it will move (from the Auth → Users page), the owner strikes any that no longer work here, and those rows are **disabled in Auth, not remapped** — a departed employee's login ends at the migration, it does not get a new role. The count assertion then reflects the list as reviewed.
 
-## 6. Step N+2 — `0007_role_enum_to_text.sql`
+## 6. Step N+2 — `0008_role_enum_to_text.sql` (was `0007` before the repair file)
 
 A week after N+1, with the fleet's `last_seen` column showing every device has pushed since.
 
@@ -271,7 +273,7 @@ and `role_is` loses its old-name arm, becoming a plain membership test. Because 
 
 `0004` created `operation_catalog` and left it empty, and created `proposals`, `events`, `jobs_queue` and `outbox` with no function able to write to them — writes are granted to nobody and arrive only through `security definer` `op_*` functions (`0004:35-53`). This is that step. It depends on the role migration only in that `role_permissions` is keyed on the target vocabulary, which N+1 makes true of `profiles.role` as well.
 
-### 7.1 The spine — `0008_op_spine.sql`
+### 7.1 The spine — `0009_op_spine.sql`
 
 Six functions, each `security definer`, `search_path` pinned, `revoke all … from public` and granted per the table below. 03 §7.3 names them; what follows is what each one has to do given the tables as merged.
 
@@ -288,7 +290,7 @@ Two rules the table does not show. **`p_principal_id` is mandatory for a service
 
 `ai_reserve` / `ai_settle` are listed with these in 03 §7.3 but belong to the metering tables (`ai_caps`, `agent_runs`, `model_routes`), none of which `0004` created. They are their own migration and are out of this plan's scope.
 
-### 7.2 The first five operations — `0009_ops_first_five.sql`
+### 7.2 The first five operations — `0010_ops_first_five.sql`
 
 Each is a `defineOp` file in `packages/domain/ops/` whose SQL body ships beside it, per 03 §2.3:
 
@@ -318,9 +320,9 @@ With §7.1 and §7.2 applied, an approval recorded from the inbox or by SMS reac
 2. `0005` — add the four enum values. Staging, then production. Inert either way.
 3. Collect the three named people's login emails and review the five `tech → crew` rows with the owner (§5.2); the counts in §5.1 are re-read as an aggregate the day `0006` is written. The owner supplied the three emails on 2026-09-19 from the QuickBooks payroll roster and they are in `0006`; if any is not that person's app login, the "6 named rows moved" assertion fails on staging and nothing commits. The payroll roster shows seven employees against nine human logins, so at least one `tech` login belongs to someone not on payroll; it becomes `crew` like the rest and is the owner's to disable in Auth if it is a former employee.
 4. `0006` — rehearse on staging, check the fleet, apply to production in an evening window, check the fleet again an hour later. **Done on staging 2026-09-19 (DB push run 8):** history 0000–0006, census matched, every gate verified. Staging holds no `auth.users` rows, though, so the remap block matched nothing there and its count assertions were skipped; production is the first database where §4.2 meets real rows, protected by the all-or-nothing assertions. The email rows in §5.2 can be checked by eye against Supabase Auth → Users before the production run.
-5. Wait a week with the rollback statement written down and the old names still legal.
-6. `0007` — the type swap, with `EXPECT_ENUMS` 7 → 6 in the same PR. **Its own PR, merged only after the week:** `supabase db push` applies every migration file not yet in the history, so a `0007` sitting in `supabase/migrations/` on the day `0006` is pushed would run in the same push and close the rollback window before it opened.
-7. `0008`, `0009` — the op spine and the first five operations.
+5. Wait a week with the rollback statement written down and the old names still legal. **Done on production 2026-09-22 00:59 UTC** (DB push runs 9 and 10 from `main`): 1 owner / 3 crew_lead / 5 crew / 2 agent / 0 office over 11 profiles, every assertion passed. The same evening the owner deleted two logins on the Users page (see §1); `0007_restore_office_brief_agent.sql` is the repair, applied on his word like everything else, and it is the one file allowed inside the week because it changes no gate and no type.
+6. `0008` — the type swap, with `EXPECT_ENUMS` 7 → 6 in the same PR, asserting on the post-repair fleet (10 logins, 2 crew_lead). **Its own PR, merged only after the week (on or after 2026-09-29):** `supabase db push` applies every migration file not yet in the history, so a `0008` sitting in `supabase/migrations/` on the day `0006` is pushed would run in the same push and close the rollback window before it opened.
+7. `0009`, `0010` — the op spine and the first five operations.
 8. Separately, in the same phase: the 29 email-fence policies become one role/kind predicate now that `agents` exists.
 
 Every one of these reaches production through `.github/workflows/db-push.yml` — staging rehearsal, then a manual production run gated on the owner's word. Nothing here is applied through the Supabase SQL editor or the MCP connector; 03 §8.6 is unambiguous about why, and the 2026-09-07 history repair is the receipt.
