@@ -18,7 +18,7 @@ import {
   INSPECTION_TYPES, INSPECTION_RESULTS, PRECON_ITEMS, COMPLETION_ITEMS,
   blankScopeArea, blankScopeItem, blankAllowanceRow, blankPermitRow,
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
-  newPortalShare, PORTAL_MILESTONES,
+  newPortalShare, PORTAL_MILESTONES, jobType,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
 import { photoShareControl, photoShareSheetLine } from "./photoshare.js";
@@ -30,6 +30,7 @@ import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, photoAiOutdated, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { dictateBtn } from "./dictate.js";
+import { siteVisitPanel } from "./sitevisit.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
@@ -1450,6 +1451,7 @@ export function invoice(project, inv) {
     paintRecap();
   }
   const lossTa = ta(inv, "lossSummary");
+  const notesTa = ta(inv, "notes");
   const itemsWrap = h("div", {});
   function paintItems() {
     itemsWrap.replaceChildren(invoiceCharges(inv, (s) => recalc(s)));
@@ -1727,8 +1729,25 @@ export function invoice(project, inv) {
   }
   scopeBtn.addEventListener("click", () => { if (aiAvailable()) renderScopeStart(); });
 
+  /* ---- AI: Site Visit (estimates) — draft from the Magicplan report, photos,
+     note pages, the recorded walk and the typed scope. See sitevisit.js. ---- */
+  const siteBtn = h("button", { type: "button", class: "btn btn--sm" }, "📋 Site visit");
+  const openSiteVisit = () => aiPanel.replaceChildren(siteVisitPanel({
+    project, inv, save: commit,
+    onApplied: (sum) => {
+      lossTa.value = inv.lossSummary || ""; lossTa.autoGrow();
+      notesTa.value = inv.notes || ""; notesTa.autoGrow();
+      paintItems();
+      toast(`Estimate drafted from the site visit: ${sum.lines} line${sum.lines === 1 ? "" : "s"}, ${sum.fromCatalog} priced from the Fairbanks list` +
+        (sum.flagged ? `, ${sum.flagged} need a price` : "") + ". Review every line.", 5000);
+    },
+  }));
+  siteBtn.addEventListener("click", () => { if (aiAvailable()) openSiteVisit(); });
+  // a draft still running for THIS estimate: reopen the panel so it loads when done
+  if (isEst && project.siteVisit && project.siteVisit.pending && project.siteVisit.pending.invId === inv.id) openSiteVisit();
+
   const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" },
-    ...(isEst ? [scopeBtn, draftBtn, importBtn, auditBtn] : [scopeBtn, draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);
+    ...(isEst ? [siteBtn, scopeBtn, draftBtn, importBtn, auditBtn] : [scopeBtn, draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);
 
   /* ---- supporting documents: receipts, sub invoices, dump tickets…
      Attached PDFs/photos become full pages after the invoice when printed. ---- */
@@ -1859,10 +1878,12 @@ export function invoice(project, inv) {
   // (Pricing mode has no toggle — it's derived from the document kind above:
   //  estimate = piecework, invoice = T&M. Removed the redundant control.)
 
+  // an estimate on a construction (remodel / new work) job has no loss behind it
+  const buildEst = isEst && jobType(project) === "construction";
   const invoiceSheet = sheet(
-    isEst ? "RECONSTRUCTION ESTIMATE" : "CONSTRUCTION INVOICE",
-    isEst ? "Proposed rebuild scope & pricing — post-mitigation reconstruction" : "Mitigation & Reconstruction Services | IICRC S500 Compliant",
-    isEst ? "Reconstruction Estimate" : "Construction Invoice",
+    buildEst ? "ESTIMATE" : isEst ? "RECONSTRUCTION ESTIMATE" : "CONSTRUCTION INVOICE",
+    buildEst ? "Proposed scope & pricing" : isEst ? "Proposed rebuild scope & pricing — post-mitigation reconstruction" : "Mitigation & Reconstruction Services | IICRC S500 Compliant",
+    buildEst ? "Estimate" : isEst ? "Reconstruction Estimate" : "Construction Invoice",
     h("div", { class: "grid2" },
       field(isEst ? "Estimate #" : "Invoice #", inp(inv, "invoiceNo")),
       field(isEst ? "Estimate Date" : "Invoice Date", inp(inv, "invoiceDate", { type: "date" }))),
@@ -1871,10 +1892,10 @@ export function invoice(project, inv) {
       : h("div", { class: "grid2" },
           field("Due Date", inp(inv, "dueDate", { type: "date" })),
           field("Payment Terms", inp(inv, "terms"))),
-    sectionTitle(isEst ? "Prepared For / Insured & Claim" : "Bill To / Insured & Claim"),
+    sectionTitle(buildEst ? "Prepared For" : isEst ? "Prepared For / Insured & Claim" : "Bill To / Insured & Claim"),
     jobInfo(project, ["customer", "address", "phone", "email"]),
-    jobInfo(project, ["carrier", "claimNo", "dateOfLoss", "adjuster"]),
-    field(isEst ? "Damage Description / Rebuild Scope Summary" : "Loss Description / Scope Summary", lossTa),
+    buildEst ? null : jobInfo(project, ["carrier", "claimNo", "dateOfLoss", "adjuster"]),
+    field(buildEst ? "Scope Summary" : isEst ? "Damage Description / Rebuild Scope Summary" : "Loss Description / Scope Summary", lossTa),
     sectionTitle(isEst ? "Estimated Scope of Repairs" : "Charges"),
     isEst ? null : h("div", { class: "app-only" }, field("Billing model", modeSeg)),
     aiBar,
@@ -1882,7 +1903,7 @@ export function invoice(project, inv) {
     itemsWrap,
     totalsBox,
     recapEl,
-    field("Notes / Supporting Documentation", ta(inv, "notes")),
+    field(isEst ? "Notes, Assumptions & Exclusions" : "Notes / Supporting Documentation", notesTa),
     h("div", { class: "app-only", style: "margin:4px 0 10px" },
       h("div", { class: "subtle", style: "font-size:12px" },
         "Attach receipts, subcontractor invoices or other supporting documents — each prints as its own page after the invoice."),
@@ -1890,9 +1911,11 @@ export function invoice(project, inv) {
     attachNote,
     isEst
       ? h("div", { class: "remit print-only" },
-          h("strong", {}, "Roybal Construction, LLC — Reconstruction Estimate"),
+          h("strong", {}, "Roybal Construction, LLC — " + (buildEst ? "Estimate" : "Reconstruction Estimate")),
           h("div", {}, "3850 Royal Rd, Fairbanks, AK 99701 · 907-371-9868 · branden@roybalconstruction.com"),
-          h("div", {}, "This is an estimate of proposed reconstruction, not an invoice. Pricing subject to hidden-condition supplements and carrier-approved change orders."))
+          h("div", {}, buildEst
+            ? "This is an estimate of proposed work, not an invoice. Pricing is subject to hidden conditions and signed change orders."
+            : "This is an estimate of proposed reconstruction, not an invoice. Pricing subject to hidden-condition supplements and carrier-approved change orders."))
       : h("div", { class: "remit print-only" },
           h("strong", {}, "Remit to: Roybal Construction, LLC"),
           h("div", {}, "3850 Royal Rd, Fairbanks, AK 99701"),

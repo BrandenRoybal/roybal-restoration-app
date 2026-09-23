@@ -234,6 +234,34 @@ export function draftReconEstimate(project, pricingMode, verifiedScope) {
     pricingMode,
   }).then((b) => b.draft);
 }
+/* ---------- Site Visit estimator ----------
+   The draft reads the site visit itself (report PDF, photos, note pages, the
+   recorded walk, typed scope) from storage; the facts here are only the job
+   header plus whatever the job has already documented. */
+function siteVisitFacts(project) {
+  if (jobType(project) === "construction") {
+    return {
+      job: {
+        owner: project.customer || "", property: project.address || "",
+        jobType: "construction", constructionType: project.constructionType || "",
+        carrier: project.carrier || "", claim: project.claimNo || "", jobId: project.workOrderNo || "",
+      },
+    };
+  }
+  return reconEstimateFacts(project);
+}
+/** Transcribe an uploaded site-walk recording → { transcript, seconds }. */
+export function transcribeSiteAudio(project, path) {
+  return callOffice(project, "siteVisitTranscribe", { path });
+}
+/** Submit the draft → { batchId, model }. It runs in the background. */
+export function startSiteVisitDraft(project, packet, pricingMode) {
+  return callOffice(project, "siteVisitStart", { packet, facts: siteVisitFacts(project), pricingMode });
+}
+/** { status: "running" } until it finishes, then { status: "done", draft }. */
+export function checkSiteVisitDraft(project, batchId, pricingMode) {
+  return callOffice(project, "siteVisitResult", { batchId, pricingMode });
+}
 export function auditReconEstimate(project, inv, pricingMode) {
   return callOffice(project, "invoiceAudit", {
     facts: reconEstimateFacts(project),

@@ -24,6 +24,11 @@
  *   progressNarrative — weekly construction progress update (Markdown)
  *                   for the owner / adjuster / lender, from the
  *                   constructionFacts digest.
+ *   siteVisitTranscribe / siteVisitStart / siteVisitResult — the Site Visit
+ *                   estimator: an estimate drafted from the Magicplan report,
+ *                   photos, note pages, the recorded walk and the typed scope,
+ *                   read by signed URL and run as a Message Batch (see
+ *                   ./sitevisit.ts for why).
  *
  * fieldAssist personas: body.app (field | board | admin) picks the persona
  * (server-defined text only, registry in ../_shared/personas/) and is stamped on
@@ -61,6 +66,7 @@ import {
   PERSONAS, CTX_LABELS, SPOKEN_RULE, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS,
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
+import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, buildContent, buildBatchBody, parseBatchResult } from "./sitevisit.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -76,6 +82,13 @@ const LLM_API_KEY = Deno.env.get("LLM_API_KEY") ?? "";                        //
 // Sonnet — near-Opus quality but fast, since someone is waiting on those.
 const PHOTO_MODEL = Deno.env.get("OFFICE_PHOTO_MODEL") ?? "claude-sonnet-4-6";
 const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-opus-4-8";
+// Site Visit estimates read the whole site visit (report PDF, photos, notes,
+// the recorded walk) — Branden asked for the best model available, so it runs
+// on the most capable one. Env-overridable without a redeploy of the code.
+const SITE_VISIT_MODEL = Deno.env.get("SITE_VISIT_MODEL") ?? "claude-fable-5-1";
+const SITE_VISIT_EFFORT = Deno.env.get("SITE_VISIT_EFFORT") ?? "high";
+// Message Batches bill at half the standard token price.
+const BATCH_DISCOUNT = 0.5;
 const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
 // Spoken turns can run a faster model (someone is standing there listening);
 // defaults to the same assistant model until the env override is set.
@@ -98,6 +111,10 @@ const LLM_PRICES: Record<string, { in: number; out: number }> = {
   "claude-haiku-4-5": { in: 1.0, out: 5.0 },
   "claude-sonnet-4-6": { in: 3.0, out: 15.0 },
   "claude-opus-4-8": { in: 5.0, out: 25.0 },
+  "claude-sonnet-5": { in: 2.0, out: 10.0 },
+  "claude-opus-5": { in: 5.0, out: 25.0 },
+  "claude-opus-5-5": { in: 4.0, out: 20.0 },
+  "claude-fable-5-1": { in: 10.0, out: 50.0 },
 };
 const priceFor = (model: string) => LLM_PRICES[model] ?? { in: 3.0, out: 15.0 };
 
@@ -498,21 +515,10 @@ async function resolvePrices(items: DraftLine[], jwt: string, mode: PricingMode)
   });
 }
 
-async function invoiceDraft(body: Record<string, unknown>) {
-  const facts = body.facts;
-  if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
-  const jwt = String((body as Record<string, unknown>)._jwt ?? "");
-  // Two independent axes:
-  //  - doc type: reconstruction ESTIMATE (future put-back) vs INVOICE (performed work)
-  //  - pricing mode: PIECEWORK (unit-priced) vs T&M (hourly trade labor) — the toggle
-  const estimate = body.mode === "reconEstimate";
-  const pm: PricingMode =
-    body.pricingMode === "tm" || body.pricingMode === "piecework"
-      ? (body.pricingMode as PricingMode)
-      : estimate ? "piecework" : "tm";
-  const rows = await fetchCatalogRows(jwt, catsForMode(pm));
-  const catText = catalogTextFromRows(rows, pm);
-
+/* The company estimating rules shared by every line-item draft: the pricing
+   mode (piecework vs T&M), the common line conventions, and Roybal inclusion
+   rules distilled from Branden's past estimates (docs/Estimating_Rules_Draft.md). */
+function estimatingRules(pm: PricingMode) {
   const codeRule =
     "- EVERY line MUST be tagged with the catalog line it bills: set `category` + `code` to a real row from the PRICE CATALOG and `priceBasis` to how it is priced. The catalog's authoritative Fairbanks price OVERRIDES your `price`, so your number only stands when NO catalog code fits (then category=\"\" code=\"\" priceBasis=\"estimate\", and price it at a fair Fairbanks rate).\n";
   const pricingRules =
@@ -527,22 +533,6 @@ async function invoiceDraft(body: Record<string, unknown>) {
         "- MATERIAL lines: category='' code='' priceBasis='estimate'. Estimate a fair MATERIAL-ONLY cost per unit (drywall board, mud/tape, insulation, paint, primer, trim, fasteners, poly) — unit = SF/LF/EA, qty = the material quantity. Materials-only, NO labor baked in (labor is the HR lines). These stay flagged for the office to true-up against receipts.\n" +
         "- Equipment / consumables / pass-through (dehumidifier & air-mover days, dumpster/haul, PPE) also go as priceBasis='estimate' at a fair cost.\n" +
         "- Do NOT emit a single per-SF assembly price that covers labor + material — that double-bills labor. Split every assembly into LABOR (hours) + MATERIAL (estimate).\n";
-  const scopeFraming =
-    estimate
-      ? "Draft the RECONSTRUCTION ESTIMATE line items — the proposed scope to REBUILD the structure after mitigation (future work, not billing for performed work).\n" +
-        "- VERIFIED SCOPE (HIGHEST PRIORITY): if facts.verifiedScope is present it is the estimator's CONFIRMED scope of work — their spoken narration (facts.verifiedScope.summary / .narration) plus their answers to scope questions (facts.verifiedScope.answers). Build the line items to fulfil it EXACTLY; it OVERRIDES any inference. Use the documented facts below only for quantities and support. If facts.verifiedScope is absent, infer scope from the documented demolition/damage as described next.\n" +
-        "- SCOPE = PUT-BACK of the documented demolition/damage (facts.demoNotes, facts.affectedAreas): flood cuts to new drywall; removed flooring to underlayment, flooring, baseboard, paint. Include the full finish chain per assembly (hang, tape, texture, prime, paint).\n" +
-        "- QUANTITIES from facts.planDimensions (tech-verified SF/LF) — cite the room's dimensions in the basis; where missing, derive conservatively and say so.\n" +
-        "- Include trades the damage clearly requires (electrical/plumbing/HVAC disturbed by demo, insulation in opened walls, code items facts.supportingDocs cites).\n" +
-        "- STRUCTURE ONLY: contents / personal property (facts.contentsLoss) are claimed separately — note that in lossSummary.\n"
-      : "Draft the line items billing the DOCUMENTED PERFORMED work for this job.\n" +
-        "- VERIFIED SCOPE (HIGHEST PRIORITY): if facts.verifiedScope is present it is the estimator's CONFIRMED billable scope (their narration in .summary/.narration plus .answers) — bill it exactly, using the documented facts below for quantities / hours / support; it OVERRIDES inference.\n" +
-        "- Bill only what the facts support; state the basis on every line.\n" +
-        "- facts.receipts (when present) are AI-read receipts / sub invoices — bill each pass-through at its receipt total, citing vendor + date; never bill a receipt twice.\n";
-  const hourRule =
-    pm === "tm" && !estimate
-      ? "- RECONCILE HOURS: HR quantities across ALL labor lines MUST sum to facts.labor.totalHours. Split facts.labor.entries into trade-specific labor lines by their work notes; bill any remainder as one 'General mitigation labor' (LAB / LBR) line so no logged hour goes unbilled. Moisture mapping / monitoring visits bill hourly, never as flat per-visit fees.\n"
-      : "";
   const commonRules =
     "- Group every line into its room/area via the room field (Xactimate style); job-wide lines (debris, floor protection, final clean, permits) go under 'Main Level'.\n" +
     "- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit it.\n" +
@@ -561,6 +551,41 @@ async function invoiceDraft(body: Record<string, unknown>) {
   const inclusionRestoration =
     "- PUT-BACK COMPLETENESS: every tear-out / flood cut / removal in facts.demoNotes and facts.affectedAreas needs its FULL rebuild — removed flooring → floor prep + flooring + transitions; drywall → hang, tape, texture, prime, two coats paint; baseboard / trim / paneling → reinstall; detached fixtures → reset or replace per the rule above. Leave no demo line without its put-back.\n" +
     "- FINISH CHAIN: any new or patched drywall → mask & prep → PVA primer (one coat) → paint (two coats); any flooring install → a floor-prep line first. Always include a final construction cleaning line and floor / surface protection.\n";
+  return { pricingRules, commonRules, inclusionUniversal, inclusionMitigation, inclusionRestoration };
+}
+
+async function invoiceDraft(body: Record<string, unknown>) {
+  const facts = body.facts;
+  if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
+  const jwt = String((body as Record<string, unknown>)._jwt ?? "");
+  // Two independent axes:
+  //  - doc type: reconstruction ESTIMATE (future put-back) vs INVOICE (performed work)
+  //  - pricing mode: PIECEWORK (unit-priced) vs T&M (hourly trade labor) — the toggle
+  const estimate = body.mode === "reconEstimate";
+  const pm: PricingMode =
+    body.pricingMode === "tm" || body.pricingMode === "piecework"
+      ? (body.pricingMode as PricingMode)
+      : estimate ? "piecework" : "tm";
+  const rows = await fetchCatalogRows(jwt, catsForMode(pm));
+  const catText = catalogTextFromRows(rows, pm);
+
+  const { pricingRules, commonRules, inclusionUniversal, inclusionMitigation, inclusionRestoration } = estimatingRules(pm);
+  const scopeFraming =
+    estimate
+      ? "Draft the RECONSTRUCTION ESTIMATE line items — the proposed scope to REBUILD the structure after mitigation (future work, not billing for performed work).\n" +
+        "- VERIFIED SCOPE (HIGHEST PRIORITY): if facts.verifiedScope is present it is the estimator's CONFIRMED scope of work — their spoken narration (facts.verifiedScope.summary / .narration) plus their answers to scope questions (facts.verifiedScope.answers). Build the line items to fulfil it EXACTLY; it OVERRIDES any inference. Use the documented facts below only for quantities and support. If facts.verifiedScope is absent, infer scope from the documented demolition/damage as described next.\n" +
+        "- SCOPE = PUT-BACK of the documented demolition/damage (facts.demoNotes, facts.affectedAreas): flood cuts to new drywall; removed flooring to underlayment, flooring, baseboard, paint. Include the full finish chain per assembly (hang, tape, texture, prime, paint).\n" +
+        "- QUANTITIES from facts.planDimensions (tech-verified SF/LF) — cite the room's dimensions in the basis; where missing, derive conservatively and say so.\n" +
+        "- Include trades the damage clearly requires (electrical/plumbing/HVAC disturbed by demo, insulation in opened walls, code items facts.supportingDocs cites).\n" +
+        "- STRUCTURE ONLY: contents / personal property (facts.contentsLoss) are claimed separately — note that in lossSummary.\n"
+      : "Draft the line items billing the DOCUMENTED PERFORMED work for this job.\n" +
+        "- VERIFIED SCOPE (HIGHEST PRIORITY): if facts.verifiedScope is present it is the estimator's CONFIRMED billable scope (their narration in .summary/.narration plus .answers) — bill it exactly, using the documented facts below for quantities / hours / support; it OVERRIDES inference.\n" +
+        "- Bill only what the facts support; state the basis on every line.\n" +
+        "- facts.receipts (when present) are AI-read receipts / sub invoices — bill each pass-through at its receipt total, citing vendor + date; never bill a receipt twice.\n";
+  const hourRule =
+    pm === "tm" && !estimate
+      ? "- RECONCILE HOURS: HR quantities across ALL labor lines MUST sum to facts.labor.totalHours. Split facts.labor.entries into trade-specific labor lines by their work notes; bill any remainder as one 'General mitigation labor' (LAB / LBR) line so no logged hour goes unbilled. Moisture mapping / monitoring visits bill hourly, never as flat per-visit fees.\n"
+      : "";
   const inclusionRules = inclusionUniversal + (estimate ? inclusionRestoration : inclusionMitigation);
   const content =
     scopeFraming + "\n" + pricingRules + hourRule + commonRules + "\n" + inclusionRules + "\n" +
@@ -761,6 +786,130 @@ async function scopeInterview(body: Record<string, unknown>) {
     },
     usage, model: DOC_MODEL,
     summary: { done, asked: asked + 1 },
+  };
+}
+
+/* ============================================================
+   Site Visit estimator — draft an estimate from the evidence Branden
+   collects on a site visit (Magicplan report PDF, photos, photographed
+   handwritten notes, the recorded walk, typed scope). The pure half —
+   packet cleaning, the request, the result parser — is ./sitevisit.ts.
+
+   siteVisitTranscribe — Deepgram reads the uploaded walk recording
+                         straight from storage (signed URL; the audio never
+                         passes through this function).
+   siteVisitStart      — submits ONE Message Batches request that reads
+                         every file by signed URL. Returns the batch id;
+                         nothing is billed yet.
+   siteVisitResult     — once the batch has ended, fetches the result,
+                         stamps catalog prices and returns the draft. The
+                         serve() gate answers "still running" polls
+                         without an envelope or a ledger row.
+   ============================================================ */
+const MEDIA_BUCKET = "field-media";
+const ANTHROPIC_HEADERS = () => ({ "x-api-key": LLM_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" });
+// all ten price_list categories — a site visit can be any trade
+const SITE_CATS = ["DRY", "PNT", "INS", "FNC", "FRM", "ACT", "APP", "WTR", "ACC", "LAB"];
+
+/** Signed download URL for one field-media object, under the caller's JWT
+    (RLS: field_media_rw lets any signed-in user read the bucket). */
+async function signMedia(path: string, jwt: string, expiresIn: number): Promise<string> {
+  if (!isSitePath(path)) throw new Error("That file isn't part of a site visit packet.");
+  const apikey = isNewFormatKey(jwt) ? jwt : ANON_KEY;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${MEDIA_BUCKET}/${path}`, {
+    method: "POST",
+    headers: { apikey, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ expiresIn }),
+  });
+  const out = await res.json().catch(() => ({})) as { signedURL?: string; signedUrl?: string; message?: string };
+  const rel = out.signedURL ?? out.signedUrl;
+  if (!res.ok || !rel) throw new Error(`Couldn't open ${path.split("/").pop()} from storage (${res.status}${out.message ? ": " + out.message : ""}) — upload it again.`);
+  return `${SUPABASE_URL}/storage/v1${rel.startsWith("/") ? rel : "/" + rel}`;
+}
+
+async function siteVisitTranscribe(body: Record<string, unknown>) {
+  if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
+  const jwt = String(body._jwt ?? "");
+  const url = await signMedia(String(body.path ?? ""), jwt, 3600);
+  const kt = STT_KEYTERMS.map((t) => `&keyterm=${encodeURIComponent(t)}`).join("");
+  const res = await fetch(
+    `https://api.deepgram.com/v1/listen?model=${encodeURIComponent(STT_MODEL)}&smart_format=true&punctuate=true&diarize=true&utterances=true${kt}`,
+    { method: "POST", headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`Transcription failed (${res.status}): ${raw.slice(0, 300)}`);
+  const { transcript, seconds } = formatTranscript(JSON.parse(raw));
+  if (!transcript) {
+    const e = new Error("No speech found in that recording.") as Error & { audioSeconds?: number };
+    e.audioSeconds = seconds;
+    throw e;
+  }
+  return { result: { transcript, seconds }, usage: { inTok: 0, outTok: 0 }, model: "deepgram-stt", summary: { seconds, chars: transcript.length }, audioSeconds: seconds };
+}
+
+async function siteVisitStart(body: Record<string, unknown>) {
+  if (!LLM_API_KEY) throw new Error("llm_key_missing: set the LLM_API_KEY function secret (Anthropic)");
+  const jwt = String(body._jwt ?? "");
+  const packet = cleanPacket(body.packet);
+  if (!packetHasEvidence(packet)) throw new Error("Add the Magicplan report, photos, notes, a recording or a typed scope first.");
+  const pm: PricingMode = body.pricingMode === "tm" ? "tm" : "piecework";
+
+  // batch requests can wait in Anthropic's queue, so the links must outlive it
+  const signed: Record<string, string> = {};
+  for (const f of [...packet.reports, ...packet.photos, ...packet.notes]) signed[f.path] = await signMedia(f.path, jwt, 86400);
+
+  const rows = await fetchCatalogRows(jwt, pm === "tm" ? TM_CATS : SITE_CATS);
+  const r = estimatingRules(pm);
+  const rulesText = r.pricingRules + r.commonRules + "\n" + r.inclusionUniversal +
+    "When the job includes mitigation (emergency, extraction, tear-out, drying), these apply to those lines:\n" + r.inclusionMitigation +
+    "For put-back and rebuild lines:\n" + r.inclusionRestoration;
+  const content = buildContent({ packet, signed, facts: body.facts ?? {}, rulesText, catalogText: catalogTextFromRows(rows, pm) });
+  const customId = "sv-" + crypto.randomUUID();
+  const res = await fetch("https://api.anthropic.com/v1/messages/batches", {
+    method: "POST", headers: ANTHROPIC_HEADERS(),
+    body: JSON.stringify(buildBatchBody({ customId, model: SITE_VISIT_MODEL, effort: SITE_VISIT_EFFORT, content })),
+  });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`Couldn't start the draft (${res.status}): ${raw.slice(0, 300)}`);
+  const batch = JSON.parse(raw) as { id?: string };
+  if (!batch.id) throw new Error("Couldn't start the draft: no batch id came back.");
+  return {
+    result: { batchId: batch.id, pricingMode: pm, model: SITE_VISIT_MODEL },
+    usage: { inTok: 0, outTok: 0 }, model: SITE_VISIT_MODEL,
+    summary: { batchId: batch.id, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length },
+  };
+}
+
+type BatchInfo = { id?: string; processing_status?: string; results_url?: string | null };
+async function getBatch(batchId: string): Promise<BatchInfo> {
+  if (!/^msgbatch_[A-Za-z0-9]+$/.test(batchId)) throw new Error("That isn't a draft this app started.");
+  const res = await fetch(`https://api.anthropic.com/v1/messages/batches/${batchId}`, { headers: ANTHROPIC_HEADERS() });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`Couldn't check the draft (${res.status}): ${raw.slice(0, 300)}`);
+  return JSON.parse(raw) as BatchInfo;
+}
+
+async function siteVisitResult(body: Record<string, unknown>) {
+  const jwt = String(body._jwt ?? "");
+  const batch = await getBatch(String(body.batchId ?? ""));
+  if (batch.processing_status !== "ended" || !batch.results_url) throw new Error("The draft is still running.");
+  const res = await fetch(batch.results_url, { headers: ANTHROPIC_HEADERS() });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`Couldn't fetch the draft (${res.status}): ${raw.slice(0, 300)}`);
+  const first = raw.split("\n").find((l) => l.trim());
+  const parsed = parseBatchResult(first ? JSON.parse(first) : {});
+  const model = parsed.model || SITE_VISIT_MODEL;
+  if (parsed.error || !parsed.draft) {
+    const e = new Error(parsed.error ?? "the draft came back empty") as Error & { usage?: Usage; model?: string; costScale?: number };
+    e.usage = parsed.usage; e.model = model; e.costScale = BATCH_DISCOUNT;
+    throw e;
+  }
+  const pm: PricingMode = body.pricingMode === "tm" ? "tm" : "piecework";
+  const priced = await resolvePrices(parsed.draft.items as DraftLine[], jwt, pm);
+  const draft = { ...parsed.draft, items: priced };
+  return {
+    result: { status: "done", draft },
+    usage: parsed.usage, model, costScale: BATCH_DISCOUNT,
+    summary: { batchId: batch.id, items: priced.length, catalog_priced: priced.filter((i) => (i as { priced?: string }).priced === "catalog").length, questions: draft.questions.length },
   };
 }
 
@@ -1745,8 +1894,9 @@ async function portalDraft(body: Record<string, unknown>) {
    anon key only (RLS always applies), the caller's JWT on every DB op,
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
-const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number }>> = {
+const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number; costScale?: number }>> = {
   photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
+  siteVisitTranscribe, siteVisitStart, siteVisitResult,
 };
 
 serve(async (req: Request) => {
@@ -1790,6 +1940,16 @@ serve(async (req: Request) => {
     // the envelope + ledger; also selects the fieldAssist persona
     const app = String(body.app ?? "field");
 
+    // Site Visit polls: "still running" costs nothing and writes nothing —
+    // only a FINISHED draft goes through the envelope + ledger below. The
+    // caller must still be a real signed-in user.
+    if (action === "siteVisitResult") {
+      const who = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}` } });
+      if (!who.ok) return json({ ok: false, error: "Sign in again to check the draft." }, 401);
+      const batch = await getBatch(String(body.batchId ?? ""));
+      if (batch.processing_status !== "ended") return json({ ok: true, capped: false, status: "running", processing_status: batch.processing_status ?? "" });
+    }
+
     // Envelope (RLS-gated insert before any paid call — see deploy note).
     const ev = await insertRow("capture_events", {
       unified_job_id, source_type: "office_ai", form_key: action, captured_by,
@@ -1799,17 +1959,19 @@ serve(async (req: Request) => {
 
     // Spend cap.
     const spent = await monthSpend(jwt);
-    if (SPEND_CAP_USD > 0 && spent >= SPEND_CAP_USD) {
+    // (a finished Site Visit draft was already paid for when it ran — collecting
+    // it must never be blocked by the cap, only recorded against it)
+    if (SPEND_CAP_USD > 0 && spent >= SPEND_CAP_USD && action !== "siteVisitResult") {
       await patchCaptureEvent(captureEventId!, { status: "discarded", error: "spend_cap_reached", processed_at: new Date().toISOString() }, jwt);
       await insertRow("ai_usage", { capture_event_id: captureEventId, unified_job_id, captured_by, form_key: action, provider: "none", capped: true, cost_usd: 0, note: "monthly spend cap reached" }, jwt);
       return json({ ok: true, capped: true, spend: { month_to_date_usd: spent, cap_usd: SPEND_CAP_USD } });
     }
 
-    const { result, usage, model, summary, audioSeconds = 0, ttsChars = 0 } = await run(body as Record<string, unknown>);
+    const { result, usage, model, summary, audioSeconds = 0, ttsChars = 0, costScale = 1 } = await run(body as Record<string, unknown>);
     // Full cost of the call: LLM tokens + Deepgram STT seconds + Aura TTS
     // characters — ALL of it lands in cost_usd so the cap governs honestly.
     const price = priceFor(model);
-    const llmCost = Math.max(0, (usage.inTok / 1e6) * price.in + (usage.outTok / 1e6) * price.out);
+    const llmCost = Math.max(0, ((usage.inTok / 1e6) * price.in + (usage.outTok / 1e6) * price.out) * costScale);
     const sttCost = Math.max(0, (audioSeconds / 60) * STT_PRICE_PER_MIN);
     const ttsCost = Math.max(0, (ttsChars / 1000) * TTS_PRICE_PER_1K);
     const cost = llmCost + sttCost + ttsCost;
@@ -1838,13 +2000,13 @@ serve(async (req: Request) => {
     // a 200 we rejected) still lands on the ledger — the cap must see every
     // dollar, not just successful calls. Best-effort; never masks the error.
     try {
-      const e = err as { usage?: Usage; audioSeconds?: number; ttsChars?: number; model?: string };
+      const e = err as { usage?: Usage; audioSeconds?: number; ttsChars?: number; model?: string; costScale?: number };
       const u = e?.usage ?? { inTok: 0, outTok: 0 };
       const aSec = Number(e?.audioSeconds) || 0;
       const tCh = Number(e?.ttsChars) || 0;
       if (u.inTok > 0 || u.outTok > 0 || aSec > 0 || tCh > 0) {
         const p = priceFor(String(e?.model ?? ""));
-        const llmC = Math.max(0, (u.inTok / 1e6) * p.in + (u.outTok / 1e6) * p.out);
+        const llmC = Math.max(0, ((u.inTok / 1e6) * p.in + (u.outTok / 1e6) * p.out) * (Number(e?.costScale) || 1));
         const sttC = Math.max(0, (aSec / 60) * STT_PRICE_PER_MIN);
         const ttsC = Math.max(0, (tCh / 1000) * TTS_PRICE_PER_1K);
         const usedLlmE = u.inTok > 0 || u.outTok > 0;
