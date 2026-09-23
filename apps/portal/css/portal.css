@@ -285,3 +285,29 @@ body {
 .packetframe { width: 100%; min-height: 60vh; border: 1px solid var(--line); border-radius: 12px;
   background: #fff; box-shadow: var(--shadow); display: block; }
 .packet-progress { color: var(--brand-dark); font-weight: 600; }
+
+/* ---------- "what we need from you" (top of the page) ---------- */
+.needs { border: 2px solid var(--brand); padding: 16px 18px; }
+.needs--clear { border: 1px solid var(--line); border-left: 4px solid var(--green); }
+.needs__title { margin: 0; font-weight: 800; font-size: 16px; color: var(--navy); }
+.needs--clear .needs__title { color: var(--green); }
+.needs__sub { margin: 2px 0 0; font-size: 13.5px; color: var(--muted); }
+.needs__list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.needs__item { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  text-align: left; font: inherit; font-weight: 600; font-size: 15px; color: var(--ink);
+  background: #fff4ec; border: 1px solid #f7c9ab; border-radius: 10px; padding: 11px 14px; cursor: pointer; }
+.needs__item span { color: var(--brand-dark); font-size: 20px; line-height: 1; }
+.needs__item:focus-visible, .needs__news:focus-visible { outline: 2px solid var(--navy); outline-offset: 2px; }
+.needs__news { margin-top: 10px; background: none; border: 0; padding: 0; font: inherit; font-size: 14px;
+  font-weight: 700; color: var(--navy-2); cursor: pointer; }
+
+/* images load as they scroll into view: hold the space, then fade in */
+.photo img.is-loading, .doc__pages img.is-loading { background: linear-gradient(100deg, #eef1f5 40%, #f7f8fa 50%, #eef1f5 60%) 0 0 / 200% 100%;
+  animation: shimmer 1.4s linear infinite; min-height: 120px; }
+.doc__pages img.is-loading { min-width: 92px; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .photo img.is-loading, .doc__pages img.is-loading { animation: none; } }
+
+/* insurance claim panel */
+.claim__stage { display: inline-block; margin: 0 0 8px; font-weight: 700; font-size: 14.5px; color: var(--navy);
+  background: #e9f0f7; border-radius: 999px; padding: 5px 12px; }
