@@ -452,7 +452,39 @@ export const PORTAL_MILESTONES = [
   { key: "final",       label: "Final walkthrough" },
   { key: "complete",    label: "Job complete" },
 ];
-export const portalMilestoneLabel = (k) => PORTAL_MILESTONES.find((m) => m.key === k)?.label || "";
+
+/* The construction track. A remodel or an addition has no mitigation or
+   drying, and a customer reading "Structural drying" on their shop build
+   is reading someone else's job. "scheduled", "final" and "complete" keep
+   the restoration keys, so a status carries over when a job's kind flips
+   and the portal's closeout ("complete") works on both tracks. */
+export const CONSTRUCTION_PORTAL_MILESTONES = [
+  { key: "contract",  label: "Contract signed" },
+  { key: "permits",   label: "Permits" },
+  { key: "scheduled", label: "Scheduled" },
+  { key: "framing",   label: "Framing & rough-in" },
+  { key: "drywall",   label: "Insulation & drywall" },
+  { key: "finishes",  label: "Finishes" },
+  { key: "final",     label: "Final walkthrough" },
+  { key: "complete",  label: "Job complete" },
+];
+
+/* the track for a job kind — pass jobType(p), never the raw field */
+export const portalMilestoneTrack = (kind) =>
+  (kind === "construction" ? CONSTRUCTION_PORTAL_MILESTONES : PORTAL_MILESTONES);
+
+/* A status saved on the other track (a job whose kind was flipped, or a
+   construction job published before it had its own track) lands on the
+   nearest step of this one instead of showing no current step at all. */
+const TO_CONSTRUCTION = { mitigation: "scheduled", drying: "scheduled", approved: "scheduled", reconstruction: "framing" };
+const TO_RESTORATION = { contract: "scheduled", permits: "scheduled", framing: "reconstruction", drywall: "reconstruction", finishes: "reconstruction" };
+export function portalStatusFor(status, kind) {
+  const k = String(status || "");
+  if (portalMilestoneTrack(kind).some((m) => m.key === k)) return k;
+  return (kind === "construction" ? TO_CONSTRUCTION : TO_RESTORATION)[k] || k;
+}
+
+export const portalMilestoneLabel = (k, kind) => portalMilestoneTrack(kind).find((m) => m.key === k)?.label || "";
 
 /* Friendly, customer-facing lines announcing a milestone — posted to the
    portal thread when the office advances the status (a proactive nudge).
@@ -466,7 +498,28 @@ export const PORTAL_MILESTONE_NUDGES = {
   final:          "We're at the final walkthrough stage — nearly done. We'll go over everything to make sure it's just right.",
   complete:       "Your project is complete. Thank you for trusting Roybal Construction — please reach out any time if you need anything.",
 };
-export const portalMilestoneNudge = (k) => PORTAL_MILESTONE_NUDGES[k] || "";
+export const CONSTRUCTION_MILESTONE_NUDGES = {
+  contract:  "Thanks for choosing Roybal Construction — your contract is signed and your project is officially underway. We'll keep you posted right here.",
+  permits:   "We're working on the permits for your project. We'll let you know here as soon as they're in hand.",
+  scheduled: "Good news — your project is on our schedule. We'll keep you posted right here as things move along.",
+  framing:   "Framing and rough-in are underway — the structure, plumbing and electrical are going in.",
+  drywall:   "We're on to insulation and drywall — the rooms are starting to take shape.",
+  finishes:  "Finishes are underway — the part where it starts to look like the finished space.",
+  final:     "We're at the final walkthrough stage — nearly done. We'll go over everything to make sure it's just right.",
+  complete:  "Your project is complete. Thank you for trusting Roybal Construction — please reach out any time if you need anything.",
+};
+export const portalMilestoneNudge = (k, kind) =>
+  (kind === "construction" ? CONSTRUCTION_MILESTONE_NUDGES : PORTAL_MILESTONE_NUDGES)[k] || "";
+
+/* Where an insurance claim stands, in the customer's words (the portal's
+   claim panel). The gateway keeps its own copy of these labels. */
+export const PORTAL_CLAIM_STAGES = [
+  { value: "reported",   label: "Claim reported" },
+  { value: "inspection", label: "Adjuster inspection" },
+  { value: "submitted",  label: "Our estimate is with your insurance" },
+  { value: "approved",   label: "Estimate approved" },
+  { value: "supplement", label: "Supplement pending" },
+];
 
 export function newPortalShare() {
   return {

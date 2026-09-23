@@ -15,7 +15,12 @@
  * unguessable token is the credential. Deployed `--no-verify-jwt` (public).
  *
  * Actions:
- *   view     — { token } -> { ok, job, photos, documents, unread }
+ *   view     — { token, lazyMedia? } -> { ok, job, photos, documents, unread }
+ *              With lazyMedia (today's page) photos/documents are hashes
+ *              only and each image comes from `media`; without it (a page
+ *              cached before 2026-09) they are inlined full size, as before.
+ *   media    — { token, hash, size:'thumb'|'full' } -> { ok, src } — ONE
+ *              image, served only when its hash is on that token's row.
  *   photoShare — { token } -> { ok, kind, claim header, photos:[{hash,caption,room,stage,item}] }
  *                An insurance photo link (photo_shares row): the full-size
  *                photo list for the adjuster page, references only.
@@ -51,6 +56,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { customerSheet, validateResponse, submissionMessage } from "./selections.ts";
 import { crewToday, crewLine, introLine } from "./crewtoday.mjs";
+import { mediaLists, mediaAllowed, mediaKeys } from "./media.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -120,10 +126,19 @@ const svc = { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` };
 const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
+const JOB_COLS = "id,contact_id,field_project_id,customer_name,property_address,status,milestones,photos,documents," +
+  "drying,closeout,approvals,billing,selections_submitted_at";
+/* `claim` arrives with migration 0009. Until that applies, asking for it is
+   a 400 that would take every portal link down, so the first such refusal
+   drops it for the life of this instance and the page simply has no panel. */
+let claimColumn = true;
 async function jobByToken(token: string) {
-  const q = `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true` +
-    `&select=id,contact_id,field_project_id,customer_name,property_address,status,milestones,photos,documents,drying,closeout,approvals,billing,selections_submitted_at&limit=1`;
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
+  const q = (cols: string) => `portal_jobs?share_token=eq.${encodeURIComponent(token)}&enabled=eq.true&select=${cols}&limit=1`;
+  let res = await fetch(`${SUPABASE_URL}/rest/v1/${q(claimColumn ? JOB_COLS + ",claim" : JOB_COLS)}`, { headers: svc });
+  if (res.status === 400 && claimColumn) {
+    claimColumn = false;
+    res = await fetch(`${SUPABASE_URL}/rest/v1/${q(JOB_COLS)}`, { headers: svc });
+  }
   if (!res.ok) throw new Error(`lookup failed (${res.status})`);
   const rows = await res.json();
   return Array.isArray(rows) ? rows[0] || null : null;
@@ -135,7 +150,8 @@ async function jobByToken(token: string) {
    fetch the object and return the data URL itself, which <img src> renders
    natively. Returns null when the object is missing or isn't an image. */
 async function mediaSrc(hash: string): Promise<string | null> {
-  if (!/^[0-9a-f]{64}$/.test(String(hash || ""))) return null;
+  // a content hash, or the thumbnail sweep's derived `thumb_<hash>` key
+  if (!/^(thumb_)?[0-9a-f]{64}$/.test(String(hash || ""))) return null;
   const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${hash}`, { headers: svc });
   if (!res.ok) return null;
   const text = await res.text();
@@ -232,10 +248,22 @@ async function unreadForCustomer(jobId: string): Promise<number> {
   return Number.isFinite(n) ? n : 0;
 }
 
-async function view(token: string) {
+async function view(token: string, lazyMedia = false) {
   if (!goodToken(token)) throw new Error("bad_token");
   const row = await jobByToken(token);
   if (!row) return null;
+  const lists = lazyMedia ? mediaLists(row) : await inlineMedia(row);
+  return {
+    ...(await viewSlice(row)),
+    photos: lists.photos,
+    documents: lists.documents,
+  };
+}
+
+/* The pre-2026-09 response shape: every shared image inlined full size. Kept
+   only for a portal page a customer's browser cached before lazy loading. */
+// deno-lint-ignore no-explicit-any
+async function inlineMedia(row: any) {
   const photos: Array<{ url: string; caption: string; stage: string }> = [];
   // Cap how many full images we inline so the response stays reasonable on a
   // phone; the office shares a handful of progress photos in practice.
@@ -254,6 +282,93 @@ async function view(token: string) {
     }
     if (pages.length) documents.push({ label: String(d.label || "Document").slice(0, 120), type: String(d.type || "").slice(0, 60), pages });
   }
+  return { photos, documents };
+}
+
+/* ONE shared image for the page, by hash — a preview (thumbnail when the
+   sweep has made one) or the full photo. mediaAllowed is the gate. */
+async function portalMedia(token: string, hash: string, size: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row || !mediaAllowed(row, hash)) return null;
+  for (const key of mediaKeys(hash, size === "thumb" ? "thumb" : "full")) {
+    const src = await mediaSrc(key);
+    if (src) return { src };
+  }
+  return null;
+}
+
+/* the insurance claim panel, allow-listed. Only what the policyholder
+   already knows or is owed: whose claim, its number, where it stands, and
+   their deductible. Never the adjuster, never our estimate or its amounts. */
+const CLAIM_STAGES: Record<string, string> = {
+  reported: "Claim reported",
+  inspection: "Adjuster inspection",
+  submitted: "Our estimate is with your insurance",
+  approved: "Estimate approved",
+  supplement: "Supplement pending",
+};
+// deno-lint-ignore no-explicit-any
+function claimPanel(c: any) {
+  if (!c || typeof c !== "object") return null;
+  const stage = CLAIM_STAGES[String(c.stage)] ? String(c.stage) : "";
+  const deductible = Number(c.deductible);
+  const out = {
+    carrier: String(c.carrier || "").slice(0, 80),
+    claimNo: String(c.claimNo || "").slice(0, 60),
+    dateOfLoss: /^\d{4}-\d{2}-\d{2}$/.test(String(c.dateOfLoss || "")) ? String(c.dateOfLoss) : "",
+    stage, stageLabel: stage ? CLAIM_STAGES[stage] : "",
+    deductible: Number.isFinite(deductible) && deductible > 0 ? Math.round(deductible * 100) / 100 : 0,
+    deductibleState: ["due", "paid"].includes(String(c.deductibleState)) ? String(c.deductibleState) : "",
+  };
+  return out.carrier || out.claimNo || out.stage ? out : null;
+}
+
+/* crew bios (phase 1): everyone assigned on the linked board job (base
+   roster + phase crew), re-projected through a hard allow-list. Bio detail
+   (photo/years/certs/blurb) only when the office checked bioPublic on the
+   roster — otherwise name + role alone, matching what the daily crew line
+   already tells the customer. Phone, rate, QB ids can never leak: they are
+   simply not in the projection. */
+// deno-lint-ignore no-explicit-any
+async function crewFor(row: any) {
+  const crewOut: Array<{ name: string; role: string; photoUrl: string; years: number; certs: string; blurb: string }> = [];
+  const fid = String(row.field_project_id || "");
+  if (fid && /^[\w-]+$/.test(fid)) {
+    const bq = `coordination_jobs?deleted=eq.false&data->>fieldJobId=eq.${encodeURIComponent(fid)}&select=data&limit=3`;
+    const boards = await fetch(`${SUPABASE_URL}/rest/v1/${bq}`, { headers: svc }).then((r) => r.json()).catch(() => []);
+    const b = Array.isArray(boards) && boards[0]?.data ? boards[0].data as Record<string, unknown> : null;
+    if (b) {
+      const subs = Array.isArray(b.subtasks) ? b.subtasks as Array<Record<string, unknown>> : [];
+      const ids = new Set(
+        [...(Array.isArray(b.crewIds) ? b.crewIds : []),
+         ...subs.flatMap((st) => Array.isArray(st?.crewIds) ? st.crewIds : [])].map((v) => String(v)));
+      if (ids.size) {
+        const crewRows = await fetch(`${SUPABASE_URL}/rest/v1/crew_members?deleted=eq.false&select=data&limit=100`, { headers: svc })
+          .then((r) => r.json()).catch(() => []);
+        for (const c of Array.isArray(crewRows) ? crewRows : []) {
+          const d = c?.data as Record<string, unknown> | undefined;
+          if (!d?.id || !ids.has(String(d.id)) || d.active === false || !d.name) continue;
+          const pub = d.bioPublic === true;
+          crewOut.push({
+            name: String(d.name).slice(0, 60),
+            role: String(d.role || "").slice(0, 60),
+            photoUrl: pub && /^https:\/\//.test(String(d.photoUrl || "")) ? String(d.photoUrl).slice(0, 300) : "",
+            years: pub ? Math.max(0, Math.min(60, Number(d.bioYears) || 0)) : 0,
+            certs: pub ? String(d.bioCerts || "").slice(0, 120) : "",
+            blurb: pub ? String(d.bioBlurb || "").slice(0, 200) : "",
+          });
+          if (crewOut.length >= 8) break;
+        }
+      }
+    }
+  }
+  return crewOut;
+}
+
+/* everything in the view except the images */
+// deno-lint-ignore no-explicit-any
+async function viewSlice(row: any) {
   // drying (CF-2): readings only, re-projected through an explicit allow-list —
   // a field added to the stored blob later cannot leak by being forgotten here.
   const dr = row.drying && typeof row.drying === "object" ? row.drying : null;
@@ -300,53 +415,15 @@ async function view(token: string) {
     payUrl: /^https:\/\//.test(String(bi.payUrl || "")) ? String(bi.payUrl) : "",
     asOf: String(bi.asOf || "").slice(0, 10),
   } : null;
-  // crew bios (phase 1): everyone assigned on the linked board job (base
-  // roster + phase crew), re-projected through a hard allow-list. Bio detail
-  // (photo/years/certs/blurb) only when the office checked bioPublic on the
-  // roster — otherwise name + role alone, matching what the daily crew line
-  // already tells the customer. Phone, rate, QB ids can never leak: they are
-  // simply not in the projection.
-  const crewOut: Array<{ name: string; role: string; photoUrl: string; years: number; certs: string; blurb: string }> = [];
-  const fid = String(row.field_project_id || "");
-  if (fid && /^[\w-]+$/.test(fid)) {
-    const bq = `coordination_jobs?deleted=eq.false&data->>fieldJobId=eq.${encodeURIComponent(fid)}&select=data&limit=3`;
-    const boards = await fetch(`${SUPABASE_URL}/rest/v1/${bq}`, { headers: svc }).then((r) => r.json()).catch(() => []);
-    const b = Array.isArray(boards) && boards[0]?.data ? boards[0].data as Record<string, unknown> : null;
-    if (b) {
-      const subs = Array.isArray(b.subtasks) ? b.subtasks as Array<Record<string, unknown>> : [];
-      const ids = new Set(
-        [...(Array.isArray(b.crewIds) ? b.crewIds : []),
-         ...subs.flatMap((st) => Array.isArray(st?.crewIds) ? st.crewIds : [])].map((v) => String(v)));
-      if (ids.size) {
-        const crewRows = await fetch(`${SUPABASE_URL}/rest/v1/crew_members?deleted=eq.false&select=data&limit=100`, { headers: svc })
-          .then((r) => r.json()).catch(() => []);
-        for (const c of Array.isArray(crewRows) ? crewRows : []) {
-          const d = c?.data as Record<string, unknown> | undefined;
-          if (!d?.id || !ids.has(String(d.id)) || d.active === false || !d.name) continue;
-          const pub = d.bioPublic === true;
-          crewOut.push({
-            name: String(d.name).slice(0, 60),
-            role: String(d.role || "").slice(0, 60),
-            photoUrl: pub && /^https:\/\//.test(String(d.photoUrl || "")) ? String(d.photoUrl).slice(0, 300) : "",
-            years: pub ? Math.max(0, Math.min(60, Number(d.bioYears) || 0)) : 0,
-            certs: pub ? String(d.bioCerts || "").slice(0, 120) : "",
-            blurb: pub ? String(d.bioBlurb || "").slice(0, 200) : "",
-          });
-          if (crewOut.length >= 8) break;
-        }
-      }
-    }
-  }
   return {
+    claim: claimPanel(row.claim),
     job: {
       customerName: row.customer_name || "",
       address: row.property_address || "",
       status: row.status || "",
       milestones: Array.isArray(row.milestones) ? row.milestones : [],
     },
-    crew: crewOut,
-    photos,
-    documents,
+    crew: await crewFor(row),
     drying: drying && (drying.areas.length || drying.equipmentOut) ? drying : null,
     closeout,
     approvals,
@@ -604,6 +681,27 @@ async function submitSelections(token: string) {
   return { ...sheet, submittedAt: at };
 }
 
+// deno-lint-ignore no-explicit-any
+async function conciergeDigest(row: any) {
+  const slice = await viewSlice(row);
+  const sheet = await selectionsFor(row.id).catch(() => null);
+  return {
+    customerName: row.customer_name || "", status: row.status || "",
+    milestones: slice.job.milestones.map((m: Record<string, unknown>) => ({ label: m.label, state: m.state })),
+    sharedPhotos: (Array.isArray(row.photos) ? row.photos : []).map((p: Record<string, unknown>) => ({ caption: p.caption || "", stage: p.stage || "" })),
+    sharedDocuments: (Array.isArray(row.documents) ? row.documents : []).map((d: Record<string, unknown>) => String(d.label || "Document")),
+    crewOnThisJob: slice.crew.map((c) => (c.role ? `${c.name} (${c.role})` : c.name)),
+    drying: slice.drying,
+    selections: sheet && sheet.total ? {
+      total: sheet.total, answered: sheet.answered, remaining: sheet.remaining,
+      sent: !!row.selections_submitted_at,
+      stillToDecide: sheet.selections.filter((x) => !x.choice).map((x) => x.title).slice(0, 20),
+    } : null,
+    changeOrders: slice.approvals.map((a: { title: string; status: string }) => ({ title: a.title, status: a.status })),
+    warranty: slice.closeout ? { months: slice.closeout.warrantyMonths, completedAt: slice.closeout.completedAt } : null,
+  };
+}
+
 /* month-to-date AI spend across the account (service role) */
 async function monthSpend(): Promise<number> {
   const month = new Date().toISOString().slice(0, 7);
@@ -642,12 +740,14 @@ async function conciergeAnswer(digest: unknown, thread: Array<{ from: string; bo
         "You are the friendly virtual assistant on the customer project portal for Roybal Construction, LLC (a family water/fire " +
         "restoration and reconstruction company in North Pole / Fairbanks, Alaska). You are chatting with the CUSTOMER about THEIR job. " +
         "You may use ONLY the JOB FACTS and MESSAGE THREAD provided — nothing else. Answer routine questions: what their current status " +
-        "means, what each milestone is, what generally comes next, and what the shared photos show.\n" +
+        "means, what each milestone is, what generally comes next, what the shared photos show, what the drying readings say " +
+        "(an area is dry when its reading is at or below its dry goal), who from our crew is on their job, which selections " +
+        "they still need to make, and whether a change order is waiting for their signature (point them to it on the page).\n" +
         "SET answerable=false (do not attempt an answer) whenever a good answer would need information you were NOT given — a specific " +
         "completion or visit DATE, any PRICE / cost / estimate / deductible, INSURANCE or claim or adjuster details, scheduling or " +
         "rescheduling a visit, or any promise, commitment, or decision. Never guess, never invent dates or numbers, never quote policy. " +
         "When unsure, choose answerable=false. When answerable=true, write a warm, brief reply (1-4 sentences, plain language, no " +
-        "signature). Call `respond`.",
+        "signature). Always answer by calling the `respond` tool.",
       messages: [{ role: "user", content:
         `JOB FACTS (all you may use):\n\`\`\`json\n${JSON.stringify(digest)}\n\`\`\`\n\n` +
         `MESSAGE THREAD (oldest to newest):\n${threadText}\n\n` +
@@ -662,7 +762,9 @@ async function conciergeAnswer(digest: unknown, thread: Array<{ from: string; bo
           },
         },
       }],
-      tool_choice: { type: "tool", name: "respond" },
+      // auto, not forced: forced tool_choice is refused by the newest models.
+      // A reply that skips the tool reads as not answerable → office handoff.
+      tool_choice: { type: "auto" },
     }),
   });
   const raw = await res.text();
@@ -712,12 +814,12 @@ async function ask(token: string, bodyText: string) {
     body: text, read_by_office: false, read_by_customer: true,
   });
 
-  // customer-safe digest (portal_jobs already holds only curated fields)
-  const digest = {
-    customerName: row.customer_name || "", status: row.status || "",
-    milestones: (Array.isArray(row.milestones) ? row.milestones : []).map((m: Record<string, unknown>) => ({ label: m.label, state: m.state })),
-    sharedPhotos: (Array.isArray(row.photos) ? row.photos : []).map((p: Record<string, unknown>) => ({ caption: p.caption || "", stage: p.stage || "" })),
-  };
+  // customer-safe digest: exactly what the customer's own page shows them,
+  // through the same allow-lists — so the assistant can answer "is it dry
+  // yet?" or "what do I still need to pick?" instead of handing every such
+  // question to the office. Money amounts stay out (answering them is the
+  // office's job), and so do dates beyond the ones already on the page.
+  const digest = await conciergeDigest(row);
 
   // recent thread for context (customer POV)
   const tRes = await fetch(`${SUPABASE_URL}/rest/v1/portal_messages?portal_job_id=eq.${row.id}&select=direction,body&order=created_at.asc&limit=${MSG_LIMIT}`, { headers: svc });
@@ -1071,7 +1173,8 @@ serve(async (req: Request) => {
     else if (action === "warrantyRequest") result = await warrantyRequest(token, String(body.note ?? ""));
     else if (action === "respondApproval") result = await respondApproval(token, String(body.approvalId ?? ""),
       body.approve === true, String(body.name ?? ""), String(body.signature ?? ""), String(body.note ?? ""));
-    else if (action === "view") result = await view(token);
+    else if (action === "view") result = await view(token, body.lazyMedia === true);
+    else if (action === "media") result = await portalMedia(token, String(body.hash ?? ""), String(body.size ?? "full"));
     else if (action === "photoShare") result = await photoShareView(token);
     else if (action === "photoMedia") result = await photoShareMedia(token, String(body.hash ?? ""));
     else if (action === "packetHtml") result = await packetShareHtml(token);

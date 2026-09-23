@@ -82,4 +82,67 @@ const noNudge = await portal.postMilestoneNudge("ps-1", "not-a-milestone");
 ok("unknown status -> no post, returns null", noNudge === null && !calls.some((c) => c.method === "POST"));
 ok("missing job id -> no post", (await portal.postMilestoneNudge("", "drying")) === null);
 
+/* ---------- the customer hears about new posts ---------- */
+const TOK = "ab".repeat(24);
+const bridge = portal.portalSmsPlan({ lastInboundChannel: "sms", phone: "9075550101", shareToken: TOK, pingedRecently: true, text: "On our way" });
+ok("texting customer: the reply itself is texted, even if pinged today",
+  bridge && bridge.captured_by === "portal-bridge" && bridge.body.includes("On our way"));
+const ping = portal.portalSmsPlan({ lastInboundChannel: "portal", phone: "9075550101", shareToken: TOK, pingedRecently: false, text: "private detail" });
+ok("web customer: a short update text with their link",
+  ping && ping.captured_by === "portal-update" && ping.body.includes("https://portal.roybalconstruction.com/j/" + TOK));
+ok("the update text never carries the message itself", ping && !ping.body.includes("private detail"));
+ok("no inbound yet counts as a web customer",
+  portal.portalSmsPlan({ lastInboundChannel: undefined, phone: "9075550101", shareToken: TOK, pingedRecently: false })?.captured_by === "portal-update");
+ok("one update text per window",
+  portal.portalSmsPlan({ lastInboundChannel: "portal", phone: "9075550101", shareToken: TOK, pingedRecently: true }) === null);
+ok("no phone on file -> nothing",
+  portal.portalSmsPlan({ lastInboundChannel: "portal", phone: "", shareToken: TOK, pingedRecently: false }) === null);
+ok("no valid link -> nothing",
+  portal.portalSmsPlan({ lastInboundChannel: "portal", phone: "9075550101", shareToken: "", pingedRecently: false }) === null);
+
+/* end to end through sendOfficeReply: route each REST read to a canned row */
+const routes = [];
+globalThis.fetch = async (url, opts = {}) => {
+  const u = String(url);
+  calls.push({ url: u, method: opts.method || "GET", body: opts.body ? JSON.parse(opts.body) : null });
+  const hit = routes.find(([frag]) => u.includes(frag));
+  const body = hit ? hit[1] : [];
+  return { ok: true, status: 200, json: async () => body, text: async () => "", headers: { get: () => null } };
+};
+const settle = () => new Promise((r) => setTimeout(r, 20));
+const notifyCall = () => calls.find((c) => c.url.includes("/functions/v1/roybal-notify"));
+
+routes.length = 0; calls.length = 0;
+routes.push(["portal_messages?portal_job_id", [{ channel: "portal" }]],
+  ["portal_jobs?", [{ contact_id: "c-1", share_token: TOK }]],
+  ["contacts?", [{ phone_norm: "9075550101" }]],
+  ["sms_messages?", []],
+  ["rest/v1/portal_messages", [{ id: "m9" }]]);
+await portal.sendOfficeReply("ps-1", "New photos are up");
+await settle();
+const sent = notifyCall();
+ok("web customer's reply triggers one update text via roybal-notify",
+  sent && sent.body.kind === "portal" && sent.body.captured_by === "portal-update" && sent.body.to === "9075550101");
+const dq = calls.find((c) => c.url.includes("sms_messages?"));
+ok("dedupe reads this number's recent update texts, ignoring failed ones",
+  dq && dq.url.includes("sent_by=eq.portal-update") && dq.url.includes(encodeURIComponent("+19075550101")) && dq.url.includes("status=neq.failed"));
+
+routes.length = 0; calls.length = 0;
+routes.push(["portal_messages?portal_job_id", [{ channel: "portal" }]],
+  ["portal_jobs?", [{ contact_id: "c-1", share_token: TOK }]],
+  ["contacts?", [{ phone_norm: "9075550101" }]],
+  ["sms_messages?", [{ id: "s1" }]],
+  ["rest/v1/portal_messages", [{ id: "m10" }]]);
+await portal.sendOfficeReply("ps-1", "Second update today");
+await settle();
+ok("already texted inside the window -> no second text", !notifyCall());
+
+routes.length = 0; calls.length = 0;
+routes.push(["portal_messages?portal_job_id", [{ channel: "portal" }]],
+  ["portal_jobs?", []],
+  ["rest/v1/portal_messages", [{ id: "m11" }]]);
+await portal.sendOfficeReply("ps-1", "Portal is off");
+await settle();
+ok("a turned-off portal texts nothing", !notifyCall());
+
 console.log(`\n${pass} portal-thread checks passed.`);

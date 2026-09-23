@@ -42,7 +42,8 @@ async function callGateway(payload) {
    {session, jobId} (a CF-1 account viewing one of its own jobs). The gateway
    resolves a session to the job's token server-side; this client never holds
    share tokens it wasn't opened with. */
-const fetchView = (cred) => callGateway({ action: "view", ...cred });
+const fetchView = (cred) => callGateway({ action: "view", ...cred, lazyMedia: true });
+const fetchMedia = (cred, hash, size) => callGateway({ action: "media", ...cred, hash, size });
 const fetchThread = (cred) => callGateway({ action: "messages", ...cred });
 const askConcierge = (cred, body) => callGateway({ action: "ask", ...cred, body });
 const fetchSelections = (cred) => callGateway({ action: "selections", ...cred });
@@ -59,7 +60,60 @@ const respondApproval = (cred, approvalId, approve, name, signature, note) =>
   callGateway({ action: "respondApproval", ...cred, approvalId, approve, name, signature, note });
 
 const REVIEW_URL = "https://g.page/r/CSv3IUml4W9GEBM/review";
+/* "2026-09-22" (or a full ISO stamp) → "Sep 22, 2026"; anything else as-is */
+const niceDate = (v) => {
+  const m = String(v || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return String(v || "");
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], 12));
+  return isNaN(d) ? String(v) : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+};
 const usd = (n) => "$" + (Math.round((Number(n) || 0) * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
+
+/* ---------- images, one at a time ----------
+   The view lists photo and document-page hashes; each image is fetched only
+   as it nears the screen — a small preview first, then the full photo — at
+   most four requests at once, each image once per visit. (A gateway from
+   before lazy loading still sends `url`, and that is used as-is.) */
+function mediaLoader(cred) {
+  const cache = new Map();
+  const queue = [];
+  let active = 0;
+  const pump = () => {
+    while (active < 4 && queue.length) {
+      const job = queue.shift(); active++;
+      job().finally(() => { active--; pump(); });
+    }
+  };
+  return (hash, size) => {
+    const key = hash + "|" + size;
+    if (!cache.has(key)) cache.set(key, new Promise((resolve) => {
+      queue.push(() => fetchMedia(cred, hash, size).then((r) => resolve(r.src || "")).catch(() => resolve("")));
+      pump();
+    }));
+    return cache.get(key);
+  };
+}
+
+const whenNear = (() => {
+  const io = "IntersectionObserver" in window
+    ? new IntersectionObserver((entries) => {
+        for (const e of entries) if (e.isIntersecting) { io.unobserve(e.target); e.target._near(); }
+      }, { rootMargin: "400px 0px" })
+    : null;
+  return (el, fn) => { if (io) { el._near = fn; io.observe(el); } else fn(); };
+})();
+
+/* an <img> for one shared image: `item` is {hash} or a legacy {url} */
+function lazyImg(item, getMedia, attrs, upgrade) {
+  const img = h("img", { ...attrs, class: "is-loading" });
+  if (item.url) { img.src = item.url; img.classList.remove("is-loading"); return img; }
+  whenNear(img, async () => {
+    const small = await getMedia(item.hash, "thumb");
+    if (small) { img.src = small; img.classList.remove("is-loading"); }
+    if (upgrade) { const full = await getMedia(item.hash, "full"); if (full) { img.src = full; img.classList.remove("is-loading"); } }
+  });
+  return img;
+}
 
 /* ---------- a small signature pad (CF-3 e-sign) ---------- */
 function sigPad() {
@@ -158,7 +212,7 @@ function threadCard(token) {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
   });
 
-  const card = h("div", { class: "card" },
+  const card = h("div", { class: "card", id: "messages" },
     h("p", { class: "sectitle" }, "Messages"), list, form, status);
 
   // load the thread
@@ -175,7 +229,7 @@ function threadCard(token) {
    honest job is to show people their own rooms and make it easy to raise a
    hand, which is the moment the conversation actually starts. */
 function selectionsCard(token, sheet) {
-  const card = h("div", { class: "card" });
+  const card = h("div", { class: "card", id: "selections" });
   let state = sheet;
   let busy = false;
   // Sticky once true: changing an answer after sending clears submittedAt on
@@ -261,7 +315,7 @@ function selectionsCard(token, sheet) {
               : `${state.remaining} ${state.remaining === 1 ? "choice" : "choices"} left`),
         h("span", {}, state.submittedAt
           ? "You can still change any of these — just send them again if you do."
-          : "Nothing here costs you anything. Keeping what was there is covered by your insurance.")));
+          : "Keeping what was there adds nothing to your bill.")));
 
     const kids = [h("p", { class: "sectitle" }, "Your selections"), head];
 
@@ -439,10 +493,11 @@ function render(data, token, opts) {
     ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Meet your crew"), ...crewRows)
     : null;
 
+  const getMedia = mediaLoader(token);
   const photos = (data.photos || []).map((p) =>
     h("figure", { class: "photo" },
-      h("img", { src: p.url, alt: p.caption || "Project photo", loading: "lazy",
-        onclick: () => openLightbox(p.url, p.caption || "Project photo") }),
+      lazyImg(p, getMedia, { alt: p.caption || "Project photo",
+        onclick: () => openLightbox(p, getMedia, p.caption || "Project photo") }, true),
       (p.caption || p.stage) ? h("figcaption", {}, p.caption || "",
         p.stage ? h("span", { class: "stage" }, (p.caption ? " · " : "") + p.stage) : null) : null));
   const gallery = photos.length
@@ -453,7 +508,7 @@ function render(data, token, opts) {
   const dr = data.drying;
   const drying = dr && ((dr.areas || []).length || dr.equipmentOut) ? h("div", { class: "card" },
     h("p", { class: "sectitle" }, "Drying progress"),
-    dr.asOf ? h("p", { class: "dry__asof" }, "Readings from " + dr.asOf) : null,
+    dr.asOf ? h("p", { class: "dry__asof" }, "Readings from " + niceDate(dr.asOf)) : null,
     ...(dr.areas || []).map((a) => h("div", { class: "dry__row" + (a.dry ? " is-dry" : "") },
       h("span", { class: "dry__mark" }, a.dry ? "✓" : "…"),
       h("div", {},
@@ -472,8 +527,8 @@ function render(data, token, opts) {
       return h("div", { class: "card appr appr--" + a.status },
         h("p", { class: "sectitle" }, a.title),
         h("p", { class: "warr__p" }, a.status === "approved"
-          ? `✓ Approved${a.respondedAt ? " " + a.respondedAt : ""}${a.signedName ? " — signed " + a.signedName : ""}.`
-          : `✗ Declined${a.respondedAt ? " " + a.respondedAt : ""}. We'll follow up to talk it through.`));
+          ? `✓ Approved${a.respondedAt ? " " + niceDate(a.respondedAt) : ""}${a.signedName ? " — signed " + a.signedName : ""}.`
+          : `✗ Declined${a.respondedAt ? " " + niceDate(a.respondedAt) : ""}. We'll follow up to talk it through.`));
     }
     const nameInp = h("input", { class: "appr__name", placeholder: "Type your full legal name", "aria-label": "Your full legal name" });
     const pad = sigPad();
@@ -501,7 +556,7 @@ function render(data, token, opts) {
         if (r.answered) finish(card, "declined"); else st.textContent = "Already answered — refresh to see the latest.";
       } catch { st.textContent = "Couldn't send — try again, or call 907-371-9868."; noBtn.disabled = false; }
     });
-    const card = h("div", { class: "card appr appr--pending" },
+    const card = h("div", { class: "card appr appr--pending", id: "appr-" + a.id },
       h("p", { class: "sectitle" }, "Needs your approval — " + a.title),
       a.description ? h("p", { class: "warr__p" }, a.description) : null,
       h("p", { class: "appr__amt" }, a.amountDelta > 0 ? `Adds ${usd(a.amountDelta)} to the contract.`
@@ -521,7 +576,7 @@ function render(data, token, opts) {
     bi.payUrl && bi.balance > 0
       ? h("a", { class: "acct__btn review__btn", style: "margin-top:10px", href: bi.payUrl, target: "_blank", rel: "noopener" }, "Pay online")
       : bi.balance > 0 ? h("p", { class: "dry__note" }, "To pay, reply here or call 907-371-9868 — thank you!") : h("p", { class: "dry__note" }, "Paid in full — thank you!"),
-    bi.asOf ? h("p", { class: "dry__note" }, "As of " + bi.asOf + ".") : null) : null;
+    bi.asOf ? h("p", { class: "dry__note" }, "As of " + niceDate(bi.asOf) + ".") : null) : null;
 
   // closeout (CF-4): once complete, the page becomes the customer's record —
   // warranty with one-tap service request, the home file, review + referral
@@ -549,7 +604,7 @@ function render(data, token, opts) {
       h("p", { class: "warr__p" },
         co.warrantyMonths
           ? `Our workmanship on this project is covered for ${co.warrantyMonths} months` +
-            (co.completedAt ? ` from ${co.completedAt}` : "") + (ends ? ` (through ${ends})` : "") + "."
+            (co.completedAt ? ` from ${niceDate(co.completedAt)}` : "") + (ends ? ` (through ${niceDate(ends)})` : "") + "."
           : "Questions about our workmanship? We stand behind it — reach out any time."),
       h("p", { class: "warr__p" }, "Notice something that doesn't look right? Tell us and we'll make it right."),
       note, h("div", { style: "margin-top:8px" }, reqBtn), reqStatus);
@@ -571,13 +626,35 @@ function render(data, token, opts) {
     closeoutCards = [warranty, homeFile, review].filter(Boolean);
   }
 
+  // insurance claim (office opt-in): where it stands, in plain words
+  const cl = data.claim;
+  const CLAIM_NOTES = {
+    reported: "Your claim is open with your insurance company. Their adjuster will reach out to set up an inspection.",
+    inspection: "Your adjuster is inspecting the damage. Let us know when they're scheduled and we'll meet them on site.",
+    submitted: "We've sent our repair estimate to your insurance company and are waiting on their review.",
+    approved: "Your insurance company approved the repair estimate.",
+    supplement: "We found damage that wasn't visible at first and asked your insurance company to add it. Work on those items waits on their answer.",
+  };
+  const claimCard = cl ? h("div", { class: "card" },
+    h("p", { class: "sectitle" }, "Your insurance claim"),
+    cl.stageLabel ? h("p", { class: "claim__stage" }, cl.stageLabel) : null,
+    cl.stage && CLAIM_NOTES[cl.stage] ? h("p", { class: "warr__p" }, CLAIM_NOTES[cl.stage]) : null,
+    ...[["Insurance company", cl.carrier], ["Claim number", cl.claimNo], ["Date of loss", cl.dateOfLoss ? niceDate(cl.dateOfLoss) : ""],
+      ["Your deductible", cl.deductible ? usd(cl.deductible) + (cl.deductibleState === "paid" ? " · paid, thank you" : cl.deductibleState === "due" ? " · still due" : "") : ""]]
+      .filter(([, v]) => v)
+      .map(([k, v]) => h("div", { class: "hf__row" }, h("span", { class: "hf__k" }, k), h("span", { class: "hf__v" }, v))),
+    h("p", { class: "dry__note" },
+      "How it works: your insurance pays to put things back the way they were, less your deductible. Upgrades you choose are yours to cover, and we'll always tell you before anything costs extra.")) : null;
+
   // documents the office shared — tap a page to view it full screen
   const docs = (data.documents || []).map((d) =>
     h("div", { class: "doc" },
       h("div", { class: "doc__label" }, d.label, d.type ? h("span", { class: "stage" }, " · " + d.type) : null),
-      h("div", { class: "doc__pages" }, ...(d.pages || []).map((u, i) =>
-        h("img", { src: u, alt: `${d.label} — page ${i + 1}`, loading: "lazy",
-          onclick: () => openLightbox(u, `${d.label} — page ${i + 1}`) })))));
+      h("div", { class: "doc__pages" }, ...(d.pages || []).map((pg, i) => {
+        const item = /^[0-9a-f]{64}$/.test(pg) ? { hash: pg } : { url: pg };
+        return lazyImg(item, getMedia, { alt: `${d.label} — page ${i + 1}`,
+          onclick: () => openLightbox(item, getMedia, `${d.label} — page ${i + 1}`) }, false);
+      }))));
   const documents = docs.length
     ? h("div", { class: "card" }, h("p", { class: "sectitle" }, "Documents"),
         h("p", { class: "dry__note", style: "margin-top:0" }, "Shared for you and your insurance — tap a page to read it."),
@@ -597,21 +674,62 @@ function render(data, token, opts) {
   const saveCard = (!opts || !opts.backToProjects) && token && token.token && !storedSession()
     ? accountCard(token) : null;
 
+  const pendingCards = approvalCards.filter((c) => c.classList.contains("appr--pending"));
+  const answeredCards = approvalCards.filter((c) => !c.classList.contains("appr--pending"));
+  const needs = needsCard(data);
+
+  // What the customer has to act on comes first — a change order waiting on
+  // a signature used to sit below the crew cards, several screens down on a
+  // phone. Then the record, then the conversation.
   // native replaceChildren stringifies null args ("null"), so drop falsy first
-  app.replaceChildren(...[back, hero, timeline, crewCard, ...approvalCards, ...closeoutCards, billingCard, drying, selections, gallery, documents, saveCard, threadCard(token)].filter(Boolean));
+  app.replaceChildren(...[back, hero, needs, ...pendingCards, selections, ...closeoutCards, timeline, claimCard, crewCard,
+    drying, gallery, documents, ...answeredCards, billingCard, threadCard(token), saveCard].filter(Boolean));
+}
+
+/* "What we need from you" — the short list right under the address, each
+   line a tap down to its card. When nothing is waiting it says so, which is
+   itself the answer most visitors came for. */
+function needsCard(data) {
+  const go = (id) => () => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const items = [];
+  for (const a of data.approvals || [])
+    if (a.status === "pending") items.push({ text: `Review and sign: ${a.title}`, target: "appr-" + a.id });
+  const sel = data.selections;
+  if (sel && sel.total && !sel.submittedAt)
+    items.push({ text: sel.complete ? "Send us your selections"
+      : `Make your selections (${sel.remaining} ${sel.remaining === 1 ? "choice" : "choices"} left)`, target: "selections" });
+  const unread = Number(data.unread) || 0;
+  const news = unread
+    ? h("button", { class: "needs__news", type: "button", onclick: go("messages") },
+        `${unread} new ${unread === 1 ? "message" : "messages"} from us ›`)
+    : null;
+  if (!items.length) {
+    return h("div", { class: "card needs needs--clear" },
+      h("p", { class: "needs__title" }, "✓ Nothing needed from you right now"),
+      h("p", { class: "needs__sub" }, "We'll text you when we post an update."), news);
+  }
+  return h("div", { class: "card needs" },
+    h("p", { class: "needs__title" }, items.length === 1 ? "1 thing needs you" : `${items.length} things need you`),
+    h("ul", { class: "needs__list" }, ...items.map((it) =>
+      h("li", {}, h("button", { type: "button", class: "needs__item", onclick: go(it.target) }, it.text, h("span", { "aria-hidden": "true" }, "›"))))),
+    news);
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";
 
 /* full-screen photo viewer — tap the backdrop, the ✕, or Esc to close */
-function openLightbox(src, alt) {
+function openLightbox(item, getMedia, alt) {
   const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
   const onKey = (e) => { if (e.key === "Escape") close(); };
+  const img = h("img", { alt, onclick: (e) => e.stopPropagation() });
   const box = h("div", { class: "lightbox", role: "dialog", "aria-label": "Photo", onclick: close },
-    h("button", { class: "lightbox__close", "aria-label": "Close", onclick: close }, "✕"),
-    h("img", { src, alt, onclick: (e) => e.stopPropagation() }));
+    h("button", { class: "lightbox__close", "aria-label": "Close", onclick: close }, "✕"), img);
   document.addEventListener("keydown", onKey);
   document.body.append(box);
+  if (item.url) { img.src = item.url; return; }
+  // the preview is usually already loaded — show it at once, then sharpen
+  getMedia(item.hash, "thumb").then((s) => { if (s && !img.src) img.src = s; });
+  getMedia(item.hash, "full").then((s) => { if (s) img.src = s; });
 }
 
 (async () => {
