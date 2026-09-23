@@ -128,7 +128,7 @@ const ITEM_SCHEMA = {
     category: { type: "string", description: "Xactimate CATEGORY of the catalog row billed (e.g. 'DRY', 'PNT', 'FNC'). Empty string only when no catalog row fits." },
     code: { type: "string", description: "Xactimate SELECTOR from the price catalog (must appear in it). Empty string only when no catalog row fits." },
     priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: replace = install/put-back; remove = tear-out; detach_reset = detach & reset; labor = an hourly LAB rate (HR lines only); estimate = no catalog row, your own Fairbanks price." },
-    by: { type: "string", description: "Who performs or supplies the line: 'Roybal' for the company's own crew and purchases, a subcontractor's name exactly as COMPANY RATES lists it, 'Sub' for a trade with no named subcontractor, or 'Allowance' for a placeholder figure (design, engineering, permits, owner selections)." },
+    by: { type: "string", description: "Who performs or supplies the line, by trade: 'Roybal' for the company's own crew and purchases, a sub label exactly as COMPANY RATES lists it (e.g. 'Electrical sub'), '<trade> sub' for a trade COMPANY RATES does not list (e.g. 'Roofing sub'), or 'Allowance' for a placeholder figure (design, engineering, permits, owner selections). Never a company name." },
   },
 } as const;
 
@@ -196,8 +196,8 @@ export type BuildArgs = {
 };
 
 /* A construction estimate is organised the way Branden prices a remodel
-   (his AmeriGas ROM, 2026-09-16): by trade section, each line naming who
-   does it at that party's rate, material apart from labor, allowances for
+   (his AmeriGas ROM, 2026-09-16): by trade section, each line naming the
+   trade that does it (never the sub's company) at that trade's rate, material apart from labor, allowances for
    design and permits, and the owner's open choices priced as alternates. */
 const CONSTRUCTION_SHAPE =
   "HOW TO SHAPE A CONSTRUCTION ESTIMATE:\n" +
@@ -207,12 +207,13 @@ const CONSTRUCTION_SHAPE =
   "- Quantities come from the plan and report; name the dimension or area in basis. Where the plan is conceptual, say so and price the reasonable case.\n" +
   "- Every option the owner is still choosing between, and every piece of scope that depends on a survey, a plan reviewer or a field verification, is an alternate with its net base-cost change, not a base line. State in assumptions which option the base carries.\n" +
   "- Set contingencyPct for how settled the design is, accuracyPct for how firm the estimate is, and duration in weeks. Overhead and profit are applied separately at 10% and 10% when subcontractors are on the job; do not add them.\n" +
-  "- Exclusions name owner-supplied items, work areas left untouched, and anything the plan leaves out.\n";
+  "- Exclusions name owner-supplied items, work areas left untouched, and anything the plan leaves out.\n" +
+  "- Never name a subcontractor's company anywhere in the estimate (lines, basis, notes, alternates, summaries), even when the walk or notes name one: the company may change subs without a change order, so the estimate names the trade only.\n";
 
 const CLAIM_SHAPE =
   "HOW TO SHAPE AN INSURANCE / RESTORATION ESTIMATE:\n" +
   "- Room names follow the Magicplan report. Job-wide lines go under 'Main Level'.\n" +
-  "- by is 'Roybal' unless the evidence names a subcontractor for the line.\n" +
+  "- by is 'Roybal' unless a trade sub does the line, then that trade ('Electrical sub'); never a company name.\n" +
   "- Tear-out and put-back both appear when the evidence shows damaged material.\n" +
   "- alternates stay empty; contingencyPct and accuracyPct are 0; duration is empty.\n";
 

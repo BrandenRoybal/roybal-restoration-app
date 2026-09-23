@@ -87,14 +87,14 @@ test("a construction draft carries who does each line, the alternates, contingen
   const sum = applySiteDraft(inv, {
     ...DRAFT,
     items: [
-      { room: "10 — Plumbing", desc: "Break-area sink rough-in & trim", qty: 12, unit: "HR", price: 200, by: "AK 49", priced: "estimate" },
+      { room: "10 — Plumbing", desc: "Break-area sink rough-in & trim", qty: 12, unit: "HR", price: 200, by: "Plumbing & heating sub", priced: "estimate" },
       { room: "04 — Framing & carpentry", desc: "Partitions, labor", qty: 35, unit: "HR", price: 125, by: "Roybal", priced: "estimate" },
     ],
     alternates: [{ title: "Keep and patch the existing tile", description: "Deducts tile removal and LVP.", baseCost: -3708 }],
     contingencyPct: 15, accuracyPct: 25, duration: "7-9 weeks",
   });
   assert.equal(sum.alternates, 1);
-  assert.deepEqual(inv.items.map((it) => it.by), ["AK 49", "Roybal"]);
+  assert.deepEqual(inv.items.map((it) => it.by), ["Plumbing & heating sub", "Roybal"]);
   assert.deepEqual(inv.alternates, [{ title: "Keep and patch the existing tile", description: "Deducts tile removal and LVP.", baseCost: "-3708" }]);
   assert.equal(inv.contingencyPct, "15");
   assert.equal(inv.accuracyPct, "25");
@@ -103,7 +103,7 @@ test("a construction draft carries who does each line, the alternates, contingen
   assert.equal(inv.profitPct, "10");
   // an O&P the owner already set by hand is left alone; a Roybal-only draft doesn't force 10 & 10
   const manual = { items: [], opAuto: false, overheadPct: "5", profitPct: "5" };
-  applySiteDraft(manual, { ...DRAFT, items: [{ desc: "x", by: "FBX Electric" }] });
+  applySiteDraft(manual, { ...DRAFT, items: [{ desc: "x", by: "Electrical sub" }] });
   assert.equal(manual.overheadPct, "5");
   const own = { items: [], opAuto: true, overheadPct: "0", profitPct: "0" };
   applySiteDraft(own, { ...DRAFT, items: [{ desc: "x", by: "Roybal" }, { desc: "y", by: "Allowance" }] });
@@ -115,6 +115,9 @@ test("the rates sent with every draft name the company and each sub with a price
   assert.equal(lines.length, SUB_RATES.length);
   assert.ok(lines.every((l) => /^[^|]+ \| [^|]+ \| \$\d+(\.\d+)?\/(HR|SF)/.test(l)), lines.join("\n"));
   assert.ok(lines[0].startsWith("Roybal | "));
+  // trades only: a named sub in a signed estimate makes every sub swap a change order
+  assert.ok(SUB_RATES.slice(1).every((r) => / sub$/.test(r.by)), SUB_RATES.map((r) => r.by).join(", "));
+  assert.doesNotMatch(subRatesText(), /AK 49|FBX|Graham/i);
 });
 
 test("an empty draft section leaves no empty heading", () => {

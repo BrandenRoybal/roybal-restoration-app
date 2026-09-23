@@ -160,11 +160,12 @@ test("an errored or expired batch explains itself and bills nothing", () => {
 
 test("a construction job is shaped by trade with the company's rates; a claim stays room by room", () => {
   const packet = cleanPacket({ typedScope: "Call center remodel" });
-  const build = buildContent({ packet, signed: {}, facts: {}, rulesText: "", catalogText: "", kind: "construction", ratesText: "AK 49 | plumbing | $200/HR" });
+  const build = buildContent({ packet, signed: {}, facts: {}, rulesText: "", catalogText: "", kind: "construction", ratesText: "Plumbing & heating sub | plumbing | $200/HR" });
   const bt = build[build.length - 1].text;
   assert.ok(bt.includes("HOW TO SHAPE A CONSTRUCTION ESTIMATE") && bt.includes("'04 — Framing & carpentry'"));
-  assert.ok(bt.includes("COMPANY RATES") && bt.includes("AK 49 | plumbing | $200/HR"));
+  assert.ok(bt.includes("COMPANY RATES") && bt.includes("Plumbing & heating sub | plumbing | $200/HR"));
   assert.ok(!bt.includes("HOW TO SHAPE AN INSURANCE"));
+  assert.ok(bt.includes("Never name a subcontractor's company"));
   const claim = buildContent({ packet, signed: {}, facts: {}, rulesText: "", catalogText: "" });
   const ct = claim[claim.length - 1].text;
   assert.ok(ct.includes("HOW TO SHAPE AN INSURANCE / RESTORATION ESTIMATE") && !ct.includes("CONSTRUCTION ESTIMATE"));
