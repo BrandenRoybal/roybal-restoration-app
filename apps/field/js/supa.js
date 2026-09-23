@@ -221,6 +221,24 @@ export async function uploadMedia(hash, text) {
   if (!res.ok && res.status !== 409) throw new Error("Media upload failed (" + res.status + ")");
 }
 
+/* Site Visit packet files (Magicplan report PDF, site-walk recording, photos,
+   note pages) go to the same private bucket under sitevisit/<job>/, stored as
+   the real file with its real type — the estimator reads them by signed URL,
+   so they never ride inside the job record. */
+export async function uploadSiteFile(path, blob, contentType) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${path}`;
+  const send = () => fetch(url, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": contentType || blob.type || "application/octet-stream", "x-upsert": "true" },
+    body: blob,
+  });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  if (res.status === 413) throw new Error("That file is larger than the storage upload limit");
+  if (!res.ok && res.status !== 409) throw new Error("Upload failed (" + res.status + ")");
+}
+
 /* crew headshots (Job Board roster → portal bio cards) live in the PUBLIC
    crew-photos bucket: customers load them straight from the CDN URL, and
    Twilio can fetch them for the MMS intro later. One object per member,
