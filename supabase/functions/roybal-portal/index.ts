@@ -21,6 +21,10 @@
  *              cached before 2026-09) they are inlined full size, as before.
  *   media    — { token, hash, size:'thumb'|'full' } -> { ok, src } — ONE
  *              image, served only when its hash is on that token's row.
+ *   signDoc  — { token, approvalId } -> { ok, html } — the full document a
+ *              pending approval asks them to sign (a snapshot of the office's
+ *              form), images hydrating via `media`. The first read stamps
+ *              viewedAt, and an approval can't be signed until it is set.
  *   photoShare — { token } -> { ok, kind, claim header, photos:[{hash,caption,room,stage,item}] }
  *                An insurance photo link (photo_shares row): the full-size
  *                photo list for the adjuster page, references only.
@@ -54,9 +58,9 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { customerSheet, validateResponse, submissionMessage } from "./selections.ts";
+import { customerSheet, validateResponse, submissionMessage, visibleRows } from "./selections.ts";
 import { crewToday, crewLine, introLine } from "./crewtoday.mjs";
-import { mediaLists, mediaAllowed, mediaKeys } from "./media.mjs";
+import { mediaLists, mediaAllowed, mediaKeys, signDoc } from "./media.mjs";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -127,7 +131,7 @@ const goodToken = (t: string) => /^[0-9a-f]{16,}$/.test(t);
 
 /* the single enabled portal_jobs row for this token (service role; token-gated) */
 const JOB_COLS = "id,contact_id,field_project_id,customer_name,property_address,status,milestones,photos,documents," +
-  "drying,closeout,approvals,billing,selections_submitted_at";
+  "drying,closeout,approvals,billing,selections_submitted_at,selections_source";
 /* `claim` arrives with migration 0009. Until that applies, asking for it is
    a 400 that would take every portal link down, so the first such refusal
    drops it for the life of this instance and the page simply has no panel. */
@@ -396,9 +400,15 @@ async function viewSlice(row: any) {
   } : null;
   // approvals (CF-3): allow-list re-projection. The signature image is
   // deliberately NOT echoed back — the customer drew it; the office views it.
+  // Every one is a document to sign: a change order (money) or another form
+  // (work authorization, certificates, punch list). hasDoc says the full
+  // document is there to read; without it the page won't offer a signature.
   const approvals = (Array.isArray(row.approvals) ? row.approvals : []).slice(0, 12)
     .map((a: Record<string, unknown>) => ({
       id: String(a.id || ""),
+      kind: a.kind === "document" ? "document" : "changeOrder",
+      hasDoc: !!signDoc(a),
+      viewedAt: String(a.viewedAt || "").slice(0, 25),
       title: String(a.title || "Change order").slice(0, 120),
       description: String(a.description || "").slice(0, 1200),
       amountDelta: Number(a.amountDelta) || 0,
@@ -451,6 +461,10 @@ async function respondApproval(token: string, approvalId: string, approve: boole
   const cleanName = String(name || "").trim().slice(0, 80);
   const sig = String(signature || "");
   if (approve) {
+    // Nobody signs what they haven't been shown: the document has to be on
+    // the approval, and this customer has to have opened it.
+    if (!signDoc(cur)) throw new Error("document_missing");
+    if (!cur.viewedAt) throw new Error("not_viewed");
     if (cleanName.length < 2) throw new Error("name_required");
     if (sig && (!sig.startsWith("data:image/png;base64,") || sig.length > 80_000)) throw new Error("bad_signature");
   }
@@ -472,12 +486,37 @@ async function respondApproval(token: string, approvalId: string, approve: boole
   await fetch(`${SUPABASE_URL}/rest/v1/portal_messages`, {
     method: "POST", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
     body: JSON.stringify([{ portal_job_id: row.id, direction: "in", channel: "portal", author: "customer",
-      body: `${approve ? "✓ Approved" : "✗ Declined"}: ${String(cur.title || "change order")}` +
+      body: `${approve ? (cur.kind === "document" ? "✓ Signed" : "✓ Approved") : "✗ Declined"}: ${String(cur.title || "change order")}` +
         (approve && cleanName ? ` — signed ${cleanName}` : "") +
         (String(note || "").trim() ? ` — "${String(note).trim().slice(0, 200)}"` : ""),
       read_by_office: false, read_by_customer: true }]),
   }).catch(() => {});
   return { answered: true, status: approve ? "approved" : "declined" };
+}
+
+/* the full document behind one approval, for reading before signing. The
+   first read stamps viewedAt on the approval — the record that the customer
+   opened this version before they signed it. */
+async function approvalDocument(token: string, approvalId: string) {
+  if (!goodToken(token)) throw new Error("bad_token");
+  const row = await jobByToken(token);
+  if (!row) return null;
+  const list = Array.isArray(row.approvals) ? row.approvals : [];
+  const idx = list.findIndex((a: Record<string, unknown>) => String(a.id) === String(approvalId));
+  const d = idx < 0 ? null : signDoc(list[idx]);
+  if (!d) return null;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${d.html}`, { headers: svc });
+  if (!res.ok) return null;
+  const html = await res.text();
+  if (!html.trimStart().startsWith("<")) return null;
+  if (!list[idx].viewedAt) {
+    list[idx] = { ...list[idx], viewedAt: new Date().toISOString() };
+    await fetch(`${SUPABASE_URL}/rest/v1/portal_jobs?id=eq.${row.id}`, {
+      method: "PATCH", headers: { ...svc, "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify({ approvals: list }),
+    }).catch(() => { /* reading still works; signing will ask them to open it again */ });
+  }
+  return { html };
 }
 
 /* ---------- CF-4: request warranty service ----------
@@ -600,13 +639,14 @@ async function insertMessage(m: Record<string, unknown>) {
    customer sees goes through customerSelection()'s allow-list, so our cost
    basis and the Xactimate codes never cross the boundary. */
 
-async function selectionsFor(jobId: string) {
+// deno-lint-ignore no-explicit-any
+async function selectionsFor(jobId: string, source: any) {
   const q = `portal_selections?portal_job_id=eq.${jobId}` +
     `&select=selection_id,sort_order,type,label,scope,room,rooms,title,descr,qty,unit,items,` +
     `customer_choice,customer_note,responded_at&order=sort_order.asc`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, { headers: svc });
   if (!res.ok) throw new Error(`selections read failed (${res.status})`);
-  return customerSheet(await res.json());
+  return customerSheet(visibleRows(await res.json(), source));
 }
 
 async function selections(token: string) {
@@ -615,7 +655,7 @@ async function selections(token: string) {
   if (!row) return null;
   // submittedAt has to ride along, or a customer who already sent their
   // choices comes back after a reload to a sheet that looks unsent.
-  return { ...(await selectionsFor(row.id)), submittedAt: row.selections_submitted_at || null };
+  return { ...(await selectionsFor(row.id, row.selections_source)), submittedAt: row.selections_submitted_at || null };
 }
 
 /* one decision answered */
@@ -625,6 +665,8 @@ async function respondSelection(token: string, selectionId: unknown, choice: unk
   const row = await jobByToken(token);
   if (!row) return null;
   await floodGuard(row.id);
+  // a closed sheet or a hidden decision can't be answered
+  if (!visibleRows([{ selection_id: v.id }], row.selections_source).length) throw new Error("bad_selection");
 
   // Scoped to this job AND this decision — a token can never touch another job's sheet.
   const q = `portal_selections?portal_job_id=eq.${row.id}&selection_id=eq.${encodeURIComponent(v.id)}`;
@@ -652,7 +694,7 @@ async function respondSelection(token: string, selectionId: unknown, choice: unk
       body: JSON.stringify({ selections_submitted_at: null }),
     }).catch(() => { /* the answer is saved either way */ });
   }
-  return { ...(await selectionsFor(row.id)), submittedAt: null };
+  return { ...(await selectionsFor(row.id, row.selections_source)), submittedAt: null };
 }
 
 /* the customer is done — stamp the job and tell the office on the thread,
@@ -662,7 +704,7 @@ async function submitSelections(token: string) {
   const row = await jobByToken(token);
   if (!row) return null;
   await floodGuard(row.id);
-  const sheet = await selectionsFor(row.id);
+  const sheet = await selectionsFor(row.id, row.selections_source);
   if (!sheet.total) throw new Error("nothing_to_submit");
   if (!sheet.complete) throw new Error("incomplete");
 
@@ -684,7 +726,7 @@ async function submitSelections(token: string) {
 // deno-lint-ignore no-explicit-any
 async function conciergeDigest(row: any) {
   const slice = await viewSlice(row);
-  const sheet = await selectionsFor(row.id).catch(() => null);
+  const sheet = await selectionsFor(row.id, row.selections_source).catch(() => null);
   return {
     customerName: row.customer_name || "", status: row.status || "",
     milestones: slice.job.milestones.map((m: Record<string, unknown>) => ({ label: m.label, state: m.state })),
@@ -697,7 +739,7 @@ async function conciergeDigest(row: any) {
       sent: !!row.selections_submitted_at,
       stillToDecide: sheet.selections.filter((x) => !x.choice).map((x) => x.title).slice(0, 20),
     } : null,
-    changeOrders: slice.approvals.map((a: { title: string; status: string }) => ({ title: a.title, status: a.status })),
+    documentsToSign: slice.approvals.map((a: { title: string; status: string; kind: string }) => ({ title: a.title, kind: a.kind, status: a.status })),
     warranty: slice.closeout ? { months: slice.closeout.warrantyMonths, completedAt: slice.closeout.completedAt } : null,
   };
 }
@@ -742,7 +784,7 @@ async function conciergeAnswer(digest: unknown, thread: Array<{ from: string; bo
         "You may use ONLY the JOB FACTS and MESSAGE THREAD provided — nothing else. Answer routine questions: what their current status " +
         "means, what each milestone is, what generally comes next, what the shared photos show, what the drying readings say " +
         "(an area is dry when its reading is at or below its dry goal), who from our crew is on their job, which selections " +
-        "they still need to make, and whether a change order is waiting for their signature (point them to it on the page).\n" +
+        "they still need to make, and whether a change order or other document is waiting for their signature (point them to it on the page, where they can read it in full before signing).\n" +
         "SET answerable=false (do not attempt an answer) whenever a good answer would need information you were NOT given — a specific " +
         "completion or visit DATE, any PRICE / cost / estimate / deductible, INSURANCE or claim or adjuster details, scheduling or " +
         "rescheduling a visit, or any promise, commitment, or decision. Never guess, never invent dates or numbers, never quote policy. " +
@@ -1175,6 +1217,7 @@ serve(async (req: Request) => {
       body.approve === true, String(body.name ?? ""), String(body.signature ?? ""), String(body.note ?? ""));
     else if (action === "view") result = await view(token, body.lazyMedia === true);
     else if (action === "media") result = await portalMedia(token, String(body.hash ?? ""), String(body.size ?? "full"));
+    else if (action === "signDoc") result = await approvalDocument(token, String(body.approvalId ?? ""));
     else if (action === "photoShare") result = await photoShareView(token);
     else if (action === "photoMedia") result = await photoShareMedia(token, String(body.hash ?? ""));
     else if (action === "packetHtml") result = await packetShareHtml(token);

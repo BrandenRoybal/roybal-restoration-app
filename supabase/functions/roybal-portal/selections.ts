@@ -72,6 +72,18 @@ export function customerSelection(row: SelectionRow) {
   };
 }
 
+/* What the office still shows the customer. The office can close the whole
+   sheet (every choice is made, or the job isn't using it) or hide single
+   decisions; both live on portal_jobs.selections_source, which the field app
+   keeps across a re-import. A hidden decision is gone from the customer's
+   side entirely: not listed, not counted, not answerable. */
+export function visibleRows(rows: SelectionRow[], source: unknown) {
+  const src = source && typeof source === "object" ? source as Record<string, unknown> : {};
+  if (src.closed === true) return [];
+  const omit = new Set(Array.isArray(src.omit) ? src.omit.map(str) : []);
+  return (rows || []).filter((r) => !omit.has(str(r.selection_id)));
+}
+
 /* The whole sheet, plus the progress the card shows. */
 export function customerSheet(rows: SelectionRow[]) {
   const list = (rows || []).map(customerSelection);

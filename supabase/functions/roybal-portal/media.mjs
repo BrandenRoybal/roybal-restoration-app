@@ -37,12 +37,22 @@ export function mediaLists(row) {
   return { photos, documents };
 }
 
-/* true only when `hash` is one of the images this row shares */
+/* a document sent for signature: its HTML snapshot's hash and the images
+   inside it, as the field app stored them on the approval */
+export function signDoc(approval) {
+  const d = approval && approval.doc;
+  if (!d || !HASH.test(String(d.html || ""))) return null;
+  return { html: String(d.html), media: arr(d.media).map(String).filter((h) => HASH.test(h)) };
+}
+
+/* true only when `hash` is one of the images this row shares — its photos,
+   its document pages, or an image inside a document it asks them to sign */
 export function mediaAllowed(row, hash) {
   const h = String(hash || "");
   if (!HASH.test(h)) return false;
   const { photos, documents } = mediaLists(row);
-  return photos.some((p) => p.hash === h) || documents.some((d) => d.pages.includes(h));
+  if (photos.some((p) => p.hash === h) || documents.some((d) => d.pages.includes(h))) return true;
+  return arr(row && row.approvals).some((a) => { const d = signDoc(a); return !!d && d.media.includes(h); });
 }
 
 /* the storage keys to try, in order: a preview asks for the thumbnail and
