@@ -100,6 +100,11 @@ ok("no phone on file -> nothing",
 ok("no valid link -> nothing",
   portal.portalSmsPlan({ lastInboundChannel: "portal", phone: "9075550101", shareToken: "", pingedRecently: false }) === null);
 
+const must = portal.portalSmsPlan({ lastInboundChannel: "portal", phone: "9075550101", shareToken: TOK, pingedRecently: true,
+  ping: "a document needs your signature. Read it and sign here:" });
+ok("a signature request texts even inside the update window, with its own words",
+  must && must.captured_by === "portal-update" && must.body.includes("needs your signature") && must.body.endsWith("/j/" + TOK));
+
 /* end to end through sendOfficeReply: route each REST read to a canned row */
 const routes = [];
 globalThis.fetch = async (url, opts = {}) => {
@@ -144,5 +149,17 @@ routes.push(["portal_messages?portal_job_id", [{ channel: "portal" }]],
 await portal.sendOfficeReply("ps-1", "Portal is off");
 await settle();
 ok("a turned-off portal texts nothing", !notifyCall());
+
+routes.length = 0; calls.length = 0;
+routes.push(["portal_messages?portal_job_id", [{ channel: "portal" }]],
+  ["portal_jobs?", [{ contact_id: "c-1", share_token: TOK }]],
+  ["contacts?", [{ phone_norm: "9075550101" }]],
+  ["sms_messages?", [{ id: "s1" }]],
+  ["rest/v1/portal_messages", [{ id: "m12" }]]);
+await portal.sendOfficeReply("ps-1", "Please review and sign", "office", { ping: "a document needs your signature. Read it and sign here:" });
+await settle();
+const signText = notifyCall();
+ok("a signature request goes out even after an update text today",
+  signText && /needs your signature/.test(signText.body.body) && !calls.some((c) => c.url.includes("sms_messages?")));
 
 console.log(`\n${pass} portal-thread checks passed.`);

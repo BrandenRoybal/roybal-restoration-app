@@ -79,13 +79,13 @@ export async function buildSharePhotos(photos, ensure, onProgress = () => {}) {
   return { rows, skipped };
 }
 
-async function ensureUploaded(hash, src) {
+export async function ensureUploaded(hash, src) {
   if (await mediaExists(hash)) return;
   await uploadMedia(hash, src);
   if (!(await mediaExists(hash))) throw new Error("cloud copy could not be verified");
 }
 
-const requireOnline = () => {
+export const requireOnline = () => {
   if (!isSignedIn()) throw new Error("Sign in under Menu → Sync first — the link is served from the cloud");
   if (likelyOffline()) throw new Error("Publishing a link needs internet — try again when online");
 };
@@ -254,7 +254,7 @@ export async function dehydrateImages(root) {
 
 /* the self-contained document: settle, snapshot + the app's own stylesheets,
    so the share renders exactly like the printed packet */
-export async function buildPacketHtml(project, sheets) {
+export async function buildPacketHtml(project, sheets, title = "") {
   const host = await settleSheets(sheets);
   let wrap;
   try { wrap = snapshotSheets(sheets); }
@@ -270,7 +270,7 @@ export async function buildPacketHtml(project, sheets) {
   } catch { /* offline css fetch — the skeleton still carries the content */ }
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-    `<title>Job Packet — ${escHtml(project.customer)}</title>` +
+    `<title>${escHtml(title || "Job Packet — " + (project.customer || ""))}</title>` +
     `<style>${css}</style>` +
     `<style>body{background:#fff;margin:0;padding:16px}.sheet{margin:0 auto 24px;max-width:8.5in;box-shadow:none}` +
     /* frozen canvases are <img> now — mirror the print rules written for `canvas` */

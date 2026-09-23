@@ -103,6 +103,31 @@ export function selectionSummary(sheet) {
   };
 }
 
+/* PURE: the office's show/hide settings survive a re-import. `closed` hides
+   the whole sheet from the customer; `omit` hides single decisions (only
+   ids the new sheet still has are kept). The gateway reads both from
+   portal_jobs.selections_source. */
+export function carrySourceSettings(prevSource, rows) {
+  const prev = prevSource && typeof prevSource === "object" ? prevSource : {};
+  const ids = new Set((rows || []).map((r) => r.selection_id));
+  const omit = (Array.isArray(prev.omit) ? prev.omit : []).map(String).filter((id) => ids.has(id));
+  return { closed: prev.closed === true, omit };
+}
+
+/* PURE: the office's summary of a published sheet as the customer sees it. */
+export function selectionStatus(rows, source) {
+  const src = source && typeof source === "object" ? source : {};
+  const omit = new Set(Array.isArray(src.omit) ? src.omit.map(String) : []);
+  const shown = (rows || []).filter((r) => !omit.has(String(r.selection_id)));
+  return {
+    closed: src.closed === true,
+    total: (rows || []).length,
+    shown: shown.length,
+    answered: shown.filter((r) => r.customer_choice).length,
+    wantsChange: shown.filter((r) => r.customer_choice === "change").length,
+  };
+}
+
 /* ---------- persistence ---------- */
 
 export async function fetchSelections(portalJobId) {
@@ -110,7 +135,7 @@ export async function fetchSelections(portalJobId) {
   const { rest } = await import("./supa.js");
   const q = `portal_selections?portal_job_id=eq.${portalJobId}` +
     `&select=id,selection_id,sort_order,type,label,scope,room,title,descr,cat,sel,qty,unit,` +
-    `lkq_unit_cost,lkq_total,waste_pct,items,chosen_option_id,chosen_label,delta_cents,chosen_at` +
+    `lkq_unit_cost,lkq_total,waste_pct,items,chosen_option_id,chosen_label,delta_cents,chosen_at,customer_choice,customer_note` +
     `&order=sort_order.asc`;
   const res = await rest(q, { method: "GET" });
   if (!res.ok) throw new Error("Selections load failed (" + res.status + ")");
@@ -148,10 +173,17 @@ export async function publishSelections(project, sheet, meta = {}) {
   }
 
   const summary = selectionSummary(sheet);
+  // keep the office's show/hide settings across the re-import
+  let prevSource = share.selectionsSource || null;
+  try {
+    const r = await rest(`portal_jobs?id=eq.${portalJobId}&select=selections_source&limit=1`, { method: "GET" });
+    if (r.ok) prevSource = ((await r.json())[0] || {}).selections_source || prevSource;
+  } catch { /* the local copy will do */ }
   const source = {
     file: meta.file || "",
     importedAt: new Date().toISOString(),
     ...summary,
+    ...carrySourceSettings(prevSource, rows),
   };
   await rest(`portal_jobs?id=eq.${portalJobId}`, {
     method: "PATCH",
@@ -160,4 +192,21 @@ export async function publishSelections(project, sheet, meta = {}) {
   }).catch(() => { /* selections are published; the stamp is cosmetic */ });
 
   return { published: rows.length, removed, repriced, source, summary };
+}
+
+/* Save the office's show/hide settings. Merges into the stored source so the
+   import stamp (file, counts) is kept. Returns the saved source. */
+export async function saveSelectionSettings(project, { closed, omit }) {
+  const share = (project && project.portalShare) || {};
+  if (!share.id) throw new Error("Turn the customer portal on for this job first.");
+  const { rest } = await import("./supa.js");
+  const r = await rest(`portal_jobs?id=eq.${share.id}&select=selections_source&limit=1`, { method: "GET" });
+  if (!r.ok) throw new Error("Load failed (" + r.status + ")");
+  const cur = ((await r.json())[0] || {}).selections_source || share.selectionsSource || {};
+  const next = { ...cur, closed: !!closed, omit: [...new Set((omit || []).map(String))], settingsAt: new Date().toISOString() };
+  const up = await rest(`portal_jobs?id=eq.${share.id}`, {
+    method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ selections_source: next }),
+  });
+  if (!up.ok) throw new Error("Save failed (" + up.status + ")");
+  return next;
 }

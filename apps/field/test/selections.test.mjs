@@ -3,7 +3,7 @@
    decisions in place, never silently drop what they already chose.
    Run: node apps/field/test/selections.test.mjs */
 import assert from "node:assert";
-import { selectionRows, mergeSelectionRows, selectionSummary } from "../js/selections.js";
+import { selectionRows, mergeSelectionRows, selectionSummary, carrySourceSettings, selectionStatus } from "../js/selections.js";
 import { buildSelectionSheet, normalizeLines } from "../js/xactimate.js";
 
 let pass = 0;
@@ -125,5 +125,21 @@ ok("and the two reconcile to the estimate",
   Math.round((sum.selectionValue + sum.scopeValue) * 100) === Math.round(sum.estimateValue * 100));
 eq("reports how many lines were read", sum.lineCount, 3);
 eq("an empty sheet summarises to zeroes", selectionSummary({}).decisions, 0);
+
+/* ============================================================
+   4. What the office shows the customer
+   ============================================================ */
+console.log("\n show / hide");
+
+const pub = [{ selection_id: "a", customer_choice: "match" }, { selection_id: "b", customer_choice: "change" },
+  { selection_id: "c", customer_choice: null }];
+const carried = carrySourceSettings({ closed: true, omit: ["c", "gone"] }, pub);
+ok("closing survives a re-import", carried.closed === true);
+eq("hidden decisions survive, ones the estimate dropped are forgotten", carried.omit.join(), "c");
+ok("no earlier settings means open, nothing hidden",
+  carrySourceSettings(null, pub).closed === false && carrySourceSettings(null, pub).omit.length === 0);
+const st = selectionStatus(pub, { omit: ["c"] });
+ok("the office sees what the customer sees", st.total === 3 && st.shown === 2 && st.answered === 2 && st.wantsChange === 1);
+ok("and whether it's closed", selectionStatus(pub, { closed: true }).closed === true);
 
 console.log(`\n${pass} assertions passed`);

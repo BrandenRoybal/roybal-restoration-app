@@ -230,7 +230,10 @@ export async function fetchPortalThread(portalJobId) {
 }
 
 /* office (or an approved AI draft) replies to the customer */
-export async function sendOfficeReply(portalJobId, body, author = "office") {
+/* `ping` (optional) replaces the generic update text for a post the customer
+   must act on — a document waiting on their signature — and goes out even if
+   an update text went out earlier in the window. */
+export async function sendOfficeReply(portalJobId, body, author = "office", { ping = "" } = {}) {
   const text = (body || "").trim();
   if (!portalJobId || !text) throw new Error("Nothing to send");
   const { rest } = await import("./supa.js");
@@ -249,7 +252,7 @@ export async function sendOfficeReply(portalJobId, body, author = "office") {
   });
   if (!res.ok) throw new Error("Send failed (" + res.status + ")");
   const row = (await res.json())[0];
-  mirrorReplyToSms(portalJobId, text).catch(() => {});   // bridge: best-effort, never blocks the thread post
+  mirrorReplyToSms(portalJobId, text, ping).catch(() => {});   // bridge: best-effort, never blocks the thread post
   return row;
 }
 
@@ -264,19 +267,21 @@ export async function sendOfficeReply(portalJobId, body, author = "office") {
    an evening post texts nothing and the next daytime post carries the ping.
    PURE + TESTABLE: the decision; mirrorReplyToSms does the I/O. */
 export const UPDATE_PING_HOURS = 20;
-export function portalSmsPlan({ lastInboundChannel, phone, shareToken, pingedRecently, text }) {
+export function portalSmsPlan({ lastInboundChannel, phone, shareToken, pingedRecently, text, ping }) {
   if (String(phone || "").length !== 10) return null;
   if (lastInboundChannel === "sms") {
     return { captured_by: "portal-bridge",
       body: "Roybal Construction: " + String(text || "").slice(0, 280) + " — reply to this text or see your project page." };
   }
   const link = portalShareLink(/^[0-9a-f]{16,}$/i.test(String(shareToken || "")) ? shareToken : "");
-  if (!link || pingedRecently) return null;
+  if (!link) return null;
+  if (ping) return { captured_by: "portal-update", body: "Roybal Construction: " + String(ping).slice(0, 200) + " " + link };
+  if (pingedRecently) return null;
   return { captured_by: "portal-update",
     body: "Roybal Construction: there's a new update on your project. See it here: " + link };
 }
 
-async function mirrorReplyToSms(portalJobId, text) {
+async function mirrorReplyToSms(portalJobId, text, ping = "") {
   const { rest, callFunction } = await import("./supa.js");
   const last = await rest(`portal_messages?portal_job_id=eq.${portalJobId}&direction=eq.in&select=channel&order=created_at.desc&limit=1`, { method: "GET" });
   if (!last.ok) return;
@@ -287,7 +292,7 @@ async function mirrorReplyToSms(portalJobId, text) {
   const cr = await rest(`contacts?id=eq.${job.contact_id}&select=phone_norm&limit=1`, { method: "GET" });
   const phone = cr.ok ? String(((await cr.json())[0] || {}).phone_norm || "") : "";
   let pingedRecently = false;
-  if (!(m && m.channel === "sms") && phone.length === 10) {
+  if (!(m && m.channel === "sms") && phone.length === 10 && !ping) {
     // failed rows don't count: a send the window refused may go on the next post
     const since = new Date(Date.now() - UPDATE_PING_HOURS * 3600_000).toISOString();
     const r = await rest(`sms_messages?direction=eq.outbound&sent_by=eq.portal-update` +
@@ -296,7 +301,7 @@ async function mirrorReplyToSms(portalJobId, text) {
     // an unreadable log means we can't prove it's quiet — skip rather than risk repeats
     pingedRecently = !r.ok || ((await r.json()) || []).length > 0;
   }
-  const plan = portalSmsPlan({ lastInboundChannel: m && m.channel, phone, shareToken: job.share_token, pingedRecently, text });
+  const plan = portalSmsPlan({ lastInboundChannel: m && m.channel, phone, shareToken: job.share_token, pingedRecently, text, ping });
   if (!plan) return;
   await callFunction("roybal-notify", { action: "sendSms", to: phone, kind: "portal", ...plan });
 }
