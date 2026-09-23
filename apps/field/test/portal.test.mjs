@@ -53,7 +53,21 @@ for (const needle of FORBIDDEN)
   ok(`internal data never leaks: "${needle}"`, !json.includes(needle));
 
 ok("projection keys are the curated set only",
-  Object.keys(proj).sort().join(",") === "closeout,customer_name,documents,drying,milestones,photos,property_address,status,statusLabel");
+  Object.keys(proj).sort().join(",") === "claim,closeout,customer_name,documents,drying,milestones,photos,property_address,status,statusLabel");
+ok("claim panel is off by default", proj.claim === null);
+
+/* ---------- the claim panel, when the office turns it on ---------- */
+const withClaim = portalProjection({ ...project, dateOfLoss: "2026-08-30",
+  portalShare: { ...project.portalShare, claim: { show: true, stage: "supplement", deductible: "1000", deductibleState: "due" } } });
+ok("claim panel carries carrier, claim #, loss date, stage and deductible",
+  withClaim.claim.carrier === "State Farm" && withClaim.claim.claimNo === "02-0D9H-665" &&
+  withClaim.claim.dateOfLoss === "2026-08-30" && withClaim.claim.stage === "supplement" &&
+  withClaim.claim.deductible === 1000 && withClaim.claim.deductibleState === "due");
+const cjson = JSON.stringify(withClaim);
+for (const needle of ["Dan Page", "48000", "999", "supplement $5000"])
+  ok(`claim panel never carries "${needle}"`, !cjson.includes(needle));
+ok("claim panel turned back off is null again",
+  portalProjection({ ...project, portalShare: { ...project.portalShare, claim: { show: false, stage: "approved" } } }).claim === null);
 
 /* ---------- milestone states ---------- */
 const ms = portalMilestones("drying");
@@ -62,6 +76,24 @@ ok("current milestone marked", cur && cur.key === "drying");
 ok("earlier milestones are done", ms.find((m) => m.key === "mitigation").state === "done");
 ok("later milestones are upcoming", ms.find((m) => m.key === "complete").state === "upcoming");
 ok("unknown status -> all upcoming", portalMilestones("").every((m) => m.state === "upcoming"));
+
+/* ---------- construction jobs get their own track ---------- */
+const cjob = { ...project, jobType: "construction", portalShare: { ...project.portalShare, status: "drywall" } };
+const cproj = portalProjection(cjob);
+ok("construction job shows the construction track",
+  cproj.milestones.map((m) => m.key).join(",") === "contract,permits,scheduled,framing,drywall,finishes,final,complete");
+ok("construction track never mentions water or drying",
+  !/mitigation|drying/i.test(JSON.stringify(cproj.milestones)));
+ok("construction status label", cproj.statusLabel === "Insulation & drywall");
+ok("restoration is still the default track (no jobType)", proj.milestones[1].key === "mitigation");
+const moved = portalProjection({ ...project, jobType: "construction", portalShare: { ...project.portalShare, status: "reconstruction" } });
+ok("a restoration status on a construction job lands on its nearest step",
+  moved.status === "framing" && moved.milestones.find((m) => m.state === "current").key === "framing");
+const back = portalProjection({ ...project, portalShare: { ...project.portalShare, status: "finishes" } });
+ok("and the other way round", back.status === "reconstruction");
+ok("closeout still works on the construction track",
+  portalProjection({ ...cjob, portalShare: { ...cjob.portalShare, status: "complete", closeout: { completedAt: "2026-09-01", warrantyMonths: 12 } } })
+    .closeout.warrantyMonths === 12);
 
 /* ---------- link + token ---------- */
 ok("share link points at the portal subdomain", portalShareLink("abc123") === "https://portal.roybalconstruction.com/j/abc123");

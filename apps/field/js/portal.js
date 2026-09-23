@@ -13,15 +13,17 @@
    and media.js are imported lazily so this module (and portalProjection's
    test) load under Node.
    ============================================================ */
-import { PORTAL_MILESTONES, portalMilestoneLabel, portalMilestoneNudge } from "./model.js";
+import { jobType, portalMilestoneTrack, portalMilestoneLabel, portalMilestoneNudge, portalStatusFor } from "./model.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 
-/* the milestone timeline with the office-chosen current one marked */
-export function portalMilestones(status) {
-  const order = PORTAL_MILESTONES.map((m) => m.key);
-  const cur = order.indexOf(status);
-  return PORTAL_MILESTONES.map((m, i) => ({
+/* the milestone timeline with the office-chosen current one marked, on the
+   job kind's own track (restoration unless `kind` says construction) */
+export function portalMilestones(status, kind) {
+  const track = portalMilestoneTrack(kind);
+  const order = track.map((m) => m.key);
+  const cur = order.indexOf(portalStatusFor(status, kind));
+  return track.map((m, i) => ({
     key: m.key, label: m.label,
     state: cur < 0 ? "upcoming" : i < cur ? "done" : i === cur ? "current" : "upcoming",
   }));
@@ -68,6 +70,8 @@ export function dryingSummary(project) {
 export function portalProjection(project) {
   const p = project || {};
   const share = p.portalShare || {};
+  const kind = jobType(p);
+  const status = share.status ? portalStatusFor(share.status, kind) : "";
   const sharedIds = new Set(arr(share.sharedPhotoIds));
   const photos = arr(p.photos)
     .filter((ph) => ph && ph.src && sharedIds.has(ph.id))
@@ -89,7 +93,7 @@ export function portalProjection(project) {
   // complete. Office-curated rows only — label/value strings, nothing read
   // from internal data.
   const co = share.closeout || null;
-  const closeout = share.status === "complete" && co ? {
+  const closeout = status === "complete" && co ? {
     completedAt: String(co.completedAt || "").slice(0, 10),
     warrantyMonths: Number(co.warrantyMonths) || 0,
     homeFile: arr(co.homeFile)
@@ -97,16 +101,31 @@ export function portalProjection(project) {
       .slice(0, 40)
       .map((r) => ({ label: String(r.label || "").slice(0, 80), value: String(r.value || "").slice(0, 200) })),
   } : null;
+  // claim panel: OFF unless the office turned it on. Carrier, claim number
+  // and date of loss come from the job; where the claim stands and the
+  // deductible are what the office sets on the form. The adjuster, our
+  // estimate and every amount but the customer's own deductible stay out.
+  const cl = share.claim || null;
+  const deductible = cl ? parseFloat(cl.deductible) : NaN;
+  const claim = cl && cl.show ? {
+    carrier: String(p.carrier || "").slice(0, 80),
+    claimNo: String(p.claimNo || "").slice(0, 60),
+    dateOfLoss: /^\d{4}-\d{2}-\d{2}$/.test(String(p.dateOfLoss || "")) ? String(p.dateOfLoss) : "",
+    stage: String(cl.stage || ""),
+    deductible: Number.isFinite(deductible) && deductible > 0 ? deductible : 0,
+    deductibleState: ["due", "paid"].includes(cl.deductibleState) ? cl.deductibleState : "",
+  } : null;
   return {
     customer_name: p.customer || "",
     property_address: p.address || "",
-    status: share.status || "",
-    statusLabel: portalMilestoneLabel(share.status),
-    milestones: portalMilestones(share.status),
+    status,
+    statusLabel: portalMilestoneLabel(status, kind),
+    milestones: portalMilestones(status, kind),
     photos,   // still carries the data URL here; publishPortal swaps to media hashes
     documents, // page data URLs here; publishPortal swaps to media hashes
     drying: share.shareDrying ? dryingSummary(p) : null,
     closeout,
+    claim,
   };
 }
 
@@ -173,12 +192,22 @@ export async function publishPortal(project) {
     closeout: proj.closeout,
     notify_crew: share.notifyCrew !== false,   // the who's-coming-today toggle (default on)
     published_at: new Date().toISOString(),
+    // only once the office has touched the panel, so turning it off clears it
+    ...(share.claim ? { claim: proj.claim } : {}),
   };
-  const res = await rest("portal_jobs", {
+  const post = (r) => rest("portal_jobs", {
     method: "POST",
     headers: { Prefer: "resolution=merge-duplicates,return=representation" },
-    body: JSON.stringify([row]),
+    body: JSON.stringify([r]),
   });
+  let res = await post(row);
+  // Before migration 0009 applies, the column doesn't exist and PostgREST
+  // refuses the whole row. Publish everything else rather than nothing; the
+  // panel appears on the next publish after the column lands.
+  if (!res.ok && "claim" in row && res.status === 400) {
+    const { claim: _skip, ...rest0 } = row;
+    res = await post(rest0);
+  }
   if (!res.ok) throw new Error("Publish failed (" + res.status + "): " + (await res.text().catch(() => "")));
   return row;
 }
@@ -224,27 +253,52 @@ export async function sendOfficeReply(portalJobId, body, author = "office") {
   return row;
 }
 
-/* SMS bridge, outbound half (CF-2 / portal M2): when the customer's LATEST
-   inbound message arrived by text, they're conversing over SMS — so the
-   office reply is also texted to the phone on file (kind 'portal', the
-   authenticated lane roybal-notify reserved for exactly this). Customers
-   using the web thread get no duplicate texts. */
+/* Customers who use the web page, not texts, heard nothing when we posted:
+   13 of the first 40 office updates were never opened. So every office post
+   now reaches the phone on file one of two ways:
+     - the customer's LATEST inbound message came by text → they're
+       conversing over SMS, so the reply itself is texted (the bridge);
+     - otherwise → a short "new update, here's your link" text, at most one
+       per job per UPDATE_PING_HOURS, so a busy day is one text, not five.
+   Both ride kind 'portal', so roybal-notify's 7am–8pm Alaska window applies:
+   an evening post texts nothing and the next daytime post carries the ping.
+   PURE + TESTABLE: the decision; mirrorReplyToSms does the I/O. */
+export const UPDATE_PING_HOURS = 20;
+export function portalSmsPlan({ lastInboundChannel, phone, shareToken, pingedRecently, text }) {
+  if (String(phone || "").length !== 10) return null;
+  if (lastInboundChannel === "sms") {
+    return { captured_by: "portal-bridge",
+      body: "Roybal Construction: " + String(text || "").slice(0, 280) + " — reply to this text or see your project page." };
+  }
+  const link = portalShareLink(/^[0-9a-f]{16,}$/i.test(String(shareToken || "")) ? shareToken : "");
+  if (!link || pingedRecently) return null;
+  return { captured_by: "portal-update",
+    body: "Roybal Construction: there's a new update on your project. See it here: " + link };
+}
+
 async function mirrorReplyToSms(portalJobId, text) {
   const { rest, callFunction } = await import("./supa.js");
   const last = await rest(`portal_messages?portal_job_id=eq.${portalJobId}&direction=eq.in&select=channel&order=created_at.desc&limit=1`, { method: "GET" });
   if (!last.ok) return;
-  const m = (await last.json())[0];
-  if (!m || m.channel !== "sms") return;
-  const pj = await rest(`portal_jobs?id=eq.${portalJobId}&select=contact_id&limit=1`, { method: "GET" });
-  const cid = pj.ok ? ((await pj.json())[0] || {}).contact_id : null;
-  if (!cid) return;
-  const cr = await rest(`contacts?id=eq.${cid}&select=phone_norm&limit=1`, { method: "GET" });
+  const m = (await last.json())[0] || null;
+  const pj = await rest(`portal_jobs?id=eq.${portalJobId}&enabled=eq.true&select=contact_id,share_token&limit=1`, { method: "GET" });
+  const job = pj.ok ? ((await pj.json())[0] || null) : null;
+  if (!job || !job.contact_id) return;
+  const cr = await rest(`contacts?id=eq.${job.contact_id}&select=phone_norm&limit=1`, { method: "GET" });
   const phone = cr.ok ? String(((await cr.json())[0] || {}).phone_norm || "") : "";
-  if (phone.length !== 10) return;
-  await callFunction("roybal-notify", {
-    action: "sendSms", to: phone, kind: "portal", captured_by: "portal-bridge",
-    body: "Roybal Construction: " + text.slice(0, 280) + " — reply to this text or see your project page.",
-  });
+  let pingedRecently = false;
+  if (!(m && m.channel === "sms") && phone.length === 10) {
+    // failed rows don't count: a send the window refused may go on the next post
+    const since = new Date(Date.now() - UPDATE_PING_HOURS * 3600_000).toISOString();
+    const r = await rest(`sms_messages?direction=eq.outbound&sent_by=eq.portal-update` +
+      `&to_number=eq.${encodeURIComponent("+1" + phone)}&status=neq.failed` +
+      `&created_at=gte.${encodeURIComponent(since)}&select=id&limit=1`, { method: "GET" });
+    // an unreadable log means we can't prove it's quiet — skip rather than risk repeats
+    pingedRecently = !r.ok || ((await r.json()) || []).length > 0;
+  }
+  const plan = portalSmsPlan({ lastInboundChannel: m && m.channel, phone, shareToken: job.share_token, pingedRecently, text });
+  if (!plan) return;
+  await callFunction("roybal-notify", { action: "sendSms", to: phone, kind: "portal", ...plan });
 }
 
 /* PURE + customer-safe: the digest handed to portal AI drafts. Built from the
@@ -271,8 +325,8 @@ export function threadForAi(messages) {
 /* proactive milestone nudge: post the friendly line for `status` to the thread
    as an office message (customer sees it as from the company). Returns the
    saved row, or null when there's no template for that status. */
-export async function postMilestoneNudge(portalJobId, status) {
-  const text = portalMilestoneNudge(status);
+export async function postMilestoneNudge(portalJobId, status, kind) {
+  const text = portalMilestoneNudge(status, kind);
   if (!portalJobId || !text) return null;
   return sendOfficeReply(portalJobId, text, "office");
 }

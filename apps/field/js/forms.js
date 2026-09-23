@@ -18,7 +18,7 @@ import {
   INSPECTION_TYPES, INSPECTION_RESULTS, PRECON_ITEMS, COMPLETION_ITEMS,
   blankScopeArea, blankScopeItem, blankAllowanceRow, blankPermitRow,
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
-  newPortalShare, PORTAL_MILESTONES,
+  newPortalShare, portalMilestoneTrack, portalStatusFor, jobType, PORTAL_CLAIM_STAGES,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
 import { photoShareControl, photoShareSheetLine } from "./photoshare.js";
@@ -3378,6 +3378,12 @@ export function certCompletion(project, c) {
 export function portalShareForm(project) {
   if (!project.portalShare) project.portalShare = newPortalShare();
   const s = project.portalShare;
+  // the job kind picks the milestone track; a status saved on the other
+  // track moves to its nearest step here (and the last-notified one with
+  // it, so the move alone never posts a milestone message to the customer)
+  const kind = jobType(project);
+  if (s.status) s.status = portalStatusFor(s.status, kind);
+  if (s.lastNotifiedStatus) s.lastNotifiedStatus = portalStatusFor(s.lastNotifiedStatus, kind);
 
   const body = h("div", { class: "app-only" });
   const linkBox = h("div", { style: "margin-top:10px" });
@@ -3498,7 +3504,7 @@ export function portalShareForm(project) {
   });
 
   // current milestone
-  const statusSel = sel(s, "status", PORTAL_MILESTONES.map((m) => ({ value: m.key, label: m.label })), { onchange: commit });
+  const statusSel = sel(s, "status", portalMilestoneTrack(kind).map((m) => ({ value: m.key, label: m.label })), { onchange: commit });
 
   // proactive nudge toggle — message the customer when the status advances
   const notifyBox = h("input", { type: "checkbox", checked: s.notifyOnStatus !== false });
@@ -3544,6 +3550,29 @@ export function portalShareForm(project) {
           (a.goal != null ? ` / dry at ${a.goal}%` : "")).join(" · ") +
         (d.equipmentOut ? ` · ${d.equipmentOut} machine${d.equipmentOut === 1 ? "" : "s"} running` : "");
   }
+
+  // insurance claim panel: off by default. Carrier, claim # and date of loss
+  // come from the job's own fields; the office sets the stage + deductible.
+  const claimBox = h("input", { type: "checkbox", checked: !!(s.claim && s.claim.show) });
+  const claimFields = h("div", { style: "margin:6px 0 0 26px" });
+  function paintClaim() {
+    claimFields.replaceChildren();
+    if (!(s.claim && s.claim.show)) return;
+    const c = s.claim;
+    const fromJob = [project.carrier, project.claimNo ? "claim " + project.claimNo : "", project.dateOfLoss ? "loss " + project.dateOfLoss : ""]
+      .filter(Boolean).join(" · ");
+    claimFields.append(
+      h("p", { class: "subtle", style: "font-size:12px;margin:0 0 6px" },
+        fromJob ? "From the job: " + fromJob + ". The adjuster and our estimate are never shown."
+          : "Add the carrier and claim number on the job's info first — they show from there."),
+      field("Where the claim stands", sel(c, "stage", PORTAL_CLAIM_STAGES, { placeholder: "— pick —" })),
+      field("Customer's deductible ($)", inp(c, "deductible", { inputmode: "decimal", placeholder: "e.g. 1000" })),
+      field("Deductible", sel(c, "deductibleState", [{ value: "due", label: "Still due" }, { value: "paid", label: "Paid — thank you" }], { placeholder: "— don't say —" })));
+  }
+  claimBox.addEventListener("change", () => {
+    s.claim = { stage: "", deductible: "", deductibleState: "", ...(s.claim || {}), show: claimBox.checked };
+    commit(); paintClaim();
+  });
 
   // document picker (CF-2): supporting docs the customer may see — the pages
   // only, never the AI digest. COI, cert of drying, permits, reports.
@@ -3742,7 +3771,7 @@ export function portalShareForm(project) {
       // proactive nudge: announce a NEW status to the customer on the thread
       let nudged = false;
       if (s.notifyOnStatus !== false && s.status && s.status !== (s.lastNotifiedStatus || "")) {
-        try { if (await postMilestoneNudge(s.id, s.status)) { s.lastNotifiedStatus = s.status; nudged = true; } } catch (_) { /* publish still succeeded */ }
+        try { if (await postMilestoneNudge(s.id, s.status, kind)) { s.lastNotifiedStatus = s.status; nudged = true; } } catch (_) { /* publish still succeeded */ }
       }
       commit(); paintLink(); paintThread();
       toast(nudged ? "Published — and the customer was notified of the new status." : "Published — the customer view is up to date.");
@@ -3931,6 +3960,10 @@ export function portalShareForm(project) {
         h("label", { class: "check", style: "margin:2px 0 0" }, dryBox,
           h("span", {}, "Share drying readings — today's moisture vs the dry standard, and machines running. Never a finish date.")),
         dryPreview,
+        sectionTitle("Insurance claim"),
+        h("label", { class: "check", style: "margin:2px 0 0" }, claimBox,
+          h("span", {}, "Show the customer where their claim stands — carrier, claim #, stage and their deductible")),
+        claimFields,
         sectionTitle("Shared documents"),
         h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
           "Documents the customer (or their adjuster / lender) may need — cert of drying, permits, reports. Pages only; internal notes never leave."),
@@ -3942,7 +3975,7 @@ export function portalShareForm(project) {
         selBox,
         threadBox) : null,
     );
-    paintPhotos(); paintDryPreview(); paintDocs(); paintCloseout(); paintMoney(); paintLink(); paintSelections(); paintThread();
+    paintPhotos(); paintDryPreview(); paintClaim(); paintDocs(); paintCloseout(); paintMoney(); paintLink(); paintSelections(); paintThread();
   }
   paint();
 
