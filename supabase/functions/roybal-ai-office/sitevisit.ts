@@ -152,18 +152,19 @@ export const SITE_DRAFT_SCHEMA = {
     assumptions: { type: "array", items: { type: "string" }, description: "Conditions the pricing assumes (access, working hours, occupied home, materials to match existing, utilities on, winter conditions). One line each." },
     exclusions: { type: "array", items: { type: "string" }, description: "What this estimate does not include (hidden conditions behind finishes, code upgrades not observed, contents, permits if not priced, hazardous materials testing). One line each." },
     questions: { type: "array", items: { type: "string" }, description: "Open questions the evidence could not settle and that change the price, each naming what you assumed meanwhile. Empty when none." },
-    pricingNotes: { type: "string", description: "One short paragraph an adjuster can read justifying Fairbanks / North Pole pricing where it runs above a national baseline: remote freight and material lead times, winter working conditions, local labor market. Only claims the job supports." },
+    pricingNotes: { type: "string", description: "One short paragraph the adjuster or client can read justifying Fairbanks / North Pole pricing where it runs above a national baseline: remote freight and material lead times, winter working conditions, local labor market. Only claims the job supports." },
   },
 } as const;
 
 /* ---------- the request ---------- */
 export const SITE_SYSTEM =
   "You are the senior estimator at Roybal Construction, LLC, a general contractor and IICRC-certified water restoration company in Fairbanks / North Pole, Alaska. " +
-  "You are writing an Xactimate-style, room-by-room estimate from the evidence the owner collected on a site visit: the Magicplan LiDAR report (floor plan, room dimensions, wall and floor areas, photos pinned to rooms), extra photos, photographed handwritten notes, a transcript of the recorded site walk, and the owner's typed scope. " +
+  "You are writing an Xactimate-style, room-by-room estimate from the evidence the owner collected on a site visit: the Magicplan LiDAR report (floor plan, room dimensions, wall and floor areas, photos pinned to rooms), extra photos, still frames pulled from Magicplan room videos, photographed handwritten notes, a transcript of the recorded site walk, and the owner's typed scope, plus any design drawings or customer documents the owner attached as PDFs. " +
   "The owner's typed scope and what the owner says on the walk are instructions: follow them. Photos, plan and notes are evidence: use them for scope detail and quantities. " +
   "Take quantities from the report's printed dimensions and areas, cite the page, and show arithmetic for anything derived. Never scale a drawing. " +
+  "Several stills from one video show the same room from different angles: never count the same item twice. " +
   "Include only scope the evidence supports; when something that changes the price is uncertain, state the assumption, price the reasonable case, and list the question. " +
-  "Write for an insurance adjuster: every line traceable, nothing padded, nothing missing. Return the estimate as JSON matching the schema.";
+  "Write for the reader the job facts point to: an insurance adjuster on a claim, the owner or their facilities team on a remodel or build. Either way every line is traceable, nothing padded, nothing missing. Return the estimate as JSON matching the schema.";
 
 type Block = Record<string, unknown>;
 

@@ -1,7 +1,7 @@
 /* Site Visit estimator — the client's pure helpers (no DOM, no network).
    Run: node apps/field/test/sitevisit.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
-import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit } from "../js/sitevisit.js";
+import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit, frameTimes, frameCaption, FRAMES_PER_VIDEO } from "../js/sitevisit.js";
 import { FORMS, formsFor } from "../js/model.js";
 
 let pass = 0;
@@ -89,6 +89,31 @@ test("estimates are available on construction jobs too", () => {
   const est = FORMS.find((f) => f.key === "reconEstimates");
   assert.deepEqual(est.types.slice().sort(), ["construction", "restoration"]);
   assert.ok(formsFor({ jobType: "construction" }).some((f) => f.key === "reconEstimates"));
+});
+
+test("a Magicplan clip gives evenly spaced stills, never the first or last instant", () => {
+  const t = frameTimes(28.07);
+  assert.equal(t.length, FRAMES_PER_VIDEO);
+  assert.ok(t[0] > 0 && t[t.length - 1] < 28.07);
+  const gaps = t.slice(1).map((x, i) => x - t[i]);
+  assert.ok(Math.max(...gaps) - Math.min(...gaps) < 0.05, "even spacing");
+  assert.deepEqual(frameTimes(3), [0.75, 2.25]);         // short clip: about one every 2 s
+  assert.deepEqual(frameTimes(0.5), [0.25]);
+  for (const bad of [0, -1, NaN, Infinity, undefined]) assert.deepEqual(frameTimes(bad), []);
+  assert.equal(frameCaption("Kitchen.mp4", 65.4), "still at 1:05 from Magicplan video Kitchen.mp4");
+});
+
+test("video stills go to the draft as photos; the clip itself never does", () => {
+  const sv = newSiteVisit();
+  sv.files.push(
+    { kind: "photos", path: "sitevisit/j/p.jpg", mime: "image/jpeg" },
+    { kind: "videos", id: "v1", name: "Break room.mp4", frames: 2 },
+    { kind: "frames", videoId: "v1", path: "sitevisit/j/f1.jpg", mime: "image/jpeg", caption: frameCaption("Break room.mp4", 3.5) },
+    { kind: "frames", videoId: "v1", path: "sitevisit/j/f2.jpg", mime: "image/jpeg", caption: frameCaption("Break room.mp4", 10.5) });
+  const p = packetForDraft(sv);
+  assert.deepEqual(p.photos.map((f) => f.path), ["sitevisit/j/p.jpg", "sitevisit/j/f1.jpg", "sitevisit/j/f2.jpg"]);
+  assert.equal(p.photos[1].caption, "still at 0:03 from Magicplan video Break room.mp4");
+  assert.equal(packetReady({ files: [{ kind: "videos", name: "x.mp4" }] }), false);   // a clip with no stills is nothing to read
 });
 
 console.log(`\n${pass} site-visit tests passed`);
