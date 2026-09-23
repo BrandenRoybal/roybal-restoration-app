@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit, frameTimes, frameCaption, FRAMES_PER_VIDEO } from "../js/sitevisit.js";
 import { FORMS, formsFor } from "../js/model.js";
+import { subRatesText, SUB_RATES } from "../js/pricing.js";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -59,7 +60,7 @@ const DRAFT = {
 test("a finished draft fills the estimate and reports how it was priced", () => {
   const inv = { items: [{ desc: "old" }], notes: "", lossSummary: "" };
   const sum = applySiteDraft(inv, DRAFT, "2026-09-23T04:00:00Z");
-  assert.deepEqual(sum, { lines: 3, fromCatalog: 1, flagged: 1, questions: 1 });
+  assert.deepEqual(sum, { lines: 3, fromCatalog: 1, flagged: 1, questions: 1, alternates: 0 });
   assert.equal(inv.items.length, 3);
   assert.ok(inv.items.every((it) => it.id));
   assert.equal(inv.items[0].qty, "112");
@@ -79,6 +80,41 @@ test("a redraft replaces its own notes block and keeps what the user typed", () 
   assert.equal((inv.notes.match(/ASSUMPTIONS/g) || []).length, 1);
   assert.ok(inv.notes.includes("• Permits") && !inv.notes.includes("Mold testing"));
   assert.ok(inv.notes.startsWith("Owner supplies the tile."));
+});
+
+test("a construction draft carries who does each line, the alternates, contingency and 10 & 10 with subs", () => {
+  const inv = { items: [], notes: "", opAuto: true, opMode: "pct", overheadPct: "0", profitPct: "0" };
+  const sum = applySiteDraft(inv, {
+    ...DRAFT,
+    items: [
+      { room: "10 — Plumbing", desc: "Break-area sink rough-in & trim", qty: 12, unit: "HR", price: 200, by: "AK 49", priced: "estimate" },
+      { room: "04 — Framing & carpentry", desc: "Partitions, labor", qty: 35, unit: "HR", price: 125, by: "Roybal", priced: "estimate" },
+    ],
+    alternates: [{ title: "Keep and patch the existing tile", description: "Deducts tile removal and LVP.", baseCost: -3708 }],
+    contingencyPct: 15, accuracyPct: 25, duration: "7-9 weeks",
+  });
+  assert.equal(sum.alternates, 1);
+  assert.deepEqual(inv.items.map((it) => it.by), ["AK 49", "Roybal"]);
+  assert.deepEqual(inv.alternates, [{ title: "Keep and patch the existing tile", description: "Deducts tile removal and LVP.", baseCost: "-3708" }]);
+  assert.equal(inv.contingencyPct, "15");
+  assert.equal(inv.accuracyPct, "25");
+  assert.equal(inv.duration, "7-9 weeks");
+  assert.equal(inv.overheadPct, "10");
+  assert.equal(inv.profitPct, "10");
+  // an O&P the owner already set by hand is left alone; a Roybal-only draft doesn't force 10 & 10
+  const manual = { items: [], opAuto: false, overheadPct: "5", profitPct: "5" };
+  applySiteDraft(manual, { ...DRAFT, items: [{ desc: "x", by: "FBX Electric" }] });
+  assert.equal(manual.overheadPct, "5");
+  const own = { items: [], opAuto: true, overheadPct: "0", profitPct: "0" };
+  applySiteDraft(own, { ...DRAFT, items: [{ desc: "x", by: "Roybal" }, { desc: "y", by: "Allowance" }] });
+  assert.equal(own.overheadPct, "0");
+});
+
+test("the rates sent with every draft name the company and each sub with a price", () => {
+  const lines = subRatesText().split("\n");
+  assert.equal(lines.length, SUB_RATES.length);
+  assert.ok(lines.every((l) => /^[^|]+ \| [^|]+ \| \$\d+(\.\d+)?\/(HR|SF)/.test(l)), lines.join("\n"));
+  assert.ok(lines[0].startsWith("Roybal | "));
 });
 
 test("an empty draft section leaves no empty heading", () => {

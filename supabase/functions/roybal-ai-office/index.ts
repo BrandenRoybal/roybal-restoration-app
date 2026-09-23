@@ -862,7 +862,10 @@ async function siteVisitStart(body: Record<string, unknown>) {
   const rulesText = r.pricingRules + r.commonRules + "\n" + r.inclusionUniversal +
     "When the job includes mitigation (emergency, extraction, tear-out, drying), these apply to those lines:\n" + r.inclusionMitigation +
     "For put-back and rebuild lines:\n" + r.inclusionRestoration;
-  const content = buildContent({ packet, signed, facts: body.facts ?? {}, rulesText, catalogText: catalogTextFromRows(rows, pm) });
+  const facts = (body.facts ?? {}) as { job?: { jobType?: string } };
+  const kind = facts.job?.jobType === "construction" ? "construction" : "claim";
+  const ratesText = String(body.rates ?? "").slice(0, 4000);
+  const content = buildContent({ packet, signed, facts, rulesText, catalogText: catalogTextFromRows(rows, pm), kind, ratesText });
   const customId = "sv-" + crypto.randomUUID();
   const res = await fetch("https://api.anthropic.com/v1/messages/batches", {
     method: "POST", headers: ANTHROPIC_HEADERS(),

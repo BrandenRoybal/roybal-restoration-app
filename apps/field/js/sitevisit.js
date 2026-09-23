@@ -27,6 +27,7 @@
 import { h, toast, fileToDataURL, uid } from "./core.js";
 import { uploadSiteFile } from "./supa.js";
 import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft } from "./officeai.js";
+import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -34,7 +35,7 @@ const MAX_IMAGES = 90;   // the server's limit (sitevisit.ts MAX_IMAGES): photos
 
 /* ---------- pure: packet shape ---------- */
 export const KINDS = {
-  report: { label: "Magicplan report", accept: "application/pdf,.pdf", multiple: true, hint: "The PDF report you export from Magicplan." },
+  report: { label: "Reports & drawings (PDF)", accept: "application/pdf,.pdf", multiple: true, hint: "The Magicplan report, plus any layout or customer list. Up to 4." },
   photos: { label: "Extra photos", accept: "image/*", multiple: true, hint: "Anything not already in the report." },
   notes:  { label: "Handwritten notes", accept: "image/*", multiple: true, hint: "A photo of each page." },
   videos: { label: "Magicplan room videos", accept: "video/*,.mp4,.mov", multiple: true, hint: "Still frames are pulled from each clip so the draft can see the room." },
@@ -111,6 +112,7 @@ export function applySiteDraft(inv, draft, at = new Date().toISOString()) {
     room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
     unit: li.unit || "", price: li.price != null ? String(li.price) : "",
     code: li.code || "", priced: li.priced || "", flag: li.priceFlag || "",
+    ...(li.by ? { by: String(li.by) } : {}),
   }));
   if (draft.lossSummary) inv.lossSummary = draft.lossSummary;
   const block = draftNotesText(draft);
@@ -120,12 +122,22 @@ export function applySiteDraft(inv, draft, at = new Date().toISOString()) {
   inv.notes = [kept, block].filter(Boolean).join("\n\n");
   inv.siteVisitNotes = block;
   inv.customerScope = arr(draft.rooms).map((r) => ({ room: r.name, summary: r.customerSummary }));
+  // construction shape: open choices as alternates, contingency, accuracy, duration
+  inv.alternates = arr(draft.alternates).map((a) => ({ title: String(a.title || ""), description: String(a.description || ""), baseCost: String(Number(a.baseCost) || 0) }));
+  inv.contingencyPct = Number(draft.contingencyPct) > 0 ? String(draft.contingencyPct) : "";
+  inv.accuracyPct = Number(draft.accuracyPct) > 0 ? String(draft.accuracyPct) : "";
+  inv.duration = String(draft.duration || "");
+  // GC O&P rule: 10 & 10 when a subcontractor is on the job; only while the
+  // O&P is still on automatic
+  const subs = lines.some((li) => { const b = String(li.by || "").trim().toLowerCase(); return b && b !== "roybal" && b !== "allowance"; });
+  if (subs && inv.opAuto !== false && (inv.opMode || "pct") === "pct") { inv.overheadPct = "10"; inv.profitPct = "10"; }
   inv.siteVisitDraft = { at, questions: arr(draft.questions), basis: lines.map((li) => ({ desc: li.desc || "", basis: li.basis || "", priced: li.priced || "" })) };
   return {
     lines: lines.length,
     fromCatalog: lines.filter((li) => li.priced === "catalog").length,
     flagged: lines.filter((li) => li.priced === "flag").length,
     questions: arr(draft.questions).length,
+    alternates: arr(draft.alternates).length,
   };
 }
 
@@ -286,7 +298,7 @@ export function siteVisitPanel(ctx) {
     if (hasItems && !window.confirm("When the draft is ready it replaces this estimate's line items. Start it?")) return;
     btn.disabled = true;
     try {
-      const r = await startSiteVisitDraft(project, packetForDraft(sv), inv.pricingMode || "piecework");
+      const r = await startSiteVisitDraft(project, packetForDraft(sv), inv.pricingMode || "piecework", subRatesText());
       sv.pending = { batchId: r.batchId, invId: inv.id, startedAt: new Date().toISOString(), pricingMode: inv.pricingMode || "piecework" };
       ctx.save();
       paint("");

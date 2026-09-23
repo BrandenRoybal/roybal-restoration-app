@@ -1250,8 +1250,11 @@ export function changeOrder(project, co) {
 /* Xactimate-style charges editor: line items grouped into room / section
    blocks with continuous line numbering, a wide description column and
    compact qty / unit / price columns — the way adjusters read estimates. */
-function invoiceCharges(inv, onTotals) {
+function invoiceCharges(inv, onTotals, opts = {}) {
   const tbody = h("tbody");
+  // "By" (who performs the line: Roybal, a named sub, Allowance) shows on
+  // construction estimates and on any estimate a site-visit draft filled in
+  const showBy = !!opts.showBy;
 
   function recalc() {
     let subtotal = 0;
@@ -1294,6 +1297,7 @@ function invoiceCharges(inv, onTotals) {
       cell("unit"),
       cell("price", "", "number"),
       extEl,
+      showBy ? cell("by", "invby") : null,
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { inv.items.splice(inv.items.indexOf(it), 1); paint(); recalc(); commit(); } }, "✕")));
     return tr;
   }
@@ -1329,7 +1333,7 @@ function invoiceCharges(inv, onTotals) {
         return b;
       };
       tbody.append(h("tr", { class: "invsec" },
-        h("td", { colspan: "7" }, h("div", { class: "invsec__row" }, name,
+        h("td", { colspan: showBy ? "8" : "7" }, h("div", { class: "invsec__row" }, name,
           mkMove("▲", -1, "Move this section up"), mkMove("▼", 1, "Move this section down"), addLine))));
       for (const it of sec.items) tbody.append(itemRow(it, ++no));
     }
@@ -1349,10 +1353,12 @@ function invoiceCharges(inv, onTotals) {
         h("colgroup", {},
           h("col", { style: "width:30px" }), h("col", {}), h("col", { style: "width:52px" }),
           h("col", { style: "width:46px" }), h("col", { style: "width:72px" }),
-          h("col", { style: "width:84px" }), h("col", { class: "app-only", style: "width:32px" })),
+          h("col", { style: "width:84px" }), showBy ? h("col", { style: "width:92px" }) : null,
+          h("col", { class: "app-only", style: "width:32px" })),
         h("thead", {}, h("tr", {},
           h("th", {}, "#"), h("th", { class: "invdesc" }, "Description"), h("th", {}, "Qty"),
-          h("th", {}, "Unit"), h("th", {}, "Unit Price"), h("th", {}, "Total"), h("th", { class: "app-only" }, ""))),
+          h("th", {}, "Unit"), h("th", {}, "Unit Price"), h("th", {}, "Total"), showBy ? h("th", {}, "By") : null,
+          h("th", { class: "app-only" }, ""))),
         tbody)),
     addSection);
 }
@@ -1361,6 +1367,14 @@ function invoiceCharges(inv, onTotals) {
    10 & 10 O&P only when acting as GENERAL CONTRACTOR over a subcontractor. Detect a
    sub on the job from any attached "Subcontractor invoice" across the job's invoices,
    estimates and supporting docs. */
+/* The party on a line is a subcontractor unless it is the company itself or a
+   placeholder figure. */
+export function namesSubcontractor(items) {
+  return (Array.isArray(items) ? items : []).some((it) => {
+    const b = String((it && it.by) || "").trim().toLowerCase();
+    return b && b !== "roybal" && !b.startsWith("roybal ") && b !== "allowance";
+  });
+}
 function jobHasSubcontractor(project) {
   const p = project || {};
   for (const k of ["invoices", "reconEstimates"]) {
@@ -1401,10 +1415,26 @@ export function invoice(project, inv) {
       by.set(key, by.get(key) + ext);
     }
     const total = [...by.values()].reduce((a, b) => a + b, 0);
-    if (order.length < 2 || !total) { recapEl.replaceChildren(); recapEl.hidden = true; return; }
+    // who performs it: Roybal, each subcontractor, allowances
+    const whoOrder = [], who = new Map();
+    for (const it of inv.items || []) {
+      const ext = (Number(it.qty) || 0) * (Number(it.price) || 0);
+      const k = String(it.by || "").trim();
+      if (!ext || !k) continue;
+      if (!who.has(k)) { who.set(k, 0); whoOrder.push(k); }
+      who.set(k, who.get(k) + ext);
+    }
+    const whoRows = whoOrder.length > 1 && total
+      ? [h("div", { class: "invrecap__title", style: "margin-top:10px" }, "Recap by Performer"),
+         ...whoOrder.map((k) => h("div", { class: "invrecap__row" },
+           h("span", {}, k),
+           h("span", { class: "invrecap__amt" }, money(who.get(k))),
+           h("span", { class: "invrecap__pct" }, ((who.get(k) / total) * 100).toFixed(2) + "%")))]
+      : [];
+    if ((order.length < 2 && !whoRows.length) || !total) { recapEl.replaceChildren(); recapEl.hidden = true; return; }
     recapEl.hidden = false;
     recapEl.replaceChildren(
-      h("div", { class: "invrecap__title" }, "Recap by Room"),
+      h("div", { class: "invrecap__title" }, isBuildEst ? "Recap by Section" : "Recap by Room"),
       ...order.map((key) => h("div", { class: "invrecap__row" },
         h("span", {}, key),
         h("span", { class: "invrecap__amt" }, money(by.get(key))),
@@ -1412,7 +1442,8 @@ export function invoice(project, inv) {
       h("div", { class: "invrecap__row invrecap__row--total" },
         h("span", {}, "Total"),
         h("span", { class: "invrecap__amt" }, money(total)),
-        h("span", { class: "invrecap__pct" }, "100.00%")));
+        h("span", { class: "invrecap__pct" }, "100.00%")),
+      ...whoRows);
   }
   if (!inv.billingModel) inv.billingModel = "tm";
   if (!inv.opMode) inv.opMode = "pct";   // "pct" = % of line items | "amount" = fixed $ (e.g. imported Xactimate O&P)
@@ -1423,13 +1454,21 @@ export function invoice(project, inv) {
   // GC O&P rule: auto-set 10&10 only when a subcontractor is on the job, else 0.
   // opAuto stays true until the user edits an O&P %; legacy invoices (opAuto
   // undefined) are never auto-touched, so historical O&P is preserved.
-  const subOnJob = jobHasSubcontractor(project);
+  const subOnJob = jobHasSubcontractor(project) || (isEst && namesSubcontractor(inv.items));
   if (inv.opAuto === true && inv.opMode === "pct") {
     inv.overheadPct = subOnJob ? "10" : "0";
     inv.profitPct = subOnJob ? "10" : "0";
   }
   const isContract = () => inv.billingModel === "contract";
   const isOpAmount = () => inv.opMode === "amount";
+  // construction estimates carry a design contingency (applied before O&P),
+  // a ± accuracy range and the owner's alternates, the way a ROM reads
+  const isBuildEst = isEst && jobType(project) === "construction";
+  const showCont = () => isEst && (isBuildEst || (Number(inv.contingencyPct) || 0) > 0);
+  const contEl = h("span", {}, money(0));
+  const rangeEl = h("div", { class: "estmeta" });
+  const altsEl = h("div", { class: "estalts" });
+  let lastOpFactor = 0, lastContFactor = 0;
   function recalc(sub) {
     if (sub != null) subtotal = sub;
     subEl.textContent = money(subtotal);
@@ -1437,24 +1476,72 @@ export function invoice(project, inv) {
     // total (O&P is inside the contract figure), items are the scope of work.
     const contract = isContract();
     const amt = isOpAmount();   // O&P entered as fixed dollars, not % of line items
-    const base = contract ? (Number(inv.contractAmount) || 0) : subtotal;
-    const oh = contract ? 0 : (amt ? (Number(inv.overheadAmount) || 0) : subtotal * ((Number(inv.overheadPct) || 0) / 100));
-    const pf = contract ? 0 : (amt ? (Number(inv.profitAmount) || 0) : subtotal * ((Number(inv.profitPct) || 0) / 100));
+    const cont = contract || !showCont() ? 0 : subtotal * ((Number(inv.contingencyPct) || 0) / 100);
+    contEl.textContent = money(cont);
+    const opBase = subtotal + cont;
+    const base = contract ? (Number(inv.contractAmount) || 0) : opBase;
+    const oh = contract ? 0 : (amt ? (Number(inv.overheadAmount) || 0) : opBase * ((Number(inv.overheadPct) || 0) / 100));
+    const pf = contract ? 0 : (amt ? (Number(inv.profitAmount) || 0) : opBase * ((Number(inv.profitPct) || 0) / 100));
     ohEl.textContent = money(oh);
     pfEl.textContent = money(pf);
+    lastContFactor = subtotal ? cont / subtotal : 0;
+    lastOpFactor = opBase ? (oh + pf) / opBase : 0;
     const rcv = base + oh + pf;
     rcvEl.textContent = money(rcv);
     const tax = base * ((Number(inv.taxRate) || 0) / 100);
     taxEl.textContent = money(tax);
     const total = rcv - (Number(inv.deductible) || 0) - (Number(inv.previousPayments) || 0) + tax;
     totalEl.textContent = money(total);
+    const acc = isEst ? Number(inv.accuracyPct) || 0 : 0;
+    rangeEl.replaceChildren(
+      acc > 0 && total > 0 ? h("div", {}, `Expected range at ±${acc}%: ${money(total * (1 - acc / 100))} – ${money(total * (1 + acc / 100))}`) : null,
+      isEst && String(inv.duration || "").trim() ? h("div", {}, "Estimated duration: " + String(inv.duration).trim()) : null);
+    rangeEl.hidden = !rangeEl.childNodes.length;
+    refreshAlts();
     paintRecap();
+  }
+  /* Alternates print fully marked up (contingency and O&P included) so they
+     compare directly with the total, with the base cost underneath. */
+  // built once per change in the list; recalc only refreshes the dollar
+  // figures, so typing in an alternate never loses focus
+  let altRefs = [], altsFor = null;
+  function paintAlts() {
+    const alts = Array.isArray(inv.alternates) ? inv.alternates : [];
+    altsFor = alts; altRefs = [];
+    if (!isEst || !alts.length) { altsEl.replaceChildren(); altsEl.hidden = true; return; }
+    altsEl.hidden = false;
+    altsEl.replaceChildren(
+      h("div", { class: "invrecap__title" }, "Alternates — add / deduct to the estimate total, contingency and O&P included"),
+      ...alts.map((a, i) => {
+        const amtEl = h("strong", {});
+        const baseEl = h("span", {});
+        altRefs.push({ a, amtEl, baseEl });
+        const baseIn = inp(a, "baseCost", { type: "number", oninput: () => recalc() });
+        baseIn.classList.add("app-only");
+        baseIn.style.width = "110px";
+        const del = h("button", { type: "button", class: "rowdel app-only", title: "Remove this alternate" }, "✕");
+        del.addEventListener("click", () => { inv.alternates.splice(i, 1); commit(); paintAlts(); recalc(); });
+        return h("div", { class: "estalt" },
+          h("div", { class: "estalt__head" }, h("span", { class: "estalt__no" }, "ALT " + (i + 1)), inp(a, "title"), amtEl, del),
+          ta(a, "description", { rows: 2 }),
+          h("div", { class: "subtle", style: "font-size:11px" }, baseEl,
+            h("span", { class: "app-only" }, " · base cost: "), baseIn));
+      }));
+  }
+  function refreshAlts() {
+    if (altsFor !== inv.alternates || altRefs.length !== (Array.isArray(inv.alternates) ? inv.alternates.length : 0)) paintAlts();
+    for (const { a, amtEl, baseEl } of altRefs) {
+      const amt = (Number(a.baseCost) || 0) * (1 + lastContFactor) * (1 + lastOpFactor);
+      amtEl.textContent = (amt < 0 ? "DEDUCT " : "ADD ") + money(Math.abs(amt));
+      baseEl.textContent = money(Math.abs(Number(a.baseCost) || 0)) + " at base cost";
+    }
   }
   const lossTa = ta(inv, "lossSummary");
   const notesTa = ta(inv, "notes");
   const itemsWrap = h("div", {});
   function paintItems() {
-    itemsWrap.replaceChildren(invoiceCharges(inv, (s) => recalc(s)));
+    const showBy = isEst && (isBuildEst || (inv.items || []).some((it) => String(it.by || "").trim()));
+    itemsWrap.replaceChildren(invoiceCharges(inv, (s) => recalc(s), { showBy }));
   }
   paintItems();
 
@@ -1737,6 +1824,11 @@ export function invoice(project, inv) {
     onApplied: (sum) => {
       lossTa.value = inv.lossSummary || ""; lossTa.autoGrow();
       notesTa.value = inv.notes || ""; notesTa.autoGrow();
+      // the draft can set contingency and (with subs on the lines) the 10 & 10 O&P
+      contPctRow.querySelector("input").value = inv.contingencyPct ?? "";
+      ohPctRow.querySelector("input").value = inv.overheadPct ?? "";
+      pfPctRow.querySelector("input").value = inv.profitPct ?? "";
+      paintMode();
       paintItems();
       toast(`Estimate drafted from the site visit: ${sum.lines} line${sum.lines === 1 ? "" : "s"}, ${sum.fromCatalog} priced from the Fairbanks list` +
         (sum.flagged ? `, ${sum.flagged} need a price` : "") + ". Review every line.", 5000);
@@ -1825,6 +1917,10 @@ export function invoice(project, inv) {
   /* ---- totals: rows switch with the billing model ---- */
   const trow = (label, right, cls) => h("div", { class: "trow" + (cls ? " " + cls : "") }, h("span", {}, label), right);
   const subRow = trow("Line Item Total", subEl);
+  const contPctRow = trow("Design Contingency %", inp(inv, "contingencyPct", { type: "number", oninput: () => recalc() }));
+  const contRow = trow("Design Contingency", contEl);
+  const dedRow = trow("Less: Deductible / Non-Recoverable", inp(inv, "deductible", { type: "number", oninput: () => recalc() }));
+  const prevRow = trow("Less: Previous Payments", inp(inv, "previousPayments", { type: "number", oninput: () => recalc() }));
   const contractRow = trow("Contract Amount", inp(inv, "contractAmount", { type: "number", oninput: () => recalc() }));
   const ohPctRow = trow("Overhead %", inp(inv, "overheadPct", { type: "number", oninput: () => { inv.opAuto = false; paintMode(); recalc(); } }));
   // the Overhead/Profit value cell swaps between the computed figure (% mode)
@@ -1845,12 +1941,11 @@ export function invoice(project, inv) {
   const opModeRow = h("div", { class: "trow app-only" }, h("span", {}, "Overhead & Profit"), opModeSeg);
   const opAutoNote = h("div", { class: "subtle app-only", style: "font-size:12px;margin:-2px 0 6px" },
     subOnJob
-      ? "O&P auto-set to 10 & 10 — subcontractor invoice detected on this job (GC coordination). Edit % to override."
+      ? "O&P auto-set to 10 & 10 — a subcontractor is on this job (GC coordination). Edit % to override."
       : "O&P auto-set to 0 — self-performed, no subcontractor detected. Edit % to override.");
   const totalsBox = h("div", { class: "totals" },
-    subRow, contractRow, opModeRow, opAutoNote, ohPctRow, ohRow, pfPctRow, pfRow, rcvRow,
-    trow("Less: Deductible / Non-Recoverable", inp(inv, "deductible", { type: "number", oninput: () => recalc() })),
-    trow("Less: Previous Payments", inp(inv, "previousPayments", { type: "number", oninput: () => recalc() })),
+    subRow, contractRow, contPctRow, contRow, opModeRow, opAutoNote, ohPctRow, ohRow, pfPctRow, pfRow, rcvRow,
+    dedRow, prevRow,
     trow("Sales Tax %", inp(inv, "taxRate", { type: "number", oninput: () => recalc() })),
     trow("Sales Tax", taxEl),
     trow(isEst ? "Estimate Total" : "Total Due", totalEl, "grand"));
@@ -1867,7 +1962,10 @@ export function invoice(project, inv) {
     ohEl.hidden = amt; ohAmtInput.hidden = !amt;
     pfEl.hidden = amt; pfAmtInput.hidden = !amt;
     subRow.hidden = c && !(inv.items || []).some((it) => (Number(it.qty) || 0) * (Number(it.price) || 0) > 0);
-    rcvLabel.textContent = c ? "Contract Total" : "Replacement Cost Value";
+    contPctRow.hidden = contRow.hidden = c || !showCont();
+    // a remodel has no deductible or carrier payments
+    dedRow.hidden = prevRow.hidden = isBuildEst;
+    rcvLabel.textContent = c ? "Contract Total" : isBuildEst ? "Total with Contingency & O&P" : "Replacement Cost Value";
   }
   const modeSeg = seg(inv, "billingModel", [
     { value: "tm", label: "Time & Materials" },
@@ -1896,12 +1994,14 @@ export function invoice(project, inv) {
     jobInfo(project, ["customer", "address", "phone", "email"]),
     buildEst ? null : jobInfo(project, ["carrier", "claimNo", "dateOfLoss", "adjuster"]),
     field(buildEst ? "Scope Summary" : isEst ? "Damage Description / Rebuild Scope Summary" : "Loss Description / Scope Summary", lossTa),
-    sectionTitle(isEst ? "Estimated Scope of Repairs" : "Charges"),
+    sectionTitle(buildEst ? "Estimated Scope of Work" : isEst ? "Estimated Scope of Repairs" : "Charges"),
     isEst ? null : h("div", { class: "app-only" }, field("Billing model", modeSeg)),
     aiBar,
     aiPanel,
     itemsWrap,
     totalsBox,
+    rangeEl,
+    altsEl,
     recapEl,
     field(isEst ? "Notes, Assumptions & Exclusions" : "Notes / Supporting Documentation", notesTa),
     h("div", { class: "app-only", style: "margin:4px 0 10px" },

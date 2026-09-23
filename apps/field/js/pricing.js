@@ -22,6 +22,20 @@
 
 export const LABOR_RATE = 125; // $/HR — Roybal Construction labor rate
 
+/* Who the company prices work to, and at what rate. The Site Visit draft
+   names one of these on every line of a construction estimate (the By
+   column) and prices their labor at these rates. Source: Branden's AmeriGas
+   ROM, 2026-09-16. Change a rate here and every later draft uses it. */
+export const SUB_RATES = [
+  { name: "Roybal", trade: "own crew: demo, framing, carpentry, doors, trim, exterior, supervision", rate: LABOR_RATE, unit: "HR", note: "materials billed separately" },
+  { name: "AK 49", trade: "AK 49 Plumbing & Heating: plumbing, hydronic heat, water heaters", rate: 200, unit: "HR", note: "plus materials at cost" },
+  { name: "FBX Electric", trade: "electrical, lighting, low voltage / data", rate: 150, unit: "HR", note: "plus materials" },
+  { name: "Graham", trade: "Graham Construction: drywall hang & finish", rate: 5.0, unit: "SF", note: "hang & finish; $3.25/SF hang & fire-tape only (unconfirmed); board and texture carried separately" },
+];
+export function subRatesText(rates = SUB_RATES) {
+  return rates.map((r) => `${r.name} | ${r.trade} | $${r.rate}/${r.unit}${r.note ? " | " + r.note : ""}`).join("\n");
+}
+
 export const PRICE_CATALOG = [
   // ---- Labor tasks (unit HR @ $125 — divide logged hours across these) ----
   { code: "LAB-INSP", description: "Initial loss inspection & documentation", unit: "HR", price: 125 },

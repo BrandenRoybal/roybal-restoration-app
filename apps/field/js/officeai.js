@@ -255,8 +255,8 @@ export function transcribeSiteAudio(project, path) {
   return callOffice(project, "siteVisitTranscribe", { path });
 }
 /** Submit the draft → { batchId, model }. It runs in the background. */
-export function startSiteVisitDraft(project, packet, pricingMode) {
-  return callOffice(project, "siteVisitStart", { packet, facts: siteVisitFacts(project), pricingMode });
+export function startSiteVisitDraft(project, packet, pricingMode, rates = "") {
+  return callOffice(project, "siteVisitStart", { packet, facts: siteVisitFacts(project), pricingMode, rates });
 }
 /** { status: "running" } until it finishes, then { status: "done", draft }. */
 export function checkSiteVisitDraft(project, batchId, pricingMode) {

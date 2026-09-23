@@ -175,6 +175,15 @@ table.grid--inv .invsec__row input { text-align: left; font-weight: 700; font-si
 .invrecap__row--total { font-weight: 700; border-bottom: 0; }
 .totals .trow.grand { font-size: 12pt; font-weight: 800; border-top: 1.5px solid #0f1b2d; border-bottom: 0; }
 
+/* construction estimate: range / duration, alternates, By column */
+.estmeta { margin-top: 3px; font-size: 9.5pt; color: #5a6b7f; text-align: right; }
+.estalts { margin-top: 10px; break-inside: auto; }
+.estalt { padding: 3px 0 4px; border-bottom: 0.5px solid #c4ccd8; break-inside: avoid; }
+.estalt__head { display: flex; gap: 8px; align-items: baseline; font-size: 10.5pt; }
+.estalt__head input { flex: 1; border: 0; padding: 0; font-weight: 700; font-size: 10.5pt; background: transparent; }
+.estalt__no { font-weight: 800; color: #c2410c; }
+table.grid--inv td.invby input { font-size: 8.5pt; color: #5a6b7f; }
+
 /* ---------- terms / statements ---------- */
 .termrow { display: grid; grid-template-columns: 100px 1fr; gap: 8px; padding: 2px 0; font-size: 10.5pt; border: 0; break-inside: avoid; }
 .termrow__k { font-weight: 700; }

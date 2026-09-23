@@ -254,6 +254,15 @@ tr.flag7 td { background: #fdf3e0 !important; }
 .invrecap__pct { min-width: 70px; text-align: right; color: var(--muted); }
 .invrecap__row--total { font-weight: 700; border-bottom: 0; }
 .invrecap__row--total .invrecap__pct { color: var(--ink); }
+/* construction estimate: range / duration, alternates, By column */
+.estmeta { margin-top: 6px; font-size: 13px; color: var(--muted); text-align: right; }
+.estalts { margin-top: 14px; }
+.estalt { padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.estalt__head { display: flex; gap: 8px; align-items: center; }
+.estalt__head input { flex: 1; min-width: 0; font-weight: 600; }
+.estalt__no { font-weight: 700; color: #c2410c; white-space: nowrap; }
+.estalt__head strong { white-space: nowrap; }
+table.grid--inv td.invby input { font-size: 12px; }
 
 /* ---------- Signature pad ---------- */
 .sigblock { margin-bottom: 14px; }
