@@ -311,3 +311,38 @@ body {
 /* insurance claim panel */
 .claim__stage { display: inline-block; margin: 0 0 8px; font-weight: 700; font-size: 14.5px; color: var(--navy);
   background: #e9f0f7; border-radius: 999px; padding: 5px 12px; }
+
+/* ---------- selections fold (2026-09-23) ---------- */
+.selfold > summary { list-style: none; cursor: pointer; }
+.selfold > summary::-webkit-details-marker { display: none; }
+.selfold .selhead { margin-bottom: 8px; }
+.selfold__more { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; color: var(--brand-dark); }
+.selfold__more::after { content: "›"; font-size: 20px; line-height: 1; transform: rotate(90deg); transition: transform .15s; }
+.selfold[open] .selfold__more::after { transform: rotate(-90deg); }
+.selfold[open] .selfold__open, .selfold:not([open]) .selfold__close { display: none; }
+.selfold[open] .selfold__more { margin-bottom: 14px; }
+.selfold > summary:focus-visible { outline: 2px solid var(--navy); outline-offset: 4px; border-radius: 8px; }
+
+/* ---------- documents to sign: read first (2026-09-23) ---------- */
+.appr__read { display: flex; width: 100%; justify-content: center; align-items: center; gap: 6px; margin: 10px 0 4px;
+  padding: 13px 16px; border-radius: 10px; border: 2px solid var(--navy); background: var(--panel); color: var(--navy);
+  font: inherit; font-size: 15px; font-weight: 700; cursor: pointer; }
+.appr--approved .appr__read, .appr--declined .appr__read { border-width: 1.5px; font-size: 14px; padding: 10px 14px; }
+.appr__read:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.appr__hint { margin: 8px 0; font-size: 13.5px; color: var(--muted); }
+.appr__wait { margin: 8px 0 0; font-size: 14px; color: var(--muted); }
+.appr__sign { margin-top: 6px; }
+body.noscroll { overflow: hidden; }
+.docview { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column; background: #eef1f5; }
+.docview__bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  padding: calc(env(safe-area-inset-top) + 10px) 16px 10px; background: var(--navy); color: #fff; }
+.docview__title { display: flex; flex-direction: column; min-width: 0; }
+.docview__title strong { font-size: 15.5px; }
+.docview__note { font-size: 12.5px; opacity: .8; }
+.docview__acts { display: flex; gap: 8px; }
+.docview__btn { font: inherit; font-size: 14px; font-weight: 700; padding: 9px 14px; border-radius: 9px;
+  border: 1.5px solid rgba(255,255,255,.6); background: transparent; color: #fff; cursor: pointer; }
+.docview__btn:disabled { opacity: .5; cursor: default; }
+.docview__btn--done { background: var(--brand); border-color: var(--brand); }
+.docview__frame { flex: 1; width: 100%; border: 0; background: #fff; }
+.docview__err { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; color: var(--navy); }

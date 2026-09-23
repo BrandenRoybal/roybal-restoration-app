@@ -21,9 +21,11 @@ import {
   newPortalShare, portalMilestoneTrack, portalStatusFor, jobType, PORTAL_CLAIM_STAGES,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
-import { photoShareControl, photoShareSheetLine } from "./photoshare.js";
+import { photoShareControl, photoShareSheetLine, buildPacketHtml, ensureUploaded, requireOnline } from "./photoshare.js";
+import { sha256Hex } from "./media.js";
+import { signableDocs, approvalEntry, signRequestMessages, applyPortalSignatures, signState } from "./signdocs.js";
 import { selectionSheetFromXlsx } from "./xactimate.js";
-import { publishSelections } from "./selections.js";
+import { publishSelections, fetchSelections, saveSelectionSettings, selectionStatus } from "./selections.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
 import { findBoardRow, phasesToSubRows } from "./boardpush.js";
 import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor, qbConfigured } from "./qbtime.js";
@@ -3688,63 +3690,96 @@ export function portalShareForm(project) {
   }
   statusSel.addEventListener("change", paintCloseout);
 
-  // ---------- Money (CF-3): change-order approvals + shared balance ----------
+  // ---------- Money (CF-3): documents to sign + shared balance ----------
   // Both live in portal_jobs columns publishPortal never touches (a republish
   // must not reset a customer's answer or un-share the balance).
+  // Any form with a customer signature block goes up as the FULL document
+  // (signdocs.js): the customer reads it before they can sign it.
   const moneyBox = h("div", { style: "margin-top:14px" });
+
+  /* snapshot one form exactly as it prints, upload it, return the approval's doc ref */
+  async function snapshotForSigning(doc) {
+    requireOnline();
+    const sheetEl = doc.key === "packBack" ? packBackReceipt(project) : RENDERERS[doc.key](project, doc.inst);
+    const { html, media } = await buildPacketHtml(project, [sheetEl], `${doc.title} — ${project.customer || "Roybal Construction"}`);
+    for (const m of media) await ensureUploaded(m.hash, m.text);
+    const htmlHash = await sha256Hex(html);
+    await ensureUploaded(htmlHash, html);
+    return { html: htmlHash, media: media.map((m) => m.hash) };
+  }
+
   async function paintMoney() {
-    moneyBox.replaceChildren(sectionTitle("Money"),
+    moneyBox.replaceChildren(sectionTitle("Documents to sign"),
       h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 8px" },
-        "Publish a change order for e-sign approval, and share the balance (QuickBooks is the ground truth on synced invoices)."));
+        "Send a form for e-signature. The customer sees the whole document, and can save it as a PDF, before they can sign. Their signature comes back into the form."));
     if (!s.enabled || !s.shareToken) { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Turn the portal on first.")); return; }
-    const { rest, callFunction } = await import("./supa.js");
+    const { rest } = await import("./supa.js");
     const { billingSummary, lineSubtotal, money: fmtMoney } = await import("./fincalc.js");
     let approvals = [], billing = null;
-    try {
+    const loadApprovals = async () => {
       const r = await rest(`portal_jobs?id=eq.${s.id}&select=approvals,billing&limit=1`, { method: "GET" });
-      if (r.ok) { const row = (await r.json())[0] || {}; approvals = row.approvals || []; billing = row.billing || null; }
-    } catch { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Offline — money tools need a connection.")); return; }
-    const byId = new Map(approvals.map((a) => [a.id, a]));
+      if (!r.ok) throw new Error("load failed (" + r.status + ")");
+      const row = (await r.json())[0] || {};
+      return { approvals: Array.isArray(row.approvals) ? row.approvals : [], billing: row.billing || null };
+    };
+    try { ({ approvals, billing } = await loadApprovals()); }
+    catch { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Offline — money tools need a connection.")); return; }
 
-    // change orders
-    const cos = (project.changeOrders || []).filter((c) => c && (c.description || (c.items || []).length));
-    if (!cos.length) moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "No change orders on this job yet (Change Order form)."));
-    cos.forEach((co, i) => {
-      const amt = lineSubtotal(co.items || []);
-      const cur = byId.get(co.id);
-      const label = `CO ${co.coNo || i + 1} — ${fmtMoney(amt)}`;
-      let stateEl;
-      if (cur && cur.status === "approved") stateEl = h("span", { class: "subtle", style: "color:var(--green,#1f7a45);font-size:12px" }, `✓ approved${cur.signedName ? " — signed " + cur.signedName : ""}`);
-      else if (cur && cur.status === "declined") stateEl = h("span", { class: "subtle", style: "color:#c0392b;font-size:12px" }, "✗ declined" + (cur.note ? ` — "${cur.note}"` : ""));
-      else if (cur) stateEl = h("span", { class: "subtle", style: "font-size:12px" }, "⏳ awaiting the customer");
-      else {
-        const pub = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "Publish for approval");
-        pub.addEventListener("click", async () => {
-          pub.disabled = true;
+    // a signature made in the portal lands in the form itself
+    if (applyPortalSignatures(project, approvals, lineSubtotal)) { commit(); toast("Portal signature added to the form."); }
+    const byId = new Map(approvals.map((a) => [String(a.id), a]));
+
+    const docs = signableDocs(project, lineSubtotal);
+    if (!docs.length) moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" },
+      "Nothing to sign yet. Change orders, the work authorization, certificates, the punch list and the pack-back receipt show up here once they're filled in."));
+    docs.forEach((doc) => {
+      const cur = byId.get(doc.id);
+      const state = signState(doc, cur);
+      const label = doc.title + (doc.amountDelta != null ? ` — ${fmtMoney(doc.amountDelta)}` : "");
+      const small = (text, color) => h("span", { class: "subtle", style: `font-size:12px${color ? ";color:" + color : ""}` }, text);
+
+      // send (or re-send) this document: snapshot, upload, write the approval, tell the customer
+      const sendBtn = (text, primary) => {
+        const b = h("button", { type: "button", class: "btn btn--sm " + (primary ? "btn--primary" : "btn--ghost"), style: "width:auto" }, text);
+        b.addEventListener("click", async () => {
+          b.disabled = true; const was = b.textContent; b.textContent = "Preparing the document…";
           try {
-            const next = [...approvals.filter((a) => a.id !== co.id), {
-              id: co.id, title: `Change Order ${co.coNo || i + 1}`,
-              description: String(co.description || "").slice(0, 1200),
-              amountDelta: amt, status: "pending", publishedAt: new Date().toISOString(),
-            }];
+            const ref = await snapshotForSigning(doc);
+            // re-read right before writing, so a customer's answer since the page loaded isn't overwritten
+            const fresh = (await loadApprovals()).approvals;
+            const prev = fresh.find((a) => String(a.id) === doc.id);
+            if (prev && prev.status && prev.status !== "pending") { toast("The customer already answered this one."); paintMoney(); return; }
+            const next = [...fresh.filter((a) => String(a.id) !== doc.id), approvalEntry(doc, ref, prev, new Date().toISOString())];
             const up = await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ approvals: next }) });
-            if (!up.ok) throw new Error("save failed");
-            await sendOfficeReply(s.id, `A change order needs your review and signature: Change Order ${co.coNo || i + 1} (${fmtMoney(amt)}). Open your project page to approve it.`);
-            if (project.phone) callFunction("roybal-notify", { action: "sendSms", to: project.phone, kind: "portal", captured_by: techName(),
-              body: `Roybal Construction: a change order needs your approval. Review and sign here: ${portalShareLink(s.shareToken)}` }).catch(() => {});
-            toast("Published — the customer was asked to review it.");
-            paintMoney();
-          } catch (e) { toast("Couldn't publish: " + (e.message || e)); pub.disabled = false; }
+            if (!up.ok) throw new Error("save failed (" + up.status + ")");
+            const msg = signRequestMessages(doc, { update: !!prev, money: fmtMoney });
+            await sendOfficeReply(s.id, msg.thread, "office", { ping: msg.ping });
+            toast(prev ? "Updated — the customer can read the full document now." : "Sent — the customer was asked to read and sign it.");
+            paintMoney(); paintThread();
+          } catch (e) { toast("Couldn't send: " + (e.message || e)); b.disabled = false; b.textContent = was; }
         });
-        stateEl = pub;
-      }
+        return b;
+      };
+
+      let stateEl;
+      if (state === "signed-portal") stateEl = small(`✓ signed in the portal${cur.signedName ? " — " + cur.signedName : ""}${cur.respondedAt ? ", " + fmtDate(String(cur.respondedAt).slice(0, 10)) : ""}`, "var(--green,#1f7a45)");
+      else if (state === "declined") stateEl = small("✗ declined" + (cur.note ? ` — "${cur.note}"` : ""), "#c0392b");
+      else if (state === "signed-onsite") stateEl = small("✓ signed on site", "var(--green,#1f7a45)");
+      else if (state === "no-document") stateEl = h("span", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end" },
+        small("⚠ the customer can't read this yet", "#b35c00"), sendBtn("Put the document up", true));
+      else if (state === "waiting") stateEl = h("span", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end" },
+        small(cur.viewedAt ? `⏳ opened ${fmtDate(String(cur.viewedAt).slice(0, 10))}, not signed yet` : "⏳ sent, not opened yet"),
+        sendBtn("Send updated copy", false));
+      else stateEl = sendBtn("Send for signature", false);
+
       moneyBox.append(h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--line)" },
         h("span", { style: "font-size:13px;font-weight:600" }, label), stateEl));
     });
 
     // balance
     const sum = billingSummary(project);
-    const balRow = h("div", { style: "margin-top:10px" });
+    const balRow = h("div", { style: "margin-top:14px" },
+      h("div", { style: "font-size:13px;font-weight:600;margin-bottom:4px" }, "Balance on the portal"));
     if (billing) {
       balRow.append(h("p", { class: "subtle", style: "font-size:12.5px;margin:0 0 6px" },
         `Shared ${billing.asOf || ""}: ${fmtMoney(billing.invoiced)} invoiced · ${fmtMoney(billing.paid)} paid · `,
@@ -3881,6 +3916,64 @@ export function portalShareForm(project) {
       kids.push(btn);
     }
     selBox.append(...kids, pickFile);
+    if (src && !pendingSheet && s.enabled) selBox.append(selectionControls());
+  }
+
+  /* What the customer sees of the published sheet, and the office's two
+     switches: close the whole thing (all decided, or not using it) or hide
+     single decisions. Nothing is deleted — the customer's answers stay. */
+  function selectionControls() {
+    const box = h("div", { style: "margin-top:10px" }, h("p", { class: "subtle", style: "font-size:12px" }, "Loading what the customer sees…"));
+    (async () => {
+      let rows = [], srcNow = s.selectionsSource || {};
+      try {
+        rows = await fetchSelections(s.id);
+        const { rest } = await import("./supa.js");
+        const r = await rest(`portal_jobs?id=eq.${s.id}&select=selections_source,selections_submitted_at&limit=1`, { method: "GET" });
+        if (r.ok) { const row = (await r.json())[0] || {}; srcNow = row.selections_source || srcNow; srcNow = { ...srcNow, _sentAt: row.selections_submitted_at || null }; }
+      } catch { box.replaceChildren(h("p", { class: "subtle", style: "font-size:12px" }, "Offline — connect to change what the customer sees.")); return; }
+      const st = selectionStatus(rows, srcNow);
+      const omit = new Set(Array.isArray(srcNow.omit) ? srcNow.omit.map(String) : []);
+      const save = async (closed, nextOmit, done) => {
+        try {
+          const { _sentAt, ...keep } = srcNow;
+          const saved = await saveSelectionSettings(project, { closed, omit: [...nextOmit] });
+          s.selectionsSource = { ...keep, ...saved };
+          commit(); toast(done); paintSelections();
+        } catch (e) { toast("Couldn't save: " + (e.message || e)); }
+      };
+
+      const summary = st.closed
+        ? "Closed — the customer doesn't see selections on the portal."
+        : `The customer sees ${st.shown} of ${st.total} decisions · ${st.answered} answered` +
+          (st.wantsChange ? ` (${st.wantsChange} want something different)` : "") +
+          (srcNow._sentAt ? ` · sent ${fmtDate(String(srcNow._sentAt).slice(0, 10))}` : " · not sent yet");
+      const closeBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" },
+        st.closed ? "Reopen selections on the portal" : "Close selections on the portal");
+      closeBtn.addEventListener("click", () => { closeBtn.disabled = true;
+        save(!st.closed, omit, st.closed ? "Selections are back on the customer's portal." : "Selections closed — hidden from the customer."); });
+
+      const list = h("div", { style: "max-height:360px;overflow:auto;margin-top:6px" });
+      rows.forEach((r) => {
+        const id = String(r.selection_id);
+        const cb = h("input", { type: "checkbox", checked: !omit.has(id), style: "width:20px;height:20px;min-height:0;flex:0 0 auto" });
+        cb.addEventListener("change", () => {
+          const next = new Set(omit); if (cb.checked) next.delete(id); else next.add(id);
+          save(st.closed, next, cb.checked ? "Shown to the customer." : "Hidden from the customer.");
+        });
+        const ans = r.customer_choice === "match" ? "keeping it" : r.customer_choice === "change" ? "wants something different" : "not answered";
+        list.append(h("label", { style: "display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid var(--line);font-size:12.5px" },
+          cb, h("span", {}, h("strong", {}, r.title || id), " ", h("span", { class: "subtle" }, [r.room, ans].filter(Boolean).join(" · ")),
+            r.customer_note ? h("div", { class: "subtle", style: "font-size:11.5px" }, `“${r.customer_note}”`) : null)));
+      });
+      const pick = h("details", { style: "margin-top:8px" },
+        h("summary", { style: "cursor:pointer;font-size:12.5px;font-weight:600" },
+          `Choose which decisions the customer sees${omit.size ? ` (${omit.size} hidden)` : ""}`),
+        h("p", { class: "subtle", style: "font-size:11.5px;margin:4px 0 0" }, "Uncheck anything we're not using. Their answers are kept either way."),
+        list);
+      box.replaceChildren(...[h("p", { style: "font-size:12.5px;margin:0 0 6px" }, summary), closeBtn, st.closed ? null : pick].filter(Boolean));
+    })();
+    return box;
   }
 
   // ---------- customer <-> office message thread ----------

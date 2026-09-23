@@ -58,6 +58,7 @@ const setMarketingPref = (session, optIn) => callGateway({ action: "setMarketing
 const warrantyRequest = (cred, note) => callGateway({ action: "warrantyRequest", ...cred, note });
 const respondApproval = (cred, approvalId, approve, name, signature, note) =>
   callGateway({ action: "respondApproval", ...cred, approvalId, approve, name, signature, note });
+const fetchSignDoc = (cred, approvalId) => callGateway({ action: "signDoc", ...cred, approvalId });
 
 const REVIEW_URL = "https://g.page/r/CSv3IUml4W9GEBM/review";
 /* "2026-09-22" (or a full ISO stamp) → "Sep 22, 2026"; anything else as-is */
@@ -230,6 +231,10 @@ function threadCard(token) {
    hand, which is the moment the conversation actually starts. */
 function selectionsCard(token, sheet) {
   const card = h("div", { class: "card", id: "selections" });
+  // Folded by default: the list runs long (39 decisions on one job), and the
+  // header already says where things stand. Tapping it opens the list; the
+  // Send button stays outside the fold so a finished sheet can go in one tap.
+  const fold = h("details", { class: "selfold" });
   let state = sheet;
   let busy = false;
   // Sticky once true: changing an answer after sending clears submittedAt on
@@ -317,15 +322,24 @@ function selectionsCard(token, sheet) {
           ? "You can still change any of these — just send them again if you do."
           : "Keeping what was there adds nothing to your bill.")));
 
-    const kids = [h("p", { class: "sectitle" }, "Your selections"), head];
+    const tally = done
+      ? `${done - (state.wantsChange || 0)} keeping what was there` + (state.wantsChange ? ` · ${state.wantsChange} to talk about` : "")
+      : "";
+    const inside = [h("summary", { class: "selfold__sum" },
+      h("p", { class: "sectitle" }, "Material selections"), head,
+      h("span", { class: "selfold__more" },
+        h("span", { class: "selfold__open" }, `See all ${total} ${total === 1 ? "choice" : "choices"}` + (tally ? ` (${tally})` : "")),
+        h("span", { class: "selfold__close" }, "Hide the list")))];
 
     if (!state.submittedAt && done === 0 && total > 1) {
-      kids.push(h("button", { class: "selall", type: "button", disabled: busy, onclick: matchAll },
+      inside.push(h("button", { class: "selall", type: "button", disabled: busy, onclick: matchAll },
         h("b", {}, "Put everything back the way it was"),
         h("span", {}, "One tap. Nothing extra on your bill.")));
     }
 
-    kids.push(h("div", { class: "sellist" }, ...state.selections.map(row)));
+    inside.push(h("div", { class: "sellist" }, ...state.selections.map(row)));
+    fold.replaceChildren(...inside);
+    const kids = [fold];
 
     if (!state.submittedAt) {
       kids.push(h("button", {
@@ -520,24 +534,43 @@ function render(data, token, opts) {
       `${dr.equipmentOut} drying machine${dr.equipmentOut === 1 ? "" : "s"} running at your property.`) : null,
     h("p", { class: "dry__note" }, "These are our meter readings — your team confirms timing directly with you.")) : null;
 
-  // approvals (CF-3): pending change orders sit right under the timeline —
-  // they're money waiting on the customer, the most time-bound thing here
+  // Documents to sign (change orders, work authorization, certificates…):
+  // the full document is one tap away, and the signature pad only appears
+  // once they've opened it. Nobody signs something they haven't been shown.
   const approvalCards = (data.approvals || []).map((a) => {
+    const noun = a.kind === "document" ? "document" : "change order";
+    const readBtn = (label, onViewed) => h("button", { class: "appr__read", type: "button",
+      onclick: () => openDocViewer(token, a, getMedia, onViewed) }, label);
     if (a.status !== "pending") {
       return h("div", { class: "card appr appr--" + a.status },
         h("p", { class: "sectitle" }, a.title),
         h("p", { class: "warr__p" }, a.status === "approved"
-          ? `✓ Approved${a.respondedAt ? " " + niceDate(a.respondedAt) : ""}${a.signedName ? " — signed " + a.signedName : ""}.`
-          : `✗ Declined${a.respondedAt ? " " + niceDate(a.respondedAt) : ""}. We'll follow up to talk it through.`));
+          ? `✓ ${a.kind === "document" ? "Signed" : "Approved"}${a.respondedAt ? " " + niceDate(a.respondedAt) : ""}${a.signedName ? " — signed " + a.signedName : ""}.`
+          : `✗ Declined${a.respondedAt ? " " + niceDate(a.respondedAt) : ""}. We'll follow up to talk it through.`),
+        a.hasDoc ? readBtn("📄 View the " + noun) : null);
     }
+    const amount = a.kind === "document" ? null
+      : h("p", { class: "appr__amt" }, a.amountDelta > 0 ? `Adds ${usd(a.amountDelta)} to the contract.`
+        : a.amountDelta < 0 ? `Reduces the contract by ${usd(-a.amountDelta)}.` : "No change to the contract price.");
+    const head = [
+      h("p", { class: "sectitle" }, "Needs your signature — " + a.title),
+      a.description ? h("p", { class: "warr__p" }, a.description) : null,
+      amount,
+    ];
+    if (!a.hasDoc) {
+      return h("div", { class: "card appr appr--pending", id: "appr-" + a.id }, ...head,
+        h("p", { class: "appr__wait" }, `We're putting the full ${noun} on this page so you can read it before you sign. We'll text you when it's here.`));
+    }
+
     const nameInp = h("input", { class: "appr__name", placeholder: "Type your full legal name", "aria-label": "Your full legal name" });
     const pad = sigPad();
     const st = h("p", { class: "acct__status", role: "status" });
-    const okBtn = h("button", { class: "acct__btn", type: "button" }, "Approve & sign");
+    const okBtn = h("button", { class: "acct__btn", type: "button" }, a.kind === "document" ? "Sign" : "Approve & sign");
     const noBtn = h("button", { class: "appr__decline", type: "button" }, "Decline");
     const finish = (card, status) => card.replaceWith(h("div", { class: "card appr appr--" + status },
       h("p", { class: "sectitle" }, a.title),
-      h("p", { class: "warr__p" }, status === "approved" ? "✓ Approved — thank you! We'll keep moving." : "✗ Declined — we'll reach out to talk it through.")));
+      h("p", { class: "warr__p" }, status === "approved" ? "✓ Signed — thank you! We'll keep moving." : "✗ Declined — we'll reach out to talk it through."),
+      readBtn("📄 View the " + noun)));
     okBtn.addEventListener("click", async () => {
       const nm = nameInp.value.trim();
       if (nm.length < 2) { st.textContent = "Type your full legal name to sign."; return; }
@@ -546,23 +579,31 @@ function render(data, token, opts) {
         const r = await respondApproval(token, a.id, true, nm, pad.getSignature(), "");
         if (r.answered) finish(card, "approved");
         else { st.textContent = "This was already answered — refresh to see the latest."; }
-      } catch { st.textContent = "Couldn't send — try again, or call 907-371-9868."; okBtn.disabled = false; }
+      } catch (e) {
+        st.textContent = e.message === "not_viewed" ? "Please open the document first — then sign."
+          : "Couldn't send — try again, or call 907-371-9868.";
+        okBtn.disabled = false;
+      }
     });
     noBtn.addEventListener("click", async () => {
-      if (!confirm("Decline this change order? We'll follow up to talk it through.")) return;
+      if (!confirm(`Decline this ${noun}? We'll follow up to talk it through.`)) return;
       noBtn.disabled = true; st.textContent = "Sending…";
       try {
         const r = await respondApproval(token, a.id, false, "", "", "");
         if (r.answered) finish(card, "declined"); else st.textContent = "Already answered — refresh to see the latest.";
       } catch { st.textContent = "Couldn't send — try again, or call 907-371-9868."; noBtn.disabled = false; }
     });
-    const card = h("div", { class: "card appr appr--pending", id: "appr-" + a.id },
-      h("p", { class: "sectitle" }, "Needs your approval — " + a.title),
-      a.description ? h("p", { class: "warr__p" }, a.description) : null,
-      h("p", { class: "appr__amt" }, a.amountDelta > 0 ? `Adds ${usd(a.amountDelta)} to the contract.`
-        : a.amountDelta < 0 ? `Reduces the contract by ${usd(-a.amountDelta)}.` : "No change to the contract price."),
-      nameInp, pad,
-      h("div", { class: "appr__row" }, okBtn, noBtn), st);
+
+    // signing unlocks once the document has been opened (on this visit or an earlier one)
+    const signArea = h("div", { class: "appr__sign" },
+      h("p", { class: "appr__hint" }, `By signing you agree to the ${noun} as written.`),
+      nameInp, pad, h("div", { class: "appr__row" }, okBtn, noBtn), st);
+    const gate = h("p", { class: "appr__hint" }, `Read the whole ${noun} first. Signing opens up after you do.`);
+    const unlock = () => { gate.remove(); signArea.hidden = false; };
+    signArea.hidden = !a.viewedAt;
+    const card = h("div", { class: "card appr appr--pending", id: "appr-" + a.id }, ...head,
+      readBtn(a.viewedAt ? "📄 Read it again" : `📄 Read the ${noun}`, unlock),
+      a.viewedAt ? null : gate, signArea);
     return card;
   });
 
@@ -690,10 +731,16 @@ function render(data, token, opts) {
    line a tap down to its card. When nothing is waiting it says so, which is
    itself the answer most visitors came for. */
 function needsCard(data) {
-  const go = (id) => () => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const go = (id) => () => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const fold = el.querySelector("details");       // a collapsed card opens on the way
+    if (fold) fold.open = true;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const items = [];
   for (const a of data.approvals || [])
-    if (a.status === "pending") items.push({ text: `Review and sign: ${a.title}`, target: "appr-" + a.id });
+    if (a.status === "pending") items.push({ text: `Read and sign: ${a.title}`, target: "appr-" + a.id });
   const sel = data.selections;
   if (sel && sel.total && !sel.submittedAt)
     items.push({ text: sel.complete ? "Send us your selections"
@@ -716,6 +763,47 @@ function needsCard(data) {
 }
 
 const currentLabel = (ms) => (ms || []).find((m) => m.state === "current")?.label || "";
+
+/* The full document behind an approval, full screen: a snapshot of our form
+   exactly as it prints, rendered in an isolated frame (its stylesheet can't
+   touch this page), images filling in one at a time. Save as PDF prints only
+   the document. Opening it is what unlocks signing. */
+async function openDocViewer(cred, a, getMedia, onViewed) {
+  const close = () => { box.remove(); document.removeEventListener("keydown", onKey); document.body.classList.remove("noscroll"); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const frame = h("iframe", { class: "docview__frame", title: a.title });
+  const note = h("span", { class: "docview__note", role: "status" }, "Loading…");
+  const pdf = h("button", { class: "docview__btn", type: "button", disabled: true }, "Save as PDF");
+  pdf.addEventListener("click", () => { try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch { window.print(); } });
+  const done = h("button", { class: "docview__btn docview__btn--done", type: "button", onclick: close }, "Done reading");
+  const box = h("div", { class: "docview", role: "dialog", "aria-label": a.title },
+    h("div", { class: "docview__bar" },
+      h("div", { class: "docview__title" }, h("strong", {}, a.title), note),
+      h("div", { class: "docview__acts" }, pdf, done)),
+    frame);
+  document.addEventListener("keydown", onKey);
+  document.body.classList.add("noscroll");
+  document.body.append(box);
+  try {
+    const r = await fetchSignDoc(cred, a.id);
+    frame.addEventListener("load", async () => {
+      const doc = frame.contentDocument;
+      const imgs = doc ? [...doc.querySelectorAll("img[data-media]")] : [];
+      note.textContent = imgs.length ? "Loading images…" : "";
+      await Promise.all(imgs.map((img) => getMedia(img.getAttribute("data-media"), "full").then((src) => { if (src) img.src = src; })));
+      note.textContent = "";
+      pdf.disabled = false;
+    }, { once: true });
+    frame.srcdoc = r.html;
+    a.viewedAt = a.viewedAt || new Date().toISOString();
+    if (onViewed) onViewed();
+  } catch {
+    note.textContent = "";
+    frame.replaceWith(h("div", { class: "docview__err" },
+      h("p", {}, "We couldn't open the document just now."),
+      h("p", {}, "Please try again in a moment, or call us at 907-371-9868.")));
+  }
+}
 
 /* full-screen photo viewer — tap the backdrop, the ✕, or Esc to close */
 function openLightbox(item, getMedia, alt) {

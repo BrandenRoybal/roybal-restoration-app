@@ -4,7 +4,7 @@
    Run: node --experimental-strip-types selections.test.mjs */
 import assert from "node:assert/strict";
 import {
-  customerSelection, customerSheet, validateResponse, submissionMessage, NOTE_MAX,
+  customerSelection, customerSheet, validateResponse, submissionMessage, visibleRows, NOTE_MAX,
 } from "./selections.ts";
 
 let pass = 0;
@@ -191,6 +191,23 @@ test("several changes are plural and agree", () => {
   const m = submissionMessage({ total: 9, wantsChange: 3 });
   assert.match(m, /are 3 items/);
   assert.match(m, /they were/);
+});
+
+/* ============================================================
+   6. What the office hides
+   ============================================================ */
+console.log("\n visibleRows");
+
+const three = [{ selection_id: "a" }, { selection_id: "b" }, { selection_id: "c" }];
+test("no settings shows everything", () => assert.equal(visibleRows(three, null).length, 3));
+test("a closed sheet shows nothing", () => assert.equal(visibleRows(three, { closed: true, omit: [] }).length, 0));
+test("hidden decisions drop out of the list and the count", () => {
+  const sheet = customerSheet(visibleRows(three.map((r) => ({ ...r, customer_choice: r.selection_id === "c" ? null : "match" })), { omit: ["c"] }));
+  assert.equal(sheet.total, 2);
+  assert.equal(sheet.complete, true);
+});
+test("junk settings are ignored, not trusted", () => {
+  assert.equal(visibleRows(three, { closed: "yes", omit: "a" }).length, 3);
 });
 
 console.log(`\n${pass} assertions passed`);
