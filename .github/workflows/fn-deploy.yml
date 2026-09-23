@@ -1,0 +1,135 @@
+name: Function deploy
+run-name: "Function deploy — ${{ inputs.function }} to ${{ inputs.target }}"
+
+# ============================================================================
+# The hand that moves a merged edge function onto a Supabase project.
+#
+# Merging a PR under supabase/functions/ changes a file on main. It deploys
+# nothing: field, admin and board auto-deploy on push, edge functions never
+# have. Until this workflow they went up from someone's terminal (the CLI) or
+# through a connector that re-uploads every file by hand, and neither fits an
+# owner who does not run a terminal. This is the same pattern as db-push.yml:
+# a button, the repo's own files, the same SUPABASE_ACCESS_TOKEN secret.
+#
+# WHAT ONE RUN DOES
+#   `supabase functions deploy <function> --use-api` from this checkout. The
+#   CLI bundles server-side (no Docker on the runner) and reads verify_jwt for
+#   the function from supabase/config.toml, which is why that file pins every
+#   function: a deploy can never silently flip a function's JWT gate. It then
+#   lists the project's functions so the run log shows the new version.
+#
+# WHO MAY RUN IT WHERE
+#   * staging (efbuagiwowcwwsezkgsw), from any branch.
+#   * production (djpgvcvhvgrzgaziruze): from main only, and only with the word
+#     `production` typed into the confirm box.
+#   Project refs are written here, not taken as input. The function is a fixed
+#   choice list, so a run cannot be pointed at a directory nobody reviewed.
+#
+# ROLLBACK
+#   Production deploys from main only, so roll back by reverting the PR on
+#   main and running this again.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      function:
+        description: "Edge function to deploy"
+        type: choice
+        required: true
+        options:
+          - roybal-ai-office
+          - roybal-portal
+          - roybal-notify
+          - roybal-brief
+          - roybal-lead
+          - roybal-web-agent
+          - roybal-ai-ingest
+          - roybal-ai-narrative
+          - roybal-voice
+          - gmail-proxy
+          - qb-time-proxy
+          - qbo-proxy
+      target:
+        description: "Project to deploy to"
+        type: choice
+        required: true
+        default: staging
+        options:
+          - staging
+          - production
+      confirm:
+        description: "Production only: type the word production"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# One deploy per function per target at a time; a second click queues.
+concurrency:
+  group: fn-deploy-${{ inputs.target }}-${{ inputs.function }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.target }}
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      # Inputs reach the shell through env, never through ${{ }} in a run: block.
+      TARGET: ${{ inputs.target }}
+      FN: ${{ inputs.function }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.116.0
+
+      - name: Decide what this run may do
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            staging)    PROJECT_REF=efbuagiwowcwwsezkgsw ;;
+            production) PROJECT_REF=djpgvcvhvgrzgaziruze ;;
+            *) echo "::error::unknown target '$TARGET'"; exit 1 ;;
+          esac
+          if [ "$TARGET" = "production" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::Production takes functions from main only; this run is on '$GITHUB_REF_NAME'."
+              exit 1
+            fi
+            if [ "$CONFIRM" != "production" ]; then
+              echo "::error::To deploy to production, type the word production in the confirm box."
+              exit 1
+            fi
+          fi
+          if [ ! -f "supabase/functions/$FN/index.ts" ]; then
+            echo "::error::supabase/functions/$FN/index.ts is not in this checkout."
+            exit 1
+          fi
+          if ! grep -q "^\[functions\.$FN\]" supabase/config.toml; then
+            echo "::error::supabase/config.toml has no [functions.$FN] block; pin its verify_jwt there first."
+            exit 1
+          fi
+          echo "PROJECT_REF=$PROJECT_REF" >> "$GITHUB_ENV"
+          {
+            echo "### Function deploy — $FN to $TARGET"
+            echo ""
+            echo "Project \`$PROJECT_REF\`, from \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA::7}\`."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          supabase functions deploy "$FN" --project-ref "$PROJECT_REF" --use-api
+
+      - name: Show the deployed version
+        run: |
+          set -euo pipefail
+          supabase functions list --project-ref "$PROJECT_REF" | tee -a "$GITHUB_STEP_SUMMARY"
