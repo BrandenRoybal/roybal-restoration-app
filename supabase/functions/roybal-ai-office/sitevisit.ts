@@ -117,9 +117,9 @@ export function formatTranscript(dg: unknown): { transcript: string; seconds: nu
    `rooms` adds the customer-facing plain-language scope the portal shows. */
 const ITEM_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["room", "desc", "qty", "unit", "price", "basis", "category", "code", "priceBasis"],
+  required: ["room", "desc", "qty", "unit", "price", "basis", "category", "code", "priceBasis", "by"],
   properties: {
-    room: { type: "string", description: "Room / area exactly as the Magicplan report names it (e.g. 'Kitchen', 'Bedroom 2'). 'Main Level' for job-wide lines (permits, haul-off, final clean, protection)." },
+    room: { type: "string", description: "The group this line prints under. Insurance / restoration job: the room or area exactly as the Magicplan report names it (e.g. 'Kitchen', 'Bedroom 2'); 'Main Level' for job-wide lines. Construction job: the trade section, numbered, e.g. '04 — Framing & carpentry'." },
     desc: { type: "string", description: "Plain-English line as it reads in an Xactimate estimate, e.g. 'Drywall - hung, taped, floated, ready for paint'. No catalog code abbreviations, no room name." },
     qty: { type: "number" },
     unit: { type: "string", description: "SF, LF, SY, EA, HR, DA (day) or LS" },
@@ -128,23 +128,24 @@ const ITEM_SCHEMA = {
     category: { type: "string", description: "Xactimate CATEGORY of the catalog row billed (e.g. 'DRY', 'PNT', 'FNC'). Empty string only when no catalog row fits." },
     code: { type: "string", description: "Xactimate SELECTOR from the price catalog (must appear in it). Empty string only when no catalog row fits." },
     priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: replace = install/put-back; remove = tear-out; detach_reset = detach & reset; labor = an hourly LAB rate (HR lines only); estimate = no catalog row, your own Fairbanks price." },
+    by: { type: "string", description: "Who performs or supplies the line, by trade: 'Roybal' for the company's own crew and purchases, a sub label exactly as COMPANY RATES lists it (e.g. 'Electrical sub'), '<trade> sub' for a trade COMPANY RATES does not list (e.g. 'Roofing sub'), or 'Allowance' for a placeholder figure (design, engineering, permits, owner selections). Never a company name." },
   },
 } as const;
 
 export const SITE_DRAFT_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["lossSummary", "items", "rooms", "assumptions", "exclusions", "questions", "pricingNotes"],
+  required: ["lossSummary", "items", "rooms", "assumptions", "exclusions", "questions", "pricingNotes", "alternates", "contingencyPct", "accuracyPct", "duration"],
   properties: {
     lossSummary: { type: "string", description: "2-4 sentence scope summary for the estimate header: what happened or what is being built, the areas involved, and the approach." },
     items: { type: "array", items: ITEM_SCHEMA },
     rooms: {
       type: "array",
-      description: "One entry per room/area that has line items, in the same order the items first mention them.",
+      description: "One entry per physical room or area of the building that has work, in walk-through order. On a construction job these are the rooms (Break room, Manager's office), never the trade sections.",
       items: {
         type: "object", additionalProperties: false,
         required: ["name", "customerSummary"],
         properties: {
-          name: { type: "string", description: "Exactly the room value the items use." },
+          name: { type: "string", description: "The room or area as the customer knows it. On an insurance / restoration job, exactly the room value the items use." },
           customerSummary: { type: "string", description: "1-3 plain sentences a homeowner understands: what will be done in this room. No prices, no quantities with units, no codes, no insurance or Xactimate jargon." },
         },
       },
@@ -152,18 +153,35 @@ export const SITE_DRAFT_SCHEMA = {
     assumptions: { type: "array", items: { type: "string" }, description: "Conditions the pricing assumes (access, working hours, occupied home, materials to match existing, utilities on, winter conditions). One line each." },
     exclusions: { type: "array", items: { type: "string" }, description: "What this estimate does not include (hidden conditions behind finishes, code upgrades not observed, contents, permits if not priced, hazardous materials testing). One line each." },
     questions: { type: "array", items: { type: "string" }, description: "Open questions the evidence could not settle and that change the price, each naming what you assumed meanwhile. Empty when none." },
-    pricingNotes: { type: "string", description: "One short paragraph an adjuster can read justifying Fairbanks / North Pole pricing where it runs above a national baseline: remote freight and material lead times, winter working conditions, local labor market. Only claims the job supports." },
+    pricingNotes: { type: "string", description: "One short paragraph the adjuster or client can read justifying Fairbanks / North Pole pricing where it runs above a national baseline: remote freight and material lead times, winter working conditions, local labor market. Only claims the job supports." },
+    alternates: {
+      type: "array",
+      description: "Construction jobs: the owner's open choices and conditional scope, priced as a change to the base (options discussed, scope that depends on a plan reviewer, survey or field verification). Empty on insurance / restoration jobs.",
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["title", "description", "baseCost"],
+        properties: {
+          title: { type: "string", description: "Short name, e.g. 'Keep and patch the existing tile in lieu of new LVP'." },
+          description: { type: "string", description: "What it removes from and adds to the base scope, and when it applies." },
+          baseCost: { type: "number", description: "Net change at base cost in dollars, before contingency and markup. Negative for a deduct." },
+        },
+      },
+    },
+    contingencyPct: { type: "number", description: "Construction jobs: design contingency percent for scope not yet final (e.g. 15 for a concept-plan ROM, 5-10 once drawings are stamped). 0 on insurance / restoration jobs." },
+    accuracyPct: { type: "number", description: "Construction jobs: the plus/minus accuracy of this estimate in percent (e.g. 25 for a rough order of magnitude from a concept plan). 0 on insurance / restoration jobs." },
+    duration: { type: "string", description: "Construction jobs: estimated working duration, e.g. '7-9 weeks'. Empty on insurance / restoration jobs." },
   },
 } as const;
 
 /* ---------- the request ---------- */
 export const SITE_SYSTEM =
   "You are the senior estimator at Roybal Construction, LLC, a general contractor and IICRC-certified water restoration company in Fairbanks / North Pole, Alaska. " +
-  "You are writing an Xactimate-style, room-by-room estimate from the evidence the owner collected on a site visit: the Magicplan LiDAR report (floor plan, room dimensions, wall and floor areas, photos pinned to rooms), extra photos, photographed handwritten notes, a transcript of the recorded site walk, and the owner's typed scope. " +
+  "You are writing an Xactimate-style, room-by-room estimate from the evidence the owner collected on a site visit: the Magicplan LiDAR report (floor plan, room dimensions, wall and floor areas, photos pinned to rooms), extra photos, still frames pulled from Magicplan room videos, photographed handwritten notes, a transcript of the recorded site walk, and the owner's typed scope, plus any design drawings or customer documents the owner attached as PDFs. " +
   "The owner's typed scope and what the owner says on the walk are instructions: follow them. Photos, plan and notes are evidence: use them for scope detail and quantities. " +
   "Take quantities from the report's printed dimensions and areas, cite the page, and show arithmetic for anything derived. Never scale a drawing. " +
+  "Several stills from one video show the same room from different angles: never count the same item twice. " +
   "Include only scope the evidence supports; when something that changes the price is uncertain, state the assumption, price the reasonable case, and list the question. " +
-  "Write for an insurance adjuster: every line traceable, nothing padded, nothing missing. Return the estimate as JSON matching the schema.";
+  "Write for the reader the job facts point to: an insurance adjuster on a claim, the owner or their facilities team on a remodel or build. Either way every line is traceable, nothing padded, nothing missing. Return the estimate as JSON matching the schema.";
 
 type Block = Record<string, unknown>;
 
@@ -173,7 +191,31 @@ export type BuildArgs = {
   facts: unknown;                   // job header + any documented facts (JSON)
   rulesText: string;                // pricing mode + common + inclusion rules
   catalogText: string;              // Fairbanks price catalog, one row per line
+  kind?: "construction" | "claim";  // how the estimate is organised and who reads it
+  ratesText?: string;               // the company's own labor and subcontractor rates
 };
+
+/* A construction estimate is organised the way Branden prices a remodel
+   (his AmeriGas ROM, 2026-09-16): by trade section, each line naming the
+   trade that does it (never the sub's company) at that trade's rate, material apart from labor, allowances for
+   design and permits, and the owner's open choices priced as alternates. */
+const CONSTRUCTION_SHAPE =
+  "HOW TO SHAPE A CONSTRUCTION ESTIMATE:\n" +
+  "- Group lines by trade section, numbered in build order, in the room field: '01 — General conditions, permits & design', '02 — Demolition', '03 — Concrete', '04 — Framing & carpentry', '05 — Insulation & vapor barrier', '06 — Drywall & texture', '07 — Doors, frames & hardware', '08 — Ceilings', '09 — Flooring', '10 — Plumbing', '11 — Heating / HVAC', '12 — Electrical', '13 — Low voltage', '14 — Exterior', '15 — Paint', '16 — Specialties & cleanup'. Use only the sections the job needs, keep that numbering, and add a job-specific one (e.g. 'Arctic entry addition') only when it reads better than spreading it across trades.\n" +
+  "- Every line names who does it in by. Labor is its own line in HR at that party's rate from COMPANY RATES; material is its own line (LS, EA, SF or LF) at current Fairbanks cost. A subcontractor priced per unit (drywall per SF) is one line at their unit rate. A line priced at a COMPANY RATES rate leaves category and code empty with priceBasis 'estimate', so the company's rate stands instead of a catalog labor rate.\n" +
+  "- Section 01 carries supervision hours, mobilization and protection, dumpster pulls, final clean, and Allowance lines for design, engineering and permits when the work needs them (commercial work in the City of Fairbanks needs stamped drawings and a permit).\n" +
+  "- Quantities come from the plan and report; name the dimension or area in basis. Where the plan is conceptual, say so and price the reasonable case.\n" +
+  "- Every option the owner is still choosing between, and every piece of scope that depends on a survey, a plan reviewer or a field verification, is an alternate with its net base-cost change, not a base line. State in assumptions which option the base carries.\n" +
+  "- Set contingencyPct for how settled the design is, accuracyPct for how firm the estimate is, and duration in weeks. Overhead and profit are applied separately at 10% and 10% when subcontractors are on the job; do not add them.\n" +
+  "- Exclusions name owner-supplied items, work areas left untouched, and anything the plan leaves out.\n" +
+  "- Never name a subcontractor's company anywhere in the estimate (lines, basis, notes, alternates, summaries), even when the walk or notes name one: the company may change subs without a change order, so the estimate names the trade only.\n";
+
+const CLAIM_SHAPE =
+  "HOW TO SHAPE AN INSURANCE / RESTORATION ESTIMATE:\n" +
+  "- Room names follow the Magicplan report. Job-wide lines go under 'Main Level'.\n" +
+  "- by is 'Roybal' unless a trade sub does the line, then that trade ('Electrical sub'); never a company name.\n" +
+  "- Tear-out and put-back both appear when the evidence shows damaged material.\n" +
+  "- alternates stay empty; contingencyPct and accuracyPct are 0; duration is empty.\n";
 
 /** The user turn: evidence blocks first, then the instructions and data. */
 export function buildContent(a: BuildArgs): Block[] {
@@ -182,8 +224,8 @@ export function buildContent(a: BuildArgs): Block[] {
   packet.reports.forEach((f, i) => {
     const url = signed[f.path];
     if (!url) return;
-    out.push({ type: "text", text: `MAGICPLAN REPORT ${i + 1}${f.name ? ` (${f.name})` : ""}:` });
-    out.push({ type: "document", source: { type: "url", url }, title: f.name || `Magicplan report ${i + 1}` });
+    out.push({ type: "text", text: `PDF ${i + 1}${f.name ? ` (${f.name})` : ""}: a Magicplan report, a design drawing or a customer document; read it to tell which.` });
+    out.push({ type: "document", source: { type: "url", url }, title: f.name || `PDF ${i + 1}` });
   });
   let n = 0;
   for (const f of packet.photos) {
@@ -208,10 +250,10 @@ export function buildContent(a: BuildArgs): Block[] {
     "JOB HEADER AND ANY DOCUMENTED FACTS:\n```json\n" + JSON.stringify(a.facts ?? {}, null, 2) + "\n```",
     "HOW TO WRITE IT:\n" +
       "- Cite evidence in every basis: report page, walk timestamp, photo number, notes page, or typed scope.\n" +
-      "- Room names follow the Magicplan report. Job-wide lines go under 'Main Level'.\n" +
       "- Fairbanks realism: freight and lead times, winter conditions (heat, protection, snow removal for access when the season calls for it), frost-depth and snow-load considerations on any exterior or structural scope.\n" +
-      "- Tear-out and put-back both appear when the evidence shows damaged material; a remodel prices new work only.\n" +
-      "- No overhead, profit or tax lines; they are applied separately.\n\n" + a.rulesText,
+      "- No overhead, profit or tax lines; they are applied separately.\n\n" +
+      (a.kind === "construction" ? CONSTRUCTION_SHAPE : CLAIM_SHAPE) + "\n" + a.rulesText,
+    "COMPANY RATES (the company's own crew and its subcontractors; use these rates for their lines):\n" + (String(a.ratesText ?? "").trim() || "(none given: price labor from the LAB rows of the catalog)"),
     "PRICE CATALOG (Fairbanks Xactimate; tag each line with a CATEGORY + CODE from here):\n" + a.catalogText,
   ];
   out.push({ type: "text", text: sections.join("\n\n") });
@@ -244,6 +286,8 @@ export type SiteDraft = {
   items: Array<Record<string, unknown>>;
   rooms: Array<{ name: string; customerSummary: string }>;
   assumptions: string[]; exclusions: string[]; questions: string[]; pricingNotes: string;
+  alternates: Array<{ title: string; description: string; baseCost: number }>;
+  contingencyPct: number; accuracyPct: number; duration: string;
 };
 
 /** Parse one line of a batch results file into a draft, or a clear error.
@@ -285,6 +329,12 @@ export function parseBatchResult(line: unknown): { draft?: SiteDraft; usage: Sit
         .filter((x) => x.name && x.customerSummary),
       assumptions: strs(d.assumptions), exclusions: strs(d.exclusions), questions: strs(d.questions),
       pricingNotes: String(d.pricingNotes ?? "").trim(),
+      alternates: (Array.isArray(d.alternates) ? d.alternates : [])
+        .map((x) => ({ title: String(x?.title ?? "").trim(), description: String(x?.description ?? "").trim(), baseCost: Number(x?.baseCost) || 0 }))
+        .filter((x) => x.title),
+      contingencyPct: Math.max(0, Math.min(50, Number(d.contingencyPct) || 0)),
+      accuracyPct: Math.max(0, Math.min(50, Number(d.accuracyPct) || 0)),
+      duration: String(d.duration ?? "").trim(),
     },
   };
 }

@@ -6,7 +6,8 @@
    type the scope — then hand ALL of it to Claude. This panel is that
    process inside the estimate editor:
 
-     1. drop in the Magicplan report PDF, extra photos, photographed note
+     1. drop in the Magicplan report PDF, extra photos, Magicplan room
+        videos (turned into still frames in the browser), photographed note
         pages and the walk recording (uploaded to the private field-media
         bucket under sitevisit/<job>/ — never into the job record, so a
         40 MB report or an hour of audio can't stall sync);
@@ -26,17 +27,35 @@
 import { h, toast, fileToDataURL, uid } from "./core.js";
 import { uploadSiteFile } from "./supa.js";
 import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft } from "./officeai.js";
+import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
+const MAX_IMAGES = 90;   // the server's limit (sitevisit.ts MAX_IMAGES): photos, stills and note pages together
 
 /* ---------- pure: packet shape ---------- */
 export const KINDS = {
-  report: { label: "Magicplan report", accept: "application/pdf,.pdf", multiple: true, hint: "The PDF report you export from Magicplan." },
+  report: { label: "Reports & drawings (PDF)", accept: "application/pdf,.pdf", multiple: true, hint: "The Magicplan report, plus any layout or customer list. Up to 4." },
   photos: { label: "Extra photos", accept: "image/*", multiple: true, hint: "Anything not already in the report." },
   notes:  { label: "Handwritten notes", accept: "image/*", multiple: true, hint: "A photo of each page." },
+  videos: { label: "Magicplan room videos", accept: "video/*,.mp4,.mov", multiple: true, hint: "Still frames are pulled from each clip so the draft can see the room." },
   audio:  { label: "Site walk recording", accept: "audio/*,video/*,.m4a,.mp3,.wav,.aac", multiple: false, hint: "The recording from your phone. It's transcribed for you." },
 };
+
+/* Magicplan room videos are short and silent, and the model reads images,
+   not video. Each clip becomes a handful of evenly spaced still frames
+   (never the first or last instant, which are often blurred). */
+export const FRAMES_PER_VIDEO = 8;
+export function frameTimes(duration, max = FRAMES_PER_VIDEO) {
+  const d = Number(duration);
+  if (!(d > 0) || !isFinite(d)) return [];
+  const n = Math.max(1, Math.min(max, Math.ceil(d / 2)));   // at most one frame every ~2 s
+  return Array.from({ length: n }, (_, i) => Math.round((d * (i + 0.5) / n) * 100) / 100);
+}
+const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+export function frameCaption(videoName, t) {
+  return `still at ${mmss(t)} from Magicplan video ${videoName || "clip"}`;
+}
 
 export function newSiteVisit() {
   return { files: [], transcript: "", transcriptSeconds: 0, typedScope: "", pending: null };
@@ -62,7 +81,7 @@ export function packetForDraft(sv) {
   const pick = (f) => ({ path: f.path, name: f.name || "", mime: f.mime || "", room: f.room || "", caption: f.caption || "" });
   return {
     reports: of("report").map(pick),
-    photos: of("photos").map(pick),
+    photos: [...of("photos"), ...of("frames")].map(pick),
     notes: of("notes").map(pick),
     transcript: String((sv && sv.transcript) || ""),
     typedScope: String((sv && sv.typedScope) || ""),
@@ -93,6 +112,7 @@ export function applySiteDraft(inv, draft, at = new Date().toISOString()) {
     room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
     unit: li.unit || "", price: li.price != null ? String(li.price) : "",
     code: li.code || "", priced: li.priced || "", flag: li.priceFlag || "",
+    ...(li.by ? { by: String(li.by) } : {}),
   }));
   if (draft.lossSummary) inv.lossSummary = draft.lossSummary;
   const block = draftNotesText(draft);
@@ -102,12 +122,22 @@ export function applySiteDraft(inv, draft, at = new Date().toISOString()) {
   inv.notes = [kept, block].filter(Boolean).join("\n\n");
   inv.siteVisitNotes = block;
   inv.customerScope = arr(draft.rooms).map((r) => ({ room: r.name, summary: r.customerSummary }));
+  // construction shape: open choices as alternates, contingency, accuracy, duration
+  inv.alternates = arr(draft.alternates).map((a) => ({ title: String(a.title || ""), description: String(a.description || ""), baseCost: String(Number(a.baseCost) || 0) }));
+  inv.contingencyPct = Number(draft.contingencyPct) > 0 ? String(draft.contingencyPct) : "";
+  inv.accuracyPct = Number(draft.accuracyPct) > 0 ? String(draft.accuracyPct) : "";
+  inv.duration = String(draft.duration || "");
+  // GC O&P rule: 10 & 10 when a subcontractor is on the job; only while the
+  // O&P is still on automatic
+  const subs = lines.some((li) => { const b = String(li.by || "").trim().toLowerCase(); return b && b !== "roybal" && b !== "allowance"; });
+  if (subs && inv.opAuto !== false && (inv.opMode || "pct") === "pct") { inv.overheadPct = "10"; inv.profitPct = "10"; }
   inv.siteVisitDraft = { at, questions: arr(draft.questions), basis: lines.map((li) => ({ desc: li.desc || "", basis: li.basis || "", priced: li.priced || "" })) };
   return {
     lines: lines.length,
     fromCatalog: lines.filter((li) => li.priced === "catalog").length,
     flagged: lines.filter((li) => li.priced === "flag").length,
     questions: arr(draft.questions).length,
+    alternates: arr(draft.alternates).length,
   };
 }
 
@@ -135,6 +165,55 @@ const ago = (iso) => {
   return m < 1 ? "just now" : m === 1 ? "1 minute ago" : m + " minutes ago";
 };
 
+/* Pull still frames out of a video in the browser: seek, draw to a canvas,
+   JPEG at ≤1568px. Returns [{ t, blob }]. Throws if the browser can't
+   decode the clip. */
+export async function videoFrames(file, max = FRAMES_PER_VIDEO) {
+  const url = URL.createObjectURL(file);
+  const v = document.createElement("video");
+  v.muted = true; v.playsInline = true; v.preload = "auto";
+  v.setAttribute("playsinline", ""); v.setAttribute("muted", "");
+  const once = (ev, ms = 15000) => new Promise((ok, bad) => {
+    const t = setTimeout(() => { cleanup(); bad(new Error("the video didn't load")); }, ms);
+    const done = () => { cleanup(); ok(); };
+    const fail = () => { cleanup(); bad(new Error("this browser can't play that video")); };
+    const cleanup = () => { clearTimeout(t); v.removeEventListener(ev, done); v.removeEventListener("error", fail); };
+    v.addEventListener(ev, done, { once: true });
+    v.addEventListener("error", fail, { once: true });
+  });
+  try {
+    const loaded = once("loadeddata");
+    v.src = url;
+    v.load();
+    await loaded;
+    if (v.duration === Infinity) {           // recorder-made webm: no duration until the end is found
+      const found = once("seeked");
+      v.currentTime = 1e9;
+      await found;
+    }
+    const times = frameTimes(v.duration, max);
+    if (!times.length || !v.videoWidth) throw new Error("the video has no picture");
+    const scale = Math.min(1, 1568 / Math.max(v.videoWidth, v.videoHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.round(v.videoWidth * scale);
+    c.height = Math.round(v.videoHeight * scale);
+    const g = c.getContext("2d");
+    const out = [];
+    for (const t of times) {
+      const seeked = once("seeked");
+      v.currentTime = t;
+      await seeked;
+      g.drawImage(v, 0, 0, c.width, c.height);
+      const blob = await new Promise((ok) => c.toBlob(ok, "image/jpeg", 0.85));
+      if (blob) out.push({ t, blob });
+    }
+    return out;
+  } finally {
+    v.removeAttribute("src"); v.load();
+    URL.revokeObjectURL(url);
+  }
+}
+
 /* ---------- browser: the panel ----------
    ctx: { project, inv, save(), onApplied(summary) } */
 export function siteVisitPanel(ctx) {
@@ -151,6 +230,26 @@ export function siteVisitPanel(ctx) {
       const id = uid();
       try {
         let blob = file, mime = file.type || "";
+        if (kind === "videos") {
+          paint(`Pulling stills from ${file.name || "the video"}…`);
+          const frames = await videoFrames(file);
+          if (!frames.length) throw new Error("no frames came out of it");
+          const vid = { id, kind, name: file.name || "video", mime: file.type || "video/mp4", size: 0, frames: frames.length, at: new Date().toISOString() };
+          let i = 0;
+          for (const fr of frames) {
+            i++;
+            paint(`Uploading stills from ${vid.name} (${i} of ${frames.length})…`);
+            const fid = uid();
+            const path = siteFilePath(project.id, fid, `${vid.name}-${Math.round(fr.t)}s.jpg`);
+            await uploadSiteFile(path, fr.blob, "image/jpeg");
+            sv.files.push({ id: fid, kind: "frames", videoId: id, name: `${vid.name} @ ${Math.round(fr.t)}s`, path, mime: "image/jpeg", size: fr.blob.size, caption: frameCaption(vid.name, fr.t), at: vid.at });
+            vid.size += fr.blob.size;
+          }
+          sv.files.push(vid);
+          added++;
+          ctx.save();
+          continue;
+        }
         if (kind === "photos" || kind === "notes") {
           blob = await prepareImage(file);
           if (!blob) { toast(`${file.name || "That photo"} is in a format this browser can't read (often HEIC). Export it as JPEG and add it again.`, 4000); continue; }
@@ -199,7 +298,7 @@ export function siteVisitPanel(ctx) {
     if (hasItems && !window.confirm("When the draft is ready it replaces this estimate's line items. Start it?")) return;
     btn.disabled = true;
     try {
-      const r = await startSiteVisitDraft(project, packetForDraft(sv), inv.pricingMode || "piecework");
+      const r = await startSiteVisitDraft(project, packetForDraft(sv), inv.pricingMode || "piecework", subRatesText());
       sv.pending = { batchId: r.batchId, invId: inv.id, startedAt: new Date().toISOString(), pricingMode: inv.pricingMode || "piecework" };
       ctx.save();
       paint("");
@@ -240,13 +339,13 @@ export function siteVisitPanel(ctx) {
   function fileRow(f) {
     const del = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Remove from the packet" }, "✕");
     del.addEventListener("click", () => {
-      sv.files = sv.files.filter((x) => x.id !== f.id);
+      sv.files = sv.files.filter((x) => x.id !== f.id && x.videoId !== f.id);   // a video takes its stills with it
       if (f.kind === "audio") { sv.transcript = ""; sv.transcriptSeconds = 0; }
       ctx.save(); paint("");
     });
     return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px" },
       h("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.name || f.kind),
-      h("span", { class: "subtle" }, fmtSize(f.size || 0)), del);
+      h("span", { class: "subtle" }, f.kind === "videos" ? `${f.frames || 0} stills` : fmtSize(f.size || 0)), del);
   }
 
   function slot(kind) {
@@ -256,7 +355,7 @@ export function siteVisitPanel(ctx) {
     const files = sv.files.filter((f) => f.kind === kind);
     const btn = h("button", { type: "button", class: "btn btn--sm", style: "width:auto" }, files.length && kind !== "audio" ? "+ Add more" : files.length ? "Replace" : "+ Add");
     btn.addEventListener("click", () => input.click());
-    const many = kind === "photos" || kind === "notes";
+    const many = kind === "photos" || kind === "notes" || kind === "videos";
     const extra = [];
     if (kind === "audio" && files.length) {
       if (sv.transcript) {
@@ -275,10 +374,14 @@ export function siteVisitPanel(ctx) {
           h("div", { class: "subtle", style: "font-size:11px" }, k.hint)),
         btn, input),
       ...(many && files.length > 3
-        ? [h("div", { class: "subtle", style: "font-size:12px;margin-top:4px" }, `${files.length} pages/photos, ${fmtSize(files.reduce((t, f) => t + (f.size || 0), 0))}`)]
+        ? [h("div", { class: "subtle", style: "font-size:12px;margin-top:4px" }, kind === "videos"
+          ? `${files.length} clips, ${files.reduce((t, f) => t + (f.frames || 0), 0)} stills`
+          : `${files.length} pages/photos, ${fmtSize(files.reduce((t, f) => t + (f.size || 0), 0))}`)]
         : files.map(fileRow)),
       ...extra);
   }
+
+  const imageCount = () => sv.files.filter((f) => f.path && (f.kind === "photos" || f.kind === "frames" || f.kind === "notes")).length;
 
   function paint(status) {
     const job = sv.pending;
@@ -306,7 +409,11 @@ export function siteVisitPanel(ctx) {
       h("div", { style: "font-weight:700;font-size:14px;color:#16395a" }, "📋 Site visit"),
       h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
         "Add what you collected on the walk. The draft reads all of it, prices from the Fairbanks list, and fills this estimate room by room."),
-      slot("report"), slot("photos"), slot("notes"), slot("audio"),
+      slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
+      imageCount() > MAX_IMAGES
+        ? h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },
+            `${imageCount()} pictures in the packet; the draft reads the first ${MAX_IMAGES} (note pages first). Remove clips or photos you don't need.`)
+        : null,
       h("div", { style: "padding:8px 0;border-top:1px solid #e2e6ed" },
         h("div", { style: "font-weight:600;font-size:13px;color:#16395a;margin-bottom:4px" }, "Typed scope"),
         h("div", { style: "display:flex;gap:8px;align-items:flex-start" }, scope, mic)),

@@ -22,6 +22,23 @@
 
 export const LABOR_RATE = 125; // $/HR — Roybal Construction labor rate
 
+/* Who does the work on a construction estimate, and at what rate. The Site
+   Visit draft puts one of these labels in the By column of every line and
+   prices that trade's labor at its rate. Labels are trades, never company
+   names: Branden changes subs job to job, and a named sub in a signed
+   estimate turns every swap into a change order (his call, 2026-09-23).
+   Rates are what his usual subs charge (AmeriGas ROM, 2026-09-16). Change a
+   rate here and every later draft uses it. */
+export const SUB_RATES = [
+  { by: "Roybal", trade: "own crew: demo, framing, carpentry, doors, trim, exterior, supervision", rate: LABOR_RATE, unit: "HR", note: "materials billed separately" },
+  { by: "Plumbing & heating sub", trade: "plumbing, hydronic heat, water heaters", rate: 200, unit: "HR", note: "plus materials at cost" },
+  { by: "Electrical sub", trade: "electrical, lighting, low voltage / data", rate: 150, unit: "HR", note: "plus materials" },
+  { by: "Drywall sub", trade: "drywall hang & finish", rate: 5.0, unit: "SF", note: "hang & finish; $3.25/SF hang & fire-tape only (unconfirmed); board and texture carried separately" },
+];
+export function subRatesText(rates = SUB_RATES) {
+  return rates.map((r) => `${r.by} | ${r.trade} | $${r.rate}/${r.unit}${r.note ? " | " + r.note : ""}`).join("\n");
+}
+
 export const PRICE_CATALOG = [
   // ---- Labor tasks (unit HR @ $125 — divide logged hours across these) ----
   { code: "LAB-INSP", description: "Initial loss inspection & documentation", unit: "HR", price: 125 },

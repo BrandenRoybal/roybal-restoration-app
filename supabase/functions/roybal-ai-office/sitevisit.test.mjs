@@ -158,4 +158,30 @@ test("an errored or expired batch explains itself and bills nothing", () => {
   assert.match(parseBatchResult({ result: { type: "expired" } }).error, /expired/);
 });
 
+test("a construction job is shaped by trade with the company's rates; a claim stays room by room", () => {
+  const packet = cleanPacket({ typedScope: "Call center remodel" });
+  const build = buildContent({ packet, signed: {}, facts: {}, rulesText: "", catalogText: "", kind: "construction", ratesText: "Plumbing & heating sub | plumbing | $200/HR" });
+  const bt = build[build.length - 1].text;
+  assert.ok(bt.includes("HOW TO SHAPE A CONSTRUCTION ESTIMATE") && bt.includes("'04 — Framing & carpentry'"));
+  assert.ok(bt.includes("COMPANY RATES") && bt.includes("Plumbing & heating sub | plumbing | $200/HR"));
+  assert.ok(!bt.includes("HOW TO SHAPE AN INSURANCE"));
+  assert.ok(bt.includes("Never name a subcontractor's company"));
+  const claim = buildContent({ packet, signed: {}, facts: {}, rulesText: "", catalogText: "" });
+  const ct = claim[claim.length - 1].text;
+  assert.ok(ct.includes("HOW TO SHAPE AN INSURANCE / RESTORATION ESTIMATE") && !ct.includes("CONSTRUCTION ESTIMATE"));
+  assert.ok(ct.includes("(none given"));
+});
+
+test("alternates, contingency and accuracy come back clean and bounded", () => {
+  const r = parseBatchResult(ok({
+    lossSummary: "", items: [], rooms: [], assumptions: [], exclusions: [], questions: [], pricingNotes: "",
+    alternates: [{ title: "Keep the tile", description: "Deduct", baseCost: -3708 }, { title: " ", description: "x", baseCost: 5 }],
+    contingencyPct: 15, accuracyPct: 400, duration: " 7-9 weeks ",
+  }));
+  assert.deepEqual(r.draft.alternates, [{ title: "Keep the tile", description: "Deduct", baseCost: -3708 }]);
+  assert.equal(r.draft.contingencyPct, 15);
+  assert.equal(r.draft.accuracyPct, 50);
+  assert.equal(r.draft.duration, "7-9 weeks");
+});
+
 console.log(`\n${pass} site-visit tests passed`);
