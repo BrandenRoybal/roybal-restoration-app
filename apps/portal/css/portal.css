@@ -17,12 +17,22 @@ body {
   display: flex; flex-direction: column; min-height: 100vh;
 }
 
-.top { background: var(--header-grad); color: #fff; padding: calc(env(safe-area-inset-top) + 16px) 16px 16px; }
-.top__inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 13px; }
-.mark { width: 46px; height: 46px; border-radius: 12px; background: #fff; padding: 5px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, .18); flex: 0 0 auto; box-sizing: border-box; }
-.top strong { display: block; font-size: 16px; letter-spacing: .2px; }
-.top span { font-size: 12.5px; color: rgba(255,255,255,.82); }
+/* top bar: the same bar as the Job Board and the field app (logo at the
+   left edge, company name beside it, never boxed into the centre column) */
+.top { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; gap: 12px;
+  background: var(--header-grad); color: #fff;
+  padding: calc(env(safe-area-inset-top) + 11px) max(20px, env(safe-area-inset-right)) 11px max(20px, env(safe-area-inset-left));
+  box-shadow: 0 4px 18px rgba(14, 33, 56, .30); }
+.top__brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.mark { width: 38px; height: 38px; border-radius: 10px; background: #fff; padding: 4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .18); flex: 0 0 auto; box-sizing: border-box; }
+.top strong { display: block; font-size: 16px; color: #fff; letter-spacing: .2px; }
+.top span { display: block; font-size: 12px; color: rgba(255, 255, 255, .8); }
+/* the sticky bar must not cover whatever "go to" scrolls into view */
+html { scroll-padding-top: calc(env(safe-area-inset-top) + 72px); }
+@media (max-width: 600px) { .top { padding-top: calc(env(safe-area-inset-top) + 10px); padding-bottom: 10px;
+  padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); } }
+@media print { .top { position: static; box-shadow: none; } }
 
 .wrap { flex: 1; max-width: 760px; width: 100%; margin: 0 auto; padding: 20px 16px 40px; }
 .loading, .msg { text-align: center; color: var(--muted); padding: 60px 16px; }
