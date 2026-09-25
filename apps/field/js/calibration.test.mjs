@@ -52,10 +52,19 @@ test("dollars: won jobs with both numbers, independent of hours data", () => {
     { id: "b", stage: "done", outcome: "won", estValue: 100, contractValue: 90 },
     { id: "c", stage: "done", outcome: "won", estValue: 0, contractValue: 90 },   // no bid — no
     { id: "d", stage: "done", outcome: "lost", estValue: 100, contractValue: 90 },// lost — no
+    { id: "e", stage: "scheduled", outcome: "won", estValue: 100, contractValue: 100, contractValueSource: "estimate" }, // Won copied the estimate — no
   ];
   const c = computeCalibration(jobs, {}, 2);
   assert.equal(c.dollars.n, 2);
   assert.equal(c.dollars.factor, 1.05);                 // mean of 1.2 and 0.9
+});
+
+test("dollars: a contract value typed over the estimate copy counts again", () => {
+  const jobs = [
+    { id: "a", outcome: "won", estValue: 100, contractValue: 120, contractValueSource: "manual" },
+    { id: "b", outcome: "won", estValue: 100, contractValue: 90 },
+  ];
+  assert.equal(computeCalibration(jobs, {}, 2).dollars.n, 2);
 });
 
 test("context block: gated factors only; null when nothing passes", () => {

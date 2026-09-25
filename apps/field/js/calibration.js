@@ -50,7 +50,9 @@ export function computeCalibration(jobs, hoursByJob, minN = 5) {
         hourRatios[d.type === "remodel" ? "remodel" : "mitigation"].push(act / est);
       }
     }
-    if (d.outcome === "won" && Number(d.estValue) > 0 && Number(d.contractValue) > 0) {
+    // a contract value Won copied from the estimate (contractValueSource
+    // "estimate") is the estimate itself, not a signed figure — skip it
+    if (d.outcome === "won" && Number(d.estValue) > 0 && Number(d.contractValue) > 0 && d.contractValueSource !== "estimate") {
       dollarRatios.push(Number(d.contractValue) / Number(d.estValue));
     }
   }

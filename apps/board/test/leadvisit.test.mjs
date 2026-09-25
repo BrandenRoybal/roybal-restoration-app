@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import {
   fmtVisitAt, visitDate, visitTime, whoLabel, visitPeople,
   scheduleVisitPatch, cancelVisitPatch, visitChip, bidSteps, estimateSentOn, bidStats,
+  wonContractFill,
 } from "../js/leadvisit.js";
 
 let pass = 0;
@@ -136,4 +137,17 @@ test("bidStats: visits in the next 7 days, estimates out > 5d with no answer", (
   assert.deepEqual(bidStats(leads, today), { visitsThisWeek: 2, estimatesWaiting: 1 });
 });
 
+/* ---- ✓ Won → contract value ---- */
+test("Won fills a blank contract value from the estimate the field sent, marked as a copy", () => {
+  assert.deepEqual(wonContractFill({ estimateTotal: 18450, estValue: 15000 }), { contractValue: 18450, contractValueSource: "estimate" });
+});
+test("…falls back to the field's own estValue, never a hand-typed one", () => {
+  assert.deepEqual(wonContractFill({ estValue: 17000, estValueSource: "field" }), { contractValue: 17000, contractValueSource: "estimate" });
+  assert.equal(wonContractFill({ estValue: 17000 }), null);
+  assert.equal(wonContractFill({ estValue: 17000, estValueSource: "manual" }), null);
+});
+test("…and never touches a contract value already there", () => {
+  assert.equal(wonContractFill({ estimateTotal: 18450, contractValue: 20000 }), null);
+  assert.equal(wonContractFill({}), null);
+});
 console.log(`\n${pass} leadvisit checks passed`);

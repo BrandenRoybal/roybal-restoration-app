@@ -220,7 +220,9 @@ export function analyticsTab() {
       const est = Number(d.estimatedHours), act = hoursByJob[d.id];
       return { d, est, act, ratio: act / est };
     }).sort((a, b) => b.ratio - a.ratio);
-    const bidRows = scoped.filter((d) => d.outcome === "won" && Number(d.estValue) > 0 && Number(d.contractValue) > 0)
+    // skip contract values Won copied from the estimate — they'd read as perfect bids
+    const bidRows = scoped.filter((d) => d.outcome === "won" && Number(d.estValue) > 0 && Number(d.contractValue) > 0
+        && d.contractValueSource !== "estimate")
       .map((d) => ({ d, est: Number(d.estValue), act: Number(d.contractValue), ratio: Number(d.contractValue) / Number(d.estValue) }))
       .sort((a, b) => b.ratio - a.ratio);
     const hourFactor = median(hourRows.map((r) => r.ratio));

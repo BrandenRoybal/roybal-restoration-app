@@ -13,6 +13,7 @@ import {
 } from "./data.js";
 import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, layoutSubtasksLive, phaseActuals, buildLiveOpts, workDaysBetween, effCrew, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear, entryBlock, timelineWindow, packLanes, timelineTicks, timelinePct, idleGaps, fmtSpan, DEFAULT_SETTINGS } from "./schedule.js";
 import { scheduleFlags } from "./schedulewatch.js";
+import { wonContractFill } from "./leadvisit.js";
 import { visitDate, visitTime, visitPeople, visitChip, bidSteps, whoLabel } from "./leadvisit.js";
 import { uploadCrewPhoto } from "../../js/supa.js";
 import { pickJobcode, pickQbUser, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
@@ -2199,7 +2200,8 @@ function openJobModal(existing, newMilestone) {
     field("Materials", sel("materials", MATERIALS)));
   // Block D — dollars that drive draw/billing triggers in the daily CFO report
   const moneyRow = h("div", { class: "grid2 hide-for-ms" },
-    field("Contract value ($)", inp("contractValue", { type: "number", min: "0", step: "0.01", placeholder: "e.g. 42000" })),
+    field(j.contractValueSource === "estimate" ? "Contract value ($) — from the estimate, not yet confirmed" : "Contract value ($)",
+      inp("contractValue", { type: "number", min: "0", step: "0.01", placeholder: "e.g. 42000" })),
     field("Billed to date ($)", inp("billedToDate", { type: "number", min: "0", step: "0.01", placeholder: "e.g. 15000" })));
   const crewField = field("Assigned crew", crewPick);
   crewField.classList.add("hide-for-ms");
@@ -2335,8 +2337,19 @@ function openJobModal(existing, newMilestone) {
   // Lead lifecycle actions. Won advances the lead to Scheduled and records the
   // outcome (feeds the pipeline win-rate). Lost stamps the reason, then archives.
   f.stage.addEventListener("change", () => { leadSection.style.display = f.stage.value === "lead" ? "" : "none"; });
+  // the contract value Won copied from the estimate (null = a real figure)
+  let estimateCopy = j.contractValueSource === "estimate" ? Number(j.contractValue) : null;
   wonBtn.addEventListener("click", () => {
     j.outcome = "won"; j.outcomeAt = todayISO(); j.lostReason = "";
+    // a blank contract value takes the estimate the field sent — marked as a
+    // copy until someone types the signed figure (leadvisit.js wonContractFill)
+    const fill = f.contractValue.value ? null : wonContractFill(j);
+    if (fill) {
+      f.contractValue.value = String(fill.contractValue);
+      j.contractValueSource = fill.contractValueSource;
+      estimateCopy = fill.contractValue;
+      toast("Contract value set from the estimate — change it to the signed amount if different");
+    }
     f.stage.value = "scheduled";
     leadSection.style.display = "none";
     saveBtn.click();     // reuse the normal save (schedule cascade + persist)
@@ -2383,6 +2396,9 @@ function openJobModal(existing, newMilestone) {
       startDate: f.startDate.value, targetDate: f.targetDate.value,
       estimatedHours: f.estimatedHours.value ? Number(f.estimatedHours.value) : "",
       contractValue: f.contractValue.value ? Number(f.contractValue.value) : "",
+      // the estimate copy stays marked only while the figure is still the copy
+      contractValueSource: estimateCopy != null && Number(f.contractValue.value) === estimateCopy ? "estimate"
+        : j.contractValueSource ? "manual" : "",
       billedToDate: f.billedToDate.value ? Number(f.billedToDate.value) : "",
       notes: f.notes.value.trim(),
       pinnedStart: j.scheduleMode === "manual" ? (f.pinnedStart.value || "") : (j.pinnedStart || ""),
