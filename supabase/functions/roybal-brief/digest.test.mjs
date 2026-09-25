@@ -130,4 +130,19 @@ test("overdue lead follow-ups: count + names, ignoring future/resolved/non-leads
   assert.doesNotMatch(b.text, /Priya Chandra|Old Won|Not a lead/);
 });
 
+test("🏠 today's site visits: earliest first, with time and who; not done/cancelled/other days", () => {
+  const sv = (at, extra = {}) => ({ at, by: "cj@example.com", status: "scheduled", ...extra });
+  const b = buildBrief({ ...base, boardJobs: [
+    { title: "Kennedy", stage: "lead", siteVisit: sv("2026-07-23T14:00") },
+    { title: "Fuller", stage: "lead", siteVisit: sv("2026-07-23T09:30", { by: "branden@roybalconstruction.com" }) },
+    { title: "No time", stage: "lead", siteVisit: sv("2026-07-23", { by: "" }) },
+    { title: "Tomorrow", stage: "lead", siteVisit: sv("2026-07-24T10:00") },
+    { title: "Done", stage: "lead", siteVisit: sv("2026-07-23T08:00", { status: "done", doneAt: "2026-07-23" }) },
+    { title: "Called off", stage: "lead", siteVisit: { status: "cancelled", at: "", was: "2026-07-23T08:00" } },
+    { title: "Lost", stage: "lead", outcome: "lost", siteVisit: sv("2026-07-23T11:00") },
+  ] });
+  assert.match(b.text, /🏠 3 site visits today: No time, Fuller 9:30am \(Branden\), Kennedy 2:00pm \(Cj\)/);
+  assert.doesNotMatch(b.text, /Tomorrow|Called off|Lost/);
+});
+
 console.log(`\n${pass} digest checks passed.`);

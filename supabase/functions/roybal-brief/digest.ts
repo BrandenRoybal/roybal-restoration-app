@@ -162,6 +162,21 @@ export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWa
   const unworked = boardJobs.filter((j) => !j.isMilestone && !j.archived && (j.stage || "lead") === "lead"
     && !j.outcome && !j.nextActionAt && !j.firstTouchAt);
   if (unworked.length) lines.push(`🆕 ${unworked.length} lead${unworked.length === 1 ? "" : "s"} nobody's touched: ${unworked.slice(0, 3).map((j) => j.title || j.customer || "lead").join(", ")}${unworked.length > 3 ? ` +${unworked.length - 3}` : ""}`);
+  // 🏠 site visits booked for today (docs/Lead_Bid_Workflow_Design.md §7
+  // row 2) — siteVisit.at is a local "YYYY-MM-DD[THH:MM]", written by the
+  // Leads Inbox / board editor; earliest first. A visit whose day passed
+  // without "done" already shows above as an overdue follow-up.
+  const visits = boardJobs.filter((j) => !j.isMilestone && (j.stage || "lead") === "lead" && !j.outcome
+    && j.siteVisit && typeof j.siteVisit === "object" && j.siteVisit.status !== "cancelled"
+    && j.siteVisit.status !== "done" && !j.siteVisit.doneAt
+    && String(j.siteVisit.at || "").slice(0, 10) === today)
+    .sort((x, y) => String(x.siteVisit.at).localeCompare(String(y.siteVisit.at)));
+  if (visits.length) lines.push(`🏠 ${visits.length} site visit${visits.length === 1 ? "" : "s"} today: ${visits.slice(0, 3).map((j) => {
+    const t = /T(\d{2}):(\d{2})/.exec(String(j.siteVisit.at));
+    const time = t ? ` ${((Number(t[1]) + 11) % 12) + 1}:${t[2]}${Number(t[1]) < 12 ? "am" : "pm"}` : "";
+    const by = String(j.siteVisit.by || "").split("@")[0];
+    return `${j.title || j.customer || "lead"}${time}${by ? ` (${by.charAt(0).toUpperCase() + by.slice(1)})` : ""}`;
+  }).join(", ")}${visits.length > 3 ? ` +${visits.length - 3}` : ""}`);
   // 📉 behind baseline — the live schedule re-dates a slipping phased job to
   // finish >= today (its phases drive targetDate), so it's never "past
   // target"; the Gantt baseline snapshot is the reference that exposes it
