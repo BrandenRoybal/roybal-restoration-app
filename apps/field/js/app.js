@@ -36,7 +36,7 @@ import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
 import { boardFlagsByJob } from "./myweekcalc.js";
-import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles,
+import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles, wonPhotosCard,
   suggestEstimateNo, estimateEmailDraft, markEstimateSent, estimateTotal, whoLabel, FOLLOW_UP_DAYS } from "./bid.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
@@ -1410,6 +1410,9 @@ function projectHome(project) {
     onChanged: () => projectHome(project),
   });
   if (bid) body.append(bid);
+  // 🎉 …and once it's won, a one-time offer to bring the site-visit photos over
+  const wonPhotos = wonPhotosCard(project, { onDone: () => projectHome(project) });
+  if (wonPhotos) body.append(wonPhotos);
 
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
   body.append(messageLogCard(project));
@@ -1996,6 +1999,16 @@ function formEditor(project, meta, instance) {
   body.append(actions);
 }
 
+/* ⬇ Word — the same estimate as an editable .docx (docx.js), for
+   private-pay customers who want to mark it up, or a last-minute edit in
+   Word before it goes out. The PDF stays the record; this is a copy. */
+async function saveEstimateWord(project, inv) {
+  const { estimateDocx, estimateDocxName, DOCX_MIME } = await import("./docx.js");
+  const parts = estimateDocx(project, inv, { isBuild: jobType(project) === "construction" });
+  const ok = downloadFile(estimateDocxName(project, inv), new Blob(parts, { type: DOCX_MIME }), DOCX_MIME);
+  toast(ok ? "Word copy saved — check your Downloads (or Files on a phone)." : "Couldn't save the Word file on this device.");
+}
+
 /* ✉️ Send estimate — design §5.5. A plain, editable draft to the customer
    (never AI-written), sent from the phone's own mail app with the saved PDF
    attached. Opening the email stamps the send: on the estimate (sentAt,
@@ -2018,6 +2031,8 @@ function sendEstimatePanel(project, inv) {
           `Last sent ${fmtDate(String(inv.sentAt).slice(0, 10))}` + (inv.sentTo ? " to " + inv.sentTo : "") + " — sending again logs it as revised.")
       : null;
     const pdfBtn = h("button", { class: "btn btn--sm btn--ghost", onclick: () => window.print() }, "1 · ⬇ Save as PDF");
+    const wordBtn = h("button", { class: "btn btn--sm btn--ghost", title: "Attach the editable Word copy instead",
+      onclick: () => saveEstimateWord(project, inv) }, "or ⬇ Word copy");
     const mailBtn = h("button", { class: "btn btn--sm btn--primary" }, "2 · Open in Email");
     mailBtn.addEventListener("click", async () => {
       const addr = to.value.trim();
@@ -2037,10 +2052,10 @@ function sendEstimatePanel(project, inv) {
     wrap.replaceChildren(
       h("div", { style: "font-weight:800;margin-bottom:4px" }, "✉️ Send estimate"),
       h("div", { class: "subtle", style: "font-size:12px;margin-bottom:8px" },
-        "Save the PDF first, then open the email and attach it. Opening the email marks the estimate sent" +
+        "Save the PDF (or an editable Word copy) first, then open the email and attach it. Opening the email marks the estimate sent" +
         (project.bidOf ? " and logs it on the lead, with a follow-up." : ".")),
       sentLine, to, subj, bodyTa,
-      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" }, pdfBtn, mailBtn, closeBtn));
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" }, pdfBtn, wordBtn, mailBtn, closeBtn));
   };
   openSendEstimate = () => { paint(); wrap.hidden = false; wrap.scrollIntoView({ behavior: "smooth", block: "start" }); };
   // the Bid card's "Send estimate" lands here with the panel already open

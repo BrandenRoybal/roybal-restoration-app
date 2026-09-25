@@ -128,7 +128,7 @@ export function bidSteps(d, crew = []) {
   const steps = [];
   if (sv.at && sv.status !== "cancelled" && !sv.doneAt && sv.status !== "done") {
     const who = whoLabel(sv.by, crew);
-    steps.push({ id: "visit", text: "📅 " + fmtVisitAt(sv.at) + (who ? " · " + who : "") });
+    steps.push({ id: "visit", text: "📅 " + fmtVisitAt(sv.at) + (who ? " · " + who : "") + (sv.confirmedAt ? " · 📱 confirmed" : "") });
   }
   if (x.fieldJobId || x.bidStartedAt) steps.push({ id: "bid", text: "📐 Bid started" });
   if (sv.doneAt || sv.status === "done") steps.push({ id: "inspected", text: "🔍 Inspected " + shortDate(sv.doneAt) });
@@ -178,4 +178,56 @@ export function wonContractFill(d) {
   const est = Number(x.estimateTotal) > 0 ? Number(x.estimateTotal)
     : x.estValueSource === "field" && Number(x.estValue) > 0 ? Number(x.estValue) : 0;
   return est ? { contractValue: Math.round(est * 100) / 100, contractValueSource: "estimate" } : null;
+}
+
+/* ---------- time to estimate (design §3, "falls out for free") ----------
+   Calendar days from the site visit to the estimate going out. Visit day:
+   siteVisit.doneAt, else the first hand-logged "inspected" entry. Sent
+   day: the first estimate-sent entry on or after that visit (hand-logged
+   or the field's own, PR 3), else estimateSentAt. null when either side is
+   missing, so the tile only averages leads that have both. */
+export function daysToEstimate(d) {
+  const x = d || {};
+  const log = Array.isArray(x.leadLog) ? x.leadLog.filter(Boolean) : [];
+  const day = (s) => String(s || "").slice(0, 10);
+  const firstOf = (kind, from = "") => log.filter((e) => e.kind === kind && day(e.at) && day(e.at) >= from)
+    .map((e) => day(e.at)).sort()[0] || "";
+  const visit = day(obj(x.siteVisit).doneAt) || firstOf("inspected");
+  if (!visit) return null;
+  const sent = firstOf("estimate-sent", visit) || (day(x.estimateSentAt) >= visit ? day(x.estimateSentAt) : "");
+  if (!sent) return null;
+  const [a, b] = [visit, sent].map((s) => { const [y, m, dd] = s.split("-").map(Number); return Date.UTC(y, m - 1, dd); });
+  return Math.round((b - a) / 86400000);
+}
+
+/* ---------- 📱 visit confirmation text (design §7 row 5) ----------
+   The office reads and edits it, then taps Send — that tap IS the
+   approval. Sent through roybal-notify kind "reminder": a customer kind,
+   so the 7am–8pm Alaska quiet-hours guard applies server-side. */
+export function visitConfirmText(d, crew = []) {
+  const x = d || {};
+  const sv = obj(x.siteVisit);
+  const first = String(x.customer || x.title || "").trim().split(/[\s—-]+/)[0] || "";
+  const when = fmtVisitAt(sv.at);
+  const m = /^(\w+) (\d+\/\d+)(?: (.+))?$/.exec(when);
+  const whenText = m ? `${m[1]} ${m[2]}` + (m[3] ? ` at ${m[3]}` : "") : when;
+  const who = whoLabel(sv.by, crew).split(" ")[0];
+  const where = String(x.address || "").trim();
+  return `Hi${first ? " " + first : ""}, this is Roybal Construction confirming your site visit`
+    + (where ? ` at ${where}` : "") + (whenText ? ` on ${whenText}` : "") + "."
+    + (who ? ` ${who} will be there.` : "")
+    + " Reply here or call 907-371-9868 if that time doesn't work.";
+}
+
+/* after a confirmation goes out: stamp the visit + a line in the lead log */
+export function visitConfirmedPatch(d, at, entryId) {
+  const x = d || {};
+  const sv = obj(x.siteVisit);
+  return {
+    siteVisit: { ...sv, confirmedAt: at },
+    leadLog: [...(Array.isArray(x.leadLog) ? x.leadLog : []), {
+      id: entryId, at: String(at).slice(0, 10), kind: "note",
+      note: "Site visit confirmation texted" + (sv.at ? " (" + fmtVisitAt(sv.at) + ")" : ""), action: "",
+    }],
+  };
 }

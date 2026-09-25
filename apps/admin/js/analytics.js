@@ -20,6 +20,7 @@ import { h, clear } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
 import { rest } from "../../js/supa.js";
 import { fmtTouch } from "./leads.js";
+import { daysToEstimate } from "../../board/js/leadvisit.js";
 
 const C = {
   bar: "#1c5fb0",           // single-series magnitude
@@ -225,6 +226,9 @@ export function analyticsTab() {
         && d.contractValueSource !== "estimate")
       .map((d) => ({ d, est: Number(d.estValue), act: Number(d.contractValue), ratio: Number(d.contractValue) / Number(d.estValue) }))
       .sort((a, b) => b.ratio - a.ratio);
+    /* time to estimate — site visit done → estimate out (lead → bid workflow) */
+    const estDays = scoped.map(daysToEstimate).filter((n) => n != null);
+    const estDaysMedian = median(estDays);
     const hourFactor = median(hourRows.map((r) => r.ratio));
     const bidFactor = median(bidRows.map((r) => r.ratio));
 
@@ -236,7 +240,8 @@ export function analyticsTab() {
       tile(winRate == null ? "—" : pct(winRate), `Win rate (${won.length}/${won.length + lost.length})`),
       tile(hourFactor == null ? "—" : "×" + hourFactor.toFixed(2), `Hours: actual ÷ estimate (n=${hourRows.length})`),
       tile(bidFactor == null ? "—" : "×" + bidFactor.toFixed(2), `Dollars: contract ÷ bid (n=${bidRows.length})`),
-      tile(allTouch.length ? fmtTouch(allTouch.reduce((a, b) => a + b, 0) / allTouch.length) : "—", "Avg first touch")));
+      tile(allTouch.length ? fmtTouch(allTouch.reduce((a, b) => a + b, 0) / allTouch.length) : "—", "Avg first touch"),
+      tile(estDaysMedian == null ? "—" : Math.round(estDaysMedian) + "d", `Site visit → estimate out, median (n=${estDays.length})`)));
 
     /* conversion by channel */
     const chanRows = Object.entries(byChan).filter(([, g]) => g.leads > 0)

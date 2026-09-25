@@ -21,8 +21,8 @@
    Ownership rule (docs §2.5): field owns the packet, the estimate and its
    total; board/admin own stage, outcome, follow-ups and dates.
    ============================================================ */
-import { h, Store, toast, fmtDate, uid } from "./core.js";
-import { rest, currentEmail } from "./supa.js";
+import { h, Store, toast, fmtDate, uid, fileToDataURL } from "./core.js";
+import { rest, currentEmail, downloadSiteFile } from "./supa.js";
 import { tileCandidates, startBid, findBoardRow, isBidLead } from "./boardpush.js";
 import { jobType } from "./model.js";
 
@@ -270,6 +270,28 @@ export function estimateEmailDraft(project, inv, total, signer = "") {
   return { to: String(p.email || "").trim(), subject, body };
 }
 
+/* ---------- pure: Photos on Won (design §3 step 10) ----------
+   Once the lead is won the bid file IS the job, and the site-visit
+   photos and video stills are the best "before" record it has. They live
+   in the packet (storage paths), not in Job Photos — so offer, once, to
+   copy them over. Never automatic; declining is remembered. */
+export const WON_PHOTO_CAP = 60;
+export function wonPhotoFiles(project, d) {
+  const p = project || {};
+  if (!p.bidOf || p.bidPhotosAt || !d || d.outcome !== "won") return [];
+  const sv = (p.siteVisit && typeof p.siteVisit === "object") ? p.siteVisit : {};
+  return arr(sv.files).filter((f) => f && (f.kind === "photos" || f.kind === "frames") && f.path).slice(0, WON_PHOTO_CAP);
+}
+export function jobPhotoFromSiteFile(f, src, by = "") {
+  const cap = String(f.caption || "").trim();
+  return {
+    id: uid(), ...(by ? { by } : {}), src,
+    room: String(f.room || ""), stage: "before",
+    caption: "Site visit" + (cap ? ": " + cap : ""),
+    ts: f.at || new Date().toISOString(),
+  };
+}
+
 /* ============================================================
    Network — browser only, every call fail-safe for the UI
    ============================================================ */
@@ -325,6 +347,62 @@ export async function markEstimateSent(project, inv, { to = "", via = "mailto" }
   } catch (e) {
     return { board: false, reason: String((e && e.message) || e) };
   }
+}
+
+/** Copy the won bid's site-visit photos into Job Photos as "before".
+    Stamps project.bidPhotosAt either way so the offer never repeats.
+    Returns { copied, missing }. */
+export async function copyWonPhotos(project, files, onProgress) {
+  let copied = 0, missing = 0;
+  if (!Array.isArray(project.photos)) project.photos = [];
+  const by = currentEmail();
+  for (const f of files) {
+    try {
+      const blob = await downloadSiteFile(f.path);
+      if (!blob) { missing++; continue; }
+      const src = await fileToDataURL(blob, 1200, 0.6);   // the gallery's own size (forms.js photo add)
+      project.photos.push(jobPhotoFromSiteFile(f, src, by));
+      copied++;
+    } catch (_) { missing++; }
+    if (onProgress) onProgress(copied + missing, files.length);
+  }
+  project.bidPhotosAt = new Date().toISOString();
+  await Store.put(project);
+  return { copied, missing };
+}
+
+/** The one-time offer card on a won bid file's job home. null = nothing to offer. */
+export function wonPhotosCard(project, { onDone } = {}) {
+  if (!project || !project.bidOf || project.bidPhotosAt) return null;
+  const wrap = h("div", { class: "card app-only", hidden: true, style: "border-left:4px solid #1e6b3a" });
+  (async () => {
+    let row = null;
+    try { row = await findBoardRow(project); } catch (_) { row = null; }
+    const files = wonPhotoFiles(project, row && row.data);
+    if (!files.length) return;
+    const status = h("div", { class: "subtle", style: "font-size:12px;margin-top:6px" });
+    const yes = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, `📷 Copy ${files.length} photo${files.length === 1 ? "" : "s"}`);
+    const no = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto" }, "No thanks");
+    yes.addEventListener("click", async () => {
+      yes.disabled = no.disabled = true;
+      const r = await copyWonPhotos(project, files, (n, t) => { status.textContent = `Copying… ${n}/${t}`; });
+      toast(r.copied ? `${r.copied} site-visit photo${r.copied === 1 ? "" : "s"} added to Job Photos as “before”.` + (r.missing ? ` ${r.missing} couldn't be fetched.` : "")
+        : "Couldn't fetch the site-visit photos — check your connection. They're still in the estimate's Site Visit panel.", 5000);
+      if (onDone) onDone();
+    });
+    no.addEventListener("click", async () => {
+      project.bidPhotosAt = new Date().toISOString();
+      await Store.put(project);
+      wrap.remove();
+    });
+    wrap.append(
+      h("div", { style: "font-weight:800" }, "🎉 Bid won — this is the job now"),
+      h("div", { style: "font-size:13px;margin-top:4px" },
+        `Copy the ${files.length} site-visit photo${files.length === 1 ? "" : "s"} and video stills into Job Photos as “before” shots? The originals stay in the estimate's Site Visit panel.`),
+      h("div", { style: "display:flex;gap:8px;margin-top:8px" }, yes, no), status);
+    wrap.hidden = false;
+  })();
+  return wrap;
 }
 
 /** Archive the bid files whose leads were marked lost. Returns how many. */
