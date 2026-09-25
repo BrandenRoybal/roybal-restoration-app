@@ -5,6 +5,7 @@ import assert from "node:assert";
 import {
   tileMode, isOpenLeadTile, unlinkedLeadTiles, estimateTotal, bidState, bidChip,
   fmtVisitAt, whoLabel, shortMoney, lostBidFiles, siteVisitDonePatch,
+  suggestEstimateNo, addBusinessDays, estimateSentPatch, estimateEmailDraft,
 } from "../js/bid.js";
 
 let pass = 0;
@@ -118,5 +119,44 @@ const p1 = siteVisitDonePatch({ stage: "lead", nextAction: "Send the drywall quo
 ok("an unrelated follow-up is left alone", !("nextAction" in p1) && !("nextActionAt" in p1));
 ok("no prior siteVisit / leadLog → still a valid patch", p1.siteVisit.status === "done" && p1.leadLog.length === 1 && p1.leadLog[0].action === "Send the drywall quote");
 ok("garbage tile never throws", siteVisitDonePatch(null, AT, "", "e3").leadLog.length === 1);
+
+/* ---------- PR 3: estimate number, send stamp, email ---------- */
+ok("estimate no: RC-<LAST3>-<MMYY> from the customer's last word",
+  suggestEstimateNo("Pat Kennedy", "2025-09-14") === "RC-KEN-0925" && suggestEstimateNo("AmeriGas", "2026-09-24") === "RC-AME-0926");
+ok("estimate no: short or missing names still make a number",
+  suggestEstimateNo("Jo Ng", "2026-01-02") === "RC-NGX-0126" && suggestEstimateNo("", "2026-01-02") === "RC-JOB-0126");
+ok("estimate no: a taken number gets -2, then -3 (case-insensitive)",
+  suggestEstimateNo("Kennedy", "2025-09-01", ["rc-ken-0925"]) === "RC-KEN-0925-2"
+  && suggestEstimateNo("Kennedy", "2025-09-01", ["RC-KEN-0925", "RC-KEN-0925-2"]) === "RC-KEN-0925-3");
+ok("business days skip the weekend (Thu + 5 → next Thu; Fri + 1 → Mon)",
+  addBusinessDays("2026-09-24", 5) === "2026-10-01" && addBusinessDays("2026-09-25", 1) === "2026-09-28" && addBusinessDays("", 5) === "");
+
+const sentAt = "2026-09-24T20:00:00.000Z";
+const sp1 = estimateSentPatch({ nextAction: "Send estimate", leadLog: [{ id: "x", kind: "note" }] },
+  { no: "RC-KEN-0926", total: 18450.4, at: sentAt, to: "pat@example.com", entryId: "e1" });
+ok("sent patch: log entry, number, total, 5-business-day follow-up",
+  sp1.leadLog.length === 2 && sp1.leadLog[1].kind === "estimate-sent" && sp1.leadLog[1].at === "2026-09-24"
+  && sp1.leadLog[1].note === "RC-KEN-0926 · $18,450 — to pat@example.com (Field Forms)" && sp1.leadLog[1].action === "Send estimate"
+  && sp1.estimateNo === "RC-KEN-0926" && sp1.estimateTotal === 18450 && sp1.estimateSentAt === sentAt
+  && sp1.nextAction === "Follow up on estimate" && sp1.nextActionAt === "2026-10-01" && sp1.firstTouchAt === sentAt);
+ok("sent patch: fills a blank estValue and marks it the field's",
+  sp1.estValue === 18450 && sp1.estValueSource === "field");
+const sp2 = estimateSentPatch({ estValue: 15000, firstTouchAt: "2026-09-01" }, { no: "A", total: 18450, at: sentAt });
+ok("sent patch: never replaces an estValue the office typed",
+  !("estValue" in sp2) && !("estValueSource" in sp2) && !("firstTouchAt" in sp2));
+const sp3 = estimateSentPatch({ estValue: 17000, estValueSource: "field" }, { no: "A", total: 19000, at: sentAt, revised: true });
+ok("sent patch: updates its own earlier number; a resend says (revised)",
+  sp3.estValue === 19000 && /\(revised\)/.test(sp3.leadLog[0].note));
+
+const mail = estimateEmailDraft({ customer: "Pat Kennedy", address: "1465 Noble St", email: "pat@example.com" },
+  { invoiceNo: "RC-KEN-0926", dueDate: "2026-10-24" }, 18450, "Branden");
+ok("email: to the customer, subject names the estimate and address",
+  mail.to === "pat@example.com" && mail.subject === "Estimate RC-KEN-0926 — 1465 Noble St · Roybal Construction");
+ok("email: greets by first name, states the total and the valid-through date, signs off",
+  /^Hi Pat,/.test(mail.body) && /totaling \$18,450\. Pricing is good through 10\/24\./.test(mail.body) && /\nBranden\n/.test(mail.body));
+const bare = estimateEmailDraft({}, {}, 0);
+ok("email: a bare file still makes a sendable draft, signed once by the company",
+  bare.to === "" && /^Hi,/.test(bare.body) && bare.subject === "Estimate · Roybal Construction"
+  && /Thank you,\nRoybal Construction, LLC$/.test(bare.body));
 
 console.log(`\n${pass} bid checks passed.`);

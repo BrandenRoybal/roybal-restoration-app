@@ -36,7 +36,8 @@ import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
 import { boardFlagsByJob } from "./myweekcalc.js";
-import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles } from "./bid.js";
+import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles,
+  suggestEstimateNo, estimateEmailDraft, markEstimateSent, estimateTotal, whoLabel, FOLLOW_UP_DAYS } from "./bid.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -1858,6 +1859,14 @@ async function formPage(project, key, instId) {
   if (instId) {
     const inst = project[key].find((x) => x.id === instId);
     if (!inst) return go(`#/p/${project.id}/f/${key}`);
+    // a blank estimate number gets the house convention suggested once
+    // (RC-<LAST3>-<MMYY>, -2 on collision across every local estimate);
+    // editable, and never overwritten once there's anything in the field
+    if (key === "reconEstimates" && !String(inst.invoiceNo || "").trim()) {
+      const taken = (await Store.all()).flatMap((p) => (p.reconEstimates || []).map((e) => e.invoiceNo));
+      inst.invoiceNo = suggestEstimateNo(project.customer, inst.invoiceDate || new Date().toISOString().slice(0, 10), taken);
+      await Store.put(project);
+    }
     return formEditor(project, meta, inst);
   }
   return instanceList(project, meta);
@@ -1969,9 +1978,15 @@ function formEditor(project, meta, instance) {
 
   body.append(h("div", { style: "height:8px" }));
 
+  // ✉️ Send estimate (lead → bid PR 3) — the panel paints above the actions
+  if (meta.key === "reconEstimates") body.append(sendEstimatePanel(project, instance));
+
   // sticky actions
   const actions = h("div", { class: "sticky-actions app-only" },
     h("button", { class: "btn btn--ghost", onclick: () => go(back) }, "Done"),
+    meta.key === "reconEstimates"
+      ? h("button", { class: "btn btn--ghost", onclick: () => openSendEstimate() }, "✉️ Send")
+      : null,
     h("button", { class: "btn btn--primary", onclick: () => window.print() }, "⬇ Save as PDF"));
   if (meta.multi) {
     actions.insertBefore(
@@ -1979,6 +1994,63 @@ function formEditor(project, meta, instance) {
       actions.firstChild);
   }
   body.append(actions);
+}
+
+/* ✉️ Send estimate — design §5.5. A plain, editable draft to the customer
+   (never AI-written), sent from the phone's own mail app with the saved PDF
+   attached. Opening the email stamps the send: on the estimate (sentAt,
+   sentTo, sentVia) and — while this file's board tile is still a lead — on
+   the lead (📄 Estimate sent in its log, number + total, and a follow-up
+   5 business days out) through coordination_job_patch. */
+let openSendEstimate = () => {};
+function sendEstimatePanel(project, inv) {
+  const wrap = h("div", { class: "card app-only", hidden: true, style: "border-left:4px solid #f26a21;margin-top:12px" });
+  const paint = () => {
+    const total = estimateTotal(inv, jobType(project) === "construction");
+    const draft = estimateEmailDraft(project, inv, total, whoLabel(currentEmail()));
+    const fieldCss = "width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #cdd5df;border-radius:10px;font-size:13px";
+    const to = h("input", { type: "email", value: draft.to, placeholder: "customer@email.com", style: fieldCss });
+    const subj = h("input", { value: draft.subject, style: fieldCss + ";margin-top:6px" });
+    const bodyTa = h("textarea", { style: fieldCss + ";min-height:190px;line-height:1.5;margin-top:6px" });
+    bodyTa.value = draft.body;
+    const sentLine = inv.sentAt
+      ? h("div", { class: "subtle", style: "font-size:12px;margin-bottom:6px" },
+          `Last sent ${fmtDate(String(inv.sentAt).slice(0, 10))}` + (inv.sentTo ? " to " + inv.sentTo : "") + " — sending again logs it as revised.")
+      : null;
+    const pdfBtn = h("button", { class: "btn btn--sm btn--ghost", onclick: () => window.print() }, "1 · ⬇ Save as PDF");
+    const mailBtn = h("button", { class: "btn btn--sm btn--primary" }, "2 · Open in Email");
+    mailBtn.addEventListener("click", async () => {
+      const addr = to.value.trim();
+      if (!Number(total)) { toast("This estimate has no total yet — add the line items first."); return; }
+      location.href = `mailto:${encodeURIComponent(addr)}?subject=${encodeURIComponent(subj.value)}&body=${encodeURIComponent(bodyTa.value)}`;
+      mailBtn.disabled = true;
+      const r = await markEstimateSent(project, inv, { to: addr, via: "mailto" });
+      toast(r.board ? `Estimate logged as sent on the lead — follow-up set ${FOLLOW_UP_DAYS} business days out.`
+        : r.reason === "no-lead" ? "Estimate marked sent."
+        : r.reason === "offline" ? "Marked sent on this device. The lead on the board wasn't updated (offline) — log it from the Leads Inbox."
+        : r.reason === "refused" ? "Marked sent on this device. Bid actions on the board are office-only — log it from the Leads Inbox."
+        : "Marked sent on this device. Board update failed: " + r.reason, 5000);
+      paint();
+      wrap.hidden = false;
+    });
+    const closeBtn = h("button", { class: "btn btn--sm btn--ghost", onclick: () => { wrap.hidden = true; } }, "Close");
+    wrap.replaceChildren(
+      h("div", { style: "font-weight:800;margin-bottom:4px" }, "✉️ Send estimate"),
+      h("div", { class: "subtle", style: "font-size:12px;margin-bottom:8px" },
+        "Save the PDF first, then open the email and attach it. Opening the email marks the estimate sent" +
+        (project.bidOf ? " and logs it on the lead, with a follow-up." : ".")),
+      sentLine, to, subj, bodyTa,
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" }, pdfBtn, mailBtn, closeBtn));
+  };
+  openSendEstimate = () => { paint(); wrap.hidden = false; wrap.scrollIntoView({ behavior: "smooth", block: "start" }); };
+  // the Bid card's "Send estimate" lands here with the panel already open
+  try {
+    if (sessionStorage.getItem("roybal-open-send") === inv.id) {
+      sessionStorage.removeItem("roybal-open-send");
+      setTimeout(() => openSendEstimate(), 0);
+    }
+  } catch (_) { /* storage blocked — the ✉️ Send button still works */ }
+  return wrap;
 }
 
 async function deleteInstance(project, meta, instance, back) {
