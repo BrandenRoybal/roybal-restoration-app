@@ -179,3 +179,23 @@ export function wonContractFill(d) {
     : x.estValueSource === "field" && Number(x.estValue) > 0 ? Number(x.estValue) : 0;
   return est ? { contractValue: Math.round(est * 100) / 100, contractValueSource: "estimate" } : null;
 }
+
+/* ---------- time to estimate (design §3, "falls out for free") ----------
+   Calendar days from the site visit to the estimate going out. Visit day:
+   siteVisit.doneAt, else the first hand-logged "inspected" entry. Sent
+   day: the first estimate-sent entry on or after that visit (hand-logged
+   or the field's own, PR 3), else estimateSentAt. null when either side is
+   missing, so the tile only averages leads that have both. */
+export function daysToEstimate(d) {
+  const x = d || {};
+  const log = Array.isArray(x.leadLog) ? x.leadLog.filter(Boolean) : [];
+  const day = (s) => String(s || "").slice(0, 10);
+  const firstOf = (kind, from = "") => log.filter((e) => e.kind === kind && day(e.at) && day(e.at) >= from)
+    .map((e) => day(e.at)).sort()[0] || "";
+  const visit = day(obj(x.siteVisit).doneAt) || firstOf("inspected");
+  if (!visit) return null;
+  const sent = firstOf("estimate-sent", visit) || (day(x.estimateSentAt) >= visit ? day(x.estimateSentAt) : "");
+  if (!sent) return null;
+  const [a, b] = [visit, sent].map((s) => { const [y, m, dd] = s.split("-").map(Number); return Date.UTC(y, m - 1, dd); });
+  return Math.round((b - a) / 86400000);
+}

@@ -239,6 +239,19 @@ export async function uploadSiteFile(path, blob, contentType) {
   if (!res.ok && res.status !== 409) throw new Error("Upload failed (" + res.status + ")");
 }
 
+/** Download one Site Visit packet file as a Blob; null when it's gone.
+    (Photos on Won: the bid's site-visit stills become Job Photos.) */
+export async function downloadSiteFile(path) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${path}`;
+  const send = () => fetch(url, { headers: { ...authHeaders() } });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  if (res.status === 404 || res.status === 400) return null;
+  if (!res.ok) throw new Error("Download failed (" + res.status + ")");
+  return res.blob();
+}
+
 /* crew headshots (Job Board roster → portal bio cards) live in the PUBLIC
    crew-photos bucket: customers load them straight from the CDN URL, and
    Twilio can fetch them for the MMS intro later. One object per member,

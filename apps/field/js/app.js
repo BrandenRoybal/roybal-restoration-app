@@ -36,7 +36,7 @@ import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
 import { boardFlagsByJob } from "./myweekcalc.js";
-import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles,
+import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles, wonPhotosCard,
   suggestEstimateNo, estimateEmailDraft, markEstimateSent, estimateTotal, whoLabel, FOLLOW_UP_DAYS } from "./bid.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
@@ -1410,6 +1410,9 @@ function projectHome(project) {
     onChanged: () => projectHome(project),
   });
   if (bid) body.append(bid);
+  // 🎉 …and once it's won, a one-time offer to bring the site-visit photos over
+  const wonPhotos = wonPhotosCard(project, { onDone: () => projectHome(project) });
+  if (wonPhotos) body.append(wonPhotos);
 
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
   body.append(messageLogCard(project));

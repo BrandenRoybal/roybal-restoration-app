@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import {
   fmtVisitAt, visitDate, visitTime, whoLabel, visitPeople,
   scheduleVisitPatch, cancelVisitPatch, visitChip, bidSteps, estimateSentOn, bidStats,
-  wonContractFill,
+  wonContractFill, daysToEstimate,
 } from "../js/leadvisit.js";
 
 let pass = 0;
@@ -150,4 +150,20 @@ test("…and never touches a contract value already there", () => {
   assert.equal(wonContractFill({ estimateTotal: 18450, contractValue: 20000 }), null);
   assert.equal(wonContractFill({}), null);
 });
+/* ---- time to estimate ---- */
+test("daysToEstimate: site visit done → first estimate sent after it", () => {
+  assert.equal(daysToEstimate({ siteVisit: { doneAt: "2026-09-20" }, estimateSentAt: "2026-09-23T18:00:00Z" }), 3);
+  assert.equal(daysToEstimate({ siteVisit: { doneAt: "2026-09-20" },
+    leadLog: [{ kind: "estimate-sent", at: "2026-09-10" }, { kind: "estimate-sent", at: "2026-09-22" }, { kind: "estimate-sent", at: "2026-09-25" }] }), 2);
+});
+test("…hand-logged inspections count as the visit; same-day sends are 0", () => {
+  assert.equal(daysToEstimate({ leadLog: [{ kind: "inspected", at: "2026-09-01" }, { kind: "estimate-sent", at: "2026-09-01" }] }), 0);
+});
+test("…null when either side is missing or the send came before the visit", () => {
+  assert.equal(daysToEstimate({ siteVisit: { doneAt: "2026-09-20" } }), null);
+  assert.equal(daysToEstimate({ estimateSentAt: "2026-09-23T00:00:00Z" }), null);
+  assert.equal(daysToEstimate({ siteVisit: { doneAt: "2026-09-20" }, estimateSentAt: "2026-09-19T00:00:00Z" }), null);
+  assert.equal(daysToEstimate(null), null);
+});
+
 console.log(`\n${pass} leadvisit checks passed`);

@@ -6,6 +6,7 @@ import {
   tileMode, isOpenLeadTile, unlinkedLeadTiles, estimateTotal, bidState, bidChip,
   fmtVisitAt, whoLabel, shortMoney, lostBidFiles, siteVisitDonePatch,
   suggestEstimateNo, addBusinessDays, estimateSentPatch, estimateEmailDraft,
+  wonPhotoFiles, jobPhotoFromSiteFile, WON_PHOTO_CAP,
 } from "../js/bid.js";
 
 let pass = 0;
@@ -158,5 +159,28 @@ const bare = estimateEmailDraft({}, {}, 0);
 ok("email: a bare file still makes a sendable draft, signed once by the company",
   bare.to === "" && /^Hi,/.test(bare.body) && bare.subject === "Estimate · Roybal Construction"
   && /Thank you,\nRoybal Construction, LLC$/.test(bare.body));
+
+/* ---------- Photos on Won ---------- */
+const svFiles = [
+  { id: "1", kind: "photos", path: "sitevisit/bj-1/1-a.jpg", room: "Kitchen", caption: "sink cabinet", at: "2026-09-20T10:00:00Z" },
+  { id: "2", kind: "frames", path: "sitevisit/bj-1/2-b.jpg", caption: "still at 0:12 from Magicplan video clip" },
+  { id: "3", kind: "report", path: "sitevisit/bj-1/3-r.pdf" },
+  { id: "4", kind: "audio", path: "sitevisit/bj-1/4-w.m4a" },
+  { id: "5", kind: "photos" },                                   // never uploaded — no path
+];
+const wonFile = { bidOf: "t1", siteVisit: { files: svFiles } };
+ok("won photos: only photos + video stills that made it to storage",
+  wonPhotoFiles(wonFile, { outcome: "won" }).map((f) => f.id).join() === "1,2");
+ok("won photos: nothing while the lead is open or lost, on a non-bid file, or once offered",
+  !wonPhotoFiles(wonFile, { stage: "lead" }).length && !wonPhotoFiles(wonFile, { outcome: "lost" }).length
+  && !wonPhotoFiles({ ...wonFile, bidOf: "" }, { outcome: "won" }).length
+  && !wonPhotoFiles({ ...wonFile, bidPhotosAt: "2026-09-25" }, { outcome: "won" }).length
+  && !wonPhotoFiles(wonFile, null).length);
+ok("won photos: capped", wonPhotoFiles({ bidOf: "t", siteVisit: { files: Array.from({ length: 90 }, (_, i) => ({ kind: "photos", path: "p" + i })) } }, { outcome: "won" }).length === WON_PHOTO_CAP);
+const jp = jobPhotoFromSiteFile(svFiles[0], "data:image/jpeg;base64,xx", "branden@x.com");
+ok("a copied photo is a 'before' shot that keeps its room, caption and time",
+  jp.stage === "before" && jp.room === "Kitchen" && jp.caption === "Site visit: sink cabinet" && jp.ts === "2026-09-20T10:00:00Z"
+  && jp.by === "branden@x.com" && jp.src.startsWith("data:image/jpeg") && !!jp.id);
+ok("…and a bare still still reads as a site-visit shot", jobPhotoFromSiteFile({ kind: "frames" }, "x").caption === "Site visit" && !("by" in jobPhotoFromSiteFile({}, "x")));
 
 console.log(`\n${pass} bid checks passed.`);
