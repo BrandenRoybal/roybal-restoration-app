@@ -31,6 +31,13 @@ export function helpPage(root) {
         [h("strong", {}, "Board columns"), " — jobs linked to the Job Board group under its live stage columns, so the list reads like the whiteboard. ⚠ chips repeat the board's schedule-truth warnings (no QuickBooks Time link, no hours since start, a phase that looks done but isn't marked)."],
         ["A finished job ", h("strong", {}, "archives"), " off the active list but stays below — nothing is deleted."])),
 
+    sec("📐 Leads / Bids",
+      ul(
+        [h("strong", {}, "Leads on the board — not started"), " — open leads from the web form, the phone line and the office show as grey rows under the job list. Nothing is on this device until someone taps ", h("strong", {}, "📐 Start bid"), ", which creates the bid file (site visit packet + estimate). A greyed-out button means a job file for that customer or claim # already exists — open that one instead."],
+        ["A bid file wears a ", h("strong", {}, "bid chip"), " on its row showing how far it's got (visit booked, inspected, estimate total, sent), and its job home opens with the ", h("strong", {}, "Bid card"), ": 📅 Site visit · 📎 Packet · 📄 Estimate · ✉️ Sent."],
+        [h("strong", {}, "✓ Site visit done"), " marks the lead 🔍 Inspected on the Job Board and stops its follow-up clock. The office books the visit time from the Leads Inbox."],
+        ["When the lead is won, the same file simply becomes the job — the Bid card goes away. If the office marks it ", h("strong", {}, "Lost"), ", the bid file archives itself off the list the next time you open it (never deleted — it's under 🗂 Archived)."])),
+
     sec("📅 My Week",
       p("Your next two weeks, sliced from the Job Board's live schedule — matched to the email you sign in with. It caches on the device, so it opens offline; a fresh pull replaces it when you're online. Everyone scheduled for the day also gets a morning ", h("strong", {}, "schedule text"), " listing their jobs (the office can switch that off per person).")),
 

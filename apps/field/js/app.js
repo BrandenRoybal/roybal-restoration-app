@@ -36,6 +36,7 @@ import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
 import { boardFlagsByJob } from "./myweekcalc.js";
+import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles } from "./bid.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
@@ -382,7 +383,7 @@ async function setArchived(project, on) {
    Unarchive button; a Complete-on-the-board row offers one-tap Archive.
    `watch` = the linked board tile's schedule-truth flags (schedulewatch.js),
    rendered with the same tone treatment as the drying/build flags. */
-function jobRow(p, { onArchive = null, onUnarchive = null, watch = [] } = {}) {
+function jobRow(p, { onArchive = null, onUnarchive = null, watch = [], bid = "" } = {}) {
   const isConst = jobType(p) === "construction";
   const cat = [
     p.waterCategory ? `Cat ${p.waterCategory}` : "",
@@ -407,7 +408,9 @@ function jobRow(p, { onArchive = null, onUnarchive = null, watch = [] } = {}) {
     h("div", { class: "jobrow__main" },
       h("div", { class: "jobrow__title" }, p.customer || p.address || "Untitled job", modeChip(p)),
       h("div", { class: "jobrow__sub" }, sub),
-      flags.length ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" },
+      flags.length || bid ? h("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:5px" },
+        // a bid file's progress (Leads / Bids group): the furthest step, neutral tone
+        bid ? h("span", { title: "Bid progress", style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:#e7eef7;color:#1e4a72" }, bid) : null,
         ...flags.map((f) => h("span", {
           title: f.title || null,
           style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;" +
@@ -520,6 +523,8 @@ async function projectList() {
           // Complete on the board → one-tap archive right on the card
           onArchive: sid === "done" ? async () => { await setArchived(p, true); projectList(); } : null,
           watch: flagsForRow(row),
+          // a bid file (lead-stage tile) shows how far the bid has got
+          bid: sid === "lead" && p.bidOf ? bidChip(bidState(p, row && row.data)) : "",
         })));
         listWrap.append(list);
       });
@@ -527,6 +532,20 @@ async function projectList() {
     paint(_boardRows);
     paintLive = (rows) => { if (listWrap.isConnected) paint(rows); };
   }
+
+  /* Leads on the board with no job file — ghost rows with one button, 📐
+     Start bid (docs/Lead_Bid_Workflow_Design.md §5.3). Painted below the
+     jobs, repainted when the board read lands; nothing here is on the device
+     until a bid is started, so the empty-list case shows them too. */
+  const ghostWrap = h("div");
+  body.append(ghostWrap);
+  const paintGhosts = (rows) => {
+    clear(ghostWrap);
+    if (!rows) return;
+    const el = ghostLeadRows(rows, projects, mode, { onStarted: (p) => go(`#/p/${p.id}`) });
+    if (el) ghostWrap.append(el);
+  };
+  paintGhosts(_boardRows);
 
   // The board refresh + tile adoption run even when this mode's active list is
   // EMPTY — a fresh device may have no local jobs until tiles are adopted.
@@ -536,6 +555,7 @@ async function projectList() {
     const changed = stageSig(rows) !== stageSig(_boardRows);
     _boardRows = rows;
     if (changed && paintLive) paintLive(rows);
+    if (_listRender === render) paintGhosts(rows);
     // logged hours + the board's work calendar feed the schedule-truth flags —
     // same window + paging as My Week; fail-safe null keeps the flags at
     // "no-jobcode only" when the hours can't be read (offline, HTTP error)
@@ -551,8 +571,11 @@ async function projectList() {
     // Phase 6: board tiles that reached Scheduled / In Progress with no job
     // file get one now (idempotent — deterministic ids, tombstones honored)
     const n = await adoptBoardJobs(rows, projects);
-    if (n && _listRender === render) {
-      toast(n === 1 ? "Started a job file from the Job Board." : `Started ${n} job files from the Job Board.`);
+    // a bid whose lead was marked Lost leaves the phones: archived, never deleted
+    const lost = await archiveLostBidFiles(rows, projects);
+    if ((n || lost) && _listRender === render) {
+      if (n) toast(n === 1 ? "Started a job file from the Job Board." : `Started ${n} job files from the Job Board.`);
+      if (lost) toast(lost === 1 ? "A lost lead's bid file was archived — it's under 🗂 Archived." : `${lost} lost leads' bid files were archived — they're under 🗂 Archived.`);
       projectList();
     }
   });
@@ -1370,6 +1393,22 @@ function projectHome(project) {
   });
   homeActions.append(archBtn);
   body.append(homeActions);
+
+  // 📐 A bid file (started from a lead tile) leads with the bid's state:
+  // Site visit · Packet · Estimate · Sent. The card hides itself once the
+  // tile is past the lead stage — then the file is the job, nothing else.
+  const bid = bidCard(project, {
+    openEstimate: async () => {
+      // the Site Visit panel lives on the estimate form; open the latest
+      // estimate, or start the first one
+      const meta = formByKey("reconEstimates");
+      const list = project.reconEstimates || [];
+      if (list.length) go(`#/p/${project.id}/f/${meta.key}/${list[list.length - 1].id}`);
+      else await addInstance(project, meta);
+    },
+    onChanged: () => projectHome(project),
+  });
+  if (bid) body.append(bid);
 
   body.append(completenessPanel(project));   // each job kind checks its own required-form matrix
   body.append(messageLogCard(project));
