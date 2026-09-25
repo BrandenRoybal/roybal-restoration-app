@@ -23,7 +23,8 @@ import { h, clear, toast, uid } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
 import { rest, currentEmail } from "../../js/supa.js";
 import { visitDate, visitTime, visitPeople, scheduleVisitPatch, cancelVisitPatch,
-  bidSteps, bidStats, visitChip } from "../../board/js/leadvisit.js";
+  bidSteps, bidStats, visitChip, visitConfirmText, visitConfirmedPatch } from "../../board/js/leadvisit.js";
+import { sendViaCompany, smsHref } from "../../js/sms.js";
 
 /* mirrors apps/board/js/board.js — same ids, same colors, same labels */
 const CHANNELS = [
@@ -326,11 +327,61 @@ function paintRow(row, id, d, crew = []) {
     save.addEventListener("click", () => {
       if (!date.value) { err.hidden = false; err.textContent = "Pick a date for the site visit."; return; }
       apply(scheduleVisitPatch(d, { date: date.value, time: time.value, by: who.value || me }), save,
-        (nd) => { paintRow(row, id, nd, crew); toast("Site visit booked — the bid file shows up in Field Forms"); });
+        (nd) => {
+          paintRow(row, id, nd, crew);
+          toast("Site visit booked — the bid file shows up in Field Forms");
+          // straight on to the confirmation text — still nothing sends until Send is tapped
+          const cb = row.querySelector("[data-confirm-visit]");
+          if (cb) cb.click();
+        });
     });
     const callOff = live ? h("button", { class: "btn btn--ghost btn--sm", title: "The visit is off. A bid file that already exists stays put." }, "Cancel visit") : null;
     if (callOff) callOff.addEventListener("click", () => apply(cancelVisitPatch(d), callOff));
     formHost.append(h("div", { class: "lform" }, ...[date, time, who, save, callOff, cancel].filter(Boolean)));
+  });
+
+  /* 📱 Confirm by text — a plain, editable text to the customer. Reading it
+     and tapping Send is the approval; roybal-notify kind "reminder" is a
+     customer kind, so it only goes out 7am–8pm Alaska (quiet hours are
+     enforced server-side). Sent → siteVisit.confirmedAt + a lead-log line. */
+  const confirmBtn = live && d.phone && !sv.doneAt && sv.status !== "done" && visitDate(sv.at) >= localToday()
+    ? h("button", { class: "btn btn--ghost btn--sm", "data-confirm-visit": "1",
+        title: "Text the customer the visit time from the company number — you see it before it sends" },
+        sv.confirmedAt ? "📱 Re-send confirmation" : "📱 Confirm by text")
+    : null;
+  if (confirmBtn) confirmBtn.addEventListener("click", () => {
+    busy = true;                            // an open form must survive the sync repaint
+    clear(formHost);
+    const ta = h("textarea", { rows: "3", maxlength: "480", style: "width:100%;box-sizing:border-box" });
+    ta.value = visitConfirmText(d, crew);
+    const send = h("button", { class: "btn btn--primary btn--sm" }, "Send to " + d.phone);
+    const cancel = h("button", { class: "btn btn--ghost btn--sm", onclick: () => { busy = false; clear(formHost); } }, "Not now");
+    const note = h("div", { class: "muted", style: "font-size:12px" },
+      "From the company number. Customer texts only go out 7 AM–8 PM Alaska time.");
+    send.addEventListener("click", async () => {
+      const body = ta.value.trim();
+      if (!body) return;
+      send.disabled = true; send.textContent = "Sending…";
+      err.hidden = true;
+      try {
+        await sendViaCompany({ to: d.phone, body, kind: "reminder", by: currentEmail() });
+      } catch (e) {
+        send.disabled = false; send.textContent = "Send to " + d.phone;
+        const m = String((e && e.message) || e);
+        err.hidden = false;
+        err.textContent = /quiet_hours/.test(m)
+          ? "Not sent — it's outside 7 AM–8 PM Alaska time. Send it in the morning."
+          : "Not sent — " + m.slice(0, 140);
+        if (!/quiet_hours/.test(m)) err.append(" ", h("a", { href: smsHref(d.phone, body) }, "Text it from this device instead"));
+        return;
+      }
+      // the text is out; stamp the lead (a failed stamp doesn't un-send it)
+      apply(visitConfirmedPatch(d, new Date().toISOString(), uid()), null,
+        (nd) => { paintRow(row, id, nd, crew); toast("Confirmation texted to " + d.phone); });
+    });
+    formHost.append(h("div", { class: "lform", style: "flex-direction:column;align-items:stretch;gap:6px" },
+      ta, note, h("div", { style: "display:flex;gap:8px" }, send, cancel)));
+    ta.focus();
   });
 
   /* ✓ Done — the follow-up happened; log what came of it. Same leadLog the
@@ -404,7 +455,7 @@ function paintRow(row, id, d, crew = []) {
   // DOM append() stringifies null (the campaigns lesson) — filter first
   for (const el of [
     d.phone ? h("a", { class: "btn btn--ghost btn--sm", href: "tel:" + digits(d.phone) }, "📞 Call") : null,
-    visitBtn, followBtn, doneBtn, touchedBtn, notesBtn, lostBtn,
+    visitBtn, confirmBtn, followBtn, doneBtn, touchedBtn, notesBtn, lostBtn,
   ].filter(Boolean)) actions.append(el);
   row.append(actions, formHost, err);
 }

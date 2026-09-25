@@ -128,7 +128,7 @@ export function bidSteps(d, crew = []) {
   const steps = [];
   if (sv.at && sv.status !== "cancelled" && !sv.doneAt && sv.status !== "done") {
     const who = whoLabel(sv.by, crew);
-    steps.push({ id: "visit", text: "📅 " + fmtVisitAt(sv.at) + (who ? " · " + who : "") });
+    steps.push({ id: "visit", text: "📅 " + fmtVisitAt(sv.at) + (who ? " · " + who : "") + (sv.confirmedAt ? " · 📱 confirmed" : "") });
   }
   if (x.fieldJobId || x.bidStartedAt) steps.push({ id: "bid", text: "📐 Bid started" });
   if (sv.doneAt || sv.status === "done") steps.push({ id: "inspected", text: "🔍 Inspected " + shortDate(sv.doneAt) });
@@ -198,4 +198,36 @@ export function daysToEstimate(d) {
   if (!sent) return null;
   const [a, b] = [visit, sent].map((s) => { const [y, m, dd] = s.split("-").map(Number); return Date.UTC(y, m - 1, dd); });
   return Math.round((b - a) / 86400000);
+}
+
+/* ---------- 📱 visit confirmation text (design §7 row 5) ----------
+   The office reads and edits it, then taps Send — that tap IS the
+   approval. Sent through roybal-notify kind "reminder": a customer kind,
+   so the 7am–8pm Alaska quiet-hours guard applies server-side. */
+export function visitConfirmText(d, crew = []) {
+  const x = d || {};
+  const sv = obj(x.siteVisit);
+  const first = String(x.customer || x.title || "").trim().split(/[\s—-]+/)[0] || "";
+  const when = fmtVisitAt(sv.at);
+  const m = /^(\w+) (\d+\/\d+)(?: (.+))?$/.exec(when);
+  const whenText = m ? `${m[1]} ${m[2]}` + (m[3] ? ` at ${m[3]}` : "") : when;
+  const who = whoLabel(sv.by, crew).split(" ")[0];
+  const where = String(x.address || "").trim();
+  return `Hi${first ? " " + first : ""}, this is Roybal Construction confirming your site visit`
+    + (where ? ` at ${where}` : "") + (whenText ? ` on ${whenText}` : "") + "."
+    + (who ? ` ${who} will be there.` : "")
+    + " Reply here or call 907-371-9868 if that time doesn't work.";
+}
+
+/* after a confirmation goes out: stamp the visit + a line in the lead log */
+export function visitConfirmedPatch(d, at, entryId) {
+  const x = d || {};
+  const sv = obj(x.siteVisit);
+  return {
+    siteVisit: { ...sv, confirmedAt: at },
+    leadLog: [...(Array.isArray(x.leadLog) ? x.leadLog : []), {
+      id: entryId, at: String(at).slice(0, 10), kind: "note",
+      note: "Site visit confirmation texted" + (sv.at ? " (" + fmtVisitAt(sv.at) + ")" : ""), action: "",
+    }],
+  };
 }

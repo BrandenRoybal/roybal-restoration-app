@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import {
   fmtVisitAt, visitDate, visitTime, whoLabel, visitPeople,
   scheduleVisitPatch, cancelVisitPatch, visitChip, bidSteps, estimateSentOn, bidStats,
-  wonContractFill, daysToEstimate,
+  wonContractFill, daysToEstimate, visitConfirmText, visitConfirmedPatch,
 } from "../js/leadvisit.js";
 
 let pass = 0;
@@ -150,6 +150,7 @@ test("…and never touches a contract value already there", () => {
   assert.equal(wonContractFill({ estimateTotal: 18450, contractValue: 20000 }), null);
   assert.equal(wonContractFill({}), null);
 });
+
 /* ---- time to estimate ---- */
 test("daysToEstimate: site visit done → first estimate sent after it", () => {
   assert.equal(daysToEstimate({ siteVisit: { doneAt: "2026-09-20" }, estimateSentAt: "2026-09-23T18:00:00Z" }), 3);
@@ -164,6 +165,26 @@ test("…null when either side is missing or the send came before the visit", ()
   assert.equal(daysToEstimate({ estimateSentAt: "2026-09-23T00:00:00Z" }), null);
   assert.equal(daysToEstimate({ siteVisit: { doneAt: "2026-09-20" }, estimateSentAt: "2026-09-19T00:00:00Z" }), null);
   assert.equal(daysToEstimate(null), null);
+});
+
+/* ---- 📱 visit confirmation text ---- */
+test("confirmation text: first name, address, day/date/time, who's coming", () => {
+  const d = { customer: "Pat Kennedy", address: "1465 Noble St", siteVisit: { at: "2026-09-26T14:00", by: "cj@example.com" } };
+  assert.equal(visitConfirmText(d, crew),
+    "Hi Pat, this is Roybal Construction confirming your site visit at 1465 Noble St on Sat 9/26 at 2:00 PM. CJ will be there. Reply here or call 907-371-9868 if that time doesn't work.");
+});
+test("…a lead with only a title and a date-only visit still reads right", () => {
+  const d = { title: "Fuller — basement", siteVisit: { at: "2026-09-28", by: "branden@roybalconstruction.com" } };
+  assert.equal(visitConfirmText(d, []),
+    "Hi Fuller, this is Roybal Construction confirming your site visit on Mon 9/28. Branden will be there. Reply here or call 907-371-9868 if that time doesn't work.");
+});
+test("visitConfirmedPatch stamps confirmedAt, keeps the visit, logs a note", () => {
+  const d = { siteVisit: { at: "2026-09-26T14:00", by: "a@b.c", status: "scheduled" }, leadLog: [{ id: "x" }] };
+  const p = visitConfirmedPatch(d, "2026-09-25T18:00:00Z", "e1");
+  assert.deepEqual(p.siteVisit, { at: "2026-09-26T14:00", by: "a@b.c", status: "scheduled", confirmedAt: "2026-09-25T18:00:00Z" });
+  assert.equal(p.leadLog.length, 2);
+  assert.deepEqual(p.leadLog[1], { id: "e1", at: "2026-09-25", kind: "note", note: "Site visit confirmation texted (Sat 9/26 2:00 PM)", action: "" });
+  assert.match(bidSteps({ siteVisit: p.siteVisit }, [])[0].text, /📱 confirmed$/);
 });
 
 console.log(`\n${pass} leadvisit checks passed`);

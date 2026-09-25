@@ -128,7 +128,7 @@ function renderHelp() {
     sec("🆕 Leads — the inbox for new business",
       p("Every open lead from every lane — website form, AI chat, phone line — newest first, with what the customer actually wrote or said shown in full (no more digging it out of a board chip's notes). The count on the tab is leads ", h("strong", {}, "nobody has touched yet"), "; the morning brief nags about them too."),
       p("Work a lead right from the row: ", h("strong", {}, "📞 Call"), ", ", h("strong", {}, "📅 Site visit"),
-        " (date, time, who's going — this makes the visit the follow-up and puts the bid file, with the site-visit packet and estimate, in Field Forms; the row then reads the bid as it moves: 📅 booked → 📐 bid started → 🔍 inspected → 📄 estimate sent), ", h("strong", {}, "⏰ Follow-up"),
+        " (date, time, who's going — this makes the visit the follow-up and puts the bid file, with the site-visit packet and estimate, in Field Forms; the row then reads the bid as it moves: 📅 booked → 📐 bid started → 🔍 inspected → 📄 estimate sent; booking opens a ", h("strong", {}, "📱 Confirm by text"), " draft to the customer — edit it, and nothing sends until you tap Send, only between 7 AM and 8 PM Alaska time), ", h("strong", {}, "⏰ Follow-up"),
         " (what + when — it shows on the board card and turns red when overdue), ", h("strong", {}, "✓ Done"),
         " (the appointment or call happened — log what came of it: inspection done, estimate sent, waiting on customer, no answer — with a note and an optional next follow-up; the date-stamped history lives on the lead in both apps), ", h("strong", {}, "✓ Mark contacted"),
         " (stops the response-time clock), ", h("strong", {}, "📝 Notes"),
