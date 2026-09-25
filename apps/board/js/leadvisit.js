@@ -164,3 +164,18 @@ export function bidStats(leads, today) {
   }
   return { visitsThisWeek, estimatesWaiting };
 }
+
+/* ---------- ✓ Won → contract value (design §3 step 10, §7 row 4) ----------
+   A lead won with no contract value typed gets the estimate the field
+   sent (estimateTotal, PR 3), or failing that the field's own estValue.
+   It is stamped contractValueSource "estimate" so the bid-accuracy chart
+   (admin analytics) and the field's dollar calibration skip it: comparing
+   an estimate against itself would read as a perfect bid. Typing the real
+   signed figure in the editor clears the stamp. null = nothing to fill. */
+export function wonContractFill(d) {
+  const x = d || {};
+  if (Number(x.contractValue) > 0) return null;
+  const est = Number(x.estimateTotal) > 0 ? Number(x.estimateTotal)
+    : x.estValueSource === "field" && Number(x.estValue) > 0 ? Number(x.estValue) : 0;
+  return est ? { contractValue: Math.round(est * 100) / 100, contractValueSource: "estimate" } : null;
+}
