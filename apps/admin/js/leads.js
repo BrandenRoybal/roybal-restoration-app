@@ -4,8 +4,10 @@
    Every open lead across every channel, newest first, with the
    customer's actual message IN THE OPEN — the thing that used to
    live only inside the board chip's notes textarea. One-tap triage
-   per row: set a follow-up, log what happened when it did (✓ Done →
-   data.leadLog), mark contacted, call, mark lost.
+   per row: set a follow-up, book the 📅 site visit (the lead → bid
+   step, docs/Lead_Bid_Workflow_Design.md §5.1 — the field app makes the
+   bid file once siteVisit.at is set), log what happened when it did
+   (✓ Done → data.leadLog), mark contacted, call, mark lost.
 
    Writes ride coordination_job_patch (migrations 230+246): the
    rev-bumping shallow merge the board's whole-blob guard ADOPTS
@@ -19,7 +21,9 @@
    ============================================================ */
 import { h, clear, toast, uid } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
-import { rest } from "../../js/supa.js";
+import { rest, currentEmail } from "../../js/supa.js";
+import { visitDate, visitTime, visitPeople, scheduleVisitPatch, cancelVisitPatch,
+  bidSteps, bidStats, visitChip } from "../../board/js/leadvisit.js";
 
 /* mirrors apps/board/js/board.js — same ids, same colors, same labels */
 const CHANNELS = [
@@ -96,6 +100,18 @@ async function fetchLeadData() {
   return (await res.json()).map((r) => r.data || {});
 }
 
+/* the crew roster, for the site-visit "who" picker and names on the chips.
+   Cached per page load; a failed read just means emails instead of names. */
+let crewCache = null;
+async function fetchCrew() {
+  if (crewCache) return crewCache;
+  try {
+    const res = await rest("crew_members?select=data&deleted=is.false", { method: "GET" });
+    crewCache = res.ok ? (await res.json()).map((r) => r.data).filter(Boolean) : [];
+  } catch (_) { crewCache = []; }
+  return crewCache;
+}
+
 /* ---------- nav badge: the unworked count ---------- */
 let badgeCache = { n: 0, at: 0 };
 export async function refreshLeadsBadge() {
@@ -126,6 +142,7 @@ export async function leadStats() {
     overdue: open.filter((d) => d.nextActionAt && d.nextActionAt < today).length,
     pipeline: open.reduce((s, d) => s + (Number(d.estValue) || 0), 0),
     avgTouchMs: touched.length ? touched.reduce((s, x) => s + x, 0) / touched.length : null,
+    ...bidStats(open, today),          // visitsThisWeek, estimatesWaiting
   };
 }
 export function fmtTouch(ms) {
@@ -148,7 +165,9 @@ export function leadsTab() {
 
   (async () => {
     let rows = [];
+    let crew = [];
     try {
+      crew = await fetchCrew();
       const res = await rest("coordination_jobs?deleted=eq.false&data->>stage=eq.lead&select=id,data&order=created_at.desc&limit=100", { method: "GET" });
       if (!res.ok) throw new Error(String(res.status));
       rows = (await res.json()).map((r) => ({ id: r.id, d: r.data || {} })).filter((r) => isOpenLead(r.d));
@@ -170,18 +189,18 @@ export function leadsTab() {
         "No open leads. New web-form, AI-chat, and phone leads land here the moment they come in — and on the board's Lead column at the same time.")));
       return;
     }
-    for (const r of rows) host.append(leadRow(r.id, r.d));
+    for (const r of rows) host.append(leadRow(r.id, r.d, crew));
   })();
   return box;
 }
 
-function leadRow(id, d) {
+function leadRow(id, d, crew) {
   const row = h("div", { class: "card lrow" + (isUnworked(d) ? " lrow--new" : "") });
-  paintRow(row, id, d);
+  paintRow(row, id, d, crew);
   return row;
 }
 
-function paintRow(row, id, d) {
+function paintRow(row, id, d, crew = []) {
   clear(row);
   row.className = "card lrow" + (isUnworked(d) ? " lrow--new" : "");
   const ch = channelInfo(d);
@@ -219,13 +238,25 @@ function paintRow(row, id, d) {
 
   /* current state chips */
   const state = h("div", { class: "lstate" });
-  if (d.nextActionAt) {
+  /* the bid funnel: 📅 visit → 📐 bid started → 🔍 inspected → 📄 sent */
+  const vc = visitChip(d, localToday());
+  const steps = bidSteps(d, crew);
+  for (const st of steps) {
+    const late = st.id === "visit" && vc && vc.tone === "late";
+    state.append(h("span", { class: "lchip" + (late ? " lchip--late" : ""),
+      title: late ? "The visit day has passed and nobody marked it done — log it with ✓ Done, or re-book" : "" },
+      st.text + (late ? " (passed)" : "")));
+  }
+  if (d.nextActionAt && !(d.nextAction === "Site visit" && vc && d.nextActionAt === visitDate(d.siteVisit.at))) {
     const overdue = d.nextActionAt < localToday();
     state.append(h("span", { class: "lchip" + (overdue ? " lchip--late" : "") },
       "⏰ " + d.nextActionAt + (d.nextAction ? " — " + d.nextAction : "") + (overdue ? " (overdue)" : "")));
   }
   const lastLog = (d.leadLog || [])[(d.leadLog || []).length - 1];
-  if (lastLog) {
+  // a funnel chip already says it — don't repeat "Inspected" / "Estimate sent"
+  const saidByFunnel = lastLog && ((lastLog.kind === "estimate-sent" && steps.some((st) => st.id === "sent"))
+    || (lastLog.kind === "inspected" && steps.some((st) => st.id === "inspected")));
+  if (lastLog && !saidByFunnel) {
     const k = leadLogKind(lastLog.kind);
     const note = String(lastLog.note || "");
     state.append(h("span", { class: "lchip lchip--dim", title: note },
@@ -248,7 +279,7 @@ function paintRow(row, id, d) {
       busy = false;
       badgeCache.at = 0;                    // force a badge recount next paint
       refreshLeadsBadge();
-      (after || ((nd) => paintRow(row, id, nd)))(data);
+      (after || ((nd) => paintRow(row, id, nd, crew)))(data);
     } catch (e) {
       busy = false;
       if (btn) btn.disabled = false;
@@ -271,6 +302,35 @@ function paintRow(row, id, d) {
     });
     formHost.append(h("div", { class: "lform" }, date, what, save, cancel));
     what.focus();
+  });
+
+  /* 📅 Site visit — book who's going and when. Writes data.siteVisit; the
+     field app sees siteVisit.at and makes the bid file (site-visit packet +
+     estimate) on the next jobs-list load, no retyping. Same patch path as
+     every other triage action. */
+  const sv = d.siteVisit || {};
+  const live = !!sv.at && sv.status !== "cancelled";
+  const visitBtn = h("button", { class: "btn btn--ghost btn--sm",
+    title: "Book the site visit — the bid file (packet + estimate) appears in Field Forms" }, live ? "📅 Re-book visit" : "📅 Site visit");
+  visitBtn.addEventListener("click", () => {
+    busy = true;                            // an open form must survive the sync repaint
+    clear(formHost);
+    const date = h("input", { type: "date", value: visitDate(sv.at) || localToday() });
+    const time = h("input", { type: "time", step: "900", value: visitTime(sv.at) || "" });
+    const me = currentEmail();
+    const people = visitPeople(crew, me);
+    const who = h("select", { title: "Who's going" },
+      ...people.map((p) => h("option", { value: p.email, selected: (sv.by || me) === p.email }, p.name)));
+    const save = h("button", { class: "btn btn--primary btn--sm" }, live ? "Save visit" : "Book visit");
+    const cancel = h("button", { class: "btn btn--ghost btn--sm", onclick: () => { busy = false; clear(formHost); } }, "Close");
+    save.addEventListener("click", () => {
+      if (!date.value) { err.hidden = false; err.textContent = "Pick a date for the site visit."; return; }
+      apply(scheduleVisitPatch(d, { date: date.value, time: time.value, by: who.value || me }), save,
+        (nd) => { paintRow(row, id, nd, crew); toast("Site visit booked — the bid file shows up in Field Forms"); });
+    });
+    const callOff = live ? h("button", { class: "btn btn--ghost btn--sm", title: "The visit is off. A bid file that already exists stays put." }, "Cancel visit") : null;
+    if (callOff) callOff.addEventListener("click", () => apply(cancelVisitPatch(d), callOff));
+    formHost.append(h("div", { class: "lform" }, ...[date, time, who, save, callOff, cancel].filter(Boolean)));
   });
 
   /* ✓ Done — the follow-up happened; log what came of it. Same leadLog the
@@ -344,7 +404,7 @@ function paintRow(row, id, d) {
   // DOM append() stringifies null (the campaigns lesson) — filter first
   for (const el of [
     d.phone ? h("a", { class: "btn btn--ghost btn--sm", href: "tel:" + digits(d.phone) }, "📞 Call") : null,
-    followBtn, doneBtn, touchedBtn, notesBtn, lostBtn,
+    visitBtn, followBtn, doneBtn, touchedBtn, notesBtn, lostBtn,
   ].filter(Boolean)) actions.append(el);
   row.append(actions, formHost, err);
 }
