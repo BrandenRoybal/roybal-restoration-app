@@ -13,10 +13,10 @@
         each with one button, 📐 Start bid;
      3. the Bid card on the job home — Site visit · Packet · Estimate ·
         Sent, one line each, while the linked tile is still a lead;
-     4. the three writes the field makes onto a lead tile, all through
+     4. the writes the field makes onto a lead tile, all through
         coordination_job_patch (the rev-bumping shallow merge the office
-        Leads Inbox already rides): site-visit done, and — PR 3 — the
-        estimate total and "estimate sent".
+        Leads Inbox already rides): site-visit done, and estimate sent
+        (number, total, the log entry and the follow-up).
 
    Ownership rule (docs §2.5): field owns the packet, the estimate and its
    total; board/admin own stage, outcome, follow-ups and dates.
@@ -192,6 +192,84 @@ export function siteVisitDonePatch(d, at, by, entryId) {
   return patch;
 }
 
+/* ---------- pure: the estimate number (design §3 step 7, §9 Q2) ----------
+   House convention RC-<LAST3>-<MMYY> from the customer's last word —
+   "Kennedy" in Sept 2025 → RC-KEN-0925, "AmeriGas" → RC-AME-…. A number
+   already on any local estimate gets -2, -3… Only ever SUGGESTED into a
+   blank field; a typed number is never replaced. */
+export function suggestEstimateNo(customer, dateISO, existing = []) {
+  const words = String(customer || "").replace(/[^A-Za-z\s]/g, " ").trim().split(/\s+/).filter(Boolean);
+  const last = (words[words.length - 1] || "JOB").toUpperCase();
+  const tag = (last + "XX").slice(0, 3);
+  const m = /^(\d{4})-(\d{2})/.exec(String(dateISO || ""));
+  const mmyy = m ? m[2] + m[1].slice(2) : "0000";
+  const base = `RC-${tag}-${mmyy}`;
+  const taken = new Set(arr(existing).map((s) => String(s || "").trim().toUpperCase()));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+}
+
+/* "YYYY-MM-DD" + n working days (Mon–Fri), weekends skipped; parsed by
+   hand so the date never shifts with the device's zone */
+export function addBusinessDays(dateISO, n) {
+  const [y, mo, da] = String(dateISO || "").slice(0, 10).split("-").map(Number);
+  if (!y || !mo || !da) return "";
+  const t = new Date(y, mo - 1, da);
+  let left = n;
+  while (left > 0) {
+    t.setDate(t.getDate() + 1);
+    if (t.getDay() !== 0 && t.getDay() !== 6) left--;
+  }
+  return t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0") + "-" + String(t.getDate()).padStart(2, "0");
+}
+
+export const FOLLOW_UP_DAYS = 5;   // design §9 Q1 default: 5 business days
+
+/* ---------- pure: the estimate-sent patch for coordination_job_patch ----------
+   Design §3 step 8 + §6. The field owns the estimate number and total; it
+   fills estValue only when the tile's number is blank or was the field's
+   own (estValueSource "field") — a figure the office typed by hand is
+   never replaced. A second send is logged "(revised)". */
+export function estimateSentPatch(d, { no, total, at, to, revised = false, entryId } = {}) {
+  const t = d || {};
+  const day = String(at || "").slice(0, 10);
+  const amt = Math.round(num(total));
+  const note = [no, shortMoney(amt)].filter(Boolean).join(" · ") + (revised ? " (revised)" : "")
+    + (to ? " — to " + to : "") + " (Field Forms)";
+  const patch = {
+    leadLog: [...arr(t.leadLog), { id: entryId || uid(), at: day, kind: "estimate-sent", note, action: String(t.nextAction || "") }],
+    estimateSentAt: at, estimateNo: String(no || ""), estimateTotal: amt,
+    nextAction: "Follow up on estimate", nextActionAt: addBusinessDays(day, FOLLOW_UP_DAYS),
+  };
+  if (!num(t.estValue) || t.estValueSource === "field") { patch.estValue = amt; patch.estValueSource = "field"; }
+  if (!t.firstTouchAt) patch.firstTouchAt = at;
+  return patch;
+}
+
+/* ---------- pure: the customer email (plain, editable — never AI) ---------- */
+export function estimateEmailDraft(project, inv, total, signer = "") {
+  const p = project || {};
+  const i = inv || {};
+  const first = String(p.customer || "").trim().split(/\s+/)[0] || "";
+  const where = String(p.address || "").trim();
+  const no = String(i.invoiceNo || "").trim();
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(String(i.dueDate || "")) ? fmtVisitAt(i.dueDate).replace(/^\w+ /, "") : "";
+  const subject = ["Estimate" + (no ? " " + no : ""), where].filter(Boolean).join(" — ") + " · Roybal Construction";
+  const body = [
+    `Hi${first ? " " + first : ""},`,
+    "",
+    `Thank you for having us out${where ? " to " + where : ""}. Attached is our estimate${no ? " " + no : ""}` +
+      ` for the work we discussed, totaling ${shortMoney(total)}.` + (valid ? ` Pricing is good through ${valid}.` : ""),
+    "",
+    "It lays out the scope of work, along with what we assumed and what is not included. If anything should change, or you have questions, just reply here or call 907-371-9868.",
+    "",
+    "Thank you,",
+    ...(signer ? [signer] : []),
+    "Roybal Construction, LLC",
+  ].join("\n");
+  return { to: String(p.email || "").trim(), subject, body };
+}
+
 /* ============================================================
    Network — browser only, every call fail-safe for the UI
    ============================================================ */
@@ -220,6 +298,29 @@ export async function markSiteVisitDone(project) {
   if (!row || !row.data) return { board: false, reason: "offline" };
   try {
     const merged = await patchLeadTile(row.id, siteVisitDonePatch(row.data, at, currentEmail()));
+    return { board: !!merged, reason: merged ? "" : "refused" };
+  } catch (e) {
+    return { board: false, reason: String((e && e.message) || e) };
+  }
+}
+
+/** ✉️ Estimate sent. The estimate's own stamp lands first (offline-safe);
+    then, when this file's board tile is still a lead, the number, total,
+    "📄 Estimate sent" log entry and the follow-up go onto the tile through
+    the RPC. A tile past the lead stage is a job — nothing is written to it. */
+export async function markEstimateSent(project, inv, { to = "", via = "mailto" } = {}) {
+  const at = new Date().toISOString();
+  const revised = !!inv.sentAt;
+  const total = estimateTotal(inv, jobType(project) === "construction");
+  inv.sentAt = at; inv.sentTo = to; inv.sentVia = via;
+  await Store.put(project);
+  let row = null;
+  try { row = await findBoardRow(project); } catch (_) { row = null; }
+  if (!row || !row.data) return { board: false, reason: project.bidOf ? "offline" : "no-lead" };
+  const linked = row.id === project.bidOf || row.data.fieldJobId === project.id;
+  if (!linked || (row.data.stage || "lead") !== "lead" || row.data.outcome) return { board: false, reason: "no-lead" };
+  try {
+    const merged = await patchLeadTile(row.id, estimateSentPatch(row.data, { no: inv.invoiceNo, total, at, to, revised }));
     return { board: !!merged, reason: merged ? "" : "refused" };
   } catch (e) {
     return { board: false, reason: String((e && e.message) || e) };
@@ -372,8 +473,18 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
     estBtn.addEventListener("click", () => openEstimate && openEstimate());
     wrap.append(line("📄", "Estimate", estTxt, estBtn));
 
-    // ✉️ Sent — PR 3 adds the send button and the tile write
-    wrap.append(line("✉️", "Sent", s.sent.at ? fmtDate(String(s.sent.at).slice(0, 10)) : "", null));
+    // ✉️ Sent — opens the estimate with the Send panel up (app.js
+    // sendEstimatePanel); the send stamps the estimate and the lead
+    let sendBtn = null;
+    if (est && est.lines) {
+      sendBtn = h("button", { class: s.sent.at ? "btn btn--ghost btn--sm" : "btn btn--primary btn--sm", style: "width:auto" },
+        s.sent.at ? "Send again" : "Send estimate");
+      sendBtn.addEventListener("click", () => {
+        try { sessionStorage.setItem("roybal-open-send", est.id); } catch (_) { /* the ✉️ Send button on the form still works */ }
+        if (openEstimate) openEstimate();
+      });
+    }
+    wrap.append(line("✉️", "Sent", s.sent.at ? fmtDate(String(s.sent.at).slice(0, 10)) : "", sendBtn));
 
     if (s.lead.message) {
       const m = s.lead.message.trim();
