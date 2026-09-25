@@ -7,7 +7,7 @@ import {
   rollupActuals, historyDigest, phasesToSubRows, isoDateOnly, matchCustomerRow,
   boardRowFor, tileCandidates, tilesNeedingFieldFile, fieldSeedFromBoardJob,
   nameLike, normAddr, sameWorkGroup, looseCandidates, mergeBoardTiles, duplicateTilePairs,
-  tombstoneBlocksCreate,
+  tombstoneBlocksCreate, isBidLead,
 } from "../js/boardpush.js";
 import { blankSubRow } from "../js/model.js";
 
@@ -241,6 +241,57 @@ ok("header, money and dates carried into the seed",
 const seedB = fieldSeedFromBoardJob(T_ROWS[1], blankSeed());
 ok("water tile -> restoration job, no construction fields", seedB.jobType === "restoration" && !seedB.startDate && seedB.constructionType === "");
 ok("title stands in for a missing customer", fieldSeedFromBoardJob(T_ROWS[6], blankSeed()).customer === "Kilo Title Only");
+
+/* ---------- Leads / Bids: a lead earns a file only when someone bids it ----------
+   docs/Lead_Bid_Workflow_Design.md §2.3 — the office scheduled a site visit
+   (siteVisit.at) or someone pressed Start bid (bidStartedAt). Bare leads,
+   lost leads and archived leads never do. */
+ok("a bare lead is not a bid", !isBidLead({ stage: "lead", customer: "Nobody" }));
+ok("a scheduled site visit makes it a bid", isBidLead({ stage: "lead", siteVisit: { at: "2026-09-26T14:00", by: "b@x" } }));
+ok("Start bid makes it a bid", isBidLead({ stage: "lead", bidStartedAt: "2026-09-24T20:00:00.000Z" }));
+ok("stage defaults to lead (legacy tiles)", isBidLead({ bidStartedAt: "2026-09-24T20:00:00.000Z" }));
+ok("a lost lead is dead whatever it carries", !isBidLead({ stage: "lead", outcome: "lost", siteVisit: { at: "2026-09-26" } }));
+ok("an archived lead is dead", !isBidLead({ stage: "lead", archived: true, bidStartedAt: "x" }));
+ok("a milestone is never a bid", !isBidLead({ stage: "lead", isMilestone: true, bidStartedAt: "x" }));
+ok("past the lead stage the flag means nothing (the file IS the job)", !isBidLead({ stage: "scheduled", bidStartedAt: "x" }));
+ok("garbage never throws", !isBidLead(null) && !isBidLead({ siteVisit: "not-an-object" }));
+
+const B_ROWS = [
+  tile("b1", { stage: "lead", type: "remodel", customer: "Mike Visit", address: "12 Fir", email: "mike@example.com",
+               contactId: "c-77", channel: "web-form", message: "Kitchen remodel, ~200 sf, want it before Thanksgiving",
+               siteVisit: { at: "2026-09-26T14:00", by: "branden@roybalconstruction.com", status: "scheduled" }, rev: 3 }),
+  tile("b2", { stage: "lead", type: "water", customer: "November Started", bidStartedAt: "2026-09-24T20:00:00.000Z", bidBy: "branden@roybalconstruction.com" }),
+  tile("b3", { stage: "lead", type: "remodel", customer: "Oscar Bare" }),
+  tile("b4", { stage: "lead", type: "remodel", customer: "Papa Lost", outcome: "lost", siteVisit: { at: "2026-09-20" } }),
+  tile("b5", { stage: "lead", type: "remodel", customer: "Quebec Repeat", source: "web", bidStartedAt: "2026-09-24T20:00:00.000Z" }),
+  tile("b6", { stage: "lead", type: "remodel", customer: "Romeo Live", bidStartedAt: "2026-09-24T20:00:00.000Z" }),
+  tile("b7", { stage: "lead", type: "remodel", customer: "Sierra Linked", bidStartedAt: "x", fieldJobId: "fp-s" }),
+];
+const B_PROJECTS = [
+  { id: "fp-q-old", customer: "Quebec Repeat", archivedAt: "2025-03-01T00:00:00.000Z" },   // last year's job, filed away
+  { id: "fp-r", customer: "Romeo Live" },                                                  // an open job file today
+];
+const bids = tilesNeedingFieldFile(B_ROWS, B_PROJECTS).map((r) => r.id);
+ok("a lead with a scheduled visit gets a file", bids.includes("b1"));
+ok("a lead someone started bidding gets a file", bids.includes("b2"));
+ok("a bare lead stays board-only", !bids.includes("b3"));
+ok("a lost lead never gets a file", !bids.includes("b4"));
+ok("a repeat customer's ARCHIVED job doesn't block the new bid", bids.includes("b5"));
+ok("a LIVE lookalike job file blocks it (the office links from that side)", !bids.includes("b6"));
+ok("an already-linked lead is skipped", !bids.includes("b7"));
+ok("scheduled work still honours archived lookalikes", !tilesNeedingFieldFile(T_ROWS, T_PROJECTS).find((r) => r.id === "t7"));
+
+const bidSeed = fieldSeedFromBoardJob(B_ROWS[0], blankSeed());
+ok("bid seed remembers its tile offline (bidOf)", bidSeed.bidOf === "b1");
+ok("bid seed carries email + CRM contact link", bidSeed.email === "mike@example.com" && bidSeed.contactId === "c-77");
+ok("the customer's verbatim ask and channel land on the site visit",
+  bidSeed.siteVisit && bidSeed.siteVisit.leadMessage === "Kitchen remodel, ~200 sf, want it before Thanksgiving" && bidSeed.siteVisit.leadChannel === "web-form");
+ok("the seeded siteVisit is packet-shaped (files/transcript/typedScope)",
+  Array.isArray(bidSeed.siteVisit.files) && bidSeed.siteVisit.transcript === "" && bidSeed.siteVisit.typedScope === "");
+ok("legacy source:'web' maps to the web-form channel", fieldSeedFromBoardJob(B_ROWS[4], blankSeed()).siteVisit.leadChannel === "web-form");
+ok("a bid with nothing to say gets no siteVisit object (siteVisitOf makes it later)", !("siteVisit" in fieldSeedFromBoardJob(B_ROWS[5], blankSeed())));
+ok("a scheduled tile's seed is NOT a bid", !("bidOf" in seedA) && !("siteVisit" in seedA));
+ok("control characters are stripped from the ask", fieldSeedFromBoardJob(tile("b9", { stage: "lead", bidStartedAt: "x", message: "hi\u0007there" }), blankSeed()).siteVisit.leadMessage === "hithere");
 
 /* ---------- Phase 6: field restoration job -> a "water" tile in Leads ---------- */
 const waterJob = boardJobFromProject({ id: "fp-w", customer: "Lima Wet", jobType: "restoration" }, null, NOW_ISO);

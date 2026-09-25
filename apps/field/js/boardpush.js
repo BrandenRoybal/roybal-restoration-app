@@ -614,18 +614,38 @@ export function tileCandidates(d, projects) {
   return arr(projects).filter((p) => norm(p.customer) === want);
 }
 
+/* ---------- pure: is this lead being BID? ----------
+   A lead earns a job file only when a person chose to bid it: the office
+   scheduled a site visit (data.siteVisit.at) or someone pressed Start bid
+   (data.bidStartedAt). A bare lead never does — sixty web leads a season
+   must stay sixty tiles, not sixty blank files on eight phones. Lost and
+   archived leads are dead whatever they carry. (docs/Lead_Bid_Workflow_Design.md §2.3) */
+export function isBidLead(d) {
+  if (!d || d.isMilestone) return false;
+  if ((d.stage || "lead") !== "lead") return false;
+  if (d.outcome || d.archived) return false;
+  const sv = d.siteVisit;
+  return !!((sv && typeof sv === "object" && sv.at) || d.bidStartedAt);
+}
+
 /* ---------- pure: which tiles are real work with no job file? ----------
-   Leads/bids stay board-only (dead leads must not litter crew phones);
-   milestones are calendar markers, never jobs. A tile that EVER linked a
-   field job (fieldJobId set) is respected even if that job was deleted —
-   deleting a job file must not resurrect it on the next open. */
+   Scheduled / In Progress tiles always; lead tiles only while they are
+   being bid (isBidLead) — dead leads must not litter crew phones. Milestones
+   are calendar markers, never jobs. A tile that EVER linked a field job
+   (fieldJobId set) is respected even if that job was deleted — deleting a
+   job file must not resurrect it on the next open. */
 export function tilesNeedingFieldFile(rows, projects) {
   return arr(rows).filter((r) => {
     const d = r && r.data;
     if (!d || d.isMilestone) return false;
-    if (d.stage !== "scheduled" && d.stage !== "in_progress") return false;
+    const working = d.stage === "scheduled" || d.stage === "in_progress";
+    if (!working && !isBidLead(d)) return false;
     if (d.fieldJobId) return false;
-    return tileCandidates(d, projects).length === 0;
+    // scheduled work: ANY lookalike file, archived included, means don't
+    // create (a finished job must not respawn). A bid is different — a
+    // repeat customer is a NEW job, so only a live lookalike blocks it.
+    const pool = working ? arr(projects) : arr(projects).filter((p) => p && !p.archivedAt);
+    return tileCandidates(d, pool).length === 0;
   });
 }
 
@@ -652,6 +672,22 @@ export function fieldSeedFromBoardJob(row, blank) {
   p.address = stripCtrl(d.address || "");
   p.phone = stripCtrl(d.phone || "");
   p.claimNo = stripCtrl(d.claimNo || "");
+  // what a LEAD tile knows and a hand-built tile didn't: the customer's
+  // email, the CRM person link, and the verbatim ask (CRM §13.3 data.message)
+  if (d.email) p.email = stripCtrl(d.email);
+  if (d.contactId) p.contactId = String(d.contactId);
+  if (isBidLead(d)) {
+    // a bid file knows it's a bid OFFLINE, before any board row loads — the
+    // linkedRestorationId precedent. Cleared by nothing: once won, the Bid
+    // card hides on the tile's stage and the file simply is the job.
+    p.bidOf = row.id;
+    const message = stripCtrl(d.message || "");
+    const channel = String(d.channel || (d.source === "web" ? "web-form" : "") || "");
+    if (message || channel) {
+      p.siteVisit = { files: [], transcript: "", transcriptSeconds: 0, typedScope: "", pending: null,
+        leadMessage: message, leadChannel: channel };
+    }
+  }
   return p;
 }
 
@@ -674,19 +710,45 @@ export async function adoptBoardJobs(rows, projects) {
   let created = 0;
   try {
     for (const row of tilesNeedingFieldFile(rows, projects)) {
-      if (await serverHasProject("bj-" + row.id)) continue;
-      const p = fieldSeedFromBoardJob(row, newProject());
-      await Store.put(p);   // the sync engine's saved-listener pushes it up
-      // Stamp the link on the tile (same-rev annotation — never blocks a
-      // coordinator's save; ensureBoardTile re-stamps if this write loses).
-      const base = Number(row.data.rev) || 0;
-      try { await guardedWrite(row.id, base, { ...row.data, fieldJobId: p.id, rev: base }); } catch (_) {}
-      await linkSpine(p, row.id);
-      created++;
+      if (await adoptTile(row)) created++;
     }
   } catch (_) { /* offline mid-loop etc. — whatever was created stands */ }
   _adopting = false;
   return created;
+}
+
+/** Make the job file for ONE tile (the body adoptBoardJobs runs per tile).
+    `stamp` rides along on the same-rev link annotation — Start bid uses it
+    for bidStartedAt/bidBy. Returns the new project, or null when the id
+    already exists on the server (live or tombstoned) — never a duplicate. */
+export async function adoptTile(row, stamp = null) {
+  if (await serverHasProject("bj-" + row.id)) return null;
+  const p = fieldSeedFromBoardJob(row, newProject());
+  await Store.put(p);   // the sync engine's saved-listener pushes it up
+  // Stamp the link on the tile (same-rev annotation — never blocks a
+  // coordinator's save; ensureBoardTile re-stamps if this write loses).
+  const base = Number(row.data.rev) || 0;
+  try { await guardedWrite(row.id, base, { ...row.data, ...(stamp || {}), fieldJobId: p.id, rev: base }); } catch (_) {}
+  await linkSpine(p, row.id);
+  return p;
+}
+
+/** 📐 Start bid — the deliberate tap that turns a lead tile into a bid file
+    (docs/Lead_Bid_Workflow_Design.md §3 step 4b). Refuses when the tile
+    already links a file, when a lookalike job file exists (the office links
+    it from that side), or offline — it is a board write. Returns the new
+    project, or null with `reason` for the toast. */
+export async function startBid(row, projects, by) {
+  const d = (row && row.data) || {};
+  if (!ready()) return { project: null, reason: "offline" };
+  if (d.fieldJobId) return { project: null, reason: "linked" };
+  if (tileCandidates(d, projects).length) return { project: null, reason: "lookalike" };
+  const stamp = { bidStartedAt: new Date().toISOString(), bidBy: String(by || "") };
+  // the seed reads isBidLead(d) to mark the file as a bid — stamp the row
+  // copy first so a bare lead (no site visit yet) still seeds as one
+  const stamped = { ...row, data: { ...d, ...stamp } };
+  const project = await adoptTile(stamped, stamp);
+  return { project, reason: project ? "" : "exists" };
 }
 
 /* ---------- pure: has the office already said no? ----------
