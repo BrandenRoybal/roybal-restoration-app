@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /* Local dev server that composes the deployed layout:
-   the field app at "/" and the office admin at "/admin",
-   so the admin's ../../js/* imports resolve to the field app.
+   the field app at "/", the office admin at "/admin" and the job board
+   at "/board", so the admin's ../../js/* imports resolve to the field app
+   and ../../board/js/* to the board.
    Usage: node serve.mjs [port]   (default 4190) */
 import { createServer } from "node:http";
 import { readFile, stat } from "node:fs/promises";
@@ -10,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 const ADMIN_ROOT = fileURLToPath(new URL(".", import.meta.url));
 const FIELD_ROOT = fileURLToPath(new URL("../field/", import.meta.url));
+const BOARD_ROOT = fileURLToPath(new URL("../board/", import.meta.url));
 const PORT = Number(process.argv[2]) || 4190;
 
 const MIME = {
@@ -26,6 +28,9 @@ const server = createServer(async (req, res) => {
     if (path === "/admin" || path.startsWith("/admin/")) {
       root = ADMIN_ROOT;
       path = path.slice("/admin".length) || "/";
+    } else if (path === "/board" || path.startsWith("/board/")) {
+      root = BOARD_ROOT;
+      path = path.slice("/board".length) || "/";
     }
     if (path === "/" || path === "") path = "/index.html";
     const file = normalize(join(root, path));

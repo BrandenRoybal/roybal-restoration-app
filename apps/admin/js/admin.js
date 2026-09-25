@@ -124,10 +124,11 @@ function renderHelp() {
         h("strong", {}, "⚙ Settings"), " — the ", h("strong", {}, "QuickBooks Time"), " (crew hours), ",
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
         " (job-matched email) connections, set once and out of the way."),
-      p("Today opens with two stat rows. The lead row: ", h("strong", {}, "unworked leads"), " and ", h("strong", {}, "overdue follow-ups"), " (click either to jump to the inbox), the open ", h("strong", {}, "pipeline value"), " (estimated dollars across open leads), and the ", h("strong", {}, "average first touch"), " — how fast someone reaches a new lead, measured from the moment it lands to the first action taken on it. Below it, the ops row: total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
+      p("Today opens with two stat rows. The lead row: ", h("strong", {}, "unworked leads"), " and ", h("strong", {}, "overdue follow-ups"), " (click either to jump to the inbox), the open ", h("strong", {}, "pipeline value"), " (estimated dollars across open leads), the ", h("strong", {}, "average first touch"), " — how fast someone reaches a new lead, measured from the moment it lands to the first action taken on it — then ", h("strong", {}, "site visits this week"), " and ", h("strong", {}, "estimates out with no answer for 5+ days"), ", the two places bids get stuck. Below it, the ops row: total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
     sec("🆕 Leads — the inbox for new business",
       p("Every open lead from every lane — website form, AI chat, phone line — newest first, with what the customer actually wrote or said shown in full (no more digging it out of a board chip's notes). The count on the tab is leads ", h("strong", {}, "nobody has touched yet"), "; the morning brief nags about them too."),
-      p("Work a lead right from the row: ", h("strong", {}, "📞 Call"), ", ", h("strong", {}, "⏰ Follow-up"),
+      p("Work a lead right from the row: ", h("strong", {}, "📞 Call"), ", ", h("strong", {}, "📅 Site visit"),
+        " (date, time, who's going — this makes the visit the follow-up and puts the bid file, with the site-visit packet and estimate, in Field Forms; the row then reads the bid as it moves: 📅 booked → 📐 bid started → 🔍 inspected → 📄 estimate sent), ", h("strong", {}, "⏰ Follow-up"),
         " (what + when — it shows on the board card and turns red when overdue), ", h("strong", {}, "✓ Done"),
         " (the appointment or call happened — log what came of it: inspection done, estimate sent, waiting on customer, no answer — with a note and an optional next follow-up; the date-stamped history lives on the lead in both apps), ", h("strong", {}, "✓ Mark contacted"),
         " (stops the response-time clock), ", h("strong", {}, "📝 Notes"),
@@ -260,7 +261,10 @@ async function renderToday() {
         kpi(s.unworked, "Unworked leads", s.unworked > 0, toLeads),
         kpi(s.overdue, "Overdue follow-ups", s.overdue > 0, toLeads),
         kpi(s.pipeline ? "$" + Math.round(s.pipeline).toLocaleString() : "—", "Pipeline value", false, toLeads),
-        kpi(fmtTouch(s.avgTouchMs), "Avg first touch"));
+        kpi(fmtTouch(s.avgTouchMs), "Avg first touch"),
+        // where bids get stuck (docs/Lead_Bid_Workflow_Design.md §5.1)
+        kpi(s.visitsThisWeek, "Site visits this week", false, toLeads),
+        kpi(s.estimatesWaiting, "Estimates out, no answer > 5d", s.estimatesWaiting > 0, toLeads));
       crmRow.hidden = false;
     });
     body.append(messagesPanel(), emailsPanel());

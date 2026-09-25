@@ -5,7 +5,6 @@
    Shares the field/admin login + Supabase session.
    ============================================================ */
 import { h, $, clear, uid, todayISO, fmtDate, toast, shrinkDataURL } from "../../js/core.js";
-import { uploadCrewPhoto } from "../../js/supa.js";
 import {
   SYNC_ENABLED, isSignedIn, signIn, signOut, currentEmail,
   cachedJobs, cachedCrew, cachedEntries, pull, saveJob, deleteJob,
@@ -14,6 +13,8 @@ import {
 } from "./data.js";
 import { computeSchedule, durationOf, durationFracOf, wouldCreateCycle, findOverAllocations, crewDayLoad, computeCriticalPath, linkComponents, layoutSubtasks, layoutSubtasksLive, phaseActuals, buildLiveOpts, workDaysBetween, effCrew, spanCrew, spanCrewPull, spanCrewPush, spanCrewClear, entryBlock, timelineWindow, packLanes, timelineTicks, timelinePct, idleGaps, fmtSpan, DEFAULT_SETTINGS } from "./schedule.js";
 import { scheduleFlags } from "./schedulewatch.js";
+import { visitDate, visitTime, visitPeople, visitChip, bidSteps, whoLabel } from "./leadvisit.js";
+import { uploadCrewPhoto } from "../../js/supa.js";
 import { pickJobcode, pickQbUser, qbConfigured, pullRange as qbPullRange } from "../../js/qbtime.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { boardAssistProvider } from "./assistctx.js";
@@ -658,6 +659,10 @@ function renderCard(j) {
         "⏰ " + (d < 0 ? `${-d}d late` : d === 0 ? "today" : fmtShort(j.nextActionAt))));
     }
     if (j.estValue) meta.append(h("span", { class: "chip chip--sm", title: "Estimated value" }, "~$" + Math.round(Number(j.estValue)).toLocaleString()));
+    // 📅 site visit — amber the day of, red once it's passed and not marked done
+    const vc = visitChip(j, todayISO());
+    if (vc) meta.append(h("span", { class: "chip chip--sm" + (vc.tone === "late" ? " is-late" : vc.tone === "due" ? " is-due" : ""),
+      title: vc.title + (whoLabel(j.siteVisit.by, crew) ? " · " + whoLabel(j.siteVisit.by, crew) : "") + (vc.tone === "late" ? " — passed, not marked done" : "") }, vc.text));
   }
   if (j.startDate || j.targetDate) {
     const txt = j.targetDate ? fmtShort(j.targetDate) : "Start " + fmtShort(j.startDate);
@@ -1941,6 +1946,23 @@ async function resetDay(j) {
 /* ============================================================
    job modal (new / edit)
    ============================================================ */
+/* the editor's 📅 Site visit inputs → j.siteVisit, same rules as the Leads
+   Inbox patches (leadvisit.js scheduleVisitPatch / cancelVisitPatch): a new
+   time is a fresh visit, the same time only changes who, clearing the date
+   calls the visit off (at "" — no new bid file). */
+function applyVisitFields(j, f, sv0, me) {
+  const date = f.visitDate.value;
+  const at = date ? (f.visitTime.value ? `${date}T${f.visitTime.value}` : date) : "";
+  const by = f.visitBy.value || sv0.by || me || "";
+  const wasLive = !!sv0.at && sv0.status !== "cancelled";
+  if (at) {
+    j.siteVisit = wasLive && sv0.at === at ? { ...sv0, by } : { at, by, status: "scheduled" };
+  } else if (wasLive) {
+    j.siteVisit = { status: "cancelled", at: "", by: sv0.by || "", was: sv0.at };
+    if (j.nextAction === "Site visit" && j.nextActionAt === visitDate(sv0.at)) { j.nextAction = ""; j.nextActionAt = ""; }
+  }
+}
+
 function openJobModal(existing, newMilestone) {
   const isNew = !existing;
   const j = existing ? { ...existing } : {
@@ -2189,6 +2211,36 @@ function openJobModal(existing, newMilestone) {
   f.estValue = h("input", { type: "number", min: "0", step: "100", placeholder: "e.g. 8000", value: j.estValue || "" });
   f.nextActionAt = h("input", { type: "date", value: j.nextActionAt || "" });
   f.nextAction = h("input", { type: "text", placeholder: "e.g. Call back with the quote", value: j.nextAction || "" });
+  // 📅 Site visit (docs/Lead_Bid_Workflow_Design.md §5.2) — rides the normal
+  // Save. Setting a date is what makes Field Forms create the bid file.
+  const sv0 = (j.siteVisit && typeof j.siteVisit === "object") ? j.siteVisit : {};
+  const svLive = !!sv0.at && sv0.status !== "cancelled";
+  f.visitDate = h("input", { type: "date", value: svLive ? visitDate(sv0.at) : "" });
+  f.visitTime = h("input", { type: "time", step: "900", value: svLive ? visitTime(sv0.at) : "" });
+  const me = currentEmail();
+  const people = visitPeople(crew, me);
+  if (sv0.by && !people.some((p) => p.email === sv0.by)) people.push({ email: sv0.by, name: whoLabel(sv0.by, crew) });
+  f.visitBy = h("select", {},
+    h("option", { value: "" }, "— who's going —"),
+    ...people.map((p) => h("option", { value: p.email, selected: (sv0.by || me) === p.email }, p.name)));
+  // booking the visit makes it the follow-up, unless a different, earlier one is typed
+  f.visitDate.addEventListener("change", () => {
+    const d = f.visitDate.value;
+    if (!d) return;
+    const na = f.nextAction.value.trim();
+    if (!na || na === "Site visit" || !f.nextActionAt.value || f.nextActionAt.value >= d) {
+      f.nextAction.value = "Site visit";
+      f.nextActionAt.value = d;
+    }
+  });
+  // read-only bid status + a door into the bid file once the field made it
+  const FIELD_ROOT = location.pathname.replace(/\/board\/?.*$/, "/") || "/";
+  const steps = bidSteps(j, crew).filter((st) => st.id !== "visit");
+  const bidStatusLine = steps.length || j.fieldJobId
+    ? h("div", { class: "subtle", style: "font-size:12.5px;margin:4px 0 8px;display:flex;gap:10px;flex-wrap:wrap;align-items:center" },
+        h("strong", {}, "Bid status:"), ...steps.map((st) => h("span", {}, st.text)),
+        j.fieldJobId ? h("a", { href: FIELD_ROOT + "#/p/" + encodeURIComponent(j.fieldJobId), target: "_blank", rel: "noopener" }, "Open in Field Forms →") : null)
+    : null;
   const lostSel = h("select", {}, ...LOST_REASONS.map((r) => h("option", { value: r.id, selected: j.lostReason === r.id }, r.label)));
   const lostConfirm = h("button", { class: "btn btn--danger btn--sm", type: "button" }, "Confirm lost");
   const wonBtn = h("button", { class: "btn btn--sm lead-win", type: "button", title: "Convert — advances the lead to Scheduled" }, "✓ Won");
@@ -2240,6 +2292,10 @@ function openJobModal(existing, newMilestone) {
     h("div", { class: "leadsec__h" }, "🎯 Lead", outcomeNote),
     h("div", { class: "grid2" }, field("Source", chanSel), field("Estimated value ($)", f.estValue)),
     h("div", { class: "grid2" }, field("Next action — when", f.nextActionAt), field("Next action — what", f.nextAction)),
+    h("div", { class: "grid2" },
+      field("📅 Site visit — date & time", h("div", { class: "grid2" }, f.visitDate, f.visitTime)),
+      field("Who's going", f.visitBy)),
+    bidStatusLine,
     logList,
     h("div", { class: "lead-actions" }, doneBtn, wonBtn, lostBtn, lostWrap),
     doneWrap);
@@ -2338,6 +2394,7 @@ function openJobModal(existing, newMilestone) {
       nextActionAt: f.nextActionAt.value || "",
       nextAction: f.nextAction.value.trim(),
     });
+    applyVisitFields(j, f, sv0, me);
     // j.deps / j.scheduleMode / j.durationDays are mutated live by the Schedule section
     saveBtn.disabled = true;
     if (j.archived) {
@@ -2930,6 +2987,7 @@ function openHelpModal() {
         h("ul", { class: "help__ul" },
           li("New leads land in ", h("strong", {}, "Leads / Bids"), " automatically from the website form, the AI chat, and the phone line — each card wears a ", h("strong", {}, "source badge"), " (Phone / AI chat / Web form / Referral / Repeat / Walk-in)."),
           li("Open a lead and use the ", h("strong", {}, "🎯 Lead"), " section: source, estimated value, and a ", h("strong", {}, "next action"), " (what + when). Overdue follow-ups turn the ⏰ chip red, rise to the top of Pipeline, and show up in the morning brief."),
+          li(h("strong", {}, "📅 Site visit"), " — set a date, time, and who's going in the 🎯 Lead section and Save. That's what puts the bid file (site-visit packet + estimate) in Field Forms, no retyping. The card gets a 📅 chip (amber the day of, red once it's passed and nobody marked it done); once the field starts the bid, a ", h("strong", {}, "Bid status"), " line shows how far it's got, with ", h("strong", {}, "Open in Field Forms →"), ". Clearing the date calls the visit off."),
           li(h("strong", {}, "✓ Log what happened"), " covers everything between fresh and won/lost: the appointment or call happened, so log it — inspection done, estimate sent, waiting on customer, no answer — with a note and an optional next follow-up. Each entry is date-stamped and the history stays on the lead (here and in the office app's Leads inbox)."),
           li(h("strong", {}, "✓ Won"), " advances the lead to Scheduled and counts toward your win rate. ", h("strong", {}, "✕ Lost"), " asks why (price / went with another / no response / not a fit / other) and files the card in the archive."),
           li("The ", h("strong", {}, "🗄 Archive"), " browser has an ", h("strong", {}, "All / Completed / Lost leads"), " filter, so dead bids stay on record with their reason."))),
