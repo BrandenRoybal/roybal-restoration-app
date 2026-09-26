@@ -2809,16 +2809,21 @@ export function floorPlanSheet(project, fp) {
       tbody.replaceChildren(...list.map((r) => {
         const tr = h("tr", { class: Number(r.conf) < 0.7 ? "flag7" : "" });
         const actions = h("td", { class: "app-only", style: "white-space:nowrap" });
+        const measured = r.source === "magicplan";   // docs/Magicplan_Integration_Design.md §6 ruling 10
         if (Number(r.conf) < 0.7) {
-          const ok = h("button", { type: "button", class: "rowdel", style: "color:var(--green)",
-            title: "Confirm — I verified this room against the plan" }, "\u2713");
+          const ok = h("button", { type: "button", class: "rowdel", style: "color:var(--green)" + (measured ? ";width:auto;font-size:11px" : ""),
+            title: measured ? "Use the LiDAR-measured figures for this room" : "Confirm — I verified this room against the plan" },
+            measured ? "\u2713 Use measured" : "\u2713");
           ok.addEventListener("click", () => { r.conf = 1; commit(); paintRows(); });
           actions.append(ok);
         }
         actions.append(h("button", { type: "button", class: "rowdel",
           onclick: () => { list.splice(list.indexOf(r), 1); paintRows(); recalc(); commit(); } }, "\u2715"));
+        const nameCell = taCell(r, "name", { minWidth: "110px" });
+        if (measured) nameCell.append(h("div", { class: "app-only", style: "font-size:10px;font-weight:700;color:#1e4a72;margin-top:2px" },
+          "Magicplan · " + (r.unit || "ft")));
         tr.append(
-          taCell(r, "name", { minWidth: "110px" }),
+          nameCell,
           boundCell(r, "dims", "100px"),
           boundCell(r, "floorSF", "56px", "text", recalc),
           boundCell(r, "perimLF", "56px", "text", recalc),
@@ -2833,7 +2838,7 @@ export function floorPlanSheet(project, fp) {
     addRoom.addEventListener("click", () => { list.push(blankRoom()); paintRows(); commit(); });
     dimsBox.append(
       sectionTitle("Room Dimensions (from the plan)"),
-      h("p", { class: "subtle app-only" }, "AI-read from the uploaded plan — verify each line against the plan and edit anything off. Amber rows were computed rather than printed: tap \u2713 once you have checked them. These quantities feed the AI invoice, rebuild scope and the assistant."),
+      h("p", { class: "subtle app-only" }, "AI-read from the uploaded plan, or measured by a Magicplan LiDAR scan — verify each line and edit anything off. Amber rows were computed rather than printed (or measured while this table already had rows): tap \u2713 once you have checked them. These quantities feed the AI invoice, rebuild scope and the assistant."),
       h("div", { class: "tablewrap" },
         h("table", { class: "grid" },
           h("colgroup", {},

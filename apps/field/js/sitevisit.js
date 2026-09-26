@@ -29,6 +29,7 @@ import { uploadSiteFile } from "./supa.js";
 import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft } from "./officeai.js";
 import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
+import { magicplanBanner } from "./magicplan.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const MAX_IMAGES = 90;   // the server's limit (sitevisit.ts MAX_IMAGES): photos, stills and note pages together
@@ -220,6 +221,8 @@ export function siteVisitPanel(ctx) {
   const { project, inv } = ctx;
   const sv = siteVisitOf(project);
   const root = h("div", { class: "app-only sitevisit", style: "border:1px solid #b9c4d4;border-radius:10px;padding:12px;margin:0 0 10px;background:#f7f9fc" });
+  // 📥 a Magicplan scan waiting for this job (docs/Magicplan_Integration_Design.md §5)
+  const mpBanner = magicplanBanner(project, { onAdopted: () => paint("") });
   let timer = null;
   const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
 
@@ -341,10 +344,14 @@ export function siteVisitPanel(ctx) {
     del.addEventListener("click", () => {
       sv.files = sv.files.filter((x) => x.id !== f.id && x.videoId !== f.id);   // a video takes its stills with it
       if (f.kind === "audio") { sv.transcript = ""; sv.transcriptSeconds = 0; }
+      // a Magicplan file leaves the packet only: the storage copy stays, and
+      // the next ⟳ Pull doesn't bring it back
+      if (f.source === "magicplan" && sv.magicplan) sv.magicplan.removed = [...new Set([...(sv.magicplan.removed || []), f.id])];
       ctx.save(); paint("");
     });
     return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px" },
       h("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.name || f.kind),
+      f.source === "magicplan" ? h("span", { style: "font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;background:#e7eef7;color:#1e4a72" }, "Magicplan") : null,
       h("span", { class: "subtle" }, f.kind === "videos" ? `${f.frames || 0} stills` : fmtSize(f.size || 0)), del);
   }
 
@@ -409,6 +416,7 @@ export function siteVisitPanel(ctx) {
       h("div", { style: "font-weight:700;font-size:14px;color:#16395a" }, "📋 Site visit"),
       h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
         "Add what you collected on the walk. The draft reads all of it, prices from the Fairbanks list, and fills this estimate room by room."),
+      mpBanner,
       slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
       imageCount() > MAX_IMAGES
         ? h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },

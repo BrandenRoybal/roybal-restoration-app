@@ -41,8 +41,9 @@ env:
   # Census of production public schema, read from pg_catalog 2026-09-07.
   # If a migration legitimately changes one of these, change it here in the
   # same PR — that is the point: the number is a decision, not a reading.
-  EXPECT_TABLES: 63   # +9: the contract tables (migration 0004)
-  EXPECT_POLICIES: 126   # +12: read-only policies on the contract tables (0004)
+  EXPECT_TABLES: 64   # +9: the contract tables (migration 0004); +1: magicplan_exports (0010)
+  EXPECT_POLICIES: 127   # +12: read-only policies on the contract tables (0004);
+                         # +1: magicplan_exports owner/office read (0010)
   EXPECT_TRIGGERS: 43   # +10: 6 touch_updated_at, the proposals input guard, and the three
                         #      append-only guards on events (0004)
   EXPECT_VIEWS: 5
@@ -50,7 +51,7 @@ env:
   EXPECT_FUNCTIONS: 55   # +1: contact_same_value (0001); +5: current_org, current_principal,
                          #     current_role_name, and the two trigger functions (0004);
                          #     +1: role_is (0006)
-  EXPECT_PKUNIQUE: 87   # +14: 9 primary keys and 5 unique constraints (0004)
+  EXPECT_PKUNIQUE: 88   # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010)
 
 jobs:
   replay:

@@ -25,6 +25,7 @@ import { h, Store, toast, fmtDate, uid, fileToDataURL } from "./core.js";
 import { rest, currentEmail, downloadSiteFile } from "./supa.js";
 import { tileCandidates, startBid, findBoardRow, isBidLead } from "./boardpush.js";
 import { jobType } from "./model.js";
+import { magicplanBidLine } from "./magicplan.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -498,6 +499,12 @@ export function ghostLeadRows(rows, projects, mode, { onStarted } = {}) {
 export function bidCard(project, { openEstimate, onChanged } = {}) {
   if (!project || !project.bidOf) return null;
   const wrap = h("div", { class: "card app-only", style: "border-left:4px solid #f26a21" });
+  const line = (icon, label, value, btn) => h("div", { style: "display:grid;grid-template-columns:110px 1fr auto;gap:8px;align-items:center;margin-top:8px;font-size:13px" },
+    h("div", { style: "font-weight:700" }, icon + " " + label),
+    h("div", { class: value ? "" : "subtle" }, value || "—"),
+    btn || h("span"));
+  // 📐 Magicplan: built once so its state (pending scan, busy) survives repaints
+  const mpLine = magicplanBidLine(project, { line, onChanged: () => (onChanged ? onChanged() : load()) });
   const paint = (d) => {
     const s = bidState(project, d);
     wrap.replaceChildren();
@@ -510,11 +517,6 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
       s.lead.lost ? chip("✕ marked lost — this file archives on the next jobs-list open", "bad") : null,
       !d ? chip("board offline — showing this device's copy", "warn") : null);
     wrap.append(head);
-
-    const line = (icon, label, value, btn) => h("div", { style: "display:grid;grid-template-columns:110px 1fr auto;gap:8px;align-items:center;margin-top:8px;font-size:13px" },
-      h("div", { style: "font-weight:700" }, icon + " " + label),
-      h("div", { class: value ? "" : "subtle" }, value || "—"),
-      btn || h("span"));
 
     // 📅 Site visit
     const visitTxt = s.visit.doneAt ? `done ${fmtDate(s.visit.doneAt)}` + (s.visit.at ? ` (was ${fmtVisitAt(s.visit.at)})` : "")
@@ -542,6 +544,9 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
       s.packet.files || s.packet.transcript ? "Open packet" : "Start packet");
     packetBtn.addEventListener("click", () => openEstimate && openEstimate());
     wrap.append(line("📎", "Packet", packetTxt, packetBtn));
+
+    // 📐 Magicplan — docs/Magicplan_Integration_Design.md §5
+    wrap.append(mpLine.setTile(d));
 
     // 📄 Estimate
     const est = s.estimate;

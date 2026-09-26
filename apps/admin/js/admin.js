@@ -12,6 +12,7 @@ import { startSync, syncNow } from "../../js/sync.js";
 import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
 import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
+import { magicplanPanel } from "./magicplanconnect.js";
 import { messagesPanel } from "./messages.js";
 import { emailsPanel } from "./emailpanel.js";
 import { contactsTab, renderContactPage } from "./contacts.js";
@@ -52,7 +53,7 @@ function onStatus(s) {
    #/jobs        → the all-jobs table
    #/contacts    → the contact directory
    #/campaigns   → CF-5 campaigns
-   #/settings    → QB Time / QBO / Gmail connections
+   #/settings    → QB Time / QBO / Gmail / Magicplan connections
    #/c/<id>      → a contact's page (CRM step 5)
    #/help        → how the office admin fits together */
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
@@ -350,7 +351,7 @@ function renderSettings() {
   body.append(
     h("p", { class: "muted", style: "font-size:13px;margin:0 0 4px" },
       "Set-once connections. Each panel shows its status; reconnect from here if a password change breaks one."),
-    qbPanel(), qboPanel(), gmailPanel());
+    qbPanel(), qboPanel(), gmailPanel(), magicplanPanel());
 }
 
 boot();
