@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v183";
+const CACHE = "roybal-field-v184";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
@@ -22,6 +22,8 @@ const CORE = [
   "js/xlsx.js", "js/xactimate.js", "js/selections.js", "js/sitevisit.js",
   // Leads / Bids: app.js statically imports bid.js (ghost rows, the Bid card)
   "js/bid.js",
+  // Magicplan: bid.js and sitevisit.js import magicplan.js (→ magicplancalc.js)
+  "js/magicplan.js", "js/magicplancalc.js",
   // Word estimate: app.js lazy-imports docx.js (→ zip.js, already cached)
   "js/docx.js",
   // Photo export/offload: forms.js statically imports photoexport.js → zip.js,

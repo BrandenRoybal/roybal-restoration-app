@@ -74,3 +74,9 @@ verify_jwt = true
 
 [functions.roybal-brief]
 verify_jwt = true
+
+# Revived 2026-09-25 as a new function (docs/Magicplan_Integration_Design.md):
+# office-gated in code (default-deny ACTION_AUTH, like gmail-proxy) AND behind
+# the JWT gate — the opposite of the deleted era-0 proxy described above.
+[functions.magicplan-proxy]
+verify_jwt = true

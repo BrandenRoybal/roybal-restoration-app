@@ -1,4 +1,4 @@
-/* The per-action auth gate on the three integration proxies — F-003.
+/* The per-action auth gate on the integration proxies — F-003 (and magicplan-proxy, 2026-09-25).
    Run: node --experimental-strip-types --test supabase/functions/qb-time-proxy/authgate.test.mjs
    (picked up by `npm run fn:test`, which globs every function dir's .test.mjs)
 
@@ -59,6 +59,15 @@ const EXPECTED = {
     disconnect: ["office"],
     pullInbox: ["cron", "user"],
     sendEmail: ["cron", "user"],
+  },
+  "magicplan-proxy": {
+    getWorkspace: ["office"],
+    createProject: ["office"],
+    status: ["office"],
+    sync: ["office"],
+    markImported: ["office"],
+    archiveProject: ["office"],
+    linkExport: ["office"],
   },
 };
 
