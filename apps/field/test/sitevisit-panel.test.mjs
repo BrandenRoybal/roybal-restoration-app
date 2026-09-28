@@ -46,7 +46,9 @@ const inv = { id: "e1", items: [], siteVisitDraft: { questions: ["Which tile?"] 
 let saves = 0;
 const root = siteVisitPanel({ project, inv, save: () => { saves++; }, onApplied: () => {} });
 document.body.append(root);
-await new Promise((r) => setTimeout(r, 60));   // reconcileQueue runs on a tick
+// reconcileQueue runs on a tick and awaits IndexedDB; under a full suite run a
+// fixed 60 ms was sometimes not enough, so wait until it has settled and saved.
+for (let t = Date.now(); Date.now() - t < 3000 && !(saves >= 1 && root.querySelector(".clipchip") && [...root.querySelectorAll(".clipchip")].some((c) => c.textContent === "uploaded"));) await new Promise((r) => setTimeout(r, 20));
 const text = () => root.textContent;
 
 await test("the walk slot is first, with Record (Camera) and Add from Photos, and works with no signal", () => {
