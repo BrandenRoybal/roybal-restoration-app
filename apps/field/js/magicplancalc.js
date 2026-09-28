@@ -294,21 +294,20 @@ export function withMagicplanBasis(pricingNotes, scannedAt) {
    produced, or nothing when the configuration doesn't include one. Same
    hash → same entry, replaced in place; the sheet offers it as a download. */
 export const ESX_DOC_TITLE = "Magicplan ESX sketch (Xactimate)";
+export const ESX_DOC_ID = "mp-esx";   // one sketch per job: a new export replaces the file on this one entry
 export function adoptEsx(project, esx, at = new Date().toISOString()) {
   if (!project || !esx || !esx.path || !esx.hash) return { added: 0, updated: 0 };
   if (!Array.isArray(project.supportDocs)) project.supportDocs = [];
-  const id = "mp-esx-" + String(esx.hash).slice(0, 8);
   const file = { path: esx.path, name: esx.name || "sketch.esx", size: num(esx.size), mime: esx.mime || "application/octet-stream", hash: String(esx.hash) };
-  const i = project.supportDocs.findIndex((d) => d && d.id === id);
+  const i = project.supportDocs.findIndex((d) => d && (d.id === ESX_DOC_ID || (d.source === "magicplan" && d.mode === "file")));
   if (i >= 0) {
     const prev = project.supportDocs[i];
-    const same = ["path", "name", "size", "mime"].every((k) => String((prev.file || {})[k] || "") === String(file[k] || ""));
-    if (same) return { added: 0, updated: 0 };
+    if (String((prev.file || {}).hash || "") === file.hash) return { added: 0, updated: 0 };
     project.supportDocs[i] = { ...prev, file, updatedAt: at };
     return { added: 0, updated: 1 };
   }
   project.supportDocs.push({
-    id, by: "", createdAt: at, title: ESX_DOC_TITLE, docType: "Other", mode: "file",
+    id: ESX_DOC_ID, by: "", createdAt: at, title: ESX_DOC_TITLE, docType: "Other", mode: "file",
     uploadedPages: [], aiDigest: "", source: "magicplan", file,
   });
   return { added: 1, updated: 0 };

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
   mpFileId, mpFilePath, parsePhotoName, normalizeStatistics, dedupeRoomNames, splitAddress, projectName,
   mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF,
-  magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE,
+  magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE, ESX_DOC_ID,
 } from "../js/magicplancalc.js";
 import { siteFilePath, packetForDraft } from "../js/sitevisit.js";
 
@@ -267,14 +267,15 @@ test("adoptEsx: the sketch becomes one Supporting Doc, replaced in place on a ne
   const esx = { path: "sitevisit/lead_42/mp-abcdef01-Test.esx", name: "Test.esx", size: 4321, mime: "application/octet-stream", hash: "abcdef0123456789" };
   assert.deepEqual(adoptEsx(p, esx, "2026-09-27T00:00:00Z"), { added: 1, updated: 0 });
   assert.equal(p.supportDocs.length, 1);
-  assert.equal(p.supportDocs[0].id, "mp-esx-abcdef01");
+  assert.equal(p.supportDocs[0].id, ESX_DOC_ID);
   assert.equal(p.supportDocs[0].title, ESX_DOC_TITLE);
   assert.equal(p.supportDocs[0].mode, "file");
   assert.deepEqual(p.supportDocs[0].uploadedPages, []);   // nothing prints, nothing for the AI to read
   assert.deepEqual(p.supportDocs[0].file, esx);
-  assert.deepEqual(adoptEsx(p, esx), { added: 0, updated: 0 });
-  assert.deepEqual(adoptEsx(p, { ...esx, size: 5000 }), { added: 0, updated: 1 });
+  assert.deepEqual(adoptEsx(p, esx), { added: 0, updated: 0 });                                        // same hash: nothing
+  assert.deepEqual(adoptEsx(p, { ...esx, hash: "fedcba98", path: "sitevisit/lead_42/mp-fedcba98-Test.esx", size: 5000 }), { added: 0, updated: 1 });   // a re-export replaces the file
   assert.equal(p.supportDocs.length, 1);
+  assert.equal(p.supportDocs[0].file.hash, "fedcba98");
   assert.deepEqual(adoptEsx(p, null), { added: 0, updated: 0 });
   assert.deepEqual(adoptEsx(p, { path: "", hash: "" }), { added: 0, updated: 0 });
 });

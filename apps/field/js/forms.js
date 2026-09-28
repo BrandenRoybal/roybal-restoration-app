@@ -511,6 +511,13 @@ export function moistureMap(project, m) {
    the desiccant formula for AFDs. Rooms come from the AI floor-plan
    takeoff; class/category/psychrometrics from the job. Deterministic
    and offline — defensible to an adjuster line by line. */
+/* M3: rooms whose volume the Magicplan scan measured, and the one rule that
+   decides whether the sizing uses those volumes — the chip shows it, the
+   calc runs it: on by default only when every measured row was accepted
+   in the Floor Plan (conf 1), otherwise off until tapped. */
+const measuredVolRooms = (planRooms) => planRooms.filter((r) => r.source === "magicplan" && parseFloat(r.volumeCF) > 0);
+const measuredVolAccepted = (planRooms) => { const m = measuredVolRooms(planRooms); return m.length > 0 && m.every((r) => Number(r.conf) >= 1); };
+const measuredVolOn = (d, planRooms) => (d.calcMeasuredVol == null ? measuredVolAccepted(planRooms) : !!d.calcMeasuredVol);
 function equipSizingSection(project, d) {
   if (!d.calcRooms) d.calcRooms = {};
   if (!d.calcDeviation) d.calcDeviation = {};   // per-row deviation-from-worksheet notes (am/dehu/scrub/heat)
@@ -569,10 +576,10 @@ function equipSizingSection(project, d) {
       // M3: rooms measured by the Magicplan scan carry their own volume —
       // offered, never applied silently: on by default only when the Floor
       // Plan accepted the measured rows (conf 1), amber otherwise.
-      const measured = planRooms.filter((r) => r.source === "magicplan" && parseFloat(r.volumeCF) > 0);
+      const measured = measuredVolRooms(planRooms);
       if (measured.length) {
-        const accepted = measured.every((r) => Number(r.conf) >= 1);
-        const on = d.calcMeasuredVol == null ? accepted : !!d.calcMeasuredVol;
+        const accepted = measuredVolAccepted(planRooms);
+        const on = measuredVolOn(d, planRooms);
         const chip = h("button", { type: "button", class: "btn btn--sm " + (on ? "btn--primary" : "btn--ghost"),
           style: "width:auto" + (on || accepted ? "" : ";border-color:#d99a2b;color:#8a5a00") },
           `${on ? "✓ " : ""}📐 Use Magicplan room volumes (${measured.length} measured)`);
@@ -620,9 +627,7 @@ function equipSizingSection(project, d) {
             dehuType: d.calcDehuType || "lgr", dehuPints: parseFloat(d.calcPints) || 70, dehuCFM: parseFloat(d.calcCFM) || 500,
             upperWetSF: parseFloat(d.calcUpperSF) || 0, insets: parseFloat(d.calcInsets) || 0,
             lowerWallsOnly: !!d.calcLowerWalls,
-            useMeasuredVolume: d.calcMeasuredVol == null
-              ? rooms.some((r) => r.source === "magicplan" && parseFloat(r.volumeCF) > 0) && rooms.filter((r) => r.source === "magicplan").every((r) => Number(r.conf) >= 1)
-              : !!d.calcMeasuredVol,
+            useMeasuredVolume: measuredVolOn(d, planRooms),   // the chip's own rule, so what it shows is what runs
           });
           if (!out) { toast(planRooms.length ? "Tap at least one affected room first." : "Enter the wet floor SF / wall LF first."); return; }
           out.at = new Date().toISOString();
