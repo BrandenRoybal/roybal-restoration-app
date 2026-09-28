@@ -23,7 +23,8 @@
 import { h, Store, toast, likelyOffline, fmtDate } from "./core.js";
 import { SYNC_ENABLED } from "./config.js";
 import { callFunction, rest, isSignedIn, currentEmail } from "./supa.js";
-import { adoptExport, exportSummary, mpState, splitAddress } from "./magicplancalc.js";
+import { adoptExport, exportSummary, mpState, splitAddress, adoptEsx } from "./magicplancalc.js";
+import { jobType } from "./model.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 export const online = () => !!(SYNC_ENABLED && isSignedIn() && !likelyOffline());
@@ -40,6 +41,8 @@ async function mpProxy(action, payload = {}) {
 export const mpWorkspace = () => mpProxy("getWorkspace");
 export const mpArchive = (projectId) => mpProxy("archiveProject", { projectId });
 export const mpLinkExport = (exportId, fieldProjectId) => mpProxy("linkExport", { exportId, fieldProjectId });
+/** M3: run the workspace's export configuration and keep its ESX sketch (claims). */
+export const mpEsx = (planId, fieldProjectId) => mpProxy("esxExport", { planId, fieldProjectId });
 
 /* ---------- who is this? ----------
    Owner/office only (the proxy refuses anyone else anyway — this just keeps
@@ -149,7 +152,26 @@ export async function adoptRow(project, pending) {
     adoptedIds.add(r.id);
     try { await mpProxy("markImported", { exportId: r.id, fieldProjectId: project.id }); } catch (_) { /* re-offered next open; the merge is idempotent */ }
   }
+  counts.esx = await esxAfterAdopt(project);
   return counts;
+}
+
+/* M3 §5.5: on a claim, ask the proxy for the ESX sketch the workspace's
+   export configuration produces. Built and idle until that configuration
+   includes ESX — no toast, no error either way; a failure here never
+   touches the adopt that just succeeded. Returns 1 when a sketch was added
+   or replaced in Supporting Docs. */
+async function esxAfterAdopt(project) {
+  try {
+    if (!project || jobType(project) === "construction") return 0;
+    const mp = project.siteVisit && project.siteVisit.magicplan;
+    if (!mp || !mp.planId) return 0;
+    const r = await mpEsx(mp.planId, project.id);
+    if (!r || !r.available || !r.esx) return 0;
+    const c = adoptEsx(project, r.esx);
+    if (c.added || c.updated) await Store.put(project);
+    return c.added + c.updated;
+  } catch (_) { return 0; }
 }
 
 /** On the owner's device: adopt now. Elsewhere: return the pending row for
@@ -175,7 +197,8 @@ export async function pullMagicplan(project) {
 }
 
 const adoptedToast = (c) => `Magicplan scan added: ${c.reports} report${c.reports === 1 ? "" : "s"}, ${c.photos} photo${c.photos === 1 ? "" : "s"}` +
-  (c.rooms ? `, ${c.rooms} room${c.rooms === 1 ? "" : "s"} measured` + (c.accepted ? "" : " (amber in Floor Plan — check them)") : "") + ".";
+  (c.rooms ? `, ${c.rooms} room${c.rooms === 1 ? "" : "s"} measured` + (c.accepted ? "" : " (amber in Floor Plan — check them)") : "") +
+  (c.esx ? ", ESX sketch in Supporting Docs" : "") + ".";
 
 /* ============================================================
    UI

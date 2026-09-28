@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import {
   mpFileId, mpFilePath, parsePhotoName, normalizeStatistics, dedupeRoomNames, splitAddress, projectName,
   mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF,
+  magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE,
 } from "../js/magicplancalc.js";
 import { siteFilePath, packetForDraft } from "../js/sitevisit.js";
 
@@ -123,7 +124,7 @@ test("an empty Floor Plan table takes measured rows accepted (conf 1) with their
   const m = mergeMeasuredRooms([], stats);
   assert.equal(m.accepted, true);
   assert.equal(m.added, 2);
-  assert.deepEqual(m.rows[0], { name: "Living Room", dims: "14' 6\" x 14' 9\"", floorSF: "214", perimLF: "58", ceiling: "8 ft", notes: "", conf: 1, source: "magicplan", unit: "ft" });
+  assert.deepEqual(m.rows[0], { name: "Living Room", dims: "14' 6\" x 14' 9\"", floorSF: "214", perimLF: "58", ceiling: "8 ft", notes: "", conf: 1, source: "magicplan", unit: "ft", volumeCF: 1715 });
   assert.equal(m.rows[1].ceiling, "8 ft");   // the room's own height is 0 → the floor's
 });
 test("a table someone already filled gets the measured rows amber, and keeps its own rows", () => {
@@ -237,6 +238,45 @@ test("the Bid card state walks not created → ready → received → imported �
   assert.equal(mpState(p).key, "imported");
   assert.equal(mpState(p, { userModified: "2026-09-26T20:00:00Z" }).key, "imported");
   assert.equal(mpState(p, { userModified: "2026-09-27T08:00:00Z" }).key, "updated");
+});
+
+/* ---------- M3: measured quantities into the draft packet ---------- */
+test("magicplanQuantities: the adopted scan becomes the packet's measured block (feet, dedupe labels), or nothing", () => {
+  const p = { id: "lead_42", siteVisit: { files: [] } };
+  assert.equal(magicplanQuantities(p.siteVisit), null);
+  adoptExport(p, { id: "x1", mp_project_id: "proj-1", mp_plan_id: "plan-1", synced_at: "2026-09-26T22:41:00Z", files: [], photos: [], statistics: normalizeStatistics(IMPERIAL), floors_svg: [] }, "2026-09-27T00:00:00Z");
+  const q = magicplanQuantities(p.siteVisit);
+  assert.equal(q.units, "imperial");
+  assert.equal(q.sourceUnits, "imperial");
+  assert.equal(q.scannedAt, "2026-09-26T22:41:00Z");
+  assert.equal(q.rooms[0].name, "Living Room");
+  assert.deepEqual(q.rooms[0], { name: "Living Room", floorSF: 214, perimLF: 58, ceilingFt: 8, wallSF: 465, wallSFNet: 403, doors: 2, windows: 3, volumeCF: 1715 });
+  assert.equal(packetForDraft(p.siteVisit).magicplanQuantities.rooms.length, q.rooms.length);   // rides the packet
+  assert.equal("magicplanQuantities" in packetForDraft({ files: [] }), false);                  // absent, not null, without a scan
+});
+test("the Pricing Basis sentence names the scan date and lands once", () => {
+  assert.equal(magicplanBasisSentence("2026-09-26T22:41:00Z"), "Quantities from Magicplan LiDAR scan dated Sep 26, 2026; wall areas net of openings.");
+  assert.equal(magicplanBasisSentence(""), "Quantities from Magicplan LiDAR scan; wall areas net of openings.");
+  const once = withMagicplanBasis("Fairbanks freight adds 12%.", "2026-09-26");
+  assert.equal(once, "Fairbanks freight adds 12%. Quantities from Magicplan LiDAR scan dated Sep 26, 2026; wall areas net of openings.");
+  assert.equal(withMagicplanBasis(once, "2026-09-26"), once);
+  assert.equal(withMagicplanBasis("", "2026-09-26"), "Quantities from Magicplan LiDAR scan dated Sep 26, 2026; wall areas net of openings.");
+});
+test("adoptEsx: the sketch becomes one Supporting Doc, replaced in place on a new file, never duplicated", () => {
+  const p = { id: "lead_42" };
+  const esx = { path: "sitevisit/lead_42/mp-abcdef01-Test.esx", name: "Test.esx", size: 4321, mime: "application/octet-stream", hash: "abcdef0123456789" };
+  assert.deepEqual(adoptEsx(p, esx, "2026-09-27T00:00:00Z"), { added: 1, updated: 0 });
+  assert.equal(p.supportDocs.length, 1);
+  assert.equal(p.supportDocs[0].id, "mp-esx-abcdef01");
+  assert.equal(p.supportDocs[0].title, ESX_DOC_TITLE);
+  assert.equal(p.supportDocs[0].mode, "file");
+  assert.deepEqual(p.supportDocs[0].uploadedPages, []);   // nothing prints, nothing for the AI to read
+  assert.deepEqual(p.supportDocs[0].file, esx);
+  assert.deepEqual(adoptEsx(p, esx), { added: 0, updated: 0 });
+  assert.deepEqual(adoptEsx(p, { ...esx, size: 5000 }), { added: 0, updated: 1 });
+  assert.equal(p.supportDocs.length, 1);
+  assert.deepEqual(adoptEsx(p, null), { added: 0, updated: 0 });
+  assert.deepEqual(adoptEsx(p, { path: "", hash: "" }), { added: 0, updated: 0 });
 });
 
 console.log(`\n${pass} passed`);

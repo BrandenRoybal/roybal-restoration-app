@@ -141,6 +141,7 @@ export function measuredRow(room, units, conf) {
     floorSF: cell(room.floorSF), perimLF: cell(room.perimLF),
     ceiling: num(room.ceilingFt) > 0 ? `${room.ceilingFt} ft` : "",
     notes: "", conf, source: "magicplan", unit: units === "metric" ? "m → ft" : "ft",
+    volumeCF: num(room.volumeCF) > 0 ? Math.round(num(room.volumeCF)) : 0,   // M3: measured room volume, offered to the dehu sizing
   };
 }
 export function mergeMeasuredRooms(rows, stats) {
@@ -158,7 +159,7 @@ export function mergeMeasuredRooms(rows, stats) {
     const i = out.findIndex((r) => r && r.source === "magicplan" && String(r.name || "").toLowerCase() === next.name.toLowerCase());
     if (i < 0) { out.push(next); added++; continue; }
     const prev = out[i];
-    const same = ["dims", "floorSF", "perimLF", "ceiling", "unit"].every((k) => String(prev[k] || "") === String(next[k] || ""));
+    const same = ["dims", "floorSF", "perimLF", "ceiling", "unit", "volumeCF"].every((k) => String(prev[k] || "") === String(next[k] || ""));
     if (same) continue;
     out[i] = { ...prev, ...next, notes: prev.notes || "" };
     updated++;
@@ -243,4 +244,72 @@ export function mpState(project, { pending = null, userModified = "" } = {}) {
     return { key: newer ? "updated" : "imported" };
   }
   return { key: "ready" };
+}
+
+/* ============================================================
+   M3 — measured quantities in the draft (design §5, brief §5)
+   ============================================================ */
+
+/** Measured rooms as the estimator reads them — the packet's optional
+    magicplanQuantities block. Built from the normalized statistics already
+    on the blob (feet after adoptExport), so units is always "imperial" here;
+    sourceUnits remembers what the scan was in. null when nothing measured. */
+export function magicplanQuantities(sv) {
+  const mp = sv && sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : null;
+  const stats = mp && mp.statistics && typeof mp.statistics === "object" ? mp.statistics : null;
+  if (!stats) return null;
+  const rooms = dedupeRoomNames(stats.floors).map((r) => ({
+    name: r.label || r.name,
+    floorSF: num(r.floorSF), perimLF: num(r.perimLF), ceilingFt: num(r.ceilingFt),
+    wallSF: num(r.wallSF), wallSFNet: num(r.wallSFNet),
+    doors: num(r.doors), windows: num(r.windows), volumeCF: num(r.volumeCF),
+  })).filter((r) => r.name && (r.floorSF > 0 || r.perimLF > 0 || r.wallSF > 0 || r.volumeCF > 0));
+  if (!rooms.length) return null;
+  return { scannedAt: String(mp.syncedAt || mp.importedAt || ""), units: "imperial", sourceUnits: stats.units === "metric" ? "metric" : "imperial", rooms };
+}
+
+/** "Sep 26, 2026" from an ISO stamp; the raw string when it isn't one. */
+const scanDate = (iso) => {
+  const s = String(iso || "");
+  const d = new Date(s.length === 10 ? s + "T00:00:00" : s);
+  return isNaN(d) ? s : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+};
+/** The Pricing Basis sentence the estimate carries when the draft had measured quantities. */
+export function magicplanBasisSentence(scannedAt) {
+  const when = scanDate(scannedAt);
+  return `Quantities from Magicplan LiDAR scan${when ? " dated " + when : ""}; wall areas net of openings.`;
+}
+/** Append that sentence to a draft's pricingNotes once (idempotent: a re-run
+    of the draft or a re-apply never doubles it). */
+export function withMagicplanBasis(pricingNotes, scannedAt) {
+  const notes = String(pricingNotes || "").trim();
+  if (/Quantities from Magicplan LiDAR scan/i.test(notes)) return notes;
+  const sentence = magicplanBasisSentence(scannedAt);
+  return notes ? notes + " " + sentence : sentence;
+}
+
+/* ---------- ESX sketch → Supporting Docs (claim jobs only) ----------
+   The proxy's esxExport action returns {path, name, size, mime, hash} for
+   the ExportConfig.XactimateEsx file the workspace's export configuration
+   produced, or nothing when the configuration doesn't include one. Same
+   hash → same entry, replaced in place; the sheet offers it as a download. */
+export const ESX_DOC_TITLE = "Magicplan ESX sketch (Xactimate)";
+export function adoptEsx(project, esx, at = new Date().toISOString()) {
+  if (!project || !esx || !esx.path || !esx.hash) return { added: 0, updated: 0 };
+  if (!Array.isArray(project.supportDocs)) project.supportDocs = [];
+  const id = "mp-esx-" + String(esx.hash).slice(0, 8);
+  const file = { path: esx.path, name: esx.name || "sketch.esx", size: num(esx.size), mime: esx.mime || "application/octet-stream", hash: String(esx.hash) };
+  const i = project.supportDocs.findIndex((d) => d && d.id === id);
+  if (i >= 0) {
+    const prev = project.supportDocs[i];
+    const same = ["path", "name", "size", "mime"].every((k) => String((prev.file || {})[k] || "") === String(file[k] || ""));
+    if (same) return { added: 0, updated: 0 };
+    project.supportDocs[i] = { ...prev, file, updatedAt: at };
+    return { added: 0, updated: 1 };
+  }
+  project.supportDocs.push({
+    id, by: "", createdAt: at, title: ESX_DOC_TITLE, docType: "Other", mode: "file",
+    uploadedPages: [], aiDigest: "", source: "magicplan", file,
+  });
+  return { added: 1, updated: 0 };
 }

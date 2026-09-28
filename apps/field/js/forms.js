@@ -5,6 +5,7 @@
 import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween, likelyOffline } from "./core.js";
 import { exportPhotosZip, exportPhotoLogPdf, archivePhotos, archivableCount, photoFullSrc } from "./photoexport.js";
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
+import { magicplanPlanChips } from "./magicplanplan.js";
 import { tombstoneItems } from "./merge.js";
 import {
   field, inp, ta, sel, seg, check, sigBlock, signOrUpload, photoUploader,
@@ -410,6 +411,16 @@ export function moistureMap(project, m) {
       pad.hasBackground() ? "🔄 Replace floor plan" : "📄 Import floor plan (PDF / image)");
     importBtn.addEventListener("click", () => fpInput.click());
     fpBox.append(importBtn);
+    // M3: the Magicplan floor SVG as the base plan — same crop/zoom path as an imported file
+    fpBox.append(magicplanPlanChips(project, {
+      onPick: async (url) => {
+        const cropped = await cropZoom(url);
+        pad.setBackground(cropped || url);
+        equipPad.setBackground(cropped || url);
+        toast("Magicplan floor plan added — draw on top");
+        renderFp();
+      },
+    }));
     if (pad.hasBackground()) {
       const cropBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "✂️ Crop / zoom");
       cropBtn.addEventListener("click", async () => {
@@ -526,7 +537,8 @@ function equipSizingSection(project, d) {
     resultsBox.append(
       h("p", { class: "subtle", style: "font-size:12px;margin:8px 0 4px" },
         `Sized ${fmtDate((c.at || "").slice(0, 10))} — Class ${c.inputs.waterClass || "?"} / Cat ${c.inputs.waterCategory || "?"}, ` +
-        `${c.inputs.sf.toLocaleString()} SF wet floor across ${c.inputs.rooms} room(s), ${c.inputs.volume.toLocaleString()} cu ft`),
+        `${c.inputs.sf.toLocaleString()} SF wet floor across ${c.inputs.rooms} room(s), ${c.inputs.volume.toLocaleString()} cu ft` +
+        (c.inputs.measuredVolumeRooms ? ` (📐 ${c.inputs.measuredVolumeRooms} room volume${c.inputs.measuredVolumeRooms === 1 ? "" : "s"} measured by Magicplan)` : "")),
       h("div", { class: "tablewrap" },
         h("table", { class: "grid" },
           h("colgroup", {}, h("col", { style: "width:150px" }), h("col", { style: "width:96px" }), h("col", { style: "width:80px" }), h("col", {}), h("col", { style: "width:150px" })),
@@ -554,6 +566,20 @@ function equipSizingSection(project, d) {
         list.append(chip);
       });
       controls.append(h("p", { class: "subtle", style: "font-size:12px;margin:4px 0" }, "Tap the AFFECTED rooms (wet-floor SF from the floor-plan takeoff):"), list);
+      // M3: rooms measured by the Magicplan scan carry their own volume —
+      // offered, never applied silently: on by default only when the Floor
+      // Plan accepted the measured rows (conf 1), amber otherwise.
+      const measured = planRooms.filter((r) => r.source === "magicplan" && parseFloat(r.volumeCF) > 0);
+      if (measured.length) {
+        const accepted = measured.every((r) => Number(r.conf) >= 1);
+        const on = d.calcMeasuredVol == null ? accepted : !!d.calcMeasuredVol;
+        const chip = h("button", { type: "button", class: "btn btn--sm " + (on ? "btn--primary" : "btn--ghost"),
+          style: "width:auto" + (on || accepted ? "" : ";border-color:#d99a2b;color:#8a5a00") },
+          `${on ? "✓ " : ""}📐 Use Magicplan room volumes (${measured.length} measured)`);
+        chip.title = accepted ? "Room volume from the LiDAR scan instead of floor × ceiling" : "The measured rows are still amber in the Floor Plan — check them, or use them here anyway";
+        chip.addEventListener("click", () => { d.calcMeasuredVol = !on; commit(); paintControls(); });
+        controls.append(h("div", { style: "margin:2px 0 6px" }, chip));
+      }
     } else {
       controls.append(
         h("p", { class: "subtle", style: "font-size:12px;margin:4px 0" },
@@ -594,6 +620,9 @@ function equipSizingSection(project, d) {
             dehuType: d.calcDehuType || "lgr", dehuPints: parseFloat(d.calcPints) || 70, dehuCFM: parseFloat(d.calcCFM) || 500,
             upperWetSF: parseFloat(d.calcUpperSF) || 0, insets: parseFloat(d.calcInsets) || 0,
             lowerWallsOnly: !!d.calcLowerWalls,
+            useMeasuredVolume: d.calcMeasuredVol == null
+              ? rooms.some((r) => r.source === "magicplan" && parseFloat(r.volumeCF) > 0) && rooms.filter((r) => r.source === "magicplan").every((r) => Number(r.conf) >= 1)
+              : !!d.calcMeasuredVol,
           });
           if (!out) { toast(planRooms.length ? "Tap at least one affected room first." : "Enter the wet floor SF / wall LF first."); return; }
           out.at = new Date().toISOString();
@@ -2960,11 +2989,33 @@ export function supportDocSheet(project, d) {
     attachedNote: "each prints as its own full page in the packet.",
   });
   upload.addEventListener("docpageschange", paintAi);
+  /* M3: a document that is a FILE rather than pages — the Magicplan ESX
+     sketch for the adjuster. It lives in field-media like the packet does
+     (never inside the job record) and is offered as a download; nothing
+     prints, the AI does not read it. */
+  const fileBox = h("div", { class: "app-only" });
+  if (d.file && d.file.path) {
+    const mb = d.file.size ? (d.file.size / 1048576).toFixed(d.file.size < 1048576 ? 2 : 1) + " MB" : "";
+    const dl = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto" }, "⬇ Download");
+    dl.addEventListener("click", async () => {
+      dl.disabled = true;
+      try {
+        const { downloadSiteFile } = await import("./supa.js");
+        const blob = await downloadSiteFile(d.file.path);
+        if (!blob) throw new Error("That file is no longer in storage — ⟳ Pull the Magicplan scan again");
+        downloadFile(d.file.name || "sketch.esx", blob, d.file.mime || "application/octet-stream");
+      } catch (e) { toast((e && e.message) || "Couldn't download the file", 4000); }
+      dl.disabled = false;
+    });
+    fileBox.append(h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 10px" },
+      h("span", {}, "📎 ", h("strong", {}, d.file.name || "file"), mb ? ` · ${mb}` : "", d.source === "magicplan" ? " · from the Magicplan scan" : ""), dl));
+  }
   return sheet("SUPPORTING DOCUMENT", "Third-Party Reports & Documents", "Supporting Document",
     h("div", { class: "grid2" },
       field("Document title", inp(d, "title", { placeholder: "e.g. Structural engineer's report — Smith" })),
       field("Type", sel(d, "docType", SUPPORT_DOC_TYPES, { placeholder: "Type…" }))),
     sectionTitle("Document"),
+    fileBox,
     h("div", { class: "app-only" }, upload, aiBar),
     digestBox);
 }
@@ -3152,6 +3203,27 @@ export function scopeOfWork(project, s) {
   const addAllow = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add allowance");
   addAllow.addEventListener("click", () => { s.allowances.push(blankAllowanceRow()); paintAllow(); commit(); });
 
+  /* Reference plans: carried over from a linked restoration job, and (M3) the
+     Magicplan floor plan on a tap — each floor once, tracked by its path. */
+  const plansBox = h("div");
+  function paintPlans() {
+    plansBox.replaceChildren();
+    if (s.referencePlans && s.referencePlans.length)
+      plansBox.append(sectionTitle("Reference Plans"), ...s.referencePlans.map((src) => h("img", { src, alt: "Reference plan", class: "docpage" })));
+    plansBox.append(magicplanPlanChips(project, {
+      label: "Add Magicplan floor plan",
+      onPick: (url, f) => {
+        if (!Array.isArray(s.referencePlans)) s.referencePlans = [];
+        if (!Array.isArray(s.magicplanPlanPaths)) s.magicplanPlanPaths = [];
+        if (s.magicplanPlanPaths.includes(f.path)) { toast("That floor plan is already on the sheet"); return; }
+        s.referencePlans.push(url); s.magicplanPlanPaths.push(f.path);
+        commit(); paintPlans();
+        toast("Magicplan floor plan added to the reference plans");
+      },
+    }));
+  }
+  paintPlans();
+
   return sheet("SCOPE OF WORK", "Construction / Remodel Work Description", "Scope of Work",
     h("div", { class: "grid3" },
       field("Date", inp(s, "date", { type: "date" })),
@@ -3159,9 +3231,7 @@ export function scopeOfWork(project, s) {
       field("Contract Amount", inp(project, "contractAmount", { type: "number", placeholder: "$" }))),
     jobInfo(project, ["customer", "address", "phone", "email"]),
     field("Project Summary", ta(s, "summary", { rows: 3 })),
-    s.referencePlans && s.referencePlans.length ? h("div", {},
-      sectionTitle("Reference Plans"),
-      ...s.referencePlans.map((src) => h("img", { src, alt: "Reference plan", class: "docpage" }))) : null,
+    plansBox,
     sectionTitle("Work by Room / Area"),
     areasWrap, addArea,
     sectionTitle("Allowances"),

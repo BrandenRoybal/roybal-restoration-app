@@ -37,6 +37,7 @@ import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDr
 import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
 import { magicplanBanner, officeRole } from "./magicplan.js";
+import { magicplanQuantities, withMagicplanBasis } from "./magicplancalc.js";
 import {
   FRAMES_PER_VIDEO, frameTimes, mmss, frameCaption, stillTimes, clipTooBig, WALK_MAX_BYTES, OVERSIZE_MSG, LONG_CLIP_SECONDS, LONG_CLIP_NOTE,
   roomFromOpening, magicplanRoomNames, captionStills, rebuildTranscript, adoptLegacyTranscript, clipNumber, clipLabel, walkSummary,
@@ -85,6 +86,8 @@ export function packetForDraft(sv) {
     notes: of("notes").map(pick),
     transcript: String((sv && sv.transcript) || ""),
     typedScope: String((sv && sv.typedScope) || ""),
+    // M3: measured rooms from the Magicplan scan (feet), or absent
+    ...(function () { const q = magicplanQuantities(sv); return q ? { magicplanQuantities: q } : {}; })(),
   };
 }
 export function packetReady(sv) {
@@ -438,7 +441,11 @@ export function siteVisitPanel(ctx) {
       const r = await checkSiteVisitDraft(project, job.batchId, job.pricingMode);
       if (r.status !== "done") { if (manual) toast("Still drafting."); paint(""); return; }
       const target = job.invId === inv.id ? inv : arr(project.reconEstimates).find((e) => e && e.id === job.invId) || inv;
-      const sum = applySiteDraft(target, r.draft || {});
+      const draft = r.draft || {};
+      // M3: the estimate's Pricing Basis says where measured quantities came from
+      const mq = magicplanQuantities(sv);
+      if (mq) draft.pricingNotes = withMagicplanBasis(draft.pricingNotes, mq.scannedAt);
+      const sum = applySiteDraft(target, draft);
       sv.pending = null;
       sv.lastDraftAt = new Date().toISOString();
       ctx.save();

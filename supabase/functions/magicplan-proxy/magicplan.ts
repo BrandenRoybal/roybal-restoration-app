@@ -197,6 +197,28 @@ export function workspaceOf(resp: unknown) {
     listingUrl: w.listing_url ? str(w.listing_url) : null, lastModified: str(w.last_modified),
   };
 }
+/** POST /plans/{id}/custom-export → {data: ProjectFile[]}; the one file the
+    workspace's export configuration generated as an Xactimate ESX sketch
+    (generated_by "ExportConfig.XactimateEsx"), or null when the
+    configuration has no ESX in it — the M3 feature check. The whole call is
+    idle in that case: nothing is stored, nothing is reported. */
+export const ESX_GENERATED_BY = "ExportConfig.XactimateEsx";
+export type EsxFile = { filename: string; mime: string; url: string; hash: string; size: number };
+export function esxOf(resp: unknown): { esx: EsxFile | null; files: number } {
+  const d = resp && typeof resp === "object" ? (resp as Json).data : null;
+  const list = arr<Json>(d).filter((f) => f && typeof f === "object");
+  const hit = list.find((f) => str(f.generated_by) === ESX_GENERATED_BY);
+  if (!hit) return { esx: null, files: list.length };
+  const file = (hit.file && typeof hit.file === "object" ? hit.file : {}) as Json;
+  const url = str(file.url);
+  if (!url) return { esx: null, files: list.length };
+  const filename = str(hit.filename) || "sketch.esx";
+  return {
+    esx: { filename, mime: str(hit.filetype) || "application/octet-stream", url, hash: str(file.hash), size: num(file.size) },
+    files: list.length,
+  };
+}
+
 /** {message, data} on a 4xx/5xx → one readable line. */
 export function mpErrorText(status: number, body: unknown, what: string) {
   const b = (body && typeof body === "object" ? body : {}) as Json;

@@ -117,13 +117,19 @@ export function equipmentCalc({
   rooms, waterClass, waterCategory, affT,
   ceiling = 8, dehuType = "lgr", dehuPints = 70, dehuCFM = 500,
   upperWetSF = 0, insets = 0, lowerWallsOnly = false,
+  useMeasuredVolume = false,   // M3: a room's Magicplan volumeCF instead of floor × ceiling, when it has one
 } = {}) {
   const am = airmoverCalc({ rooms, upperWetSF, insets, lowerWallsOnly });
   if (!am) return null;
   const rs = (rooms || []).filter((r) => r && (num(r.floorSF) > 0 || num(r.perimLF) > 0));
-  const volume = Math.round(rs.reduce((t, r) => t + num(r.floorSF) * (num(r.ceiling) || ceiling), 0));
+  const measuredOf = (r) => (useMeasuredVolume && num(r.volumeCF) > 0 ? Math.round(num(r.volumeCF)) : 0);
+  const measuredRooms = rs.filter((r) => measuredOf(r) > 0).length;
+  const volume = Math.round(rs.reduce((t, r) => t + (measuredOf(r) || num(r.floorSF) * (num(r.ceiling) || ceiling)), 0));
+  const measuredNote = measuredRooms ? ` — volume measured by the Magicplan scan for ${measuredRooms} of ${rs.length} room(s)` : "";
   const dehu = dehuCalc({ volume, waterClass, type: dehuType, ahamPints: dehuPints, cfmRating: dehuCFM });
+  if (dehu && dehu.basis && measuredNote) dehu.basis += measuredNote;
   const scrubbers = scrubberCalc({ volume, waterCategory });
+  if (scrubbers && scrubbers.count > 0 && measuredNote) scrubbers.basis += measuredNote;
   const t = parseFloat(affT);
   const heatKnown = Number.isFinite(t);
   const heat = heatKnown && t < 70;
@@ -132,6 +138,7 @@ export function equipmentCalc({
       rooms: rs.length, sf: am.floorSF, lf: am.perimLF, volume,
       waterClass: String(waterClass || ""), waterCategory: String(waterCategory || ""),
       affT: heatKnown ? t : null, ceiling, dehuType,
+      measuredVolumeRooms: measuredRooms,   // M3: how many rooms' volumes came from the scan (0 = all floor × ceiling)
     },
     airMovers: am,
     dehu,
