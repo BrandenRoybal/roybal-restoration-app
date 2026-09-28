@@ -74,7 +74,7 @@ export function helpPage(root) {
 
     sec("Offline & sync",
       ul(
-        ["Everything saves to the device first and works with zero signal; changes sync when you're back online — watch the status line under your email."],
+        ["Everything saves to the device first and works with zero signal; changes sync when you're back online — the dot in the top bar shows sync state, and 👤 on the jobs screen opens your account, the sync status line, ↻ Sync and Sign out. It opens by itself when you're not signed in or sync has a problem."],
         ["Photos, readings, and forms merge across devices, so two people can work the same job."],
         ["If a job looks stale on this device, sign out and back in to re-pull the latest from the cloud."])));
 }

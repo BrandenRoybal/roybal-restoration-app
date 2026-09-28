@@ -269,7 +269,11 @@ function updateSyncStatus(s) {
   updateNet();                      // a completed sync clears a stale red dot
   // refresh the account row if it's on screen
   const row = $("#acctRow");
-  if (row) row.replaceWith(accountRow());
+  if (row) {
+    const panel = row.parentElement;
+    row.replaceWith(accountRow());
+    if (panel && acctNeedsAttention()) panel.hidden = false;   // a sync issue comes out from behind 👤
+  }
 }
 function syncLabel() {
   if (!SYNC_ENABLED) return "";
@@ -334,6 +338,10 @@ function accountRow() {
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => { localStorage.removeItem(OFFLINE_KEY); route(); } }, "Sign in to sync"));
   }
   return row;
+}
+/* the account row shows itself (no tap on 👤 needed) when it wants action */
+function acctNeedsAttention() {
+  return !isSignedIn() || !!(lastSync && lastSync.state === "error");
 }
 function doSignOut() {
   if (!confirm("Sign out? Jobs stay saved on this device.")) return;
@@ -462,10 +470,20 @@ async function projectList() {
   const activeCount = (m) => byMode[m].filter((p) => !p.archivedAt).length;
   const bidsCount = (rows) => activeCount("bids") + (rows ? unlinkedLeadTiles(rows, projects, null).length : 0);
 
+  /* Account + sync lives behind 👤 so the list starts right under the tabs.
+     It stays out on screen when it needs someone: not signed in, or a sync
+     issue. The header dot still shows sync state at a glance. */
+  const acctPanel = h("div", { hidden: !(SYNC_ENABLED && acctNeedsAttention()) || null }, SYNC_ENABLED ? accountRow() : null);
+  const acctBtn = h("button", { class: "btn btn--ghost btn--sm", title: "Account and sync", "aria-expanded": String(!acctPanel.hidden) }, "👤");
+  acctBtn.addEventListener("click", () => {
+    acctPanel.hidden = !acctPanel.hidden;
+    acctBtn.setAttribute("aria-expanded", String(!acctPanel.hidden));
+  });
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "Jobs"),
       h("div", { style: "display:flex;gap:8px;flex:none" },
+        SYNC_ENABLED ? acctBtn : null,
         h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/help"), title: "How the app works" }, "❓"),
         SHOW_MY_WEEK ? h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/week"), title: "Your schedule from the Job Board" }, "📅 My Week") : null,
         h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job"))));
@@ -482,7 +500,7 @@ async function projectList() {
   });
   body.append(modeSeg);
 
-  if (SYNC_ENABLED) body.append(accountRow(), mediaQueueBanner({ onOpen: (id) => go(`#/p/${id}`) }));   // "2 clips waiting to upload · 410 MB"
+  if (SYNC_ENABLED) body.append(acctPanel, mediaQueueBanner({ onOpen: (id) => go(`#/p/${id}`) }));   // "2 clips waiting to upload · 410 MB"
 
 
   let paintLive = null;   // set when an active list is on screen

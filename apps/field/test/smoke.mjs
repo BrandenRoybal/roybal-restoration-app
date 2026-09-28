@@ -65,6 +65,8 @@ function setInput(el, val) {
   ok(/📐 Lead bids \(0\)[\s\S]*💧 Restoration \(0\)[\s\S]*🔨 Construction \(0\)/.test(text()), "tabs read Lead bids, Restoration, Construction in that order");
   ok(!/My Week/.test(text()), "no My Week button on the home screen while it is parked");
   ok(!/Add to Home Screen/.test(text()), "no add-to-home-screen tip");
+  ok(!!view().querySelector('button[title="Account and sync"]'), "account and sync sit behind the 👤 button");
+  ok(!view().querySelector("#acctRow").parentElement.hidden, "…but stay out on screen while nobody is signed in");
   [...view().querySelectorAll(".seg button")].find((b) => /Lead bids/.test(b.textContent)).click();
   await tick(40);
   ok(/No bids started yet/.test(text()) && !/No restoration jobs yet/.test(text()), "the Lead bids tab opens on its own list");
