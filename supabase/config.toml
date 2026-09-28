@@ -26,7 +26,9 @@
 # projects in the vendor account, while magicplan-webhook ran verify_jwt=true
 # and could therefore never be reached by the vendor's (JWT-less) webhook at
 # all. Both function directories are deleted; the code stays in git history
-# if Magicplan is ever revived.
+# if Magicplan is ever revived. 2026-09-25: a NEW magicplan-proxy
+# (verify_jwt=true + in-code gate) replaces the deleted one — see
+# docs/Magicplan_Integration_Design.md.
 
 project_id = "djpgvcvhvgrzgaziruze"
 
@@ -74,3 +76,6 @@ verify_jwt = true
 
 [functions.roybal-brief]
 verify_jwt = true
+
+[functions.magicplan-proxy]
+verify_jwt = true # holds the company Magicplan key; in-code default-deny ACTION_AUTH gate, office-only (docs/Magicplan_Integration_Design.md §2.2). A NEW function — not the era-0 one of the same name deleted 2026-09-06

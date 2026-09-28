@@ -2807,18 +2807,29 @@ export function floorPlanSheet(project, fp) {
     const tbody = h("tbody");
     const paintRows = () => {
       tbody.replaceChildren(...list.map((r) => {
+        // a LiDAR-measured row from the Magicplan lane (magicplancalc.js measuredRows):
+        // amber until accepted, and it says which unit it was measured in
+        const measured = r.source === "magicplan";
         const tr = h("tr", { class: Number(r.conf) < 0.7 ? "flag7" : "" });
         const actions = h("td", { class: "app-only", style: "white-space:nowrap" });
         if (Number(r.conf) < 0.7) {
-          const ok = h("button", { type: "button", class: "rowdel", style: "color:var(--green)",
-            title: "Confirm — I verified this room against the plan" }, "\u2713");
+          const ok = measured
+            ? h("button", { type: "button", class: "rowdel", style: "color:var(--green);white-space:nowrap",
+                title: "Accept this Magicplan measurement" }, "\u2713 Use measured")
+            : h("button", { type: "button", class: "rowdel", style: "color:var(--green)",
+                title: "Confirm — I verified this room against the plan" }, "\u2713");
           ok.addEventListener("click", () => { r.conf = 1; commit(); paintRows(); });
           actions.append(ok);
         }
         actions.append(h("button", { type: "button", class: "rowdel",
           onclick: () => { list.splice(list.indexOf(r), 1); paintRows(); recalc(); commit(); } }, "\u2715"));
+        const nameTd = taCell(r, "name", { minWidth: "110px" });
+        if (measured) {
+          nameTd.append(h("div", { class: "subtle app-only", style: "font-size:10px" },
+            r.unit === "metric" ? "📐 Magicplan · measured in metres, shown in ft" : "📐 Magicplan · measured in feet"));
+        }
         tr.append(
-          taCell(r, "name", { minWidth: "110px" }),
+          nameTd,
           boundCell(r, "dims", "100px"),
           boundCell(r, "floorSF", "56px", "text", recalc),
           boundCell(r, "perimLF", "56px", "text", recalc),
@@ -2833,7 +2844,7 @@ export function floorPlanSheet(project, fp) {
     addRoom.addEventListener("click", () => { list.push(blankRoom()); paintRows(); commit(); });
     dimsBox.append(
       sectionTitle("Room Dimensions (from the plan)"),
-      h("p", { class: "subtle app-only" }, "AI-read from the uploaded plan — verify each line against the plan and edit anything off. Amber rows were computed rather than printed: tap \u2713 once you have checked them. These quantities feed the AI invoice, rebuild scope and the assistant."),
+      h("p", { class: "subtle app-only" }, "AI-read from the uploaded plan — verify each line against the plan and edit anything off. Amber rows were computed rather than printed: tap \u2713 once you have checked them. These quantities feed the AI invoice, rebuild scope and the assistant. Rows tagged 📐 Magicplan are LiDAR-measured; tap ✓ Use measured to accept them."),
       h("div", { class: "tablewrap" },
         h("table", { class: "grid" },
           h("colgroup", {},

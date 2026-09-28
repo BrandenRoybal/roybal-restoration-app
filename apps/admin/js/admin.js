@@ -12,6 +12,7 @@ import { startSync, syncNow } from "../../js/sync.js";
 import { qbPanel, handleQbCallback } from "./qbconnect.js";
 import { qboPanel, handleQboCallback } from "./qboconnect.js";
 import { gmailPanel, handleGmailCallback } from "./gmailconnect.js";
+import { magicplanPanel, magicplanBusy } from "./magicplanconnect.js";
 import { messagesPanel } from "./messages.js";
 import { emailsPanel } from "./emailpanel.js";
 import { contactsTab, renderContactPage } from "./contacts.js";
@@ -43,8 +44,9 @@ function onStatus(s) {
   // contact page (its edit form would lose keystrokes to a background sync),
   // the campaigns composer (curation gone, and a rebuilt panel would hide a
   // send loop still running in a detached node — duplicate-SMS bait), or an
-  // open lead-triage form
-  if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy() && !leadsBusy()) route();
+  // open lead-triage form, or a Magicplan link/archive mid-flight (a half-picked
+  // "Link to job" would be wiped)
+  if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy() && !leadsBusy() && !magicplanBusy()) route();
 }
 
 /* ---------- routes (the CRM home's hash router — doc §13.1) ----------
@@ -52,7 +54,7 @@ function onStatus(s) {
    #/jobs        → the all-jobs table
    #/contacts    → the contact directory
    #/campaigns   → CF-5 campaigns
-   #/settings    → QB Time / QBO / Gmail connections
+   #/settings    → QB Time / QBO / Gmail connections + the Magicplan scan panel
    #/c/<id>      → a contact's page (CRM step 5)
    #/help        → how the office admin fits together */
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
@@ -123,7 +125,8 @@ function renderHelp() {
         h("strong", {}, "📊 Analytics"), "; and ",
         h("strong", {}, "⚙ Settings"), " — the ", h("strong", {}, "QuickBooks Time"), " (crew hours), ",
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
-        " (job-matched email) connections, set once and out of the way."),
+        " (job-matched email) connections, set once and out of the way, and ", h("strong", {}, "Magicplan"),
+        " (LiDAR scans: workspace status, recent scans, link an unmatched scan to a job, archive)."),
       p("Today opens with two stat rows. The lead row: ", h("strong", {}, "unworked leads"), " and ", h("strong", {}, "overdue follow-ups"), " (click either to jump to the inbox), the open ", h("strong", {}, "pipeline value"), " (estimated dollars across open leads), the ", h("strong", {}, "average first touch"), " — how fast someone reaches a new lead, measured from the moment it lands to the first action taken on it — then ", h("strong", {}, "site visits this week"), " and ", h("strong", {}, "estimates out with no answer for 5+ days"), ", the two places bids get stuck. Below it, the ops row: total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
     sec("🆕 Leads — the inbox for new business",
       p("Every open lead from every lane — website form, AI chat, phone line — newest first, with what the customer actually wrote or said shown in full (no more digging it out of a board chip's notes). The count on the tab is leads ", h("strong", {}, "nobody has touched yet"), "; the morning brief nags about them too."),
@@ -350,7 +353,7 @@ function renderSettings() {
   body.append(
     h("p", { class: "muted", style: "font-size:13px;margin:0 0 4px" },
       "Set-once connections. Each panel shows its status; reconnect from here if a password change breaks one."),
-    qbPanel(), qboPanel(), gmailPanel());
+    qbPanel(), qboPanel(), gmailPanel(), magicplanPanel());
 }
 
 boot();

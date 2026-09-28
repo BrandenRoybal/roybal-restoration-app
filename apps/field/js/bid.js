@@ -17,6 +17,8 @@
         coordination_job_patch (the rev-bumping shallow merge the office
         Leads Inbox already rides): site-visit done, and estimate sent
         (number, total, the log entry and the follow-up).
+     5. the 📐 Magicplan line on the Bid card — magicplan.js owns it (create
+        the project at scheduling, ⟳ Pull the scan into the packet).
 
    Ownership rule (docs §2.5): field owns the packet, the estimate and its
    total; board/admin own stage, outcome, follow-ups and dates.
@@ -25,6 +27,7 @@ import { h, Store, toast, fmtDate, uid, fileToDataURL } from "./core.js";
 import { rest, currentEmail, downloadSiteFile } from "./supa.js";
 import { tileCandidates, startBid, findBoardRow, isBidLead } from "./boardpush.js";
 import { jobType } from "./model.js";
+import { magicplanBidRow } from "./magicplan.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -534,6 +537,10 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
       });
     }
     wrap.append(line("📅", "Site visit", visitTxt, doneBtn));
+
+    // 📐 Magicplan — the scan lane (magicplan.js): state from the blob at once, refined when roles/tile/proxy answer
+    const mp = magicplanBidRow(project, d, { onChanged: () => (onChanged ? onChanged() : load()) });
+    wrap.append(line("📐", "Magicplan", mp.value, mp.btn));
 
     // 📎 Packet
     const packetTxt = [s.packet.files ? `${s.packet.files} file${s.packet.files === 1 ? "" : "s"}` : "",

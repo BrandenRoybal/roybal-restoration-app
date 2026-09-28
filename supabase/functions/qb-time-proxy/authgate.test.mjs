@@ -1,9 +1,9 @@
-/* The per-action auth gate on the three integration proxies — F-003.
+/* The per-action auth gate on the four integration proxies — F-003.
    Run: node --experimental-strip-types --test supabase/functions/qb-time-proxy/authgate.test.mjs
    (picked up by `npm run fn:test`, which globs every function dir's .test.mjs)
 
-   WHY one file for three functions: qbo-proxy, qb-time-proxy and gmail-proxy
-   all sit behind the same door — verify_jwt=true, which admits the publishable
+   WHY one file for four functions: qbo-proxy, qb-time-proxy, gmail-proxy and
+   magicplan-proxy all sit behind the same door — verify_jwt=true, which admits the publishable
    key committed at apps/field/js/config.js:8 and served on the public site. So
    they now share one gate design (ACTION_AUTH + authorize before dispatch) and
    one test asserting it holds. The index.ts files cannot be imported here (they
@@ -59,6 +59,15 @@ const EXPECTED = {
     disconnect: ["office"],
     pullInbox: ["cron", "user"],
     sendEmail: ["cron", "user"],
+  },
+  "magicplan-proxy": {
+    getWorkspace: ["office"],
+    createProject: ["office"],
+    status: ["office"],
+    sync: ["office"],
+    markImported: ["office"],
+    archiveProject: ["office"],
+    linkExport: ["office"],
   },
 };
 

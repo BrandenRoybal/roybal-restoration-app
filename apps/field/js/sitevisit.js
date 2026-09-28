@@ -22,6 +22,11 @@
         per-room summary kept on the estimate (inv.customerScope) for the
         customer portal.
 
+   The 📐 Magicplan lane (magicplan.js) drops a scan's report, photos and
+   measured rooms straight into this packet: the banner + auto-adopt
+   checkbox under the blurb and the small "Magicplan" tag on a file row are
+   its; a ✕ on such a row is remembered so a re-pull never resurrects it.
+
    The pure helpers at the top are Node-tested (test/sitevisit.test.mjs).
    ============================================================ */
 import { h, toast, fileToDataURL, uid } from "./core.js";
@@ -29,6 +34,7 @@ import { uploadSiteFile } from "./supa.js";
 import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft } from "./officeai.js";
 import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
+import { magicplanSection, noteMagicplanRemoved } from "./magicplan.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const MAX_IMAGES = 90;   // the server's limit (sitevisit.ts MAX_IMAGES): photos, stills and note pages together
@@ -339,12 +345,16 @@ export function siteVisitPanel(ctx) {
   function fileRow(f) {
     const del = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Remove from the packet" }, "✕");
     del.addEventListener("click", () => {
+      if (f.source === "magicplan") noteMagicplanRemoved(sv, f.id);   // a re-pull must not bring it back
       sv.files = sv.files.filter((x) => x.id !== f.id && x.videoId !== f.id);   // a video takes its stills with it
       if (f.kind === "audio") { sv.transcript = ""; sv.transcriptSeconds = 0; }
       ctx.save(); paint("");
     });
     return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px" },
       h("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.name || f.kind),
+      f.source === "magicplan"
+        ? h("span", { class: "subtle", style: "font-size:10px;border:1px solid #b9c4d4;border-radius:4px;padding:0 4px;white-space:nowrap" }, "Magicplan")
+        : null,
       h("span", { class: "subtle" }, f.kind === "videos" ? `${f.frames || 0} stills` : fmtSize(f.size || 0)), del);
   }
 
@@ -383,6 +393,9 @@ export function siteVisitPanel(ctx) {
 
   const imageCount = () => sv.files.filter((f) => f.path && (f.kind === "photos" || f.kind === "frames" || f.kind === "notes")).length;
 
+  // 📐 Magicplan: one stable node, re-parented by every paint, filled by refresh()
+  const mp = magicplanSection({ project, onAdopted: () => paint("") });
+
   function paint(status) {
     const job = sv.pending;
     const scope = h("textarea", { rows: "4", placeholder: "Type the scope the way you would in Claude: what's in, what's out, materials, anything the photos won't show.", style: "flex:1;min-width:0;font-size:13px" });
@@ -409,6 +422,7 @@ export function siteVisitPanel(ctx) {
       h("div", { style: "font-weight:700;font-size:14px;color:#16395a" }, "📋 Site visit"),
       h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
         "Add what you collected on the walk. The draft reads all of it, prices from the Fairbanks list, and fills this estimate room by room."),
+      mp.node,
       slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
       imageCount() > MAX_IMAGES
         ? h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },
@@ -430,6 +444,7 @@ export function siteVisitPanel(ctx) {
   }
 
   paint("");
+  mp.refresh();
   if (sv.pending) setTimeout(() => check(false), 0);   // came back to it: load it if it's done
   return root;
 }
