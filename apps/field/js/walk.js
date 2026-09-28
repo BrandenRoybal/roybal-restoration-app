@@ -55,10 +55,14 @@ export function stillTimes(duration) {
   return Array.from({ length: n }, (_, i) => Math.round((d * (i + 0.5) / n) * 100) / 100);
 }
 
-/* ---------- size rule (V0: no queue, no resumable upload yet) ---------- */
-export const WALK_MAX_SECONDS = 180;
-export const WALK_MAX_BYTES = 250e6;
-export const OVERSIZE_MSG = "Split it by room — under 3 minutes per clip. Bigger clips come in V1.";
+/* ---------- size rule (V1: queued, resumable uploads) ----------
+   The hard limits are what the queue will carry; the soft one is what
+   makes good scope notes — one room, one to three minutes. */
+export const WALK_MAX_SECONDS = 900;      // 15 minutes
+export const WALK_MAX_BYTES = 1e9;        // 1 GB (the Storage project limit was raised to match)
+export const OVERSIZE_MSG = "That clip is over the limit (15 minutes / 1 GB). Split it by room — one room per clip.";
+export const LONG_CLIP_SECONDS = 180;
+export const LONG_CLIP_NOTE = "Shorter clips make better scope notes — under 3 minutes per room is the sweet spot.";
 /** An unknown duration is not a refusal (the still puller decides then). */
 export function clipTooBig(duration, size) {
   const d = Number(duration);

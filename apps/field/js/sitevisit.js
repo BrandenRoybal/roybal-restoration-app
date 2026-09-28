@@ -30,14 +30,15 @@
 
    The pure helpers at the top are Node-tested (test/sitevisit.test.mjs).
    ============================================================ */
-import { h, toast, fileToDataURL, uid } from "./core.js";
-import { uploadSiteFile } from "./supa.js";
+import { h, toast, fileToDataURL, uid, likelyOffline } from "./core.js";
+import { uploadSiteFile, isSignedIn } from "./supa.js";
+import { enqueueMedia, queueRows, queueSummary, onMedia, retryMedia, removeMedia, drainMediaQueue, fmtMB } from "./mediaqueue.js";
 import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft } from "./officeai.js";
 import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
 import { magicplanBanner, officeRole } from "./magicplan.js";
 import {
-  FRAMES_PER_VIDEO, frameTimes, mmss, frameCaption, stillTimes, clipTooBig, WALK_MAX_BYTES, OVERSIZE_MSG,
+  FRAMES_PER_VIDEO, frameTimes, mmss, frameCaption, stillTimes, clipTooBig, WALK_MAX_BYTES, OVERSIZE_MSG, LONG_CLIP_SECONDS, LONG_CLIP_NOTE,
   roomFromOpening, magicplanRoomNames, captionStills, rebuildTranscript, adoptLegacyTranscript, clipNumber, clipLabel, walkSummary,
 } from "./walk.js";
 export { FRAMES_PER_VIDEO, frameTimes, frameCaption };   // moved to walk.js; callers and tests unchanged
@@ -47,7 +48,7 @@ export const MAX_IMAGES = 150;   // the server's limit (sitevisit.ts MAX_IMAGES)
 
 /* ---------- pure: packet shape ---------- */
 export const KINDS = {
-  walk:   { label: "🎥 Walk clips", accept: "video/*,.mp4,.mov", multiple: true, hint: "One clip per room, one to three minutes, say the room first. Each clip gives stills and a transcript. Needs signal to add (offline capture comes in V1)." },
+  walk:   { label: "🎥 Walk clips", accept: "video/*,.mp4,.mov", multiple: true, hint: "One clip per room, one to three minutes, say the room first. Each clip gives stills and a transcript. Works with no signal — clips upload themselves when the phone can." },
   report: { label: "Reports & drawings (PDF)", accept: "application/pdf,.pdf", multiple: true, hint: "The Magicplan report, plus any layout or customer list. Up to 4." },
   photos: { label: "Extra photos", accept: "image/*", multiple: true, hint: "Anything not already in the report." },
   notes:  { label: "Handwritten notes", accept: "image/*", multiple: true, hint: "A photo of each page." },
@@ -247,61 +248,70 @@ export function siteVisitPanel(ctx) {
   const busy = new Set();   // walk rows with a transcription in flight (one Deepgram call per tap)
 
   async function addFiles(kind, files) {
-    if (!aiAvailable()) return;
+    if (kind !== "walk" && !aiAvailable()) return;   // a walk clip is captured offline; only its transcript needs signal
     let added = 0;
     for (const file of files) {
       const id = uid();
       try {
         let blob = file, mime = file.type || "";
         if (kind === "walk") {
-          // a narrated clip: stills first (the packet gains pictures right
-          // away), then the clip itself, then its transcript
+          // A narrated clip, captured with or without signal. Order matters:
+          // the blob goes to the media queue FIRST (Safari drops the File the
+          // moment it reloads), then stills are pulled and queued too, and the
+          // queue uploads everything when the phone can. The transcript is
+          // asked for when the queue says the clip landed (onMedia below), or
+          // on the next open of this panel (reconcileQueue).
           const name = file.name || "walk.mov";
           if (file.size > WALK_MAX_BYTES) { toast(OVERSIZE_MSG, 4000); continue; }
-          paint(`Reading ${name}…`);
-          const duration = await videoDuration(file);
-          if (clipTooBig(duration, file.size)) { toast(OVERSIZE_MSG, 4000); continue; }
           const at = new Date().toISOString();
-          const row = { id, kind, name, mime: file.type || "video/mp4", size: file.size || 0, path: "", duration: isFinite(duration) ? duration : 0, frames: 0, room: "", at, status: "queued" };
-          const alive = () => sv.files.includes(row);   // ✕ mid-flight stops the work; nothing is re-added
+          const clipPath = siteFilePath(project.id, id, name);
+          const row = { id, kind, name, mime: file.type || "video/mp4", size: file.size || 0, path: clipPath, duration: 0, frames: 0, room: "", at, status: "queued" };
+          paint(`Saving ${name} on this phone…`);
+          await enqueueMedia({ id, projectId: project.id, kind: "walk", blob: file, mime: row.mime, name, path: clipPath });
           sv.files.push(row);
+          ctx.save();
+          const alive = () => sv.files.includes(row);   // ✕ mid-flight stops the work; nothing is re-added
           busy.add(id);
           try {
+            paint(`Reading ${name}…`);
+            const duration = await videoDuration(file);
+            row.duration = isFinite(duration) ? duration : 0;
+            if (clipTooBig(row.duration, file.size)) {
+              await removeMedia(id);
+              sv.files = sv.files.filter((x) => x.id !== id);
+              ctx.save();
+              toast(OVERSIZE_MSG, 5000);
+              continue;
+            }
+            if (row.duration > LONG_CLIP_SECONDS) toast(LONG_CLIP_NOTE, 4000);
             paint(`Pulling stills from ${name}…`);
             // a clip whose length the browser can't report still gets the silent-clip default (8 spread over it)
             const frames = await videoFrames(file, row.duration > 0 ? stillTimes(row.duration) : FRAMES_PER_VIDEO);
-            if (!frames.length) throw new Error("no frames came out of it");
             let i = 0;
             for (const fr of frames) {
               if (!alive()) break;
               i++;
-              paint(`Uploading stills from ${name} (${i} of ${frames.length})…`);
+              paint(`Saving stills from ${name} (${i} of ${frames.length})…`);
               const fid = uid(), sec = Math.round(fr.t);
               const fpath = siteFilePath(project.id, fid, `${name}-${sec}s.jpg`);
-              await uploadSiteFile(fpath, fr.blob, "image/jpeg");
-              if (!alive()) break;
-              sv.files.push({ id: fid, kind: "frames", videoId: id, name: `${name} @ ${sec}s`, path: fpath, mime: "image/jpeg", size: fr.blob.size, caption: frameCaption(clipLabel(row), sec, "walk clip"), at });
+              await enqueueMedia({ id: fid, projectId: project.id, kind: "frames", blob: fr.blob, mime: "image/jpeg", name: `${name} @ ${sec}s`, path: fpath });
+              if (!alive()) { await removeMedia(fid); break; }
+              sv.files.push({ id: fid, kind: "frames", videoId: id, name: `${name} @ ${sec}s`, path: fpath, mime: "image/jpeg", size: fr.blob.size, caption: frameCaption(clipLabel(row), sec, "walk clip"), at, queued: true });
               row.frames = i;
+              ctx.save();
             }
             if (!alive()) continue;
-            row.status = "uploading";
-            ctx.save();
-            paint(`Uploading ${name} (${fmtSize(file.size)})…`);
-            const clipPath = siteFilePath(project.id, id, name);
-            await uploadSiteFile(clipPath, file, row.mime);
-            if (!alive()) continue;
-            row.path = clipPath;   // set only once the object exists, so Transcribe never points at nothing
-            row.status = "uploaded";
             added++;
           } catch (e) {
-            // an unfinished clip is not a packet file: take the row and its stills back out
-            sv.files = sv.files.filter((x) => x.id !== id && x.videoId !== id);
-            throw e;
+            // the browser couldn't decode it for stills — the clip is still
+            // queued: Deepgram reads the audio track without them
+            if (alive()) toast(`No stills from ${name} (${e && e.message ? e.message : e}). The clip still uploads and transcribes.`, 5000);
           } finally {
             busy.delete(id);
           }
           ctx.save();
-          await transcribeWalk(row);
+          paint("");
+          drainMediaQueue().catch(() => {});
           continue;
         }
         if (kind === "videos") {
@@ -378,8 +388,9 @@ export function siteVisitPanel(ctx) {
   /* One narrated clip: transcript → room from the opening words (never
      guessed) → quotes on its stills → the flat transcript rebuilt. A failure
      leaves the row 'uploaded' with its Transcribe button as the retry. */
+  const canTalkToAi = () => isSignedIn() && !likelyOffline();   // the silent pre-check; aiAvailable() toasts
   async function transcribeWalk(row) {
-    if (!row || row.status !== "uploaded" || !row.path || busy.has(row.id) || !aiAvailable()) return;
+    if (!row || row.status !== "uploaded" || !row.path || busy.has(row.id) || !canTalkToAi() || !aiAvailable()) return;
     busy.add(row.id);
     paint(`Transcribing ${row.name}…`);
     try {
@@ -402,6 +413,8 @@ export function siteVisitPanel(ctx) {
   async function start(btn) {
     if (!aiAvailable()) return;
     if (!packetReady(sv)) { toast("Add the report, photos, notes, a recording or a typed scope first."); return; }
+    const waiting = await queueRows(project.id).catch(() => []);
+    if (waiting.length) { toast(`${waiting.length} file${waiting.length === 1 ? " is" : "s are"} still uploading — draft when the packet is complete.`, 4000); drainMediaQueue().catch(() => {}); return; }
     const hasItems = arr(inv.items).some((it) => String(it.desc || "").trim());
     if (hasItems && !window.confirm("When the draft is ready it replaces this estimate's line items. Start it?")) return;
     btn.disabled = true;
@@ -410,7 +423,7 @@ export function siteVisitPanel(ctx) {
       sv.pending = { batchId: r.batchId, invId: inv.id, startedAt: new Date().toISOString(), pricingMode: inv.pricingMode || "piecework" };
       ctx.save();
       paint("");
-      toast("Drafting from the site visit. This takes a few minutes; you can leave this page.");
+      toast("Drafting from the site visit. Usually 5–30 minutes, up to an hour on a busy day; you can leave this page.");
     } catch (e) {
       btn.disabled = false;
       toast("Couldn't start the draft: " + (e && e.message ? e.message : e), 4000);
@@ -447,7 +460,9 @@ export function siteVisitPanel(ctx) {
   function fileRow(f) {
     const del = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Remove from the packet" }, "✕");
     del.addEventListener("click", () => {
+      const gone = sv.files.filter((x) => x.id === f.id || x.videoId === f.id);
       sv.files = sv.files.filter((x) => x.id !== f.id && x.videoId !== f.id);   // a video takes its stills with it
+      for (const x of gone) if (x.kind === "walk" || x.queued) removeMedia(x.id).catch(() => {});   // never upload what was taken out
       // the flat transcript is derived from the rows; the storage object
       // stays — retention (design §2 decision 10) owns deletes, never a tap
       if (f.kind === "audio" || f.kind === "walk" || f.kind === "meeting") rebuildTranscript(sv);
@@ -463,16 +478,88 @@ export function siteVisitPanel(ctx) {
       h("span", { class: "subtle" }, f.kind === "videos" ? `${f.frames || 0} stills` : fmtSize(f.size || 0)), del);
   }
 
+  /* ---------- the media queue ↔ this packet ----------
+     The queue never writes to the job record; the panel reads the queue.
+     Live: onMedia events move a clip queued → uploading → uploaded (then
+     transcribe) or → failed. On open: reconcileQueue() settles what happened
+     while the panel was closed (a clip that is no longer queued has landed). */
+  const progress = new Map();   // clip id → % (chips update in place; a full repaint would eat the scope textarea's focus)
+  let qsum = null;              // this job's queue summary for the line under the walk slot
+  const refreshQueueSummary = async () => { try { qsum = await queueSummary(project.id); } catch { qsum = null; } };
+  const offMedia = onMedia(async ({ type, row: q }) => {
+    if (!q || q.projectId !== project.id) return;
+    if (!root.isConnected) { offMedia(); return; }
+    const f = sv.files.find((x) => x.id === q.id);
+    if (type === "progress") {
+      progress.set(q.id, q.pct);
+      if (f && f.kind === "walk") { f.status = "uploading"; paintChip(f); }
+      return;
+    }
+    await refreshQueueSummary();
+    if (type === "uploaded") {
+      progress.delete(q.id);
+      if (f && f.kind === "walk") { f.status = "uploaded"; ctx.save(); paint(""); await transcribeWalk(f); return; }
+      if (f && f.kind === "frames") { delete f.queued; ctx.save(); }
+      if (!qsum || !qsum.count) paint("");   // a still landing is not worth a repaint; the last one is
+      return;
+    }
+    if (type === "failed" || type === "error" || type === "paused" || type === "queued" || type === "removed") {
+      if (f && f.kind === "walk") { f.status = type === "failed" ? "failed" : "queued"; if (q.lastError) f.lastError = q.lastError; ctx.save(); }
+      paint("");
+    }
+  });
+  async function reconcileQueue() {
+    let rows = [];
+    try { rows = await queueRows(project.id); } catch { return; }
+    const q = new Map(rows.map((r) => [r.id, r]));
+    let changed = false;
+    for (const f of sv.files) {
+      if (!f) continue;
+      if (f.kind === "walk") {
+        const r = q.get(f.id);
+        if (r) { const st = r.status === "failed" ? "failed" : r.status === "uploading" ? "uploading" : "queued"; if (r.pct) progress.set(f.id, r.pct); if (f.status !== st) { f.status = st; changed = true; } }
+        else if (f.status === "queued" || f.status === "uploading" || f.status === "failed") { f.status = "uploaded"; changed = true; }   // landed while the panel was closed
+      } else if (f.kind === "frames" && f.queued && !q.has(f.id)) { delete f.queued; changed = true; }
+    }
+    await refreshQueueSummary();
+    if (changed) ctx.save();
+    paint("");
+    drainMediaQueue().catch(() => {});
+    // clips that landed but were never transcribed (the panel was closed, or it failed): one at a time
+    if (canTalkToAi()) for (const f of sv.files) if (f && f.kind === "walk" && f.status === "uploaded" && !(f.transcript && f.transcript.text)) await transcribeWalk(f);
+  }
+  function paintChip(f) {
+    const el = root.querySelector(`[data-clip="${f.id}"] .clipchip`);
+    if (el) el.textContent = chipText(f);
+  }
+  function chipText(f) {
+    if (busy.has(f.id)) return "working…";
+    if (f.status === "transcribed") return "transcribed ✓";
+    if (f.status === "uploaded") return "uploaded";
+    if (f.status === "failed") return "upload failed — tap retry";
+    const pct = progress.get(f.id);
+    if (f.status === "uploading" || pct) return `uploading ${pct || 0}%`;
+    return "queued — uploads when the phone has signal";
+  }
+
   /* A walk clip: "Kitchen · 2:14 · 12 stills · transcribed ✓", a Room field
      the owner can correct (the stills' quotes and the flat transcript follow),
-     and a Transcribe button while the transcript is missing. */
+     a Transcribe button while the transcript is missing, and a retry when
+     the upload gave up. */
   function walkRow(f, del) {
     const n = clipNumber(sv.files, f);
     const chip = (text, color) => h("span", { style: `font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;background:${color};white-space:nowrap` }, text);
-    const status = busy.has(f.id) ? chip("working…", "#fff4e5;color:#b45309")
-      : f.status === "transcribed" ? chip("transcribed ✓", "#e3f3e6;color:#2e7d32")
-      : f.status === "uploaded" ? chip("uploaded", "#e7eef7;color:#1e4a72")
-      : chip("not uploaded — remove it and add it again", "#fde8e8;color:#b42318");
+    const color = busy.has(f.id) ? "#fff4e5;color:#b45309"
+      : f.status === "transcribed" ? "#e3f3e6;color:#2e7d32"
+      : f.status === "uploaded" ? "#e7eef7;color:#1e4a72"
+      : f.status === "failed" ? "#fde8e8;color:#b42318"
+      : "#f1f3f6;color:#44556b";
+    const status = chip(chipText(f), color);
+    status.classList.add("clipchip");
+    if (f.status === "failed") status.title = f.lastError || "";
+    const retry = f.status === "failed"
+      ? h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", onclick: async () => { await retryMedia(f.id); f.status = "queued"; ctx.save(); paint(""); drainMediaQueue().catch(() => {}); } }, "Retry")
+      : null;
     const room = h("input", { type: "text", placeholder: `Clip ${n} — room?`, value: f.room || "", title: "The room this clip is about", style: "width:9em;font-size:12px;padding:2px 6px" });
     room.addEventListener("change", () => {   // change, not input: every save repaints the panel
       f.room = room.value.trim();
@@ -482,10 +569,10 @@ export function siteVisitPanel(ctx) {
     const tb = f.status === "uploaded" && !busy.has(f.id)
       ? h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", onclick: () => transcribeWalk(f) }, "Transcribe")
       : null;
-    return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px;flex-wrap:wrap" },
+    return h("div", { "data-clip": f.id, style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px;flex-wrap:wrap" },
       h("span", { style: "flex:1;min-width:8em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.room ? f.room : `Clip ${n}`,
         h("span", { class: "subtle" }, ` · ${mmss(f.duration || 0)} · ${f.frames || 0} stills`)),
-      room, status, tb, del);
+      room, status, retry, tb, del);
   }
 
   function slot(kind) {
@@ -534,6 +621,11 @@ export function siteVisitPanel(ctx) {
       ...(kind === "walk" && files.length > 1
         ? [h("div", { class: "subtle", style: "font-size:12px;margin-top:4px" }, (() => { const w = walkSummary(sv.files); return `${w.clips} clips · ${fmtMinutes(w.seconds)} · ${w.stills} stills`; })())]
         : []),
+      ...(kind === "walk" && qsum && qsum.count
+        ? [h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },
+            `📤 ${qsum.clips ? `${qsum.clips} clip${qsum.clips === 1 ? "" : "s"}` : `${qsum.count} file${qsum.count === 1 ? "" : "s"}`} waiting to upload · ${fmtMB(Math.max(0, qsum.bytes - qsum.bytesSent))}` +
+            (qsum.failed ? ` · ${qsum.failed} failed` : "") + (likelyOffline() ? " — no signal; it goes when you have it" : ""))]
+        : []),
       ...extra);
   }
 
@@ -555,7 +647,7 @@ export function siteVisitPanel(ctx) {
       ? h("div", { style: "margin-top:10px;padding:8px 10px;border-radius:8px;background:#fff4e5;border:1px solid #f0b463;font-size:13px" },
           h("strong", {}, "Drafting from the site visit"),
           h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
-            `Started ${ago(job.startedAt)}. It usually takes a few minutes. You can leave this page; open this estimate again to load it.`),
+            `Started ${ago(job.startedAt)}. It usually takes 5–30 minutes, up to an hour on a busy day. You can leave this page; open this estimate again to load it.`),
           checkBtn)
       : h("div", { style: "margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, go,
           sv.lastDraftAt ? h("span", { class: "subtle", style: "font-size:12px" }, `Last drafted ${ago(sv.lastDraftAt)}`) : null);
@@ -588,5 +680,6 @@ export function siteVisitPanel(ctx) {
 
   paint("");
   if (sv.pending) setTimeout(() => check(false), 0);   // came back to it: load it if it's done
+  setTimeout(() => { reconcileQueue().catch(() => {}); }, 0);   // what the queue did while this panel was closed
   return root;
 }

@@ -42,16 +42,17 @@ test("a narrated clip yields 8 to 24 stills, one per ten seconds past 80 s", () 
 });
 
 test("clips over three minutes or 250 MB are refused until V1; an unknown length is not", () => {
-  assert.equal(WALK_MAX_SECONDS, 180);
-  assert.equal(WALK_MAX_BYTES, 250e6);
-  assert.equal(clipTooBig(180, 1e6), false);
-  assert.equal(clipTooBig(180.01, 1e6), true);
-  assert.equal(clipTooBig(60, 250e6), false);
-  assert.equal(clipTooBig(60, 250e6 + 1), true);
+  assert.equal(WALK_MAX_SECONDS, 900);
+  assert.equal(WALK_MAX_BYTES, 1e9);
+  assert.equal(clipTooBig(900, 1e6), false);
+  assert.equal(clipTooBig(900.01, 1e6), true);
+  assert.equal(clipTooBig(60, 1e9), false);
+  assert.equal(clipTooBig(60, 1e9 + 1), true);
+  assert.equal(clipTooBig(200, 1e6), false, "over three minutes is a note, not a refusal (V1)");
   assert.equal(clipTooBig(NaN, 1e6), false);
   assert.equal(clipTooBig(Infinity, 1e6), false);
   assert.equal(clipTooBig(undefined, undefined), false);
-  assert.equal(OVERSIZE_MSG, "Split it by room — under 3 minutes per clip. Bigger clips come in V1.");
+  assert.equal(OVERSIZE_MSG, "That clip is over the limit (15 minutes / 1 GB). Split it by room — one room per clip.");
 });
 
 test("the opening is what was said in the first five seconds, else the first utterance", () => {

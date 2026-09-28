@@ -3,6 +3,7 @@
    No SDK: just fetch calls, to keep the app dependency-free.
    ============================================================ */
 import { SUPABASE_URL, SUPABASE_KEY, BUILD } from "./config.js";
+import { tusUpload } from "./tusup.js";
 import { noteNetworkOk } from "./core.js";
 
 const SESSION_KEY = "roybal-session";
@@ -237,6 +238,26 @@ export async function uploadSiteFile(path, blob, contentType) {
   if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
   if (res.status === 413) throw new Error("That file is larger than the storage upload limit");
   if (!res.ok && res.status !== 409) throw new Error("Upload failed (" + res.status + ")");
+}
+
+/* Big packet files (walk clips) go up resumably: tus at
+   /storage/v1/upload/resumable, 6 MiB chunks, resumable from the server's
+   offset after a drop (js/tusup.js). The queue (mediaqueue.js) persists
+   uploadUrl/offset between attempts and hands them back here. A 401 on the
+   first request refreshes the session once and retries. */
+export async function uploadSiteFileResumable(path, blob, contentType, opts = {}) {
+  await ensureFresh();
+  const headers = () => { const hd = authHeaders(); delete hd["Content-Type"]; return hd; };
+  const run = () => tusUpload({
+    endpoint: `${SUPABASE_URL}/storage/v1/upload/resumable`, headers,
+    bucket: MEDIA_BUCKET, path, blob, contentType: contentType || blob.type || "application/octet-stream",
+    uploadUrl: opts.uploadUrl || "", offset: opts.offset || 0, onProgress: opts.onProgress, signal: opts.signal,
+  });
+  try { return await run(); }
+  catch (e) {
+    if (e && e.status === 401 && session && session.refresh_token) { await refresh(); return run(); }
+    throw e;
+  }
 }
 
 /** Download one Site Visit packet file as a Blob; null when it's gone.
