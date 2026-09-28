@@ -62,12 +62,22 @@ function setInput(el, val) {
   await nav("#/");
   ok(/No restoration jobs yet/.test(text()), "empty job list renders");
   ok(/🔨 Construction \(0\)/.test(text()), "home screen shows the construction mode toggle");
+  ok(/📐 Lead bids \(0\)[\s\S]*💧 Restoration \(0\)[\s\S]*🔨 Construction \(0\)/.test(text()), "tabs read Lead bids, Restoration, Construction in that order");
+  ok(!/My Week/.test(text()), "no My Week button on the home screen while it is parked");
+  ok(!/Add to Home Screen/.test(text()), "no add-to-home-screen tip");
+  [...view().querySelectorAll(".seg button")].find((b) => /Lead bids/.test(b.textContent)).click();
+  await tick(40);
+  ok(/No bids started yet/.test(text()) && !/No restoration jobs yet/.test(text()), "the Lead bids tab opens on its own list");
+  [...view().querySelectorAll(".seg button")].find((b) => /Restoration/.test(b.textContent)).click();
+  await tick(40);
+  ok(/No restoration jobs yet/.test(text()), "back on Restoration");
 
   // 1b. ❓ Help renders, and its form list stays generated from FORMS
   await nav("#/help");
   ok(/How the app works/.test(text()), "help page renders");
   ok(FORMS.every((f) => text().includes(f.name)), "help lists every form from the registry");
-  ok(/My Week/.test(text()) && /confirm chip/.test(text()), "help covers My Week + the assistant");
+  ok(/confirm chip/.test(text()), "help covers the assistant");
+  ok(!/📅 My Week/.test(text()), "help leaves out My Week while it is parked (SHOW_MY_WEEK off)");
   await nav("#/");
 
   // 2. create a job -> edit screen

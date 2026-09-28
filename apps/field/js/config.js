@@ -22,7 +22,13 @@ export const SYNC_VIA_RPC = true;
 // which would let exactly the stale devices the server's min-build gate exists
 // to catch sail straight through it. Bump in lockstep with sw.js CACHE
 // (build.test.mjs fails the suite if the two drift).
-export const BUILD = "v188";
+export const BUILD = "v189";
+
+// My Week is parked (Sep 2026): until the Job Board's schedule feeds it
+// reliably it could show the crew wrong days, so the home-screen button and
+// its Help section are off. The #/week page and all its code stay — flip
+// this to true to bring it back.
+export const SHOW_MY_WEEK = false;
 
 // QuickBooks Time OAuth client id — PUBLIC (safe to ship). The Client Secret
 // and tokens live only in the qb-time-proxy Edge Function's secrets. Fill this
