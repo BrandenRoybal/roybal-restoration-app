@@ -311,6 +311,240 @@ override/ amount mode) + full field-app suite (581 checks, exit 0).
 
 ---
 
+## 10. Patterns mined from 40 past Xactimate estimates (2026-09-28)
+
+> **What this is.** A second, larger pass over your own estimates. 46 Xactimate exports went in;
+> after dropping duplicates and non-claim work, 40 remain: **17 mitigation, 18 full-scope
+> restoration, 3 small repair tickets, 1 combined tear-out-and-rebuild, 1 fire bid.** 13 jobs have
+> both a mitigation and a restoration estimate, which is what makes the put-back comparisons
+> below possible. Files with no mitigation/restoration label were classified from their contents.
+>
+> **How to read a count.** *x/y* — *y* is the number of rooms or estimates where the pattern
+> could apply, *x* is how many actually follow it. "Tendency" means under the 60% bar: listed so
+> you can promote it or kill it, not treated as a rule.
+>
+> **What is left out on purpose.** No prices, no Xactimate codes, no customer or job names. The
+> full count tables stay with the private data, outside this repo (the repo is public).
+>
+> **How to mark it.** Same legend as the rest of this doc — ✅ keep, ✏️ tweak (write the tweak),
+> ❌ not a rule, ➕ something missing. Put the mark after the pattern's number (`M3 ✅`), or just
+> reply with numbers ("R3 ✏️ only when the floor is replaced").
+
+### 10.1 Mitigation — job-level lines (17 estimates)
+
+- **M1** — Debris haul-off is on every mitigation estimate (17/17). Small and medium jobs get one
+  pickup load (9 estimates); big tear-outs get a dump trailer, dumpster or dump truck (8
+  estimates). Across all job types, 29 of the 36 haul lines are a single load.
+- **M2** — Drying equipment is on 15/17; air movers on 14/17. On plain water losses, air movers
+  and dehumidifiers appear together on 8/9.
+- **M3** — When air movers are billed, equipment setup / take-down / monitoring hours are billed
+  too (11/14), and so is equipment decontamination (10/14).
+- **M4** — Decontamination quantity is one per piece of equipment placed (air movers +
+  dehumidifiers + scrubbers + heaters): 8 of the 10 estimates that bill decon (3 itemize the
+  pieces in the line text, 5 more add up that way).
+- **M5** — Anti-microbial is on 11/17 mitigation estimates and in 43/67 mitigation rooms.
+- **M6** — Contents handling is on 10/17: labor hours, move-out-then-reset per room, boxes,
+  moving van, storage container and padlock.
+- **M7** — Category 3 tear-out variants are used on every sewage and mold job (3/3), on 3/4 freeze
+  jobs and on 1/9 plain water jobs.
+- **M8** — Freeze jobs (only 4 — too few to call a rule) add the plumber's paid bill as a
+  pass-through (3/4), crawlspace visqueen and drying heat.
+- **M9** — Cold-weather drying heat is on 5 estimates: indirect-fired furnace, temporary heaters
+  or IR panels.
+- **M10** — Final clean (3/17) and floor protection (5/17) are rare on mitigation estimates. They
+  belong to restoration.
+- Tendencies (under 60%):
+  - **M11** — Tech or cleaning labor hours: 9/17.
+  - **M12** — Emergency service call: 8/17.
+  - **M13** — Air scrubber: 8/17.
+  - **M14** — PPE: 5/17 — the mold job, 1 of the 2 sewage jobs and 3 plain water jobs.
+
+### 10.2 Restoration — job-level lines (18 estimates)
+
+- **R1** — Drywall is on 18/18. Debris haul is on 17/18; 16 of those 17 are pickup loads, 14 of
+  them exactly one load.
+- **R2** — Mask-for-paint by the LF 17/18, PVA seal 17/18, paint 17/18.
+- **R3** — Floor protection 12/18, new baseboard 12/18, final construction clean 11/18.
+- **R4** — Contents are moved back on 6/18 — 5 of the 8 pairs where the mitigation estimate packed
+  contents out, repeating the hours, the moving van and another container month.
+- **R5** — Dust containment is on 6 of 19 restoration or combined estimates: a barrier plus zipper
+  door, tension posts × days, and an air scrubber for 3–5 days. The default barrier is 48 SF (4
+  estimates).
+
+### 10.3 Room level — mitigation (67 rooms in 15 estimates)
+
+- **MR1** — Flooring out → baseboard out: 51/52 rooms (13/13 estimates).
+- **MR2** — A flood cut → baseboard out 34/35 rooms (9/9 estimates), flooring out 31/35 (9/9),
+  anti-microbial 28/35 (6/9).
+- **MR3** — Hard flooring out → drywall out: 28/30 rooms (12/12 estimates).
+- **MR4** — Carpet out → pad out at the same SF: 19/19 rooms (4/4 estimates).
+- **MR5** — Wet insulation out → drywall out: 14/15 rooms (6/7 estimates).
+- **MR6** — A door slab removed → baseboard and flooring removed too: 20/20 rooms (6 estimates).
+- **MR7** — Bathroom (10 rooms, 8 estimates): flooring, drywall and baseboard out 10/10; toilet
+  9/10; door 8/10; vanity 7/10; tub or shower 7/10; anti-microbial 6/10; flood cut 6/10. Where the
+  toilet comes out, the vanity also comes out in 7/9 and the tub or shower in 7/9 (6/7 estimates).
+- **MR8** — Bedroom (11 rooms, 6 estimates): flooring and baseboard 11/11, pad 10/11, carpet 8/11.
+- **MR9** — Closet (12 rooms, 7 estimates): flooring and baseboard 12/12, drywall 9/12, flood cut
+  8/12, anti-microbial 8/12.
+- **MR10** — Laundry (5 rooms): flood cut and baseboard 5/5. Utility (5 rooms): anti-microbial
+  5/5. Hallway (5 rooms): flooring 5/5.
+
+### 10.4 Room level — restoration (74 rooms in 18 estimates)
+
+- **RR1** — New drywall → PVA seal 54/57 rooms (17/18 estimates), paint 54/57, mask 53/57,
+  baseboard 40/57 (12/18 estimates), floor protection 34/57 (12/18 estimates).
+- **RR2** — A flood-cut band → mask 39/41, seal 38/41, two-coat paint 38/41, baseboard 37/41, new
+  floor 37/41 (10–11 of 11 estimates); baseboard painted or stained 25/41 (6/11 estimates).
+- **RR3** — New hard floor → baseboard 29/33 rooms (10/12 estimates), floor protection 21/33
+  (7/12). Floor prep for resilient flooring is on 8/12 estimates, but only in 16/33 rooms.
+- **RR4** — New carpet → pad 19/20 rooms (4/5 estimates), baseboard 18/20, baseboard painted or
+  stained 18/20.
+- **RR5** — Baseboard installed → painted or stained in 34/50 rooms (7/12 estimates).
+- **RR6** — A toilet goes back → new floor plus drywall, seal and paint 8/8 (6/6 estimates); door
+  6/8; vanity, faucet or tub/shower items 5/8 each.
+- **RR7** — Bathroom (12 rooms, 10 estimates): seal, two-coat paint and drywall 12/12; mask 11/12;
+  floor protection 9/12; new hard floor 9/12; door 8/12; toilet 8/12.
+- **RR8** — Bedroom (11 rooms): baseboard 10/11, new floor 10/11, mask 9/11, baseboard painted
+  9/11, carpet and pad 8/11.
+- **RR9** — Closet (14 rooms): new floor 14/14, baseboard 13/14, mask 12/14, flood cut with seal
+  and paint 10/14, baseboard painted 9/14.
+- **RR10** — Living (8 rooms): drywall, mask, seal and two-coat paint 8/8; baseboard 6/8. Laundry
+  (6 rooms): mask and drywall 6/6; seal, paint, baseboard and flood cut 5/6.
+
+### 10.5 Quantities
+
+- **Q1** — Restoration copies the mitigation quantities room by room: flood-cut LF comes back as
+  the same LF of drywall band (31/32 rooms, 9 pairs); removed floor SF comes back as the same SF of
+  new floor, pad or prep (42/42 rooms, 11 pairs); baseboard LF comes back the same (37/44 rooms —
+  in 5 rooms none came back, see D3); pad 19/19, toilets 7/7, vanities 5/5, doors 15/15.
+- **Q2** — Flood-cut LF = baseboard LF: 23/37 restoration rooms (8/10 estimates) and 22/34
+  mitigation rooms (7/9 estimates).
+- **Q3** — Flood-cut LF = mask-for-paint LF: 29/39 rooms (9/10 estimates).
+- **Q4** — Paint covers the full height of the affected walls, not just the patch: total painted SF
+  ≈ 8 × the flood-cut LF in 30/38 rooms (8/10 estimates). The exceptions are 4-ft cuts and paneled
+  walls.
+- **Q5** — You have split seal and paint three ways (see D4):
+  - March 2026 (3 estimates, 16 rooms): seal only the 2-ft band (LF × 2), paint the full wall two
+    coats (LF × 8).
+  - May–June 2026 (4 estimates): seal plus two coats on the lower third of the wall (LF × 2.64),
+    then one coat on the upper two-thirds. The one-coat SF is twice the two-coat SF in 13/19 rooms.
+  - Seal plus two coats on the full wall: 3 estimates.
+- **Q6** — Two-coat paint SF = seal SF in 30/54 rooms (13/17 estimates).
+- **Q7** — Floor protection SF = new floor SF: 21/27 rooms (7/8 estimates).
+- **Q8** — Floor prep SF = net floor SF before waste: 12/15 rooms.
+- **Q9** — Pad SF = net floor SF. Carpet is pad + 15% waste (9 rooms, 2 estimates) or equal to the
+  pad (10 rooms, 2 estimates). Sheet vinyl gets +15% (6/7 rooms).
+- **Q10** — Painted or stained baseboard LF = baseboard LF: 19/19 rooms (5 estimates). Trim stain
+  LF = baseboard + casing LF: 13/15 rooms (2 estimates). Tack strip LF = baseboard LF: 7/7 rooms
+  (2 estimates).
+- **Q11** — Casing is 17 LF per door opening: 20/28 casing lines (6 estimates). A double bifold
+  closet gets 19 LF.
+- **Q12** — Removed pad SF = removed carpet SF: 19/19 rooms.
+- **Q13** — Final clean SF is the floor area of the work area: exactly the sum of the affected
+  rooms' floor SF on 4 estimates, otherwise the whole level or the containment area.
+- **Q14** — Drying days stated in the line text: 2, 3, 4, 4 and 5.
+- Tendencies (under 60%):
+  - **Q15** — Setup / monitoring ≈ 1 hour per drying day: 5/9 estimates.
+  - **Q16** — One dehumidifier per 3.3–4.5 air movers (by unit-days): 5/9 estimates.
+
+### 10.6 Activity choices
+
+- **AC1** — Mitigation never uses remove-and-replace. Wet porous materials are removed only:
+  drywall 51/53 lines (14 estimates), carpet 19/19, pad 23/23, baseboard 51/52, hard floors 29/30,
+  insulation 15/17. Every exception is on the mold job, which included its own rebuild.
+- **AC2** — Restoration bills new material as replace-only, because the removal is already on the
+  mitigation estimate: baseboard 40/40 lines (11 estimates), carpet 13/13, pad 12/12, hard floor
+  28/30, drywall 43/50, vanity 6/6, tub 5/5, insulation 4/4.
+- **AC3** — Restoration uses remove-and-replace only for items the mitigation estimate never removed
+  (crawlspace visqueen, heat covers, ceilings): 3 of the 4 estimates that use it.
+- **AC4** — The pairing across the two estimates is consistent. Detach in mitigation ↔ reset in
+  restoration (one job: toilet, sink, washer, dryer, refrigerator, range, countertop, heat covers).
+  Remove in mitigation ↔ a new item in restoration (3 toilet pairs, 2 vanity pairs, appliances on
+  3 pairs).
+- **AC5** — Toilets: removed in mitigation (5 estimates) or detached (2); new in restoration (5
+  estimates) or reset (1).
+- **AC6** — Vanities: removed in mitigation on 4 estimates; new in restoration 5/5.
+- **AC7** — Door slabs: removed in mitigation (20/21 lines, 6 estimates); in restoration reset (14
+  lines, 2 estimates) or replaced (5 lines, 3 estimates).
+- **AC8** — Appliances: removed in mitigation (16/20 lines); in restoration 8 lines are new and 7
+  are reset or remove-and-reset.
+- **AC9** — Detach-and-reset for undamaged items that are in the way (lights, towel bars, shower
+  doors, mirrors, faucet trim, shelving, heat covers, door slabs): 12 estimates.
+- **AC10** — Hydronic baseboard-heat covers are detached and reset, or removed and replaced, so the
+  drywall band can be cut out: 4 jobs.
+
+### 10.7 What you consistently bill that engines commonly forget
+
+- **F1** — Debris haul: 34/35 estimates.
+- **F2** — Equipment decontamination (10/14) and setup / monitoring hours (11/14) whenever air
+  movers are billed.
+- **F3** — Mask by the LF plus PVA seal before paint (17/18 restoration estimates), with paint at
+  full wall height (30/38 rooms).
+- **F4** — Floor protection equal to the floor SF: 12/18.
+- **F5** — Final construction clean: 11/18.
+- **F6** — Putting back everything mitigation removed, at the same quantity. Baseboard is the
+  most-missed item.
+- **F7** — Painting or staining new baseboard: 7/12.
+- **F8** — Floor prep under resilient flooring: 8/12.
+- **F9** — Casing at 17 LF per door.
+- **F10** — Anti-microbial after tear-out: 11/17.
+- **F11** — Contents out and back, including moving van, container and padlock.
+- **F12** — Tack strip and stair-step charges with carpet (only 2 estimates).
+- **F13** — Cold-weather drying heat (5 estimates) and the plumber's paid bill on freeze jobs
+  (3/4).
+- **F14** — Dust containment plus a scrubber during restoration drywall work: 6/19.
+- **F15** — Emergency service call (8/17), and PPE on Category 3 and mold jobs.
+- **F16** — Crawlspace visqueen with seam tape (5 estimates) and hydronic heat covers (4 jobs).
+
+### 10.8 Where the data disagrees with confirmed rules
+
+Your confirmed rules above still win; these are the places your own past estimates did something
+different, so you can say which one is right.
+
+- **D1** — **Final clean and floor protection.** The engine's finish chain says *always* include a
+  final construction clean and floor / surface protection on a restoration (§3.3, §5), but they
+  appear on only 11/18 and 12/18 restoration estimates. Either the past estimates missed them or
+  they depend on the job. The engine keeps "always" until you mark this.
+- **D2** — **PPE in the Cat 3 package.** §2.6 *always* bills PPE consumables on a Cat 3 job, but
+  PPE appears on only 1 of the 2 sewage jobs. The engine keeps the confirmed package.
+- **D3** — **Baseboard put-back.** In 5 of 44 restoration rooms the baseboard that mitigation
+  removed did not come back. That looks like a miss, not a rule — the engine now checks every
+  room for it.
+- **D4** — **Seal and paint split.** The split changed between March and May 2026 (Q5). The engine
+  uses the May method: seal plus two coats on the lower third of the wall, one coat on the upper
+  two-thirds, with paint covering the full height of the affected walls. The confirmed chain in
+  §3.1 (mask → prime → two coats) still holds for the patch itself. Mark Q5 if a different method
+  is what you want now.
+
+### 10.9 What the engine now carries
+
+- **Two blocks of text, `houseMitigation` and `houseRestoration`,** returned by `estimatingRules()`
+  in `supabase/functions/roybal-ai-office/pricing.ts`. They condense the patterns above that clear
+  the 60% bar — plus a few lower-support ones stated with the condition that triggers them (about
+  one setup hour per drying day; contents back in when mitigation packed them out; dust
+  containment in an occupied home) — into "include each unless the evidence shows it does not
+  apply here." No prices, no codes, no names.
+- **Where they go.** A reconstruction-estimate draft gets `houseRestoration`; a mitigation invoice
+  draft gets `houseMitigation`; a site-visit draft on a claim job gets both; the supplement audit
+  gets the one that matches what it is checking. A construction (non-claim) site visit gets
+  neither. A site visit from a field app older than v192 (it sends no job type) is drafted as a
+  claim and gets both blocks, but never the private price reference below.
+- **They sit below your confirmed rules.** Each block comes after the confirmed inclusion rules it
+  belongs with and is worded as a house pattern, not a mandate. Each block's header says so to the
+  model in so many words: *"If a pattern here conflicts with a confirmed rule above, the rule above
+  wins."* Where a pattern and a confirmed rule disagree (D1, D2), the confirmed rule wins. When you
+  mark a pattern ✏️ or ❌, the block text changes to match.
+- **Prices are a separate matter.** The prices on these same estimates are kept as a private,
+  owner/office-only reference that never lives in this repo — see
+  `docs/architecture/04-OPEN-QUESTIONS.md` C9 and ADR-12. Nothing in this section is a price. The
+  reference never offers or stamps a job-specific lump sum (a bid item, an agreed price, a paid
+  bill, an allowance or discount, or a line carrying that job's own quantities such as "2 units x
+  5 days"): those rows stay loaded but are not unit prices. Dropping the reference tables stops new
+  reference pricing only; lines already drafted keep their reference note on the job record.
+
+---
+
 *Draft generated from 18 past PDF estimates (8 mitigation, 9 restoration, 1 carrier) spanning
-Freeze, Water, and Fire losses. Customer identities intentionally omitted. ESX files were
-encrypted (Verisk proprietary) and could not be read directly.*
+Freeze, Water, and Fire losses; §10 from a second pass over 40 estimates. Customer identities
+intentionally omitted. ESX files were encrypted (Verisk proprietary) and could not be read
+directly.*

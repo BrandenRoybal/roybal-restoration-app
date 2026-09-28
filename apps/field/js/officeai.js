@@ -170,9 +170,15 @@ function photoAiSummary(project) {
   }
   return out.slice(0, 40);
 }
+/* The job's kind rides the facts as job.jobType ("construction" or
+   "restoration"): the office function keeps the claim-only pricing tier (the
+   owner's past-Xactimate reference) and the claim house patterns off a
+   construction job, and treats facts without it (an older client) as unknown. */
+const withJobType = (f, project) => ({ ...f, job: { ...(f.job || {}), jobType: jobType(project) } });
+
 export function invoiceFacts(project) {
   return {
-    ...narrativeFacts(project),
+    ...withJobType(narrativeFacts(project), project),
     labor: laborSummary(project),
     photoFindings: photoAiSummary(project),
   };
@@ -210,7 +216,7 @@ export function auditInvoice(project, inv, pricingMode) {
    digest (demo extent, plan dimensions, contents loss) and the edge
    prompt writes proposed repair scope, not billing for performed work. */
 function reconEstimateFacts(project) {
-  return { ...rebuildFacts(project), labor: laborSummary(project), photoFindings: photoAiSummary(project) };
+  return { ...withJobType(rebuildFacts(project), project), labor: laborSummary(project), photoFindings: photoAiSummary(project) };
 }
 /* Scope interview — verify rebuild scope BEFORE drafting. One adaptive question
    at a time; returns { done, question, options, why, scopeSummary }. The client

@@ -12,7 +12,9 @@
  *                   applies them into the project blob (photos stay ≤1600px
  *                   JPEG data URLs from fileToDataURL, so they are small).
  *   invoiceDraft  — Xactimate-style invoice line items drafted from the
- *                   narrativeFacts() digest + the price catalog.
+ *                   narrativeFacts() digest + the price catalog. On piecework
+ *                   claims the owner's past Xactimate estimates are a flagged
+ *                   REFERENCE fallback tier (./pricing.ts; owner/office only).
  *   invoiceAudit  — compares the current invoice items against the digest
  *                   and returns documented-but-unbilled suggestions.
  *   adjusterEmail — claim-submission email (subject + body) from the digest
@@ -66,7 +68,13 @@ import {
   PERSONAS, CTX_LABELS, SPOKEN_RULE, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS,
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
-import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody, parseBatchResult } from "./sitevisit.ts";
+import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
+// line-item pricing (catalog + reference tiers, the estimating rules) — pure,
+// Node-tested in ./pricing.test.mjs
+import {
+  catalogTextFromRows, referenceTextFromRows, estimatingRules, auditCodeRule, resolveLines, referenceAllowed, fetchAllPages, kindOfFacts,
+  type CatalogRow, type RefRow, type DraftLine, type PricingMode, type ResolveOpts,
+} from "./pricing.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -424,8 +432,8 @@ const DRAFT_SCHEMA = {
           unit: { type: "string", description: "EA, SF, LF, HR, Day or LS" },
           price: { type: "number", description: "Unit price in DOLLARS. Your best estimate — it is OVERRIDDEN by the catalog's authoritative price whenever category+code match a real line, so it only stands for lines you cannot map to a catalog code." },
           basis: { type: "string", description: "The documentation this line traces to (equipment log, moisture map, hours...)" },
-          category: { type: "string", description: "The Xactimate CATEGORY code of the catalog line you are billing (e.g. 'DRY', 'PNT', 'LAB'). Empty string ONLY if no catalog line fits." },
-          code: { type: "string", description: "The Xactimate SELECTOR/code from the price catalog you are billing (e.g. '1/2', 'AC', 'DMO'). Must be a code that appears in the provided catalog. Empty string ONLY if no catalog line fits." },
+          category: { type: "string", description: "The Xactimate CATEGORY code of the catalog line you are billing (e.g. 'DRY', 'PNT', 'LAB'). Empty string ONLY if no catalog line fits (nor an XACTIMATE REFERENCE row, when that list is provided)." },
+          code: { type: "string", description: "The Xactimate SELECTOR/code from the price catalog you are billing (e.g. '1/2', 'AC', 'DMO'). Must be a code that appears in the provided catalog — or, only when no catalog line fits, in the XACTIMATE REFERENCE list when one is provided. Empty string ONLY if neither fits." },
           priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: 'replace' = install/put-back unit price; 'remove' = tear-out/demo; 'detach_reset' = detach & reset; 'labor' = an hourly LAB trade rate (T&M); 'estimate' = no catalog match, price is your own estimate." },
         },
       },
@@ -444,120 +452,75 @@ function catalogText(catalog: unknown): string {
    The model drafts scope and tags each line with the Xactimate
    category+code+priceBasis it is billing; resolvePrices() then stamps the
    AUTHORITATIVE unit price from public.price_list, so prices always come from
-   the sheet, never the model. Two pricing modes:
+   the sheet, never the model. The pure half (prompt text, the estimating
+   rules, the catalog → reference → estimate resolver) is ./pricing.ts; this
+   half only reads the rows under the caller's JWT.
      piecework — unit price carries labor+material: replace_price (put-back),
                  remove_price (demo/tear-out) or detach_reset_price (D&R).
      tm        — labor bills hourly at the trade's LAB rate (× hours); materials,
                  equipment and pass-throughs price per unit from their own rows.
    ============================================================ */
-type CatalogRow = {
-  category: string; code: string; description: string; unit: string | null;
-  replace_price: number | null; remove_price: number | null; detach_reset_price: number | null;
-};
-type PricingMode = "piecework" | "tm";
 // Categories offered to the model per mode (kept scoped so the prompt stays lean).
 const RECON_CATS = ["DRY", "PNT", "INS", "FNC", "FRM", "ACT", "APP"]; // reconstruction put-back trades
 const TM_CATS = ["LAB"];                                               // T&M prices labor from the sheet's LAB rates; materials are ESTIMATED, not piecework
 const catsForMode = (mode: PricingMode) => (mode === "piecework" ? RECON_CATS : TM_CATS);
 
+/** Every price_list row in these categories. Paged: one `limit=5000` request
+    came back cut at PostgREST's max-rows (1000), so whole categories never
+    reached the prompt or the price stamp. Fail-soft: a read error prices
+    nothing from the catalog (every line stays an estimate), never throws. */
 async function fetchCatalogRows(jwt: string, categories: string[]): Promise<CatalogRow[]> {
   if (!categories.length) return [];
   const inList = categories.map((c) => encodeURIComponent(c)).join(",");
-  const res = await db(
-    `price_list?select=category,code,description,unit,replace_price,remove_price,detach_reset_price&category=in.(${inList})&order=category,code&limit=5000`,
-    jwt, { method: "GET" });
-  if (!res.ok) return [];
-  return ((await res.json().catch(() => [])) as CatalogRow[]) ?? [];
-}
-
-const money = (n: number | null) => (n == null ? "—" : `$${Number(n).toFixed(2)}`);
-
-/** Compact catalog block for the prompt: CATEGORY CODE | description | unit | prices. */
-function catalogTextFromRows(rows: CatalogRow[], mode: PricingMode): string {
-  if (mode === "tm") {
-    // T&M uses ONLY these hourly labor rates from the sheet. Materials are estimated
-    // by the model (no piecework unit prices), so no material catalog is sent.
-    const labor = rows.filter((r) => r.category === "LAB" && r.unit === "HR" && (r.replace_price ?? 0) > 0);
-    const laborTxt = labor.map((r) => `LAB ${r.code} | ${r.description} | HR | ${money(r.replace_price)}`).join("\n");
-    return `LABOR RATES — category LAB, billed HOURS × rate (the ONLY catalog prices in T&M):\n${laborTxt}`;
+  // id breaks ties so the page boundaries are stable (unique is market+category+code)
+  const path = `price_list?select=category,code,description,unit,replace_price,remove_price,detach_reset_price&category=in.(${inList})&order=category,code,id`;
+  try {
+    return await fetchAllPages<CatalogRow>(async (from, to) => {
+      const res = await db(path, jwt, { method: "GET", headers: { Range: `${from}-${to}` } });
+      if (!res.ok) { await res.text().catch(() => ""); return { ok: false, status: res.status, rows: [] }; }
+      const rows = await res.json();
+      return { ok: true, status: res.status, rows: Array.isArray(rows) ? rows : [] };
+    });
+  } catch (e) {
+    console.warn(`price_list read failed — drafting without catalog prices: ${e instanceof Error ? e.message : String(e)}`);
+    return [];
   }
-  // piecework: drop $0 placeholders (Bid/Agreed) and material-only sheet rows (SH)
-  const usable = rows.filter((r) => (r.replace_price ?? 0) > 0 || (r.remove_price ?? 0) > 0);
-  return usable.map((r) =>
-    `${r.category} ${r.code} | ${r.description} | ${r.unit} | replace ${money(r.replace_price)}`
-    + (r.remove_price != null ? ` | tear-out ${money(r.remove_price)}` : "")
-    + (r.detach_reset_price != null ? ` | D&R ${money(r.detach_reset_price)}` : "")
-  ).join("\n");
 }
 
-/** Stamp authoritative prices from the catalog onto drafted/suggested lines. */
-type DraftLine = {
-  room?: string; desc?: string; qty?: number; unit?: string; price?: number; basis?: string; reason?: string;
-  category?: string; code?: string; priceBasis?: string;
-};
-async function resolvePrices(items: DraftLine[], jwt: string, mode: PricingMode): Promise<DraftLine[]> {
+/** The owner's past Xactimate estimates as a reference price tier (see
+    ./pricing.ts). Read through xact_ref_prices_for under the caller's JWT:
+    owner/office get rows, everyone else gets none by design, and before the
+    table exists on a database the call 404s. Every failure is [] — the
+    reference tier is optional and must never break a draft. */
+async function fetchReferenceRows(jwt: string): Promise<RefRow[]> {
+  try {
+    return await fetchAllPages<RefRow>(async (from) => {
+      const res = await db(`rpc/xact_ref_prices_for?order=category,code,activity,unit&limit=1000&offset=${from}`, jwt,
+        { method: "POST", body: "{}" });
+      if (!res.ok) { await res.text().catch(() => ""); return { ok: false, status: res.status, rows: [] }; }
+      const rows = await res.json();                  // a parse failure throws → [] below
+      return { ok: true, status: res.status, rows: Array.isArray(rows) ? rows : [] };
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/\(404\)/.test(msg)) console.warn(`xact reference read failed — no reference prices: ${msg}`);
+    return [];
+  }
+}
+
+
+/** Stamp authoritative prices onto drafted/suggested lines: read the catalog
+    rows for the categories the lines use (and the reference rows when the tier
+    applies and the caller has not already read them), then resolveLines(). */
+async function resolvePrices(items: DraftLine[], jwt: string, opts: ResolveOpts, refRows?: RefRow[]): Promise<DraftLine[]> {
   const list = Array.isArray(items) ? items : [];
   const cats = [...new Set(list.map((i) => i.category).filter((c): c is string => !!c))];
   const rows = cats.length ? await fetchCatalogRows(jwt, cats) : [];
-  const byKey = new Map(rows.map((r) => [`${r.category}::${r.code}`, r] as const));
-  return list.map((it) => {
-    const { priceBasis: basis, ...rest } = it;
-    const row = it.category && it.code ? byKey.get(`${it.category}::${it.code}`) : undefined;
-    if (!row) return { ...rest, priced: "estimate" };
-    // GUARDRAIL: an hourly LAB rate may ONLY bill an HR line. If the model tags a
-    // line priceBasis='labor' but leaves an area/count unit (SF/LF/EA), applying the
-    // hourly rate would multiply it by the AREA (e.g. $81.27/hr × 508 SF = $41k for a
-    // 3-hour tear-out). Refuse to price it and flag for manual crew-hours instead.
-    if (basis === "labor" && String(it.unit || "").toUpperCase() !== "HR") {
-      return { ...rest, price: undefined, code: row.code, priced: "flag",
-        priceFlag: `${row.code} is an hourly labor rate (${money(row.replace_price)}/HR) — bill this as HR × crew-hours, not per ${it.unit || "unit"}` };
-    }
-    const col = basis === "remove" ? row.remove_price
-      : basis === "detach_reset" ? row.detach_reset_price
-      : row.replace_price; // "replace" | "labor" both live in replace_price
-    if (col == null || col <= 0) return { ...rest, priced: "estimate" };
-    return { ...rest, price: col, code: row.code, catalogDesc: row.description, unit: it.unit || row.unit || "", priced: "catalog" };
-  });
+  const ref = referenceAllowed(opts) ? (refRows ?? await fetchReferenceRows(jwt)) : [];
+  return resolveLines(list, rows, ref, opts);
 }
 
-/* The company estimating rules shared by every line-item draft: the pricing
-   mode (piecework vs T&M), the common line conventions, and Roybal inclusion
-   rules distilled from Branden's past estimates (docs/Estimating_Rules_Draft.md). */
-function estimatingRules(pm: PricingMode) {
-  const codeRule =
-    "- EVERY line MUST be tagged with the catalog line it bills: set `category` + `code` to a real row from the PRICE CATALOG and `priceBasis` to how it is priced. The catalog's authoritative Fairbanks price OVERRIDES your `price`, so your number only stands when NO catalog code fits (then category=\"\" code=\"\" priceBasis=\"estimate\", and price it at a fair Fairbanks rate).\n";
-  const pricingRules =
-    pm === "piecework"
-      ? "PRICING MODE — PIECEWORK (Xactimate unit-priced): each line's unit price carries BOTH labor and material.\n" +
-        "- priceBasis: 'replace' for install / put-back, 'remove' for tear-out / demo, 'detach_reset' for detach & reset. The catalog lists replace / tear-out / D&R prices per row.\n" +
-        codeRule
-      : "PRICING MODE — TIME & MATERIALS: this bills LABOR HOURLY at the sheet's trade rates and MATERIALS at your ESTIMATED cost. It does NOT use Xactimate piecework unit prices — the only catalog prices are the LABOR RATES.\n" +
-        "- LABOR lines: category='LAB', code = the trade doing the work (DMO demolition, CLN-R remediation cleaning, CLN cleaning, LBR general laborer, DRY drywall, PNT painter, INS insulation, FLR flooring, CARPFRM framer, CARPFNC finish carpenter, ELE electrician, PLM plumber, EQU equipment operator, SUPERR residential supervision), priceBasis='labor', unit MUST be 'HR', qty = ESTIMATED CREW-HOURS.\n" +
-        "  · NEVER put an area/count (SF/LF/EA) on a labor line — convert the task to hours. E.g. tear out ~500 SF drywall ceiling ≈ 3-4 crew-hours (NOT qty 500); hang/finish ~500 SF drywall ≈ 16-20 hrs. A labor line with a non-HR unit is a hard error.\n" +
-        "  · The sheet's LAB rate is stamped automatically — put the trade code and the hours; leave price 0.\n" +
-        "- MATERIAL lines: category='' code='' priceBasis='estimate'. Estimate a fair MATERIAL-ONLY cost per unit (drywall board, mud/tape, insulation, paint, primer, trim, fasteners, poly) — unit = SF/LF/EA, qty = the material quantity. Materials-only, NO labor baked in (labor is the HR lines). These stay flagged for the office to true-up against receipts.\n" +
-        "- Equipment / consumables / pass-through (dehumidifier & air-mover days, dumpster/haul, PPE) also go as priceBasis='estimate' at a fair cost.\n" +
-        "- Do NOT emit a single per-SF assembly price that covers labor + material — that double-bills labor. Split every assembly into LABOR (hours) + MATERIAL (estimate).\n";
-  const commonRules =
-    "- Group every line into its room/area via the room field (Xactimate style); job-wide lines (debris, floor protection, final clean, permits) go under 'Main Level'.\n" +
-    "- On Cat 3 jobs, removal/handling lines carry the qualifier (e.g. 'cut/bag - Cat 3 water'); Cat 1/2 jobs omit it.\n" +
-    "- Descriptions are plain English as Xactimate reads — never include catalog code abbreviations, never repeat the room name in the description.\n" +
-    "- lossSummary: 2-3 sentences. No overhead/profit/tax lines (applied separately). Prices in DOLLARS.\n";
-  // Roybal company estimating standards — the "what to include" judgment distilled
-  // from Branden's past estimates (see docs/Estimating_Rules_Draft.md).
-  const inclusionUniversal =
-    "ROYBAL INCLUSION RULES (company estimating standards — apply within the scope above):\n" +
-    "- DETACH & RESET vs REMOVE & REPLACE: REPLACE (remove + install new) when an item is DAMAGED by the loss, OR the loss is Category 3 (facts.job.waterCategory = '3') AND the item is a POROUS material (plywood, particleboard, MDF, fiberboard). Otherwise an undamaged item detached only to dry the assembly behind it is DETACH & RESET. Apply to vanities, cabinets, toilets, trim, doors.\n" +
-    "- LABOR MINIMUMS: never auto-add a trade labor minimum to pad a small quantity — carriers flag and cut them. At most note in lossSummary that one may apply; do not insert the line.\n";
-  const inclusionMitigation =
-    "- CATEGORY 3 PACKAGE: when facts.job.waterCategory is '3' (black / contaminated water), ALWAYS bill EVERY one of — containment barrier, negative-air / HEPA air scrubber (per 24 hr × days), floor protection over unaffected paths, HEPA vacuuming of affected surfaces, antimicrobial application, and PPE CONSUMABLES billed as equipment replacement (Tyvek / Type-X suits, HEPA / P100 respirator cartridges, gloves, boot covers). Never omit any of these on a Cat 3 job.\n" +
-    "- HEPA FILTER REPLACEMENT: with any HEPA / negative-air scrubber on the job, add a filter-replacement line, qty = (# scrubbers) × (1.0 on Cat 3 or mold — filter contaminated, must be discarded; else 0.5 — proportional filter life). State the reason in the basis.\n" +
-    "- DRYING EQUIPMENT — DO NOT GUESS QUANTITIES: bill from facts.equipmentSizing.recommended (IICRC S500 worksheet counts already computed on site: airMoversLow/High, dehumidifiers, dehuType, airScrubbers, auxiliaryHeat) × the DEPLOYED unit-days in facts.equipment (unitDays) — fallback facts.drying.days. Air movers & dehumidifiers bill per-24-hr period × unit-days. Dehumidifiers are LGR RENTALS in 70 / 110 / 130 PPD sizes. If facts.equipmentSizing is null, size conservatively and say so in the basis.\n";
-  const inclusionRestoration =
-    "- PUT-BACK COMPLETENESS: every tear-out / flood cut / removal in facts.demoNotes and facts.affectedAreas needs its FULL rebuild — removed flooring → floor prep + flooring + transitions; drywall → hang, tape, texture, prime, two coats paint; baseboard / trim / paneling → reinstall; detached fixtures → reset or replace per the rule above. Leave no demo line without its put-back.\n" +
-    "- FINISH CHAIN: any new or patched drywall → mask & prep → PVA primer (one coat) → paint (two coats); any flooring install → a floor-prep line first. Always include a final construction cleaning line and floor / surface protection.\n";
-  return { pricingRules, commonRules, inclusionUniversal, inclusionMitigation, inclusionRestoration };
-}
+const countPriced = (lines: DraftLine[], how: string) => lines.filter((i) => i.priced === how).length;
 
 async function invoiceDraft(body: Record<string, unknown>) {
   const facts = body.facts;
@@ -571,10 +534,16 @@ async function invoiceDraft(body: Record<string, unknown>) {
     body.pricingMode === "tm" || body.pricingMode === "piecework"
       ? (body.pricingMode as PricingMode)
       : estimate ? "piecework" : "tm";
+  const kind = kindOfFacts(facts);
+  const opts: ResolveOpts = { mode: pm, kind };
   const rows = await fetchCatalogRows(jwt, catsForMode(pm));
   const catText = catalogTextFromRows(rows, pm);
+  // the owner's past Xactimate estimates: a fallback tier on piecework claims only
+  const refRows = referenceAllowed(opts) ? await fetchReferenceRows(jwt) : [];
+  const refText = referenceTextFromRows(refRows, rows);
 
-  const { pricingRules, commonRules, inclusionUniversal, inclusionMitigation, inclusionRestoration } = estimatingRules(pm);
+  const { pricingRules, commonRules, inclusionUniversal, inclusionMitigation, inclusionRestoration, houseMitigation, houseRestoration } =
+    estimatingRules(pm, { reference: !!refText });
   const scopeFraming =
     estimate
       ? "Draft the RECONSTRUCTION ESTIMATE line items — the proposed scope to REBUILD the structure after mitigation (future work, not billing for performed work).\n" +
@@ -591,10 +560,14 @@ async function invoiceDraft(body: Record<string, unknown>) {
     pm === "tm" && !estimate
       ? "- RECONCILE HOURS: HR quantities across ALL labor lines MUST sum to facts.labor.totalHours. Split facts.labor.entries into trade-specific labor lines by their work notes; bill any remainder as one 'General mitigation labor' (LAB / LBR) line so no logged hour goes unbilled. Moisture mapping / monitoring visits bill hourly, never as flat per-visit fees.\n"
       : "";
-  const inclusionRules = inclusionUniversal + (estimate ? inclusionRestoration : inclusionMitigation);
+  // the house patterns mined from past claim estimates sit below the confirmed
+  // inclusion rules — claim jobs only (a remodel has no mitigation to put back)
+  const house = kind === "claim" ? (estimate ? houseRestoration : houseMitigation) : "";
+  const inclusionRules = inclusionUniversal + (estimate ? inclusionRestoration : inclusionMitigation) + house;
   const content =
     scopeFraming + "\n" + pricingRules + hourRule + commonRules + "\n" + inclusionRules + "\n" +
     "PRICE CATALOG (tag each line with a CATEGORY + CODE from here — Fairbanks Xactimate):\n" + catText + "\n\n" +
+    (refText ? refText + "\n\n" : "") +
     "DOCUMENTED FACTS (use ONLY these):\n```json\n" + JSON.stringify(facts, null, 2) + "\n```";
 
   const { input, usage } = await forcedTool({
@@ -613,12 +586,12 @@ async function invoiceDraft(body: Record<string, unknown>) {
     maxTokens: 16384,
   });
   const drafted = Array.isArray((input as { items?: DraftLine[] }).items) ? (input as { items: DraftLine[] }).items : [];
-  const priced = await resolvePrices(drafted, jwt, pm);
+  const priced = await resolvePrices(drafted, jwt, opts, refRows);
   (input as Record<string, unknown>).items = priced;
   return {
     result: { draft: input },
     usage, model: DOC_MODEL,
-    summary: { items: priced.length, mode: pm, catalog_priced: priced.filter((i) => (i as { priced?: string }).priced === "catalog").length },
+    summary: { items: priced.length, mode: pm, catalog_priced: countPriced(priced, "catalog"), reference_priced: countPriced(priced, "reference") },
   };
 }
 
@@ -641,8 +614,8 @@ const AUDIT_SCHEMA = {
           unit: { type: "string" },
           price: { type: "number", description: "Unit price in DOLLARS — overridden by the catalog price when category+code match." },
           reason: { type: "string", description: "The specific documentation supporting this missed line" },
-          category: { type: "string", description: "Xactimate CATEGORY code of the catalog line billed (e.g. 'DRY','LAB'); empty only if none fits." },
-          code: { type: "string", description: "Xactimate SELECTOR/code from the catalog (e.g. '1/2','DMO'); empty only if none fits." },
+          category: { type: "string", description: "Xactimate CATEGORY code of the catalog line billed (e.g. 'DRY','LAB'), or of an XACTIMATE REFERENCE row when no catalog line fits and that list is provided; empty only if none fits." },
+          code: { type: "string", description: "Xactimate SELECTOR/code from the catalog (e.g. '1/2','DMO'), or from the XACTIMATE REFERENCE list when no catalog line fits and that list is provided; empty only if none fits." },
           priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: replace/remove/detach_reset unit price, hourly 'labor' LAB rate, or 'estimate' when uncataloged." },
         },
       },
@@ -659,14 +632,19 @@ async function invoiceAudit(body: Record<string, unknown>) {
     body.pricingMode === "tm" || body.pricingMode === "piecework"
       ? (body.pricingMode as PricingMode)
       : estimate ? "piecework" : "tm";
+  const kind = kindOfFacts(facts);
+  const opts: ResolveOpts = { mode: pm, kind };
   const rows = await fetchCatalogRows(jwt, catsForMode(pm));
   const catText = catalogTextFromRows(rows, pm);
+  const refRows = referenceAllowed(opts) ? await fetchReferenceRows(jwt) : [];
+  const refText = referenceTextFromRows(refRows, rows);
+  // the drafter's own rule text, so the audit's house checklist cannot drift from it
+  const rules = estimatingRules(pm, { reference: !!refText });
   const items = Array.isArray(body.items) ? body.items as Array<{ room?: string; desc: string; qty: string; unit: string; price: string }> : [];
   const itemsText = items.length
     ? items.map((it) => `- [${it.room || "Main Level"}] ${it.desc} | ${it.qty} ${it.unit} @ $${it.price}`).join("\n")
     : (estimate ? "(the estimate is currently empty)" : "(the invoice is currently empty)");
-  const codeRule =
-    "- Tag every suggestion with the catalog line it bills: set category + code from the PRICE CATALOG and priceBasis (replace/remove/detach_reset/labor). The catalog price is authoritative and overrides your price; use category=\"\" code=\"\" priceBasis=\"estimate\" only when nothing fits.\n";
+  const codeRule = auditCodeRule(!!refText);
   const modeRule =
     pm === "piecework"
       ? "PRICING MODE — PIECEWORK: unit-priced lines (labor+material inside the unit price); priceBasis 'replace' for put-back, 'remove' for demo, 'detach_reset' for D&R. Never hourly T&M.\n"
@@ -677,10 +655,12 @@ async function invoiceAudit(body: Record<string, unknown>) {
       : (pm === "tm"
           ? "MOST IMPORTANT CHECK — hour reconciliation: compare total HR billed across the current hourly lines to facts.labor.totalHours; if logged hours are unbilled, suggest labor line(s) at the appropriate trade rate that bill the gap, describing the work from the labor entries' notes. Unbilled logged hours are lost revenue. Also flag missing equipment-rental days, materials and pass-throughs — including facts.receipts not yet billed.\n"
           : "MOST IMPORTANT CHECK: flag documented scope, equipment days, materials and pass-throughs the facts support but the current lines omit — including facts.receipts not yet billed.\n");
-  // Roybal inclusion checklist — mirror of the drafter's rules (docs/Estimating_Rules_Draft.md)
-  const inclusionCheck = estimate
+  // Roybal inclusion checklist — mirror of the drafter's rules (docs/Estimating_Rules_Draft.md),
+  // plus the matching house-pattern block on claim jobs
+  const inclusionCheck = (estimate
     ? "ROYBAL INCLUSION CHECKS — also flag when missing: any tear-out in facts.demoNotes without its put-back (floor prep + flooring + transitions; drywall hang / tape / texture / prime / two-coat paint; baseboard / trim reinstall); missing final construction cleaning; missing mask-&-prep or PVA primer before paint. Do NOT suggest trade labor minimums (carriers cut them).\n"
-    : "ROYBAL INCLUSION CHECKS — also flag when missing: on Cat 3 (facts.job.waterCategory '3') any of containment barrier, negative-air / HEPA scrubber, floor protection, HEPA vacuuming, antimicrobial, PPE consumables (Tyvek suits, HEPA / P100 cartridges, gloves, boot covers), or the HEPA filter replacement; drying-equipment days that don't match facts.equipmentSizing.recommended × facts.equipment unit-days. Do NOT suggest trade labor minimums (carriers cut them).\n";
+    : "ROYBAL INCLUSION CHECKS — also flag when missing: on Cat 3 (facts.job.waterCategory '3') any of containment barrier, negative-air / HEPA scrubber, floor protection, HEPA vacuuming, antimicrobial, PPE consumables (Tyvek suits, HEPA / P100 cartridges, gloves, boot covers), or the HEPA filter replacement; drying-equipment days that don't match facts.equipmentSizing.recommended × facts.equipment unit-days. Do NOT suggest trade labor minimums (carriers cut them).\n") +
+    (kind === "claim" ? (estimate ? rules.houseRestoration : rules.houseMitigation) : "");
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
     system: estimate
@@ -698,15 +678,19 @@ async function invoiceAudit(body: Record<string, unknown>) {
       focus + inclusionCheck +
       "No overhead/profit/tax lines. Prices in DOLLARS.\n\n" +
       "PRICE CATALOG (tag each suggestion with a CATEGORY + CODE — Fairbanks Xactimate):\n" + catText + "\n\n" +
+      (refText ? refText + "\n\n" : "") +
       "DOCUMENTED FACTS:\n```json\n" + JSON.stringify(facts, null, 2) + "\n```",
     toolName: "audit",
     schema: AUDIT_SCHEMA as unknown as Record<string, unknown>,
     maxTokens: 8192,
   });
   const suggested = Array.isArray((input as { suggestions?: DraftLine[] }).suggestions) ? (input as { suggestions: DraftLine[] }).suggestions : [];
-  const priced = await resolvePrices(suggested, jwt, pm);
+  const priced = await resolvePrices(suggested, jwt, opts, refRows);
   (input as Record<string, unknown>).suggestions = priced;
-  return { result: input, usage, model: DOC_MODEL, summary: { suggestions: priced.length, mode: pm } };
+  return {
+    result: input, usage, model: DOC_MODEL,
+    summary: { suggestions: priced.length, mode: pm, catalog_priced: countPriced(priced, "catalog"), reference_priced: countPriced(priced, "reference") },
+  };
 }
 
 /* ============================================================
@@ -869,15 +853,21 @@ async function siteVisitStart(body: Record<string, unknown>) {
   for (const f of [...packet.reports, ...packet.photos, ...packet.notes]) signed[f.path] = await signMedia(f.path, jwt, 86400);
 
   const rows = await fetchCatalogRows(jwt, pm === "tm" ? TM_CATS : SITE_CATS);
-  const r = estimatingRules(pm);
-  const rulesText = r.pricingRules + r.commonRules + "\n" + r.inclusionUniversal +
-    "When the job includes mitigation (emergency, extraction, tear-out, drying), these apply to those lines:\n" + r.inclusionMitigation +
-    "For put-back and rebuild lines:\n" + r.inclusionRestoration;
-  const facts = (body.facts ?? {}) as { job?: { jobType?: string } };
-  const kind = facts.job?.jobType === "construction" ? "construction" : "claim";
+  const facts = body.facts ?? {};
+  // construction / claim from facts.job.jobType. No jobType (a client older
+  // than v192) is unknown: the claim shape and house patterns, but no
+  // reference block and no reference prices — that client shows a reference
+  // line as a plain estimate and has no customerText backstop (sitevisit.ts).
+  const kind = kindOfFacts(facts);
+  // the owner's past Xactimate estimates: a fallback tier on piecework claims only
+  const refRows = referenceAllowed({ mode: pm, kind }) ? await fetchReferenceRows(jwt) : [];
+  const { rulesText, referenceText } = siteVisitRules(pm, kind, refRows, rows);
   const ratesText = String(body.rates ?? "").slice(0, 4000);
-  const content = buildContent({ packet, signed, facts, rulesText, catalogText: catalogTextFromRows(rows, pm), kind, ratesText });
-  const customId = "sv-" + crypto.randomUUID();
+  const content = buildContent({ packet, signed, facts, rulesText, catalogText: catalogTextFromRows(rows, pm), kind, ratesText, referenceText });
+  // the kind rides the batch's custom_id so siteVisitResult knows whether the
+  // reference tier may price the result (sv-x- claim, sv-c- construction; an
+  // unknown visit keeps the legacy sv-, which reads back as unknown)
+  const customId = customIdFor(kind, crypto.randomUUID());
   const res = await fetch("https://api.anthropic.com/v1/messages/batches", {
     method: "POST", headers: ANTHROPIC_HEADERS(),
     body: JSON.stringify(buildBatchBody({ customId, model: SITE_VISIT_MODEL, effort: SITE_VISIT_EFFORT, content })),
@@ -889,7 +879,7 @@ async function siteVisitStart(body: Record<string, unknown>) {
   return {
     result: { batchId: batch.id, pricingMode: pm, model: SITE_VISIT_MODEL },
     usage: { inTok: 0, outTok: 0 }, model: SITE_VISIT_MODEL,
-    summary: { batchId: batch.id, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length },
+    summary: { batchId: batch.id, kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, referenceRows: referenceText ? refRows.length : 0 },
   };
 }
 
@@ -910,7 +900,11 @@ async function siteVisitResult(body: Record<string, unknown>) {
   const raw = await res.text();
   if (!res.ok) throw new Error(`Couldn't fetch the draft (${res.status}): ${raw.slice(0, 300)}`);
   const first = raw.split("\n").find((l) => l.trim());
-  const parsed = parseBatchResult(first ? JSON.parse(first) : {});
+  const line = first ? JSON.parse(first) : {};
+  const parsed = parseBatchResult(line);
+  // sv-x- claim, sv-c- construction; a batch started before the kind was
+  // encoded reads as unknown and is never reference-priced
+  const kind = kindFromCustomId((line as { custom_id?: string }).custom_id);
   const model = parsed.model || SITE_VISIT_MODEL;
   if (parsed.error || !parsed.draft) {
     const e = new Error(parsed.error ?? "the draft came back empty") as Error & { usage?: Usage; model?: string; costScale?: number };
@@ -918,12 +912,12 @@ async function siteVisitResult(body: Record<string, unknown>) {
     throw e;
   }
   const pm: PricingMode = body.pricingMode === "tm" ? "tm" : "piecework";
-  const priced = await resolvePrices(parsed.draft.items as DraftLine[], jwt, pm);
+  const priced = await resolvePrices(parsed.draft.items as DraftLine[], jwt, { mode: pm, kind });
   const draft = { ...parsed.draft, items: priced };
   return {
     result: { status: "done", draft },
     usage: parsed.usage, model, costScale: BATCH_DISCOUNT,
-    summary: { batchId: batch.id, items: priced.length, catalog_priced: priced.filter((i) => (i as { priced?: string }).priced === "catalog").length, questions: draft.questions.length },
+    summary: { batchId: batch.id, kind, items: priced.length, catalog_priced: countPriced(priced, "catalog"), reference_priced: countPriced(priced, "reference"), questions: draft.questions.length },
   };
 }
 

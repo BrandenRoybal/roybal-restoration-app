@@ -75,6 +75,13 @@ jobs:
         if: '!cancelled()'
         run: npm run fn:test
 
+      # The loader for the owner's past-Xactimate reference (migration 0011):
+      # the file checks that keep customer, address and claim fields and bad
+      # prices out of the RPC, and that it never prints the password or token.
+      - name: Xactimate reference loader tests
+        if: '!cancelled()'
+        run: node --test tools/xact-ref/load.test.mjs
+
       - name: Phone agent tests
         if: '!cancelled()'
         working-directory: services/phone-agent

@@ -33,7 +33,7 @@ import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, photoAiOutdated, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { dictateBtn } from "./dictate.js";
-import { siteVisitPanel } from "./sitevisit.js";
+import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText } from "./sitevisit.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
@@ -1283,6 +1283,14 @@ export function changeOrder(project, co) {
 /* ============================================================
    7. MITIGATION INVOICE
    ============================================================ */
+/* A drafted / suggested line's price provenance as an on-screen span
+   (catalog / reference / flag / est. — see pricedTag in sitevisit.js).
+   Only the app-only AI panels use it, so none of it prints. */
+function pricedTagEl(li) {
+  const t = pricedTag(li);
+  return h("span", { style: "color:" + t.color, title: t.title || null }, " \u00b7 " + t.text);
+}
+
 /* Xactimate-style charges editor: line items grouped into room / section
    blocks with continuous line numbering, a wide description column and
    compact qty / unit / price columns — the way adjusters read estimates. */
@@ -1312,9 +1320,24 @@ function invoiceCharges(inv, onTotals, opts = {}) {
 
   function itemRow(it, no) {
     const tr = h("tr");
+    // a price the draft took from the owner's past Xactimate estimates stays
+    // marked for review on screen (app-only: never prints, never in the .docx)
+    const refBadge = it.priced === "reference"
+      ? h("div", { class: "app-only", style: "font-size:11px;color:var(--navy-3);padding:0 8px 2px", title: it.refNote || null }, "Xactimate ref price \u00b7 review")
+      : null;
     const cell = (key, cls, type = "text") => {
       const input = h("input", { type, value: it[key] ?? "" });
-      input.addEventListener("input", () => { it[key] = input.value; extEl.textContent = money((Number(it.qty) || 0) * (Number(it.price) || 0)); recalc(); commit(); });
+      input.addEventListener("input", () => {
+        it[key] = input.value;
+        // the office typed its own price: it is no longer the reference price,
+        // so the review badge and the refNote go (in place — no repaint mid-typing)
+        if (key === "price" && it.priced === "reference") {
+          it.priced = "manual";
+          delete it.refNote;
+          if (refBadge) refBadge.remove();
+        }
+        extEl.textContent = money((Number(it.qty) || 0) * (Number(it.price) || 0)); recalc(); commit();
+      });
       return h("td", { class: cls || "" }, input);
     };
     // Description: an auto-growing textarea on screen (never clips what you
@@ -1328,7 +1351,7 @@ function invoiceCharges(inv, onTotals, opts = {}) {
     const extEl = h("td", { class: "ext calc" }, money((Number(it.qty) || 0) * (Number(it.price) || 0)));
     tr.append(
       h("td", { class: "lineno" }, String(no) + "."),
-      h("td", { class: "invdesc" }, dTa, dPrint),
+      h("td", { class: "invdesc" }, dTa, dPrint, refBadge),
       cell("qty", "", "number"),
       cell("unit"),
       cell("price", "", "number"),
@@ -1605,28 +1628,22 @@ export function invoice(project, inv) {
         busyBtn(draftBtn, false, isEst ? "\u2728 Draft rebuild estimate" : "\u2728 Draft from documentation");
         return;
       }
-      if (draft.lossSummary) { inv.lossSummary = draft.lossSummary; lossTa.value = inv.lossSummary; lossTa.autoGrow(); }
+      // scrubbed of the private reference source only when a line was priced from it
+      if (draft.lossSummary) { inv.lossSummary = draftText(draft, draft.lossSummary); lossTa.value = inv.lossSummary; lossTa.autoGrow(); }
       inv.items = lines.map((li) => ({
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",
         code: li.code || "", priced: li.priced || "", flag: li.priceFlag || "",   // pricing provenance + any guardrail flag
+        ...(li.refNote ? { refNote: String(li.refNote) } : {}),                  // office-only: where a "reference" price came from
       }));
       commit(); paintItems();
-      const fromCatalog = lines.filter((li) => li.priced === "catalog").length;
-      const flagged = lines.filter((li) => li.priced === "flag").length;
       aiPanel.replaceChildren(
         h("div", { style: "border:1px dashed #b9c4d4;border-radius:10px;padding:8px 12px;margin:0 0 10px;background:#f7f9fc;font-size:12px" },
           h("strong", {}, "\u2728 Draft basis \u2014 review every line before sending:"),
-          h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 4px" },
-            `${fromCatalog} of ${lines.length} line${lines.length !== 1 ? "s" : ""} priced from the Fairbanks list; the rest are estimates \u2014 verify those.`
-            + (flagged ? ` \u26a0\ufe0f ${flagged} need${flagged !== 1 ? "" : "s"} attention (blank price).` : "")),
+          h("div", { class: "subtle", style: "font-size:11px;margin:2px 0 4px" }, pricingSummary(pricingCounts(lines))),
           ...lines.map((li) => h("div", { style: "margin-top:4px;color:#5a6b7f" },
             h("strong", { style: "color:#2b3a4d" }, li.desc || ""),
-            li.priced === "catalog"
-              ? h("span", { style: "color:#1f9d55" }, ` \u00b7 Fairbanks ${li.code || ""}`)
-              : li.priced === "flag"
-                ? h("span", { style: "color:#c0392b" }, " \u00b7 \u26a0\ufe0f " + (li.priceFlag || "needs manual price"))
-                : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
+            pricedTagEl(li),
             li.basis ? " \u2014 " + li.basis : ""))));
       toast((isEst ? "Estimate" : "Invoice") + " draft ready \u2014 every line is editable.");
     } catch (e) {
@@ -1652,13 +1669,15 @@ export function invoice(project, inv) {
             h("div", { style: "flex:1;font-size:12px" },
               h("strong", { style: "color:#2b3a4d" }, sug.desc || ""),
               ` \u2014 ${sug.qty} ${sug.unit} @ $${Number(sug.price || 0).toFixed(2)}`,
-              sug.priced === "catalog"
-                ? h("span", { style: "color:#1f9d55" }, ` \u00b7 Fairbanks ${sug.code || ""}`)
-                : h("span", { style: "color:#c9760b" }, " \u00b7 est."),
+              pricedTagEl(sug),
               h("div", { style: "color:#5a6b7f" }, sug.reason || "")),
             add);
           add.addEventListener("click", () => {
-            inv.items.push({ room: sug.room || "", desc: sug.desc || "", qty: String(sug.qty ?? ""), unit: sug.unit || "", price: sug.price != null ? String(sug.price) : "", code: sug.code || "", priced: sug.priced || "" });
+            inv.items.push({
+              room: sug.room || "", desc: sug.desc || "", qty: String(sug.qty ?? ""), unit: sug.unit || "", price: sug.price != null ? String(sug.price) : "",
+              code: sug.code || "", priced: sug.priced || "", flag: sug.priceFlag || "",
+              ...(sug.refNote ? { refNote: String(sug.refNote) } : {}),
+            });
             commit(); paintItems(); row.remove();
           });
           return row;
@@ -1867,6 +1886,7 @@ export function invoice(project, inv) {
       paintMode();
       paintItems();
       toast(`Estimate drafted from the site visit: ${sum.lines} line${sum.lines === 1 ? "" : "s"}, ${sum.fromCatalog} priced from the Fairbanks list` +
+        (sum.fromReference ? `, ${sum.fromReference} from your past Xactimate estimates (review)` : "") +
         (sum.flagged ? `, ${sum.flagged} need a price` : "") + ". Review every line.", 5000);
     },
   }));

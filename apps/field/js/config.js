@@ -22,7 +22,7 @@ export const SYNC_VIA_RPC = true;
 // which would let exactly the stale devices the server's min-build gate exists
 // to catch sail straight through it. Bump in lockstep with sw.js CACHE
 // (build.test.mjs fails the suite if the two drift).
-export const BUILD = "v191";
+export const BUILD = "v192";
 
 // My Week is parked (Sep 2026): until the Job Board's schedule feeds it
 // reliably it could show the crew wrong days, so the home-screen button and
