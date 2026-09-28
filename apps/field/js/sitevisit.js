@@ -95,13 +95,78 @@ export function packetReady(sv) {
   return p.reports.length + p.photos.length + p.notes.length > 0 || !!p.transcript.trim() || !!p.typedScope.trim();
 }
 
+/* ---------- pure: where each drafted price came from ----------
+   The server stamps every drafted line with `priced`:
+     "catalog"   — the Fairbanks price_list row (authoritative);
+     "reference" — owner/office drafts only: Roybal's own past Xactimate
+                   estimates, used only when price_list has no row, on
+                   piecework claim work. Flagged for review; the line's
+                   refNote says how many lines/estimates and the range;
+     "flag"      — a guardrail blanked the price (priceFlag says why);
+     "estimate"  — the model's own number.
+   These labels are for the office, on screen only. The reference source
+   never reaches a customer surface: refNote is read only by pricedTag()
+   and the app-only line badge, and customerText() drops any sentence of
+   draft prose that names it. */
+export function pricingCounts(lines) {
+  const xs = arr(lines);
+  const n = (p) => xs.filter((li) => li && li.priced === p).length;
+  const fromCatalog = n("catalog"), fromReference = n("reference"), flagged = n("flag");
+  return { lines: xs.length, fromCatalog, fromReference, flagged, estimates: xs.length - fromCatalog - fromReference - flagged };
+}
+/** The draft-basis summary line, e.g. "12 of 30 lines priced from the Fairbanks
+    list, 6 from your past Xactimate estimates (review), 12 estimates — …". */
+export function pricingSummary(c) {
+  const s = (k) => (k !== 1 ? "s" : "");
+  let t = `${c.fromCatalog} of ${c.lines} line${s(c.lines)} priced from the Fairbanks list`;
+  t += c.fromReference
+    ? `, ${c.fromReference} from your past Xactimate estimates (review), ${c.estimates} estimate${s(c.estimates)} — verify those.`
+    : "; the rest are estimates — verify those.";
+  if (c.flagged) t += ` ⚠️ ${c.flagged} need${c.flagged !== 1 ? "" : "s"} attention (blank price).`;
+  return t;
+}
+const priceText = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? "" : "$" + Number(v).toFixed(2));
+/** The on-screen provenance tag for one drafted/suggested line: { text, color, title? }.
+    Colours match the panels: green Fairbanks, slate-blue reference, red flag, amber est. */
+export function pricedTag(li) {
+  const p = (li && li.priced) || "";
+  if (p === "catalog") return { text: ("Fairbanks " + (li.code || "")).trim(), color: "#1f9d55" };
+  if (p === "reference") return { text: ["Xactimate ref", priceText(li.price), "· review"].filter(Boolean).join(" "), color: "var(--navy-3)", title: String(li.refNote || "") };
+  if (p === "flag") return { text: "⚠️ " + (li.priceFlag || li.flag || "needs manual price"), color: "#c0392b" };
+  return { text: "est.", color: "#c9760b" };
+}
+
+/* Draft prose that prints or reaches the portal (notes, loss summary, the
+   per-room customer summary, alternates) must never name the private
+   reference source. The server tells the model so; this is the backstop:
+   any sentence that still does is dropped, the rest is left exactly as
+   written. Sentences split on . ! ? followed by a space, so "$3.21" and
+   "1/2\"" stay whole. (No lookbehind: older iPad Safari can't parse it.) */
+const REF_MENTION = /xactimate\s+ref|past\s+xactimate|xact_ref|\bref(?:erence)?[- ](?:price|priced|pricing|code|row|line|rate)s?\b|refNote/i;
+const SENTENCE = /(?:[^.!?]|[.!?](?=\S))+[.!?]*\s*|[.!?]+\s*/g;
+export function customerText(text) {
+  const src = String(text ?? "");
+  if (!REF_MENTION.test(src)) return src;
+  const out = [];
+  for (const line of src.split("\n")) {
+    if (!REF_MENTION.test(line)) { out.push(line); continue; }
+    const kept = (line.match(SENTENCE) || []).filter((s) => !REF_MENTION.test(s)).join("").trimEnd();
+    if (kept.trim()) out.push(kept);
+  }
+  return out.join("\n").trim();
+}
+
 /** The printed notes block: assumptions, exclusions and the Fairbanks pricing basis. */
 export function draftNotesText(draft) {
-  const list = (title, xs) => (arr(xs).length ? title + "\n" + arr(xs).map((x) => "• " + x).join("\n") : "");
+  const list = (title, xs) => {
+    const kept = arr(xs).map(customerText).filter((x) => x.trim());
+    return kept.length ? title + "\n" + kept.map((x) => "• " + x).join("\n") : "";
+  };
+  const basis = draft.pricingNotes ? customerText(draft.pricingNotes) : "";
   return [
     list("ASSUMPTIONS", draft.assumptions),
     list("EXCLUSIONS", draft.exclusions),
-    draft.pricingNotes ? "PRICING BASIS\n" + draft.pricingNotes : "",
+    basis ? "PRICING BASIS\n" + basis : "",
   ].filter(Boolean).join("\n\n");
 }
 
@@ -115,18 +180,19 @@ export function applySiteDraft(inv, draft, at = new Date().toISOString()) {
     room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
     unit: li.unit || "", price: li.price != null ? String(li.price) : "",
     code: li.code || "", priced: li.priced || "", flag: li.priceFlag || "",
+    ...(li.refNote ? { refNote: String(li.refNote) } : {}),   // office-only provenance of a "reference" price; never printed
     ...(li.by ? { by: String(li.by) } : {}),
   }));
-  if (draft.lossSummary) inv.lossSummary = draft.lossSummary;
+  if (draft.lossSummary) inv.lossSummary = customerText(draft.lossSummary);
   const block = draftNotesText(draft);
   const prev = String(inv.siteVisitNotes || "");
   const notes = String(inv.notes || "");
   const kept = prev && notes.includes(prev) ? notes.replace(prev, "").trim() : notes.trim();
   inv.notes = [kept, block].filter(Boolean).join("\n\n");
   inv.siteVisitNotes = block;
-  inv.customerScope = arr(draft.rooms).map((r) => ({ room: r.name, summary: r.customerSummary }));
+  inv.customerScope = arr(draft.rooms).map((r) => ({ room: r.name, summary: typeof r.customerSummary === "string" ? customerText(r.customerSummary) : r.customerSummary }));
   // construction shape: open choices as alternates, contingency, accuracy, duration
-  inv.alternates = arr(draft.alternates).map((a) => ({ title: String(a.title || ""), description: String(a.description || ""), baseCost: String(Number(a.baseCost) || 0) }));
+  inv.alternates = arr(draft.alternates).map((a) => ({ title: customerText(a.title || ""), description: customerText(a.description || ""), baseCost: String(Number(a.baseCost) || 0) }));
   inv.contingencyPct = Number(draft.contingencyPct) > 0 ? String(draft.contingencyPct) : "";
   inv.accuracyPct = Number(draft.accuracyPct) > 0 ? String(draft.accuracyPct) : "";
   inv.duration = String(draft.duration || "");
@@ -134,11 +200,16 @@ export function applySiteDraft(inv, draft, at = new Date().toISOString()) {
   // O&P is still on automatic
   const subs = lines.some((li) => { const b = String(li.by || "").trim().toLowerCase(); return b && b !== "roybal" && b !== "allowance"; });
   if (subs && inv.opAuto !== false && (inv.opMode || "pct") === "pct") { inv.overheadPct = "10"; inv.profitPct = "10"; }
-  inv.siteVisitDraft = { at, questions: arr(draft.questions), basis: lines.map((li) => ({ desc: li.desc || "", basis: li.basis || "", priced: li.priced || "" })) };
+  inv.siteVisitDraft = { at, questions: arr(draft.questions), basis: lines.map((li) => ({
+    desc: li.desc || "", basis: li.basis || "", priced: li.priced || "",
+    ...(li.refNote ? { refNote: String(li.refNote) } : {}),
+  })) };
+  const c = pricingCounts(lines);
   return {
-    lines: lines.length,
-    fromCatalog: lines.filter((li) => li.priced === "catalog").length,
-    flagged: lines.filter((li) => li.priced === "flag").length,
+    lines: c.lines,
+    fromCatalog: c.fromCatalog,
+    fromReference: c.fromReference,
+    flagged: c.flagged,
     questions: arr(draft.questions).length,
     alternates: arr(draft.alternates).length,
   };

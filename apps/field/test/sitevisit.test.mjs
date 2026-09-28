@@ -2,9 +2,12 @@
    Run: node apps/field/test/sitevisit.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit, frameTimes, frameCaption, FRAMES_PER_VIDEO, KINDS, MAX_IMAGES } from "../js/sitevisit.js";
+import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit, frameTimes, frameCaption, FRAMES_PER_VIDEO, KINDS, MAX_IMAGES,
+  pricingCounts, pricingSummary, pricedTag, customerText } from "../js/sitevisit.js";
 import { FORMS, formsFor } from "../js/model.js";
 import { subRatesText, SUB_RATES } from "../js/pricing.js";
+import { estimateDocumentXml } from "../js/docx.js";
+import { portalProjection } from "../js/portal.js";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -61,7 +64,7 @@ const DRAFT = {
 test("a finished draft fills the estimate and reports how it was priced", () => {
   const inv = { items: [{ desc: "old" }], notes: "", lossSummary: "" };
   const sum = applySiteDraft(inv, DRAFT, "2026-09-23T04:00:00Z");
-  assert.deepEqual(sum, { lines: 3, fromCatalog: 1, flagged: 1, questions: 1, alternates: 0 });
+  assert.deepEqual(sum, { lines: 3, fromCatalog: 1, fromReference: 0, flagged: 1, questions: 1, alternates: 0 });
   assert.equal(inv.items.length, 3);
   assert.ok(inv.items.every((it) => it.id));
   assert.equal(inv.items[0].qty, "112");
@@ -109,6 +112,100 @@ test("a construction draft carries who does each line, the alternates, contingen
   const own = { items: [], opAuto: true, overheadPct: "0", profitPct: "0" };
   applySiteDraft(own, { ...DRAFT, items: [{ desc: "x", by: "Roybal" }, { desc: "y", by: "Allowance" }] });
   assert.equal(own.overheadPct, "0");
+});
+
+/* ---------- the private Xactimate reference (owner/office drafts only) ----------
+   Synthetic codes and prices only: this repo is public. */
+const REF_NOTE = "Xactimate reference from your past estimates: 3 line(s) on 2 estimate(s), TESTLIST_JAN26, range $1.00–$2.00 — review";
+const REF_DRAFT = {
+  ...DRAFT,
+  lossSummary: "Rebuild the kitchen after the dishwasher leak.",
+  items: [
+    { room: "Kitchen", desc: "Test wall finish", qty: 40, unit: "SF", price: 1.5, priced: "catalog", code: "TST1", basis: "walk 02:10" },
+    { room: "Kitchen", desc: "Test trim piece", qty: 22, unit: "LF", price: 1.75, priced: "reference", code: "ZZZ", catalogDesc: "Test trim piece", refNote: REF_NOTE, basis: "Magicplan p.2" },
+    { room: "Kitchen", desc: "Test fixture", qty: 1, unit: "EA", price: 90, priced: "estimate", basis: "photo 4" },
+  ],
+};
+
+test("a reference-priced line keeps its price, provenance and refNote, and is counted on its own", () => {
+  const inv = { items: [], notes: "" };
+  const sum = applySiteDraft(inv, REF_DRAFT, "2026-09-28T04:00:00Z");
+  assert.deepEqual(sum, { lines: 3, fromCatalog: 1, fromReference: 1, flagged: 0, questions: 1, alternates: 0 });
+  const ref = inv.items[1];
+  assert.equal(ref.priced, "reference");
+  assert.equal(ref.price, "1.75");
+  assert.equal(ref.code, "ZZZ");
+  assert.equal(ref.refNote, REF_NOTE);
+  assert.equal("refNote" in inv.items[0], false, "only reference lines carry a refNote");
+  assert.deepEqual(inv.siteVisitDraft.basis[1], { desc: "Test trim piece", basis: "Magicplan p.2", priced: "reference", refNote: REF_NOTE });
+  assert.deepEqual(inv.siteVisitDraft.basis[0], { desc: "Test wall finish", basis: "walk 02:10", priced: "catalog" });
+});
+
+test("the draft-basis summary counts reference lines separately; without any it reads as before", () => {
+  const none = pricingCounts(DRAFT.items);
+  assert.deepEqual(none, { lines: 3, fromCatalog: 1, fromReference: 0, flagged: 1, estimates: 1 });
+  assert.equal(pricingSummary(none),
+    "1 of 3 lines priced from the Fairbanks list; the rest are estimates — verify those. ⚠️ 1 needs attention (blank price).");
+  const withRef = { lines: 30, fromCatalog: 12, fromReference: 6, flagged: 0, estimates: 12 };
+  assert.equal(pricingSummary(withRef),
+    "12 of 30 lines priced from the Fairbanks list, 6 from your past Xactimate estimates (review), 12 estimates — verify those.");
+  assert.deepEqual(pricingCounts(REF_DRAFT.items), { lines: 3, fromCatalog: 1, fromReference: 1, flagged: 0, estimates: 1 });
+  assert.deepEqual(pricingCounts(undefined), { lines: 0, fromCatalog: 0, fromReference: 0, flagged: 0, estimates: 0 });
+});
+
+test("each provenance gets its own label and colour; the reference tag carries the refNote as its title", () => {
+  const [cat, ref, est] = REF_DRAFT.items.map(pricedTag);
+  const flag = pricedTag(DRAFT.items[2]);
+  assert.deepEqual(cat, { text: "Fairbanks TST1", color: "#1f9d55" });
+  assert.deepEqual(ref, { text: "Xactimate ref $1.75 · review", color: "var(--navy-3)", title: REF_NOTE });
+  assert.deepEqual(est, { text: "est.", color: "#c9760b" });
+  assert.deepEqual(flag, { text: "⚠️ hourly rate on an SF line", color: "#c0392b" });
+  assert.equal(new Set([cat.color, ref.color, est.color, flag.color]).size, 4, "four distinct colours");
+  assert.equal(pricedTag({ priced: "reference", price: "" }).text, "Xactimate ref · review");   // no price, no "$NaN"
+  assert.equal(pricedTag({ priced: "flag", flag: "stored flag" }).text, "⚠️ stored flag");  // an item's saved flag reads too
+});
+
+test("a reference line's refNote never reaches what the customer sees: notes, scope, Word file, portal", () => {
+  const inv = { items: [], notes: "", invoiceNo: "RC-TEST-1", opMode: "pct" };
+  applySiteDraft(inv, REF_DRAFT, "2026-09-28T04:00:00Z");
+  const customerFacing = [
+    inv.notes, inv.lossSummary, JSON.stringify(inv.customerScope), JSON.stringify(inv.alternates),
+    estimateDocumentXml({ customer: "Test Customer", address: "1 Test St" }, inv, { isBuild: false }),
+    JSON.stringify(portalProjection({ customer: "Test Customer", reconEstimates: [inv], portalShare: { status: "estimate" } })),
+  ];
+  for (const text of customerFacing) {
+    assert.ok(!text.includes(REF_NOTE), "refNote leaked: " + text.slice(0, 120));
+    assert.doesNotMatch(text, /xactimate|reference|refNote|TESTLIST/i);
+  }
+  // the QuickBooks push builds its lines from room/desc/qty/unit/price only
+  const qbo = readFileSync(new URL("../js/qbo.js", import.meta.url), "utf8");
+  assert.doesNotMatch(qbo, /refNote|\.priced\b|siteVisitDraft/);
+});
+
+test("draft prose that names the reference source is dropped sentence by sentence; everything else is kept verbatim", () => {
+  assert.equal(customerText("Fairbanks list, $3.21/SF for 1/2\" drywall. Owner supplies tile."), "Fairbanks list, $3.21/SF for 1/2\" drywall. Owner supplies tile.");
+  assert.equal(customerText("Priced at $3.21 per SF. Trim priced from past Xactimate estimates. Freight adds lead time."),
+    "Priced at $3.21 per SF. Freight adds lead time.");
+  assert.equal(customerText("Line one.\nThree lines use Xactimate reference prices.\nLine three."), "Line one.\nLine three.");
+  assert.equal(customerText("Some reference-priced lines need review"), "");
+  assert.equal(customerText(undefined), "");
+  const notes = draftNotesText({
+    assumptions: ["Home is unoccupied", "Trim uses the XACTIMATE REFERENCE codes."],
+    exclusions: ["Reference prices from past estimates are placeholders."],
+    pricingNotes: "Fairbanks list, Sept 2026. Two lines priced from Roybal's past Xactimate estimates — review.",
+  });
+  assert.equal(notes, "ASSUMPTIONS\n• Home is unoccupied\n\nPRICING BASIS\nFairbanks list, Sept 2026.");
+  // and applySiteDraft runs the loss summary, room summaries and alternates through it
+  const inv = { items: [], notes: "" };
+  applySiteDraft(inv, {
+    ...REF_DRAFT,
+    lossSummary: "Kitchen rebuild. Trim is from the Xactimate reference.",
+    rooms: [{ name: "Kitchen", customerSummary: "New trim. Trim is a reference price." }],
+    alternates: [{ title: "Tile", description: "Deducts tile. Priced off past Xactimate jobs.", baseCost: -100 }],
+  });
+  assert.equal(inv.lossSummary, "Kitchen rebuild.");
+  assert.deepEqual(inv.customerScope, [{ room: "Kitchen", summary: "New trim." }]);
+  assert.deepEqual(inv.alternates, [{ title: "Tile", description: "Deducts tile.", baseCost: "-100" }]);
 });
 
 test("the rates sent with every draft name the company and each sub with a price", () => {

@@ -252,11 +252,13 @@ This is everything the plan needs from you. It consolidates the "option left to 
 
 ### C9. The price source — confirm `price_list` stays frozen.
 
-**Status: DEFERRED TO DEFAULT (2026-09-06)** — option (a), the one marked *default* below.
+**Status: DEFERRED TO DEFAULT (2026-09-06)** — option (a), the one marked *default* below. **Qualified 2026-09-28** by the owner's choice to keep a private reference source; see the note under Options.
 
 **Why.** The 2,959-row `price_list` was transcribed from Xactimate and the EULA forbids redistributing that data, so every design froze it behind a `price_sources` interface (ADR-12). Drafted and review-gap lines price from `internal_rates` calibrated from paid invoices [A-5.6], then the job's approved estimate; the P2 detector prices a delta only from a rate already on that invoice [A-7.11].
 
 **Options.** (a) `internal_rates` first, approved estimate second, `price_list` frozen and never expanded — *default*. (b) Retire `price_list` now, which moves rate-book seeding into E0/P1. (c) A licensed feed on a timeline you name — a `price_sources` adapter, nothing else changes.
+
+**Note (2026-09-28) — the owner's own past estimates, kept as a private reference.** After the EULA risk was put to him, the owner chose to keep the prices on his own past Xactimate estimates as a reference: *"use that information to teach the engine and … keep the pricing information as reference even if we use our own pricing."* They live in `xact_ref_prices` (per-code medians, ranges and counts; the line detail in `xact_ref_lines`; migration `0011_xact_reference.sql`), readable only by owner and office through the `xact_ref_prices_for` function. The drafter reaches for this reference only when `price_list` has no row, and only on piecework claim work — never construction, never T&M. A line priced from it is stamped `reference` and flagged for review, and that label and its note never appear on a customer surface (portal, printed documents, QuickBooks). The rows are loaded out of band by the owner and never committed, because the repo is public; dropping the two tables is the kill switch. `price_list` itself stays frozen and option (a) stands.
 
 ## Assumptions we will proceed on unless you object
 

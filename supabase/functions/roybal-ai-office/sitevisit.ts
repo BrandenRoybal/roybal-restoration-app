@@ -201,8 +201,8 @@ const ITEM_SCHEMA = {
     unit: { type: "string", description: "SF, LF, SY, EA, HR, DA (day) or LS" },
     price: { type: "number", description: "Unit price in DOLLARS. Overridden by the price catalog whenever category+code match a real row, so it only stands for lines no catalog row fits." },
     basis: { type: "string", description: "Where this line and its quantity come from, citable: 'Magicplan p.3: 12\\'4\" x 10\\'6\", 8\\' ceiling', 'walk Kitchen 02:14: \"take it to four feet on the sink wall\"' (the clip's room and the time into that clip), 'photo 7 (Kitchen): swollen toe kick', 'notes p.2', 'typed scope'. Show the arithmetic for derived quantities." },
-    category: { type: "string", description: "Xactimate CATEGORY of the catalog row billed (e.g. 'DRY', 'PNT', 'FNC'). Empty string only when no catalog row fits." },
-    code: { type: "string", description: "Xactimate SELECTOR from the price catalog (must appear in it). Empty string only when no catalog row fits." },
+    category: { type: "string", description: "Xactimate CATEGORY of the catalog row billed (e.g. 'DRY', 'PNT', 'FNC'), or of an XACTIMATE REFERENCE row when no catalog row fits and that list is given. Empty string only when neither fits." },
+    code: { type: "string", description: "Xactimate SELECTOR from the price catalog (must appear in it), or from the XACTIMATE REFERENCE list when no catalog row fits and that list is given. Empty string only when neither fits." },
     priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: replace = install/put-back; remove = tear-out; detach_reset = detach & reset; labor = an hourly LAB rate (HR lines only); estimate = no catalog row, your own Fairbanks price." },
     by: { type: "string", description: "Who performs or supplies the line, by trade: 'Roybal' for the company's own crew and purchases, a sub label exactly as COMPANY RATES lists it (e.g. 'Electrical sub'), '<trade> sub' for a trade COMPANY RATES does not list (e.g. 'Roofing sub'), or 'Allowance' for a placeholder figure (design, engineering, permits, owner selections). Never a company name." },
   },
@@ -269,7 +269,22 @@ export type BuildArgs = {
   catalogText: string;              // Fairbanks price catalog, one row per line
   kind?: "construction" | "claim";  // how the estimate is organised and who reads it
   ratesText?: string;               // the company's own labor and subcontractor rates
+  referenceText?: string;           // XACTIMATE REFERENCE block (piecework claims only; '' = none)
 };
+
+/* The batch custom_id carries the estimate's kind, so siteVisitResult (a
+   later request that only has the batch) knows whether the reference tier
+   may price the draft: sv-x-<uuid> = insurance claim, sv-c-<uuid> =
+   construction. Batches started before this encoding read as unknown and
+   never get reference prices. */
+export type SiteKind = "claim" | "construction" | "unknown";
+export function customIdFor(kind: "claim" | "construction", uuid: string): string {
+  return (kind === "construction" ? "sv-c-" : "sv-x-") + uuid;
+}
+export function kindFromCustomId(id: unknown): SiteKind {
+  const s = String(id ?? "");
+  return s.startsWith("sv-x-") ? "claim" : s.startsWith("sv-c-") ? "construction" : "unknown";
+}
 
 /* A construction estimate is organised the way Branden prices a remodel
    (his AmeriGas ROM, 2026-09-16): by trade section, each line naming the
@@ -321,6 +336,8 @@ export function buildContent(a: BuildArgs): Block[] {
     out.push({ type: "image", source: { type: "url", url } });
   }
   const measured = quantitiesText(packet.magicplanQuantities);
+  // the reference block is a claim-only fallback tier; never on a construction job
+  const reference = a.kind === "construction" ? "" : String(a.referenceText ?? "").trim();
   const sections = [
     ...(measured ? [measured] : []),
     "OWNER'S TYPED SCOPE:\n" + (packet.typedScope.trim() || "(none)"),
@@ -334,6 +351,7 @@ export function buildContent(a: BuildArgs): Block[] {
       "- No overhead, profit or tax lines; they are applied separately.\n\n" +
       (a.kind === "construction" ? CONSTRUCTION_SHAPE : CLAIM_SHAPE) + "\n" + a.rulesText,
     "COMPANY RATES (the company's own crew and its subcontractors; use these rates for their lines):\n" + (String(a.ratesText ?? "").trim() || "(none given: price labor from the LAB rows of the catalog)"),
+    ...(reference ? [reference] : []),
     "PRICE CATALOG (Fairbanks Xactimate; tag each line with a CATEGORY + CODE from here):\n" + a.catalogText,
   ];
   out.push({ type: "text", text: sections.join("\n\n") });
