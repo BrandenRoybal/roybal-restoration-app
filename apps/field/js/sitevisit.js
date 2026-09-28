@@ -422,8 +422,10 @@ export function siteVisitPanel(ctx) {
     if (hasItems && !window.confirm("When the draft is ready it replaces this estimate's line items. Start it?")) return;
     btn.disabled = true;
     try {
-      const r = await startSiteVisitDraft(project, packetForDraft(sv), inv.pricingMode || "piecework", subRatesText());
-      sv.pending = { batchId: r.batchId, invId: inv.id, startedAt: new Date().toISOString(), pricingMode: inv.pricingMode || "piecework" };
+      const packet = packetForDraft(sv);
+      const r = await startSiteVisitDraft(project, packet, inv.pricingMode || "piecework", subRatesText());
+      sv.pending = { batchId: r.batchId, invId: inv.id, startedAt: new Date().toISOString(), pricingMode: inv.pricingMode || "piecework",
+        magicplanScannedAt: packet.magicplanQuantities ? packet.magicplanQuantities.scannedAt || "" : null };   // M3: what THIS draft measured from
       ctx.save();
       paint("");
       toast("Drafting from the site visit. Usually 5–30 minutes, up to an hour on a busy day; you can leave this page.");
@@ -442,8 +444,9 @@ export function siteVisitPanel(ctx) {
       if (r.status !== "done") { if (manual) toast("Still drafting."); paint(""); return; }
       const target = job.invId === inv.id ? inv : arr(project.reconEstimates).find((e) => e && e.id === job.invId) || inv;
       const draft = r.draft || {};
-      // M3: the estimate's Pricing Basis says where measured quantities came from
-      const mq = magicplanQuantities(sv);
+      // M3: the estimate's Pricing Basis says where measured quantities came from —
+      // the scan the draft was started with (a scan adopted while it ran is not in it)
+      const mq = job.magicplanScannedAt != null ? { scannedAt: job.magicplanScannedAt } : (job.magicplanScannedAt === undefined ? magicplanQuantities(sv) : null);
       if (mq) draft.pricingNotes = withMagicplanBasis(draft.pricingNotes, mq.scannedAt);
       const sum = applySiteDraft(target, draft);
       sv.pending = null;

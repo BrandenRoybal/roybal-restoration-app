@@ -218,6 +218,7 @@ test("esxOf keeps only the ExportConfig.XactimateEsx file; a configuration witho
   assert.deepEqual(S.esxOf({ data: [] }), { esx: null, files: 0 });
   assert.deepEqual(S.esxOf({}), { esx: null, files: 0 });
   assert.deepEqual(S.esxOf({ data: [PFILE({ generated_by: "ExportConfig.XactimateEsx", file: { hash: "", size: 0 } })] }), { esx: null, files: 1 });   // no url → nothing to fetch
+  assert.equal(S.esxOf({ data: [PFILE({ generated_by: "ExportConfig.XactimateEsx", filetype: "esx" })] }).esx.mime, "application/octet-stream");   // an extension is not a MIME type
 });
 test("the stored ESX path is a site-visit path the estimator's signer accepts, with the .esx name kept", () => {
   const path = S.mpFilePath("lead_42", "abcdef0123456789abcdef0123456789", "Test Customer - 1 Test St.esx");

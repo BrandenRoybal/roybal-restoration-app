@@ -214,7 +214,7 @@ export function esxOf(resp: unknown): { esx: EsxFile | null; files: number } {
   if (!url) return { esx: null, files: list.length };
   const filename = str(hit.filename) || "sketch.esx";
   return {
-    esx: { filename, mime: str(hit.filetype) || "application/octet-stream", url, hash: str(file.hash), size: num(file.size) },
+    esx: { filename, mime: /^[a-z]+\/[\w.+-]+$/i.test(str(hit.filetype)) ? str(hit.filetype) : "application/octet-stream", url, hash: str(file.hash), size: num(file.size) },
     files: list.length,
   };
 }
