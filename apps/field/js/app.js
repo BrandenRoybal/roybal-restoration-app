@@ -31,6 +31,7 @@ import { transcribeWidget } from "./voice.js";
 import { aiAvailable, aiReady, draftAdjusterEmail, analyzeContentsItem, scanContentsPhoto, justifyContents, draftRebuild, draftProgress, draftTimeline } from "./officeai.js";
 import { dryingFlags, isCertified } from "./dryingwatch.js";
 import { buildFlags } from "./buildwatch.js";
+import { startMediaQueue, mediaQueueBanner } from "./mediaqueue.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
@@ -161,10 +162,12 @@ function startSyncUI() {
   startSync(updateSyncStatus);
 }
 function boot() {
-  // ask the browser to shield IndexedDB (jobs + backups) from storage eviction
+  // ask the browser to shield IndexedDB (jobs + backups + the media queue) from storage eviction
   try { navigator.storage?.persist?.().catch(() => {}); } catch { /* best-effort */ }
   setAuthor(currentEmail());   // stamp new captures with who's signed in ("" offline)
   if (SYNC_ENABLED && isSignedIn()) startSyncUI();
+  // walk clips captured with no signal upload themselves: on open, on `online`, on the tab coming back
+  if (SYNC_ENABLED) startMediaQueue();
   route();
 }
 
@@ -457,7 +460,8 @@ async function projectList() {
   });
   body.append(modeSeg);
 
-  if (SYNC_ENABLED) body.append(accountRow());
+  if (SYNC_ENABLED) body.append(accountRow(), mediaQueueBanner({ onOpen: (id) => go(`#/p/${id}`) }));   // "2 clips waiting to upload · 410 MB"
+
 
   let paintLive = null;   // set when an active list is on screen
 

@@ -76,22 +76,31 @@ export function fmtDate(iso) {
 export const money = (n) =>
   (Number(n) || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
-/* ---------- IndexedDB store ("projects" + on-device "backups") ---------- */
+/* ---------- IndexedDB store ("projects" + on-device "backups" + the
+   "media_queue" of clips waiting to upload) ---------- */
 const DB_NAME = "roybal-field";
+const DB_VERSION = 3;          // 3: media_queue (Walkthrough V1). Bump = onupgradeneeded on every installed phone: add stores, never drop.
 const STORE = "projects";
 const BACKUPS = "backups";
+export const MEDIA_STORE = "media_queue";
 let _db;
 function db() {
   if (_db) return Promise.resolve(_db);
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 2);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const d = req.result;
       if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE, { keyPath: "id" });
       if (!d.objectStoreNames.contains(BACKUPS)) d.createObjectStore(BACKUPS, { keyPath: "id" });
+      if (!d.objectStoreNames.contains(MEDIA_STORE)) {
+        const m = d.createObjectStore(MEDIA_STORE, { keyPath: "id" });
+        m.createIndex("projectId", "projectId", { unique: false });
+      }
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
+    // another tab holds the old version open: don't hang — the reload picks it up
+    req.onblocked = () => reject(new Error("The app is open in another tab on an older version. Close it and reopen."));
   });
 }
 function tx(mode, name = STORE) { return db().then((d) => d.transaction(name, mode).objectStore(name)); }
@@ -746,3 +755,31 @@ export function daysBetween(aIso, bIso) {
   if (isNaN(a) || isNaN(b)) return null;
   return Math.round(Math.abs(b - a) / 86400000);
 }
+
+
+/* ---------- the media queue: clips (and their stills) waiting to upload ----------
+   A row holds the Blob itself — the File the Camera handed us is gone the
+   moment Safari reloads, so it goes in here BEFORE stills are pulled or
+   anything is shown as saved (docs/Narrated_Walkthrough_Design.md §4.3).
+   Rows are removed only after the server acknowledged the last byte. No
+   listeners: the queue (mediaqueue.js) owns the lifecycle. */
+export const MediaStore = {
+  async put(row) {
+    const os = await tx("readwrite", MEDIA_STORE);
+    return reqProm(os.put(row));
+  },
+  async get(id) {
+    const os = await tx("readonly", MEDIA_STORE);
+    return (await reqProm(os.get(id))) || null;
+  },
+  /** Every queued row, oldest first. */
+  async all() {
+    const os = await tx("readonly", MEDIA_STORE);
+    const rows = (await reqProm(os.getAll())) || [];
+    return rows.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id)));
+  },
+  async del(id) {
+    const os = await tx("readwrite", MEDIA_STORE);
+    return reqProm(os.delete(id));
+  },
+};
