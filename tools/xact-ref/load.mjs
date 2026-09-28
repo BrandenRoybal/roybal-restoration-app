@@ -60,8 +60,12 @@ export const LINE_FIELDS = {
 // carrying one stops the load: the reference is prices and scope, never who.
 export const FORBIDDEN_KEY = /customer|client|insured|homeowner|owner_name|policy|claim|address|street|city|zip|postal|phone|email|contact/i;
 
-// numeric(12,2) holds magnitudes below 10^10.
-const MONEY_LIMIT = 1e10;
+// numeric(12,2) holds at most 9999999999.99. Postgres rounds a value to two
+// places (half away from zero) before it checks that, so 9999999999.995 comes
+// in as 10000000000.00 and overflows: compare the value as Postgres will
+// store it, not as sent.
+const MONEY_MAX = 9999999999.99;
+const moneyInRange = (v) => Math.round(Math.abs(v) * 100) / 100 <= MONEY_MAX;
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -104,7 +108,7 @@ function checkField(kind, name, v) {
     case "money":
       if (blank(v)) return null;
       if (!isNum(v)) return `${name} is not a number`;
-      if (Math.abs(v) >= MONEY_LIMIT) return `${name} is out of range`;
+      if (!moneyInRange(v)) return `${name} is out of range`;
       return null;
     case "date":
       if (blank(v) || v === "") return null;

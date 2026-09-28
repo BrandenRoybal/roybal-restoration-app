@@ -21,7 +21,11 @@
  *   - a line priced from it is stamped priced:'reference' with a refNote the
  *     office reviews — it never passes as a catalog price.
  * Only owner/office callers get rows back (xact_ref_prices_for returns zero
- * rows to anyone else), and dropping the tables turns the tier off.
+ * rows to anyone else), and dropping the tables stops NEW reference pricing.
+ * Lines already drafted keep their priced:'reference' stamp and refNote on
+ * the job record (the synced job blob) until someone edits or re-drafts them.
+ * Job-specific lump sums (bid items, agreed prices, paid bills, allowances —
+ * isLumpSumRef) stay loaded but are never offered or stamped.
  */
 
 export type PricingMode = "piecework" | "tm";
@@ -59,15 +63,57 @@ const num = (v: unknown): number | null => {
 };
 export const money = (n: number | null | undefined) => (n == null ? "—" : `$${Number(n).toFixed(2)}`);
 
-/* Unit spellings the model and the sheets use for the same thing. */
+/* Unit spellings the model and the sheets use for the same thing (keys are
+   already upper-cased with whitespace and dots removed: "Sq. Ft." → SQFT). */
 const UNIT_ALIASES: Record<string, string> = {
-  SQFT: "SF", DAY: "DA", DAYS: "DA", EACH: "EA", HRS: "HR", HOUR: "HR", HOURS: "HR",
+  SQFT: "SF", SQFEET: "SF", SQUAREFEET: "SF",
+  LINFT: "LF", LINEARFT: "LF", LINEARFEET: "LF",
+  GAL: "GL", GALLON: "GL", GALLONS: "GL",
+  EACH: "EA", DAY: "DA", DAYS: "DA", WEEK: "WK", WEEKS: "WK", MONTH: "MO", MONTHS: "MO",
+  HRS: "HR", HOUR: "HR", HOURS: "HR",
 };
 /** Normalise a unit for comparison: case, whitespace and dots out, then aliases
-    (SQ FT / SQFT → SF, DAY / DAYS → DA, EACH → EA, HRS / HOUR → HR). */
+    (SQ FT → SF, LIN FT → LF, GAL → GL, DAY → DA, WEEK → WK, MONTH → MO,
+    EACH → EA, HRS / HOUR → HR). */
 export function normUnit(u: unknown): string {
   const s = String(u ?? "").toUpperCase().replace(/[\s.]+/g, "");
   return Object.prototype.hasOwnProperty.call(UNIT_ALIASES, s) ? UNIT_ALIASES[s] : s;
+}
+
+/* What a unit measures. Area, linear and volume units are dimensional: SF vs
+   SY is a 9x error, so two different units there are a real mismatch. Count
+   units are not: Xactimate bills drying equipment as EA "per 24 hour period"
+   on some rows and DA on others, and the model writes DA, Day or EA for the
+   same air mover — a count row priced on a count line is the same money. */
+export type UnitClass = "area" | "linear" | "volume" | "hours" | "count";
+const UNIT_CLASS: Record<string, UnitClass> = {
+  SF: "area", SY: "area", SQ: "area",
+  LF: "linear",
+  CF: "volume", CY: "volume", BF: "volume", GL: "volume",
+  HR: "hours",
+};
+/** A unit's class; EA, DA, LS, MO, WK and anything unrecognised count. */
+export function unitClass(u: unknown): UnitClass {
+  const n = normUnit(u);
+  return Object.prototype.hasOwnProperty.call(UNIT_CLASS, n) ? UNIT_CLASS[n] : "count";
+}
+/* Time periods inside the count class: a per-week or per-month price on a
+   per-day line (or the reverse) is a 7x / 30x error, so two DIFFERENT periods
+   mismatch. EA and LS stay compatible with a period: the sheet prices drying
+   equipment as EA "per 24 hour period". */
+const PERIODS = new Set(["DA", "WK", "MO"]);
+/** Can a price per `rowUnit` be stamped on a line per `lineUnit`? A blank
+    unit on either side is compatible (the line takes the row's unit). A
+    change of class (SF vs LF, HR vs SF), two different units in one
+    dimensional class (SF vs SY, CF vs GL) or two different time periods
+    (DA vs WK vs MO) is a mismatch; EA / LS against a count or period unit
+    never is. */
+export function unitsCompatible(lineUnit: unknown, rowUnit: unknown): boolean {
+  const a = normUnit(lineUnit), b = normUnit(rowUnit);
+  if (!a || !b || a === b) return true;
+  const ca = unitClass(a);
+  if (ca !== unitClass(b) || ca !== "count") return false;
+  return !(PERIODS.has(a) && PERIODS.has(b));
 }
 
 /** The estimate's kind from the facts the field app sends (job.jobType, set
@@ -91,6 +137,18 @@ export function refPrice(r: RefRow): number | null {
   if (latest != null && latest > 0) return latest;
   const med = num(r.median);
   return med != null && med > 0 ? med : null;
+}
+
+/* A reference row that is a job-specific lump sum, not a unit price: a bid
+   item, an agreed price, a paid (sub / plumber) bill, an allowance or a
+   discount. Its median across other jobs says nothing about this job — a
+   plumber's paid-bill median would replace this job's own receipt — so it is
+   never offered to the model or stamped on a line. The row stays loaded as
+   reference data. (A description that carries its own job's quantities, like
+   "1 unit x 4 days", is still a true per-day unit price and stays in.) */
+const LUMP_SUM_WORDS = /\b(bid item|agreed price|paid bill|allowance|discount|lump sum)\b/i;
+export function isLumpSumRef(r: Pick<RefRow, "description"> | null | undefined): boolean {
+  return LUMP_SUM_WORDS.test(String(r?.description ?? ""));
 }
 
 /** What the office sees beside a reference-priced line. */
@@ -163,13 +221,14 @@ export const REFERENCE_PRIVATE =
 const PROMPT_ACTIVITIES = ["Replace", "Remove", "D&R"];
 
 /** The XACTIMATE REFERENCE block: one line per reference code the catalog does
-    not carry. '' when there is nothing to offer (no header either). */
+    not carry (never a job-specific lump sum, isLumpSumRef). '' when there is
+    nothing to offer (no header either). */
 export function referenceTextFromRows(refRows: RefRow[], catalogRows: CatalogRow[]): string {
   const inCatalog = new Set((Array.isArray(catalogRows) ? catalogRows : []).map((r) => `${r.category}::${r.code}`));
   const oneLine = (s: unknown) => String(s ?? "").replace(/\s+/g, " ").trim();
   const lines = (Array.isArray(refRows) ? refRows : [])
     .filter((r) => r && oneLine(r.category) && oneLine(r.code) && PROMPT_ACTIVITIES.includes(String(r.activity)) &&
-      !inCatalog.has(`${r.category}::${r.code}`) && refPrice(r) != null)
+      !inCatalog.has(`${r.category}::${r.code}`) && refPrice(r) != null && !isLumpSumRef(r))
     .slice()
     .sort((a, b) =>
       String(a.category).localeCompare(String(b.category)) || String(a.code).localeCompare(String(b.code)) ||
@@ -196,15 +255,19 @@ export function resolveLines(items: DraftLine[], catalogRows: CatalogRow[], refR
   const refByKey = new Map<string, RefRow[]>();
   if (referenceAllowed(opts)) {
     for (const r of Array.isArray(refRows) ? refRows : []) {
-      if (!r || !r.category || !r.code) continue;
+      // a job-specific lump sum is never stamped as a unit price
+      if (!r || !r.category || !r.code || isLumpSumRef(r)) continue;
       const k = `${r.category}::${r.code}`;
       const bucket = refByKey.get(k);
       if (bucket) bucket.push(r); else refByKey.set(k, [r]);
     }
   }
 
-  /* The reference tier: exact category + code + unit, activity from priceBasis.
-     null = no reference price for this line. */
+  /* The reference tier: exact category + code, activity from priceBasis, and
+     the line's own unit. Stricter than the catalog path, because nobody chose
+     the row: the only stand-in allowed is EA for DA (the sheet prices drying
+     equipment as EA "per 24 hour period"), or any single unit for a line
+     that has none. null = no reference price for this line. */
   const fromReference = (it: DraftLine, rest: DraftLine, basis: string | undefined): DraftLine | null => {
     if (!refByKey.size) return null;
     const cat = String(it.category ?? "").trim(), code = String(it.code ?? "").trim();
@@ -220,7 +283,18 @@ export function resolveLines(items: DraftLine[], catalogRows: CatalogRow[], refR
       if (!hr) return null;
       return { ...rest, price: undefined, code, priced: "flag", priceFlag: laborFlag(code, refPrice(hr), it.unit) };
     }
-    const hit = rows.find((r) => r.activity === activity && normUnit(r.unit) === unit);
+    // The same unit wins. Otherwise the one unit that stands in (an EA "per
+    // 24 hr" row for a DA line, or a DA row for an EA line); several candidate
+    // units (EA and MO rows for a line with no unit) are ambiguous, so it is a
+    // miss rather than a guess. A row whose unit was never recorded ('') only
+    // ever matches a line with none.
+    const standsIn = (ru: string) => !unit || (unit === "EA" && ru === "DA") || (unit === "DA" && ru === "EA");
+    const same = rows.filter((r) => r.activity === activity);
+    let hit = same.find((r) => normUnit(r.unit) === unit);
+    if (!hit) {
+      const fits = same.filter((r) => normUnit(r.unit) && standsIn(normUnit(r.unit)));
+      if (new Set(fits.map((r) => normUnit(r.unit))).size === 1) hit = fits[0];
+    }
     const price = hit ? refPrice(hit) : null;
     if (!hit || price == null) return null;
     return {
@@ -245,10 +319,11 @@ export function resolveLines(items: DraftLine[], catalogRows: CatalogRow[], refR
       : basis === "detach_reset" ? row.detach_reset_price
       : row.replace_price); // "replace" | "labor" both live in replace_price
     if (col == null || col <= 0) return miss();
-    // a per-SF price stamped on a per-LF line (or any other unit mismatch) is
-    // wrong by the ratio of the two — flag it rather than stamp it
-    const lineUnit = normUnit(it.unit), rowUnit = normUnit(row.unit);
-    if (lineUnit && rowUnit && lineUnit !== rowUnit) {
+    // a per-SF price stamped on a per-LF line (a change of class, or SF vs SY
+    // inside one) is wrong by the ratio of the two — flag it rather than stamp
+    // it. Count units (EA / DA / LS / MO / WK) never flag: an EA "per 24 hour
+    // period" drying row billed as DA is the same money.
+    if (!unitsCompatible(it.unit, row.unit)) {
       return { ...rest, price: undefined, code: row.code, priced: "flag",
         priceFlag: `${row.code} is priced per ${String(row.unit).trim()}; this line is per ${String(it.unit).trim()} — fix the unit or quantity` };
     }
@@ -301,7 +376,7 @@ export function estimatingRules(pm: PricingMode, opts: { reference?: boolean } =
   // (docs/Estimating_Rules_Draft.md, "Patterns mined from 40 past Xactimate
   // estimates"). Mechanism only: no prices, codes or job names.
   const houseMitigation =
-    "ROYBAL HOUSE PATTERNS — MITIGATION (how Branden's past mitigation estimates are built; include each unless the evidence shows it does not apply here):\n" +
+    "ROYBAL HOUSE PATTERNS — MITIGATION (how Branden's past mitigation estimates are built; include each unless the evidence shows it does not apply here. If a pattern here conflicts with a confirmed rule above, the rule above wins.):\n" +
     "- Debris haul-off on every mitigation job: one pickup load for a small or medium tear-out; a dump trailer or dumpster for a large one.\n" +
     "- Whenever air movers are billed, also bill equipment setup / take-down / monitoring hours (about 1 hour per drying day) and equipment decontamination at one per piece of equipment placed (air movers + dehumidifiers + scrubbers + heaters).\n" +
     "- Anti-microbial on the exposed surfaces of every room where material was torn out.\n" +
@@ -313,7 +388,7 @@ export function estimatingRules(pm: PricingMode, opts: { reference?: boolean } =
     "- Undamaged items in the way (light fixtures, towel bars, shower doors, mirrors, faucet trim, shelving, hydronic baseboard-heat covers) are DETACH & RESET, never replaced.\n" +
     "- Final cleaning and floor protection usually belong to the restoration estimate, not mitigation.\n";
   const houseRestoration =
-    "ROYBAL HOUSE PATTERNS — RESTORATION / PUT-BACK (how Branden's past rebuild estimates are built; include each unless the evidence shows it does not apply here):\n" +
+    "ROYBAL HOUSE PATTERNS — RESTORATION / PUT-BACK (how Branden's past rebuild estimates are built; include each unless the evidence shows it does not apply here. If a pattern here conflicts with a confirmed rule above, the rule above wins.):\n" +
     "- Put back everything the mitigation removed, room by room, at the SAME quantity: flood-cut LF comes back as the same LF of drywall band; removed floor SF comes back as the same SF of new flooring (plus pad or floor prep); baseboard LF, toilets, vanities, doors and appliances come back one for one. Baseboard is the item most often missed: check every room for it.\n" +
     "- New material is REPLACE only when its removal is already on the mitigation estimate. Use remove-and-replace only for items the mitigation never removed (ceilings, crawlspace vapor barrier, heat covers).\n" +
     "- An item DETACHED during mitigation is RESET here; an item REMOVED during mitigation is replaced new.\n" +

@@ -119,6 +119,19 @@ test("null prices are allowed; out-of-range prices are not", () => {
   assert.deepEqual(v.errors, ["prices[0]: median is out of range"]);
 });
 
+test("the money bound is numeric(12,2) after Postgres rounds to two places", () => {
+  // these round to 10000000000.00 in Postgres and would overflow the column
+  for (const v of [9999999999.996, 9999999999.995, -9999999999.996, -9999999999.995]) {
+    const r = validate(file([price({ median: v })], [line({ line_total: v })]));
+    assert.equal(r.ok, false, String(v));
+    assert.deepEqual(r.errors, ["prices[0]: median is out of range", "lines[0]: line_total is out of range"], String(v));
+  }
+  // the largest storable values (and ones that round down to them) load
+  for (const v of [9999999999.99, 9999999999.994, -9999999999.99, -9999999999.994, 0, 0.004]) {
+    assert.equal(validate(file([price({ median: v })], [line({ line_total: v })])).ok, true, String(v));
+  }
+});
+
 test("counts must be whole numbers", () => {
   const v = validate(file([price({ n_lines: 2.5 }), price({ code: "TST2", n_estimates: "3" })], [line({ line_no: 1.5 })]));
   assert.deepEqual(v.errors, [

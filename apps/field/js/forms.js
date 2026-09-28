@@ -33,7 +33,7 @@ import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, photoAiOutdated, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { dictateBtn } from "./dictate.js";
-import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, customerText } from "./sitevisit.js";
+import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText } from "./sitevisit.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
@@ -1320,9 +1320,24 @@ function invoiceCharges(inv, onTotals, opts = {}) {
 
   function itemRow(it, no) {
     const tr = h("tr");
+    // a price the draft took from the owner's past Xactimate estimates stays
+    // marked for review on screen (app-only: never prints, never in the .docx)
+    const refBadge = it.priced === "reference"
+      ? h("div", { class: "app-only", style: "font-size:11px;color:var(--navy-3);padding:0 8px 2px", title: it.refNote || null }, "Xactimate ref price \u00b7 review")
+      : null;
     const cell = (key, cls, type = "text") => {
       const input = h("input", { type, value: it[key] ?? "" });
-      input.addEventListener("input", () => { it[key] = input.value; extEl.textContent = money((Number(it.qty) || 0) * (Number(it.price) || 0)); recalc(); commit(); });
+      input.addEventListener("input", () => {
+        it[key] = input.value;
+        // the office typed its own price: it is no longer the reference price,
+        // so the review badge and the refNote go (in place — no repaint mid-typing)
+        if (key === "price" && it.priced === "reference") {
+          it.priced = "manual";
+          delete it.refNote;
+          if (refBadge) refBadge.remove();
+        }
+        extEl.textContent = money((Number(it.qty) || 0) * (Number(it.price) || 0)); recalc(); commit();
+      });
       return h("td", { class: cls || "" }, input);
     };
     // Description: an auto-growing textarea on screen (never clips what you
@@ -1334,11 +1349,6 @@ function invoiceCharges(inv, onTotals, opts = {}) {
     dTa.addEventListener("input", () => { it.desc = dTa.value; dPrint.textContent = dTa.value; grow(); commit(); });
     requestAnimationFrame(grow);
     const extEl = h("td", { class: "ext calc" }, money((Number(it.qty) || 0) * (Number(it.price) || 0)));
-    // a price the draft took from the owner's past Xactimate estimates stays
-    // marked for review on screen (app-only: never prints, never in the .docx)
-    const refBadge = it.priced === "reference"
-      ? h("div", { class: "app-only", style: "font-size:11px;color:var(--navy-3);padding:0 8px 2px", title: it.refNote || null }, "Xactimate ref price \u00b7 review")
-      : null;
     tr.append(
       h("td", { class: "lineno" }, String(no) + "."),
       h("td", { class: "invdesc" }, dTa, dPrint, refBadge),
@@ -1618,7 +1628,8 @@ export function invoice(project, inv) {
         busyBtn(draftBtn, false, isEst ? "\u2728 Draft rebuild estimate" : "\u2728 Draft from documentation");
         return;
       }
-      if (draft.lossSummary) { inv.lossSummary = customerText(draft.lossSummary); lossTa.value = inv.lossSummary; lossTa.autoGrow(); }
+      // scrubbed of the private reference source only when a line was priced from it
+      if (draft.lossSummary) { inv.lossSummary = draftText(draft, draft.lossSummary); lossTa.value = inv.lossSummary; lossTa.autoGrow(); }
       inv.items = lines.map((li) => ({
         room: li.room || "", desc: li.desc || "", qty: li.qty != null ? String(li.qty) : "",
         unit: li.unit || "", price: li.price != null ? String(li.price) : "",

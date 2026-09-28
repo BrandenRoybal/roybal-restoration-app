@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit, frameTimes, frameCaption, FRAMES_PER_VIDEO, KINDS, MAX_IMAGES,
-  pricingCounts, pricingSummary, pricedTag, customerText } from "../js/sitevisit.js";
+  pricingCounts, pricingSummary, pricedTag, customerText, hasReferenceLines, draftText, scanBasisNotes } from "../js/sitevisit.js";
 import { FORMS, formsFor } from "../js/model.js";
 import { subRatesText, SUB_RATES } from "../js/pricing.js";
 import { estimateDocumentXml } from "../js/docx.js";
@@ -190,8 +190,9 @@ test("draft prose that names the reference source is dropped sentence by sentenc
   assert.equal(customerText("Some reference-priced lines need review"), "");
   assert.equal(customerText(undefined), "");
   const notes = draftNotesText({
+    items: REF_DRAFT.items,   // the scrub runs only on a draft with a reference-priced line
     assumptions: ["Home is unoccupied", "Trim uses the XACTIMATE REFERENCE codes."],
-    exclusions: ["Reference prices from past estimates are placeholders."],
+    exclusions: ["Reference prices from our past estimates are placeholders."],
     pricingNotes: "Fairbanks list, Sept 2026. Two lines priced from Roybal's past Xactimate estimates — review.",
   });
   assert.equal(notes, "ASSUMPTIONS\n• Home is unoccupied\n\nPRICING BASIS\nFairbanks list, Sept 2026.");
@@ -200,12 +201,101 @@ test("draft prose that names the reference source is dropped sentence by sentenc
   applySiteDraft(inv, {
     ...REF_DRAFT,
     lossSummary: "Kitchen rebuild. Trim is from the Xactimate reference.",
-    rooms: [{ name: "Kitchen", customerSummary: "New trim. Trim is a reference price." }],
+    rooms: [{ name: "Kitchen", customerSummary: "New trim. Trim is off the reference list." }],
     alternates: [{ title: "Tile", description: "Deducts tile. Priced off past Xactimate jobs.", baseCost: -100 }],
   });
   assert.equal(inv.lossSummary, "Kitchen rebuild.");
   assert.deepEqual(inv.customerScope, [{ room: "Kitchen", summary: "New trim." }]);
   assert.deepEqual(inv.alternates, [{ title: "Tile", description: "Deducts tile.", baseCost: "-100" }]);
+});
+
+/* Review fixes: the scrub runs only on a draft that used the reference (#6),
+   catches paraphrases of the source (#5/#8/#12), splits sentences past
+   closing quotes and brackets, and never takes the Magicplan sentence (#7). */
+const ORDINARY = "Partition walls hung to a laser reference line. Carry a reference price of $450 for the vanity.";
+test("a draft with no reference line keeps its prose exactly as written", () => {
+  const construction = {
+    ...DRAFT,
+    items: [
+      { room: "04 — Framing & carpentry", desc: "Partitions, labor", qty: 35, unit: "HR", price: 125, by: "Roybal", priced: "estimate" },
+      { room: "Kitchen", desc: "Test wall finish", qty: 40, unit: "SF", price: 1.5, priced: "catalog", code: "TST1" },
+    ],
+    lossSummary: ORDINARY,
+    rooms: [{ name: "Kitchen", customerSummary: ORDINARY }],
+    assumptions: [ORDINARY], exclusions: ["Checked against Xactimate history."],
+    pricingNotes: ORDINARY,
+    alternates: [{ title: "Laser reference line", description: ORDINARY, baseCost: 450 }],
+  };
+  assert.equal(hasReferenceLines(construction), false);
+  assert.equal(hasReferenceLines(REF_DRAFT), true);
+  assert.equal(hasReferenceLines(undefined), false);
+  const inv = { items: [], notes: "" };
+  applySiteDraft(inv, construction);
+  assert.equal(inv.lossSummary, ORDINARY);
+  assert.deepEqual(inv.customerScope, [{ room: "Kitchen", summary: ORDINARY }]);
+  assert.deepEqual(inv.alternates, [{ title: "Laser reference line", description: ORDINARY, baseCost: "450" }]);
+  // not even a sentence the scrub WOULD drop: without a reference line there is no private source to hide
+  assert.equal(inv.notes, "ASSUMPTIONS\n• " + ORDINARY + "\n\nEXCLUSIONS\n• Checked against Xactimate history.\n\nPRICING BASIS\n" + ORDINARY);
+  assert.equal(draftText(construction, "Checked against Xactimate history."), "Checked against Xactimate history.");
+  assert.equal(draftText(construction, undefined), "");
+  // on a draft that did use the reference, a laser "reference line" is still ordinary prose; a
+  // "reference price" is not (on that draft it most likely names the private source), so it goes
+  const LINE_ONLY = "Partition walls hung to a laser reference line.";
+  assert.equal(customerText(ORDINARY), LINE_ONLY);
+  const withRef = { items: [], notes: "" };
+  applySiteDraft(withRef, { ...REF_DRAFT, lossSummary: ORDINARY, rooms: [{ name: "Kitchen", customerSummary: ORDINARY }] });
+  assert.equal(withRef.lossSummary, LINE_ONLY);
+  assert.deepEqual(withRef.customerScope, [{ room: "Kitchen", summary: LINE_ONLY }]);
+});
+
+test("paraphrases of the private source are dropped; the Fairbanks Xactimate price list is not one", () => {
+  const LEGIT = "Priced from the Fairbanks Xactimate price list, Sept 2026.";
+  for (const s of [
+    "Trim priced from Roybal's past estimates.",
+    "Casing uses our prior Xactimate estimates.",
+    "Per Roybal's historical Xactimate pricing.",
+    "Baseboard came off the reference list of Roybal's past jobs.",
+    "Matched to previous Xactimate jobs.",
+    "Checked against Xactimate history.",
+    "Priced from our own Xactimate estimates.",
+    "Crown matched to our past estimates.",
+    "Two lines came from the reference block.",
+    "Those codes sit in the reference tier.",
+    "See xact_ref for the source.",
+    "The refNote has the range.",
+  ]) {
+    assert.equal(customerText(LEGIT + " " + s + " Owner supplies tile."), LEGIT + " Owner supplies tile.", s);
+  }
+  assert.equal(customerText(LEGIT), LEGIT);
+  assert.equal(customerText("Our pricing follows the Fairbanks Xactimate price list."), "Our pricing follows the Fairbanks Xactimate price list.");
+  // end to end on a reference draft
+  const inv = { items: [], notes: "" };
+  applySiteDraft(inv, { ...REF_DRAFT, assumptions: [], exclusions: [], pricingNotes: LEGIT + " Two lines priced from Roybal's past estimates — review." });
+  assert.equal(inv.notes, "PRICING BASIS\n" + LEGIT);
+});
+
+test("a sentence ends past its closing quote or bracket, so the next one survives", () => {
+  assert.equal(customerText('Trim is "per our past Xactimate estimates." Freight adds lead time.'), "Freight adds lead time.");
+  assert.equal(customerText("Casing is allowance-priced (from Roybal's past estimates.) Owner supplies tile."), "Owner supplies tile.");
+  assert.equal(customerText("Door slab [see xact_ref.] Owner supplies tile."), "Owner supplies tile.");
+  assert.equal(customerText("Owner supplies tile. Trim per \u201cour prior Xactimate estimates.\u201d Freight adds lead time."), "Owner supplies tile. Freight adds lead time.");
+  // a quoted measurement or a price is still not a boundary
+  assert.equal(customerText('Hang 1/2" drywall at $3.21/SF (see plan.) Checked against Xactimate history.'), 'Hang 1/2" drywall at $3.21/SF (see plan.)');
+});
+
+test("the Magicplan basis sentence goes on after the scrub, so a flagged sentence can't take it", () => {
+  const draft = { ...REF_DRAFT, assumptions: [], exclusions: [], pricingNotes: "Fairbanks list, Sept 2026. Two lines priced from past Xactimate estimates (review)" };
+  const MP = "Quantities from Magicplan LiDAR scan dated Sep 26, 2026; wall areas net of openings.";
+  draft.pricingNotes = scanBasisNotes(draft, "2026-09-26");
+  assert.equal(draft.pricingNotes, "Fairbanks list, Sept 2026. " + MP);
+  const inv = { items: [], notes: "" };
+  applySiteDraft(inv, draft);
+  assert.equal(inv.notes, "PRICING BASIS\nFairbanks list, Sept 2026. " + MP);
+  // only the flagged notes: the Magicplan sentence is all that's left
+  assert.equal(scanBasisNotes({ ...REF_DRAFT, pricingNotes: "Priced from our past Xactimate estimates" }, "2026-09-26"), MP);
+  // a draft with no reference line: the notes are kept as written, the sentence added once
+  assert.equal(scanBasisNotes({ ...DRAFT, pricingNotes: "Laser reference line set" }, "2026-09-26"), "Laser reference line set " + MP);
+  assert.equal(scanBasisNotes({ ...DRAFT, pricingNotes: "Fairbanks freight. " + MP }, "2026-09-26"), "Fairbanks freight. " + MP);
 });
 
 test("the rates sent with every draft name the company and each sub with a price", () => {

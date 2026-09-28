@@ -40,7 +40,10 @@
 --   drop function if exists public.xact_ref_reload(jsonb, jsonb);
 -- (cascade takes xact_ref_prices_for with it: it returns the table's row
 -- type.) The engine treats a failed or missing RPC as "no reference rows" and
--- prices exactly as it did before this file.
+-- prices exactly as it did before this file. That stops NEW reference
+-- pricing only: lines already drafted keep their priced='reference' stamp
+-- and review note on the job record (the synced job blob) until they are
+-- edited or re-drafted; dropping the tables does not reach back into them.
 -- ============================================================================
 
 

@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   normUnit, resolveLines, referenceTextFromRows, referenceAllowed, refPrice, refNote, estimatingRules, auditCodeRule,
   catalogTextFromRows, fetchAllPages, REFERENCE_HEADER, REFERENCE_PRIVATE, kindOfFacts,
+  unitClass, unitsCompatible, isLumpSumRef,
 } from "./pricing.ts";
 
 let pass = 0;
@@ -40,6 +41,90 @@ test("normUnit folds case, whitespace and the common aliases", () => {
   assert.equal(normUnit(""), "");
   assert.equal(normUnit(null), "");
   assert.equal(normUnit("constructor"), "CONSTRUCTOR");      // own-property lookup only
+  // the spellings a model writes for the sheet's units
+  for (const [u, want] of [
+    ["GAL", "GL"], ["gallon", "GL"], ["Gallons", "GL"], ["Week", "WK"], ["weeks", "WK"], ["Month", "MO"], ["MONTHS", "MO"],
+    ["Lin Ft", "LF"], ["linear ft", "LF"], ["Linear Feet", "LF"], ["sq feet", "SF"], ["Each", "EA"], ["hours", "HR"],
+  ]) assert.equal(normUnit(u), want, u);
+});
+
+/* ---------- unit classes ---------- */
+test("unit classes: area, linear, volume, hours; EA / DA / LS / MO / WK and anything unknown count; periods differ", () => {
+  for (const u of ["SF", "sq ft", "SY", "SQ"]) assert.equal(unitClass(u), "area", u);
+  for (const u of ["LF", "lin ft"]) assert.equal(unitClass(u), "linear", u);
+  for (const u of ["CF", "CY", "BF", "GL", "gal"]) assert.equal(unitClass(u), "volume", u);
+  for (const u of ["HR", "Hours"]) assert.equal(unitClass(u), "hours", u);
+  for (const u of ["EA", "DA", "Day", "LS", "MO", "Month", "WK", "Week", "TESTUNIT", "constructor"]) assert.equal(unitClass(u), "count", u);
+  // compatible: the same unit, a blank on either side, EA / LS against any count or period unit
+  for (const [a, b] of [["SF", "sq ft"], ["", "SF"], ["SF", null], ["EA", "DA"], ["Day", "EA"], ["LS", "EA"], ["EA", "WK"], ["MO", "EA"], ["Days", "DA"], ["GAL", "GL"]]) {
+    assert.equal(unitsCompatible(a, b), true, `${a} / ${b}`);
+  }
+  // a mismatch: a change of class, or two units inside one dimensional class
+  // a mismatch: a change of class, two units inside one dimensional class, or two different time periods
+  for (const [a, b] of [["LF", "SF"], ["SF", "SY"], ["SQ", "SF"], ["SF", "HR"], ["EA", "HR"], ["CF", "GL"], ["CY", "CF"], ["EA", "SF"], ["LF", "EA"], ["DA", "WK"], ["Week", "Day"], ["MO", "DA"], ["WK", "MO"]]) {
+    assert.equal(unitsCompatible(a, b), false, `${a} / ${b}`);
+  }
+});
+
+test("count units never flag on the catalog path: a per-24-hour EA drying row billed as DA or Day prices", () => {
+  const eqRow = cat("TSTA", { unit: "EA", description: "Test drying unit (per 24 hour period)", replace_price: 30, remove_price: null });
+  for (const unit of ["DA", "Day", "days", "EA", "each"]) {
+    const r = one(line({ code: "TSTA", unit, qty: 12 }), [eqRow], []);
+    assert.equal(r.priced, "catalog", unit);
+    assert.equal(r.price, 30, unit);
+    assert.equal(r.unit, unit, "the line keeps its own unit");
+  }
+  // a DA row billed as EA prices too, and so does LS / a period against an EA row
+  assert.equal(one(line({ code: "TSTB", unit: "EA" }), [cat("TSTB", { unit: "DA" })], []).priced, "catalog");
+  assert.equal(one(line({ code: "TSTB", unit: "Week" }), [cat("TSTB", { unit: "EA" })], []).priced, "catalog");
+  // but a per-month row on a per-week line (or per-week on per-day) is a 4x / 7x error: flag it
+  const period = one(line({ code: "TSTB", unit: "Week" }), [cat("TSTB", { unit: "MO" })], []);
+  assert.equal(period.priced, "flag");
+  assert.equal(period.price, undefined);
+  assert.equal(one(line({ code: "TSTB", unit: "DA", qty: 14 }), [cat("TSTB", { unit: "WK" })], []).priced, "flag");
+  assert.equal(one(line({ code: "TSTB", unit: "LS" }), [cat("TSTB", { unit: "EA" })], []).priced, "catalog");
+  // GAL and GL are one unit
+  const gal = one(line({ code: "TSTC", unit: "GAL" }), [cat("TSTC", { unit: "GL", replace_price: 40 })], []);
+  assert.equal(gal.priced, "catalog");
+  assert.equal(gal.price, 40);
+});
+
+test("dimensional mismatches still flag on the catalog path: SF as LF, SF as SY, HR as SF, CF as GL", () => {
+  const flagged = (rowUnit, lineUnit) => {
+    const r = one(line({ code: "TSTD", unit: lineUnit }), [cat("TSTD", { unit: rowUnit })], []);
+    assert.equal(r.priced, "flag", `${rowUnit} row billed as ${lineUnit}`);
+    assert.equal(r.price, undefined);
+    assert.equal(r.priceFlag, `TSTD is priced per ${rowUnit}; this line is per ${lineUnit} — fix the unit or quantity`);
+  };
+  flagged("SF", "LF");
+  flagged("SF", "SY");
+  flagged("HR", "SF");                                      // an hourly row on an area line (non-labor basis)
+  flagged("EA", "SF");
+  flagged("CF", "GL");
+});
+
+test("the reference path is strict: the line's own unit, or EA standing in for DA; SF on SY misses; WK never borrows an EA or MO price", () => {
+  const eaRow = ref("TSTE", "Replace", { unit: "EA", latest_median: 30, description: "Test drying unit (per 24 hour period)" });
+  const da = one(line({ code: "TSTE", unit: "DA" }), [], [eaRow]);
+  assert.equal(da.priced, "reference");
+  assert.equal(da.price, 30);
+  assert.equal(da.unit, "DA");
+  assert.equal(one(line({ code: "TSTE", unit: "Day" }), [], [eaRow]).priced, "reference");
+  assert.equal(one(line({ code: "TSTF", unit: "GAL" }), [], [ref("TSTF", "Replace", { unit: "GL" })]).priced, "reference");
+  // a dimensional mismatch is a miss, as before
+  assert.equal(one(line({ code: "TSTG", unit: "SY" }), [], [ref("TSTG", "Replace", { unit: "SF" })]).priced, "estimate");
+  assert.equal(one(line({ code: "TSTG", unit: "SF" }), [], [ref("TSTG", "Replace", { unit: "HR" })]).priced, "estimate");
+  // the same unit wins over a merely compatible one
+  const both = [ref("TSTH", "Replace", { unit: "EA", latest_median: 30 }), ref("TSTH", "Replace", { unit: "MO", latest_median: 700 })];
+  assert.equal(one(line({ code: "TSTH", unit: "MO" }), [], both).price, 700);
+  assert.equal(one(line({ code: "TSTH", unit: "each" }), [], both).price, 30);
+  // WK is neither EA nor MO: no reference price (a per-24-hr EA price on a per-week line is a 7x error)
+  assert.equal(one(line({ code: "TSTH", unit: "WK" }), [], both).priced, "estimate");
+  assert.equal(one(line({ code: "TSTH", unit: "LS" }), [], both).priced, "estimate");
+  // a line with no unit and two candidate units is ambiguous
+  assert.equal(one(line({ code: "TSTH", unit: "" }), [], both).priced, "estimate");
+  // a reference row with no recorded unit never prices a line that has one
+  assert.equal(one(line({ code: "TSTI", unit: "SF" }), [], [ref("TSTI", "Replace", { unit: "" })]).priced, "estimate");
 });
 
 /* ---------- the tiers ---------- */
@@ -220,6 +305,53 @@ test("referenceTextFromRows returns '' (no header) when there is nothing to offe
   assert.equal(referenceTextFromRows([ref("TST6", "R&R")], []), "");
 });
 
+/* ---------- job-specific lump sums (synthetic descriptions) ---------- */
+test("isLumpSumRef: bid items, agreed prices, paid bills, allowances and discounts; a per-day row with job quantities is still a unit price", () => {
+  for (const d of [
+    "Test plumbing - Bid Item", "TEST AGREED PRICE for fence", "Test plumber - paid bill", "Test fixture allowance",
+    "Test customer discount", "Test demo - lump sum",
+  ]) assert.equal(isLumpSumRef({ description: d }), true, d);
+  for (const d of [
+    "Test drying unit (per 24 hour period)", "Test stud wall - 2x4 - 16 in oc", "Test lumber 2x6 x 8 ft", "Test drywall 1/2 in",
+    "Test tension post - 2 posts x 5 days", "Test scrubber 2 units x 5 days", "Test heater x 4 days", "Test fan (x 3 day)",
+    "Test daily charge", "Test unit heater", "Test posts and rails", "", null, undefined,
+  ]) assert.equal(isLumpSumRef({ description: d }), false, String(d));
+  assert.equal(isLumpSumRef(null), false);
+  assert.equal(isLumpSumRef(undefined), false);
+});
+
+test("a lump-sum reference row is never offered in the prompt block", () => {
+  const t = referenceTextFromRows([
+    ref("TSTJ", "Replace", { description: "Test plumber - paid bill", unit: "EA", latest_median: 900 }),
+    ref("TSTK", "Replace", { description: "Test scrubber 2 units x 5 days", unit: "DA", latest_median: 50 }),
+    ref("TSTL", "Replace", { description: "Test extra - Bid Item", unit: "EA", latest_median: 1200 }),
+    ref("TSTM", "Replace", { description: "Test unit price row", unit: "SF", latest_median: 3 }),
+  ], []);
+  const rows = t.split("\n").filter((l) => /^ZZZ /.test(l));
+  // the per-day row keeps its place: "2 units x 5 days" is that job's quantity, the price is still per day
+  assert.deepEqual(rows, ["ZZZ TSTK | Test scrubber 2 units x 5 days | DA | Replace | ref $50.00 (3 est)", "ZZZ TSTM | Test unit price row | SF | Replace | ref $3.00 (3 est)"]);
+  // only lump sums: nothing to offer, no header
+  assert.equal(referenceTextFromRows([ref("TSTJ", "Replace", { description: "Test plumber - paid bill" })], []), "");
+});
+
+test("a lump-sum reference row is never stamped: this job's own number stands", () => {
+  // the plumber's paid bill on OTHER jobs must not replace this job's receipt
+  const paid = [ref("TSTJ", "Replace", { description: "Test plumber - paid bill", unit: "EA", latest_median: 900 })];
+  const r = one(line({ code: "TSTJ", unit: "EA", qty: 1, price: 412.5 }), [], paid);
+  assert.equal(r.priced, "estimate");
+  assert.equal(r.price, 412.5);
+  assert.equal(r.refNote, undefined);
+  for (const description of ["Test fence - Agreed Price", "Test allowance", "Test extra - Bid Item"]) {
+    const x = one(line({ code: "TSTK", unit: "EA" }), [], [ref("TSTK", "Replace", { description, unit: "EA" })]);
+    assert.equal(x.priced, "estimate", description);
+  }
+  // the labor guardrail does not reach for a lump-sum row either
+  const lab = one(line({ code: "TSTN", priceBasis: "labor", unit: "SF" }), [], [ref("TSTN", "Replace", { unit: "HR", description: "Test crew - agreed price" })]);
+  assert.equal(lab.priced, "estimate");
+  // a unit-price row beside it still prices
+  assert.equal(one(line({ code: "TSTM" }), [], [...paid, ref("TSTM", "Replace", { description: "Test unit price row" })]).priced, "reference");
+});
+
 /* ---------- the estimating rules ---------- */
 test("the house-pattern blocks exist and carry no prices, codes or job names", () => {
   for (const pm of ["piecework", "tm"]) {
@@ -240,6 +372,19 @@ test("the house-pattern blocks exist and carry no prices, codes or job names", (
   const r = estimatingRules("piecework");
   assert.match(r.houseMitigation, /REMOVE ONLY/);
   assert.match(r.houseRestoration, /Baseboard is the item most often missed/);
+});
+
+test("both house-pattern headers say a confirmed rule above wins over a pattern", () => {
+  const RULE_WINS = "If a pattern here conflicts with a confirmed rule above, the rule above wins.";
+  for (const pm of ["piecework", "tm"]) {
+    const r = estimatingRules(pm);
+    for (const k of ["houseMitigation", "houseRestoration"]) {
+      const header = r[k].split("\n")[0];
+      assert.ok(header.includes(RULE_WINS), k);
+      assert.ok(header.includes("include each unless the evidence shows it does not apply here"), k + " keeps its wording");
+      assert.ok(header.endsWith(":"), k);
+    }
+  }
 });
 
 test("the code rule names the reference tier only when the block is in the prompt", () => {

@@ -4,8 +4,9 @@ import assert from "node:assert/strict";
 import {
   isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody,
   parseBatchResult, SITE_DRAFT_SCHEMA, SITE_SYSTEM, MAX_IMAGES, cleanQuantities, quantitiesText, MAX_MEASURED_ROOMS,
-  kindFromCustomId, customIdFor,
+  kindFromCustomId, customIdFor, siteVisitRules,
 } from "./sitevisit.ts";
+import { kindOfFacts, referenceAllowed } from "./pricing.ts";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -327,6 +328,80 @@ test("the batch custom_id carries the kind, and old ids read as unknown", () => 
   for (const k of ["claim", "construction"]) assert.match(customIdFor(k, u), /^[A-Za-z0-9_-]{1,64}$/);
   const b = buildBatchBody({ customId: customIdFor("claim", u), model: "m", effort: "high", content: [] });
   assert.equal(kindFromCustomId(b.requests[0].custom_id), "claim");
+  // an unknown visit keeps the legacy id, so its result reads back as unknown
+  assert.equal(customIdFor("unknown", u), "sv-" + u);
+  assert.equal(kindFromCustomId(customIdFor("unknown", u)), "unknown");
+  assert.match(customIdFor("unknown", u), /^[A-Za-z0-9_-]{1,64}$/);
+});
+
+/* ---------- siteVisitStart's three kinds (synthetic reference rows) ---------- */
+const REF_ROWS = [{ category: "ZZZ", code: "TST2", activity: "Replace", unit: "SF", description: "Test reference row", n_lines: 5, n_estimates: 5, median: 4, latest_median: 4 }];
+const CAT_ROWS = [{ category: "ZZZ", code: "TST1", description: "Test catalog row", unit: "SF", replace_price: 2.5, remove_price: 1.25, detach_reset_price: null }];
+const U = "123e4567-e89b-42d3-a456-426614174000";
+// siteVisitStart's pure steps, in its order: kind → reference rows (only when
+// referenceAllowed) → rules + reference text → content → custom id
+const startFor = (facts, pm = "piecework") => {
+  const kind = kindOfFacts(facts);
+  const refRows = referenceAllowed({ mode: pm, kind }) ? REF_ROWS : [];
+  const { rulesText, referenceText } = siteVisitRules(pm, kind, refRows, CAT_ROWS);
+  const content = buildContent({ packet: cleanPacket({ typedScope: "Kitchen flood cut" }), signed: {}, facts, rulesText, catalogText: "CAT", kind, ratesText: "", referenceText });
+  return { kind, rulesText, referenceText, text: textOf(content), customId: customIdFor(kind, U) };
+};
+
+test("a claim visit gets the claim shape, the house patterns, the reference block and an sv-x- id", () => {
+  const s = startFor({ job: { jobType: "restoration" } });
+  assert.equal(s.kind, "claim");
+  assert.match(s.text, /HOW TO SHAPE AN INSURANCE \/ RESTORATION ESTIMATE/);
+  assert.match(s.rulesText, /ROYBAL HOUSE PATTERNS — MITIGATION/);
+  assert.match(s.rulesText, /ROYBAL HOUSE PATTERNS — RESTORATION/);
+  assert.match(s.referenceText, /^XACTIMATE REFERENCE CODES/);
+  assert.match(s.text, /ZZZ TST2 \| Test reference row \| SF \| Replace/);
+  assert.match(s.rulesText, /XACTIMATE REFERENCE row/, "the code rule names the reference tier");
+  assert.equal(s.customId, "sv-x-" + U);
+  assert.equal(kindFromCustomId(s.customId), "claim");
+  // T&M never gets the reference block, even on a claim
+  const tm = startFor({ job: { jobType: "restoration" } }, "tm");
+  assert.equal(tm.referenceText, "");
+  assert.doesNotMatch(tm.text, /XACTIMATE REFERENCE/);
+});
+
+test("a construction visit gets the construction shape, no house patterns, no reference block and an sv-c- id", () => {
+  const s = startFor({ job: { jobType: "construction" } });
+  assert.equal(s.kind, "construction");
+  assert.match(s.text, /HOW TO SHAPE A CONSTRUCTION ESTIMATE/);
+  assert.doesNotMatch(s.rulesText, /ROYBAL HOUSE PATTERNS/);
+  assert.equal(s.referenceText, "");
+  assert.doesNotMatch(s.text, /XACTIMATE REFERENCE/);
+  assert.equal(kindFromCustomId(s.customId), "construction");
+  // reference rows handed in by mistake still never make a block
+  assert.equal(siteVisitRules("piecework", "construction", REF_ROWS, CAT_ROWS).referenceText, "");
+});
+
+test("a visit from a pre-v192 client (no jobType) is drafted as a claim but never reference-priced", () => {
+  for (const facts of [{ job: {} }, {}, { job: { jobType: "" } }, null]) {
+    const s = startFor(facts);
+    assert.equal(s.kind, "unknown", JSON.stringify(facts));
+    // the claim prompt shape and the claim house patterns (harmless text)
+    assert.match(s.text, /HOW TO SHAPE AN INSURANCE \/ RESTORATION ESTIMATE/);
+    assert.doesNotMatch(s.text, /CONSTRUCTION ESTIMATE/);
+    assert.match(s.rulesText, /ROYBAL HOUSE PATTERNS — MITIGATION/);
+    assert.match(s.rulesText, /ROYBAL HOUSE PATTERNS — RESTORATION/);
+    // but no reference block and no reference code rule
+    assert.equal(s.referenceText, "");
+    assert.doesNotMatch(s.text, /XACTIMATE REFERENCE/);
+    // and the legacy id, so siteVisitResult reads it as unknown and stamps no reference
+    assert.equal(s.customId, "sv-" + U);
+    assert.equal(kindFromCustomId(s.customId), "unknown");
+    assert.equal(referenceAllowed({ mode: "piecework", kind: kindFromCustomId(s.customId) }), false);
+  }
+  // even with rows and a reference text forced in, an unknown visit renders none
+  assert.equal(siteVisitRules("piecework", "unknown", REF_ROWS, CAT_ROWS).referenceText, "");
+  const forced = buildContent({ ...ARGS(cleanPacket({ typedScope: "x" })), kind: "unknown", referenceText: REF_BLOCK });
+  assert.doesNotMatch(textOf(forced), /XACTIMATE REFERENCE/);
+  assert.match(textOf(forced), /HOW TO SHAPE AN INSURANCE/);
+  // no kind at all is fail-closed too
+  const bare = buildContent({ ...ARGS(cleanPacket({ typedScope: "x" })), kind: undefined, referenceText: REF_BLOCK });
+  assert.doesNotMatch(textOf(bare), /XACTIMATE REFERENCE/);
 });
 
 console.log(`\n${pass} site-visit tests passed`);

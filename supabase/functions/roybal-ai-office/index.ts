@@ -68,7 +68,7 @@ import {
   PERSONAS, CTX_LABELS, SPOKEN_RULE, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS,
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
-import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody, parseBatchResult, customIdFor, kindFromCustomId } from "./sitevisit.ts";
+import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
 // line-item pricing (catalog + reference tiers, the estimating rules) — pure,
 // Node-tested in ./pricing.test.mjs
 import {
@@ -853,24 +853,20 @@ async function siteVisitStart(body: Record<string, unknown>) {
   for (const f of [...packet.reports, ...packet.photos, ...packet.notes]) signed[f.path] = await signMedia(f.path, jwt, 86400);
 
   const rows = await fetchCatalogRows(jwt, pm === "tm" ? TM_CATS : SITE_CATS);
-  const facts = (body.facts ?? {}) as { job?: { jobType?: string } };
-  const kind = facts.job?.jobType === "construction" ? "construction" : "claim";
+  const facts = body.facts ?? {};
+  // construction / claim from facts.job.jobType. No jobType (a client older
+  // than v192) is unknown: the claim shape and house patterns, but no
+  // reference block and no reference prices — that client shows a reference
+  // line as a plain estimate and has no customerText backstop (sitevisit.ts).
+  const kind = kindOfFacts(facts);
   // the owner's past Xactimate estimates: a fallback tier on piecework claims only
   const refRows = referenceAllowed({ mode: pm, kind }) ? await fetchReferenceRows(jwt) : [];
-  const referenceText = referenceTextFromRows(refRows, rows);
-  const r = estimatingRules(pm, { reference: !!referenceText });
-  // House patterns ride under their framing lines on a claim. A construction job
-  // gets neither. (The claim inclusion blocks themselves still go to construction
-  // jobs as before: the finish chain in inclusionRestoration applies to a remodel
-  // too, so dropping them is not a trivially safe change.)
-  const claim = kind === "claim";
-  const rulesText = r.pricingRules + r.commonRules + "\n" + r.inclusionUniversal +
-    "When the job includes mitigation (emergency, extraction, tear-out, drying), these apply to those lines:\n" + r.inclusionMitigation + (claim ? r.houseMitigation : "") +
-    "For put-back and rebuild lines:\n" + r.inclusionRestoration + (claim ? r.houseRestoration : "");
+  const { rulesText, referenceText } = siteVisitRules(pm, kind, refRows, rows);
   const ratesText = String(body.rates ?? "").slice(0, 4000);
   const content = buildContent({ packet, signed, facts, rulesText, catalogText: catalogTextFromRows(rows, pm), kind, ratesText, referenceText });
   // the kind rides the batch's custom_id so siteVisitResult knows whether the
-  // reference tier may price the result (sv-x- claim, sv-c- construction)
+  // reference tier may price the result (sv-x- claim, sv-c- construction; an
+  // unknown visit keeps the legacy sv-, which reads back as unknown)
   const customId = customIdFor(kind, crypto.randomUUID());
   const res = await fetch("https://api.anthropic.com/v1/messages/batches", {
     method: "POST", headers: ANTHROPIC_HEADERS(),

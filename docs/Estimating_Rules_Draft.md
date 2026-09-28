@@ -527,14 +527,20 @@ different, so you can say which one is right.
 - **Where they go.** A reconstruction-estimate draft gets `houseRestoration`; a mitigation invoice
   draft gets `houseMitigation`; a site-visit draft on a claim job gets both; the supplement audit
   gets the one that matches what it is checking. A construction (non-claim) site visit gets
-  neither.
+  neither. A site visit from a field app older than v192 (it sends no job type) is drafted as a
+  claim and gets both blocks, but never the private price reference below.
 - **They sit below your confirmed rules.** Each block comes after the confirmed inclusion rules it
-  belongs with and is worded as a house pattern, not a mandate. Where a pattern and a
-  confirmed rule disagree (D1, D2), the confirmed rule wins. When you mark a pattern ✏️ or ❌, the
-  block text changes to match.
+  belongs with and is worded as a house pattern, not a mandate. Each block's header says so to the
+  model in so many words: *"If a pattern here conflicts with a confirmed rule above, the rule above
+  wins."* Where a pattern and a confirmed rule disagree (D1, D2), the confirmed rule wins. When you
+  mark a pattern ✏️ or ❌, the block text changes to match.
 - **Prices are a separate matter.** The prices on these same estimates are kept as a private,
   owner/office-only reference that never lives in this repo — see
-  `docs/architecture/04-OPEN-QUESTIONS.md` C9 and ADR-12. Nothing in this section is a price.
+  `docs/architecture/04-OPEN-QUESTIONS.md` C9 and ADR-12. Nothing in this section is a price. The
+  reference never offers or stamps a job-specific lump sum (a bid item, an agreed price, a paid
+  bill, an allowance or discount, or a line carrying that job's own quantities such as "2 units x
+  5 days"): those rows stay loaded but are not unit prices. Dropping the reference tables stops new
+  reference pricing only; lines already drafted keep their reference note on the job record.
 
 ---
 

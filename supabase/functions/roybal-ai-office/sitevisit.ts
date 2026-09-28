@@ -21,6 +21,9 @@
  * wall clock, and a batch result waits on Anthropic's side until we fetch it.
  */
 
+import { estimatingRules, referenceTextFromRows } from "./pricing.ts";
+import type { CatalogRow, PricingMode, RefRow } from "./pricing.ts";
+
 /* Uploads live in the private field-media bucket under this prefix, one
    folder per field project. Anything else is refused before it is signed. */
 export const SITE_PREFIX = "sitevisit/";
@@ -267,23 +270,49 @@ export type BuildArgs = {
   facts: unknown;                   // job header + any documented facts (JSON)
   rulesText: string;                // pricing mode + common + inclusion rules
   catalogText: string;              // Fairbanks price catalog, one row per line
-  kind?: "construction" | "claim";  // how the estimate is organised and who reads it
+  kind?: SiteKind;                  // how the estimate is organised and who reads it ('unknown' reads as a claim)
   ratesText?: string;               // the company's own labor and subcontractor rates
   referenceText?: string;           // XACTIMATE REFERENCE block (piecework claims only; '' = none)
 };
 
-/* The batch custom_id carries the estimate's kind, so siteVisitResult (a
-   later request that only has the batch) knows whether the reference tier
-   may price the draft: sv-x-<uuid> = insurance claim, sv-c-<uuid> =
-   construction. Batches started before this encoding read as unknown and
-   never get reference prices. */
+/* The estimate's kind, from the facts the client sent (pricing.ts
+   kindOfFacts): "construction", "claim", or "unknown" when the facts carry no
+   job.jobType — a field client older than v192. An unknown visit is drafted
+   in the claim shape with the claim house patterns (harmless text), but it
+   never gets the XACTIMATE REFERENCE block or a reference price: that old
+   client would show a reference line as a plain estimate, and it has no
+   customerText() backstop to keep the private source out of customer prose.
+
+   The batch custom_id carries the kind, so siteVisitResult (a later request
+   that only has the batch) knows whether the reference tier may price the
+   draft: sv-x-<uuid> = insurance claim, sv-c-<uuid> = construction, and an
+   unknown visit keeps the legacy sv-<uuid>, which reads back as unknown (as
+   does every batch started before this encoding) and is never
+   reference-priced. */
 export type SiteKind = "claim" | "construction" | "unknown";
-export function customIdFor(kind: "claim" | "construction", uuid: string): string {
-  return (kind === "construction" ? "sv-c-" : "sv-x-") + uuid;
+export function customIdFor(kind: SiteKind, uuid: string): string {
+  return (kind === "construction" ? "sv-c-" : kind === "claim" ? "sv-x-" : "sv-") + uuid;
 }
 export function kindFromCustomId(id: unknown): SiteKind {
   const s = String(id ?? "");
   return s.startsWith("sv-x-") ? "claim" : s.startsWith("sv-c-") ? "construction" : "unknown";
+}
+
+/** The rules text and the XACTIMATE REFERENCE block for one site visit — the
+    pure half of siteVisitStart. Claim and unknown visits get the house
+    patterns under their framing lines; a construction job gets neither. (The
+    claim inclusion blocks themselves still go to construction jobs: the
+    finish chain in inclusionRestoration applies to a remodel too, so dropping
+    them is not a trivially safe change.) The reference block is built only for
+    a piecework claim, whatever rows the caller passes. */
+export function siteVisitRules(pm: PricingMode, kind: SiteKind, refRows: RefRow[], catalogRows: CatalogRow[]): { rulesText: string; referenceText: string } {
+  const referenceText = pm === "piecework" && kind === "claim" ? referenceTextFromRows(refRows, catalogRows) : "";
+  const r = estimatingRules(pm, { reference: !!referenceText });
+  const house = kind !== "construction";
+  const rulesText = r.pricingRules + r.commonRules + "\n" + r.inclusionUniversal +
+    "When the job includes mitigation (emergency, extraction, tear-out, drying), these apply to those lines:\n" + r.inclusionMitigation + (house ? r.houseMitigation : "") +
+    "For put-back and rebuild lines:\n" + r.inclusionRestoration + (house ? r.houseRestoration : "");
+  return { rulesText, referenceText };
 }
 
 /* A construction estimate is organised the way Branden prices a remodel
@@ -336,8 +365,9 @@ export function buildContent(a: BuildArgs): Block[] {
     out.push({ type: "image", source: { type: "url", url } });
   }
   const measured = quantitiesText(packet.magicplanQuantities);
-  // the reference block is a claim-only fallback tier; never on a construction job
-  const reference = a.kind === "construction" ? "" : String(a.referenceText ?? "").trim();
+  // the reference block is a claim-only fallback tier: never on a construction
+  // job, never on an unknown (pre-v192 client) one, never without a kind
+  const reference = a.kind === "claim" ? String(a.referenceText ?? "").trim() : "";
   const sections = [
     ...(measured ? [measured] : []),
     "OWNER'S TYPED SCOPE:\n" + (packet.typedScope.trim() || "(none)"),

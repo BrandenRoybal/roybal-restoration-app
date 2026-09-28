@@ -104,10 +104,12 @@ export function packetReady(sv) {
                    refNote says how many lines/estimates and the range;
      "flag"      — a guardrail blanked the price (priceFlag says why);
      "estimate"  — the model's own number.
+   The estimate editor adds one of its own: "manual" — the office typed over
+   a reference price, so the line loses its review badge and refNote.
    These labels are for the office, on screen only. The reference source
    never reaches a customer surface: refNote is read only by pricedTag()
-   and the app-only line badge, and customerText() drops any sentence of
-   draft prose that names it. */
+   and the app-only line badge, and on a draft with a reference line
+   customerText() drops any sentence of draft prose that names it. */
 export function pricingCounts(lines) {
   const xs = arr(lines);
   const n = (p) => xs.filter((li) => li && li.priced === p).length;
@@ -140,29 +142,80 @@ export function pricedTag(li) {
    per-room customer summary, alternates) must never name the private
    reference source. The server tells the model so; this is the backstop:
    any sentence that still does is dropped, the rest is left exactly as
-   written. Sentences split on . ! ? followed by a space, so "$3.21" and
-   "1/2\"" stay whole. (No lookbehind: older iPad Safari can't parse it.) */
-const REF_MENTION = /xactimate\s+ref|past\s+xactimate|xact_ref|\bref(?:erence)?[- ](?:price|priced|pricing|code|row|line|rate)s?\b|refNote/i;
-const SENTENCE = /(?:[^.!?]|[.!?](?=\S))+[.!?]*\s*|[.!?]+\s*/g;
+   written. It runs only on a draft that actually priced a line from the
+   reference (draftText below): a construction or T&M draft has no such
+   line, so its prose is never touched.
+   A mention is the SOURCE: Xactimate near past / prior / previous /
+   historical / history (either order, up to three words apart), Roybal's or
+   our past / prior / previous / own estimates, jobs or pricing, the reference
+   list / block / codes / tier / source, a reference or "ref" price / pricing
+   / code / row / rate, and the field names. "Hung to a laser reference
+   line" and "priced from our Fairbanks Xactimate price list" are ordinary
+   prose.
+   Sentences end at . ! ? plus any closing quotes / brackets, then a space,
+   so "$3.21" and "1/2\"" stay whole and a quoted or bracketed sentence
+   doesn't swallow the next one. (No lookbehind: older iPad Safari can't
+   parse it.) */
+const HIST = "(?:past|prior|previous|historical|history)";
+const NEAR = "(?:\\W+\\w+){0,3}?\\W+";   // up to three words in between
+const REF_MENTION = new RegExp([
+  "\\bxactimate\\s+ref",                                   // Xactimate ref / reference
+  "\\bxactimate\\b" + NEAR + HIST + "\\b",                 // Xactimate history
+  "\\b" + HIST + NEAR + "xactimate\\b",                    // our prior Xactimate estimates
+  "\\b(?:roybal['\u2019]?s?|our)\\s+(?:own\\s+)?(?:past|prior|previous|historical|earlier)\\s+(?:\\w+\\s+)?(?:estimates?|jobs?|pricing)\\b",
+  "\\breference\\s+(?:lists?|blocks?|codes|tiers?|sources?)\\b",
+  "\\b(?:roybal['\u2019]?s?|our)\\s+own\\s+(?:\\w+\\s+){0,2}(?:estimates?|jobs?|pricing)\\b", // our own Xactimate estimates
+  "\\breference-priced\\b",                                // the tier's own name, never ordinary prose
+  "\\bref(?:erence)?[- ](?:prices?|priced|pricing|codes?|rows?|rates?)\\b", // reference price, ref pricing
+  "\\bref\\s+\\$",                                          // "ref $4.00", as the prompt block writes it
+  "xact_ref",
+  "refnote",
+].join("|"), "i");
+const SENTENCE_END = /([.!?]+["')\]\u201d\u2019]*\s+)/;   // captured, so split() keeps it
+function sentences(line) {
+  const parts = line.split(SENTENCE_END);   // [text, end, text, end, …, text]
+  const out = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const s = parts[i] + (parts[i + 1] || "");
+    if (s) out.push(s);
+  }
+  return out;
+}
 export function customerText(text) {
   const src = String(text ?? "");
   if (!REF_MENTION.test(src)) return src;
   const out = [];
   for (const line of src.split("\n")) {
     if (!REF_MENTION.test(line)) { out.push(line); continue; }
-    const kept = (line.match(SENTENCE) || []).filter((s) => !REF_MENTION.test(s)).join("").trimEnd();
+    const kept = sentences(line).filter((s) => !REF_MENTION.test(s)).join("").trimEnd();
     if (kept.trim()) out.push(kept);
   }
   return out.join("\n").trim();
 }
+/** True when at least one of the draft's lines was priced from the reference. */
+export function hasReferenceLines(draft) {
+  return arr(draft && draft.items).some((li) => li && li.priced === "reference");
+}
+/** One piece of a draft's prose as the customer may see it: scrubbed only
+    when the draft has a reference-priced line, otherwise exactly as written. */
+export function draftText(draft, text) {
+  return hasReferenceLines(draft) ? customerText(text) : String(text ?? "");
+}
+/** M3: the draft's pricing notes with the Magicplan provenance sentence on
+    the end. The notes are scrubbed FIRST, so a flagged sentence with no
+    closing stop can't run into the Magicplan sentence and take it with it. */
+export function scanBasisNotes(draft, scannedAt) {
+  return withMagicplanBasis(draftText(draft, draft && draft.pricingNotes), scannedAt);
+}
 
 /** The printed notes block: assumptions, exclusions and the Fairbanks pricing basis. */
 export function draftNotesText(draft) {
+  const scrub = (x) => draftText(draft, x);
   const list = (title, xs) => {
-    const kept = arr(xs).map(customerText).filter((x) => x.trim());
+    const kept = arr(xs).map(scrub).filter((x) => x.trim());
     return kept.length ? title + "\n" + kept.map((x) => "• " + x).join("\n") : "";
   };
-  const basis = draft.pricingNotes ? customerText(draft.pricingNotes) : "";
+  const basis = draft.pricingNotes ? scrub(draft.pricingNotes) : "";
   return [
     list("ASSUMPTIONS", draft.assumptions),
     list("EXCLUSIONS", draft.exclusions),
@@ -183,16 +236,17 @@ export function applySiteDraft(inv, draft, at = new Date().toISOString()) {
     ...(li.refNote ? { refNote: String(li.refNote) } : {}),   // office-only provenance of a "reference" price; never printed
     ...(li.by ? { by: String(li.by) } : {}),
   }));
-  if (draft.lossSummary) inv.lossSummary = customerText(draft.lossSummary);
+  const scrub = (x) => draftText(draft, x);
+  if (draft.lossSummary) inv.lossSummary = scrub(draft.lossSummary);
   const block = draftNotesText(draft);
   const prev = String(inv.siteVisitNotes || "");
   const notes = String(inv.notes || "");
   const kept = prev && notes.includes(prev) ? notes.replace(prev, "").trim() : notes.trim();
   inv.notes = [kept, block].filter(Boolean).join("\n\n");
   inv.siteVisitNotes = block;
-  inv.customerScope = arr(draft.rooms).map((r) => ({ room: r.name, summary: typeof r.customerSummary === "string" ? customerText(r.customerSummary) : r.customerSummary }));
+  inv.customerScope = arr(draft.rooms).map((r) => ({ room: r.name, summary: typeof r.customerSummary === "string" ? scrub(r.customerSummary) : r.customerSummary }));
   // construction shape: open choices as alternates, contingency, accuracy, duration
-  inv.alternates = arr(draft.alternates).map((a) => ({ title: customerText(a.title || ""), description: customerText(a.description || ""), baseCost: String(Number(a.baseCost) || 0) }));
+  inv.alternates = arr(draft.alternates).map((a) => ({ title: scrub(a.title || ""), description: scrub(a.description || ""), baseCost: String(Number(a.baseCost) || 0) }));
   inv.contingencyPct = Number(draft.contingencyPct) > 0 ? String(draft.contingencyPct) : "";
   inv.accuracyPct = Number(draft.accuracyPct) > 0 ? String(draft.accuracyPct) : "";
   inv.duration = String(draft.duration || "");
@@ -518,7 +572,7 @@ export function siteVisitPanel(ctx) {
       // M3: the estimate's Pricing Basis says where measured quantities came from —
       // the scan the draft was started with (a scan adopted while it ran is not in it)
       const mq = job.magicplanScannedAt != null ? { scannedAt: job.magicplanScannedAt } : (job.magicplanScannedAt === undefined ? magicplanQuantities(sv) : null);
-      if (mq) draft.pricingNotes = withMagicplanBasis(draft.pricingNotes, mq.scannedAt);
+      if (mq) draft.pricingNotes = scanBasisNotes(draft, mq.scannedAt);   // scrubbed before the sentence goes on
       const sum = applySiteDraft(target, draft);
       sv.pending = null;
       sv.lastDraftAt = new Date().toISOString();
