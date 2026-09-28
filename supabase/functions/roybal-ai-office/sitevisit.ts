@@ -40,13 +40,48 @@ export const MAX_TRANSCRIPT_CHARS = 400_000;
 export const MAX_SCOPE_CHARS = 40_000;
 
 export type SiteFile = { path: string; name?: string; mime?: string; room?: string; caption?: string };
+/* M3 (Magicplan design §5): the measured rooms, as the client built them from
+   the normalized statistics on the bid file. Feet by contract; a block that
+   says metric is converted here so no metre ever reaches the prompt. */
+export type MeasuredRoom = { name: string; floorSF: number; perimLF: number; ceilingFt: number; wallSF: number; wallSFNet: number; doors: number; windows: number; volumeCF: number };
+export type MagicplanQuantities = { scannedAt: string; units: "imperial" | "metric"; rooms: MeasuredRoom[] };
+export const MAX_MEASURED_ROOMS = 80;
 export type SitePacket = {
   reports?: SiteFile[];      // Magicplan report PDF(s)
   photos?: SiteFile[];       // extra site photos (already JPEG, ≤1568px)
   notes?: SiteFile[];        // photographed handwritten note pages
   transcript?: string;       // site-walk transcript (from siteVisitTranscribe)
   typedScope?: string;       // Branden's typed scope / instructions
+  magicplanQuantities?: MagicplanQuantities | null;   // measured rooms (M3), or absent
 };
+
+/* metric → feet, the same factors and rounding as the client's normalizeStatistics */
+const M2_FT2 = 10.764, M_FT = 3.281, M3_FT3 = 35.315;
+const r1 = (v: number) => Math.round(v);
+const rHalf = (v: number) => Math.round(v * 2) / 2;
+/** Bound and normalise the measured-rooms block; null when there is nothing usable. */
+export function cleanQuantities(raw: unknown): MagicplanQuantities | null {
+  if (!raw || typeof raw !== "object") return null;
+  const q = raw as Partial<MagicplanQuantities>;
+  const metric = String(q.units ?? "").toLowerCase() === "metric";
+  const n = (v: unknown) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : 0; };
+  const area = (v: unknown) => r1(n(v) * (metric ? M2_FT2 : 1));
+  const len = (v: unknown) => rHalf(n(v) * (metric ? M_FT : 1));
+  const vol = (v: unknown) => r1(n(v) * (metric ? M3_FT3 : 1));
+  const rooms: MeasuredRoom[] = (Array.isArray(q.rooms) ? q.rooms : []).slice(0, MAX_MEASURED_ROOMS)
+    .map((r) => {
+      const x = (r && typeof r === "object" ? r : {}) as Partial<MeasuredRoom>;
+      return {
+        name: String(x.name ?? "").trim().slice(0, 80),
+        floorSF: area(x.floorSF), perimLF: len(x.perimLF), ceilingFt: len(x.ceilingFt),
+        wallSF: area(x.wallSF), wallSFNet: area(x.wallSFNet),
+        doors: Math.round(n(x.doors)), windows: Math.round(n(x.windows)), volumeCF: vol(x.volumeCF),
+      };
+    })
+    .filter((r) => r.name && (r.floorSF > 0 || r.perimLF > 0 || r.wallSF > 0 || r.volumeCF > 0));
+  if (!rooms.length) return null;
+  return { scannedAt: String(q.scannedAt ?? "").slice(0, 40), units: "imperial", rooms };
+}
 
 /** Normalise and bound the client's packet; drops anything unsafe. */
 export function cleanPacket(raw: unknown): Required<SitePacket> {
@@ -70,7 +105,28 @@ export function cleanPacket(raw: unknown): Required<SitePacket> {
     reports, photos, notes,
     transcript: String(p.transcript ?? "").slice(0, MAX_TRANSCRIPT_CHARS),
     typedScope: String(p.typedScope ?? "").slice(0, MAX_SCOPE_CHARS),
+    magicplanQuantities: cleanQuantities(p.magicplanQuantities),
   };
+}
+
+/** The MEASURED QUANTITIES section: one line per room, feet, the way the
+    estimator is told to cite them. Empty string when the packet has none. */
+export function quantitiesText(q: MagicplanQuantities | null | undefined): string {
+  if (!q || !q.rooms.length) return "";
+  const fmt = (v: number) => v.toLocaleString("en-US");
+  const when = q.scannedAt ? (() => { const d = new Date(q.scannedAt); return isNaN(d.getTime()) ? q.scannedAt : d.toISOString().slice(0, 10); })() : "date not recorded";
+  const lines = q.rooms.map((r) => {
+    const bits: string[] = [];
+    if (r.floorSF) bits.push(`${fmt(r.floorSF)} ft² floor`);
+    if (r.perimLF) bits.push(`${fmt(r.perimLF)} LF perimeter`);
+    if (r.ceilingFt) bits.push(`${fmt(r.ceilingFt)} ft ceiling`);
+    if (r.wallSF) bits.push(`${fmt(r.wallSF)} ft² walls` + (r.wallSFNet ? ` (${fmt(r.wallSFNet)} ft² net of openings)` : ""));
+    if (r.doors) bits.push(`${r.doors} door${r.doors === 1 ? "" : "s"}`);
+    if (r.windows) bits.push(`${r.windows} window${r.windows === 1 ? "" : "s"}`);
+    if (r.volumeCF) bits.push(`${fmt(r.volumeCF)} ft³`);
+    return `- ${r.name}: ${bits.join(", ")}`;
+  });
+  return `MEASURED QUANTITIES (Magicplan LiDAR, ${when}; feet, wall areas net of openings where given):\n` + lines.join("\n");
 }
 
 /** True when the packet carries enough evidence to draft from. */
@@ -264,12 +320,15 @@ export function buildContent(a: BuildArgs): Block[] {
     out.push({ type: "text", text: `HANDWRITTEN NOTES, PAGE ${pg}:` });
     out.push({ type: "image", source: { type: "url", url } });
   }
+  const measured = quantitiesText(packet.magicplanQuantities);
   const sections = [
+    ...(measured ? [measured] : []),
     "OWNER'S TYPED SCOPE:\n" + (packet.typedScope.trim() || "(none)"),
     "SITE WALK TRANSCRIPT (one or more narrated clips; each clip opens with a header line — Clip n · Room · length — and every timestamp inside a clip is minutes:seconds into THAT clip, not into the visit; a recording with no header is timed from its own start):\n" + (packet.transcript.trim() || "(no recording)"),
     "JOB HEADER AND ANY DOCUMENTED FACTS:\n```json\n" + JSON.stringify(a.facts ?? {}, null, 2) + "\n```",
     "HOW TO WRITE IT:\n" +
       "- Cite evidence in every basis: report page, walk clip room and timestamp, photo number, notes page, or typed scope.\n" +
+      (measured ? "- Use MEASURED QUANTITIES over anything read off the report PDF: they are the LiDAR scan's own figures. Cite them as 'Magicplan: 214 ft² floor, 58 LF perimeter' (the room's measured numbers, not a page). Wall areas there are net of openings; only derive what the scan does not give.\n" : "") +
       "- The room named at the top of a clip is the room every line from that clip belongs to unless the speaker names another.\n" +
       "- Fairbanks realism: freight and lead times, winter conditions (heat, protection, snow removal for access when the season calls for it), frost-depth and snow-load considerations on any exterior or structural scope.\n" +
       "- No overhead, profit or tax lines; they are applied separately.\n\n" +

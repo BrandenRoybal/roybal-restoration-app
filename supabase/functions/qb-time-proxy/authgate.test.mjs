@@ -68,6 +68,7 @@ const EXPECTED = {
     markImported: ["office"],
     archiveProject: ["office"],
     linkExport: ["office"],
+    esxExport: ["office"],     // M3: the ESX sketch — runs the export configuration, so office only
   },
 };
 

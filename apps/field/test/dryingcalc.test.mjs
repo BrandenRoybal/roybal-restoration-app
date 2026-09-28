@@ -73,4 +73,15 @@ const dep = deployedCounts([
 ]);
 ok("deployed counts match free-text types", dep.airMovers === 3 && dep.dehus === 2 && dep.scrubbers === 2 && dep.heaters === 1);
 
+/* ---------- M3: Magicplan room volume, offered ---------- */
+const MEASURED = [
+  { name: "Living Room", floorSF: "214", perimLF: "58", ceiling: "8 ft", source: "magicplan", conf: 1, volumeCF: 1900 },   // scan says 1900, floor × ceiling says 1712
+  { name: "Hall", floorSF: "40", perimLF: "26", ceiling: "", source: "magicplan", conf: 1, volumeCF: 0 },
+];
+const offCalc = equipmentCalc({ rooms: MEASURED, waterClass: "2", waterCategory: "1", affT: "72" });
+const onCalc = equipmentCalc({ rooms: MEASURED, waterClass: "2", waterCategory: "1", affT: "72", useMeasuredVolume: true });
+ok("without the chip the volume is floor × ceiling as before", offCalc.inputs.volume === 254 * 8 && offCalc.inputs.measuredVolumeRooms === 0);
+ok("with the chip a room's scanned volume replaces its floor × ceiling; rooms without one keep the formula", onCalc.inputs.volume === 1900 + 40 * 8 && onCalc.inputs.measuredVolumeRooms === 1);
+ok("the dehu basis says the volume was measured, and by how much of the job", /measured by the Magicplan scan for 1 of 2 room\(s\)/.test(onCalc.dehu.basis) && !/Magicplan/.test(offCalc.dehu.basis));
+
 console.log(`\n${pass} drying-calc checks passed.`);

@@ -41,7 +41,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   MP_BASE, mpHeaders, mpErrorText, retryDelayMs, createProjectBody, projectName, projectOf, findOurs,
-  workspaceOf, runSync, isSitePath, type ExportRow,
+  workspaceOf, runSync, isSitePath, mpFilePath, esxOf, type ExportRow,
 } from "./magicplan.ts";
 
 const CORS = {
@@ -79,6 +79,7 @@ const ACTION_AUTH: Record<string, AuthKind[]> = {
   markImported: ["office"],
   archiveProject: ["office"],
   linkExport: ["office"],
+  esxExport: ["office"],
 };
 
 /** The caller's bearer token, or "" when it is not a user JWT at all (the
@@ -287,6 +288,30 @@ serve(async (req) => {
       const ready = await syncInto(sb, String(row.mp_project_id), fieldProjectId, true);
       await sb.from("magicplan_exports").update({ field_project_id: fieldProjectId }).eq("id", row.id);
       return ok(ready);
+    }
+
+    // ── esxExport (M3) ────────────────────────────────────────────────────
+    // Runs the workspace's export configuration for this plan and keeps the
+    // ESX sketch it produced, if it produced one. No ESX in the configuration
+    // → {available:false}, nothing stored: the path is built and idle until
+    // the owner adds ESX to the configuration in Magicplan Cloud.
+    if (action === "esxExport") {
+      const fieldProjectId = String(body.fieldProjectId ?? "");
+      const planId = String(body.planId ?? "");
+      if (!safeJob(fieldProjectId)) return err("fieldProjectId is missing or malformed");
+      if (!planId) return err("planId is missing");
+      const s = secrets();
+      const q = s.email ? `?acting_user=${encodeURIComponent(s.email)}` : "";
+      const { esx, files } = esxOf(await mpCall("POST", `/plans/${encodeURIComponent(planId)}/custom-export${q}`, {}));
+      if (!esx) return ok({ available: false, files });
+      const bytes = await fetchBytes(esx.url);
+      const hash = esx.hash || await sha256(bytes);
+      const name = /\.esx$/i.test(esx.filename) ? esx.filename : esx.filename.replace(/\.[A-Za-z0-9]+$/, "") + ".esx";
+      const path = mpFilePath(fieldProjectId, hash, name);
+      if (!isSitePath(path)) return err("The ESX file name can't be stored as a site-visit path");
+      const { error } = await sb.storage.from(MEDIA_BUCKET).upload(path, bytes, { contentType: esx.mime, upsert: true });
+      if (error) return err(`Storage upload failed for ${name}: ${error.message}`, 502);
+      return ok({ available: true, files, esx: { path, name, size: bytes.byteLength, mime: esx.mime, hash } });
     }
 
     return err(`Unknown action: ${action}`, 404);

@@ -201,6 +201,32 @@ test("no browser code talks to Magicplan: no cloud.magicplan.app anywhere under 
   const hits = walk(join(repo, "apps")).filter((f) => readFileSync(f, "utf8").includes("cloud.magicplan.app"));
   assert.deepEqual(hits, []);
 });
+/* ---------- M3: the ESX sketch (POST /plans/{id}/custom-export → {data: ProjectFile[]}) ---------- */
+const PFILE = (o = {}) => ({
+  id: "18878d4c-e147-427d-bd34-40a151f67150", project_id: "06b03d53-2bb0-4a5a-8db9-656b708fb962",
+  filename: "Test Customer - 1 Test St.pdf", filetype: "application/pdf",
+  file: { url: "https://cloud.magicplan.app/files/x.pdf", hash: "9037abf3f694cd62b7ea284103c0e7f8", size: 2048576 },
+  generated_by: "ExportConfig.Report", metadata: null, ...o,
+});
+test("esxOf keeps only the ExportConfig.XactimateEsx file; a configuration without ESX is idle (null, nothing else)", () => {
+  const esx = PFILE({ filename: "Test Customer - 1 Test St.esx", filetype: "application/octet-stream", generated_by: "ExportConfig.XactimateEsx",
+    file: { url: "https://cloud.magicplan.app/files/x.esx", hash: "abcdef0123456789abcdef0123456789", size: 4321 } });
+  const r = S.esxOf({ data: [PFILE(), PFILE({ generated_by: "ExportConfig.Sketch" }), esx] });
+  assert.equal(r.files, 3);
+  assert.deepEqual(r.esx, { filename: "Test Customer - 1 Test St.esx", mime: "application/octet-stream", url: "https://cloud.magicplan.app/files/x.esx", hash: "abcdef0123456789abcdef0123456789", size: 4321 });
+  assert.deepEqual(S.esxOf({ data: [PFILE(), PFILE({ generated_by: "ExportConfig.Sketch" })] }), { esx: null, files: 2 });
+  assert.deepEqual(S.esxOf({ data: [] }), { esx: null, files: 0 });
+  assert.deepEqual(S.esxOf({}), { esx: null, files: 0 });
+  assert.deepEqual(S.esxOf({ data: [PFILE({ generated_by: "ExportConfig.XactimateEsx", file: { hash: "", size: 0 } })] }), { esx: null, files: 1 });   // no url → nothing to fetch
+});
+test("the stored ESX path is a site-visit path the estimator's signer accepts, with the .esx name kept", () => {
+  const path = S.mpFilePath("lead_42", "abcdef0123456789abcdef0123456789", "Test Customer - 1 Test St.esx");
+  assert.equal(path, "sitevisit/lead_42/mp-abcdef01-Test_Customer_-_1_Test_St.esx");
+  assert.equal(S.isSitePath(path), true);
+  assert.equal(officeIsSitePath(path), true);
+  assert.equal(C.mpFilePath("lead_42", "abcdef0123456789abcdef0123456789", "Test Customer - 1 Test St.esx"), path);   // lockstep with the field app
+});
+
 test("the proxy is pinned verify_jwt = true", () => {
   const toml = readFileSync(join(repo, "supabase", "config.toml"), "utf8");
   assert.match(toml, /\[functions\.magicplan-proxy\]\s*\nverify_jwt = true/);

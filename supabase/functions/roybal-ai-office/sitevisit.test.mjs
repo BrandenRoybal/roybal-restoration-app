@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import {
   isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody,
-  parseBatchResult, SITE_DRAFT_SCHEMA, SITE_SYSTEM, MAX_IMAGES,
+  parseBatchResult, SITE_DRAFT_SCHEMA, SITE_SYSTEM, MAX_IMAGES, cleanQuantities, quantitiesText, MAX_MEASURED_ROOMS,
 } from "./sitevisit.ts";
 
 let pass = 0;
@@ -239,6 +239,49 @@ test("alternates, contingency and accuracy come back clean and bounded", () => {
   assert.equal(r.draft.contingencyPct, 15);
   assert.equal(r.draft.accuracyPct, 50);
   assert.equal(r.draft.duration, "7-9 weeks");
+});
+
+/* ---------- M3: measured quantities (Magicplan design §5, brief §5.1) ---------- */
+const ROOM = { name: "Living Room", floorSF: 214, perimLF: 58, ceilingFt: 8, wallSF: 465, wallSFNet: 403, doors: 2, windows: 3, volumeCF: 1715 };
+const FACTS = { job: { customer: "x" } };
+const ARGS = (packet) => ({ packet, signed: {}, facts: FACTS, rulesText: "RULES", catalogText: "CAT", kind: "claim" });
+const textOf = (content) => content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+
+test("the measured-quantities block renders one cited line per room, ahead of the typed scope, with its rule", () => {
+  const packet = cleanPacket({ typedScope: "baseboard", magicplanQuantities: { scannedAt: "2026-09-26T22:41:00Z", units: "imperial", rooms: [ROOM, { ...ROOM, name: "Hall", doors: 1, windows: 0, wallSFNet: 0 }] } });
+  assert.equal(packet.magicplanQuantities.rooms.length, 2);
+  const t = textOf(buildContent(ARGS(packet)));
+  assert.match(t, /MEASURED QUANTITIES \(Magicplan LiDAR, 2026-09-26/);
+  assert.match(t, /- Living Room: 214 ft² floor, 58 LF perimeter, 8 ft ceiling, 465 ft² walls \(403 ft² net of openings\), 2 doors, 3 windows, 1,715 ft³/);
+  assert.match(t, /- Hall: .*1 door, 1,715 ft³/);
+  assert.ok(t.indexOf("MEASURED QUANTITIES") < t.indexOf("OWNER'S TYPED SCOPE"));
+  assert.match(t, /Use MEASURED QUANTITIES over anything read off the report PDF/);
+  assert.match(t, /Cite them as 'Magicplan: 214 ft² floor, 58 LF perimeter'/);
+});
+
+test("an empty or absent block renders nothing — no section, no rule", () => {
+  for (const q of [undefined, null, {}, { rooms: [] }, { rooms: [{ name: "", floorSF: 9 }] }, { rooms: [{ name: "Ghost", floorSF: 0, perimLF: 0 }] }]) {
+    const packet = cleanPacket({ typedScope: "x", magicplanQuantities: q });
+    assert.equal(packet.magicplanQuantities, null);
+    assert.equal(quantitiesText(packet.magicplanQuantities), "");
+    const t = textOf(buildContent(ARGS(packet)));
+    assert.doesNotMatch(t, /MEASURED QUANTITIES/);
+    assert.doesNotMatch(t, /read off the report PDF/);
+  }
+  assert.equal(packetHasEvidence(cleanPacket({ magicplanQuantities: { rooms: [ROOM] } })), false);   // measurements alone are not a packet
+});
+
+test("metric input never reaches the prompt un-converted: a block that says metric comes out in feet", () => {
+  const q = cleanQuantities({ scannedAt: "2026-09-26", units: "metric", rooms: [{ name: "Salon", floorSF: 19.92, perimLF: 17.74, ceilingFt: 2.44, wallSF: 43.24, wallSFNet: 37.44, doors: 2, windows: 3, volumeCF: 48.57 }] });
+  assert.equal(q.units, "imperial");
+  assert.deepEqual(q.rooms[0], { name: "Salon", floorSF: 214, perimLF: 58, ceilingFt: 8, wallSF: 465, wallSFNet: 403, doors: 2, windows: 3, volumeCF: 1715 });
+  const t = quantitiesText(q);
+  assert.match(t, /214 ft² floor, 58 LF perimeter, 8 ft ceiling/);
+  assert.doesNotMatch(t, /m²|m³|\bm\b/);
+  // imperial passes through untouched, and junk is bounded
+  const big = cleanQuantities({ units: "imperial", rooms: Array.from({ length: 200 }, (_, i) => ({ name: "R" + i, floorSF: 10, perimLF: "x", doors: -3, windows: "2" })) });
+  assert.equal(big.rooms.length, MAX_MEASURED_ROOMS);
+  assert.deepEqual(big.rooms[0], { name: "R0", floorSF: 10, perimLF: 0, ceilingFt: 0, wallSF: 0, wallSFNet: 0, doors: 0, windows: 2, volumeCF: 0 });
 });
 
 console.log(`\n${pass} site-visit tests passed`);
