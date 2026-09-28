@@ -649,13 +649,39 @@ export function tilesNeedingFieldFile(rows, projects) {
   });
 }
 
+/* ---------- pure: the job file id for a board tile ----------
+   field_projects.id is a uuid column, so the id must be a UUID — the old
+   "bj-" + tileId was refused by the server (400), which made every Start
+   bid and every tile adoption fail closed. Derived from the tile id (a
+   128-bit hash shaped as a v8 UUID), so two crew devices adopting the same
+   tile at the same moment still converge on ONE row. */
+export function tileFileId(tileId) {
+  const str = "bj-" + String(tileId);
+  let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
+  for (let i = 0; i < str.length; i++) {
+    const k = str.charCodeAt(i);
+    h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
+    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
+    h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
+    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+  h1 ^= (h2 ^ h3 ^ h4); h2 ^= h1; h3 ^= h1; h4 ^= h1;
+  const hex = [h1, h2, h3, h4].map((n) => (n >>> 0).toString(16).padStart(8, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-` +
+    `${((parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 /* ---------- pure: board tile -> a fresh field job file ----------
-   The id derives from the tile id, so two crew devices adopting the same
-   tile at the same moment converge on ONE row instead of duplicating. */
+   The id derives from the tile id (tileFileId), so two crew devices adopting
+   the same tile at the same moment converge on ONE row instead of duplicating. */
 const FIELD_TYPE = { remodel: "remodel", new_build: "new_construction", restoration: "reconstruction" };
 export function fieldSeedFromBoardJob(row, blank) {
   const d = (row && row.data) || {};
-  const p = { ...blank, id: "bj-" + row.id };
+  const p = { ...blank, id: tileFileId(row.id) };
   p.jobType = (d.type === "water" || d.type === "fire" || d.type === "mold") ? "restoration" : "construction";
   // a Fire or Mold board tile seeds a job file classified to match — not the
   // water default the factory would leave behind
@@ -722,7 +748,7 @@ export async function adoptBoardJobs(rows, projects) {
     for bidStartedAt/bidBy. Returns the new project, or null when the id
     already exists on the server (live or tombstoned) — never a duplicate. */
 export async function adoptTile(row, stamp = null) {
-  if (await serverHasProject("bj-" + row.id)) return null;
+  if (await serverHasProject(tileFileId(row.id))) return null;
   const p = fieldSeedFromBoardJob(row, newProject());
   await Store.put(p);   // the sync engine's saved-listener pushes it up
   // Stamp the link on the tile (same-rev annotation — never blocks a
