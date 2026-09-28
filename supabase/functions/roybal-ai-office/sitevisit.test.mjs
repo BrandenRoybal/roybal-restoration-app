@@ -2,8 +2,8 @@
    Run: node --experimental-strip-types sitevisit.test.mjs */
 import assert from "node:assert/strict";
 import {
-  isSitePath, cleanPacket, packetHasEvidence, formatTranscript, buildContent, buildBatchBody,
-  parseBatchResult, SITE_DRAFT_SCHEMA, MAX_IMAGES,
+  isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody,
+  parseBatchResult, SITE_DRAFT_SCHEMA, SITE_SYSTEM, MAX_IMAGES,
 } from "./sitevisit.ts";
 
 let pass = 0;
@@ -38,6 +38,23 @@ test("notes pages win the image budget over extra photos", () => {
   assert.equal(p.notes.length + p.photos.length, MAX_IMAGES);
 });
 
+test("the image budget is 150 and drops from the tail: notes, then photos, then the newest stills", () => {
+  assert.equal(MAX_IMAGES, 150);
+  const img = (n) => ({ path: "sitevisit/j/" + n, mime: "image/jpeg" });
+  const notes = Array.from({ length: 10 }, (_, i) => img("n" + (i + 1)));
+  // packetForDraft() lists photos before stills, stills in capture order, so
+  // the newest stills sit at the end of the array and fall off first
+  const photos = Array.from({ length: 20 }, (_, i) => img("p" + (i + 1)));
+  const stills = Array.from({ length: 130 }, (_, i) => img("s" + String(i + 1).padStart(3, "0")));
+  const p = cleanPacket({ notes, photos: [...photos, ...stills] });
+  assert.equal(p.notes.length, 10);
+  assert.equal(p.photos.length, 140);
+  assert.ok(p.photos[p.photos.length - 1].path.endsWith("s120"));
+  const kept = new Set(p.photos.map((f) => f.path));
+  for (let i = 121; i <= 130; i++) assert.ok(!kept.has("sitevisit/j/s" + i), "s" + i + " should be dropped");
+  for (let i = 1; i <= 20; i++) assert.ok(kept.has("sitevisit/j/p" + i), "p" + i + " should be kept");
+});
+
 test("an empty packet has no evidence; any one input is enough", () => {
   assert.equal(packetHasEvidence(cleanPacket({})), false);
   assert.equal(packetHasEvidence(cleanPacket({ typedScope: "  " })), false);
@@ -68,6 +85,27 @@ test("one speaker gets no speaker labels; no utterances falls back to the flat t
   assert.equal(one.transcript, "[01:05] Hall closet too.");
   const flat = formatTranscript({ metadata: { duration: 9 }, results: { channels: [{ alternatives: [{ transcript: " just text " }] }] } });
   assert.deepEqual(flat, { transcript: "just text", seconds: 9 });
+});
+
+test("utterances are kept as data, trimmed to four fields", () => {
+  const u = trimUtterances({
+    metadata: { duration: 131.2 },
+    results: { utterances: [
+      { start: 0.4, end: 2.1, speaker: 0, transcript: "Kitchen. LVP over OSB.", confidence: 0.98, channel: 0, id: "u1", words: [{ word: "kitchen" }] },
+      { start: 60.2, end: 63.9, speaker: 1, transcript: "  Instruction: flood cut to four feet on the sink wall.  ", confidence: 0.91, channel: 0, id: "u2", words: [] },
+      { start: 70, end: 71, speaker: 0, transcript: "   ", id: "u3" },
+      { start: 131, speaker: 0, transcript: "End kitchen.", id: "u4" },
+    ] },
+  });
+  assert.deepEqual(u, [
+    { start: 0.4, end: 2.1, speaker: 0, text: "Kitchen. LVP over OSB." },
+    { start: 60.2, end: 63.9, speaker: 1, text: "Instruction: flood cut to four feet on the sink wall." },
+    { start: 131, end: 131, speaker: 0, text: "End kitchen." },
+  ]);
+  assert.equal(u[2].end, u[2].start);                      // a missing end never runs backwards
+  assert.deepEqual(trimUtterances({}), []);
+  assert.deepEqual(trimUtterances(undefined), []);
+  assert.deepEqual(trimUtterances({ results: { channels: [{ alternatives: [{ transcript: "flat only" }] }] } }), []);
 });
 
 test("the request reads every file by URL, labels each, and ends with the instructions", () => {
@@ -170,6 +208,25 @@ test("a construction job is shaped by trade with the company's rates; a claim st
   const ct = claim[claim.length - 1].text;
   assert.ok(ct.includes("HOW TO SHAPE AN INSURANCE / RESTORATION ESTIMATE") && !ct.includes("CONSTRUCTION ESTIMATE"));
   assert.ok(ct.includes("(none given"));
+});
+
+test("the prompt explains clip headers and cites the clip's room", () => {
+  const packet = cleanPacket({
+    transcript:
+      "— Clip 1 · Kitchen · 2:14 —\n[00:02] Kitchen. LVP over OSB.\n[02:10] Instruction: take it to four feet on the sink wall.\n\n" +
+      "— Clip 2 · Hall · 1:05 —\n[00:01] Hall. Same LVP.",
+  });
+  const c = buildContent({ packet, signed: {}, facts: {}, rulesText: "", catalogText: "" });
+  const t = c[c.length - 1].text;
+  assert.ok(t.includes("— Clip 1 · Kitchen · 2:14 —") && t.includes("— Clip 2 · Hall · 1:05 —"));
+  assert.ok(t.includes("each clip opens with a header line — Clip n · Room · length —"));
+  assert.ok(t.includes("minutes:seconds into THAT clip"));
+  assert.ok(t.includes("walk clip room and timestamp"));
+  assert.ok(t.includes("The room named at the top of a clip is the room every line from that clip belongs to"));
+  const schema = JSON.stringify(SITE_DRAFT_SCHEMA);
+  assert.ok(schema.includes("walk Kitchen 02:14"));
+  assert.ok(!schema.includes("walk 14:20"));
+  assert.ok(SITE_SYSTEM.includes("narrated walk clips"));
 });
 
 test("alternates, contingency and accuracy come back clean and bounded", () => {

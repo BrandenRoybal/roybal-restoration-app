@@ -6,7 +6,7 @@ import {
   tileMode, isOpenLeadTile, unlinkedLeadTiles, estimateTotal, bidState, bidChip,
   fmtVisitAt, whoLabel, shortMoney, lostBidFiles, siteVisitDonePatch,
   suggestEstimateNo, addBusinessDays, estimateSentPatch, estimateEmailDraft,
-  wonPhotoFiles, jobPhotoFromSiteFile, WON_PHOTO_CAP,
+  wonPhotoFiles, jobPhotoFromSiteFile, WON_PHOTO_CAP, packetText,
 } from "../js/bid.js";
 
 let pass = 0;
@@ -66,6 +66,14 @@ const tileD = { stage: "lead", channel: "web-form", createdAt: "2026-09-20T10:00
 const s1 = bidState(file, tileD);
 ok("visit reads off the tile (the office owns the appointment)", s1.visit.at === "2026-09-26T14:00" && s1.visit.status === "scheduled" && !s1.visit.doneAt);
 ok("packet counts files and the transcript", s1.packet.files === 3 && s1.packet.transcript === true && s1.packet.scope === false);
+ok("a packet without walk clips reads as it did", s1.packet.clips === 0 && packetText(s1.packet) === "3 files · transcript ✓");
+const walked = bidState({ ...file, siteVisit: { files: [
+  { kind: "walk", id: "w1", duration: 165, frames: 8, at: "2026-09-26T10:01:00Z" }, { kind: "walk", id: "w2", duration: 165, frames: 12, at: "2026-09-26T10:05:00Z" },
+  { kind: "walk", id: "w3", duration: 165, frames: 8, at: "2026-09-26T10:09:00Z" }, { kind: "walk", id: "w4", duration: 165, frames: 12, at: "2026-09-26T10:12:00Z" },
+  { kind: "frames", videoId: "w1" }, { kind: "report" } ], transcript: "— Clip 1 · Kitchen · 2:45 —\n[00:02] Kitchen." } }, tileD);
+ok("the Packet line counts clips and minutes once walk clips exist", walked.packet.clips === 4 && walked.packet.seconds === 660 && walked.packet.stills === 40
+  && packetText(walked.packet) === "4 clips · 11 min · transcript ✓");
+ok("packetText: seconds under a minute, typed scope, and nothing at all", packetText({ clips: 1, seconds: 42, scope: true }) === "1 clip · 42 sec · scope typed ✓" && packetText({}) === "" && packetText(null) === "");
 ok("estimate: number, lines, total", s1.estimate.no === "RC-MIK-0926" && s1.estimate.lines === 1 && s1.estimate.total === 12000);
 ok("the customer's ask comes from the file first", s1.lead.message === "Kitchen remodel" && s1.lead.channel === "web-form");
 ok("chip: furthest step wins — an estimate with lines", bidChip(s1) === "📄 est. $12,000");

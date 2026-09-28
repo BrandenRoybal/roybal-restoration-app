@@ -6,12 +6,18 @@
    type the scope — then hand ALL of it to Claude. This panel is that
    process inside the estimate editor:
 
-     1. drop in the Magicplan report PDF, extra photos, Magicplan room
-        videos (turned into still frames in the browser), photographed note
-        pages and the walk recording (uploaded to the private field-media
-        bucket under sitevisit/<job>/ — never into the job record, so a
-        40 MB report or an hour of audio can't stall sync);
-     2. the recording is transcribed server-side (Deepgram);
+     1. drop in narrated walk clips (🎥 Record opens the phone's Camera; one
+        clip per room, stills pulled in the browser AND a transcript), the
+        Magicplan report PDF, extra photos, silent Magicplan room videos
+        (stills only), photographed note pages and, still, one walk audio
+        recording (all uploaded to the private field-media bucket under
+        sitevisit/<job>/ — never into the job record, so a 40 MB report or
+        an hour of audio can't stall sync);
+     2. each recording is transcribed server-side (Deepgram); every walk
+        still is captioned with the words spoken at that second, the clip's
+        room is read from its first five seconds, and sv.transcript is
+        rebuilt from every clip in order (js/walk.js, the pure half —
+        docs/Narrated_Walkthrough_Design.md);
      3. one tap drafts the estimate: the most capable Claude model reads
         the files themselves plus the typed scope, the company estimating
         rules and the Fairbanks price catalog (roybal-ai-office
@@ -29,34 +35,25 @@ import { uploadSiteFile } from "./supa.js";
 import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft } from "./officeai.js";
 import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
-import { magicplanBanner } from "./magicplan.js";
+import { magicplanBanner, officeRole } from "./magicplan.js";
+import {
+  FRAMES_PER_VIDEO, frameTimes, mmss, frameCaption, stillTimes, clipTooBig, WALK_MAX_BYTES, OVERSIZE_MSG,
+  roomFromOpening, magicplanRoomNames, captionStills, rebuildTranscript, adoptLegacyTranscript, clipNumber, clipLabel, walkSummary,
+} from "./walk.js";
+export { FRAMES_PER_VIDEO, frameTimes, frameCaption };   // moved to walk.js; callers and tests unchanged
 
 const arr = (v) => (Array.isArray(v) ? v : []);
-const MAX_IMAGES = 90;   // the server's limit (sitevisit.ts MAX_IMAGES): photos, stills and note pages together
+export const MAX_IMAGES = 150;   // the server's limit (sitevisit.ts MAX_IMAGES): photos, stills and note pages together
 
 /* ---------- pure: packet shape ---------- */
 export const KINDS = {
+  walk:   { label: "🎥 Walk clips", accept: "video/*,.mp4,.mov", multiple: true, hint: "One clip per room, one to three minutes, say the room first. Each clip gives stills and a transcript. Needs signal to add (offline capture comes in V1)." },
   report: { label: "Reports & drawings (PDF)", accept: "application/pdf,.pdf", multiple: true, hint: "The Magicplan report, plus any layout or customer list. Up to 4." },
   photos: { label: "Extra photos", accept: "image/*", multiple: true, hint: "Anything not already in the report." },
   notes:  { label: "Handwritten notes", accept: "image/*", multiple: true, hint: "A photo of each page." },
-  videos: { label: "Magicplan room videos", accept: "video/*,.mp4,.mov", multiple: true, hint: "Still frames are pulled from each clip so the draft can see the room." },
-  audio:  { label: "Site walk recording", accept: "audio/*,video/*,.m4a,.mp3,.wav,.aac", multiple: false, hint: "The recording from your phone. It's transcribed for you." },
+  videos: { label: "Silent clips (Magicplan)", accept: "video/*,.mp4,.mov", multiple: true, hint: "Still frames are pulled from each clip so the draft can see the room." },
+  audio:  { label: "Site walk recording", accept: "audio/*,video/*,.m4a,.mp3,.wav,.aac", multiple: false, hint: "A voice memo of the whole walk, if you made one instead of clips. It's transcribed for you." },
 };
-
-/* Magicplan room videos are short and silent, and the model reads images,
-   not video. Each clip becomes a handful of evenly spaced still frames
-   (never the first or last instant, which are often blurred). */
-export const FRAMES_PER_VIDEO = 8;
-export function frameTimes(duration, max = FRAMES_PER_VIDEO) {
-  const d = Number(duration);
-  if (!(d > 0) || !isFinite(d)) return [];
-  const n = Math.max(1, Math.min(max, Math.ceil(d / 2)));   // at most one frame every ~2 s
-  return Array.from({ length: n }, (_, i) => Math.round((d * (i + 0.5) / n) * 100) / 100);
-}
-const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
-export function frameCaption(videoName, t) {
-  return `still at ${mmss(t)} from Magicplan video ${videoName || "clip"}`;
-}
 
 export function newSiteVisit() {
   return { files: [], transcript: "", transcriptSeconds: 0, typedScope: "", pending: null };
@@ -65,6 +62,7 @@ export function siteVisitOf(project) {
   if (!project.siteVisit || typeof project.siteVisit !== "object") project.siteVisit = newSiteVisit();
   const sv = project.siteVisit;
   if (!Array.isArray(sv.files)) sv.files = [];
+  adoptLegacyTranscript(sv);   // a pre-walk-clip visit: its transcript moves onto the recording's row, once
   return sv;
 }
 
@@ -166,10 +164,9 @@ const ago = (iso) => {
   return m < 1 ? "just now" : m === 1 ? "1 minute ago" : m + " minutes ago";
 };
 
-/* Pull still frames out of a video in the browser: seek, draw to a canvas,
-   JPEG at ≤1568px. Returns [{ t, blob }]. Throws if the browser can't
-   decode the clip. */
-export async function videoFrames(file, max = FRAMES_PER_VIDEO) {
+/* Load a video into an off-screen <video> element far enough to know its
+   duration and picture size. Returns { v, once, release } — release() always. */
+async function loadVideo(file) {
   const url = URL.createObjectURL(file);
   const v = document.createElement("video");
   v.muted = true; v.playsInline = true; v.preload = "auto";
@@ -182,6 +179,7 @@ export async function videoFrames(file, max = FRAMES_PER_VIDEO) {
     v.addEventListener(ev, done, { once: true });
     v.addEventListener("error", fail, { once: true });
   });
+  const release = () => { v.removeAttribute("src"); v.load(); URL.revokeObjectURL(url); };
   try {
     const loaded = once("loadeddata");
     v.src = url;
@@ -192,15 +190,32 @@ export async function videoFrames(file, max = FRAMES_PER_VIDEO) {
       v.currentTime = 1e9;
       await found;
     }
-    const times = frameTimes(v.duration, max);
-    if (!times.length || !v.videoWidth) throw new Error("the video has no picture");
+  } catch (e) { release(); throw e; }
+  return { v, once, release };
+}
+
+/** The clip's length in seconds (NaN when the browser can't tell). */
+export async function videoDuration(file) {
+  const { v, release } = await loadVideo(file);
+  try { return Number(v.duration); } finally { release(); }
+}
+
+/* Pull still frames out of a video in the browser: seek, draw to a canvas,
+   JPEG at ≤1568px. `times` is a list of seconds to take, or a count spread
+   evenly over the clip (the silent Magicplan default). Returns [{ t, blob }].
+   Throws if the browser can't decode the clip. */
+export async function videoFrames(file, times = FRAMES_PER_VIDEO) {
+  const { v, once, release } = await loadVideo(file);
+  try {
+    const list = Array.isArray(times) ? times.filter((t) => t > 0 && t < v.duration) : frameTimes(v.duration, times);
+    if (!list.length || !v.videoWidth) throw new Error("the video has no picture");
     const scale = Math.min(1, 1568 / Math.max(v.videoWidth, v.videoHeight));
     const c = document.createElement("canvas");
     c.width = Math.round(v.videoWidth * scale);
     c.height = Math.round(v.videoHeight * scale);
     const g = c.getContext("2d");
     const out = [];
-    for (const t of times) {
+    for (const t of list) {
       const seeked = once("seeked");
       v.currentTime = t;
       await seeked;
@@ -210,8 +225,7 @@ export async function videoFrames(file, max = FRAMES_PER_VIDEO) {
     }
     return out;
   } finally {
-    v.removeAttribute("src"); v.load();
-    URL.revokeObjectURL(url);
+    release();
   }
 }
 
@@ -225,6 +239,12 @@ export function siteVisitPanel(ctx) {
   const mpBanner = magicplanBanner(project, { onAdopted: () => paint("") });
   let timer = null;
   const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
+  // 🎥 Record renders for the owner and office (design §2 decision 8). One
+  // cached read; unknown (offline, a failed read) shows the buttons — the
+  // server action is the enforcement, this only keeps a crew phone tidy.
+  let office = null;
+  officeRole().then((r) => { if (r === false) { office = false; paint(""); } });
+  const busy = new Set();   // walk rows with a transcription in flight (one Deepgram call per tap)
 
   async function addFiles(kind, files) {
     if (!aiAvailable()) return;
@@ -233,6 +253,57 @@ export function siteVisitPanel(ctx) {
       const id = uid();
       try {
         let blob = file, mime = file.type || "";
+        if (kind === "walk") {
+          // a narrated clip: stills first (the packet gains pictures right
+          // away), then the clip itself, then its transcript
+          const name = file.name || "walk.mov";
+          if (file.size > WALK_MAX_BYTES) { toast(OVERSIZE_MSG, 4000); continue; }
+          paint(`Reading ${name}…`);
+          const duration = await videoDuration(file);
+          if (clipTooBig(duration, file.size)) { toast(OVERSIZE_MSG, 4000); continue; }
+          const at = new Date().toISOString();
+          const row = { id, kind, name, mime: file.type || "video/mp4", size: file.size || 0, path: "", duration: isFinite(duration) ? duration : 0, frames: 0, room: "", at, status: "queued" };
+          const alive = () => sv.files.includes(row);   // ✕ mid-flight stops the work; nothing is re-added
+          sv.files.push(row);
+          busy.add(id);
+          try {
+            paint(`Pulling stills from ${name}…`);
+            // a clip whose length the browser can't report still gets the silent-clip default (8 spread over it)
+            const frames = await videoFrames(file, row.duration > 0 ? stillTimes(row.duration) : FRAMES_PER_VIDEO);
+            if (!frames.length) throw new Error("no frames came out of it");
+            let i = 0;
+            for (const fr of frames) {
+              if (!alive()) break;
+              i++;
+              paint(`Uploading stills from ${name} (${i} of ${frames.length})…`);
+              const fid = uid(), sec = Math.round(fr.t);
+              const fpath = siteFilePath(project.id, fid, `${name}-${sec}s.jpg`);
+              await uploadSiteFile(fpath, fr.blob, "image/jpeg");
+              if (!alive()) break;
+              sv.files.push({ id: fid, kind: "frames", videoId: id, name: `${name} @ ${sec}s`, path: fpath, mime: "image/jpeg", size: fr.blob.size, caption: frameCaption(clipLabel(row), sec, "walk clip"), at });
+              row.frames = i;
+            }
+            if (!alive()) continue;
+            row.status = "uploading";
+            ctx.save();
+            paint(`Uploading ${name} (${fmtSize(file.size)})…`);
+            const clipPath = siteFilePath(project.id, id, name);
+            await uploadSiteFile(clipPath, file, row.mime);
+            if (!alive()) continue;
+            row.path = clipPath;   // set only once the object exists, so Transcribe never points at nothing
+            row.status = "uploaded";
+            added++;
+          } catch (e) {
+            // an unfinished clip is not a packet file: take the row and its stills back out
+            sv.files = sv.files.filter((x) => x.id !== id && x.videoId !== id);
+            throw e;
+          } finally {
+            busy.delete(id);
+          }
+          ctx.save();
+          await transcribeWalk(row);
+          continue;
+        }
         if (kind === "videos") {
           paint(`Pulling stills from ${file.name || "the video"}…`);
           const frames = await videoFrames(file);
@@ -270,25 +341,59 @@ export function siteVisitPanel(ctx) {
         sv.files.push({ id, kind, name: file.name || "", path, mime, size: blob.size || 0, at: new Date().toISOString() });
         added++;
         ctx.save();
-        if (kind === "audio") { sv.transcript = ""; sv.transcriptSeconds = 0; ctx.save(); await transcribe(); }
+        if (kind === "audio") { rebuildTranscript(sv); ctx.save(); await transcribe(); }   // the walk clips' text stays
       } catch (e) {
+        busy.delete(id);
         toast(`Couldn't add ${file.name || "that file"}: ${e && e.message ? e.message : e}`, 4000);
       }
     }
     paint(added ? "" : undefined);
   }
 
+  /* The transcript as data on its row (design §4.1): the utterances feed the
+     still captions and the room; the text feeds the flat sv.transcript. */
+  const trimUtts = (xs) => arr(xs).map((u) => ({ start: Number(u && u.start) || 0, end: Number(u && u.end) || 0, speaker: Number(u && u.speaker) || 0, text: String((u && u.text) || "") }));
+  const transcriptOf = (r) => ({ utterances: trimUtts(r.utterances), text: r.transcript || "", seconds: Number(r.seconds) || 0, model: "deepgram-stt", at: new Date().toISOString() });
+
   async function transcribe() {
     const rec = sv.files.find((f) => f.kind === "audio");
-    if (!rec || !aiAvailable()) return;
+    if (!rec || busy.has(rec.id) || !aiAvailable()) return;
+    busy.add(rec.id);
     paint("Transcribing the recording… an hour of audio takes about a minute.");
     try {
       const r = await transcribeSiteAudio(project, rec.path);
-      sv.transcript = r.transcript || "";
-      sv.transcriptSeconds = Number(r.seconds) || 0;
+      rec.transcript = transcriptOf(r);
+      rec.status = "transcribed";
+      rebuildTranscript(sv);
       ctx.save();
+      busy.delete(rec.id);
       paint("");
     } catch (e) {
+      busy.delete(rec.id);
+      paint("");
+      toast("Transcription failed: " + (e && e.message ? e.message : e), 4000);
+    }
+  }
+
+  /* One narrated clip: transcript → room from the opening words (never
+     guessed) → quotes on its stills → the flat transcript rebuilt. A failure
+     leaves the row 'uploaded' with its Transcribe button as the retry. */
+  async function transcribeWalk(row) {
+    if (!row || row.status !== "uploaded" || !row.path || busy.has(row.id) || !aiAvailable()) return;
+    busy.add(row.id);
+    paint(`Transcribing ${row.name}…`);
+    try {
+      const r = await transcribeSiteAudio(project, row.path);
+      row.transcript = transcriptOf(r);
+      row.status = "transcribed";
+      if (!row.room) row.room = roomFromOpening(row.transcript.utterances, { rooms: arr(project.rooms), magicplanRooms: magicplanRoomNames(sv) }) || "";
+      captionStills(sv, row);
+      rebuildTranscript(sv);
+      ctx.save();
+      busy.delete(row.id);   // before the repaint, or the row shows "working…" with no retry
+      paint("");
+    } catch (e) {
+      busy.delete(row.id);
       paint("");
       toast("Transcription failed: " + (e && e.message ? e.message : e), 4000);
     }
@@ -343,16 +448,44 @@ export function siteVisitPanel(ctx) {
     const del = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Remove from the packet" }, "✕");
     del.addEventListener("click", () => {
       sv.files = sv.files.filter((x) => x.id !== f.id && x.videoId !== f.id);   // a video takes its stills with it
-      if (f.kind === "audio") { sv.transcript = ""; sv.transcriptSeconds = 0; }
+      // the flat transcript is derived from the rows; the storage object
+      // stays — retention (design §2 decision 10) owns deletes, never a tap
+      if (f.kind === "audio" || f.kind === "walk" || f.kind === "meeting") rebuildTranscript(sv);
       // a Magicplan file leaves the packet only: the storage copy stays, and
       // the next ⟳ Pull doesn't bring it back
       if (f.source === "magicplan" && sv.magicplan) sv.magicplan.removed = [...new Set([...(sv.magicplan.removed || []), f.id])];
       ctx.save(); paint("");
     });
+    if (f.kind === "walk") return walkRow(f, del);
     return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px" },
       h("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.name || f.kind),
       f.source === "magicplan" ? h("span", { style: "font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;background:#e7eef7;color:#1e4a72" }, "Magicplan") : null,
       h("span", { class: "subtle" }, f.kind === "videos" ? `${f.frames || 0} stills` : fmtSize(f.size || 0)), del);
+  }
+
+  /* A walk clip: "Kitchen · 2:14 · 12 stills · transcribed ✓", a Room field
+     the owner can correct (the stills' quotes and the flat transcript follow),
+     and a Transcribe button while the transcript is missing. */
+  function walkRow(f, del) {
+    const n = clipNumber(sv.files, f);
+    const chip = (text, color) => h("span", { style: `font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;background:${color};white-space:nowrap` }, text);
+    const status = busy.has(f.id) ? chip("working…", "#fff4e5;color:#b45309")
+      : f.status === "transcribed" ? chip("transcribed ✓", "#e3f3e6;color:#2e7d32")
+      : f.status === "uploaded" ? chip("uploaded", "#e7eef7;color:#1e4a72")
+      : chip("not uploaded — remove it and add it again", "#fde8e8;color:#b42318");
+    const room = h("input", { type: "text", placeholder: `Clip ${n} — room?`, value: f.room || "", title: "The room this clip is about", style: "width:9em;font-size:12px;padding:2px 6px" });
+    room.addEventListener("change", () => {   // change, not input: every save repaints the panel
+      f.room = room.value.trim();
+      captionStills(sv, f); rebuildTranscript(sv);
+      ctx.save(); paint("");
+    });
+    const tb = f.status === "uploaded" && !busy.has(f.id)
+      ? h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", onclick: () => transcribeWalk(f) }, "Transcribe")
+      : null;
+    return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px;flex-wrap:wrap" },
+      h("span", { style: "flex:1;min-width:8em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.room ? f.room : `Clip ${n}`,
+        h("span", { class: "subtle" }, ` · ${mmss(f.duration || 0)} · ${f.frames || 0} stills`)),
+      room, status, tb, del);
   }
 
   function slot(kind) {
@@ -362,12 +495,25 @@ export function siteVisitPanel(ctx) {
     const files = sv.files.filter((f) => f.kind === kind);
     const btn = h("button", { type: "button", class: "btn btn--sm", style: "width:auto" }, files.length && kind !== "audio" ? "+ Add more" : files.length ? "Replace" : "+ Add");
     btn.addEventListener("click", () => input.click());
-    const many = kind === "photos" || kind === "notes" || kind === "videos";
+    const many = kind === "photos" || kind === "notes" || kind === "videos" || kind === "walk";
     const extra = [];
+    let buttons = [btn, input];
+    if (kind === "walk") {
+      // 🎥 Record opens the phone's Camera (capture=environment); Add from
+      // Photos is the same input without it. Both land in addFiles("walk").
+      const cam = h("input", { type: "file", accept: "video/*", capture: "environment", style: "display:none" });
+      cam.addEventListener("change", () => { const fs = [...cam.files]; cam.value = ""; if (fs.length) addFiles(kind, fs); });
+      const rec = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto", onclick: () => cam.click() }, "🎥 Record");
+      const lib = h("button", { type: "button", class: "btn btn--sm", style: "width:auto", onclick: () => input.click() }, "Add from Photos");
+      buttons = office === false
+        ? [h("span", { class: "subtle", style: "font-size:11px" }, "Recording walks is for the owner and office."), input, cam]
+        : [rec, lib, input, cam];
+    }
     if (kind === "audio" && files.length) {
-      if (sv.transcript) {
+      const rec = files[0];
+      if (rec.transcript && rec.transcript.text) {
         extra.push(h("div", { class: "subtle", style: "font-size:12px;margin-top:4px;color:#2e7d32" },
-          `✓ Transcribed, ${fmtMinutes(sv.transcriptSeconds || 0)}`));
+          `✓ Transcribed, ${fmtMinutes(rec.transcript.seconds || 0)}`));
       } else {
         const tb = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto;margin-top:4px" }, "Transcribe");
         tb.addEventListener("click", () => transcribe());
@@ -375,16 +521,19 @@ export function siteVisitPanel(ctx) {
       }
     }
     return h("div", { style: "padding:8px 0;border-top:1px solid #e2e6ed" },
-      h("div", { style: "display:flex;gap:8px;align-items:center" },
+      h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
         h("div", { style: "flex:1;min-width:0" },
           h("div", { style: "font-weight:600;font-size:13px;color:#16395a" }, k.label + (many && files.length ? ` (${files.length})` : "")),
           h("div", { class: "subtle", style: "font-size:11px" }, k.hint)),
-        btn, input),
-      ...(many && files.length > 3
+        ...buttons),
+      ...(many && kind !== "walk" && files.length > 3   // walk rows always list: each carries its room, status and retry
         ? [h("div", { class: "subtle", style: "font-size:12px;margin-top:4px" }, kind === "videos"
           ? `${files.length} clips, ${files.reduce((t, f) => t + (f.frames || 0), 0)} stills`
           : `${files.length} pages/photos, ${fmtSize(files.reduce((t, f) => t + (f.size || 0), 0))}`)]
         : files.map(fileRow)),
+      ...(kind === "walk" && files.length > 1
+        ? [h("div", { class: "subtle", style: "font-size:12px;margin-top:4px" }, (() => { const w = walkSummary(sv.files); return `${w.clips} clips · ${fmtMinutes(w.seconds)} · ${w.stills} stills`; })())]
+        : []),
       ...extra);
   }
 
@@ -412,15 +561,15 @@ export function siteVisitPanel(ctx) {
           sv.lastDraftAt ? h("span", { class: "subtle", style: "font-size:12px" }, `Last drafted ${ago(sv.lastDraftAt)}`) : null);
 
     const questions = arr(inv.siteVisitDraft && inv.siteVisitDraft.questions);
-    root.replaceChildren(
+    root.replaceChildren(...[   // a null slot must not become a "null" text node
       h("div", { style: "font-weight:700;font-size:14px;color:#16395a" }, "📋 Site visit"),
       h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
         "Add what you collected on the walk. The draft reads all of it, prices from the Fairbanks list, and fills this estimate room by room."),
       mpBanner,
-      slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
+      slot("walk"), slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
       imageCount() > MAX_IMAGES
         ? h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },
-            `${imageCount()} pictures in the packet; the draft reads the first ${MAX_IMAGES} (note pages first). Remove clips or photos you don't need.`)
+            `${imageCount()} pictures in the packet; the draft reads the first ${MAX_IMAGES} (note pages first, then photos, then the newest stills are dropped). Remove clips or photos you don't need.`)
         : null,
       h("div", { style: "padding:8px 0;border-top:1px solid #e2e6ed" },
         h("div", { style: "font-weight:600;font-size:13px;color:#16395a;margin-bottom:4px" }, "Typed scope"),
@@ -432,7 +581,7 @@ export function siteVisitPanel(ctx) {
             h("strong", {}, "Open questions from the last draft"),
             h("div", { class: "subtle", style: "font-size:11px" }, "Answer them in the typed scope and draft again."),
             ...questions.map((q) => h("div", { style: "margin-top:3px" }, "• " + q)))
-        : null);
+        : null].filter(Boolean));
     if (job && !timer) timer = setInterval(() => check(false), 30000);
     if (!job) stopTimer();
   }

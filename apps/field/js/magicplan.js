@@ -59,6 +59,20 @@ export function callerRole() {
   }
   return rolePromise;
 }
+/* Three-state twin for UI that must fail OPEN: true / false when the server
+   answered, null when it couldn't (offline, expired token, 5xx) — a phone on
+   bad signal keeps its buttons, and the server action stays the gate. */
+let officePromise = null;
+export function officeRole() {
+  if (!officePromise) {
+    officePromise = (async () => {
+      const res = await rest("rpc/role_is", { method: "POST", body: JSON.stringify({ p_roles: ["owner", "office"] }) });
+      if (!res.ok) { officePromise = null; return null; }
+      return (await res.json()) === true;
+    })().catch(() => { officePromise = null; return null; });
+  }
+  return officePromise;
+}
 
 /* Auto-adopt is per device: on by default on the owner's, off elsewhere. */
 const AUTO_KEY = "roybal-mp-autoadopt";
