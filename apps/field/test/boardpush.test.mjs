@@ -8,6 +8,7 @@ import {
   boardRowFor, tileCandidates, tilesNeedingFieldFile, fieldSeedFromBoardJob,
   nameLike, normAddr, sameWorkGroup, looseCandidates, mergeBoardTiles, duplicateTilePairs,
   tombstoneBlocksCreate, isBidLead,
+  tileFileId,
 } from "../js/boardpush.js";
 import { blankSubRow } from "../js/model.js";
 
@@ -233,7 +234,12 @@ ok("tileCandidates empty for a blank tile", tileCandidates({}, T_PROJECTS).lengt
 const blankSeed = () => ({ id: "x", jobType: "restoration", constructionType: "", customer: "", address: "",
   phone: "", claimNo: "", contractAmount: "", startDate: "", targetCompletion: "" });
 const seedA = fieldSeedFromBoardJob(T_ROWS[0], blankSeed());
-ok("seed id derives from the tile (idempotent across devices)", seedA.id === "bj-t1");
+ok("seed id derives from the tile (idempotent across devices)", seedA.id === tileFileId("t1") && fieldSeedFromBoardJob(T_ROWS[0], blankSeed()).id === seedA.id);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+ok("seed id is a UUID the server's uuid column accepts (not bj-<tile>)", UUID_RE.test(seedA.id));
+ok("tileFileId is a UUID for a real tile id too", UUID_RE.test(tileFileId("8ec83d30-6a75-49fa-9e86-724d6bdd6895")));
+ok("different tiles get different file ids", tileFileId("t1") !== tileFileId("t2") && tileFileId("8ec83d30-6a75-49fa-9e86-724d6bdd6895") !== tileFileId("b6290fa6-6565-4e08-912a-fd5714b0f1dd"));
+ok("the file id never equals the tile id", tileFileId("t1") !== "t1");
 ok("remodel tile -> construction/remodel job", seedA.jobType === "construction" && seedA.constructionType === "remodel");
 ok("header, money and dates carried into the seed",
   seedA.customer === "Echo New" && seedA.claimNo === "CL-300" && seedA.contractAmount === "22000" &&
