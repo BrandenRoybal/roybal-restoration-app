@@ -263,30 +263,43 @@ export function siteVisitPanel(ctx) {
           if (clipTooBig(duration, file.size)) { toast(OVERSIZE_MSG, 4000); continue; }
           const at = new Date().toISOString();
           const row = { id, kind, name, mime: file.type || "video/mp4", size: file.size || 0, path: "", duration: isFinite(duration) ? duration : 0, frames: 0, room: "", at, status: "queued" };
-          sv.files.push(row);   // exists before anything slow, so a failure leaves a row to ✕ (its stills go with it)
+          const alive = () => sv.files.includes(row);   // ✕ mid-flight stops the work; nothing is re-added
+          sv.files.push(row);
           busy.add(id);
-          paint(`Pulling stills from ${name}…`);
-          const frames = await videoFrames(file, stillTimes(row.duration));
-          if (!frames.length) throw new Error("no frames came out of it");
-          let i = 0;
-          for (const fr of frames) {
-            i++;
-            paint(`Uploading stills from ${name} (${i} of ${frames.length})…`);
-            const fid = uid(), sec = Math.round(fr.t);
-            const fpath = siteFilePath(project.id, fid, `${name}-${sec}s.jpg`);
-            await uploadSiteFile(fpath, fr.blob, "image/jpeg");
-            sv.files.push({ id: fid, kind: "frames", videoId: id, name: `${name} @ ${sec}s`, path: fpath, mime: "image/jpeg", size: fr.blob.size, caption: frameCaption(clipLabel(row), sec, "walk clip"), at });
-            row.frames = i;
+          try {
+            paint(`Pulling stills from ${name}…`);
+            // a clip whose length the browser can't report still gets the silent-clip default (8 spread over it)
+            const frames = await videoFrames(file, row.duration > 0 ? stillTimes(row.duration) : FRAMES_PER_VIDEO);
+            if (!frames.length) throw new Error("no frames came out of it");
+            let i = 0;
+            for (const fr of frames) {
+              if (!alive()) break;
+              i++;
+              paint(`Uploading stills from ${name} (${i} of ${frames.length})…`);
+              const fid = uid(), sec = Math.round(fr.t);
+              const fpath = siteFilePath(project.id, fid, `${name}-${sec}s.jpg`);
+              await uploadSiteFile(fpath, fr.blob, "image/jpeg");
+              if (!alive()) break;
+              sv.files.push({ id: fid, kind: "frames", videoId: id, name: `${name} @ ${sec}s`, path: fpath, mime: "image/jpeg", size: fr.blob.size, caption: frameCaption(clipLabel(row), sec, "walk clip"), at });
+              row.frames = i;
+            }
+            if (!alive()) continue;
+            row.status = "uploading";
+            ctx.save();
+            paint(`Uploading ${name} (${fmtSize(file.size)})…`);
+            const clipPath = siteFilePath(project.id, id, name);
+            await uploadSiteFile(clipPath, file, row.mime);
+            if (!alive()) continue;
+            row.path = clipPath;   // set only once the object exists, so Transcribe never points at nothing
+            row.status = "uploaded";
+            added++;
+          } catch (e) {
+            // an unfinished clip is not a packet file: take the row and its stills back out
+            sv.files = sv.files.filter((x) => x.id !== id && x.videoId !== id);
+            throw e;
+          } finally {
+            busy.delete(id);
           }
-          row.status = "uploading";
-          ctx.save();
-          paint(`Uploading ${name} (${fmtSize(file.size)})…`);
-          const clipPath = siteFilePath(project.id, id, name);
-          await uploadSiteFile(clipPath, file, row.mime);
-          row.path = clipPath;   // set only once the object exists, so Transcribe never points at nothing
-          row.status = "uploaded";
-          added++;
-          busy.delete(id);
           ctx.save();
           await transcribeWalk(row);
           continue;
@@ -344,7 +357,8 @@ export function siteVisitPanel(ctx) {
 
   async function transcribe() {
     const rec = sv.files.find((f) => f.kind === "audio");
-    if (!rec || !aiAvailable()) return;
+    if (!rec || busy.has(rec.id) || !aiAvailable()) return;
+    busy.add(rec.id);
     paint("Transcribing the recording… an hour of audio takes about a minute.");
     try {
       const r = await transcribeSiteAudio(project, rec.path);
@@ -352,8 +366,10 @@ export function siteVisitPanel(ctx) {
       rec.status = "transcribed";
       rebuildTranscript(sv);
       ctx.save();
+      busy.delete(rec.id);
       paint("");
     } catch (e) {
+      busy.delete(rec.id);
       paint("");
       toast("Transcription failed: " + (e && e.message ? e.message : e), 4000);
     }
@@ -374,12 +390,12 @@ export function siteVisitPanel(ctx) {
       captionStills(sv, row);
       rebuildTranscript(sv);
       ctx.save();
+      busy.delete(row.id);   // before the repaint, or the row shows "working…" with no retry
       paint("");
     } catch (e) {
+      busy.delete(row.id);
       paint("");
       toast("Transcription failed: " + (e && e.message ? e.message : e), 4000);
-    } finally {
-      busy.delete(row.id);
     }
   }
 

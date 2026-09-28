@@ -134,6 +134,9 @@ test("captionStills rewrites one clip's stills from its transcript and leaves th
   const sv2 = { files: [longName, { kind: "frames", videoId: "w2", name: "z @ 1s" }] };
   captionStills(sv2, longName);
   assert.ok(sv2.files[1].caption.length <= 300, "fits the server's 300-char caption cap");
+  longName.room = "r".repeat(120);
+  captionStills(sv2, longName);
+  assert.ok(sv2.files[1].caption.length <= 300, "a long room name is capped too");
   assert.equal(captionStills(sv, { id: "none", transcript: null }), 0);
   assert.equal(captionStills(null, walk), 0);
 });
@@ -175,6 +178,19 @@ test("a visit transcribed before walk clips keeps its transcript: adopted onto t
   const walked = { files: [{ id: "w", kind: "walk", transcript: { text: "x", seconds: 1 } }, { id: "a", kind: "audio" }], transcript: "derived already" };
   assert.equal(adoptLegacyTranscript(walked), false);
   assert.equal(walked.files[1].transcript, undefined);
+  // once derived, never legacy again: deleting the last transcribed clip
+  // beside an untranscribed recording leaves the recording untranscribed
+  rebuildTranscript(walked);
+  assert.equal(walked.transcriptDerived, true);
+  walked.files = walked.files.filter((f) => f.id !== "w");
+  rebuildTranscript(walked);
+  assert.equal(walked.files[0].transcript, undefined);
+  assert.equal(walked.transcript, "");
+  // Replace recording on a legacy visit: the old text goes with the old row
+  sv.files = [{ id: "a2", kind: "audio", name: "new.m4a", at: "2026-09-27T10:00:00Z" }];
+  rebuildTranscript(sv);
+  assert.equal(sv.files[0].transcript, undefined);
+  assert.equal(sv.transcript, "");
 });
 
 test("clips are numbered in capture order whether or not they are transcribed; the summary counts them", () => {

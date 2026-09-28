@@ -168,7 +168,7 @@ export function stillSecond(f) {
 }
 const shortName = (s) => { const n = String(s || "").trim(); return n.length > 40 ? n.slice(0, 39) + "…" : n; };
 /** What a walk still is captioned from: the room when known, else the clip name. */
-export const clipLabel = (row) => (row && row.room) || shortName(row && row.name) || "clip";
+export const clipLabel = (row) => shortName(row && row.room) || shortName(row && row.name) || "clip";
 /** Rewrite the captions of one clip's stills from its transcript. Returns
     how many were written; idempotent; other clips' stills are untouched. */
 export function captionStills(sv, row) {
@@ -206,21 +206,26 @@ export function transcriptFromFiles(files) {
     sv.transcript. Move it onto the recording's row once, so the flat text
     can be derived from rows from then on. True when it did something. */
 export function adoptLegacyTranscript(sv) {
-  if (!sv || !arr(sv.files).length) return false;
+  if (!sv || !arr(sv.files).length || sv.transcriptDerived) return false;   // derived text is never legacy
   const text = String(sv.transcript || "").trim();
   if (!text || sv.files.some((f) => f && f.transcript)) return false;
   const rec = sv.files.find((f) => f && f.kind === "audio");
   if (!rec) return false;
   rec.transcript = { utterances: [], text, seconds: Number(sv.transcriptSeconds) || 0, model: "", at: rec.at || "" };
+  sv.transcriptDerived = true;
   return true;
 }
 
-/** sv.transcript / sv.transcriptSeconds := derived from the rows. */
+/** sv.transcript / sv.transcriptSeconds := derived from the rows. From the
+    first rebuild on, sv.transcriptDerived marks the text as a copy of the
+    rows, so replacing a recording or deleting the last transcribed clip can
+    never graft stale text onto an untranscribed row. */
 export function rebuildTranscript(sv) {
   adoptLegacyTranscript(sv);
   const r = transcriptFromFiles(sv && sv.files);
   sv.transcript = r.transcript;
   sv.transcriptSeconds = r.seconds;
+  sv.transcriptDerived = true;
   return r;
 }
 
