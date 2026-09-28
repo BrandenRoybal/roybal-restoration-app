@@ -273,6 +273,24 @@ export async function downloadSiteFile(path) {
   return res.blob();
 }
 
+/** A short-lived signed URL for one Site Visit packet file — how the Scope
+    Notes player seeks a walk clip to the cited second without pulling the
+    whole file through JavaScript first (V2). The same storage sign call the
+    server makes for the estimator, under the user's own session. */
+export async function signedSiteUrl(path, expiresIn = 3600) {
+  await ensureFresh();
+  const url = `${SUPABASE_URL}/storage/v1/object/sign/${MEDIA_BUCKET}/${path}`;
+  const send = () => fetch(url, { method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" }, body: JSON.stringify({ expiresIn }) });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  if (res.status === 404 || res.status === 400) return null;
+  if (!res.ok) throw new Error("Couldn't open that clip (" + res.status + ")");
+  const out = await res.json().catch(() => ({}));
+  const rel = out.signedURL || out.signedUrl;
+  if (!rel) return null;
+  return `${SUPABASE_URL}/storage/v1${rel.startsWith("/") ? rel : "/" + rel}`;
+}
+
 /* crew headshots (Job Board roster → portal bio cards) live in the PUBLIC
    crew-photos bucket: customers load them straight from the CDN URL, and
    Twilio can fetch them for the MMS intro later. One object per member,

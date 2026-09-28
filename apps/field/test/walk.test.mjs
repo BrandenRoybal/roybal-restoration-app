@@ -9,6 +9,8 @@ import {
   captionForStill, withQuote, stillSecond, captionStills,
   clipHeader, transcriptFromFiles, adoptLegacyTranscript, rebuildTranscript,
   walkRows, clipNumber, walkSummary,
+  NOTE_BUCKETS, textHash, clipKey, clipsToExtract, extractInputFor, itemKey, mergeScopeNotes, noteItems, isAccepted, isDropped,
+  scopeNotesSummary, openVerify, cite, typedScopeFromRoom, walkScopeNotesText, lineMatches, missingLines, MAX_EXTRACT_STILLS,
 } from "../js/walk.js";
 
 let pass = 0;
@@ -209,6 +211,111 @@ test("clips are numbered in capture order whether or not they are transcribed; t
   assert.deepEqual(walkSummary(files), { clips: 4, seconds: 660, stills: 40 });
   assert.deepEqual(walkSummary([]), { clips: 0, seconds: 0, stills: 0 });
   assert.deepEqual(walkSummary(null), { clips: 0, seconds: 0, stills: 0 });
+});
+
+/* ---------- V2: scope notes ---------- */
+const clip = (id, room, text, at = "2026-09-26T20:00:00Z") => ({ id, kind: "walk", name: id + ".mov", room, at, status: "transcribed", path: `sitevisit/j/${id}.mov`,
+  transcript: { text, seconds: 90, utterances: [u(1, 3, text)] } });
+const still = (videoId, sec, extra = {}) => ({ id: videoId + "-" + sec, kind: "frames", videoId, name: `${videoId}.mov @ ${sec}s`, path: `sitevisit/j/${videoId}-${sec}.jpg`, caption: "c" + sec, ...extra });
+const item = (text, at, clipId = "c1", extra = {}) => ({ text, clip: clipId, at, ...extra });
+const room = (name, o = {}) => { const r = { room: name }; for (const b of NOTE_BUCKETS) r[b] = o[b] || []; return r; };
+const NOTES_C1 = { clip: "c1", clipRoom: "Kitchen", dropped: 0, jobWide: room("", { instructions: [item("protect the floors", 3)] }),
+  rooms: [room("Kitchen", { observations: [item("base run swollen at the toe kick", 12)], instructions: [item("Take it to four feet on the sink wall.", 134)],
+    verify: [item("~12 LF (est. from still 01:42)", 102)], trades: [item("electrician for the disposal circuit", 60, "c1", { trade: "Electrical" })] })] };
+const NOTES_C2 = { clip: "c2", clipRoom: "kitchen", dropped: 1, jobWide: room(""),
+  rooms: [room("kitchen", { materials: [item("LVP over OSB", 20, "c2")] }), room("Hall", { instructions: [item("new base in the hall", 40, "c2")] })] };
+
+test("the cache key changes with the transcript, so only new or re-transcribed clips are extracted", () => {
+  const sv = { files: [clip("c1", "Kitchen", "hello"), clip("c2", "Hall", "world"), { id: "c3", kind: "walk", status: "uploaded" }] };
+  assert.notEqual(textHash("hello"), textHash("hello."));
+  assert.deepEqual(clipsToExtract(sv).map((f) => f.id), ["c1", "c2"]);
+  sv.scopeNotes = { fromClips: [clipKey(sv.files[0])] };
+  assert.deepEqual(clipsToExtract(sv).map((f) => f.id), ["c2"]);
+  sv.files[0].transcript.text = "hello again";
+  assert.deepEqual(clipsToExtract(sv).map((f) => f.id), ["c1", "c2"]);
+});
+
+test("extractInputFor sends the clip's utterances and its uploaded stills (with their second), the room names and the job kind", () => {
+  const c1 = clip("c1", "Kitchen", "hello");
+  const sv = { files: [c1, still("c1", 12), still("c1", 40, { queued: true }), still("c1", 3, { path: "" }), still("c2", 5), { id: "x", kind: "frames", videoId: "c1", name: "no second", path: "sitevisit/j/x.jpg" }],
+    magicplan: { statistics: { units: "imperial", floors: [{ name: "1st", rooms: [{ name: "Living Room" }] }] } } };
+  const i = extractInputFor(sv, c1, { rooms: ["Kitchen", "Hall"], jobKind: "construction" });
+  assert.deepEqual(i.clip, { id: "c1", room: "Kitchen", utterances: c1.transcript.utterances });
+  assert.deepEqual(i.stills, [{ path: "sitevisit/j/c1-12.jpg", caption: "c12", t: 12, mime: "image/jpeg" }]);
+  assert.deepEqual(i.rooms, ["Kitchen", "Hall"]);
+  assert.deepEqual(i.magicplanRooms, ["Living Room"]);
+  assert.equal(i.jobKind, "construction");
+  const many = { files: [c1, ...Array.from({ length: 30 }, (_, k) => still("c1", k + 1))] };
+  assert.equal(extractInputFor(many, c1).stills.length, MAX_EXTRACT_STILLS);
+});
+
+test("mergeScopeNotes merges rooms by name, keeps every citation, and carries the review state across a re-run", () => {
+  const sn = mergeScopeNotes([{ key: "c1:h1", notes: NOTES_C1 }, { key: "c2:h2", notes: NOTES_C2 }], { at: "2026-09-27T00:00:00Z", model: "m" });
+  assert.equal(sn.status, "draft");
+  assert.deepEqual(sn.fromClips, ["c1:h1", "c2:h2"]);
+  assert.deepEqual(sn.rooms.map((r) => r.room), ["Kitchen", "Hall"]);
+  assert.equal(sn.rooms[0].materials[0].text, "LVP over OSB");           // c2's "kitchen" folded into Kitchen
+  assert.deepEqual(sn.jobWide.instructions, [{ text: "protect the floors", clip: "c1", at: 3 }]);
+  const items = noteItems(sn);
+  assert.equal(items.length, 7);
+  const k = itemKey(NOTES_C1.rooms[0].instructions[0], "instructions");
+  assert.equal(k, "c1:instructions:134:take-it-to-four-feet-on-the-sink-wall");
+  assert.ok(items.some((it) => it.key === k && it.room === "Kitchen" && it.bucket === "instructions"));
+  // review state keyed by item survives a re-run; a key that no longer exists is dropped
+  sn.accepted[k] = true; sn.edited[k] = "Take it to 4 ft on the sink wall."; sn.accepted["gone:x:1:z"] = true;
+  const again = mergeScopeNotes([{ key: "c1:h1", notes: NOTES_C1 }], { prior: sn });
+  assert.deepEqual(again.accepted, { [k]: true });
+  assert.equal(noteItems(again).find((it) => it.key === k).text, "Take it to 4 ft on the sink wall.");
+  assert.deepEqual(again.rooms.map((r) => r.room), ["Kitchen"]);
+  // an item without a citation never gets in
+  const bad = mergeScopeNotes([{ key: "c9", notes: { rooms: [room("Bath", { observations: [{ text: "no clip", at: 1 }, { text: "no time", clip: "c9" }] })] } }]);
+  assert.equal(noteItems(bad).length, 0);
+});
+
+test("summary, open verify items, and the citation text", () => {
+  const sn = mergeScopeNotes([{ key: "c1:h1", notes: NOTES_C1 }]);
+  assert.deepEqual(scopeNotesSummary(sn), { items: 5, accepted: 0, toVerify: 1, clips: 1, reviewed: false });
+  const v = openVerify(sn)[0];
+  assert.equal(cite(v), "walk Kitchen 1:42");
+  sn.verified[v.key] = "2026-09-27T01:00:00Z";
+  assert.deepEqual(openVerify(sn), []);
+  for (const it of noteItems(sn)) sn.accepted[it.key] = it.bucket !== "verify";
+  assert.equal(scopeNotesSummary(sn).reviewed, true);
+  assert.equal(isDropped(sn, v.key), true);
+  assert.equal(scopeNotesSummary(sn).toVerify, 0);   // a dropped verify item is not open
+});
+
+test("Use as typed scope: accepted, unused items of one room as Markdown under its heading; the draft block excludes what was used", () => {
+  const sn = mergeScopeNotes([{ key: "c1:h1", notes: NOTES_C1 }]);
+  const items = noteItems(sn);
+  for (const it of items) sn.accepted[it.key] = true;
+  assert.equal(typedScopeFromRoom(sn, "Bath").text, "");
+  const t = typedScopeFromRoom(sn, "Kitchen");
+  assert.equal(t.text,
+    "## Kitchen\n- base run swollen at the toe kick [walk Kitchen 0:12]\n- Take it to four feet on the sink wall. [walk Kitchen 2:14]\n- Verify: ~12 LF (est. from still 01:42) [walk Kitchen 1:42]\n- Electrical: electrician for the disposal circuit [walk Kitchen 1:00]");
+  assert.equal(t.keys.length, 4);
+  for (const k of t.keys) sn.used[k] = true;
+  assert.equal(walkScopeNotesText(sn), "## Job-wide\n- protect the floors [walk job-wide 0:03]");
+  assert.equal(typedScopeFromRoom(sn, "Kitchen").text, "");
+  sn.used = {};
+  assert.match(walkScopeNotesText(sn), /^## Kitchen\n- base run swollen/);
+  assert.equal(walkScopeNotesText({ rooms: [], jobWide: null }), "");
+});
+
+test("missingLines: an accepted instruction or trade with no matching line in its room, conservatively", () => {
+  const sn = mergeScopeNotes([{ key: "c1:h1", notes: NOTES_C1 }, { key: "c2:h2", notes: NOTES_C2 }]);
+  for (const it of noteItems(sn)) sn.accepted[it.key] = true;
+  const lines = [
+    { room: "Kitchen", desc: "Cabinetry - lower (base) units - Detach & reset, sink wall to 4 feet" },
+    { room: "Kitchen", desc: "Electrical sub - disposal circuit" },
+    { room: "Main Level", desc: "Floor protection - plastic and ram board" },
+  ];
+  const miss = missingLines(sn, lines);
+  assert.deepEqual(miss.map((it) => it.text), ["new base in the hall"]);   // the hall instruction has no hall line
+  assert.deepEqual(missingLines(sn, []).map((it) => it.text), ["Take it to four feet on the sink wall.", "electrician for the disposal circuit", "new base in the hall", "protect the floors"]);
+  assert.equal(lineMatches({ text: "electrician for the disposal circuit", trade: "Electrical" }, { desc: "ELECTRICAL SUB — disposal" }), true);
+  assert.equal(lineMatches({ text: "paint the ceiling" }, { desc: "Drywall - hung, taped" }), false);
+  assert.equal(lineMatches({ text: "protect the floors" }, { desc: "Floor protection" }), true);
 });
 
 console.log(`\n${pass} walk tests passed`);

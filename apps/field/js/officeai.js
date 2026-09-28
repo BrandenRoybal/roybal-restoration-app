@@ -254,6 +254,14 @@ function siteVisitFacts(project) {
 export function transcribeSiteAudio(project, path) {
   return callOffice(project, "siteVisitTranscribe", { path });
 }
+/** V2: one narrated clip → its cited scope notes ({ notes, model }). */
+export function extractWalkClip(project, input) {
+  return callOffice(project, "walkExtract", input);
+}
+/** V2: accepted walk notes the draft has no line for → proposals rows ({ written, existing }). */
+export function proposeMissingLines(project, estimateId, items) {
+  return callOffice(project, "proposeMissingLines", { projectId: project.id, estimateId, items });
+}
 /** Submit the draft → { batchId, model }. It runs in the background. */
 export function startSiteVisitDraft(project, packet, pricingMode, rates = "") {
   return callOffice(project, "siteVisitStart", { packet, facts: siteVisitFacts(project), pricingMode, rates });

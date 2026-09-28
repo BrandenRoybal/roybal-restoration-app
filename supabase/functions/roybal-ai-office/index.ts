@@ -67,6 +67,7 @@ import {
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
 import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody, parseBatchResult } from "./sitevisit.ts";
+import { cleanWalkInput, buildWalkContent, parseWalkResult, countItems, missingLineProposal, WALK_SYSTEM, WALK_NOTES_SCHEMA } from "./walk.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -87,6 +88,11 @@ const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-opus-4-8";
 // on the most capable one. Env-overridable without a redeploy of the code.
 const SITE_VISIT_MODEL = Deno.env.get("SITE_VISIT_MODEL") ?? "claude-fable-5-1";
 const SITE_VISIT_EFFORT = Deno.env.get("SITE_VISIT_EFFORT") ?? "high";
+// Walk scope notes (V2): one direct structured-output request per clip, the
+// estimator's model unless overridden — the same JSON-schema mechanism the
+// draft uses, so what works for the draft works here.
+const WALK_EXTRACT_MODEL = Deno.env.get("WALK_EXTRACT_MODEL") ?? SITE_VISIT_MODEL;
+const WALK_EXTRACT_EFFORT = Deno.env.get("WALK_EXTRACT_EFFORT") ?? "medium";
 // Message Batches bill at half the standard token price.
 const BATCH_DISCOUNT = 0.5;
 const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
@@ -225,6 +231,37 @@ async function chatText(opts: {
   const text = (data.content ?? []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("\n").trim();
   const usage = data.usage ?? {};
   return { text, usage: { inTok: Number(usage.input_tokens) || 0, outTok: Number(usage.output_tokens) || 0 } };
+}
+
+/* Direct structured-output call (JSON schema on output_config — the batch
+   draft's mechanism, without the batch). Returns the parsed JSON; a 200 we
+   reject still carries its usage so the ledger sees it. */
+async function structuredCall(opts: {
+  model: string; effort: string; system: string; content: unknown; schema: Record<string, unknown>; maxTokens?: number;
+}): Promise<{ json: unknown; usage: Usage }> {
+  if (!LLM_API_KEY) throw new Error("llm_key_missing: set the LLM_API_KEY function secret (Anthropic)");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST", headers: ANTHROPIC_HEADERS(),
+    body: JSON.stringify({
+      model: opts.model, max_tokens: opts.maxTokens ?? 16000,
+      thinking: { type: "adaptive" },   // the exact request shape the draft already runs with (buildBatchBody)
+      output_config: { effort: opts.effort, format: { type: "json_schema", schema: opts.schema } },
+      system: opts.system, messages: [{ role: "user", content: opts.content }],
+    }),
+  });
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`llm_failed (${res.status}): ${raw.slice(0, 300)}`);
+  const data = JSON.parse(raw);
+  const u = data.usage ?? {};
+  const usage: Usage = {
+    inTok: (Number(u.input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0),
+    outTok: Number(u.output_tokens) || 0,
+  };
+  const billed = (msg: string) => { const e = new Error(msg) as Error & { usage?: Usage; model?: string }; e.usage = usage; e.model = opts.model; return e; };
+  if (data.stop_reason === "refusal") throw billed("the model declined this clip — try again, or trim anything unrelated from it");
+  if (data.stop_reason === "max_tokens") throw billed("llm_truncated: the response hit its output limit before finishing — split the clip");
+  const text = (data.content ?? []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => String(b.text ?? "")).join("");
+  try { return { json: JSON.parse(text), usage }; } catch { throw billed("the notes came back unreadable — try again"); }
 }
 
 /* Deepgram pre-recorded STT (same account as voice capture). Returns the
@@ -925,6 +962,58 @@ async function siteVisitResult(body: Record<string, unknown>) {
     usage: parsed.usage, model, costScale: BATCH_DISCOUNT,
     summary: { batchId: batch.id, items: priced.length, catalog_priced: priced.filter((i) => (i as { priced?: string }).priced === "catalog").length, questions: draft.questions.length },
   };
+}
+
+/* ============================================================
+   Action: walkExtract — one narrated clip → cited scope notes (V2)
+   docs/Narrated_Walkthrough_Design.md §4.2, §6; brief §6.1
+   ============================================================ */
+async function walkExtract(body: Record<string, unknown>) {
+  const jwt = String(body._jwt ?? "");
+  // the same people who may record (design §2 decision 8); the server gate is the enforcement
+  const who = await db("rpc/role_is", jwt, { method: "POST", body: JSON.stringify({ p_roles: ["owner", "office", "crew_lead"] }) });
+  if (!who.ok || (await who.json().catch(() => null)) !== true) throw new Error("Scope notes are for the owner, office and crew leads.");
+  const input = cleanWalkInput(body);
+  const signed: Record<string, string> = {};
+  for (const s of input.stills) { try { signed[s.path] = await signMedia(s.path, jwt, 3600); } catch (_) { /* a still that is gone is left out, not sent blank */ } }
+  const content = buildWalkContent(input, signed);
+  const { json, usage } = await structuredCall({ model: WALK_EXTRACT_MODEL, effort: WALK_EXTRACT_EFFORT, system: WALK_SYSTEM, content, schema: WALK_NOTES_SCHEMA });
+  const allowedRooms = [input.clip.room, ...input.rooms, ...input.magicplanRooms].filter(Boolean);
+  const notes = parseWalkResult(json, { clipId: input.clip.id, allowedRooms, jobKind: input.jobKind });
+  return {
+    result: { notes, model: WALK_EXTRACT_MODEL },
+    usage, model: WALK_EXTRACT_MODEL,
+    summary: { clip: input.clip.id, stills: Object.keys(signed).length, utterances: input.clip.utterances.length, items: countItems(notes), dropped: notes.dropped },
+  };
+}
+
+/* ============================================================
+   Action: proposeMissingLines — accepted walk notes with no estimate line
+   become proposals rows (V2 brief §6.6). Service role writes the row in
+   0004's shape; the field app's panel is the review surface until P1 has
+   one. Never applied: a proposal is a question for a person.
+   ============================================================ */
+async function proposeMissingLines(body: Record<string, unknown>) {
+  const jwt = String(body._jwt ?? "");
+  if (!SERVICE_KEY) throw new Error("proposals need the service role on this function");
+  const who = await db("rpc/role_is", jwt, { method: "POST", body: JSON.stringify({ p_roles: ["owner", "office"] }) });
+  if (!who.ok || (await who.json().catch(() => null)) !== true) throw new Error("Only the owner or office can file estimate proposals.");
+  const projectId = String(body.projectId ?? "").slice(0, 80);
+  const estimateId = String(body.estimateId ?? "").slice(0, 80);
+  if (!projectId || !estimateId) throw new Error("projectId and estimateId are required");
+  const items = (Array.isArray(body.items) ? body.items : []).slice(0, 50) as Array<Record<string, unknown>>;
+  let written = 0, existing = 0;
+  for (const it of items) {
+    if (!it || typeof it !== "object" || !String(it.key ?? "") || !String(it.text ?? "")) continue;
+    const row = missingLineProposal({ projectId, estimateId, item: it as { key: string; room: string; bucket: string; text: string; clip: string; at: number; trade?: string } });
+    // one row per item: the idempotency key is unique, so a re-run after a
+    // second draft writes nothing new for a note already on file
+    const res = await db("proposals?on_conflict=idempotency_key", SERVICE_KEY, { method: "POST", headers: { Prefer: "return=representation,resolution=ignore-duplicates" }, body: JSON.stringify([row]) });
+    if (!res.ok) throw new Error(`proposals insert failed (${res.status}): ${(await res.text().catch(() => "")).slice(0, 200)}`);
+    const rows = await res.json().catch(() => []);
+    if (Array.isArray(rows) && rows.length) written++; else existing++;
+  }
+  return { result: { written, existing }, usage: { inTok: 0, outTok: 0 }, model: "none", summary: { written, existing, items: items.length } };
 }
 
 /* ============================================================
@@ -1911,6 +2000,7 @@ async function portalDraft(body: Record<string, unknown>) {
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number; costScale?: number }>> = {
   photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
   siteVisitTranscribe, siteVisitStart, siteVisitResult,
+  walkExtract, proposeMissingLines,
 };
 
 serve(async (req: Request) => {

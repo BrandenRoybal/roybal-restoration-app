@@ -26,7 +26,7 @@ import { rest, currentEmail, downloadSiteFile } from "./supa.js";
 import { tileCandidates, startBid, findBoardRow, isBidLead } from "./boardpush.js";
 import { jobType } from "./model.js";
 import { magicplanBidLine } from "./magicplan.js";
-import { walkSummary } from "./walk.js";
+import { walkSummary, scopeNotesSummary, openVerify, cite } from "./walk.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -99,6 +99,7 @@ export function bidState(project, d) {
       ...walkSummary(sv.files),   // clips, seconds, stills
       transcript: !!String(sv.transcript || "").trim(),
       scope: !!String(sv.typedScope || "").trim(),
+      notes: sv.scopeNotes ? scopeNotesSummary(sv.scopeNotes) : null,   // V2: items, accepted, toVerify, reviewed
     },
     estimate: latest ? {
       id: latest.id || "",
@@ -158,6 +159,7 @@ export function packetText(packet) {
     p.clips ? n(p.clips, "clip") : p.files ? n(p.files, "file") : "",
     p.clips && secs ? (secs >= 60 ? `${Math.round(secs / 60)} min` : `${Math.round(secs)} sec`) : "",
     p.transcript ? "transcript ✓" : "",
+    p.notes && p.notes.items ? `scope notes${p.notes.reviewed ? " ✓" : ` ${p.notes.accepted}/${p.notes.items}`}${p.notes.toVerify ? ` (${p.notes.toVerify} to verify)` : ""}` : "",
     p.scope ? "scope typed ✓" : "",
   ].filter(Boolean).join(" · ");
 }
@@ -559,6 +561,25 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
       s.packet.files || s.packet.transcript ? "Open packet" : "Start packet");
     packetBtn.addEventListener("click", () => openEstimate && openEstimate());
     wrap.append(line("📎", "Packet", packetTxt, packetBtn));
+
+    // 🔎 Verify (V2 §6.5): the walk's open "check this before you leave the
+    // driveway" items, one checkbox each; checking stamps verifiedAt.
+    const sv = project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : null;
+    const open = sv && sv.scopeNotes ? openVerify(sv.scopeNotes) : [];
+    if (open.length) {
+      const list = h("div", { style: "display:flex;flex-direction:column;gap:4px" }, ...open.map((it) => {
+        const cb = h("input", { type: "checkbox", style: "margin:0 6px 0 0" });
+        cb.addEventListener("change", async () => {
+          if (!sv.scopeNotes.verified) sv.scopeNotes.verified = {};
+          sv.scopeNotes.verified[it.key] = new Date().toISOString();
+          await Store.put(project);
+          if (onChanged) onChanged(); else load();
+        });
+        return h("label", { style: "display:flex;align-items:flex-start;font-size:13px;cursor:pointer" }, cb,
+          h("span", {}, it.text, " ", h("span", { class: "subtle", style: "font-size:11px" }, `[${cite(it)}]`)));
+      }));
+      wrap.append(line("🔎", "Verify", list, null));
+    }
 
     // 📐 Magicplan — docs/Magicplan_Integration_Design.md §5
     wrap.append(mpLine.setTile(d));

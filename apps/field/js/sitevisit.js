@@ -38,9 +38,11 @@ import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
 import { magicplanBanner, officeRole } from "./magicplan.js";
 import { magicplanQuantities, withMagicplanBasis } from "./magicplancalc.js";
+import { scopeNotesSection, fileMissingLines } from "./scopenotes.js";
 import {
   FRAMES_PER_VIDEO, frameTimes, mmss, frameCaption, stillTimes, clipTooBig, WALK_MAX_BYTES, OVERSIZE_MSG, LONG_CLIP_SECONDS, LONG_CLIP_NOTE,
   roomFromOpening, magicplanRoomNames, captionStills, rebuildTranscript, adoptLegacyTranscript, clipNumber, clipLabel, walkSummary,
+  walkScopeNotesText,
 } from "./walk.js";
 export { FRAMES_PER_VIDEO, frameTimes, frameCaption };   // moved to walk.js; callers and tests unchanged
 
@@ -88,6 +90,8 @@ export function packetForDraft(sv) {
     typedScope: String((sv && sv.typedScope) || ""),
     // M3: measured rooms from the Magicplan scan (feet), or absent
     ...(function () { const q = magicplanQuantities(sv); return q ? { magicplanQuantities: q } : {}; })(),
+    // V2: the accepted walk scope notes not yet carried into the typed scope, or absent
+    ...(function () { const t = walkScopeNotesText(sv && sv.scopeNotes); return t ? { walkScopeNotes: t } : {}; })(),
   };
 }
 export function packetReady(sv) {
@@ -249,6 +253,8 @@ export function siteVisitPanel(ctx) {
   let office = null;
   officeRole().then((r) => { if (r === false) { office = false; paint(""); } });
   const busy = new Set();   // walk rows with a transcription in flight (one Deepgram call per tap)
+  // 🗒️ Scope notes (V2): built once so its player and in-flight extraction survive repaints
+  const notes = scopeNotesSection({ project, sv, inv, save: () => ctx.save(), onTypedScope: () => paint("") });
 
   async function addFiles(kind, files) {
     if (kind !== "walk" && !aiAvailable()) return;   // a walk clip is captured offline; only its transcript needs signal
@@ -455,6 +461,10 @@ export function siteVisitPanel(ctx) {
       stopTimer();
       paint("");
       if (target === inv) ctx.onApplied(sum);
+      // V2 §6.6: accepted walk notes the draft has no line for → proposals rows (never applied); the panel lists them
+      if (sv.scopeNotes) fileMissingLines(project, sv, target).then((r) => {
+        if (r.missing.length) { notes.refresh(); toast(`${r.missing.length} accepted walk note${r.missing.length === 1 ? "" : "s"} not in the estimate — see "Not in estimate" under Scope notes${r.written ? ` (${r.written} filed for office review)` : ""}.`, 6000); }
+      }).catch(() => {});
     } catch (e) {
       // no signal: keep waiting; the draft is safe on the server
       if (e instanceof TypeError) { if (manual) toast("No connection. The draft keeps running; check again when you're back online."); return; }
@@ -673,6 +683,7 @@ export function siteVisitPanel(ctx) {
         ? h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },
             `${imageCount()} pictures in the packet; the draft reads the first ${MAX_IMAGES} (note pages first, then photos, then the newest stills are dropped). Remove clips or photos you don't need.`)
         : null,
+      (notes.refresh(), notes),
       h("div", { style: "padding:8px 0;border-top:1px solid #e2e6ed" },
         h("div", { style: "font-weight:600;font-size:13px;color:#16395a;margin-bottom:4px" }, "Typed scope"),
         h("div", { style: "display:flex;gap:8px;align-items:flex-start" }, scope, mic)),

@@ -284,4 +284,18 @@ test("metric input never reaches the prompt un-converted: a block that says metr
   assert.deepEqual(big.rooms[0], { name: "R0", floorSF: 10, perimLF: 0, ceilingFt: 0, wallSF: 0, wallSFNet: 0, doors: 0, windows: 2, volumeCF: 0 });
 });
 
+/* ---------- V2: reviewed walk scope notes ahead of the transcript ---------- */
+test("accepted walk scope notes sit between the typed scope and the transcript, with the instructions-vs-evidence rule", () => {
+  const packet = cleanPacket({ typedScope: "x", transcript: "[00:05] hello", walkScopeNotes: "## Kitchen\n- Take it to four feet on the sink wall. [walk Kitchen 2:14]" });
+  const t = textOf(buildContent(ARGS(packet)));
+  const i = (re) => t.search(re);
+  assert.ok(i(/OWNER'S TYPED SCOPE/) < i(/WALK SCOPE NOTES \(reviewed by the estimator/));
+  assert.ok(i(/WALK SCOPE NOTES/) < i(/SITE WALK TRANSCRIPT/));
+  assert.match(t, /- Take it to four feet on the sink wall\. \[walk Kitchen 2:14\]/);
+  assert.match(t, /WALK SCOPE NOTES are instructions the estimator already reviewed: follow every one/);
+  const none = textOf(buildContent(ARGS(cleanPacket({ typedScope: "x", walkScopeNotes: "   " }))));
+  assert.doesNotMatch(none, /WALK SCOPE NOTES/);
+  assert.equal(cleanPacket({}).walkScopeNotes, "");
+});
+
 console.log(`\n${pass} site-visit tests passed`);

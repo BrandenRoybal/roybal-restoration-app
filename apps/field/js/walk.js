@@ -251,3 +251,169 @@ export function walkSummary(files) {
     stills: rows.reduce((t, f) => t + (Number(f.frames) || 0), 0),
   };
 }
+
+/* ============================================================
+   V2 — scope notes: the reviewable middle layer (design §4.2, §3 steps 7–10)
+   ------------------------------------------------------------
+   walkExtract runs once per clip on the server and returns that clip's
+   notes (rooms[] + jobWide, every item {text, clip, at, …}). Everything
+   below is pure: what to send for a clip, the cache key that says a clip's
+   notes are current, the merge into siteVisit.scopeNotes, the review state
+   (accepted / edited / used / verified, keyed per item), the typed-scope
+   text a room turns into, the block the draft reads, and the conservative
+   "not in estimate" comparison.
+   ============================================================ */
+export const NOTE_BUCKETS = ["observations", "materials", "damage", "quantities", "instructions", "preExisting", "homeownerSaid", "verify", "safety", "trades"];
+export const BUCKET_LABEL = {
+  observations: "Observed", materials: "Materials", damage: "Damage", quantities: "Quantities (spoken)", instructions: "Instructions",
+  preExisting: "Pre-existing", homeownerSaid: "Homeowner said", verify: "Verify", safety: "Safety", trades: "Trades needed",
+};
+export const MAX_EXTRACT_STILLS = 24;
+
+/** djb2 of the transcript text — the "is this clip's extraction current" half of the cache key. */
+export function textHash(s) {
+  let h = 5381;
+  const t = String(s || "");
+  for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+/** id + transcript hash: re-running after a clip is added extracts one clip, not four. */
+export const clipKey = (row) => `${row && row.id}:${textHash(row && row.transcript && row.transcript.text)}`;
+
+/** Clips that have a transcript and whose notes are missing or stale. */
+export function clipsToExtract(sv) {
+  const done = new Set(arr(sv && sv.scopeNotes && sv.scopeNotes.fromClips));
+  return walkRows(sv && sv.files).filter((f) => f.transcript && String(f.transcript.text || "").trim() && !done.has(clipKey(f)));
+}
+
+/** The walkExtract input for one clip (design §6): its utterances, its
+    uploaded stills with the caption and second, the room names, the job kind. */
+export function extractInputFor(sv, row, { rooms = [], jobKind = "claim" } = {}) {
+  const stills = arr(sv && sv.files)
+    .filter((f) => f && f.kind === "frames" && f.videoId === row.id && f.path && !f.queued)
+    .map((f) => ({ path: f.path, caption: String(f.caption || ""), t: stillSecond(f), mime: f.mime || "image/jpeg" }))
+    .filter((s) => s.t != null)
+    .sort((a, b) => a.t - b.t)
+    .slice(0, MAX_EXTRACT_STILLS);
+  return {
+    clip: { id: row.id, room: String(row.room || ""), utterances: arr(row.transcript && row.transcript.utterances) },
+    stills, rooms: arr(rooms), magicplanRooms: magicplanRoomNames(sv), jobKind,
+  };
+}
+
+/* ---------- keys: one per item, stable across re-runs ---------- */
+const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+export const itemKey = (it, bucket) => `${it.clip}:${bucket}:${Math.round((Number(it.at) || 0) * 10) / 10}:${slug(it.text)}`;
+
+const emptyRoom = (room) => { const r = { room }; for (const b of NOTE_BUCKETS) r[b] = []; return r; };
+const normRoom = (s) => String(s || "").trim().toLowerCase();
+
+/** Merge per-clip notes into siteVisit.scopeNotes. Rooms merge by name
+    (case-insensitive); items keep their clip citation; the review state
+    (accepted / edited / used / verified) survives a re-run because it is
+    keyed by item, and stale clips' items fall away with their key. */
+export function mergeScopeNotes(perClip, { prior = null, at = new Date().toISOString(), model = "" } = {}) {
+  const rooms = new Map();
+  const jobWide = emptyRoom("");
+  const keys = new Set();
+  const fromClips = [];
+  for (const c of arr(perClip)) {
+    if (!c || !c.notes) continue;
+    fromClips.push(c.key);
+    const put = (target, r) => { for (const b of NOTE_BUCKETS) for (const it of arr(r[b])) { if (!it || !it.text || !it.clip || !Number.isFinite(Number(it.at))) continue; target[b].push({ ...it }); keys.add(itemKey(it, b)); } };
+    for (const r of arr(c.notes.rooms)) {
+      const k = normRoom(r.room);
+      if (!k) { put(jobWide, r); continue; }
+      if (!rooms.has(k)) rooms.set(k, emptyRoom(String(r.room).trim()));
+      put(rooms.get(k), r);
+    }
+    if (c.notes.jobWide) put(jobWide, c.notes.jobWide);
+  }
+  const keep = (m) => { const out = {}; for (const [k, v] of Object.entries(m || {})) if (keys.has(k)) out[k] = v; return out; };
+  const p = prior && typeof prior === "object" ? prior : {};
+  return {
+    status: "draft", generatedAt: at, model, fromClips,
+    rooms: [...rooms.values()], jobWide,
+    accepted: keep(p.accepted), edited: keep(p.edited), used: keep(p.used), verified: keep(p.verified),
+  };
+}
+
+/** Every item with its room, bucket and key — the review surface's flat list. */
+export function noteItems(sn) {
+  const out = [];
+  if (!sn) return out;
+  const one = (r) => { for (const b of NOTE_BUCKETS) for (const it of arr(r[b])) out.push({ ...it, room: r.room || "", bucket: b, key: itemKey(it, b) }); };
+  for (const r of arr(sn.rooms)) one(r);
+  if (sn.jobWide) one(sn.jobWide);
+  return out.map((it) => ({ ...it, text: (sn.edited && sn.edited[it.key]) || it.text }));
+}
+export const isAccepted = (sn, key) => !!(sn && sn.accepted && sn.accepted[key] === true);
+export const isDropped = (sn, key) => !!(sn && sn.accepted && sn.accepted[key] === false);
+
+/** "3 clips · 14 notes · 5 accepted · 2 to verify" for the panel and the Bid card. */
+export function scopeNotesSummary(sn) {
+  const items = noteItems(sn);
+  const accepted = items.filter((it) => isAccepted(sn, it.key)).length;
+  const toVerify = openVerify(sn).length;
+  return { items: items.length, accepted, toVerify, clips: arr(sn && sn.fromClips).length, reviewed: !!sn && items.length > 0 && items.every((it) => isAccepted(sn, it.key) || isDropped(sn, it.key)) };
+}
+
+/** Verify items still open — not dropped, not checked off — the Bid card's
+    Verify line (an amber, unreviewed one still needs looking at). */
+export function openVerify(sn) {
+  return noteItems(sn).filter((it) => it.bucket === "verify" && !isDropped(sn, it.key) && !(sn.verified && sn.verified[it.key]));
+}
+
+/** "walk Kitchen 2:14" — how a note is cited everywhere (matches the transcript header the draft sees). */
+export const cite = (it) => `walk ${it.room || "job-wide"} ${mmss(Number(it.at) || 0)}`;
+const lineFor = (it) => {
+  const t = it.bucket === "homeownerSaid" && !/^homeowner/i.test(it.text) ? "Homeowner: " + it.text : it.bucket === "verify" ? "Verify: " + it.text : it.bucket === "trades" && it.trade ? `${it.trade}: ${it.text}` : it.text;
+  return `- ${t} [${cite(it)}]`;
+};
+
+/** The accepted, not-yet-used items of one room as typed-scope Markdown
+    under a "## Room" heading; the keys it used, so the caller can mark them. */
+export function typedScopeFromRoom(sn, room) {
+  const items = noteItems(sn).filter((it) => normRoom(it.room) === normRoom(room) && isAccepted(sn, it.key) && !(sn.used && sn.used[it.key]));
+  if (!items.length) return { text: "", keys: [] };
+  return { text: `## ${room || "Job-wide"}\n` + items.map(lineFor).join("\n"), keys: items.map((it) => it.key) };
+}
+
+/** The WALK SCOPE NOTES block the draft reads: accepted items not already
+    carried into the typed scope, room by room, each cited. "" when none. */
+export function walkScopeNotesText(sn) {
+  const items = noteItems(sn).filter((it) => isAccepted(sn, it.key) && !(sn.used && sn.used[it.key]));
+  if (!items.length) return "";
+  const byRoom = new Map();
+  for (const it of items) { const k = it.room || ""; if (!byRoom.has(k)) byRoom.set(k, []); byRoom.get(k).push(it); }
+  return [...byRoom.entries()].map(([room, xs]) => `## ${room || "Job-wide"}\n` + xs.map(lineFor).join("\n")).join("\n\n");
+}
+
+/* ---------- "Not in estimate": accepted instructions and trades with no matching line ----------
+   Conservative on purpose: a line matches when it is in the same room (or
+   the note is job-wide) and shares at least two meaningful words with the
+   note (three-letter stopwords and shorter dropped), or the trade name
+   appears in the line. Anything that matches is left alone. */
+const STOP = new Set(["the", "and", "that", "this", "with", "from", "into", "over", "under", "them", "then", "take", "goes", "get", "put", "back", "out", "off", "its", "it's", "there", "here", "have", "has", "some", "just", "also", "will", "should", "about", "around", "need", "needs", "make", "sure", "want", "going", "gonna", "everything", "anything", "whole", "entire"]);
+const NUMBERS = { one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", ten: "10", eleven: "11", twelve: "12" };
+const words = (s) => new Set(String(s || "").toLowerCase().replace(/[^a-z0-9']+/g, " ").split(" ")
+  .map((w) => NUMBERS[w] || w)
+  .filter((w) => (w.length >= 4 || /^\d+$/.test(w)) && !STOP.has(w))
+  .map((w) => w.replace(/(ing|ed|es|s)$/, "")));
+/** True when the estimate line plausibly covers the note: the trade is named
+    in the line, or the two share meaningful words — one is enough for a short
+    note, two for a longer one. Lenient by design: a doubtful case is "covered". */
+export function lineMatches(note, line) {
+  const desc = `${line.desc || ""} ${line.notes || ""}`;
+  if (note.trade && desc.toLowerCase().includes(String(note.trade).toLowerCase())) return true;
+  const a = words(note.text), b = words(desc);
+  let hits = 0;
+  for (const w of a) if (b.has(w)) hits++;
+  return hits >= (a.size <= 3 ? 1 : 2);
+}
+export function missingLines(sn, estimateItems) {
+  const lines = arr(estimateItems).filter((li) => li && String(li.desc || "").trim());
+  return noteItems(sn)
+    .filter((it) => (it.bucket === "instructions" || it.bucket === "trades") && isAccepted(sn, it.key))
+    .filter((it) => !lines.some((li) => (!it.room || normRoom(li.room) === normRoom(it.room) || !String(li.room || "").trim()) && lineMatches(it, li)));
+}

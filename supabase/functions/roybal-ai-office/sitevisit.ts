@@ -53,6 +53,7 @@ export type SitePacket = {
   transcript?: string;       // site-walk transcript (from siteVisitTranscribe)
   typedScope?: string;       // Branden's typed scope / instructions
   magicplanQuantities?: MagicplanQuantities | null;   // measured rooms (M3), or absent
+  walkScopeNotes?: string;   // V2: the accepted, not-yet-used scope notes, room by room, each cited (walk.js walkScopeNotesText)
 };
 
 /* metric → feet, the same factors and rounding as the client's normalizeStatistics */
@@ -106,6 +107,7 @@ export function cleanPacket(raw: unknown): Required<SitePacket> {
     transcript: String(p.transcript ?? "").slice(0, MAX_TRANSCRIPT_CHARS),
     typedScope: String(p.typedScope ?? "").slice(0, MAX_SCOPE_CHARS),
     magicplanQuantities: cleanQuantities(p.magicplanQuantities),
+    walkScopeNotes: String(p.walkScopeNotes ?? "").slice(0, MAX_SCOPE_CHARS),
   };
 }
 
@@ -321,14 +323,18 @@ export function buildContent(a: BuildArgs): Block[] {
     out.push({ type: "image", source: { type: "url", url } });
   }
   const measured = quantitiesText(packet.magicplanQuantities);
+  const notes = packet.walkScopeNotes.trim();
   const sections = [
     ...(measured ? [measured] : []),
     "OWNER'S TYPED SCOPE:\n" + (packet.typedScope.trim() || "(none)"),
+    // V2: what the estimator accepted from the walk, ahead of the raw transcript
+    ...(notes ? ["WALK SCOPE NOTES (reviewed by the estimator — each line cites its clip and time):\n" + notes] : []),
     "SITE WALK TRANSCRIPT (one or more narrated clips; each clip opens with a header line — Clip n · Room · length — and every timestamp inside a clip is minutes:seconds into THAT clip, not into the visit; a recording with no header is timed from its own start):\n" + (packet.transcript.trim() || "(no recording)"),
     "JOB HEADER AND ANY DOCUMENTED FACTS:\n```json\n" + JSON.stringify(a.facts ?? {}, null, 2) + "\n```",
     "HOW TO WRITE IT:\n" +
       "- Cite evidence in every basis: report page, walk clip room and timestamp, photo number, notes page, or typed scope.\n" +
       (measured ? "- Use MEASURED QUANTITIES over anything read off the report PDF: they are the LiDAR scan's own figures. Cite them as 'Magicplan: 214 ft² floor, 58 LF perimeter' (the room's measured numbers, not a page). Wall areas there are net of openings; only derive what the scan does not give.\n" : "") +
+      (notes ? "- WALK SCOPE NOTES are instructions the estimator already reviewed: follow every one, and cite it by its clip and time. The transcript is evidence for the rest.\n" : "") +
       "- The room named at the top of a clip is the room every line from that clip belongs to unless the speaker names another.\n" +
       "- Fairbanks realism: freight and lead times, winter conditions (heat, protection, snow removal for access when the season calls for it), frost-depth and snow-load considerations on any exterior or structural scope.\n" +
       "- No overhead, profit or tax lines; they are applied separately.\n\n" +

@@ -74,6 +74,10 @@ const walked = bidState({ ...file, siteVisit: { files: [
 ok("the Packet line counts clips and minutes once walk clips exist", walked.packet.clips === 4 && walked.packet.seconds === 660 && walked.packet.stills === 40
   && packetText(walked.packet) === "4 clips · 11 min · transcript ✓");
 ok("packetText: seconds under a minute, typed scope, and nothing at all", packetText({ clips: 1, seconds: 42, scope: true }) === "1 clip · 42 sec · scope typed ✓" && packetText({}) === "" && packetText(null) === "");
+ok("packetText: scope notes read as progress until reviewed, with the open verify count (V2)",
+  packetText({ clips: 4, seconds: 660, transcript: true, notes: { items: 14, accepted: 5, toVerify: 2, reviewed: false } }) === "4 clips · 11 min · transcript ✓ · scope notes 5/14 (2 to verify)"
+  && packetText({ clips: 4, seconds: 660, transcript: true, notes: { items: 14, accepted: 12, toVerify: 0, reviewed: true }, scope: true }) === "4 clips · 11 min · transcript ✓ · scope notes ✓ · scope typed ✓"
+  && packetText({ clips: 1, notes: { items: 0 } }) === "1 clip");
 ok("estimate: number, lines, total", s1.estimate.no === "RC-MIK-0926" && s1.estimate.lines === 1 && s1.estimate.total === 12000);
 ok("the customer's ask comes from the file first", s1.lead.message === "Kitchen remodel" && s1.lead.channel === "web-form");
 ok("chip: furthest step wins — an estimate with lines", bidChip(s1) === "📄 est. $12,000");
