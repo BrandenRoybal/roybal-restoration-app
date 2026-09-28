@@ -46,13 +46,29 @@ export const isOpenLeadTile = (d) =>
    Open lead tiles with no job file, for this tab, newest first. An ACTIVE
    lookalike job file (same claim # or customer) means the office links it
    from that side — the row still shows, but startBid refuses it (`blocked`).
-   Archived lookalikes don't count: a repeat customer is a new bid. */
+   Archived lookalikes don't count: a repeat customer is a new bid.
+   No mode = every tab's leads (the 📐 Lead bids tab shows them all). */
 export function unlinkedLeadTiles(rows, projects, mode) {
   const live = arr(projects).filter((p) => p && !p.archivedAt);
   return arr(rows)
-    .filter((r) => r && r.data && isOpenLeadTile(r.data) && !r.data.fieldJobId && tileMode(r.data) === mode)
+    .filter((r) => r && r.data && isOpenLeadTile(r.data) && !r.data.fieldJobId && (!mode || tileMode(r.data) === mode))
     .map((r) => ({ row: r, blocked: tileCandidates(r.data, live).length > 0 }))
     .sort((a, b) => String(b.row.data.createdAt || "").localeCompare(String(a.row.data.createdAt || "")));
+}
+
+/* ---------- pure: does this file belong on the 📐 Lead bids tab ----------
+   A live file whose board tile is still at the lead stage: found by the
+   bidOf link Start bid wrote, or by the tile's fieldJobId. Offline (no rows)
+   or tile not found, the bidOf link alone decides. Once the office moves the
+   tile past Leads (won → Scheduled), the file drops back onto its
+   Restoration / Construction tab — it IS the job now. */
+export function isBidFile(p, rows) {
+  if (!p || p.archivedAt) return false;
+  if (!rows) return !!p.bidOf;
+  const live = arr(rows).filter((r) => r && r.data);
+  const row = (p.bidOf && live.find((r) => r.id === p.bidOf)) || live.find((r) => r.data.fieldJobId === p.id) || null;
+  if (!row) return !!p.bidOf;
+  return (row.data.stage || "lead") === "lead";
 }
 
 /* ---------- pure: estimate total, the way the estimate editor prints it ----------
@@ -493,7 +509,8 @@ export function ghostLeadRows(rows, projects, mode, { onStarted } = {}) {
       }
       btn.disabled = false; btn.textContent = "📐 Start bid";
     });
-    const meta = [channelLabel(d.channel || (d.source === "web" ? "web-form" : "")), ageLabel(d.createdAt),
+    const meta = [mode ? "" : (tileMode(d) === "restoration" ? "💧 Restoration" : "🔨 Construction"),
+      channelLabel(d.channel || (d.source === "web" ? "web-form" : "")), ageLabel(d.createdAt),
       d.estValue ? "~" + shortMoney(d.estValue) : "",
       d.siteVisit && d.siteVisit.at ? "📅 " + fmtVisitAt(d.siteVisit.at) : ""].filter(Boolean);
     const msg = String(d.message || "").trim();

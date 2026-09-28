@@ -19,7 +19,7 @@ import { setCtx, field, inp, ta, sel, seg, photoUploader, uploadedDocPages } fro
 import { RENDERERS, packBackReceipt, uploadedDocSheet, narrativeSheet, progressSheet } from "./forms.js";
 import { photoShareControl, publishPacketShare, packetShareLink, photoShareLink, shareLive } from "./photoshare.js";
 import { qrSvg } from "./qr.js";
-import { SYNC_ENABLED, SUPABASE_URL, SUPABASE_KEY, BUILD } from "./config.js";
+import { SYNC_ENABLED, SUPABASE_URL, SUPABASE_KEY, BUILD, SHOW_MY_WEEK } from "./config.js";
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
 import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged, reloadFromCloud } from "./sync.js";
 import { graftProject } from "./graft.js";
@@ -37,7 +37,7 @@ import { dictateBtn } from "./dictate.js";
 import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
 import { boardFlagsByJob } from "./myweekcalc.js";
-import { ghostLeadRows, bidCard, bidState, bidChip, archiveLostBidFiles, wonPhotosCard,
+import { ghostLeadRows, unlinkedLeadTiles, isBidFile, bidCard, bidState, bidChip, archiveLostBidFiles, wonPhotosCard,
   suggestEstimateNo, estimateEmailDraft, markEstimateSent, estimateTotal, whoLabel, FOLLOW_UP_DAYS } from "./bid.js";
 import { mountAssist } from "./assist.js";
 import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
@@ -310,7 +310,7 @@ function renderLogin() {
     h("div", { style: "max-width:380px;margin:8vh auto 0;text-align:center" },
       h("img", { src: "assets/emblem-mark.svg", alt: "", style: "width:84px;height:84px;border-radius:18px;background:#fff;padding:12px" }),
       h("h1", { style: "margin:14px 0 2px" }, "Roybal Field Forms"),
-      h("p", { class: "subtle" }, "Sign in with your own crew email — your jobs sync across devices and your schedule shows under 📅 My Week."),
+      h("p", { class: "subtle" }, "Sign in with your own crew email — your jobs sync across devices" + (SHOW_MY_WEEK ? " and your schedule shows under 📅 My Week." : ".")),
       h("div", { class: "card", style: "text-align:left;margin-top:14px" },
         err,
         field("Email", email), field("Password", pass), btn),
@@ -346,10 +346,25 @@ function doSignOut() {
 /* ============================================================
    Project list (home)
    ============================================================ */
-/* Home-screen mode — which job kind the list shows and "+ New Job" creates. */
+/* Home-screen tab — 📐 Lead bids, 💧 Restoration or 🔨 Construction. The two
+   job tabs also decide what "+ New Job" creates; on the Lead bids tab it
+   starts the kind of job last viewed (bids themselves start from a lead). */
 const MODE_KEY = "roybal-mode";
-const activeMode = () => (localStorage.getItem(MODE_KEY) === "construction" ? "construction" : "restoration");
-const setMode = (m) => localStorage.setItem(MODE_KEY, m);
+const JOB_MODE_KEY = "roybal-mode-job";
+const activeMode = () => {
+  const m = localStorage.getItem(MODE_KEY);
+  return m === "bids" || m === "construction" ? m : "restoration";
+};
+const jobMode = () => {
+  const m = activeMode();
+  if (m !== "bids") return m;
+  return localStorage.getItem(JOB_MODE_KEY) === "construction" ? "construction" : "restoration";
+};
+const setMode = (m) => {
+  localStorage.setItem(MODE_KEY, m);
+  if (m !== "bids") localStorage.setItem(JOB_MODE_KEY, m);
+};
+
 
 /* Small job-kind chip for job cards — keeps mixed contexts unambiguous. */
 function modeChip(p) {
@@ -437,25 +452,32 @@ async function projectList() {
   const projects = await Store.all();
   const body = clear(view);
   const mode = activeMode();
-  const byMode = { restoration: [], construction: [] };
-  projects.forEach((p) => byMode[jobType(p)].push(p));
+  /* Live bid files (board tile still at Leads) sit on the 📐 Lead bids tab,
+     not their job tab; archived files stay on their job tab's archive. */
+  const bidSig = (rows) => projects.filter((p) => isBidFile(p, rows)).map((p) => p.id).sort().join(",");
+  const byMode = { bids: [], restoration: [], construction: [] };
+  projects.forEach((p) => byMode[isBidFile(p, _boardRows) ? "bids" : jobType(p)].push(p));
   const active = byMode[mode].filter((p) => !p.archivedAt);
   const archived = byMode[mode].filter((p) => p.archivedAt);
   const activeCount = (m) => byMode[m].filter((p) => !p.archivedAt).length;
+  const bidsCount = (rows) => activeCount("bids") + (rows ? unlinkedLeadTiles(rows, projects, null).length : 0);
 
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "Jobs"),
       h("div", { style: "display:flex;gap:8px;flex:none" },
         h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/help"), title: "How the app works" }, "❓"),
-        h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/week"), title: "Your schedule from the Job Board" }, "📅 My Week"),
+        SHOW_MY_WEEK ? h("button", { class: "btn btn--ghost btn--sm", onclick: () => go("#/week"), title: "Your schedule from the Job Board" }, "📅 My Week") : null,
         h("button", { class: "btn btn--primary btn--sm", onclick: () => go("#/new") }, "+ New Job"))));
 
   const modeSeg = h("div", { class: "seg", style: "margin:0 0 10px" });
-  [["restoration", `💧 Restoration (${activeCount("restoration")})`],
+  let bidsTab = null;   // its count grows when the board's open leads load
+  [["bids", `📐 Lead bids (${bidsCount(_boardRows)})`],
+   ["restoration", `💧 Restoration (${activeCount("restoration")})`],
    ["construction", `🔨 Construction (${activeCount("construction")})`]].forEach(([m, label]) => {
     const b = h("button", { type: "button", class: m === mode ? "active" : "" }, label);
     b.addEventListener("click", () => { if (m !== mode) { setMode(m); projectList(); } });
+    if (m === "bids") bidsTab = b;
     modeSeg.append(b);
   });
   body.append(modeSeg);
@@ -465,7 +487,10 @@ async function projectList() {
 
   let paintLive = null;   // set when an active list is on screen
 
-  if (!active.length && !archived.length) {
+  if (mode === "bids" && !active.length) {
+    body.append(h("p", { class: "subtle", style: "margin:6px 2px 0" },
+      "No bids started yet. Open leads from the Job Board show below — tap 📐 Start bid on one to open its bid file."));
+  } else if (!active.length && !archived.length) {
     body.append(h("div", { class: "empty" },
       h("div", { class: "big" }, mode === "construction" ? "🔨" : "🧰"),
       h("p", {}, mode === "construction" ? "No construction jobs yet." : "No restoration jobs yet."),
@@ -506,9 +531,12 @@ async function projectList() {
         const sid = row && row.data && BOARD_STAGES[row.data.stage] ? row.data.stage : null;
         return { p, sid, row };
       });
-      if (!staged.some((x) => x.sid)) {
+      if (mode === "bids" || !staged.some((x) => x.sid)) {
         const list = h("div", { class: "joblist" });
-        staged.forEach(({ p, row }) => list.append(jobRow(p, { watch: flagsForRow(row) })));
+        staged.forEach(({ p, row }) => list.append(jobRow(p, {
+          watch: flagsForRow(row),
+          bid: mode === "bids" && p.bidOf ? bidChip(bidState(p, row && row.data)) : "",
+        })));
         listWrap.append(list);
         return;
       }
@@ -539,15 +567,18 @@ async function projectList() {
   }
 
   /* Leads on the board with no job file — ghost rows with one button, 📐
-     Start bid (docs/Lead_Bid_Workflow_Design.md §5.3). Painted below the
-     jobs, repainted when the board read lands; nothing here is on the device
-     until a bid is started, so the empty-list case shows them too. */
+     Start bid (docs/Lead_Bid_Workflow_Design.md §5.3). They live on the 📐
+     Lead bids tab only (every kind, restoration and construction), below the
+     bid files, repainted when the board read lands; nothing here is on the
+     device until a bid is started. */
   const ghostWrap = h("div");
   body.append(ghostWrap);
   const paintGhosts = (rows) => {
     clear(ghostWrap);
     if (!rows) return;
-    const el = ghostLeadRows(rows, projects, mode, { onStarted: (p) => go(`#/p/${p.id}`) });
+    if (bidsTab) bidsTab.textContent = `📐 Lead bids (${bidsCount(rows)})`;
+    if (mode !== "bids") return;
+    const el = ghostLeadRows(rows, projects, null, { onStarted: (p) => go(`#/p/${p.id}`) });
     if (el) ghostWrap.append(el);
   };
   paintGhosts(_boardRows);
@@ -558,7 +589,9 @@ async function projectList() {
   fetchBoardRowsSafe().then(async (rows) => {
     if (!rows) return;   // offline / signed out
     const changed = stageSig(rows) !== stageSig(_boardRows);
+    const moved = bidSig(rows) !== bidSig(_boardRows);   // a bid won / a file reached Leads → re-sort the tabs
     _boardRows = rows;
+    if (moved && _listRender === render) return projectList();
     if (changed && paintLive) paintLive(rows);
     if (_listRender === render) paintGhosts(rows);
     // logged hours + the board's work calendar feed the schedule-truth flags —
@@ -599,12 +632,12 @@ async function projectList() {
     det.addEventListener("toggle", () => { _archOpen = det.open; });
     body.append(det);
   }
-  body.append(installHint());
+  body.append(buildLabel());
 }
 
 const APP_VERSION = "v36";   // fallback only; the label below shows the LIVE service-worker cache version
 
-function installHint() {
+function buildLabel() {
   const ver = h("div", { style: "text-align:center;color:var(--muted);font-size:11px;margin-top:14px" },
     "Roybal Field Forms · build " + APP_VERSION);
   // Show the LIVE service-worker cache version so the label always reflects the
@@ -617,11 +650,7 @@ function installHint() {
       }).catch(() => {});
     }
   } catch (_) {}
-  return h("div", {},
-    h("div", { class: "note", style: "margin-top:18px" },
-      h("strong", {}, "Tip: "),
-      "Add this app to your home screen (Share → “Add to Home Screen”) to launch it like a regular app and use it with no signal in the field."),
-    ver);
+  return ver;
 }
 
 /* Guard the #/new route HARD. On a laggy tablet every extra tap used to mint
@@ -639,7 +668,7 @@ async function createProject() {
     // which can take a beat on a photo-heavy tablet; a silent screen reads as
     // "the tap didn't work" and invites more taps
     clear(view).append(h("p", { class: "subtle", style: "margin:24px" }, "Opening new job…"));
-    const mode = activeMode();   // the home-screen toggle decides what "+ New Job" starts
+    const mode = jobMode();   // the home-screen toggle decides what "+ New Job" starts
     const existing = (await Store.all()).find((p) => !p.archivedAt && p.jobType === mode && isBlankProject(p));
     if (existing) {
       // a blank left by another tech (or an offline session) is being adopted —

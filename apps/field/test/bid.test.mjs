@@ -6,7 +6,7 @@ import {
   tileMode, isOpenLeadTile, unlinkedLeadTiles, estimateTotal, bidState, bidChip,
   fmtVisitAt, whoLabel, shortMoney, lostBidFiles, siteVisitDonePatch,
   suggestEstimateNo, addBusinessDays, estimateSentPatch, estimateEmailDraft,
-  wonPhotoFiles, jobPhotoFromSiteFile, WON_PHOTO_CAP, packetText,
+  wonPhotoFiles, jobPhotoFromSiteFile, WON_PHOTO_CAP, packetText, isBidFile,
 } from "../js/bid.js";
 
 let pass = 0;
@@ -46,6 +46,18 @@ ok("an archived lookalike does not block a repeat customer", cons.find((x) => x.
 ok("linked, lost and scheduled tiles are not ghost rows", !cons.find((x) => ["g4", "g5", "g7"].includes(x.row.id)));
 ok("restoration tab gets the water lead only", unlinkedLeadTiles(ROWS, PROJECTS, "restoration").map((x) => x.row.id).join(",") === "g2");
 ok("garbage rows never throw", unlinkedLeadTiles([null, {}, { data: null }], [], "construction").length === 0);
+ok("no mode = the Lead bids tab: every kind's open leads", unlinkedLeadTiles(ROWS, PROJECTS, null).length
+  === unlinkedLeadTiles(ROWS, PROJECTS, "construction").length + unlinkedLeadTiles(ROWS, PROJECTS, "restoration").length);
+
+/* ---------- which files sit on the 📐 Lead bids tab ---------- */
+const bidRows = [tile("L1", { stage: "lead", fieldJobId: "b1" }), tile("L2", { stage: "scheduled", fieldJobId: "b2" }),
+  tile("L3", { stage: "lead", fieldJobId: "j3" })];
+ok("a bid file whose tile is at Leads is on the bids tab", isBidFile({ id: "b1", bidOf: "L1" }, bidRows));
+ok("won and scheduled → back on its job tab", !isBidFile({ id: "b2", bidOf: "L2" }, bidRows));
+ok("a job linked to a lead-stage tile (no Start bid) is a bid too", isBidFile({ id: "j3" }, bidRows));
+ok("offline: the bidOf link alone decides", isBidFile({ id: "b1", bidOf: "L1" }, null) && !isBidFile({ id: "j3" }, null));
+ok("tile not found: bidOf still decides", isBidFile({ id: "x", bidOf: "gone" }, bidRows) && !isBidFile({ id: "plain" }, bidRows));
+ok("archived files never sit on the bids tab", !isBidFile({ id: "b1", bidOf: "L1", archivedAt: "2026-09-28" }, bidRows));
 
 /* ---------- estimate total mirrors the estimate editor ---------- */
 const est = { kind: "estimate", items: [{ qty: "10", price: "100" }, { qty: 2, price: 250 }], overheadPct: "10", profitPct: "10", opMode: "pct", contingencyPct: "5", taxRate: "0" };

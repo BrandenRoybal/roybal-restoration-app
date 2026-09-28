@@ -10,6 +10,7 @@
    ============================================================ */
 import { h } from "./core.js";
 import { FORMS } from "./model.js";
+import { SHOW_MY_WEEK } from "./config.js";
 
 const sec = (title, ...kids) => h("div", { class: "card", style: "margin-top:14px" },
   h("div", { style: "font-weight:700;margin-bottom:6px" }, title), ...kids);
@@ -23,24 +24,24 @@ const formList = (type) => ul(...FORMS.filter((f) => !f.types || f.types.include
 export function helpPage(root) {
   root.append(
     h("h1", {}, "How the app works"),
-    p("This is the crew's job binder: every form, photo, reading, and signature for a job lives here, works with no signal, and turns into clean PDFs for the carrier. Sign in with your own crew email — that's what syncs your work across devices and powers My Week."),
+    p("This is the crew's job binder: every form, photo, reading, and signature for a job lives here, works with no signal, and turns into clean PDFs for the carrier. Sign in with your own crew email — that's what syncs your work across devices" + (SHOW_MY_WEEK ? " and powers My Week." : ".")),
 
     sec("The job list",
       ul(
-        [h("strong", {}, "💧 Restoration / 🔨 Construction"), " — two lists, one toggle. Restoration is water/fire/mold mitigation; Construction is remodels, new builds, and rebuilds (each gets its own form set)."],
+        [h("strong", {}, "📐 Lead bids / 💧 Restoration / 🔨 Construction"), " — three tabs across the top. Lead bids holds every bid in progress plus the open leads not started yet; Restoration is water/fire/mold mitigation; Construction is remodels, new builds, and rebuilds (each gets its own form set). A won bid moves to its Restoration or Construction tab once the office schedules it."],
         [h("strong", {}, "Board columns"), " — jobs linked to the Job Board group under its live stage columns, so the list reads like the whiteboard. ⚠ chips repeat the board's schedule-truth warnings (no QuickBooks Time link, no hours since start, a phase that looks done but isn't marked)."],
         ["A finished job ", h("strong", {}, "archives"), " off the active list but stays below — nothing is deleted."])),
 
     sec("📐 Leads / Bids",
       ul(
-        [h("strong", {}, "Leads on the board — not started"), " — open leads from the web form, the phone line and the office show as grey rows under the job list. Nothing is on this device until someone taps ", h("strong", {}, "📐 Start bid"), ", which creates the bid file (site visit packet + estimate). A greyed-out button means a job file for that customer or claim # already exists — open that one instead."],
+        [h("strong", {}, "Leads on the board — not started"), " — open leads from the web form, the phone line and the office show as grey rows on the 📐 Lead bids tab, under the bids already started. Nothing is on this device until someone taps ", h("strong", {}, "📐 Start bid"), ", which creates the bid file (site visit packet + estimate). A greyed-out button means a job file for that customer or claim # already exists — open that one instead."],
         ["A bid file wears a ", h("strong", {}, "bid chip"), " on its row showing how far it's got (visit booked, inspected, estimate total, sent), and its job home opens with the ", h("strong", {}, "Bid card"), ": 📅 Site visit · 📎 Packet · 📄 Estimate · ✉️ Sent."],
         [h("strong", {}, "✓ Site visit done"), " marks the lead 🔍 Inspected on the Job Board and stops its follow-up clock. The office books the visit time from the Leads Inbox."],
         ["A new estimate suggests its number (", h("strong", {}, "RC-KEN-0925"), " — the customer's last name and the month; edit it freely). ", h("strong", {}, "✉️ Send"), " on the estimate (or ", h("strong", {}, "Send estimate"), " on the Bid card) drafts the customer email: save the PDF, open the email, attach it. Opening the email marks the estimate sent and logs 📄 Estimate sent on the lead with the total and a follow-up 5 business days out. The Send panel's ", h("strong", {}, "⬇ Word copy"), " saves the same estimate as an editable Word file — handy for private-pay customers who want to mark it up."],
         ["When the lead is won, the same file simply becomes the job — the Bid card goes away, and the job home offers once to copy the site-visit photos and video stills into Job Photos as “before” shots. If the office marks it ", h("strong", {}, "Lost"), ", the bid file archives itself off the list the next time you open it (never deleted — it's under 🗂 Archived)."])),
 
-    sec("📅 My Week",
-      p("Your next two weeks, sliced from the Job Board's live schedule — matched to the email you sign in with. It caches on the device, so it opens offline; a fresh pull replaces it when you're online. Everyone scheduled for the day also gets a morning ", h("strong", {}, "schedule text"), " listing their jobs (the office can switch that off per person).")),
+    ...(!SHOW_MY_WEEK ? [] : [sec("📅 My Week",
+      p("Your next two weeks, sliced from the Job Board's live schedule — matched to the email you sign in with. It caches on the device, so it opens offline; a fresh pull replaces it when you're online. Everyone scheduled for the day also gets a morning ", h("strong", {}, "schedule text"), " listing their jobs (the office can switch that off per person)."))]),
 
     sec("Inside a job",
       ul(
