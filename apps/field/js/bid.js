@@ -26,6 +26,7 @@ import { rest, currentEmail, downloadSiteFile } from "./supa.js";
 import { tileCandidates, startBid, findBoardRow, isBidLead } from "./boardpush.js";
 import { jobType } from "./model.js";
 import { magicplanBidLine } from "./magicplan.js";
+import { walkSummary } from "./walk.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -95,6 +96,7 @@ export function bidState(project, d) {
     },
     packet: {
       files: arr(sv.files).length,
+      ...walkSummary(sv.files),   // clips, seconds, stills
       transcript: !!String(sv.transcript || "").trim(),
       scope: !!String(sv.typedScope || "").trim(),
     },
@@ -145,6 +147,20 @@ const shortDate = (iso) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
   return m ? `${Number(m[2])}/${Number(m[3])}` : "";
 };
+
+/* the Packet line: "4 clips · 11 min · transcript ✓" once walk clips exist,
+   "3 files · transcript ✓ · scope typed ✓" for a packet without them */
+export function packetText(packet) {
+  const p = packet || {};
+  const n = (x, one) => `${x} ${one}${x === 1 ? "" : "s"}`;
+  const secs = Number(p.seconds) || 0;
+  return [
+    p.clips ? n(p.clips, "clip") : p.files ? n(p.files, "file") : "",
+    p.clips && secs ? (secs >= 60 ? `${Math.round(secs / 60)} min` : `${Math.round(secs)} sec`) : "",
+    p.transcript ? "transcript ✓" : "",
+    p.scope ? "scope typed ✓" : "",
+  ].filter(Boolean).join(" · ");
+}
 
 /* one chip's worth of progress for the jobs-list row: the furthest step */
 export function bidChip(state) {
@@ -538,9 +554,8 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
     wrap.append(line("📅", "Site visit", visitTxt, doneBtn));
 
     // 📎 Packet
-    const packetTxt = [s.packet.files ? `${s.packet.files} file${s.packet.files === 1 ? "" : "s"}` : "",
-      s.packet.transcript ? "transcript ✓" : "", s.packet.scope ? "scope typed ✓" : ""].filter(Boolean).join(" · ");
-    const packetBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto", title: "The Site Visit panel lives on the estimate: Magicplan report, photos, note pages, room videos, the walk recording" },
+    const packetTxt = packetText(s.packet);
+    const packetBtn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto", title: "The Site Visit panel lives on the estimate: narrated walk clips, Magicplan report, photos, note pages, room videos, the walk recording" },
       s.packet.files || s.packet.transcript ? "Open packet" : "Start packet");
     packetBtn.addEventListener("click", () => openEstimate && openEstimate());
     wrap.append(line("📎", "Packet", packetTxt, packetBtn));

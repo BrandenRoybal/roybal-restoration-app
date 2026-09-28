@@ -1,7 +1,8 @@
 /* Site Visit estimator — the client's pure helpers (no DOM, no network).
    Run: node apps/field/test/sitevisit.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
-import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit, frameTimes, frameCaption, FRAMES_PER_VIDEO } from "../js/sitevisit.js";
+import { readFileSync } from "node:fs";
+import { siteFilePath, packetForDraft, packetReady, draftNotesText, applySiteDraft, siteVisitOf, newSiteVisit, frameTimes, frameCaption, FRAMES_PER_VIDEO, KINDS, MAX_IMAGES } from "../js/sitevisit.js";
 import { FORMS, formsFor } from "../js/model.js";
 import { subRatesText, SUB_RATES } from "../js/pricing.js";
 
@@ -153,6 +154,60 @@ test("video stills go to the draft as photos; the clip itself never does", () =>
   assert.deepEqual(p.photos.map((f) => f.path), ["sitevisit/j/p.jpg", "sitevisit/j/f1.jpg", "sitevisit/j/f2.jpg"]);
   assert.equal(p.photos[1].caption, "still at 0:03 from Magicplan video Break room.mp4");
   assert.equal(packetReady({ files: [{ kind: "videos", name: "x.mp4" }] }), false);   // a clip with no stills is nothing to read
+});
+
+/* ---------- narrated walk clips (docs/Narrated_Walkthrough_Design.md) ---------- */
+test("the slots lead with 🎥 Walk clips; the old kinds keep their shape", () => {
+  assert.equal(Object.keys(KINDS)[0], "walk");
+  assert.equal(KINDS.walk.label, "🎥 Walk clips");
+  assert.equal(KINDS.walk.accept, "video/*,.mp4,.mov");
+  assert.equal(KINDS.walk.multiple, true);
+  assert.equal(KINDS.videos.label, "Silent clips (Magicplan)");
+  assert.equal(KINDS.videos.accept, "video/*,.mp4,.mov");
+  assert.equal(KINDS.audio.multiple, false);
+  assert.equal(KINDS.audio.accept, "audio/*,video/*,.m4a,.mp3,.wav,.aac");
+});
+
+test("a walk clip's stills go to the draft as photos; the clip itself never does", () => {
+  const sv = newSiteVisit();
+  sv.files.push(
+    { id: "w1", kind: "walk", name: "IMG_0042.mov", path: "sitevisit/j/w1-IMG_0042.mov", mime: "video/quicktime", status: "transcribed", room: "Kitchen", duration: 134 },
+    { id: "f1", kind: "frames", videoId: "w1", path: "sitevisit/j/f1.jpg", mime: "image/jpeg", caption: 'still at 0:12 from walk clip Kitchen · "sink wall"' },
+    { id: "f2", kind: "frames", videoId: "w1", path: "sitevisit/j/f2.jpg", mime: "image/jpeg", caption: "still at 0:31 from walk clip Kitchen" });
+  const p = packetForDraft(sv);
+  assert.deepEqual(p.photos.map((f) => f.path), ["sitevisit/j/f1.jpg", "sitevisit/j/f2.jpg"]);
+  assert.equal(p.photos[0].caption, 'still at 0:12 from walk clip Kitchen · "sink wall"');
+  assert.equal(JSON.stringify(p).includes("IMG_0042.mov"), false);
+  assert.equal(packetReady({ files: [{ kind: "walk", path: "sitevisit/j/w.mov" }] }), false);   // a clip with no stills and no transcript is nothing to read
+});
+
+test("photos list before stills, so the server's budget drops the newest stills first", () => {
+  const sv = newSiteVisit();
+  sv.files.push(
+    { id: "w1", kind: "walk", at: "2026-09-26T09:00:00Z" },
+    { id: "a1", kind: "frames", videoId: "w1", path: "sitevisit/j/a1.jpg", mime: "image/jpeg", at: "2026-09-26T09:00:00Z" },
+    { id: "p1", kind: "photos", path: "sitevisit/j/p1.jpg", mime: "image/jpeg", at: "2026-09-26T09:02:00Z" },
+    { id: "w2", kind: "walk", at: "2026-09-26T09:05:00Z" },
+    { id: "b1", kind: "frames", videoId: "w2", path: "sitevisit/j/b1.jpg", mime: "image/jpeg", at: "2026-09-26T09:05:00Z" },
+    { id: "p2", kind: "photos", path: "sitevisit/j/p2.jpg", mime: "image/jpeg", at: "2026-09-26T09:07:00Z" });
+  assert.deepEqual(packetForDraft(sv).photos.map((f) => f.path), ["sitevisit/j/p1.jpg", "sitevisit/j/p2.jpg", "sitevisit/j/a1.jpg", "sitevisit/j/b1.jpg"]);
+});
+
+test("the client's image cap mirrors the server's", () => {
+  const server = readFileSync(new URL("../../../supabase/functions/roybal-ai-office/sitevisit.ts", import.meta.url), "utf8");
+  const n = Number((server.match(/export const MAX_IMAGES = (\d+)/) || [])[1]);
+  assert.equal(MAX_IMAGES, 150);
+  assert.equal(MAX_IMAGES, n, "sitevisit.js MAX_IMAGES must equal sitevisit.ts MAX_IMAGES");
+});
+
+test("opening a visit transcribed before walk clips keeps its transcript, on the recording's row", () => {
+  const project = { siteVisit: { files: [{ id: "a1", kind: "audio", name: "walk.m4a", path: "sitevisit/j/a1-walk.m4a", at: "2026-09-20T10:00:00Z" }], transcript: "[00:05] start in the kitchen", transcriptSeconds: 600 } };
+  const sv = siteVisitOf(project);
+  assert.equal(sv.files[0].transcript.text, "[00:05] start in the kitchen");
+  assert.equal(sv.files[0].transcript.seconds, 600);
+  assert.equal(sv.transcript, "[00:05] start in the kitchen");   // untouched until something rebuilds it
+  const again = siteVisitOf(project);
+  assert.equal(again.files[0].transcript.text, "[00:05] start in the kitchen");
 });
 
 console.log(`\n${pass} site-visit tests passed`);

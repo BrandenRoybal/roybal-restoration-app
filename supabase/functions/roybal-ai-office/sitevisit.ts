@@ -35,7 +35,7 @@ export const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"
 /* Per-request caps — generous for one site visit, bounded so a mistaken bulk
    upload cannot build a runaway request. */
 export const MAX_REPORTS = 4;
-export const MAX_IMAGES = 90;     // photos + note pages together
+export const MAX_IMAGES = 150;    // photos, walk/Magicplan stills and note pages together
 export const MAX_TRANSCRIPT_CHARS = 400_000;
 export const MAX_SCOPE_CHARS = 40_000;
 
@@ -82,7 +82,7 @@ export function packetHasEvidence(p: Required<SitePacket>): boolean {
 /* ---------- Deepgram → readable transcript ----------
    With diarize + utterances Deepgram returns speaker-split utterances with
    start times; the estimator cites them ("walk 14:20"), so keep the stamps. */
-type Utterance = { start?: number; speaker?: number; transcript?: string };
+type Utterance = { start?: number; end?: number; speaker?: number; transcript?: string };
 const stamp = (sec: number) => {
   const s = Math.max(0, Math.floor(sec || 0));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
@@ -111,6 +111,26 @@ export function formatTranscript(dg: unknown): { transcript: string; seconds: nu
   return { transcript: flat, seconds };
 }
 
+/** The same utterances kept as data (start, end, speaker, text): the client
+    stores them on the walk clip's file row so a still can be captioned with
+    the words spoken at that second (design §3 step 6) and the room read from
+    the first five seconds (§7). formatTranscript stays the flat text the
+    draft reads. */
+export type WalkUtterance = { start: number; end: number; speaker: number; text: string };
+export function trimUtterances(dg: unknown): WalkUtterance[] {
+  const d = (dg ?? {}) as { results?: { utterances?: Utterance[] } };
+  const utts = Array.isArray(d.results?.utterances) ? d.results!.utterances! : [];
+  const out: WalkUtterance[] = [];
+  for (const u of utts) {
+    const text = String(u.transcript ?? "").trim();
+    if (!text) continue;
+    const start = Number(u.start) || 0;
+    const end = Math.max(start, Number(u.end) || start);
+    out.push({ start, end, speaker: Number(u.speaker) || 0, text });
+  }
+  return out;
+}
+
 /* ---------- the draft's output shape ----------
    Items keep the invoice editor's line shape exactly, so catalog price
    stamping, O&P, totals, the PDF and the QuickBooks push work unchanged.
@@ -124,7 +144,7 @@ const ITEM_SCHEMA = {
     qty: { type: "number" },
     unit: { type: "string", description: "SF, LF, SY, EA, HR, DA (day) or LS" },
     price: { type: "number", description: "Unit price in DOLLARS. Overridden by the price catalog whenever category+code match a real row, so it only stands for lines no catalog row fits." },
-    basis: { type: "string", description: "Where this line and its quantity come from, citable: 'Magicplan p.3: 12\\'4\" x 10\\'6\", 8\\' ceiling', 'walk 14:20: \"take it to four feet on the sink wall\"', 'photo 7 (Kitchen): swollen toe kick', 'notes p.2', 'typed scope'. Show the arithmetic for derived quantities." },
+    basis: { type: "string", description: "Where this line and its quantity come from, citable: 'Magicplan p.3: 12\\'4\" x 10\\'6\", 8\\' ceiling', 'walk Kitchen 02:14: \"take it to four feet on the sink wall\"' (the clip's room and the time into that clip), 'photo 7 (Kitchen): swollen toe kick', 'notes p.2', 'typed scope'. Show the arithmetic for derived quantities." },
     category: { type: "string", description: "Xactimate CATEGORY of the catalog row billed (e.g. 'DRY', 'PNT', 'FNC'). Empty string only when no catalog row fits." },
     code: { type: "string", description: "Xactimate SELECTOR from the price catalog (must appear in it). Empty string only when no catalog row fits." },
     priceBasis: { type: "string", enum: ["replace", "remove", "detach_reset", "labor", "estimate"], description: "Which catalog price this line uses: replace = install/put-back; remove = tear-out; detach_reset = detach & reset; labor = an hourly LAB rate (HR lines only); estimate = no catalog row, your own Fairbanks price." },
@@ -176,7 +196,7 @@ export const SITE_DRAFT_SCHEMA = {
 /* ---------- the request ---------- */
 export const SITE_SYSTEM =
   "You are the senior estimator at Roybal Construction, LLC, a general contractor and IICRC-certified water restoration company in Fairbanks / North Pole, Alaska. " +
-  "You are writing an Xactimate-style, room-by-room estimate from the evidence the owner collected on a site visit: the Magicplan LiDAR report (floor plan, room dimensions, wall and floor areas, photos pinned to rooms), extra photos, still frames pulled from Magicplan room videos, photographed handwritten notes, a transcript of the recorded site walk, and the owner's typed scope, plus any design drawings or customer documents the owner attached as PDFs. " +
+  "You are writing an Xactimate-style, room-by-room estimate from the evidence the owner collected on a site visit: the Magicplan LiDAR report (floor plan, room dimensions, wall and floor areas, photos pinned to rooms), extra photos, still frames pulled from Magicplan room videos and narrated walk clips (a walk still is captioned with what was being said at that second), photographed handwritten notes, a transcript of the recorded site walk, and the owner's typed scope, plus any design drawings or customer documents the owner attached as PDFs. " +
   "The owner's typed scope and what the owner says on the walk are instructions: follow them. Photos, plan and notes are evidence: use them for scope detail and quantities. " +
   "Take quantities from the report's printed dimensions and areas, cite the page, and show arithmetic for anything derived. Never scale a drawing. " +
   "Several stills from one video show the same room from different angles: never count the same item twice. " +
@@ -246,10 +266,11 @@ export function buildContent(a: BuildArgs): Block[] {
   }
   const sections = [
     "OWNER'S TYPED SCOPE:\n" + (packet.typedScope.trim() || "(none)"),
-    "SITE WALK TRANSCRIPT (timestamps are minutes:seconds into the recording):\n" + (packet.transcript.trim() || "(no recording)"),
+    "SITE WALK TRANSCRIPT (one or more narrated clips; each clip opens with a header line — Clip n · Room · length — and every timestamp inside a clip is minutes:seconds into THAT clip, not into the visit; a recording with no header is timed from its own start):\n" + (packet.transcript.trim() || "(no recording)"),
     "JOB HEADER AND ANY DOCUMENTED FACTS:\n```json\n" + JSON.stringify(a.facts ?? {}, null, 2) + "\n```",
     "HOW TO WRITE IT:\n" +
-      "- Cite evidence in every basis: report page, walk timestamp, photo number, notes page, or typed scope.\n" +
+      "- Cite evidence in every basis: report page, walk clip room and timestamp, photo number, notes page, or typed scope.\n" +
+      "- The room named at the top of a clip is the room every line from that clip belongs to unless the speaker names another.\n" +
       "- Fairbanks realism: freight and lead times, winter conditions (heat, protection, snow removal for access when the season calls for it), frost-depth and snow-load considerations on any exterior or structural scope.\n" +
       "- No overhead, profit or tax lines; they are applied separately.\n\n" +
       (a.kind === "construction" ? CONSTRUCTION_SHAPE : CLAIM_SHAPE) + "\n" + a.rulesText,

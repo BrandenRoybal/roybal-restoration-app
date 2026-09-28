@@ -66,7 +66,7 @@ import {
   PERSONAS, CTX_LABELS, SPOKEN_RULE, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS,
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
-import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, buildContent, buildBatchBody, parseBatchResult } from "./sitevisit.ts";
+import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody, parseBatchResult } from "./sitevisit.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
@@ -97,9 +97,14 @@ const SPEND_CAP_USD = Number(Deno.env.get("SPEND_CAP_USD") ?? "50");
 const STT_API_KEY = Deno.env.get("STT_API_KEY") ?? "";        // Deepgram (shared with roybal-ai-ingest)
 const STT_MODEL = Deno.env.get("STT_MODEL") ?? "nova-3";
 // nova-3 keyterm boosting — trade vocabulary the transcriber would otherwise
-// mangle ("LGR" -> "algae are"). Comma-separated; override via STT_KEYTERMS.
+// mangle ("LGR" -> "algae are"), plus the walk narration cue words the room
+// parser and the estimator prompt depend on (design §7: "instruction:",
+// "pre-existing:", "homeowner says:", "verify:", "end <room>"). Comma-separated;
+// override via STT_KEYTERMS — the env value REPLACES the whole list, so an
+// STT_KEYTERMS secret must carry these too.
 const STT_KEYTERMS = (Deno.env.get("STT_KEYTERMS") ??
-  "LGR,dehu,Cat 3,antimicrobial,air mover,air scrubber,flood cut,Xactimate,subfloor,baseboard,drywall,moisture map,containment,HEPA")
+  "LGR,dehu,Cat 3,antimicrobial,air mover,air scrubber,flood cut,Xactimate,subfloor,baseboard,drywall,moisture map,containment,HEPA," +
+  "instruction,pre-existing,homeowner says,verify,end,LVP,OSB,dehumidifier")
   .split(",").map((s) => s.trim()).filter(Boolean);
 const TTS_MODEL = Deno.env.get("TTS_MODEL") ?? "aura-2-thalia-en";  // Deepgram Aura voice
 // Deepgram pricing — metered into ai_usage so voice rides the cap honestly.
@@ -830,6 +835,10 @@ async function signMedia(path: string, jwt: string, expiresIn: number): Promise<
 async function siteVisitTranscribe(body: Record<string, unknown>) {
   if (!STT_API_KEY) throw new Error("stt_key_missing: set the STT_API_KEY function secret (Deepgram)");
   const jwt = String(body._jwt ?? "");
+  // Who records is ruled (design §2 decision 8): owner, office and crew leads.
+  // The client only hides the button; this gate is the enforcement — fail closed.
+  const who = await db("rpc/role_is", jwt, { method: "POST", body: JSON.stringify({ p_roles: ["owner", "office", "crew_lead"] }) });
+  if (!who.ok || (await who.json().catch(() => null)) !== true) throw new Error("Recording walks is for the owner, office and crew leads.");
   const url = await signMedia(String(body.path ?? ""), jwt, 3600);
   const kt = STT_KEYTERMS.map((t) => `&keyterm=${encodeURIComponent(t)}`).join("");
   const res = await fetch(
@@ -837,13 +846,15 @@ async function siteVisitTranscribe(body: Record<string, unknown>) {
     { method: "POST", headers: { Authorization: `Token ${STT_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
   const raw = await res.text();
   if (!res.ok) throw new Error(`Transcription failed (${res.status}): ${raw.slice(0, 300)}`);
-  const { transcript, seconds } = formatTranscript(JSON.parse(raw));
+  const dg = JSON.parse(raw);
+  const { transcript, seconds } = formatTranscript(dg);
+  const utterances = trimUtterances(dg);
   if (!transcript) {
     const e = new Error("No speech found in that recording.") as Error & { audioSeconds?: number };
     e.audioSeconds = seconds;
     throw e;
   }
-  return { result: { transcript, seconds }, usage: { inTok: 0, outTok: 0 }, model: "deepgram-stt", summary: { seconds, chars: transcript.length }, audioSeconds: seconds };
+  return { result: { transcript, seconds, utterances }, usage: { inTok: 0, outTok: 0 }, model: "deepgram-stt", summary: { seconds, chars: transcript.length, utterances: utterances.length }, audioSeconds: seconds };
 }
 
 async function siteVisitStart(body: Record<string, unknown>) {
