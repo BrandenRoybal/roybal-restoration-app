@@ -216,8 +216,8 @@ async function ensureCustomer(
 /* ============================================================
    Caller identity + the per-action gate — F-003
    ============================================================ */
-const OFFICE_ROLES = ["admin", "office", "owner"];                          // moves money / mutates the connection
-const STAFF_ROLES = ["admin", "office", "tech", "owner", "crew_lead", "crew"]; // the signed-in crew (same band ensureCustomer trusts)
+const OFFICE_ROLES = ["office", "owner"];                          // moves money / mutates the connection
+const STAFF_ROLES = ["office", "owner", "crew_lead", "crew"]; // the signed-in crew (same band ensureCustomer trusts)
 // both vocabularies until migration 0007 (docs/architecture/09 §1.2)
 
 /** Which callers each action admits. DEFAULT-DENY: an action that is not

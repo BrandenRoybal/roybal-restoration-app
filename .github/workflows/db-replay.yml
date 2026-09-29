@@ -49,7 +49,7 @@ env:
   EXPECT_TRIGGERS: 43   # +10: 6 touch_updated_at, the proposals input guard, and the three
                         #      append-only guards on events (0004)
   EXPECT_VIEWS: 5
-  EXPECT_ENUMS: 7
+  EXPECT_ENUMS: 6   # -1: user_role dropped, profiles.role is text + check (0012)
   EXPECT_FUNCTIONS: 57   # +1: contact_same_value (0001); +5: current_org, current_principal,
                          #     current_role_name, and the two trigger functions (0004);
                          #     +1: role_is (0006); +2: xact_ref_prices_for and

@@ -127,7 +127,7 @@ async function requireUser(
 /* ============================================================
    Caller identity + the per-action gate — F-003
    ============================================================ */
-const OFFICE_ROLES = ["admin", "office", "owner"];   // employee data / connection changes
+const OFFICE_ROLES = ["office", "owner"];   // employee data / connection changes
 // both vocabularies until migration 0007 (docs/architecture/09 §1.2)
 
 /** Which callers each action admits. DEFAULT-DENY: an action that is not
