@@ -125,11 +125,11 @@ values
   ('00000000-0000-0000-0000-00000000d003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-xr-crew@example.invalid',   '', now(), now(), now(), '{}', '{}')
 on conflict (id) do nothing;
 
--- today's vocabulary, as production holds it: the owner is `admin`, crew are `tech`
+-- the vocabulary profiles_role_check enforces since 0012: owner / office / crew
 insert into public.profiles (id, full_name, role) values
-  ('00000000-0000-0000-0000-00000000d001', 'xr test owner',  'admin'),
+  ('00000000-0000-0000-0000-00000000d001', 'xr test owner',  'owner'),
   ('00000000-0000-0000-0000-00000000d002', 'xr test office', 'office'),
-  ('00000000-0000-0000-0000-00000000d003', 'xr test crew',   'tech')
+  ('00000000-0000-0000-0000-00000000d003', 'xr test crew',   'crew')
 on conflict (id) do update set role = excluded.role, full_name = excluded.full_name;
 
 -- 3a. the owner loads two price rows and three lines (all invented)
