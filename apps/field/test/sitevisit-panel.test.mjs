@@ -81,5 +81,13 @@ await test("the drafting notice says how long a batch really takes", () => {
   assert.ok(r2.textContent.includes("5–30 minutes, up to an hour"));
 });
 
+await test("a direct draft says minutes, not the batch queue's hour", () => {
+  project.siteVisit.pending = { batchId: "svd_x", invId: "e1", startedAt: new Date().toISOString(), pricingMode: "piecework", mode: "direct" };
+  const r3 = siteVisitPanel({ project, inv, save: () => {}, onApplied: () => {} });
+  assert.ok(r3.textContent.includes("It usually takes a few minutes"));
+  assert.ok(!r3.textContent.includes("up to an hour"));
+  project.siteVisit.pending = null;
+});
+
 console.log(`\n${pass} passed`);
 process.exit(0);

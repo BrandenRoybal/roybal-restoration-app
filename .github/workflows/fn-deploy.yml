@@ -51,6 +51,7 @@ on:
           - qb-time-proxy
           - qbo-proxy
           - magicplan-proxy
+          - roybal-site-draft
       target:
         description: "Project to deploy to"
         type: choice

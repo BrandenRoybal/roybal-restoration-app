@@ -80,3 +80,11 @@ verify_jwt = true
 # the JWT gate — the opposite of the deleted era-0 proxy described above.
 [functions.magicplan-proxy]
 verify_jwt = true
+
+# Added 2026-09-30: runs one Site Visit estimate draft direct (full price,
+# back in minutes) instead of the Message Batches queue. Called only by
+# roybal-ai-office, which forwards the caller's session; the job is also
+# HMAC-signed under LLM_API_KEY and must be fresh, so a session alone can't
+# start a run.
+[functions.roybal-site-draft]
+verify_jwt = true

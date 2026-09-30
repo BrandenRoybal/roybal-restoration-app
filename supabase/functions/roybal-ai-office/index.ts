@@ -68,7 +68,13 @@ import {
   PERSONAS, CTX_LABELS, SPOKEN_RULE, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS,
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
-import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildBatchBody, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
+import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildMessageParams, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
+// the direct run (roybal-site-draft) and its outcome file — pure, Node-tested
+// in ../_shared/sitedraft.test.mjs
+import {
+  directIdFor, parseDirectId, directPaths, readOutcome, asBatchLine, batchBodyFor, signBody,
+  DIRECT_STALE_MS, DIRECT_LOST_MS, type LostUsage,
+} from "../_shared/sitedraft.ts";
 // line-item pricing (catalog + reference tiers, the estimating rules) — pure,
 // Node-tested in ./pricing.test.mjs
 import {
@@ -97,6 +103,11 @@ const SITE_VISIT_MODEL = Deno.env.get("SITE_VISIT_MODEL") ?? "claude-fable-5-1";
 const SITE_VISIT_EFFORT = Deno.env.get("SITE_VISIT_EFFORT") ?? "high";
 // Message Batches bill at half the standard token price.
 const BATCH_DISCOUNT = 0.5;
+// How a draft runs: "direct" (default since 2026-09-30, Branden's call: full
+// price, back in minutes, the batch queue only as the fallback) or "batch"
+// (the half-price queue, which can hold a draft for hours). Env-switchable
+// without a redeploy.
+const SITE_VISIT_MODE = (Deno.env.get("SITE_VISIT_MODE") ?? "direct").trim().toLowerCase() === "batch" ? "batch" : "direct";
 const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
 // Spoken turns can run a faster model (someone is standing there listening);
 // defaults to the same assistant model until the env override is set.
@@ -787,13 +798,17 @@ async function scopeInterview(body: Record<string, unknown>) {
    siteVisitTranscribe — Deepgram reads the uploaded walk recording
                          straight from storage (signed URL; the audio never
                          passes through this function).
-   siteVisitStart      — submits ONE Message Batches request that reads
-                         every file by signed URL. Returns the batch id;
-                         nothing is billed yet.
-   siteVisitResult     — once the batch has ended, fetches the result,
-                         stamps catalog prices and returns the draft. The
-                         serve() gate answers "still running" polls
-                         without an envelope or a ledger row.
+   siteVisitStart      — builds ONE request that reads every file by
+                         signed URL and hands it to roybal-site-draft, which
+                         runs it direct (back in minutes, full price). If
+                         that function can't take it, or SITE_VISIT_MODE is
+                         "batch", it goes to the Message Batches queue
+                         instead. Returns the draft id; nothing is billed yet.
+   siteVisitResult     — once the draft has finished (direct outcome in
+                         storage, or the batch has ended), stamps catalog
+                         prices and returns the draft. The serve() gate
+                         answers "still running" polls without an envelope
+                         or a ledger row.
    ============================================================ */
 const MEDIA_BUCKET = "field-media";
 const ANTHROPIC_HEADERS = () => ({ "x-api-key": LLM_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" });
@@ -868,19 +883,103 @@ async function siteVisitStart(body: Record<string, unknown>) {
   // reference tier may price the result (sv-x- claim, sv-c- construction; an
   // unknown visit keeps the legacy sv-, which reads back as unknown)
   const customId = customIdFor(kind, crypto.randomUUID());
+  const params = buildMessageParams({ model: SITE_VISIT_MODEL, effort: SITE_VISIT_EFFORT, content });
+  // direct first; the queue when the draft function can't take it (not yet
+  // deployed, or down): a draft is never refused for want of the fast path
+  let id = "";
+  if (SITE_VISIT_MODE === "direct") {
+    try { id = await startDirect(customId, params, jwt); }
+    catch (e) { console.warn(`direct draft didn't start, queueing it: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+  const mode = id ? "direct" : "batch";
+  if (!id) id = await submitBatch(customId, params);
+  // the field app stores this as `batchId` and hands it back on every poll
+  return {
+    result: { batchId: id, pricingMode: pm, model: SITE_VISIT_MODEL, mode },
+    usage: { inTok: 0, outTok: 0 }, model: SITE_VISIT_MODEL,
+    summary: { batchId: id, mode, kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, referenceRows: referenceText ? refRows.length : 0 },
+  };
+}
+
+/** Queue the draft as one Message Batches request; returns the batch id. */
+async function submitBatch(customId: string, params: Record<string, unknown>): Promise<string> {
   const res = await fetch("https://api.anthropic.com/v1/messages/batches", {
-    method: "POST", headers: ANTHROPIC_HEADERS(),
-    body: JSON.stringify(buildBatchBody({ customId, model: SITE_VISIT_MODEL, effort: SITE_VISIT_EFFORT, content })),
+    method: "POST", headers: ANTHROPIC_HEADERS(), body: JSON.stringify(batchBodyFor(customId, params)),
   });
   const raw = await res.text();
   if (!res.ok) throw new Error(`Couldn't start the draft (${res.status}): ${raw.slice(0, 300)}`);
   const batch = JSON.parse(raw) as { id?: string };
   if (!batch.id) throw new Error("Couldn't start the draft: no batch id came back.");
-  return {
-    result: { batchId: batch.id, pricingMode: pm, model: SITE_VISIT_MODEL },
-    usage: { inTok: 0, outTok: 0 }, model: SITE_VISIT_MODEL,
-    summary: { batchId: batch.id, kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, referenceRows: referenceText ? refRows.length : 0 },
-  };
+  return batch.id;
+}
+
+/* ---------- the direct run's files in field-media (caller's JWT, RLS) ---------- */
+const storageHeaders = (jwt: string, extra: Record<string, string> = {}) =>
+  ({ apikey: isNewFormatKey(jwt) ? jwt : ANON_KEY, Authorization: `Bearer ${jwt}`, ...extra });
+
+async function putMedia(path: string, text: string, jwt: string, upsert: boolean): Promise<Response> {
+  return await fetch(`${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${path}`, {
+    method: "POST", headers: storageHeaders(jwt, { "Content-Type": "application/json", "x-upsert": upsert ? "true" : "false" }), body: text,
+  });
+}
+
+/** The object's JSON, or null when it isn't there (yet). */
+async function getMediaJson(path: string, jwt: string): Promise<unknown> {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${MEDIA_BUCKET}/${path}`, { headers: storageHeaders(jwt) });
+  if (res.status === 400 || res.status === 404) { await res.body?.cancel(); return null; }   // storage answers a missing object with either
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`Couldn't check the draft (${res.status}): ${raw.slice(0, 200)}`);
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+/** Start the direct run: keep the request (so a run that dies silently can
+    still be queued), sign an upload for its outcome, hand both to
+    roybal-site-draft. Throws unless that function accepted the job. */
+async function startDirect(customId: string, params: Record<string, unknown>, jwt: string): Promise<string> {
+  const key = crypto.randomUUID().replace(/-/g, "");
+  const id = directIdFor(Date.now(), key);
+  const paths = directPaths(key);
+  const kept = await putMedia(paths.request, JSON.stringify({ v: 1, customId, params }), jwt, false);
+  if (!kept.ok) throw new Error(`couldn't keep the request (${kept.status}): ${(await kept.text().catch(() => "")).slice(0, 200)}`);
+  const signRes = await fetch(`${SUPABASE_URL}/storage/v1/object/upload/sign/${MEDIA_BUCKET}/${paths.result}`, {
+    method: "POST", headers: storageHeaders(jwt, { "Content-Type": "application/json" }), body: "{}",
+  });
+  const signed = await signRes.json().catch(() => ({})) as { url?: string };
+  if (!signRes.ok || !signed.url) throw new Error(`couldn't sign the result upload (${signRes.status})`);
+  const body = JSON.stringify({ v: 1, issuedAt: Date.now(), customId, params, resultUrl: signed.url });
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/roybal-site-draft`, {
+    method: "POST",
+    headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json", "x-draft-signature": await signBody(LLM_API_KEY, body) },
+    body,
+  });
+  const raw = await res.text().catch(() => "");
+  if (res.status !== 202) throw new Error(`roybal-site-draft answered ${res.status}: ${raw.slice(0, 200)}`);
+  return id;
+}
+
+/** A direct run that has left no outcome long past its wall clock died
+    without a word (the worker was killed outright). The first poll to take
+    the lock queues the kept request as a batch and writes that outcome. */
+async function rescueDirect(d: { startMs: number; key: string }, jwt: string): Promise<void> {
+  const paths = directPaths(d.key);
+  const lock = await putMedia(paths.lock, JSON.stringify({ at: new Date().toISOString() }), jwt, false);
+  if (!lock.ok) {
+    await lock.body?.cancel();
+    // someone took the lock and still no outcome: that rescue failed too
+    if (Date.now() - d.startMs > DIRECT_LOST_MS) throw new Error("the draft was lost before it finished — start it again");
+    return;
+  }
+  const kept = await getMediaJson(paths.request, jwt) as { customId?: string; params?: Record<string, unknown> } | null;
+  const customId = String(kept?.customId ?? "");
+  let outcome: Record<string, unknown>;
+  if (!kept?.params || !customId) outcome = { v: 1, type: "error", customId, error: "the draft was lost before it finished — start it again" };
+  else {
+    try { outcome = { v: 1, type: "batch", customId, batchId: await submitBatch(customId, kept.params), reason: "the direct run went quiet" }; }
+    catch (e) { outcome = { v: 1, type: "error", customId, error: e instanceof Error ? e.message : String(e) }; }
+  }
+  const wrote = await putMedia(paths.result, JSON.stringify(outcome), jwt, true);
+  if (!wrote.ok) console.error(`draft ${d.key}: rescue outcome not written (${wrote.status})`);
+  else console.warn(`draft ${d.key}: direct run went quiet; ${String(outcome.type)}`);
 }
 
 type BatchInfo = { id?: string; processing_status?: string; results_url?: string | null };
@@ -892,23 +991,56 @@ async function getBatch(batchId: string): Promise<BatchInfo> {
   return JSON.parse(raw) as BatchInfo;
 }
 
-async function siteVisitResult(body: Record<string, unknown>) {
-  const jwt = String(body._jwt ?? "");
-  const batch = await getBatch(String(body.batchId ?? ""));
-  if (batch.processing_status !== "ended" || !batch.results_url) throw new Error("The draft is still running.");
-  const res = await fetch(batch.results_url, { headers: ANTHROPIC_HEADERS() });
+/* Where a draft stands. `running` answers the poll for free; `ready` carries
+   the one results line (batch or direct, same shape) and how it is billed. */
+type SiteProbe =
+  | { running: true; status: string; mode: "direct" | "batch" }
+  | { running: false; line: Record<string, unknown>; costScale: number; lost?: LostUsage; batchId: string };
+
+async function batchLine(batch: BatchInfo): Promise<Record<string, unknown>> {
+  const res = await fetch(batch.results_url!, { headers: ANTHROPIC_HEADERS() });
   const raw = await res.text();
   if (!res.ok) throw new Error(`Couldn't fetch the draft (${res.status}): ${raw.slice(0, 300)}`);
   const first = raw.split("\n").find((l) => l.trim());
-  const line = first ? JSON.parse(first) : {};
+  return first ? JSON.parse(first) : {};
+}
+
+async function probeBatch(batchId: string, lost?: LostUsage): Promise<SiteProbe> {
+  const batch = await getBatch(batchId);
+  if (batch.processing_status !== "ended" || !batch.results_url) return { running: true, status: batch.processing_status ?? "", mode: "batch" };
+  return { running: false, line: await batchLine(batch), costScale: BATCH_DISCOUNT, ...(lost ? { lost } : {}), batchId };
+}
+
+async function probeSiteDraft(id: string, jwt: string): Promise<SiteProbe> {
+  const d = parseDirectId(id);
+  if (!d) return probeBatch(id);   // a queued draft (msgbatch_…), as before
+  const out = readOutcome(await getMediaJson(directPaths(d.key).result, jwt));
+  if (!out) {
+    if (Date.now() - d.startMs > DIRECT_STALE_MS) { await rescueDirect(d, jwt); return { running: true, status: "queued", mode: "batch" }; }
+    return { running: true, status: "direct", mode: "direct" };
+  }
+  if (out.type === "error") throw new Error(out.error);
+  if (out.type === "batch") return probeBatch(out.batchId, out.lost);
+  return { running: false, line: asBatchLine(out.customId, out.message), costScale: 1, batchId: id };
+}
+
+async function siteVisitResult(body: Record<string, unknown>) {
+  const jwt = String(body._jwt ?? "");
+  // serve() probed it already (and answered if it was still running)
+  const probe = (body._probe as SiteProbe | undefined) ?? await probeSiteDraft(String(body.batchId ?? ""), jwt);
+  if (probe.running) throw new Error("The draft is still running.");
+  const line = probe.line;
   const parsed = parseBatchResult(line);
   // sv-x- claim, sv-c- construction; a batch started before the kind was
   // encoded reads as unknown and is never reference-priced
   const kind = kindFromCustomId((line as { custom_id?: string }).custom_id);
   const model = parsed.model || SITE_VISIT_MODEL;
+  // a direct run cut off and re-queued was billed for what it had streamed
+  const p = priceFor(model);
+  const extraCostUsd = probe.lost ? (probe.lost.inTok / 1e6) * p.in + (probe.lost.outTok / 1e6) * p.out : 0;
   if (parsed.error || !parsed.draft) {
-    const e = new Error(parsed.error ?? "the draft came back empty") as Error & { usage?: Usage; model?: string; costScale?: number };
-    e.usage = parsed.usage; e.model = model; e.costScale = BATCH_DISCOUNT;
+    const e = new Error(parsed.error ?? "the draft came back empty") as Error & { usage?: Usage; model?: string; costScale?: number; extraCostUsd?: number };
+    e.usage = parsed.usage; e.model = model; e.costScale = probe.costScale; e.extraCostUsd = extraCostUsd;
     throw e;
   }
   const pm: PricingMode = body.pricingMode === "tm" ? "tm" : "piecework";
@@ -916,8 +1048,8 @@ async function siteVisitResult(body: Record<string, unknown>) {
   const draft = { ...parsed.draft, items: priced };
   return {
     result: { status: "done", draft },
-    usage: parsed.usage, model, costScale: BATCH_DISCOUNT,
-    summary: { batchId: batch.id, kind, items: priced.length, catalog_priced: countPriced(priced, "catalog"), reference_priced: countPriced(priced, "reference"), questions: draft.questions.length },
+    usage: parsed.usage, model, costScale: probe.costScale, extraCostUsd,
+    summary: { batchId: probe.batchId, mode: probe.costScale === 1 ? "direct" : "batch", kind, items: priced.length, catalog_priced: countPriced(priced, "catalog"), reference_priced: countPriced(priced, "reference"), questions: draft.questions.length },
   };
 }
 
@@ -1902,7 +2034,7 @@ async function portalDraft(body: Record<string, unknown>) {
    anon key only (RLS always applies), the caller's JWT on every DB op,
    and the RLS-gated capture_events insert BEFORE any paid LLM call.
    ============================================================ */
-const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number; costScale?: number }>> = {
+const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number; costScale?: number; extraCostUsd?: number }>> = {
   photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
   siteVisitTranscribe, siteVisitStart, siteVisitResult,
 };
@@ -1954,8 +2086,12 @@ serve(async (req: Request) => {
     if (action === "siteVisitResult") {
       const who = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}` } });
       if (!who.ok) return json({ ok: false, error: "Sign in again to check the draft." }, 401);
-      const batch = await getBatch(String(body.batchId ?? ""));
-      if (batch.processing_status !== "ended") return json({ ok: true, capped: false, status: "running", processing_status: batch.processing_status ?? "" });
+      // always set here, never taken from the request body
+      const probe = await probeSiteDraft(String(body.batchId ?? ""), jwt);
+      if (probe.running) return json({ ok: true, capped: false, status: "running", processing_status: probe.status, mode: probe.mode });
+      (body as Record<string, unknown>)._probe = probe;
+    } else {
+      delete (body as Record<string, unknown>)._probe;
     }
 
     // Envelope (RLS-gated insert before any paid call — see deploy note).
@@ -1975,11 +2111,13 @@ serve(async (req: Request) => {
       return json({ ok: true, capped: true, spend: { month_to_date_usd: spent, cap_usd: SPEND_CAP_USD } });
     }
 
-    const { result, usage, model, summary, audioSeconds = 0, ttsChars = 0, costScale = 1 } = await run(body as Record<string, unknown>);
+    const { result, usage, model, summary, audioSeconds = 0, ttsChars = 0, costScale = 1, extraCostUsd = 0 } = await run(body as Record<string, unknown>);
     // Full cost of the call: LLM tokens + Deepgram STT seconds + Aura TTS
     // characters — ALL of it lands in cost_usd so the cap governs honestly.
     const price = priceFor(model);
-    const llmCost = Math.max(0, ((usage.inTok / 1e6) * price.in + (usage.outTok / 1e6) * price.out) * costScale);
+    // extraCostUsd: tokens already billed on an earlier attempt of the same
+    // work (a direct Site Visit run cut off and re-queued)
+    const llmCost = Math.max(0, ((usage.inTok / 1e6) * price.in + (usage.outTok / 1e6) * price.out) * costScale + extraCostUsd);
     const sttCost = Math.max(0, (audioSeconds / 60) * STT_PRICE_PER_MIN);
     const ttsCost = Math.max(0, (ttsChars / 1000) * TTS_PRICE_PER_1K);
     const cost = llmCost + sttCost + ttsCost;
@@ -2008,13 +2146,13 @@ serve(async (req: Request) => {
     // a 200 we rejected) still lands on the ledger — the cap must see every
     // dollar, not just successful calls. Best-effort; never masks the error.
     try {
-      const e = err as { usage?: Usage; audioSeconds?: number; ttsChars?: number; model?: string; costScale?: number };
+      const e = err as { usage?: Usage; audioSeconds?: number; ttsChars?: number; model?: string; costScale?: number; extraCostUsd?: number };
       const u = e?.usage ?? { inTok: 0, outTok: 0 };
       const aSec = Number(e?.audioSeconds) || 0;
       const tCh = Number(e?.ttsChars) || 0;
-      if (u.inTok > 0 || u.outTok > 0 || aSec > 0 || tCh > 0) {
+      if (u.inTok > 0 || u.outTok > 0 || aSec > 0 || tCh > 0 || (Number(e?.extraCostUsd) || 0) > 0) {
         const p = priceFor(String(e?.model ?? ""));
-        const llmC = Math.max(0, ((u.inTok / 1e6) * p.in + (u.outTok / 1e6) * p.out) * (Number(e?.costScale) || 1));
+        const llmC = Math.max(0, ((u.inTok / 1e6) * p.in + (u.outTok / 1e6) * p.out) * (Number(e?.costScale) || 1) + (Number(e?.extraCostUsd) || 0));
         const sttC = Math.max(0, (aSec / 60) * STT_PRICE_PER_MIN);
         const ttsC = Math.max(0, (tCh / 1000) * TTS_PRICE_PER_1K);
         const usedLlmE = u.inTok > 0 || u.outTok > 0;

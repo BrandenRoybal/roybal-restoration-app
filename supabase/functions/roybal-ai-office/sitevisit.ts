@@ -16,12 +16,17 @@
  * Files are referenced by signed URL, never inlined — a 40 MB report never
  * passes through the edge function's 256 MB / 2 s-CPU budget.
  *
- * The request runs through the Message Batches API (one request per batch):
- * a top-model run over a large report can outlast the edge function's 400 s
- * wall clock, and a batch result waits on Anthropic's side until we fetch it.
+ * The request runs direct by default: roybal-site-draft streams it in a
+ * background task and leaves the finished message in storage (Branden,
+ * 2026-09-30: full price, back in minutes). The Message Batches API (one
+ * request per batch) is the fallback for a run that is overloaded or would
+ * outlast the edge worker's 400 s wall clock, and the whole path when
+ * SITE_VISIT_MODE=batch: a batch result waits on Anthropic's side until we
+ * fetch it. See ../_shared/sitedraft.ts.
  */
 
 import { estimatingRules, referenceTextFromRows } from "./pricing.ts";
+import { batchBodyFor } from "../_shared/sitedraft.ts";
 import type { CatalogRow, PricingMode, RefRow } from "./pricing.ts";
 
 /* Uploads live in the private field-media bucket under this prefix, one
@@ -388,23 +393,26 @@ export function buildContent(a: BuildArgs): Block[] {
   return out;
 }
 
+/** The Messages params for the whole draft — the same request whether it
+    runs direct (roybal-site-draft streams it) or through the batch queue. */
+export function buildMessageParams(opts: {
+  model: string; effort: string; content: Block[]; maxTokens?: number;
+}): Record<string, unknown> {
+  return {
+    model: opts.model,
+    max_tokens: opts.maxTokens ?? 64000,
+    thinking: { type: "adaptive" },
+    output_config: { effort: opts.effort, format: { type: "json_schema", schema: SITE_DRAFT_SCHEMA } },
+    system: SITE_SYSTEM,
+    messages: [{ role: "user", content: opts.content }],
+  };
+}
+
 /** One Message Batches request carrying the whole draft. */
 export function buildBatchBody(opts: {
   customId: string; model: string; effort: string; content: Block[]; maxTokens?: number;
 }): Record<string, unknown> {
-  return {
-    requests: [{
-      custom_id: opts.customId,
-      params: {
-        model: opts.model,
-        max_tokens: opts.maxTokens ?? 64000,
-        thinking: { type: "adaptive" },
-        output_config: { effort: opts.effort, format: { type: "json_schema", schema: SITE_DRAFT_SCHEMA } },
-        system: SITE_SYSTEM,
-        messages: [{ role: "user", content: opts.content }],
-      },
-    }],
-  };
+  return batchBodyFor(opts.customId, buildMessageParams(opts));
 }
 
 /* ---------- the result ---------- */
