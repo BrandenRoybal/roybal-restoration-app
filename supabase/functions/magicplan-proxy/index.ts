@@ -119,12 +119,15 @@ async function authorize(action: string, req: Request, sb: Db) {
    Magicplan transport
    ============================================================ */
 function secrets() {
-  const key = Deno.env.get("MAGICPLAN_API_KEY") ?? "";
-  const customer = Deno.env.get("MAGICPLAN_CUSTOMER_ID") ?? "";
+  // Trimmed: a pasted secret with a trailing space made Magicplan reject the
+  // project email ("does not match format email") on 2026-09-30.
+  const env = (k: string) => (Deno.env.get(k) ?? "").trim();
+  const key = env("MAGICPLAN_API_KEY");
+  const customer = env("MAGICPLAN_CUSTOMER_ID");
   if (!key || !customer) throw new Error("Magicplan isn't set up on this project yet (MAGICPLAN_API_KEY / MAGICPLAN_CUSTOMER_ID)");
   return {
     key, customer,
-    email: Deno.env.get("MAGICPLAN_PROJECT_EMAIL") ?? "",
+    email: env("MAGICPLAN_PROJECT_EMAIL"),
     prefix: Deno.env.get("MAGICPLAN_NAME_PREFIX") ?? "",
   };
 }
