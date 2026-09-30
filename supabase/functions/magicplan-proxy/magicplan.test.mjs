@@ -102,6 +102,8 @@ test("createProjectBody: prefix + \"<Customer> — <street>\", our id, the secre
   assert.deepEqual(b, { name: "[STAGING] Test Customer — 1 Test St", external_reference_id: "bj-lead_42", email: "owner@example.invalid",
     address: { street: "1 Test St", city: "Fairbanks", postal_code: "99701", country: "US" } });
   assert.equal(S.createProjectBody({ fieldProjectId: "x" }, "e", "").address.country, "US");
+  // A secret pasted with stray whitespace must not reach Magicplan (it 400s the email).
+  assert.equal(S.createProjectBody({ fieldProjectId: "x" }, " owner@example.invalid \n", "").email, "owner@example.invalid");
 });
 test("errors read {message, data}; 429 backs off per Retry-After, capped", () => {
   assert.equal(S.mpErrorText(401, { message: "Unauthorized", data: "Invalid key" }, "GET /workspace"), "Magicplan GET /workspace failed (401): Unauthorized — Invalid key");

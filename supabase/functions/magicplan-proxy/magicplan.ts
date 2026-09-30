@@ -128,7 +128,7 @@ export function createProjectBody(input: { fieldProjectId: string; customer?: st
   return {
     name: prefix + projectName(input.customer, a.street),
     external_reference_id: input.fieldProjectId,
-    email,
+    email: String(email ?? "").trim(),
     address: {
       street: str(a.street) || null, city: str(a.city) || null,
       postal_code: str(a.postal_code) || null, country: str(a.country) || "US",
