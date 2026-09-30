@@ -459,7 +459,7 @@ export const PORTAL_MILESTONES = [
    the restoration keys, so a status carries over when a job's kind flips
    and the portal's closeout ("complete") works on both tracks. */
 export const CONSTRUCTION_PORTAL_MILESTONES = [
-  { key: "contract",  label: "Contract signed" },
+  { key: "contract",  label: "Contract" },
   { key: "permits",   label: "Permits" },
   { key: "scheduled", label: "Scheduled" },
   { key: "framing",   label: "Framing & rough-in" },
