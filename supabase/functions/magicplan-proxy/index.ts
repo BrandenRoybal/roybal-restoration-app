@@ -316,6 +316,10 @@ serve(async (req) => {
 
     return err(`Unknown action: ${action}`, 404);
   } catch (e) {
-    return err(e instanceof Error ? e.message : String(e), 502);
+    // Logged so a failure the phone only toasts for 5 s can be read later in
+    // the function logs. The text names the call and Magicplan's reason, never the key.
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`magicplan-proxy ${action}: ${message}`);
+    return err(message, 502);
   }
 });

@@ -219,10 +219,19 @@ export function esxOf(resp: unknown): { esx: EsxFile | null; files: number } {
   };
 }
 
-/** {message, data} on a 4xx/5xx → one readable line. */
+/** A 4xx/5xx body → one readable line. The documented 400 is
+    {message, data: {errors}}, but the first live one (POST /projects,
+    2026-09-30) came back with none of the text we read, so the owner saw a
+    bare "(400)". Read every place Magicplan documents a reason, and when none
+    matches, show the body itself: it is Magicplan's reply, never our key. */
+const reasonText = (v: unknown): string =>
+  typeof v === "string" ? v : v && typeof v === "object" ? JSON.stringify(v) : "";
 export function mpErrorText(status: number, body: unknown, what: string) {
   const b = (body && typeof body === "object" ? body : {}) as Json;
-  const msg = [str(b.message), typeof b.data === "string" ? b.data : ""].filter(Boolean).join(" — ");
+  const d = (b.data && typeof b.data === "object" && !Array.isArray(b.data) ? b.data : {}) as Json;
+  const parts = [str(b.message), typeof b.data === "string" ? b.data : "", reasonText(d.errors), str(d.message),
+    reasonText(b.errors), reasonText(b.error)].filter(Boolean);
+  const msg = [...new Set(parts)].join(" — ") || (body == null ? "" : reasonText(body));
   return `Magicplan ${what} failed (${status})${msg ? ": " + msg.slice(0, 300) : ""}`;
 }
 
