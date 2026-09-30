@@ -105,6 +105,13 @@ test("createProjectBody: prefix + \"<Customer> — <street>\", our id, the secre
 });
 test("errors read {message, data}; 429 backs off per Retry-After, capped", () => {
   assert.equal(S.mpErrorText(401, { message: "Unauthorized", data: "Invalid key" }, "GET /workspace"), "Magicplan GET /workspace failed (401): Unauthorized — Invalid key");
+  assert.equal(S.mpErrorText(400, { message: "Bad Request", data: { errors: "Field 'email' is required." } }, "POST /projects"),
+    "Magicplan POST /projects failed (400): Bad Request — Field 'email' is required.");
+  assert.equal(S.mpErrorText(400, { data: { errors: { email: ["not a workspace user"] } } }, "POST /projects"),
+    'Magicplan POST /projects failed (400): {"email":["not a workspace user"]}');
+  assert.equal(S.mpErrorText(400, { error: "invalid country" }, "POST /projects"), "Magicplan POST /projects failed (400): invalid country");
+  assert.equal(S.mpErrorText(400, { detail: "x" }, "POST /projects"), 'Magicplan POST /projects failed (400): {"detail":"x"}');
+  assert.equal(S.mpErrorText(400, null, "POST /projects"), "Magicplan POST /projects failed (400)");
   assert.equal(S.retryDelayMs("2"), 2000);
   assert.equal(S.retryDelayMs(null), 3000);
   assert.equal(S.retryDelayMs("600"), 30000);
