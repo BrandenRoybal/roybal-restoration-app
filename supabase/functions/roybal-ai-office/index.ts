@@ -73,7 +73,7 @@ import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtter
 // in ../_shared/sitedraft.test.mjs
 import {
   directIdFor, parseDirectId, directPaths, readOutcome, asBatchLine, batchBodyFor, signBody,
-  DIRECT_STALE_MS, DIRECT_LOST_MS, type LostUsage,
+  DIRECT_STALE_MS, type LostUsage,
 } from "../_shared/sitedraft.ts";
 // line-item pricing (catalog + reference tiers, the estimating rules) — pure,
 // Node-tested in ./pricing.test.mjs
@@ -913,35 +913,33 @@ async function submitBatch(customId: string, params: Record<string, unknown>): P
   return batch.id;
 }
 
-/* ---------- the direct run's files in field-media (caller's JWT, RLS) ---------- */
+/* ---------- the direct run's outcome file in field-media (caller's JWT, RLS) ---------- */
 const storageHeaders = (jwt: string, extra: Record<string, string> = {}) =>
   ({ apikey: isNewFormatKey(jwt) ? jwt : ANON_KEY, Authorization: `Bearer ${jwt}`, ...extra });
 
-async function putMedia(path: string, text: string, jwt: string, upsert: boolean): Promise<Response> {
-  return await fetch(`${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${path}`, {
-    method: "POST", headers: storageHeaders(jwt, { "Content-Type": "application/json", "x-upsert": upsert ? "true" : "false" }), body: text,
-  });
+/** The outcome file: `missing` until the run writes it; `unknown` when
+    storage didn't answer (a hiccup must not end a draft that is fine). */
+async function readDirectFile(path: string, jwt: string): Promise<{ state: "found"; value: unknown } | { state: "missing" } | { state: "unknown" }> {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${MEDIA_BUCKET}/${path}`, { headers: storageHeaders(jwt) });
+    if (res.status === 400 || res.status === 404) { await res.body?.cancel(); return { state: "missing" }; }   // storage answers a missing object with either
+    const raw = await res.text();
+    if (!res.ok) { console.warn(`draft outcome read ${res.status}: ${raw.slice(0, 200)}`); return { state: "unknown" }; }
+    return { state: "found", value: JSON.parse(raw) };
+  } catch (e) {
+    console.warn(`draft outcome read failed: ${e instanceof Error ? e.message : String(e)}`);
+    return { state: "unknown" };
+  }
 }
 
-/** The object's JSON, or null when it isn't there (yet). */
-async function getMediaJson(path: string, jwt: string): Promise<unknown> {
-  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${MEDIA_BUCKET}/${path}`, { headers: storageHeaders(jwt) });
-  if (res.status === 400 || res.status === 404) { await res.body?.cancel(); return null; }   // storage answers a missing object with either
-  const raw = await res.text();
-  if (!res.ok) throw new Error(`Couldn't check the draft (${res.status}): ${raw.slice(0, 200)}`);
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
-/** Start the direct run: keep the request (so a run that dies silently can
-    still be queued), sign an upload for its outcome, hand both to
-    roybal-site-draft. Throws unless that function accepted the job. */
+/** Start the direct run: sign an upload for its outcome and hand the job to
+    roybal-site-draft. Throws unless that function accepted it (not deployed,
+    down, or its worker too close to the time limit), and the start queues
+    the draft instead. The request itself is never stored. */
 async function startDirect(customId: string, params: Record<string, unknown>, jwt: string): Promise<string> {
   const key = crypto.randomUUID().replace(/-/g, "");
   const id = directIdFor(Date.now(), key);
-  const paths = directPaths(key);
-  const kept = await putMedia(paths.request, JSON.stringify({ v: 1, customId, params }), jwt, false);
-  if (!kept.ok) throw new Error(`couldn't keep the request (${kept.status}): ${(await kept.text().catch(() => "")).slice(0, 200)}`);
-  const signRes = await fetch(`${SUPABASE_URL}/storage/v1/object/upload/sign/${MEDIA_BUCKET}/${paths.result}`, {
+  const signRes = await fetch(`${SUPABASE_URL}/storage/v1/object/upload/sign/${MEDIA_BUCKET}/${directPaths(key).result}`, {
     method: "POST", headers: storageHeaders(jwt, { "Content-Type": "application/json" }), body: "{}",
   });
   const signed = await signRes.json().catch(() => ({})) as { url?: string };
@@ -955,31 +953,6 @@ async function startDirect(customId: string, params: Record<string, unknown>, jw
   const raw = await res.text().catch(() => "");
   if (res.status !== 202) throw new Error(`roybal-site-draft answered ${res.status}: ${raw.slice(0, 200)}`);
   return id;
-}
-
-/** A direct run that has left no outcome long past its wall clock died
-    without a word (the worker was killed outright). The first poll to take
-    the lock queues the kept request as a batch and writes that outcome. */
-async function rescueDirect(d: { startMs: number; key: string }, jwt: string): Promise<void> {
-  const paths = directPaths(d.key);
-  const lock = await putMedia(paths.lock, JSON.stringify({ at: new Date().toISOString() }), jwt, false);
-  if (!lock.ok) {
-    await lock.body?.cancel();
-    // someone took the lock and still no outcome: that rescue failed too
-    if (Date.now() - d.startMs > DIRECT_LOST_MS) throw new Error("the draft was lost before it finished — start it again");
-    return;
-  }
-  const kept = await getMediaJson(paths.request, jwt) as { customId?: string; params?: Record<string, unknown> } | null;
-  const customId = String(kept?.customId ?? "");
-  let outcome: Record<string, unknown>;
-  if (!kept?.params || !customId) outcome = { v: 1, type: "error", customId, error: "the draft was lost before it finished — start it again" };
-  else {
-    try { outcome = { v: 1, type: "batch", customId, batchId: await submitBatch(customId, kept.params), reason: "the direct run went quiet" }; }
-    catch (e) { outcome = { v: 1, type: "error", customId, error: e instanceof Error ? e.message : String(e) }; }
-  }
-  const wrote = await putMedia(paths.result, JSON.stringify(outcome), jwt, true);
-  if (!wrote.ok) console.error(`draft ${d.key}: rescue outcome not written (${wrote.status})`);
-  else console.warn(`draft ${d.key}: direct run went quiet; ${String(outcome.type)}`);
 }
 
 type BatchInfo = { id?: string; processing_status?: string; results_url?: string | null };
@@ -1014,9 +987,13 @@ async function probeBatch(batchId: string, lost?: LostUsage): Promise<SiteProbe>
 async function probeSiteDraft(id: string, jwt: string): Promise<SiteProbe> {
   const d = parseDirectId(id);
   if (!d) return probeBatch(id);   // a queued draft (msgbatch_…), as before
-  const out = readOutcome(await getMediaJson(directPaths(d.key).result, jwt));
+  const file = await readDirectFile(directPaths(d.key).result, jwt);
+  if (file.state === "unknown") return { running: true, status: "direct", mode: "direct" };
+  const out = file.state === "found" ? readOutcome(file.value) : null;
   if (!out) {
-    if (Date.now() - d.startMs > DIRECT_STALE_MS) { await rescueDirect(d, jwt); return { running: true, status: "queued", mode: "batch" }; }
+    // the run writes an outcome inside its worker's 400 s, even when it is
+    // cut off; none long after means the worker was killed outright
+    if (Date.now() - d.startMs > DIRECT_STALE_MS) throw new Error("the draft stopped before it finished — start it again");
     return { running: true, status: "direct", mode: "direct" };
   }
   if (out.type === "error") throw new Error(out.error);

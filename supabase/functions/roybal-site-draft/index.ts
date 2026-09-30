@@ -20,7 +20,9 @@
  *                          limited, cut off, or ran near the wall clock
  *     { type: "error" }    the request itself was refused (a 4xx)
  *   The worker's 400 s wall clock runs from its boot, so the stream gets
- *   DIRECT_RUN_BUDGET_MS from BOOT and is then cut off and queued. Nothing
+ *   DIRECT_RUN_BUDGET_MS from BOOT and is then cut off and queued. A job
+ *   that reaches a warm worker with less than MIN_DIRECT_BUDGET_MS left is
+ *   refused with 503 before anything is spent, and the start queues it. Nothing
  *   here reads or writes the database: the ledger row is written when
  *   roybal-ai-office collects the draft, under the caller's session.
  *
@@ -35,7 +37,7 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import {
   readJob, signBody, sameSignature, runBudgetMs, fallbackForStatus, batchBodyFor, splitSse, StreamAssembler,
-  type DraftJob, type DirectOutcome, type LostUsage,
+  MIN_DIRECT_BUDGET_MS, type DraftJob, type DirectOutcome, type LostUsage,
 } from "../_shared/sitedraft.ts";
 
 // the worker's 400 s wall clock runs from here
@@ -87,7 +89,7 @@ class Run {
   /** Queue the same request as a Message Batch and point the outcome at it. */
   async toBatch(reason: string): Promise<void> {
     if (!this.claim()) return;
-    const lost: LostUsage = this.asm.lost();
+    const lost: LostUsage = this.asm.lost(Date.now(), Number(this.job.params.max_tokens) || 64000);
     let outcome: DirectOutcome;
     try {
       const res = await fetch(`${API}/messages/batches`, {
@@ -106,10 +108,9 @@ class Run {
     try { await this.write(outcome); } catch (e) { console.error(`draft ${this.key}: ${e instanceof Error ? e.message : e}`); }
   }
 
-  async run(): Promise<void> {
+  async run(budget: number): Promise<void> {
     live.add(this);
     const ctl = new AbortController();
-    const budget = runBudgetMs(BOOT, Date.now());
     const timer = setTimeout(() => ctl.abort(), budget);
     try {
       const res = await fetch(`${API}/messages`, {
@@ -129,7 +130,9 @@ class Run {
         const { events, rest } = splitSse(buf + value);
         buf = rest;
         for (const e of events) this.asm.push(e);
-        if (this.asm.error) { reader.cancel().catch(() => {}); break; }
+        // stop at message_stop: the draft is whole, and a budget abort must
+        // not land on a read that is only waiting for the connection to close
+        if (this.asm.done || this.asm.error) { clearTimeout(timer); reader.cancel().catch(() => {}); break; }
       }
       for (const e of splitSse(buf + "\n\n").events) this.asm.push(e);
       if (this.asm.error) return await this.toBatch(`stream error: ${this.asm.error}`);
@@ -165,8 +168,15 @@ serve(async (req: Request) => {
   try { job = readJob(JSON.parse(raw), Date.now()); } catch (_) { job = null; }
   if (!job) return reply(400, { ok: false, error: "not a draft job" });
   const key = job.resultUrl.replace(/^.*\/drafts\/([0-9a-f]{32})\.json.*$/, "$1");
-  const task = new Run(job, key).run().catch((e) => console.error(`draft ${key}: ${e instanceof Error ? e.message : e}`));
+  // a warm worker a few minutes old can't finish a draft: say so before a
+  // token is spent, and the start queues it instead
+  const budget = runBudgetMs(BOOT, Date.now());
+  if (budget < MIN_DIRECT_BUDGET_MS) {
+    console.log(JSON.stringify({ draft: key, outcome: "refused", budgetSecs: Math.round(budget / 1000) }));
+    return reply(503, { ok: false, error: "this worker is too close to its time limit", budgetSecs: Math.round(budget / 1000) });
+  }
+  const task = new Run(job, key).run(budget).catch((e) => console.error(`draft ${key}: ${e instanceof Error ? e.message : e}`));
   const rt = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
   if (rt && typeof rt.waitUntil === "function") rt.waitUntil(task); else await task;
-  return reply(202, { ok: true, accepted: true, budgetSecs: Math.round(runBudgetMs(BOOT, Date.now()) / 1000) });
+  return reply(202, { ok: true, accepted: true, budgetSecs: Math.round(budget / 1000) });
 });

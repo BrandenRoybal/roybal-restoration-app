@@ -17,17 +17,15 @@
  * The run lives in its own function because an edge worker has a 400 s wall
  * clock from the moment it boots (Supabase paid plan), and roybal-ai-office's
  * workers are kept busy by polls, so a background task started there could
- * inherit a worker with seconds left. A run that is still going near the
- * limit is cut off and re-submitted to the batch queue, so the worst case is
- * the old behavior, never a lost draft.
+ * inherit a worker with seconds left. A job that reaches a worker without
+ * enough time left is refused, and the start queues it as a batch instead; a
+ * run still going near the limit is cut off and queued. The worst case is the
+ * old behavior.
  *
- * Everything the run leaves behind sits in field-media under
- * sitevisit/drafts/ (same RLS as the packet files it reads):
- *   <key>.req.json  the request, kept so a run that died silently can still
- *                   be queued by whoever polls next;
- *   <key>.json      the outcome: the finished message, the batch it fell
- *                   back to, or the error;
- *   <key>.lock      taken by the one poll that queues a silent run.
+ * The run leaves one file, field-media sitevisit/drafts/<key>.json: the
+ * finished message, the batch it fell back to, or the error. The request
+ * itself is never stored (it can carry the owner-only Xactimate reference
+ * prices, and the bucket is readable by every login).
  */
 
 /* ---------- ids and paths ---------- */
@@ -49,8 +47,8 @@ export function parseDirectId(id: unknown): { startMs: number; key: string } | n
   return Number.isFinite(startMs) ? { startMs, key: m[2] } : null;
 }
 
-export function directPaths(key: string): { request: string; result: string; lock: string } {
-  return { request: `${DIRECT_FOLDER}${key}.req.json`, result: `${DIRECT_FOLDER}${key}.json`, lock: `${DIRECT_FOLDER}${key}.lock` };
+export function directPaths(key: string): { result: string } {
+  return { result: `${DIRECT_FOLDER}${key}.json` };
 }
 
 /* ---------- timing ---------- */
@@ -58,11 +56,13 @@ export function directPaths(key: string): { request: string; result: string; loc
    boot, which leaves time to submit the batch fallback and write the outcome
    before the runtime shuts the worker down. */
 export const DIRECT_RUN_BUDGET_MS = 340_000;
+/* A job that reaches a worker with less than this left is refused (the start
+   queues it instead): a warm worker a few minutes old could not finish a
+   draft, and a stream cut off part way is paid for and thrown away. */
+export const MIN_DIRECT_BUDGET_MS = 180_000;
 /* No outcome this long after the start means the run died without writing
-   one (the worker was killed outright); the next poll queues it instead. */
+   one (the worker was killed outright, with no chance to queue it). */
 export const DIRECT_STALE_MS = 8 * 60_000;
-/* ...and if even that queueing left no outcome, the draft is reported lost. */
-export const DIRECT_LOST_MS = 2 * DIRECT_STALE_MS;
 /* A signed job older than this is refused (a replayed request). */
 export const JOB_MAX_AGE_MS = 120_000;
 
@@ -112,6 +112,11 @@ export function batchBodyFor(customId: string, params: Record<string, unknown>):
 
 /* ---------- the signed job (roybal-ai-office → roybal-site-draft) ---------- */
 export type DraftJob = { v: 1; issuedAt: number; customId: string; params: Record<string, unknown>; resultUrl: string };
+/* Output tokens a stream is assumed to generate per second, for the ledger
+   when a run is abandoned: thinking streams no text (display omitted) and the
+   real count only arrives at the end, so time is the only measure. Kept on
+   the high side: the spend cap should over-count, not under-count. */
+export const LOST_TOK_PER_SEC = 60;
 const RESULT_URL = /^\/object\/upload\/sign\/field-media\/sitevisit\/drafts\/[0-9a-f]{32}\.json\?token=[^\s&#]+$/;
 
 /** Validate a parsed job body; null when anything is off. */
@@ -179,10 +184,13 @@ export class StreamAssembler {
   done = false;
   error = "";
   textChars = 0;
+  private genStartMs = 0;
   private blocks = new Map<number, { type: string; text: string }>();
 
-  push(e: Record<string, unknown>): void {
+  push(e: Record<string, unknown>, nowMs = Date.now()): void {
     const type = String(e.type ?? "");
+    // the first block starts when the input has been read and output begins
+    if (type === "content_block_start" && !this.genStartMs) this.genStartMs = nowMs;
     if (type === "message_start") {
       const m = (e.message ?? {}) as { model?: string; usage?: Usage };
       this.model = String(m.model ?? "");
@@ -222,11 +230,14 @@ export class StreamAssembler {
   }
 
   /** What an abandoned stream had already cost, for the spend ledger: the
-      input is known from message_start; the output is a floor (streamed text
-      at ~4 characters a token; thinking tokens are billed but never streamed). */
-  lost(): LostUsage {
+      input is known from message_start; the output is estimated from how long
+      it had been generating (thinking is billed but never streamed), never
+      below the streamed text (~4 characters a token), never above max_tokens. */
+  lost(nowMs = Date.now(), maxTokens = 64000): LostUsage {
     const u = this.usage;
     const inTok = (Number(u.input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0);
-    return { inTok, outTok: Math.max(Number(u.output_tokens) || 0, Math.ceil(this.textChars / 4)) };
+    const genSecs = this.genStartMs ? Math.max(0, nowMs - this.genStartMs) / 1000 : 0;
+    const byTime = Math.min(Math.max(0, maxTokens), Math.ceil(genSecs * LOST_TOK_PER_SEC));
+    return { inTok, outTok: Math.max(Number(u.output_tokens) || 0, Math.ceil(this.textChars / 4), byTime) };
   }
 }

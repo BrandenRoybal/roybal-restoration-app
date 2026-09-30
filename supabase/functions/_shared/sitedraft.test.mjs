@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   directIdFor, parseDirectId, directPaths, runBudgetMs, fallbackForStatus, readOutcome, asBatchLine, batchBodyFor,
   readJob, signBody, sameSignature, splitSse, StreamAssembler,
-  DIRECT_RUN_BUDGET_MS, DIRECT_STALE_MS, DIRECT_LOST_MS, JOB_MAX_AGE_MS,
+  DIRECT_RUN_BUDGET_MS, DIRECT_STALE_MS, MIN_DIRECT_BUDGET_MS, JOB_MAX_AGE_MS, LOST_TOK_PER_SEC,
 } from "./sitedraft.ts";
 import { isSitePath, buildBatchBody, buildMessageParams, parseBatchResult } from "../roybal-ai-office/sitevisit.ts";
 
@@ -23,9 +23,10 @@ await test("a direct id round-trips its start time and key, and never looks like
   assert.throws(() => directIdFor(1, "../etc"));
 });
 
-await test("every file the run leaves is a site-visit path the bucket rules accept", () => {
+await test("the one file the run leaves is a site-visit path the bucket rules accept", () => {
   const p = directPaths(KEY);
-  for (const path of [p.request, p.result, p.lock]) assert.equal(isSitePath(path), true, path);
+  assert.deepEqual(Object.keys(p), ["result"], "the request itself is never stored");
+  assert.equal(isSitePath(p.result), true);
   assert.equal(p.result, `sitevisit/drafts/${KEY}.json`);
 });
 
@@ -33,8 +34,9 @@ await test("the stream gets the worker's budget from boot, and the timings nest"
   assert.equal(runBudgetMs(1000, 1000), DIRECT_RUN_BUDGET_MS);
   assert.equal(runBudgetMs(1000, 1000 + DIRECT_RUN_BUDGET_MS + 5), 0);
   assert.ok(DIRECT_RUN_BUDGET_MS < 400_000, "inside the 400 s wall clock");
-  assert.ok(DIRECT_STALE_MS > 400_000 + 60_000, "a live run is never rescued");
-  assert.ok(DIRECT_LOST_MS > DIRECT_STALE_MS);
+  assert.ok(DIRECT_STALE_MS > 400_000 + 60_000, "a live run is never reported lost");
+  assert.ok(MIN_DIRECT_BUDGET_MS < DIRECT_RUN_BUDGET_MS, "a fresh worker always takes the job");
+  assert.ok(MIN_DIRECT_BUDGET_MS >= 120_000, "a warm worker with a minute left refuses it");
 });
 
 await test("overload, rate limits and server errors queue the draft; a bad request does not", () => {
@@ -145,6 +147,16 @@ await test("a run cut off mid-stream is not done and knows what it already cost"
   const lost = asm.lost();
   assert.equal(lost.inTok, 81500);
   assert.ok(lost.outTok >= Math.ceil(draftJson.length / 4));
+});
+
+await test("a run cut off while thinking is billed by the time it spent, not the one token usage shows", () => {
+  const asm = new StreamAssembler();
+  asm.push({ type: "message_start", message: { model: "m", usage: { input_tokens: 80000, output_tokens: 1 } } }, 0);
+  asm.push({ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } }, 20_000);
+  asm.push({ type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "s" } }, 30_000);
+  assert.deepEqual(asm.lost(20_000 + 300_000), { inTok: 80000, outTok: 300 * LOST_TOK_PER_SEC });
+  assert.equal(asm.lost(20_000 + 10_000_000, 64000).outTok, 64000, "never above max_tokens");
+  assert.equal(new StreamAssembler().lost(5_000).outTok, 0, "nothing generated before the first block");
 });
 
 await test("an error event mid-stream is caught, and a length cut-off stays the parser's clear error", () => {
