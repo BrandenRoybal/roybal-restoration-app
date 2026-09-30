@@ -55,10 +55,10 @@ values
   ('00000000-0000-0000-0000-00000000c002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-mp-crew@example.invalid',  '', now(), now(), now(), '{}', '{}')
 on conflict (id) do nothing;
 
--- today's vocabulary, as production holds it: the owner is `admin`, crew are `tech`
+-- the vocabulary profiles_role_check enforces since 0012: owner / office / crew
 insert into public.profiles (id, full_name, role) values
-  ('00000000-0000-0000-0000-00000000c001', 'mp test owner', 'admin'),
-  ('00000000-0000-0000-0000-00000000c002', 'mp test crew',  'tech')
+  ('00000000-0000-0000-0000-00000000c001', 'mp test owner', 'owner'),
+  ('00000000-0000-0000-0000-00000000c002', 'mp test crew',  'crew')
 on conflict (id) do update set role = excluded.role, full_name = excluded.full_name;
 
 -- 2. the service role writes
@@ -79,7 +79,7 @@ declare n int;
 begin
   select count(*) into n from public.magicplan_exports where mp_project_id = 'test-mp-project';
   if n <> 1 then
-    raise exception 'the owner (profiles.role admin, JWT role authenticated) reads % of 1 magicplan_exports row', n;
+    raise exception 'the owner (profiles.role owner, JWT role authenticated) reads % of 1 magicplan_exports row', n;
   end if;
 end
 $$;
