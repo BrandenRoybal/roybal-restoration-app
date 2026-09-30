@@ -499,7 +499,7 @@ export const PORTAL_MILESTONE_NUDGES = {
   complete:       "Your project is complete. Thank you for trusting Roybal Construction — please reach out any time if you need anything.",
 };
 export const CONSTRUCTION_MILESTONE_NUDGES = {
-  contract:  "Thanks for choosing Roybal Construction — your contract is signed and your project is officially underway. We'll keep you posted right here.",
+  contract:  "Contract is ready for your signature. Once signed, your project is officially underway.",
   permits:   "We're working on the permits for your project. We'll let you know here as soon as they're in hand.",
   scheduled: "Good news — your project is on our schedule. We'll keep you posted right here as things move along.",
   framing:   "Framing and rough-in are underway — the structure, plumbing and electrical are going in.",
