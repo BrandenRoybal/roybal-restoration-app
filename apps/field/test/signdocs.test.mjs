@@ -4,7 +4,7 @@
    portal signature comes back into the form. Run:
    node apps/field/test/signdocs.test.mjs */
 import assert from "node:assert";
-import { SIGNABLE, signableDocs, approvalEntry, signRequestMessages, applyPortalSignatures, signState } from "../js/signdocs.js";
+import { SIGNABLE, signableDocs, approvalEntry, signRequestMessages, applyPortalSignatures, signState, resendable } from "../js/signdocs.js";
 
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); console.log("  ✓ " + name); pass++; };
@@ -78,5 +78,44 @@ ok("a signature already on the form is never overwritten", p2.changeOrders[2].si
 ok("a pending approval changes nothing", !p2.workAuth.ownerSig);
 co.sigOwner = ""; co.sigOwnerName = "";
 ok("applied once: clearing it on purpose doesn't bring it back", applyPortalSignatures(p2, approvals, sum) === 0 && !co.sigOwner);
+
+/* the estimate is the contract on a construction job (Branden, 2026-10-01):
+   he sends the portal link and the customer signs the estimate there */
+const usd = (n) => "$" + n;
+const tot = (inv) => inv.items.reduce((a, it) => a + (Number(it.qty) || 0) * (Number(it.price) || 0), 0) * 1.2;
+const build = {
+  ...project,
+  jobType: "construction",
+  reconEstimates: [
+    { id: "est-blank", kind: "estimate", invoiceNo: "", items: [{ desc: "", qty: "", price: "" }] },
+    { id: "est-a", kind: "estimate", invoiceNo: "RC-TST-1001", items: [{ desc: "Frame the addition", qty: 100, price: 200 }] },
+    { id: "est-b", kind: "estimate", invoiceNo: "", items: [{ desc: "Paint", qty: 1, price: 500 }] },
+  ],
+};
+const bdocs = signableDocs(build, sum, tot);
+const est = bdocs.find((d) => d.id === "est-a");
+ok("a construction estimate is offered, ahead of everything else", bdocs[0].id === "est-a" && !!est);
+ok("an estimate with no scope written isn't offered", !bdocs.some((d) => d.id === "est-blank"));
+ok("an estimate is titled by its number, or by position", est.title === "Estimate RC-TST-1001" && bdocs[1].title === "Estimate 3");
+ok("an estimate carries its total, not a change-order amount", est.total === 24000 && est.amountDelta === null);
+ok("restoration estimates go to the carrier and are never offered",
+  !signableDocs({ ...build, jobType: "restoration" }, sum, tot).some((d) => d.key === "reconEstimates"));
+const ea = approvalEntry(est, ref, null, "2026-10-01T03:00:00Z", { money: usd });
+ok("an estimate goes up as a document showing its total, no change-order money",
+  ea.kind === "document" && ea.formKey === "reconEstimates" && ea.description === "Total: $24000" && ea.amountDelta === 0 && ea.doc.html === H("a"));
+const em = signRequestMessages(est, { money: usd });
+ok("the request names the estimate and its total", em.thread.includes("Estimate RC-TST-1001 ($24000)"));
+ok("the text says the estimate is ready to sign", /estimate is ready to sign/i.test(em.ping) && /sign here/i.test(em.ping));
+
+ok("resend: nothing up yet, or still pending", resendable(est, null) && resendable(est, { status: "pending" }));
+ok("resend: a signed estimate is never replaced", !resendable(est, { status: "approved" }));
+ok("resend: a declined estimate can go up again, revised", resendable(est, { status: "declined" }));
+ok("resend: a declined change order stays declined", !resendable(docs[1], { status: "declined" }));
+
+const b2 = JSON.parse(JSON.stringify(build));
+ok("a portal signature lands on the estimate",
+  applyPortalSignatures(b2, [{ id: "est-a", status: "approved", signedName: "Test Customer", signature: "data:image/png;base64,EST", respondedAt: "2026-10-01T04:00:00Z" }], sum) === 1);
+const se = b2.reconEstimates[1];
+ok("in its acceptance block", se.sigOwner === "data:image/png;base64,EST" && se.sigOwnerName === "Test Customer" && se.sigOwnerDate === "2026-10-01");
 
 console.log(`\n${pass} signing checks passed.`);
