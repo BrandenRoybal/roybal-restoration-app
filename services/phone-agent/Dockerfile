@@ -7,6 +7,9 @@ WORKDIR /app
 # the one-brain registry + the board's pure scheduling engine (server-shared)
 COPY supabase/functions/_shared/personas supabase/functions/_shared/personas
 COPY apps/board/js/schedule.js apps/board/js/schedule.js
+# the Site Visit draft runner, shared with the roybal-site-draft edge function
+COPY supabase/functions/_shared/sitedraft.ts supabase/functions/_shared/sitedraft.ts
+COPY supabase/functions/_shared/sitedraft-run.ts supabase/functions/_shared/sitedraft-run.ts
 
 COPY services/phone-agent services/phone-agent
 WORKDIR /app/services/phone-agent

@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import {
   directIdFor, parseDirectId, directPaths, runBudgetMs, fallbackForStatus, readOutcome, asBatchLine, batchBodyFor,
-  readJob, signBody, sameSignature, splitSse, StreamAssembler,
-  DIRECT_RUN_BUDGET_MS, DIRECT_STALE_MS, MIN_DIRECT_BUDGET_MS, JOB_MAX_AGE_MS, LOST_TOK_PER_SEC,
+  readJob, signBody, sameSignature, splitSse, StreamAssembler, flyDraftUrl, staleAfterMs,
+  DIRECT_RUN_BUDGET_MS, DIRECT_STALE_MS, MIN_DIRECT_BUDGET_MS, JOB_MAX_AGE_MS, LOST_TOK_PER_SEC, FLY_RUN_BUDGET_MS, FLY_STALE_MS,
 } from "./sitedraft.ts";
 import { isSitePath, buildBatchBody, buildMessageParams, parseBatchResult } from "../roybal-ai-office/sitevisit.ts";
 
@@ -12,10 +12,14 @@ let pass = 0;
 const test = async (name, fn) => { await fn(); console.log("  ✓ " + name); pass++; };
 const KEY = "0123456789abcdef0123456789abcdef";
 
-await test("a direct id round-trips its start time and key, and never looks like a batch", () => {
+await test("a direct id round-trips its start time, key and runner, and never looks like a batch", () => {
   const id = directIdFor(1790000000000, KEY);
   assert.match(id, /^svd_[0-9a-z]+_[0-9a-f]{32}$/);
-  assert.deepEqual(parseDirectId(id), { startMs: 1790000000000, key: KEY });
+  assert.deepEqual(parseDirectId(id), { startMs: 1790000000000, key: KEY, runner: "edge" });
+  const fly = directIdFor(1790000000000, KEY, "fly");
+  assert.match(fly, /^svf_/);
+  assert.deepEqual(parseDirectId(fly), { startMs: 1790000000000, key: KEY, runner: "fly" });
+  assert.equal(parseDirectId("svx_abc123_" + KEY), null);
   assert.equal(parseDirectId("msgbatch_01abc"), null);
   assert.equal(parseDirectId("svd_zz_" + KEY.slice(1)), null);          // short key
   assert.equal(parseDirectId("svd_abc123_" + KEY + "/../x"), null);
@@ -39,6 +43,25 @@ await test("the stream gets the worker's budget from boot, and the timings nest"
   assert.ok(MIN_DIRECT_BUDGET_MS >= 120_000, "a warm worker with a minute left refuses it");
 });
 
+await test("on Fly the stream gets far longer, and a silent run is called dead later", () => {
+  assert.ok(FLY_RUN_BUDGET_MS >= 64000 / 45 * 1000, "a full-length draft fits at a slow token rate");
+  assert.ok(FLY_STALE_MS > FLY_RUN_BUDGET_MS + 5 * 60_000, "a live Fly run is never reported lost");
+  assert.equal(staleAfterMs("fly"), FLY_STALE_MS);
+  assert.equal(staleAfterMs("edge"), DIRECT_STALE_MS);
+});
+
+await test("the Fly runner is found from the phone line's address, or set outright, or turned off", () => {
+  assert.equal(flyDraftUrl("", "wss://roybal-phone.fly.dev/relay"), "https://roybal-phone.fly.dev/draft");
+  assert.equal(flyDraftUrl("", " wss://roybal-phone.fly.dev/relay/ "), "https://roybal-phone.fly.dev/draft");
+  assert.equal(flyDraftUrl("", ""), "", "no phone agent, no Fly");
+  assert.equal(flyDraftUrl("", "ws://insecure.example/relay"), "", "never plain ws");
+  assert.equal(flyDraftUrl("", "wss://x.example/other"), "");
+  assert.equal(flyDraftUrl("https://drafts.example.dev/draft", "wss://roybal-phone.fly.dev/relay"), "https://drafts.example.dev/draft");
+  assert.equal(flyDraftUrl("http://drafts.example.dev/draft", ""), "", "never plain http");
+  assert.equal(flyDraftUrl("off", "wss://roybal-phone.fly.dev/relay"), "");
+  assert.equal(flyDraftUrl(" OFF ", "wss://roybal-phone.fly.dev/relay"), "");
+});
+
 await test("overload, rate limits and server errors queue the draft; a bad request does not", () => {
   for (const s of [429, 500, 502, 503, 529]) assert.equal(fallbackForStatus(s), "batch", String(s));
   for (const s of [400, 401, 403, 404, 413]) assert.equal(fallbackForStatus(s), "error", String(s));
@@ -51,6 +74,10 @@ await test("readOutcome accepts the three outcomes and nothing else", () => {
   assert.deepEqual(b.lost, { inTok: 80000, outTok: 0 });
   assert.equal(readOutcome({ v: 1, type: "batch", customId: "sv-x-1", batchId: "https://evil" }), null);
   assert.equal(readOutcome({ v: 1, type: "error", customId: "", error: "nope" }).error, "nope");
+  assert.deepEqual(readOutcome({ v: 1, type: "error", customId: "", error: "x", lost: { inTok: 90000, outTok: 4000 } }).lost, { inTok: 90000, outTok: 4000 });
+  assert.deepEqual(readOutcome({ v: 1, type: "batch", customId: "", batchId: "msgbatch_1", lost: { inTok: 1e12, outTok: 1e12 } }).lost,
+    { inTok: 2_000_000, outTok: 128_000 }, "a written-in number can't run up the ledger");
+  assert.equal(readOutcome({ v: 1, type: "batch", customId: "", batchId: "msgbatch_1", lost: { inTok: 0, outTok: 0 } }).lost, undefined);
   assert.equal(readOutcome({ v: 2, type: "message", message: {} }), null);
   assert.equal(readOutcome(null), null);
   assert.equal(readOutcome("x"), null);

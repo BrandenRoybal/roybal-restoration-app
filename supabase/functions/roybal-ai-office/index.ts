@@ -69,11 +69,11 @@ import {
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
 import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildMessageParams, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
-// the direct run (roybal-site-draft) and its outcome file — pure, Node-tested
-// in ../_shared/sitedraft.test.mjs
+// the direct run (Fly, then roybal-site-draft) and its outcome file — pure,
+// Node-tested in ../_shared/sitedraft.test.mjs
 import {
-  directIdFor, parseDirectId, directPaths, readOutcome, asBatchLine, batchBodyFor, signBody,
-  DIRECT_STALE_MS, type LostUsage,
+  directIdFor, parseDirectId, directPaths, readOutcome, asBatchLine, batchBodyFor, signBody, flyDraftUrl, staleAfterMs,
+  type LostUsage, type Runner,
 } from "../_shared/sitedraft.ts";
 // line-item pricing (catalog + reference tiers, the estimating rules) — pure,
 // Node-tested in ./pricing.test.mjs
@@ -108,6 +108,10 @@ const BATCH_DISCOUNT = 0.5;
 // (the half-price queue, which can hold a draft for hours). Env-switchable
 // without a redeploy.
 const SITE_VISIT_MODE = (Deno.env.get("SITE_VISIT_MODE") ?? "direct").trim().toLowerCase() === "batch" ? "batch" : "direct";
+// Where a direct draft runs: the phone agent on Fly first (always on, no wall
+// clock, so a big draft finishes), found from the phone line's own
+// PHONE_AGENT_WSS; SITE_DRAFT_RUNNER_URL overrides it, "off" skips Fly.
+const FLY_DRAFT_URL = flyDraftUrl(Deno.env.get("SITE_DRAFT_RUNNER_URL") ?? "", Deno.env.get("PHONE_AGENT_WSS") ?? "");
 const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
 // Spoken turns can run a faster model (someone is standing there listening);
 // defaults to the same assistant model until the env override is set.
@@ -799,11 +803,12 @@ async function scopeInterview(body: Record<string, unknown>) {
                          straight from storage (signed URL; the audio never
                          passes through this function).
    siteVisitStart      — builds ONE request that reads every file by
-                         signed URL and hands it to roybal-site-draft, which
-                         runs it direct (back in minutes, full price). If
-                         that function can't take it, or SITE_VISIT_MODE is
-                         "batch", it goes to the Message Batches queue
-                         instead. Returns the draft id; nothing is billed yet.
+                         signed URL and hands it to a direct runner (back in
+                         minutes, full price): the phone agent on Fly, else
+                         roybal-site-draft on the edge. If neither takes it,
+                         or SITE_VISIT_MODE is "batch", it goes to the
+                         Message Batches queue instead. Returns the draft id;
+                         nothing is billed yet.
    siteVisitResult     — once the draft has finished (direct outcome in
                          storage, or the batch has ended), stamps catalog
                          prices and returns the draft. The serve() gate
@@ -884,11 +889,12 @@ async function siteVisitStart(body: Record<string, unknown>) {
   // unknown visit keeps the legacy sv-, which reads back as unknown)
   const customId = customIdFor(kind, crypto.randomUUID());
   const params = buildMessageParams({ model: SITE_VISIT_MODEL, effort: SITE_VISIT_EFFORT, content });
-  // direct first; the queue when the draft function can't take it (not yet
-  // deployed, or down): a draft is never refused for want of the fast path
+  // direct first; the queue when no runner can take it (not yet deployed,
+  // or down): a draft is never refused for want of the fast path
   let id = "";
+  let runner: Runner | "" = "";
   if (SITE_VISIT_MODE === "direct") {
-    try { id = await startDirect(customId, params, jwt); }
+    try { ({ id, runner } = await startDirect(customId, params, jwt)); }
     catch (e) { console.warn(`direct draft didn't start, queueing it: ${e instanceof Error ? e.message : String(e)}`); }
   }
   const mode = id ? "direct" : "batch";
@@ -897,7 +903,7 @@ async function siteVisitStart(body: Record<string, unknown>) {
   return {
     result: { batchId: id, pricingMode: pm, model: SITE_VISIT_MODEL, mode },
     usage: { inTok: 0, outTok: 0 }, model: SITE_VISIT_MODEL,
-    summary: { batchId: id, mode, kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, referenceRows: referenceText ? refRows.length : 0 },
+    summary: { batchId: id, mode, ...(runner ? { runner } : {}), kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, referenceRows: referenceText ? refRows.length : 0 },
   };
 }
 
@@ -918,41 +924,76 @@ const storageHeaders = (jwt: string, extra: Record<string, string> = {}) =>
   ({ apikey: isNewFormatKey(jwt) ? jwt : ANON_KEY, Authorization: `Bearer ${jwt}`, ...extra });
 
 /** The outcome file: `missing` until the run writes it; `unknown` when
-    storage didn't answer (a hiccup must not end a draft that is fine). */
+    storage didn't answer cleanly (a hiccup must not end a draft that is
+    fine). Storage words most failures as a 400, so only a 404, or a 400
+    that says not found, counts as missing. A file that isn't JSON is found
+    and unreadable (readOutcome turns it down), so the stale timer applies. */
 async function readDirectFile(path: string, jwt: string): Promise<{ state: "found"; value: unknown } | { state: "missing" } | { state: "unknown" }> {
   try {
     const res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${MEDIA_BUCKET}/${path}`, { headers: storageHeaders(jwt) });
-    if (res.status === 400 || res.status === 404) { await res.body?.cancel(); return { state: "missing" }; }   // storage answers a missing object with either
     const raw = await res.text();
+    if (res.status === 404 || (res.status === 400 && /"statusCode"\s*:\s*"?404|not_found|object not found/i.test(raw))) return { state: "missing" };
     if (!res.ok) { console.warn(`draft outcome read ${res.status}: ${raw.slice(0, 200)}`); return { state: "unknown" }; }
-    return { state: "found", value: JSON.parse(raw) };
+    try { return { state: "found", value: JSON.parse(raw) }; } catch (_) { return { state: "found", value: null }; }
   } catch (e) {
     console.warn(`draft outcome read failed: ${e instanceof Error ? e.message : String(e)}`);
     return { state: "unknown" };
   }
 }
 
+/* Storage unreadable this long past a run's stale mark: stop waiting. */
+const UNREADABLE_GIVE_UP_MS = 30 * 60_000;
+
+/** A failed draft's error, carrying what a cut-off direct run already
+    streamed so the error path still meters it. */
+function draftError(message: string, lost?: LostUsage): Error {
+  const e = new Error(message) as Error & { model?: string; extraCostUsd?: number };
+  if (lost) {
+    const p = priceFor(SITE_VISIT_MODEL);
+    e.model = SITE_VISIT_MODEL;
+    e.extraCostUsd = (lost.inTok / 1e6) * p.in + (lost.outTok / 1e6) * p.out;
+  }
+  return e;
+}
+
 /** Start the direct run: sign an upload for its outcome and hand the job to
-    roybal-site-draft. Throws unless that function accepted it (not deployed,
-    down, or its worker too close to the time limit), and the start queues
-    the draft instead. The request itself is never stored. */
-async function startDirect(customId: string, params: Record<string, unknown>, jwt: string): Promise<string> {
+    the first runner that takes it, Fly then the edge (roybal-site-draft).
+    Throws when neither does (not deployed, down, busy, or the edge worker
+    too close to its time limit), and the start queues the draft instead.
+    The request itself is never stored. */
+async function startDirect(customId: string, params: Record<string, unknown>, jwt: string): Promise<{ id: string; runner: Runner }> {
   const key = crypto.randomUUID().replace(/-/g, "");
-  const id = directIdFor(Date.now(), key);
+  const startMs = Date.now();
   const signRes = await fetch(`${SUPABASE_URL}/storage/v1/object/upload/sign/${MEDIA_BUCKET}/${directPaths(key).result}`, {
     method: "POST", headers: storageHeaders(jwt, { "Content-Type": "application/json" }), body: "{}",
   });
   const signed = await signRes.json().catch(() => ({})) as { url?: string };
   if (!signRes.ok || !signed.url) throw new Error(`couldn't sign the result upload (${signRes.status})`);
+  // one signed job for both runners; the upload URL takes one write, so only
+  // one runner can ever land an outcome for it
   const body = JSON.stringify({ v: 1, issuedAt: Date.now(), customId, params, resultUrl: signed.url });
-  const res = await fetch(`${SUPABASE_URL}/functions/v1/roybal-site-draft`, {
-    method: "POST",
-    headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json", "x-draft-signature": await signBody(LLM_API_KEY, body) },
-    body,
-  });
-  const raw = await res.text().catch(() => "");
-  if (res.status !== 202) throw new Error(`roybal-site-draft answered ${res.status}: ${raw.slice(0, 200)}`);
-  return id;
+  const signature = await signBody(LLM_API_KEY, body);
+  const runners: { runner: Runner; url: string; headers: Record<string, string> }[] = [];
+  if (FLY_DRAFT_URL) runners.push({ runner: "fly", url: FLY_DRAFT_URL, headers: {} });
+  runners.push({ runner: "edge", url: `${SUPABASE_URL}/functions/v1/roybal-site-draft`, headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}` } });
+  const why: string[] = [];
+  for (const r of runners) {
+    try {
+      const res = await fetch(r.url, {
+        method: "POST",
+        headers: { ...r.headers, "Content-Type": "application/json", "x-draft-signature": signature },
+        body,
+        // both answer at once; a runner that hangs must not hold up the start
+        signal: AbortSignal.timeout(20_000),
+      });
+      const raw = await res.text().catch(() => "");
+      if (res.status === 202) return { id: directIdFor(startMs, key, r.runner), runner: r.runner };
+      why.push(`${r.runner} answered ${res.status}: ${raw.slice(0, 160)}`);
+    } catch (e) {
+      why.push(`${r.runner}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  throw new Error(why.join("; "));
 }
 
 type BatchInfo = { id?: string; processing_status?: string; results_url?: string | null };
@@ -988,15 +1029,19 @@ async function probeSiteDraft(id: string, jwt: string): Promise<SiteProbe> {
   const d = parseDirectId(id);
   if (!d) return probeBatch(id);   // a queued draft (msgbatch_…), as before
   const file = await readDirectFile(directPaths(d.key).result, jwt);
-  if (file.state === "unknown") return { running: true, status: "direct", mode: "direct" };
-  const out = file.state === "found" ? readOutcome(file.value) : null;
-  if (!out) {
-    // the run writes an outcome inside its worker's 400 s, even when it is
-    // cut off; none long after means the worker was killed outright
-    if (Date.now() - d.startMs > DIRECT_STALE_MS) throw new Error("the draft stopped before it finished — start it again");
+  const age = Date.now() - d.startMs;
+  if (file.state === "unknown") {
+    if (age > staleAfterMs(d.runner) + UNREADABLE_GIVE_UP_MS) throw new Error("Couldn't read the draft's result from storage — start it again");
     return { running: true, status: "direct", mode: "direct" };
   }
-  if (out.type === "error") throw new Error(out.error);
+  const out = file.state === "found" ? readOutcome(file.value) : null;
+  if (!out) {
+    // the run writes an outcome inside its budget, even when it is cut off;
+    // none long after means its worker or machine was killed outright
+    if (age > staleAfterMs(d.runner)) throw new Error("the draft stopped before it finished — start it again");
+    return { running: true, status: "direct", mode: "direct" };
+  }
+  if (out.type === "error") throw draftError(out.error, out.lost);
   if (out.type === "batch") return probeBatch(out.batchId, out.lost);
   return { running: false, line: asBatchLine(out.customId, out.message), costScale: 1, batchId: id };
 }

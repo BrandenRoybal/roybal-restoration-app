@@ -8,19 +8,26 @@
  * 75+ minutes that day). So a draft now runs straight through the Messages
  * API, and the batch queue is only the fallback.
  *
- * Two functions share this file:
- *   roybal-ai-office  starts the draft (siteVisitStart) and collects it
- *                     (siteVisitResult);
- *   roybal-site-draft runs it: one streamed Messages call in a background
- *                     task, the finished message written to storage.
+ * Three places share this file:
+ *   roybal-ai-office   starts the draft (siteVisitStart) and collects it
+ *                      (siteVisitResult);
+ *   the phone agent    runs it on Fly (services/phone-agent/draft.mjs): one
+ *                      streamed Messages call, no wall clock, so a big draft
+ *                      finishes there. Tried first;
+ *   roybal-site-draft  runs it on the edge when Fly can't take it.
+ * The runner both use is ./sitedraft-run.ts.
  *
- * The run lives in its own function because an edge worker has a 400 s wall
- * clock from the moment it boots (Supabase paid plan), and roybal-ai-office's
- * workers are kept busy by polls, so a background task started there could
- * inherit a worker with seconds left. A job that reaches a worker without
- * enough time left is refused, and the start queues it as a batch instead; a
- * run still going near the limit is cut off and queued. The worst case is the
- * old behavior.
+ * The edge runner lives in its own function because an edge worker has a
+ * 400 s wall clock from the moment it boots (Supabase paid plan), and
+ * roybal-ai-office's workers are kept busy by polls, so a background task
+ * started there could inherit a worker with seconds left. A job that reaches
+ * a worker without enough time left is refused, and the start queues it as a
+ * batch instead; a run still going near the limit is cut off and queued. The
+ * worst case is the old behavior.
+ *
+ * Rolling roybal-ai-office back past this change: set SITE_VISIT_MODE=batch
+ * first and wait out FLY_STALE_MS, so every running direct draft is
+ * collected; the older office can't read an svd_/svf_ id.
  *
  * The run leaves one file, field-media sitevisit/drafts/<key>.json: the
  * finished message, the batch it fell back to, or the error. The request
@@ -31,20 +38,33 @@
 /* ---------- ids and paths ---------- */
 /* The field app stores whatever id siteVisitStart returns as `batchId` and
    hands it back on every poll, so a direct run needs no field-app change to
-   be collected: batch ids stay msgbatch_…, direct ids are svd_<start>_<key>. */
-const DIRECT_ID = /^svd_([0-9a-z]{6,12})_([0-9a-f]{32})$/;
+   be collected: batch ids stay msgbatch_…, direct ids are
+   sv<runner>_<start>_<key>, svf_ on Fly and svd_ on the edge. */
+export type Runner = "fly" | "edge";
+const DIRECT_ID = /^sv([fd])_([0-9a-z]{6,12})_([0-9a-f]{32})$/;
 export const DIRECT_FOLDER = "sitevisit/drafts/";
 
-export function directIdFor(startMs: number, key: string): string {
+export function directIdFor(startMs: number, key: string, runner: Runner = "edge"): string {
   if (!/^[0-9a-f]{32}$/.test(key)) throw new Error("draft key must be 32 hex characters");
-  return `svd_${Math.max(0, Math.floor(startMs)).toString(36)}_${key}`;
+  return `sv${runner === "fly" ? "f" : "d"}_${Math.max(0, Math.floor(startMs)).toString(36)}_${key}`;
 }
 
-export function parseDirectId(id: unknown): { startMs: number; key: string } | null {
+export function parseDirectId(id: unknown): { startMs: number; key: string; runner: Runner } | null {
   const m = DIRECT_ID.exec(String(id ?? ""));
   if (!m) return null;
-  const startMs = parseInt(m[1], 36);
-  return Number.isFinite(startMs) ? { startMs, key: m[2] } : null;
+  const startMs = parseInt(m[2], 36);
+  return Number.isFinite(startMs) ? { startMs, key: m[3], runner: m[1] === "f" ? "fly" : "edge" } : null;
+}
+
+/** The Fly runner's address, from the phone line's own setting
+    (PHONE_AGENT_WSS = wss://<app>.fly.dev/relay → https://<app>.fly.dev/draft).
+    An explicit SITE_DRAFT_RUNNER_URL wins; "off" turns Fly off. */
+export function flyDraftUrl(explicit: string, phoneWss: string): string {
+  const set = explicit.trim();
+  if (set.toLowerCase() === "off") return "";
+  if (set) return /^https:\/\/[^\s/]+\/draft$/.test(set) ? set : "";
+  const m = /^wss:\/\/([^\s/]+)\/relay\/?$/.exec(phoneWss.trim());
+  return m ? `https://${m[1]}/draft` : "";
 }
 
 export function directPaths(key: string): { result: string } {
@@ -58,11 +78,20 @@ export function directPaths(key: string): { result: string } {
 export const DIRECT_RUN_BUDGET_MS = 340_000;
 /* A job that reaches a worker with less than this left is refused (the start
    queues it instead): a warm worker a few minutes old could not finish a
-   draft, and a stream cut off part way is paid for and thrown away. */
+   draft, and a stream cut off part way is paid for and thrown away. Between
+   this and the full budget a long draft can still be cut off and paid twice;
+   that is the price of a chance at minutes instead of the queue's hour, which
+   is Branden's call. Fly takes drafts first, so the edge rarely sees one. */
 export const MIN_DIRECT_BUDGET_MS = 180_000;
 /* No outcome this long after the start means the run died without writing
    one (the worker was killed outright, with no chance to queue it). */
 export const DIRECT_STALE_MS = 8 * 60_000;
+/* On Fly there is no wall clock: the stream gets 25 minutes (a 64k-token
+   draft at a slow 45 tokens a second still fits) before it is queued, and
+   no outcome 35 minutes on means the machine died outright. */
+export const FLY_RUN_BUDGET_MS = 25 * 60_000;
+export const FLY_STALE_MS = 35 * 60_000;
+export const staleAfterMs = (runner: Runner): number => runner === "fly" ? FLY_STALE_MS : DIRECT_STALE_MS;
 /* A signed job older than this is refused (a replayed request). */
 export const JOB_MAX_AGE_MS = 120_000;
 
@@ -82,7 +111,18 @@ export type LostUsage = { inTok: number; outTok: number };
 export type DirectOutcome =
   | { v: 1; type: "message"; customId: string; message: Record<string, unknown>; ms: number }
   | { v: 1; type: "batch"; customId: string; batchId: string; reason: string; lost?: LostUsage }
-  | { v: 1; type: "error"; customId: string; error: string };
+  | { v: 1; type: "error"; customId: string; error: string; lost?: LostUsage };
+
+/* What a cut-off run already streamed, as the file states it. The file is
+   writable by any login, so the numbers are clamped: they only ever add to
+   the spend ledger, never to a price. */
+function readLost(raw: unknown): LostUsage | undefined {
+  const l = (raw ?? null) as Record<string, unknown> | null;
+  if (!l || typeof l !== "object") return undefined;
+  const clamp = (v: unknown, max: number) => Math.min(max, Math.max(0, Math.floor(Number(v) || 0)));
+  const lost = { inTok: clamp(l.inTok, 2_000_000), outTok: clamp(l.outTok, 128_000) };
+  return lost.inTok || lost.outTok ? lost : undefined;
+}
 
 export function readOutcome(raw: unknown): DirectOutcome | null {
   const o = (raw ?? null) as Record<string, unknown> | null;
@@ -91,11 +131,13 @@ export function readOutcome(raw: unknown): DirectOutcome | null {
   if (o.type === "message" && o.message && typeof o.message === "object")
     return { v: 1, type: "message", customId, message: o.message as Record<string, unknown>, ms: Number(o.ms) || 0 };
   if (o.type === "batch" && /^msgbatch_[A-Za-z0-9]+$/.test(String(o.batchId ?? ""))) {
-    const l = (o.lost ?? null) as Record<string, unknown> | null;
-    const lost = l ? { inTok: Math.max(0, Number(l.inTok) || 0), outTok: Math.max(0, Number(l.outTok) || 0) } : undefined;
+    const lost = readLost(o.lost);
     return { v: 1, type: "batch", customId, batchId: String(o.batchId), reason: String(o.reason ?? ""), ...(lost ? { lost } : {}) };
   }
-  if (o.type === "error") return { v: 1, type: "error", customId, error: String(o.error ?? "the draft failed") };
+  if (o.type === "error") {
+    const lost = readLost(o.lost);
+    return { v: 1, type: "error", customId, error: String(o.error ?? "the draft failed"), ...(lost ? { lost } : {}) };
+  }
   return null;
 }
 
