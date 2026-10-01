@@ -441,6 +441,7 @@ test("a server that ignores ?page= is asked once more, then left; nothing is cop
   assert.ok(!calls.mp.includes(`/projects/${PID}/files?page=3`));
   assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
   assert.equal(calls.fetched.filter((u) => /\/att\d\.jpg\?/.test(u)).length, 10);
+  assert.match(row.error, /^Project attachments after page 1 may be missing: Magicplan answered \?page=2 with files already listed \{data:\[\{name,url,size\}\]\}$/);
 });
 test("a refused second page keeps the first page and says what was missed", async () => {
   const { deps } = fakes({ projectFiles: (page) => (page === 1 ? { data: tenJpgs() } : new Error("Magicplan GET /projects/x/files failed (400)")) });
@@ -460,4 +461,36 @@ test("moreAfter reads the usual page_info spellings, and says null when there is
   assert.equal(S.moreAfter({ page_info: { total_pages: 3 } }, 1), true);
   assert.equal(S.moreAfter({ meta: { current_page: 1, per_page: 10, total: 10 } }, 1), false);
   assert.equal(S.moreAfter({ pagination: { page: 1, page_size: 10, total_count: 25 } }, 1), true);
+});
+test("one file that won't copy is listed on the row; the rest of the pull still lands", async () => {
+  const { deps } = fakes({ projectFiles: (page) => ({ data: page === 1 ? tenJpgs() : page === 2 ? [att("walk.mp4", 2, 9), att("plan.thumb", 2)] : [] }) });
+  const fetchBytes = deps.fetchBytes;
+  deps.fetchBytes = async (url) => { if (url.includes("walk.mp4")) throw new Error("Couldn't download a Magicplan file (403)"); return fetchBytes(url); };
+  const upload = deps.upload;
+  deps.upload = async (path, bytes, mime) => { if (path.endsWith("Report.pdf")) throw new Error("Storage upload failed for Report.pdf: Payload too large"); return upload(path, bytes, mime); };
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.ok(row.files.some((f) => f.name === "plan.thumb"));
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.equal(row.photos.length, 2);
+  assert.ok(!row.files.some((f) => f.name === "walk.mp4" || f.name === "Report.pdf"));
+  assert.match(row.error, /Not copied \(2\): Report\.pdf, walk\.mp4 — first error: Storage upload failed/);
+});
+test("photos listed with every format's call, freshly signed each time, are copied once", async () => {
+  const { deps, calls } = fakes();
+  let n = 0;
+  deps.mp = ((mp) => async (p) => {
+    if (!p.startsWith("/plans/6a45b1435520f/files")) return mp(p);
+    n++;
+    const sign = (f) => ({ ...f, url: `${f.url}&call=${n}` });
+    return { data: { files: FILES.data.files.map(sign), photos: FILES.data.photos.map(sign) } };
+  })(deps.mp);
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(n, S.ALL_FORMATS.length);
+  assert.equal(row.photos.length, 2);
+  assert.equal(row.files.filter((f) => f.name === "Report.pdf").length, 1);
+  assert.equal(calls.fetched.filter((u) => u.includes("/p1.jpg")).length, 1);
+});
+test("the formats the files call refuses on its own are never asked for", () => {
+  for (const f of ["obj", "xfif", "magicplan", "mp"]) assert.ok(!S.ALL_FORMATS.includes(f), f);
 });

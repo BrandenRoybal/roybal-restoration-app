@@ -228,6 +228,10 @@ export function projectFilesOf(resp: unknown): MpFile[] {
     from call to call, the name, size and timestamp don't. The plan listing
     and the project listing give the same export the same name and size. */
 export const fileKey = (f: { name: string; size: number }) => `${f.name}|${f.size}`;
+/** Within one listing (the plan's files, asked format by format), the
+    timestamp is consistent too, so it joins the key. */
+export const stableKey = (f: { name: string; size: number; lastModified: string; folder: string }) =>
+  `${f.folder}|${f.name}|${f.size}|${f.lastModified}`;
 export const PROJECT_FILES_PAGES = 20;
 export const projectFilesPath = (projectId: string, page: number) =>
   `/projects/${encodeURIComponent(projectId)}/files${page > 1 ? `?page=${page}` : ""}`;
@@ -537,12 +541,20 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   // Every download goes through here: too big → listed as skipped; out of
   // time → stop, the next Pull picks up where this one ended.
   let outOfTime = false;
-  const skipped: string[] = [];
+  const skipped: string[] = [], failed: string[] = [];
+  let failedWhy: string | null = null;
   const fetchOne = async (f: MpFile, name: string) => {
     if (outOfTime) return null;
     if (deps.timeLeft && deps.timeLeft() < STOP_WITH_MS_LEFT) { outOfTime = true; return null; }
     if (f.size > MAX_FILE_BYTES) { skipped.push(`${f.name} (${Math.round(f.size / 1048576)} MB)`); return null; }
-    return await store(f, name);
+    // one file Magicplan won't hand over, or storage won't take, is listed
+    // on the row; the rest of the pull still lands
+    try { return await store(f, name); } catch (e) {
+      failed.push(f.name || name);
+      failedWhy ??= e instanceof Error ? e.message : String(e);
+      deps.warn?.(`${f.name || name} not copied: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
   };
   const storeJson = async (name: string, value: unknown) => {
     const bytes = new TextEncoder().encode(JSON.stringify(value, null, 2));
@@ -563,8 +575,10 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   for (const fmt of ALL_FORMATS) {
     try {
       const got = filesOf(await deps.mp(filesPath(project.planId, fmt)));
-      for (const f of got.files) if (!seenFile.has(f.url)) { seenFile.add(f.url); files.push(f); }
-      for (const f of got.photos) if (!seenFile.has(f.url)) { seenFile.add(f.url); photos.push(f); }
+      // keyed on what stays put between calls, not the signed url: photos
+      // come back with every format's call, freshly signed each time
+      for (const f of got.files) if (!seenFile.has(stableKey(f))) { seenFile.add(stableKey(f)); files.push(f); }
+      for (const f of got.photos) if (!seenFile.has(stableKey(f))) { seenFile.add(stableKey(f)); photos.push(f); }
     } catch (e) { refused.push(fmt); firstErr ??= e; }
   }
   if (refused.length === ALL_FORMATS.length) note("Exported files and photos not imported", firstErr);
@@ -589,7 +603,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   const fromPlan = new Set([...files, ...photos].map(fileKey));
   const seenProj = new Set<string>();
   let fullPage = 0;
-  for (let page = 1; page <= PROJECT_FILES_PAGES; page++) {
+  for (let page = 1; page <= PROJECT_FILES_PAGES && !outOfTime; page++) {
     let resp: unknown, list: MpFile[];
     try {
       resp = await deps.mp(projectFilesPath(project.id, page));
@@ -599,7 +613,16 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
       break;
     }
     const fresh = list.filter((f) => !seenProj.has(fileKey(f)));
-    if (!fresh.length) break;          // the end, or a server that ignores ?page=
+    if (!fresh.length) {
+      // an empty page is the end; a page of files already seen means
+      // Magicplan ignored ?page= — say so, with the keys of its answer
+      // (never values), so the real paging parameter can be read
+      if (page > 1 && list.length) {
+        note(`Project attachments after page ${page - 1} may be missing`,
+          new Error(`Magicplan answered ?page=${page} with files already listed ${shapeOutline(resp, 1)}`));
+      }
+      break;
+    }
     for (const f of fresh) {
       if (seenProj.has(fileKey(f))) continue;
       seenProj.add(fileKey(f));
@@ -658,6 +681,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   }
 
   if (skipped.length) note("Too large to copy", new Error(skipped.join(", ")));
+  if (failed.length) note(`Not copied (${failed.length})`, new Error(`${failed.slice(0, 8).join(", ")}${failed.length > 8 ? ", …" : ""} — first error: ${failedWhy}`));
   if (outOfTime) note("Stopped early", new Error("ran out of time — press ⟳ Pull again for the rest"));
   base.synced_at = deps.now();
   return base;
