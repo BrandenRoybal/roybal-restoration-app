@@ -190,6 +190,7 @@ async function syncInto(sb: Db, projectId: string, fieldProjectId: string, trust
         return data ?? [];
       },
       now: () => new Date().toISOString(),
+      warn: (m) => console.error(`magicplan-proxy sync: ${m}`),
     }, { projectId, fieldProjectId, trustLink });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

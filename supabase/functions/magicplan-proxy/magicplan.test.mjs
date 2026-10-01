@@ -126,15 +126,15 @@ test("mime types follow the file name", () => {
 });
 
 /* ---------- the sync, with fakes ---------- */
-function fakes({ project = PROJECT(), prior = [] } = {}) {
-  const calls = { mp: [], fetched: [], uploaded: [] };
+function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN } = {}) {
+  const calls = { mp: [], fetched: [], uploaded: [], warned: [] };
   const deps = {
     mp: async (p) => {
       calls.mp.push(p);
       if (p === `/projects/${project.data.id}`) return project;
       if (p.startsWith("/plans/6a45b1435520f/files")) return FILES;
-      if (p === "/plans/statistics/6a45b1435520f") return STATS;
-      if (p === `/projects/${project.data.id}/plan`) return PLAN;
+      if (p === "/plans/statistics/6a45b1435520f") { if (stats instanceof Error) throw stats; return stats; }
+      if (p === `/projects/${project.data.id}/plan`) { if (plan instanceof Error) throw plan; return plan; }
       throw new Error("unexpected call " + p);
     },
     fetchBytes: async (url) => { calls.fetched.push(url); return new TextEncoder().encode(url); },
@@ -142,6 +142,7 @@ function fakes({ project = PROJECT(), prior = [] } = {}) {
     upload: async (path, bytes, mime) => { calls.uploaded.push({ path, mime }); },
     priorRows: async () => prior,
     now: () => "2026-09-26T23:00:00Z",
+    warn: (m) => calls.warned.push(m),
   };
   return { deps, calls };
 }
@@ -240,4 +241,30 @@ test("the stored ESX path is a site-visit path the estimator's signer accepts, w
 test("the proxy is pinned verify_jwt = true", () => {
   const toml = readFileSync(join(repo, "supabase", "config.toml"), "utf8");
   assert.match(toml, /\[functions\.magicplan-proxy\]\s*\nverify_jwt = true/);
+});
+
+test("statistics in a shape we don't read: the report, photos and floor plan still land, the row says why", async () => {
+  const { deps, calls } = fakes({ stats: { data: { id: "6a45b1435520f", floors: [{ name: "1st Floor", statistics: { area: 20 } }] } } });
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.equal(row.statistics, null);
+  assert.equal(row.files.length, 1);
+  assert.equal(row.photos.length, 2);
+  assert.equal(row.floors_svg.length, 1);
+  assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape \{data:\{id:string,floors:\[/);
+  assert.equal(calls.warned.length, 1);
+  assert.equal(row.synced_at, "2026-09-26T23:00:00Z");
+});
+test("a failing statistics or plan call never sinks the pull", async () => {
+  const { deps } = fakes({ stats: new Error("Magicplan GET /plans/statistics failed (404)"), plan: new Error("Magicplan GET /plan failed (500)") });
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.equal(row.files.length, 1);
+  assert.equal(row.floors_svg.length, 0);
+  assert.match(row.error, /Room measurements not imported: .*\(404\) · Floor plan images not imported: .*\(500\)/);
+});
+test("shapeOutline names keys only, never values", () => {
+  const o = S.shapeOutline({ data: { address: "1 Test St", url: "https://x/y?sig=secret", floors: [{ name: "A" }] } });
+  assert.equal(o, "{data:{address:string,url:string,floors:[{name}]}}");
+  assert.ok(!o.includes("Test St") && !o.includes("secret"));
 });
