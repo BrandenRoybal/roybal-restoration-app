@@ -5,7 +5,7 @@
   "engines": { "node": ">=22.6" },
   "scripts": {
     "start": "node --experimental-strip-types server.mjs",
-    "test": "node --experimental-strip-types --test test/agent.test.mjs"
+    "test": "node --experimental-strip-types --test test/agent.test.mjs test/draft.test.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -3,6 +3,9 @@
 #   fly deploy --config services/phone-agent/fly.toml --dockerfile services/phone-agent/Dockerfile .
 app = "roybal-phone"
 primary_region = "sjc"   # sea was deprecated by Fly (Jul 2026); sjc is the closest West Coast region
+# time on a stop to queue any estimate draft still running (server.mjs exits
+# as soon as that is done, at once when none is)
+kill_timeout = 30
 
 [http_service]
   internal_port = 8080

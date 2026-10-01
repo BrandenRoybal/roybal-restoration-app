@@ -119,9 +119,29 @@ apology + retry, a second consecutive failure hands the call to voicemail.
 - Caps: `SPEND_CAP_USD`, `VOICE_MINUTES_CAP`, `VOICE_PRICE_PER_MIN`,
   `PHONE_MODEL` — all Fly secrets/env, restart to apply.
 
+## Site Visit estimate drafts (`POST /draft`, `draft.mjs`)
+
+The same machine also runs estimate drafts, because it never sleeps and has
+no wall clock (the edge runner, `roybal-site-draft`, stops at 400 s; a big
+draft can take longer). `roybal-ai-office` finds it from the
+`PHONE_AGENT_WSS` edge secret (`wss://roybal-phone.fly.dev/relay` →
+`https://roybal-phone.fly.dev/draft`) and tries it first, then the edge
+runner, then the half-price batch queue.
+
+- No new secrets: a job is signed with `LLM_API_KEY`, so this machine's key
+  must match the edge functions' key (it already should, per setup step 2).
+  A mismatch only means drafts run on the edge instead.
+- At most three drafts at once; the next one goes to the edge.
+- A deploy or restart queues any draft still running as a batch before the
+  machine stops (`kill_timeout = 30` in `fly.toml`), so none is lost.
+- `fly logs -a roybal-phone` shows one line per draft (`outcome: message`,
+  `batch`, `error`), never the packet.
+- Turn it off without a deploy: edge secret `SITE_DRAFT_RUNNER_URL=off`.
+
 ## Tests
 
 `npm test` in this directory — a fake Twilio client drives a real WebSocket
 against the server with Anthropic/Supabase stubbed: token gate, envelope
 ordering, streaming, lead creation + rate limits, owner texting, escalation,
-and tool-failure resilience.
+and tool-failure resilience. `test/draft.test.mjs` covers `/draft`: the
+signature, freshness, the busy limit, a retried start, and queueing on stop.

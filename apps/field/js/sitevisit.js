@@ -292,6 +292,10 @@ const ago = (iso) => {
   const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
   return m < 1 ? "just now" : m === 1 ? "1 minute ago" : m + " minutes ago";
 };
+/** How long a draft usually takes, by how it runs (sv.pending.mode). */
+export const waitText = (job) => (job && job.mode === "direct"
+  ? "It usually takes a few minutes, longer for a big packet"
+  : "It usually takes 5–30 minutes, up to an hour on a busy day");
 
 /* Load a video into an off-screen <video> element far enough to know its
    duration and picture size. Returns { v, once, release } — release() always. */
@@ -549,11 +553,15 @@ export function siteVisitPanel(ctx) {
     try {
       const packet = packetForDraft(sv);
       const r = await startSiteVisitDraft(project, packet, inv.pricingMode || "piecework", subRatesText());
+      // mode: "direct" runs straight through (minutes); "batch" is the queue
+      // (an office function from before this change, or the fallback) — it only
+      // changes the wording
       sv.pending = { batchId: r.batchId, invId: inv.id, startedAt: new Date().toISOString(), pricingMode: inv.pricingMode || "piecework",
+        mode: r.mode === "direct" ? "direct" : "batch",
         magicplanScannedAt: packet.magicplanQuantities ? packet.magicplanQuantities.scannedAt || "" : null };   // M3: what THIS draft measured from
       ctx.save();
       paint("");
-      toast("Drafting from the site visit. Usually 5–30 minutes, up to an hour on a busy day; you can leave this page.");
+      toast(`Drafting from the site visit. ${waitText(sv.pending)}. You can leave this page.`);
     } catch (e) {
       btn.disabled = false;
       toast("Couldn't start the draft: " + (e && e.message ? e.message : e), 4000);
@@ -566,7 +574,12 @@ export function siteVisitPanel(ctx) {
     if (!root.isConnected && !manual) { stopTimer(); return; }
     try {
       const r = await checkSiteVisitDraft(project, job.batchId, job.pricingMode);
-      if (r.status !== "done") { if (manual) toast("Still drafting."); paint(""); return; }
+      if (r.status !== "done") {
+        // a direct run that fell back to the queue says so; the wording follows
+        if (r.mode && r.mode !== job.mode) { job.mode = r.mode; ctx.save(); }
+        if (manual) toast("Still drafting.");
+        paint(""); return;
+      }
       const target = job.invId === inv.id ? inv : arr(project.reconEstimates).find((e) => e && e.id === job.invId) || inv;
       const draft = r.draft || {};
       // M3: the estimate's Pricing Basis says where measured quantities came from —
@@ -782,7 +795,7 @@ export function siteVisitPanel(ctx) {
       ? h("div", { style: "margin-top:10px;padding:8px 10px;border-radius:8px;background:#fff4e5;border:1px solid #f0b463;font-size:13px" },
           h("strong", {}, "Drafting from the site visit"),
           h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
-            `Started ${ago(job.startedAt)}. It usually takes 5–30 minutes, up to an hour on a busy day. You can leave this page; open this estimate again to load it.`),
+            `Started ${ago(job.startedAt)}. ${waitText(job)}. You can leave this page; open this estimate again to load it.`),
           checkBtn)
       : h("div", { style: "margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, go,
           sv.lastDraftAt ? h("span", { class: "subtle", style: "font-size:12px" }, `Last drafted ${ago(sv.lastDraftAt)}`) : null);

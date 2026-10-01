@@ -24,6 +24,9 @@
    setup — wrong/missing token speaks nothing and hands off to
    voicemail. Transcripts are NOT persisted (working chatter);
    only the lead, the owner text, and the usage row remain.
+
+   The same machine also runs Site Visit estimate drafts on
+   POST /draft (draft.mjs): always on, no wall clock.
    ============================================================ */
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
@@ -31,6 +34,7 @@ import { PERSONAS, PHONE_TOOLS, PHONE_TOOL_RULE } from "../../supabase/functions
 import { RELAY_TOKEN, OWNER_NAME, PORT, SPEND_CAP_USD, VOICE_MINUTES_CAP, VOICE_PRICE_PER_MIN, PHONE_MODEL, priceFor } from "./config.mjs";
 import { signIn, insertRow, patchCaptureEvent, monthSpend, monthPhoneSeconds } from "./supa.mjs";
 import { runTurn, probeLLM } from "./brain.mjs";
+import { handleDraft, drainDrafts, liveDraftCount } from "./draft.mjs";
 
 const TOOLS = Object.values(PHONE_TOOLS);
 
@@ -186,9 +190,13 @@ async function closeOut(session) {
 export function createAgentServer() {
   const http = createServer((req, res) => {
     if (req.url === "/healthz") { res.writeHead(200); res.end("ok"); return; }
+    // Site Visit estimate drafts (draft.mjs): not part of the phone line
+    if (req.url === "/draft") { handleDraft(req, res); return; }
     res.writeHead(404); res.end();
   });
-  const wss = new WebSocketServer({ server: http, path: "/relay" });
+  // ConversationRelay messages are small text; the ws default (100 MiB) would
+  // let anyone fill this 256 MB machine before the token check
+  const wss = new WebSocketServer({ server: http, path: "/relay", maxPayload: 1024 * 1024 });
   wss.on("connection", (ws) => {
     const session = newSession(ws);
     ws.on("message", (raw) => {
@@ -218,4 +226,15 @@ if (process.env.NODE_ENV !== "test") {
       "callers get two apologies then voicemail. Fix LLM_API_KEY / PHONE_MODEL in Fly secrets. " +
       `Probe error ${e.message}`));
   createAgentServer().listen(PORT, () => console.log(`phone agent on :${PORT}`));
+  // a deploy or restart stops the machine (Fly sends SIGINT): queue any
+  // estimate draft still running before exiting, so none is lost
+  for (const sig of ["SIGINT", "SIGTERM"]) {
+    process.once(sig, () => {
+      const n = liveDraftCount();
+      if (n) console.log(`${sig}: queueing ${n} running draft(s) as batches before exit`);
+      // inside fly.toml's kill_timeout (30 s)
+      Promise.race([drainDrafts(`the draft machine restarted (${sig})`), new Promise((r) => setTimeout(r, 28_000))])
+        .finally(() => process.exit(0));
+    });
+  }
 }
