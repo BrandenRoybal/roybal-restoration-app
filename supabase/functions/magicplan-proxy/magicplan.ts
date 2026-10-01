@@ -124,10 +124,13 @@ export function mpHeaders(key: string, customer: string, json = false): Record<s
     …"): the Report PDF, drawings (svg/png/jpg/dxf), the 3D model (usdz,
     obj, ifc), Magicplan's plan files (fml, xfif, xml, magicplan) and the
     spreadsheets (xls, csv). A format only comes back once it has been
-    exported in the app or by the workspace's export configuration. */
+    exported in the app or by the workspace's export configuration.
+    Asked ONE FORMAT PER CALL: the live API refuses several format[] values
+    in one request (10/1 18:00, "Value [...] for argument format is
+    invalid"), while a single format[]=pdf has always worked. */
 export const ALL_FORMATS = ["pdf", "jpg", "svg", "png", "usdz", "xls", "csv", "obj", "ifc", "dxf", "fml", "xfif", "xml", "magicplan"];
-export const filesPath = (planId: string) =>
-  `/plans/${encodeURIComponent(planId)}/files?${ALL_FORMATS.map((f) => `format[]=${f}`).join("&")}&include_photos=true`;
+export const filesPath = (planId: string, format: string) =>
+  `/plans/${encodeURIComponent(planId)}/files?format[]=${encodeURIComponent(format)}&include_photos=true`;
 
 /** The body of POST /projects. `email` is the MAGICPLAN_PROJECT_EMAIL secret
     (§6 ruling 1), never the caller; the name carries the environment prefix. */
@@ -252,13 +255,56 @@ export function planUnitsOf(resp: unknown): "metric" | "imperial" {
     unit conversion and rounding stay the one tested path. A plan with
     floors but no readable room figures throws with the room's key outline
     (keys only), so the next fix reads the live shape. */
-export function statsFromPlan(planResp: unknown, units: "metric" | "imperial"): Stats {
+const METRIC_KEYS: Record<string, number> = {
+  area: M2_FT2, area_without_walls: M2_FT2, walls_surface: M2_FT2, walls_surface_without_openings: M2_FT2,
+  perimeter: M_FT, ground_perimeter: M_FT, height: M_FT, volume: M3_FT3,
+};
+/** Which units the plan's room figures are in. The first live pull (10/1
+    18:00, a 12 x 12 ft bedroom on an imperial project) gave floor 14,
+    perimeter 13.5, walls 37, volume 35: square metres and metres, though
+    the statistics call says "imperial". So compare against the
+    statistics call's own plan totals: rooms summing to about a tenth of
+    the stated floor area are metric, and are converted to feet. And a
+    physical check that needs no totals: on an imperial project, rooms
+    whose walls average 1.8 to 4.5 high (wall area / perimeter) are in
+    metres, since no room has a 4 ft ceiling. */
+export function roomScale(fl: Json[], totals: unknown, units: "metric" | "imperial" = "imperial"): "same" | "metric-in-imperial" {
+  if (units !== "imperial") return "same";
+  const t = totals && typeof totals === "object" ? totals as Json : null;
+  const stated = num(t && (t.area_without_walls ?? t.area));
+  let sum = 0, wall = 0, perim = 0;
+  for (const f of fl) for (const rm of arr<Json>(f && f.rooms)) {
+    const st = rm && typeof rm === "object" && rm.statistics && typeof rm.statistics === "object" ? rm.statistics as Json : null;
+    sum += num(st && st.area_without_walls);
+    wall += num(st && st.walls_surface);
+    perim += num(st && st.ground_perimeter);
+  }
+  if (stated && sum) {
+    const ratio = stated / sum;
+    if (ratio > 7 && ratio < 16) return "metric-in-imperial";
+    if (ratio > 0.7 && ratio < 1.4) {
+      const h = perim ? wall / perim : 0;
+      return h >= 1.8 && h <= 4.5 ? "metric-in-imperial" : "same";
+    }
+    return "same";
+  }
+  const h = perim ? wall / perim : 0;
+  return h >= 1.8 && h <= 4.5 ? "metric-in-imperial" : "same";
+}
+/** The units and whole-plan totals from GET /plans/statistics/{id}. */
+export function planTotalsOf(resp: unknown): Json | null {
+  const d = resp && typeof resp === "object" ? (resp as Json).data as Json : null;
+  const t = d && typeof d === "object" ? d.project_statistics : null;
+  return t && typeof t === "object" ? t as Json : null;
+}
+export function statsFromPlan(planResp: unknown, units: "metric" | "imperial", statsTotals: unknown = null): Stats {
   const d = planResp && typeof planResp === "object" ? (planResp as Json).data as Json : null;
   need(d && typeof d === "object", "plan");
   const pd = (d.plan_data && typeof d.plan_data === "object" ? d.plan_data : {}) as Json;
   const fl = arr<Json>(pd.floors).filter((f) => f && typeof f === "object");
   const obj = (v: unknown) => (v && typeof v === "object" && !Array.isArray(v) ? v as Json : null);
   let rooms = 0, measured = 0;
+  const scale = roomScale(fl, statsTotals, units);
   const floors = fl.map((f) => {
     const fs = obj(f.statistics) || {};
     return {
@@ -267,7 +313,11 @@ export function statsFromPlan(planResp: unknown, units: "metric" | "imperial"): 
         rooms++;
         const st = obj(rm.statistics);
         if (st) measured++;
-        return { ...(st || {}), name: str(rm.name) || str(st && st.name) };
+        const x: Json = { ...(st || {}) };
+        // no room height on the live plan: the ceiling is volume / floor area
+        if (!num(x.height) && num(x.volume) && num(x.area_without_walls)) x.height = num(x.volume) / num(x.area_without_walls);
+        if (scale === "metric-in-imperial") for (const [k, v] of Object.entries(METRIC_KEYS)) if (x[k] != null) x[k] = num(x[k]) * v;
+        return { ...x, name: str(rm.name) || str(st && st.name) };
       }),
     };
   });
@@ -476,9 +526,18 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
 
   // 1. Every exported file and every pinned photo (videos included, when
   //    Magicplan lists them with the photos)
-  let listed: ReturnType<typeof filesOf> = { files: [], photos: [] };
-  try { listed = filesOf(await deps.mp(filesPath(project.planId))); } catch (e) { note("Exported files and photos not imported", e); }
-  const { files, photos } = listed;
+  const files: MpFile[] = [], photos: MpFile[] = [];
+  const seenFile = new Set<string>(), refused: string[] = [];
+  let firstErr: unknown = null;
+  for (const fmt of ALL_FORMATS) {
+    try {
+      const got = filesOf(await deps.mp(filesPath(project.planId, fmt)));
+      for (const f of got.files) if (!seenFile.has(f.url)) { seenFile.add(f.url); files.push(f); }
+      for (const f of got.photos) if (!seenFile.has(f.url)) { seenFile.add(f.url); photos.push(f); }
+    } catch (e) { refused.push(fmt); firstErr ??= e; }
+  }
+  if (refused.length === ALL_FORMATS.length) note("Exported files and photos not imported", firstErr);
+  else if (refused.length) note(`Magicplan refused these formats: ${refused.join(", ")}`, firstErr);
   for (const f of files) {
     const s = await fetchOne(f, f.name || "Magicplan file");
     if (s) base.files.push({ ...s, folder: f.folder, kind: kindOf(f.name, f.fileType) });
@@ -506,7 +565,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   if (plan) {
     try {
       statsResp = await deps.mp(`/plans/statistics/${encodeURIComponent(project.planId)}`);
-      base.statistics = statsFromPlan(plan, planUnitsOf(statsResp));
+      base.statistics = statsFromPlan(plan, planUnitsOf(statsResp), planTotalsOf(statsResp));
     } catch (e) { note("Room measurements not imported", e); }
 
     try {
