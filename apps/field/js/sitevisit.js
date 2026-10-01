@@ -554,7 +554,8 @@ export function siteVisitPanel(ctx) {
       const packet = packetForDraft(sv);
       const r = await startSiteVisitDraft(project, packet, inv.pricingMode || "piecework", subRatesText());
       // mode: "direct" runs straight through (minutes); "batch" is the queue
-      // (a server before v193's, or the fallback) — it only changes the wording
+      // (an office function from before this change, or the fallback) — it only
+      // changes the wording
       sv.pending = { batchId: r.batchId, invId: inv.id, startedAt: new Date().toISOString(), pricingMode: inv.pricingMode || "piecework",
         mode: r.mode === "direct" ? "direct" : "batch",
         magicplanScannedAt: packet.magicplanQuantities ? packet.magicplanQuantities.scannedAt || "" : null };   // M3: what THIS draft measured from
