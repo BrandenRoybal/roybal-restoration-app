@@ -35,20 +35,28 @@ const FILES = { data: {
 } };
 const room = (name, o = {}) => ({ uid: "r", name, area: 0, perimeter: 0, ground_perimeter: 0, area_without_walls: 0, height: 0, volume: 0,
   walls_surface: 0, walls_surface_without_openings: 0, door_count: 0, window_count: 0, dimensions: "", furnitures: [], wall_items: [], ...o });
-const STATS = { id: "6a45b1435520f", project_id: "5d0c3a3e-0000-4000-8000-000000000001", units: "imperial", statistics: {
+/* the normalizer's input shape (field app lockstep) */
+const LEGACY = { id: "6a45b1435520f", project_id: "5d0c3a3e-0000-4000-8000-000000000001", units: "imperial", statistics: {
   uid: "p", name: "plan", room_count: 1, floors: [{ uid: "f1", name: "1st Floor", height: 8, room_count: 1,
     rooms: [room("Living Room", { area_without_walls: 214.4, ground_perimeter: 58, height: 8, volume: 1715, walls_surface: 465, walls_surface_without_openings: 403, door_count: 2, window_count: 3 })] }],
 } };
-const PLAN = { data: { id: "p", name: "plan", unit: "feet", plan_data: { floors: [{ uid: "f1", name: "1st Floor", image: "https://cloud.magicplan.app/api/v2/images/plan/6a45b1435520f/svg/f1.svg", rooms: [] }] } } };
+/* GET /plans/statistics/{id}, live 2026-10-01: wrapped, plan totals only */
+const STATS = { data: { id: "6a45b1435520f", project_id: "5d0c3a3e-0000-4000-8000-000000000001", units: "imperial",
+  project_statistics: { name: "plan", area: 230, perimeter: 60, ground_perimeter: 58, area_without_walls: 214.4, room_count: 1, door_count: 2, window_count: 3 } } };
+/* GET /projects/{id}/plan: per-room statistics on each room */
+const PLAN = { data: { id: "p", name: "plan", unit: "feet", plan_data: { floors: [{ uid: "f1", name: "1st Floor", image: "https://cloud.magicplan.app/api/v2/images/plan/6a45b1435520f/svg/f1.svg",
+  statistics: { height: 8 },
+  rooms: [{ uid: "r1", name: "Living Room", formatted_dimensions: "", walls: [], objects: [],
+    statistics: { area_without_walls: 214.4, ground_perimeter: 58, height: 8, volume: 1715, walls_surface: 465, walls_surface_without_openings: 403, door_count: 2, window_count: 3 } }] }] } } };
 const WORKSPACE = { id: "ws-1", name: "Roybal Construction", owner: { id: "o", email: "owner@example.invalid", firstname: "", lastname: "" },
   created: "2026-01-01", formats: ["pdf"], webhook_url: null, listing_url: null, authorize_url: null, authentication_url: "", access_token_url: null,
   logo: null, notify_user: false, last_modified: "2026-09-24", users: [] };
 
 /* ---------- lockstep with the field app ---------- */
 test("server and field app normalize the same statistics identically", () => {
-  const metric = { ...STATS, units: "metric", statistics: { floors: [{ name: "Ground", height: 2.44, rooms: [room("Kitchen", { area_without_walls: 10, ground_perimeter: 13, volume: 24.4, walls_surface: 31.7, walls_surface_without_openings: 27 })] },
+  const metric = { ...LEGACY, units: "metric", statistics: { floors: [{ name: "Ground", height: 2.44, rooms: [room("Kitchen", { area_without_walls: 10, ground_perimeter: 13, volume: 24.4, walls_surface: 31.7, walls_surface_without_openings: 27 })] },
     { name: "Upstairs", rooms: [room("Kitchen"), room("Bath"), room("bath")] }] } };
-  for (const s of [STATS, metric, {}, null]) {
+  for (const s of [LEGACY, metric, {}, null]) {
     assert.deepEqual(S.normalizeStatistics(s), C.normalizeStatistics(s));
     assert.deepEqual(S.dedupeRoomNames(S.normalizeStatistics(s).floors), C.dedupeRoomNames(C.normalizeStatistics(s).floors));
   }
@@ -85,7 +93,8 @@ test("projectOf reads {data: Project}; findOurs matches on external_reference_id
 test("a response in the wrong shape throws with the call's name — no guessing", () => {
   assert.throws(() => S.projectOf(PROJECT().data), /Magicplan project: unexpected response shape/);
   assert.throws(() => S.filesOf({ files: [] }), /plan files/);
-  assert.throws(() => S.statisticsOf({ data: STATS }), /statistics/);   // statistics is NOT wrapped
+  assert.throws(() => S.planUnitsOf(STATS.data), /statistics: unexpected response shape \{id:string/);  // statistics IS wrapped (live)
+  assert.throws(() => S.planUnitsOf({ data: { units: "cubits" } }), /unknown units "cubits"/);
   assert.throws(() => S.workspaceOf({ data: WORKSPACE }), /workspace/); // nor is workspace
   assert.throws(() => S.findOurs({ projects: [] }, "x"), /project search/);
 });
@@ -126,7 +135,8 @@ test("mime types follow the file name", () => {
 });
 
 /* ---------- the sync, with fakes ---------- */
-function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN } = {}) {
+const FORMS = { data: [{ symbol_type: "room", symbol_instance_id: "r1", forms: [{ title: "Site walk", sections: [{ fields: [{ label: "Damage", value: "Wet drywall 2 ft" }] }] }] }] };
+function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN, projectFiles = { data: [] }, timeLeft } = {}) {
   const calls = { mp: [], fetched: [], uploaded: [], warned: [] };
   const deps = {
     mp: async (p) => {
@@ -135,6 +145,9 @@ function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN } =
       if (p.startsWith("/plans/6a45b1435520f/files")) return FILES;
       if (p === "/plans/statistics/6a45b1435520f") { if (stats instanceof Error) throw stats; return stats; }
       if (p === `/projects/${project.data.id}/plan`) { if (plan instanceof Error) throw plan; return plan; }
+      if (p === `/projects/${project.data.id}/files`) return projectFiles;
+      if (p === "/plans/forms/6a45b1435520f") return FORMS;
+      if (p === "/plans/get/6a45b1435520f") return { data: { id: "6a45b1435520f", name: "plan" } };
       throw new Error("unexpected call " + p);
     },
     fetchBytes: async (url) => { calls.fetched.push(url); return new TextEncoder().encode(url); },
@@ -143,6 +156,7 @@ function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN } =
     priorRows: async () => prior,
     now: () => "2026-09-26T23:00:00Z",
     warn: (m) => calls.warned.push(m),
+    ...(timeLeft ? { timeLeft } : {}),
   };
   return { deps, calls };
 }
@@ -153,15 +167,16 @@ test("sync copies the report, the room-tagged photos and the floor SVG, and buil
   assert.equal(row.status, "ready");
   assert.equal(row.field_project_id, "bj-lead_42");
   assert.equal(row.mp_plan_id, "6a45b1435520f");
-  assert.equal(row.files.length, 1);
+  assert.equal(row.files.filter((f) => f.kind === "report").length, 1);
+  assert.deepEqual(row.files.filter((f) => f.kind === "data").map((f) => f.name), ["Magicplan plan.json", "Magicplan statistics.json", "Magicplan forms.json", "Magicplan project.json"]);
   assert.equal(row.files[0].mime, "application/pdf");
   assert.match(row.files[0].path, /^sitevisit\/bj-lead_42\/mp-[0-9a-f]{8}-Report\.pdf$/);
   assert.deepEqual(row.photos.map((p) => [p.room, p.caption, p.symbol_instance_id]), [["Living Room", "Window", "sym-1"], ["Living Room", "Outlet", "sym-2"]]);
   assert.equal(row.statistics.floors[0].rooms[0].floorSF, 214);
   assert.equal(row.floors_svg[0].floor, "1st Floor");
-  assert.equal(calls.uploaded.length, 4);
+  assert.equal(calls.uploaded.length, 8);   // report, 2 photos, floor SVG + 4 JSON
   assert.ok(calls.uploaded.every((u) => officeIsSitePath(u.path)));
-  assert.ok(calls.mp.includes("/plans/6a45b1435520f/files?format[]=pdf&include_photos=true"));
+  assert.ok(calls.mp.includes("/plans/6a45b1435520f/files?format[]=pdf&format[]=jpg&format[]=png&format[]=svg&format[]=dxf&format[]=usdz&format[]=xls&format[]=csv&format[]=ifc&format[]=fml&format[]=xml&format[]=mp&include_photos=true"));
   assert.equal(row.synced_at, "2026-09-26T23:00:00Z");
 });
 test("a project that belongs to another job comes back unmatched with nothing downloaded", async () => {
@@ -189,7 +204,7 @@ test("a second pull downloads nothing it already holds for this job", async () =
   // …but the same scan relinked to ANOTHER job gets its own copies
   const other = fakes({ prior: [first], project: PROJECT({ external_reference_id: "bj-other" }) });
   const moved = await S.runSync(other.deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-other" });
-  assert.equal(other.calls.uploaded.length, 4);
+  assert.equal(other.calls.uploaded.length, 8);
   assert.ok(moved.files[0].path.startsWith("sitevisit/bj-other/"));
 });
 test("a failing Magicplan call propagates (the caller records a failed row and toasts it)", async () => {
@@ -244,27 +259,97 @@ test("the proxy is pinned verify_jwt = true", () => {
 });
 
 test("statistics in a shape we don't read: the report, photos and floor plan still land, the row says why", async () => {
-  const { deps, calls } = fakes({ stats: { data: { id: "6a45b1435520f", floors: [{ name: "1st Floor", statistics: { area: 20 } }] } } });
+  const { deps, calls } = fakes({ stats: { id: "6a45b1435520f", statistics: { floors: [] } } });
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
   assert.equal(row.statistics, null);
-  assert.equal(row.files.length, 1);
+  assert.equal(row.files.filter((f) => f.kind === "report").length, 1);
   assert.equal(row.photos.length, 2);
   assert.equal(row.floors_svg.length, 1);
-  assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape \{data:\{id:string,floors:\[/);
+  assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape \{id:string,statistics:\{floors:\[\]\}\}/);
   assert.equal(calls.warned.length, 1);
   assert.equal(row.synced_at, "2026-09-26T23:00:00Z");
 });
 test("a failing statistics or plan call never sinks the pull", async () => {
   const { deps } = fakes({ stats: new Error("Magicplan GET /plans/statistics failed (404)"), plan: new Error("Magicplan GET /plan failed (500)") });
+  const r2 = await S.runSync(fakes({ stats: new Error("Magicplan GET /plans/statistics failed (404)") }).deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(r2.floors_svg.length, 1);
+  assert.match(r2.error, /^Room measurements not imported: .*\(404\)$/);
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
-  assert.equal(row.files.length, 1);
+  assert.equal(row.files.filter((f) => f.kind === "report").length, 1);
   assert.equal(row.floors_svg.length, 0);
-  assert.match(row.error, /Room measurements not imported: .*\(404\) · Floor plan images not imported: .*\(500\)/);
+  assert.match(row.error, /^Floor plan not read: .*\(500\)$/);
 });
 test("shapeOutline names keys only, never values", () => {
   const o = S.shapeOutline({ data: { address: "1 Test St", url: "https://x/y?sig=secret", floors: [{ name: "A" }] } });
   assert.equal(o, "{data:{address:string,url:string,floors:[{name}]}}");
   assert.ok(!o.includes("Test St") && !o.includes("secret"));
+});
+
+test("room measurements come from the plan's rooms, in the statistics endpoint's units", () => {
+  const st = S.statsFromPlan(PLAN, S.planUnitsOf(STATS));
+  assert.equal(st.units, "imperial");
+  assert.deepEqual(st.floors[0].rooms[0], { name: "Living Room", floorSF: 214, perimLF: 58, ceilingFt: 8, wallSF: 465, wallSFNet: 403, doors: 2, windows: 3, volumeCF: 1715, dims: "" });
+  // metric converts once, exactly as the normalizer does
+  const m = S.statsFromPlan(PLAN, S.planUnitsOf({ data: { units: "metric" } }));
+  assert.equal(m.units, "metric");
+  assert.equal(m.floors[0].rooms[0].floorSF, Math.round(214.4 * 10.764));
+  // a floor height fills a room with none
+  const noH = JSON.parse(JSON.stringify(PLAN)); delete noH.data.plan_data.floors[0].rooms[0].statistics.height;
+  assert.equal(S.statsFromPlan(noH, "imperial").floors[0].rooms[0].ceilingFt, 8);
+  // rooms with no statistics: say so with the room's keys, never values
+  const bare = JSON.parse(JSON.stringify(PLAN)); delete bare.data.plan_data.floors[0].rooms[0].statistics;
+  assert.throws(() => S.statsFromPlan(bare, "imperial"), /no statistics on rooms \{uid:string,name:string,formatted_dimensions:string,walls:\[\],objects:\[\]\}/);
+  // statistics with names we don't read: say which names, never values
+  const odd = JSON.parse(JSON.stringify(PLAN)); odd.data.plan_data.floors[0].rooms[0].statistics = { surface_area: 20, len: 4 };
+  assert.throws(() => S.statsFromPlan(odd, "imperial"), /no measurements we read in room statistics \{surface_area:number,len:number,name:string\}/);
+  // a plan with no rooms is an empty, valid result
+  assert.deepEqual(S.statsFromPlan({ data: { plan_data: { floors: [] } } }, "imperial"), { units: "imperial", floors: [] });
+});
+
+/* ---------- everything in the project (Branden 10/1: "download everything") ---------- */
+const PLAN_ROOMS = { data: { ...PLAN.data, plan_data: { floors: [{ ...PLAN.data.plan_data.floors[0],
+  rooms: [{ ...PLAN.data.plan_data.floors[0].rooms[0], image: "https://cloud.magicplan.app/api/v2/images/plan/6a45b1435520f/svg/r1.svg" }] }] } } };
+const FILES_ALL = { data: {
+  files: [...FILES.data.files,
+    { name: "Scan.usdz", folder: "3D", url: "https://files.example.invalid/s.usdz?sig=1", last_modified: "2026-09-26T22:39:00Z", size: 7, file_type: "usdz" },
+    { name: "Plan.dxf", folder: "DXF", url: "https://files.example.invalid/p.dxf?sig=1", last_modified: "2026-09-26T22:39:00Z", size: 7, file_type: "dxf" },
+    { name: "Huge.ifc", folder: "IFC", url: "https://files.example.invalid/h.ifc?sig=1", last_modified: "2026-09-26T22:39:00Z", size: S.MAX_FILE_BYTES + 1, file_type: "ifc" }],
+  photos: [...FILES.data.photos,
+    { symbol_instance_id: "sym-3", name: "1st Floor - Living Room - Ceiling - 3.mov", folder: "Captured photos", url: "https://files.example.invalid/v.mov?sig=1", last_modified: "2026-09-26T22:32:00Z", size: 9, file_type: "mov" }],
+} };
+test("a pull keeps everything: 3D, drawings, videos, attachments, each room's plan, and the raw data", async () => {
+  const { deps } = fakes({ plan: PLAN_ROOMS, projectFiles: { data: [{ name: "Walkthrough.mp4", url: "https://files.example.invalid/w.mp4?sig=1", size: 11 }] } });
+  deps.mp = ((mp) => async (p) => (p.startsWith("/plans/6a45b1435520f/files") ? FILES_ALL : mp(p)))(deps.mp);
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  const by = (k) => row.files.filter((f) => f.kind === k).map((f) => f.name);
+  assert.deepEqual(by("report"), ["Report.pdf"]);
+  assert.deepEqual(by("model3d"), ["Scan.usdz"]);
+  assert.deepEqual(by("drawing"), ["Plan.dxf"]);
+  assert.deepEqual(by("video"), ["1st Floor - Living Room - Ceiling - 3.mov", "Walkthrough.mp4"]);
+  assert.deepEqual(row.files.filter((f) => f.kind === "room").map((f) => [f.floor, f.room]), [["1st Floor", "Living Room"]]);
+  assert.equal(row.photos.length, 2);   // the video isn't a photo
+  assert.equal(row.files.find((f) => f.name === "Scan.usdz").mime, "model/vnd.usdz+zip");
+  assert.ok(row.files.every((f) => officeIsSitePath(f.path)));
+  assert.match(row.error, /Too large to copy: Huge\.ifc \(150 MB\)/);
+  assert.equal(row.status, "ready");
+});
+test("a pull that runs low on time stops starting downloads and says to pull again", async () => {
+  let left = 200_000;
+  const { deps, calls } = fakes({ timeLeft: () => (left -= 50_000) });
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.ok(calls.fetched.length < 4);
+  assert.match(row.error, /press ⟳ Pull again for the rest/);
+});
+test("project files in a shape we don't read are noted, not fatal", async () => {
+  const { deps } = fakes({ projectFiles: { files: [] } });
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.match(row.error, /^Project attachments not imported: Magicplan project files: unexpected response shape \{files:\[\]\}/);
+});
+test("kindOf sorts what a pull brings back", () => {
+  assert.deepEqual(["a.pdf", "a.usdz", "a.ifc", "a.MOV", "a.mp4", "a.jpg", "a.svg", "a.dxf", "a.csv", "a.fml", "noext"].map((n) => S.kindOf(n)),
+    ["report", "model3d", "model3d", "video", "video", "photo", "drawing", "drawing", "data", "data", "data"]);
 });

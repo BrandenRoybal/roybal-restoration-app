@@ -187,11 +187,14 @@ export function adoptExport(project, row, at = new Date().toISOString()) {
     else sv.files.push(f);
     return true;
   };
-  let reports = 0, photos = 0;
+  let reports = 0, photos = 0, others = 0;
   for (const f of arr(row && row.files)) {
     if (!f || !f.path || !f.hash) continue;
-    if (put({ id: mpFileId(f.hash), kind: "report", name: f.name || "Magicplan report.pdf", path: f.path,
-      mime: f.mime || "application/pdf", size: num(f.size), room: "", caption: "", source: "magicplan", at })) reports++;
+    if (isMpReport(f)) {
+      if (put({ id: mpFileId(f.hash), kind: "report", name: f.name || "Magicplan report.pdf", path: f.path,
+        mime: f.mime || "application/pdf", size: num(f.size), room: "", caption: "", source: "magicplan", at })) reports++;
+    } else if (put({ id: mpFileId(f.hash), kind: "mpfiles", mpKind: f.kind || "data", name: f.name || "Magicplan file", path: f.path,
+      mime: f.mime || "application/octet-stream", size: num(f.size), room: f.room || "", caption: f.folder || "", source: "magicplan", at })) others++;
   }
   for (const f of arr(row && row.photos)) {
     if (!f || !f.path || !f.hash) continue;
@@ -221,15 +224,28 @@ export function adoptExport(project, row, at = new Date().toISOString()) {
     statistics: stats,
     floors: arr(row && row.floors_svg).map((f) => ({ floor: f.floor || "", path: f.path || "" })),
   };
-  return { reports, photos, rooms: labels.length, dimsAdded: dims.added, dimsUpdated: dims.updated, accepted: dims.accepted };
+  return { reports, photos, others, rooms: labels.length, dimsAdded: dims.added, dimsUpdated: dims.updated, accepted: dims.accepted };
 }
+
+/* A row's files: only a PDF is a report the estimate draft reads. Everything
+   else a pull brings back (3D model, drawings, videos, each room's plan, the
+   raw data) is kept as kind "mpfiles": listed and openable in the Site Visit
+   panel, never sent to the draft. Rows from before 10/1 carry no kind; their
+   files were all PDFs. */
+export function isMpReport(f) {
+  return f && (f.kind ? f.kind === "report" : /pdf/i.test(String(f.mime || "")) || /\.pdf$/i.test(String(f.name || "")));
+}
+const MP_KIND_LABEL = { model3d: "3D", drawing: "drawing", video: "video", room: "room plan", data: "data", photo: "image", report: "report" };
+export const mpKindLabel = (k) => MP_KIND_LABEL[k] || "file";
 
 /** "1 report, 14 photos, 6 rooms measured" — the banner's summary of a row. */
 export function exportSummary(row) {
   const n = (x, one, many) => `${x} ${x === 1 ? one : many}`;
   const rooms = row && row.statistics ? dedupeRoomNames(row.statistics.floors).length : 0;
-  return [n(arr(row && row.files).length, "report", "reports"), n(arr(row && row.photos).length, "photo", "photos"),
-    n(rooms, "room measured", "rooms measured")].join(", ");
+  const files = arr(row && row.files).filter((f) => f);
+  const reports = files.filter(isMpReport).length, others = files.length - reports;
+  return [n(reports, "report", "reports"), n(arr(row && row.photos).length, "photo", "photos"),
+    n(rooms, "room measured", "rooms measured"), ...(others ? [n(others, "other file", "other files")] : [])].join(", ");
 }
 
 /* ---------- the Bid card line ----------

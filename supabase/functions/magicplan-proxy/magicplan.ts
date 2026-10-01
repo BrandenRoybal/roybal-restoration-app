@@ -5,8 +5,9 @@
  * docs/Magicplan_Integration_Design.md is the spec. Response shapes here are
  * the LIVE ones, read from the Cloud API's OpenAPI 3.1.1 document (API v1.2)
  * on 2026-09-25, and where they differ from design §1 the live one wins:
- *   - GET /workspace and GET /plans/statistics/{id} are NOT wrapped in
- *     {data}; every other call used here is.
+ *   - GET /workspace is NOT wrapped in {data}; every other call used here
+ *     is, GET /plans/statistics/{id} included (seen live 2026-10-01, which
+ *     also showed it carries plan totals only: rooms come from the plan).
  *   - GET /projects/{id}/plan puts the floors under data.plan_data.floors.
  *   - GET /projects (the name search) lists no plan_id — the project itself
  *     is read to get it.
@@ -119,7 +120,14 @@ export function mpHeaders(key: string, customer: string, json = false): Record<s
   return { key, customer, accept: "application/json", ...(json ? { "content-type": "application/json" } : {}) };
 }
 /** GET /plans/{id}/files query: Report PDF(s) + the photos pinned in the scan. */
-export const filesPath = (planId: string) => `/plans/${encodeURIComponent(planId)}/files?format[]=pdf&include_photos=true`;
+/** Every export format the API lists (design §1): the Report PDF, drawings
+    (svg/png/jpg/dxf), the 3D model (usdz, ifc), Magicplan's own plan files
+    (fml, xml, mp) and the spreadsheets (xls, csv). A format only comes back
+    once it has been exported in the app or by the workspace's export
+    configuration. */
+export const ALL_FORMATS = ["pdf", "jpg", "png", "svg", "dxf", "usdz", "xls", "csv", "ifc", "fml", "xml", "mp"];
+export const filesPath = (planId: string) =>
+  `/plans/${encodeURIComponent(planId)}/files?${ALL_FORMATS.map((f) => `format[]=${f}`).join("&")}&include_photos=true`;
 
 /** The body of POST /projects. `email` is the MAGICPLAN_PROJECT_EMAIL secret
     (§6 ruling 1), never the caller; the name carries the environment prefix. */
@@ -181,6 +189,36 @@ export function floorImagesOf(resp: unknown) {
   const pd = (d.plan_data && typeof d.plan_data === "object" ? d.plan_data : {}) as Json;
   return arr<Json>(pd.floors).map((f, i) => ({ name: str(f && f.name) || `Floor ${i + 1}`, image: str(f && f.image) })).filter((f) => f.image);
 }
+/** Every room's own drawing — data.plan_data.floors[].rooms[].image (design §1). */
+export function roomImagesOf(resp: unknown) {
+  const d = resp && typeof resp === "object" ? (resp as Json).data as Json : null;
+  need(d && typeof d === "object", "plan");
+  const pd = (d.plan_data && typeof d.plan_data === "object" ? d.plan_data : {}) as Json;
+  const out: Array<{ floor: string; room: string; image: string }> = [];
+  arr<Json>(pd.floors).forEach((f, fi) => {
+    arr<Json>(f && f.rooms).forEach((rm, ri) => {
+      const image = str(rm && rm.image);
+      if (image) out.push({ floor: str(f && f.name) || `Floor ${fi + 1}`, room: str(rm && rm.name) || `Room ${ri + 1}`, image });
+    });
+  });
+  return out;
+}
+/** {data: [ProjectFile]} — GET /projects/{id}/files, the files attached to
+    the project (not yet seen live: an item without a URL is skipped, and a
+    response that isn't a list says so with its key outline). */
+export function projectFilesOf(resp: unknown): MpFile[] {
+  const d = resp && typeof resp === "object" ? (resp as Json).data : null;
+  const list = Array.isArray(d) ? d : null;
+  if (!list) throw new Error(`Magicplan project files: unexpected response shape ${shapeOutline(resp)}`.slice(0, 900));
+  return (list as Json[]).filter((f) => f && typeof f === "object").map((f) => {
+    const file = (f.file && typeof f.file === "object" ? f.file : {}) as Json;
+    return {
+      name: str(f.name || f.filename || file.name), folder: str(f.folder), url: str(f.url || file.url),
+      lastModified: str(f.last_modified || f.updated_at || f.created_at), size: num(f.size || file.size),
+      fileType: str(f.file_type || f.filetype),
+    };
+  }).filter((f) => f.url);
+}
 /** The keys of a response, two levels deep, with no values: what the logs
     carry when a shape surprises us, so the next fix reads the live shape
     instead of guessing it. Never a value — no addresses, no URLs, no key. */
@@ -191,12 +229,59 @@ export function shapeOutline(v: unknown, depth = 2): string {
   if (depth <= 0) return `{${keys.join(",")}}`;
   return `{${keys.map((k) => `${k}:${shapeOutline((v as Json)[k], depth - 1)}`).join(",")}}`;
 }
-/** Unwrapped — GET /plans/statistics/{id} */
-export function statisticsOf(resp: unknown) {
-  if (!(resp && typeof resp === "object" && (resp as Json).statistics && typeof (resp as Json).statistics === "object")) {
+/** The units of a plan, from GET /plans/statistics/{id}. LIVE shape
+    (first production pull, 2026-10-01): {data: {id, project_id, units,
+    project_statistics: {…whole-plan totals…}}} — wrapped in data, and no
+    per-room figures at all. Only `units` is read here; the rooms come from
+    the plan (statsFromPlan). An unknown unit name throws rather than guess
+    feet vs metres. */
+export function planUnitsOf(resp: unknown): "metric" | "imperial" {
+  const d = resp && typeof resp === "object" ? (resp as Json).data as Json : null;
+  if (!(d && typeof d === "object" && typeof d.units === "string")) {
     throw new Error(`Magicplan statistics: unexpected response shape ${shapeOutline(resp)}`.slice(0, 900));
   }
-  return normalizeStatistics(resp);
+  const u = str(d.units).trim().toLowerCase();
+  if (/^(metric|meters?|metres?|m)$/.test(u)) return "metric";
+  if (/^(imperial|feet|foot|ft)$/.test(u)) return "imperial";
+  throw new Error(`Magicplan statistics: unknown units "${u.slice(0, 20)}"`);
+}
+/** Per-room measurements from GET /projects/{id}/plan: each room carries a
+    `statistics` object (Magicplan changelog 2026-03-16: statistics under the
+    Plan, Floor and Room objects) with the same field names the old
+    statistics endpoint used. Normalized through normalizeStatistics so the
+    unit conversion and rounding stay the one tested path. A plan with
+    floors but no readable room figures throws with the room's key outline
+    (keys only), so the next fix reads the live shape. */
+export function statsFromPlan(planResp: unknown, units: "metric" | "imperial"): Stats {
+  const d = planResp && typeof planResp === "object" ? (planResp as Json).data as Json : null;
+  need(d && typeof d === "object", "plan");
+  const pd = (d.plan_data && typeof d.plan_data === "object" ? d.plan_data : {}) as Json;
+  const fl = arr<Json>(pd.floors).filter((f) => f && typeof f === "object");
+  const obj = (v: unknown) => (v && typeof v === "object" && !Array.isArray(v) ? v as Json : null);
+  let rooms = 0, measured = 0;
+  const floors = fl.map((f) => {
+    const fs = obj(f.statistics) || {};
+    return {
+      name: str(f.name), height: fs.height ?? f.height,
+      rooms: arr<Json>(f.rooms).filter((rm) => rm && typeof rm === "object").map((rm) => {
+        rooms++;
+        const st = obj(rm.statistics);
+        if (st) measured++;
+        return { ...(st || {}), name: str(rm.name) || str(st && st.name) };
+      }),
+    };
+  });
+  if (rooms && !measured) {
+    const r0 = arr<Json>(fl.find((f) => arr(f.rooms).length)?.rooms)[0];
+    throw new Error(`Magicplan plan rooms: no statistics on rooms ${shapeOutline(r0, 2)}`.slice(0, 900));
+  }
+  const out = normalizeStatistics({ units, statistics: { floors } });
+  // statistics present but none of the names we read: say which names it has
+  if (measured && out.floors.every((f) => f.rooms.every((r) => !r.floorSF && !r.perimLF && !r.wallSF))) {
+    const st0 = floors.flatMap((f) => f.rooms).find((r) => Object.keys(r).length > 1);
+    throw new Error(`Magicplan plan rooms: no measurements we read in room statistics ${shapeOutline(st0, 1)}`.slice(0, 900));
+  }
+  return out;
 }
 /** Unwrapped — GET /workspace */
 export function workspaceOf(resp: unknown) {
@@ -254,7 +339,33 @@ export function retryDelayMs(retryAfter: string | null) {
 }
 
 /* ---------- files ---------- */
-const EXT_MIME: Record<string, string> = { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", svg: "image/svg+xml", webp: "image/webp" };
+const EXT_MIME: Record<string, string> = {
+  pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", svg: "image/svg+xml", webp: "image/webp",
+  heic: "image/heic", mp4: "video/mp4", mov: "video/quicktime", m4v: "video/x-m4v",
+  usdz: "model/vnd.usdz+zip", ifc: "application/x-step", dxf: "image/vnd.dxf",
+  csv: "text/csv", xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xml: "application/xml", json: "application/json", txt: "text/plain",
+};
+/** What a Magicplan file is, for the Site Visit panel: only a PDF is a
+    report the estimate draft reads; the rest are kept and listed. */
+export type MpKind = "report" | "model3d" | "drawing" | "video" | "data" | "room" | "photo";
+export function kindOf(name: string, fileType = ""): MpKind {
+  const ext = str((/\.([A-Za-z0-9]+)$/.exec(name) || [])[1] || fileType).toLowerCase();
+  if (ext === "pdf") return "report";
+  if (ext === "usdz" || ext === "ifc" || ext === "obj" || ext === "glb") return "model3d";
+  if (["mp4", "mov", "m4v"].includes(ext)) return "video";
+  if (["jpg", "jpeg", "png", "heic", "webp"].includes(ext)) return "photo";
+  if (["svg", "dxf"].includes(ext)) return "drawing";
+  return "data";
+}
+/** The largest single file a pull copies. The edge worker holds a file in
+    memory while it hashes and stores it, so bigger ones are listed on the
+    row as skipped instead of crashing the pull. */
+export const MAX_FILE_BYTES = 150 * 1024 * 1024;
+/** Stop starting downloads with this much of the worker's time left; the
+    row is written with what landed, and the next ⟳ Pull skips those and
+    fetches the rest. */
+export const STOP_WITH_MS_LEFT = 60_000;
 export function mimeOf(name: string, fileType = "") {
   const ext = (/\.([A-Za-z0-9]+)$/.exec(name) || [])[1] || fileType;
   return EXT_MIME[str(ext).toLowerCase()] || "application/octet-stream";
@@ -268,7 +379,7 @@ type Stored = { path: string; name: string; mime: string; size: number; hash: st
 export type ExportRow = {
   mp_project_id: string; mp_plan_id: string; field_project_id: string | null;
   status: "ready" | "failed" | "unmatched";
-  files: Array<Stored & { folder: string }>;
+  files: Array<Stored & { folder: string; kind?: MpKind; room?: string; floor?: string }>;
   photos: Array<Stored & { room: string; floor: string; caption: string; symbol_instance_id: string }>;
   statistics: Stats | null;
   floors_svg: Array<Stored & { floor: string }>;
@@ -300,6 +411,7 @@ export type SyncDeps = {
   priorRows: (planId: string) => Promise<unknown[]>;            // ready|imported rows for this plan
   now: () => string;
   warn?: (message: string) => void;                             // the function log
+  timeLeft?: () => number;                                      // ms the worker has left (absent: no limit)
 };
 
 /** Builds the magicplan_exports row for one pull. Never writes field_projects
@@ -336,41 +448,98 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
     return { path, name: f.name, mime, size: bytes.byteLength || f.size, hash, mp_last_modified: f.lastModified, mp_size: f.size };
   };
 
+  const note = (what: string, e: unknown) => {
+    const line = `${what}: ${e instanceof Error ? e.message : String(e)}`;
+    base.error = [base.error, line].filter(Boolean).join(" · ").slice(0, 1000);
+    deps.warn?.(line);
+  };
+  // Every download goes through here: too big → listed as skipped; out of
+  // time → stop, the next Pull picks up where this one ended.
+  let outOfTime = false;
+  const skipped: string[] = [];
+  const fetchOne = async (f: MpFile, name: string) => {
+    if (outOfTime) return null;
+    if (deps.timeLeft && deps.timeLeft() < STOP_WITH_MS_LEFT) { outOfTime = true; return null; }
+    if (f.size > MAX_FILE_BYTES) { skipped.push(`${f.name} (${Math.round(f.size / 1048576)} MB)`); return null; }
+    return await store(f, name);
+  };
+  const storeJson = async (name: string, value: unknown) => {
+    const bytes = new TextEncoder().encode(JSON.stringify(value, null, 2));
+    const hash = await deps.sha256(bytes);
+    const path = mpFilePath(job, hash, name);
+    if (!isSitePath(path)) throw new Error(`Refusing to store ${name}: ${path} is not a site-visit path`);
+    const hit = prior.get(reuseKey(name, project.userModified, bytes.byteLength));
+    if (hit && hit.path === path) return hit;   // unchanged since the last pull
+    await deps.upload(path, bytes, "application/json");
+    return { path, name, mime: "application/json", size: bytes.byteLength, hash, mp_last_modified: project.userModified, mp_size: bytes.byteLength };
+  };
+
+  // 1. Every exported file and every pinned photo (videos included, when
+  //    Magicplan lists them with the photos)
   const { files, photos } = filesOf(await deps.mp(filesPath(project.planId)));
   for (const f of files) {
-    const s = await store(f, f.name || "Magicplan report.pdf");
-    base.files.push({ ...s, folder: f.folder });
+    const s = await fetchOne(f, f.name || "Magicplan file");
+    if (s) base.files.push({ ...s, folder: f.folder, kind: kindOf(f.name, f.fileType) });
   }
   for (const f of photos) {
-    const s = await store(f, f.name || "photo.jpg");
+    const s = await fetchOne(f, f.name || "photo.jpg");
+    if (!s) continue;
     const { floor, room, caption } = parsePhotoName(f.name);
-    base.photos.push({ ...s, room, floor, caption, symbol_instance_id: f.symbolInstanceId || "" });
+    if (kindOf(f.name, f.fileType) === "video") base.files.push({ ...s, folder: f.folder, kind: "video", room, floor });
+    else base.photos.push({ ...s, room, floor, caption, symbol_instance_id: f.symbolInstanceId || "" });
   }
 
-  // Measurements are the one part of a pull the packet can live without: a
-  // statistics call that fails or answers in a shape we don't read leaves
-  // statistics null and says why on the row, and the report, photos and
-  // floor plans still land (2026-10-01: a statistics surprise sank the
-  // whole pull after every photo had already been copied).
+  // 2. Files attached to the project itself (videos, documents)
   try {
-    base.statistics = statisticsOf(await deps.mp(`/plans/statistics/${encodeURIComponent(project.planId)}`));
-  } catch (e) {
-    base.error = `Room measurements not imported: ${e instanceof Error ? e.message : String(e)}`.slice(0, 1000);
-    deps.warn?.(base.error);
-  }
-
-  // The floor SVGs are optional the same way.
-  try {
-    for (const fl of floorImagesOf(await deps.mp(`/projects/${encodeURIComponent(project.id)}/plan`))) {
-      const s = await store({ name: `${fl.name}.svg`, folder: "floor", url: fl.image, lastModified: project.userModified, size: 0, fileType: "svg" }, `${fl.name}.svg`);
-      base.floors_svg.push({ ...s, floor: fl.name });
+    for (const f of projectFilesOf(await deps.mp(`/projects/${encodeURIComponent(project.id)}/files`))) {
+      const s = await fetchOne(f, f.name || "attachment");
+      if (s) base.files.push({ ...s, folder: f.folder || "Project files", kind: kindOf(f.name, f.fileType) });
     }
-  } catch (e) {
-    const note = `Floor plan images not imported: ${e instanceof Error ? e.message : String(e)}`;
-    base.error = [base.error, note].filter(Boolean).join(" · ").slice(0, 1000);
-    deps.warn?.(note);
+  } catch (e) { note("Project attachments not imported", e); }
+
+  // 3. The plan: floor drawings, every room's own drawing, room measurements
+  let plan: unknown = null;
+  try { plan = await deps.mp(`/projects/${encodeURIComponent(project.id)}/plan`); } catch (e) { note("Floor plan not read", e); }
+  let statsResp: unknown = null;
+  if (plan) {
+    try {
+      statsResp = await deps.mp(`/plans/statistics/${encodeURIComponent(project.planId)}`);
+      base.statistics = statsFromPlan(plan, planUnitsOf(statsResp));
+    } catch (e) { note("Room measurements not imported", e); }
+
+    try {
+      for (const fl of floorImagesOf(plan)) {
+        const s = await fetchOne({ name: `${fl.name}.svg`, folder: "floor", url: fl.image, lastModified: project.userModified, size: 0, fileType: "svg" }, `${fl.name}.svg`);
+        if (s) base.floors_svg.push({ ...s, floor: fl.name });
+      }
+      for (const rm of roomImagesOf(plan)) {
+        const label = `${rm.floor} - ${rm.room}.svg`;
+        const s = await fetchOne({ name: label, folder: "Room plans", url: rm.image, lastModified: project.userModified, size: 0, fileType: "svg" }, label);
+        if (s) base.files.push({ ...s, folder: "Room plans", kind: "room", room: rm.room, floor: rm.floor });
+      }
+    } catch (e) { note("Floor plan images not imported", e); }
   }
 
+  // 4. Everything Magicplan knows as data, kept whole: the plan with every
+  //    room's geometry and statistics, the full statistics, and the forms
+  //    filled in on the job (descriptions, notes, per-room answers). Saved as
+  //    JSON exactly as Magicplan sent it, so nothing is lost to our reading.
+  const keep: Array<[string, () => Promise<unknown>]> = [
+    ["Magicplan plan.json", async () => plan],
+    ["Magicplan statistics.json", async () => statsResp],
+    ["Magicplan forms.json", () => deps.mp(`/plans/forms/${encodeURIComponent(project.planId)}`)],
+    ["Magicplan project.json", () => deps.mp(`/plans/get/${encodeURIComponent(project.planId)}`)],
+  ];
+  for (const [name, get] of keep) {
+    try {
+      const v = await get();
+      if (v == null) continue;
+      base.files.push({ ...(await storeJson(name, v)), folder: "Magicplan data", kind: "data" });
+    } catch (e) { note(`${name} not saved`, e); }
+  }
+
+  if (skipped.length) note("Too large to copy", new Error(skipped.join(", ")));
+  if (outOfTime) note("Stopped early", new Error("ran out of time — press ⟳ Pull again for the rest"));
   base.synced_at = deps.now();
   return base;
 }
