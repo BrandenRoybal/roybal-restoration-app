@@ -5,8 +5,9 @@
  * docs/Magicplan_Integration_Design.md is the spec. Response shapes here are
  * the LIVE ones, read from the Cloud API's OpenAPI 3.1.1 document (API v1.2)
  * on 2026-09-25, and where they differ from design §1 the live one wins:
- *   - GET /workspace and GET /plans/statistics/{id} are NOT wrapped in
- *     {data}; every other call used here is.
+ *   - GET /workspace is NOT wrapped in {data}; every other call used here
+ *     is, GET /plans/statistics/{id} included (seen live 2026-10-01, which
+ *     also showed it carries plan totals only: rooms come from the plan).
  *   - GET /projects/{id}/plan puts the floors under data.plan_data.floors.
  *   - GET /projects (the name search) lists no plan_id — the project itself
  *     is read to get it.
@@ -191,12 +192,59 @@ export function shapeOutline(v: unknown, depth = 2): string {
   if (depth <= 0) return `{${keys.join(",")}}`;
   return `{${keys.map((k) => `${k}:${shapeOutline((v as Json)[k], depth - 1)}`).join(",")}}`;
 }
-/** Unwrapped — GET /plans/statistics/{id} */
-export function statisticsOf(resp: unknown) {
-  if (!(resp && typeof resp === "object" && (resp as Json).statistics && typeof (resp as Json).statistics === "object")) {
+/** The units of a plan, from GET /plans/statistics/{id}. LIVE shape
+    (first production pull, 2026-10-01): {data: {id, project_id, units,
+    project_statistics: {…whole-plan totals…}}} — wrapped in data, and no
+    per-room figures at all. Only `units` is read here; the rooms come from
+    the plan (statsFromPlan). An unknown unit name throws rather than guess
+    feet vs metres. */
+export function planUnitsOf(resp: unknown): "metric" | "imperial" {
+  const d = resp && typeof resp === "object" ? (resp as Json).data as Json : null;
+  if (!(d && typeof d === "object" && typeof d.units === "string")) {
     throw new Error(`Magicplan statistics: unexpected response shape ${shapeOutline(resp)}`.slice(0, 900));
   }
-  return normalizeStatistics(resp);
+  const u = str(d.units).trim().toLowerCase();
+  if (/^(metric|meters?|metres?|m)$/.test(u)) return "metric";
+  if (/^(imperial|feet|foot|ft)$/.test(u)) return "imperial";
+  throw new Error(`Magicplan statistics: unknown units "${u.slice(0, 20)}"`);
+}
+/** Per-room measurements from GET /projects/{id}/plan: each room carries a
+    `statistics` object (Magicplan changelog 2026-03-16: statistics under the
+    Plan, Floor and Room objects) with the same field names the old
+    statistics endpoint used. Normalized through normalizeStatistics so the
+    unit conversion and rounding stay the one tested path. A plan with
+    floors but no readable room figures throws with the room's key outline
+    (keys only), so the next fix reads the live shape. */
+export function statsFromPlan(planResp: unknown, units: "metric" | "imperial"): Stats {
+  const d = planResp && typeof planResp === "object" ? (planResp as Json).data as Json : null;
+  need(d && typeof d === "object", "plan");
+  const pd = (d.plan_data && typeof d.plan_data === "object" ? d.plan_data : {}) as Json;
+  const fl = arr<Json>(pd.floors).filter((f) => f && typeof f === "object");
+  const obj = (v: unknown) => (v && typeof v === "object" && !Array.isArray(v) ? v as Json : null);
+  let rooms = 0, measured = 0;
+  const floors = fl.map((f) => {
+    const fs = obj(f.statistics) || {};
+    return {
+      name: str(f.name), height: fs.height ?? f.height,
+      rooms: arr<Json>(f.rooms).filter((rm) => rm && typeof rm === "object").map((rm) => {
+        rooms++;
+        const st = obj(rm.statistics);
+        if (st) measured++;
+        return { ...(st || {}), name: str(rm.name) || str(st && st.name) };
+      }),
+    };
+  });
+  if (rooms && !measured) {
+    const r0 = arr<Json>(fl.find((f) => arr(f.rooms).length)?.rooms)[0];
+    throw new Error(`Magicplan plan rooms: no statistics on rooms ${shapeOutline(r0, 2)}`.slice(0, 900));
+  }
+  const out = normalizeStatistics({ units, statistics: { floors } });
+  // statistics present but none of the names we read: say which names it has
+  if (measured && out.floors.every((f) => f.rooms.every((r) => !r.floorSF && !r.perimLF && !r.wallSF))) {
+    const st0 = floors.flatMap((f) => f.rooms).find((r) => Object.keys(r).length > 1);
+    throw new Error(`Magicplan plan rooms: no measurements we read in room statistics ${shapeOutline(st0, 1)}`.slice(0, 900));
+  }
+  return out;
 }
 /** Unwrapped — GET /workspace */
 export function workspaceOf(resp: unknown) {
@@ -347,28 +395,30 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
     base.photos.push({ ...s, room, floor, caption, symbol_instance_id: f.symbolInstanceId || "" });
   }
 
-  // Measurements are the one part of a pull the packet can live without: a
-  // statistics call that fails or answers in a shape we don't read leaves
-  // statistics null and says why on the row, and the report, photos and
-  // floor plans still land (2026-10-01: a statistics surprise sank the
-  // whole pull after every photo had already been copied).
-  try {
-    base.statistics = statisticsOf(await deps.mp(`/plans/statistics/${encodeURIComponent(project.planId)}`));
-  } catch (e) {
-    base.error = `Room measurements not imported: ${e instanceof Error ? e.message : String(e)}`.slice(0, 1000);
-    deps.warn?.(base.error);
-  }
+  // Measurements and floor SVGs are the parts of a pull the packet can live
+  // without: either one failing, or answering in a shape we don't read,
+  // leaves it empty and says why on the row, and the report and photos
+  // still land (2026-10-01: a statistics surprise sank the whole pull).
+  const note = (what: string, e: unknown) => {
+    const line = `${what}: ${e instanceof Error ? e.message : String(e)}`;
+    base.error = [base.error, line].filter(Boolean).join(" · ").slice(0, 1000);
+    deps.warn?.(line);
+  };
+  let plan: unknown = null;
+  try { plan = await deps.mp(`/projects/${encodeURIComponent(project.id)}/plan`); } catch (e) { note("Floor plan not read", e); }
 
-  // The floor SVGs are optional the same way.
-  try {
-    for (const fl of floorImagesOf(await deps.mp(`/projects/${encodeURIComponent(project.id)}/plan`))) {
-      const s = await store({ name: `${fl.name}.svg`, folder: "floor", url: fl.image, lastModified: project.userModified, size: 0, fileType: "svg" }, `${fl.name}.svg`);
-      base.floors_svg.push({ ...s, floor: fl.name });
-    }
-  } catch (e) {
-    const note = `Floor plan images not imported: ${e instanceof Error ? e.message : String(e)}`;
-    base.error = [base.error, note].filter(Boolean).join(" · ").slice(0, 1000);
-    deps.warn?.(note);
+  if (plan) {
+    try {
+      const units = planUnitsOf(await deps.mp(`/plans/statistics/${encodeURIComponent(project.planId)}`));
+      base.statistics = statsFromPlan(plan, units);
+    } catch (e) { note("Room measurements not imported", e); }
+
+    try {
+      for (const fl of floorImagesOf(plan)) {
+        const s = await store({ name: `${fl.name}.svg`, folder: "floor", url: fl.image, lastModified: project.userModified, size: 0, fileType: "svg" }, `${fl.name}.svg`);
+        base.floors_svg.push({ ...s, floor: fl.name });
+      }
+    } catch (e) { note("Floor plan images not imported", e); }
   }
 
   base.synced_at = deps.now();

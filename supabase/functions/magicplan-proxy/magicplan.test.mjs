@@ -35,20 +35,28 @@ const FILES = { data: {
 } };
 const room = (name, o = {}) => ({ uid: "r", name, area: 0, perimeter: 0, ground_perimeter: 0, area_without_walls: 0, height: 0, volume: 0,
   walls_surface: 0, walls_surface_without_openings: 0, door_count: 0, window_count: 0, dimensions: "", furnitures: [], wall_items: [], ...o });
-const STATS = { id: "6a45b1435520f", project_id: "5d0c3a3e-0000-4000-8000-000000000001", units: "imperial", statistics: {
+/* the normalizer's input shape (field app lockstep) */
+const LEGACY = { id: "6a45b1435520f", project_id: "5d0c3a3e-0000-4000-8000-000000000001", units: "imperial", statistics: {
   uid: "p", name: "plan", room_count: 1, floors: [{ uid: "f1", name: "1st Floor", height: 8, room_count: 1,
     rooms: [room("Living Room", { area_without_walls: 214.4, ground_perimeter: 58, height: 8, volume: 1715, walls_surface: 465, walls_surface_without_openings: 403, door_count: 2, window_count: 3 })] }],
 } };
-const PLAN = { data: { id: "p", name: "plan", unit: "feet", plan_data: { floors: [{ uid: "f1", name: "1st Floor", image: "https://cloud.magicplan.app/api/v2/images/plan/6a45b1435520f/svg/f1.svg", rooms: [] }] } } };
+/* GET /plans/statistics/{id}, live 2026-10-01: wrapped, plan totals only */
+const STATS = { data: { id: "6a45b1435520f", project_id: "5d0c3a3e-0000-4000-8000-000000000001", units: "imperial",
+  project_statistics: { name: "plan", area: 230, perimeter: 60, ground_perimeter: 58, area_without_walls: 214.4, room_count: 1, door_count: 2, window_count: 3 } } };
+/* GET /projects/{id}/plan: per-room statistics on each room */
+const PLAN = { data: { id: "p", name: "plan", unit: "feet", plan_data: { floors: [{ uid: "f1", name: "1st Floor", image: "https://cloud.magicplan.app/api/v2/images/plan/6a45b1435520f/svg/f1.svg",
+  statistics: { height: 8 },
+  rooms: [{ uid: "r1", name: "Living Room", formatted_dimensions: "", walls: [], objects: [],
+    statistics: { area_without_walls: 214.4, ground_perimeter: 58, height: 8, volume: 1715, walls_surface: 465, walls_surface_without_openings: 403, door_count: 2, window_count: 3 } }] }] } } };
 const WORKSPACE = { id: "ws-1", name: "Roybal Construction", owner: { id: "o", email: "owner@example.invalid", firstname: "", lastname: "" },
   created: "2026-01-01", formats: ["pdf"], webhook_url: null, listing_url: null, authorize_url: null, authentication_url: "", access_token_url: null,
   logo: null, notify_user: false, last_modified: "2026-09-24", users: [] };
 
 /* ---------- lockstep with the field app ---------- */
 test("server and field app normalize the same statistics identically", () => {
-  const metric = { ...STATS, units: "metric", statistics: { floors: [{ name: "Ground", height: 2.44, rooms: [room("Kitchen", { area_without_walls: 10, ground_perimeter: 13, volume: 24.4, walls_surface: 31.7, walls_surface_without_openings: 27 })] },
+  const metric = { ...LEGACY, units: "metric", statistics: { floors: [{ name: "Ground", height: 2.44, rooms: [room("Kitchen", { area_without_walls: 10, ground_perimeter: 13, volume: 24.4, walls_surface: 31.7, walls_surface_without_openings: 27 })] },
     { name: "Upstairs", rooms: [room("Kitchen"), room("Bath"), room("bath")] }] } };
-  for (const s of [STATS, metric, {}, null]) {
+  for (const s of [LEGACY, metric, {}, null]) {
     assert.deepEqual(S.normalizeStatistics(s), C.normalizeStatistics(s));
     assert.deepEqual(S.dedupeRoomNames(S.normalizeStatistics(s).floors), C.dedupeRoomNames(C.normalizeStatistics(s).floors));
   }
@@ -85,7 +93,8 @@ test("projectOf reads {data: Project}; findOurs matches on external_reference_id
 test("a response in the wrong shape throws with the call's name — no guessing", () => {
   assert.throws(() => S.projectOf(PROJECT().data), /Magicplan project: unexpected response shape/);
   assert.throws(() => S.filesOf({ files: [] }), /plan files/);
-  assert.throws(() => S.statisticsOf({ data: STATS }), /statistics/);   // statistics is NOT wrapped
+  assert.throws(() => S.planUnitsOf(STATS.data), /statistics: unexpected response shape \{id:string/);  // statistics IS wrapped (live)
+  assert.throws(() => S.planUnitsOf({ data: { units: "cubits" } }), /unknown units "cubits"/);
   assert.throws(() => S.workspaceOf({ data: WORKSPACE }), /workspace/); // nor is workspace
   assert.throws(() => S.findOurs({ projects: [] }, "x"), /project search/);
 });
@@ -244,27 +253,51 @@ test("the proxy is pinned verify_jwt = true", () => {
 });
 
 test("statistics in a shape we don't read: the report, photos and floor plan still land, the row says why", async () => {
-  const { deps, calls } = fakes({ stats: { data: { id: "6a45b1435520f", floors: [{ name: "1st Floor", statistics: { area: 20 } }] } } });
+  const { deps, calls } = fakes({ stats: { id: "6a45b1435520f", statistics: { floors: [] } } });
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
   assert.equal(row.statistics, null);
   assert.equal(row.files.length, 1);
   assert.equal(row.photos.length, 2);
   assert.equal(row.floors_svg.length, 1);
-  assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape \{data:\{id:string,floors:\[/);
+  assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape \{id:string,statistics:\{floors:\[\]\}\}/);
   assert.equal(calls.warned.length, 1);
   assert.equal(row.synced_at, "2026-09-26T23:00:00Z");
 });
 test("a failing statistics or plan call never sinks the pull", async () => {
   const { deps } = fakes({ stats: new Error("Magicplan GET /plans/statistics failed (404)"), plan: new Error("Magicplan GET /plan failed (500)") });
+  const r2 = await S.runSync(fakes({ stats: new Error("Magicplan GET /plans/statistics failed (404)") }).deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(r2.floors_svg.length, 1);
+  assert.match(r2.error, /^Room measurements not imported: .*\(404\)$/);
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
   assert.equal(row.files.length, 1);
   assert.equal(row.floors_svg.length, 0);
-  assert.match(row.error, /Room measurements not imported: .*\(404\) · Floor plan images not imported: .*\(500\)/);
+  assert.match(row.error, /^Floor plan not read: .*\(500\)$/);
 });
 test("shapeOutline names keys only, never values", () => {
   const o = S.shapeOutline({ data: { address: "1 Test St", url: "https://x/y?sig=secret", floors: [{ name: "A" }] } });
   assert.equal(o, "{data:{address:string,url:string,floors:[{name}]}}");
   assert.ok(!o.includes("Test St") && !o.includes("secret"));
+});
+
+test("room measurements come from the plan's rooms, in the statistics endpoint's units", () => {
+  const st = S.statsFromPlan(PLAN, S.planUnitsOf(STATS));
+  assert.equal(st.units, "imperial");
+  assert.deepEqual(st.floors[0].rooms[0], { name: "Living Room", floorSF: 214, perimLF: 58, ceilingFt: 8, wallSF: 465, wallSFNet: 403, doors: 2, windows: 3, volumeCF: 1715, dims: "" });
+  // metric converts once, exactly as the normalizer does
+  const m = S.statsFromPlan(PLAN, S.planUnitsOf({ data: { units: "metric" } }));
+  assert.equal(m.units, "metric");
+  assert.equal(m.floors[0].rooms[0].floorSF, Math.round(214.4 * 10.764));
+  // a floor height fills a room with none
+  const noH = JSON.parse(JSON.stringify(PLAN)); delete noH.data.plan_data.floors[0].rooms[0].statistics.height;
+  assert.equal(S.statsFromPlan(noH, "imperial").floors[0].rooms[0].ceilingFt, 8);
+  // rooms with no statistics: say so with the room's keys, never values
+  const bare = JSON.parse(JSON.stringify(PLAN)); delete bare.data.plan_data.floors[0].rooms[0].statistics;
+  assert.throws(() => S.statsFromPlan(bare, "imperial"), /no statistics on rooms \{uid:string,name:string,formatted_dimensions:string,walls:\[\],objects:\[\]\}/);
+  // statistics with names we don't read: say which names, never values
+  const odd = JSON.parse(JSON.stringify(PLAN)); odd.data.plan_data.floors[0].rooms[0].statistics = { surface_area: 20, len: 4 };
+  assert.throws(() => S.statsFromPlan(odd, "imperial"), /no measurements we read in room statistics \{surface_area:number,len:number,name:string\}/);
+  // a plan with no rooms is an empty, valid result
+  assert.deepEqual(S.statsFromPlan({ data: { plan_data: { floors: [] } } }, "imperial"), { units: "imperial", floors: [] });
 });
