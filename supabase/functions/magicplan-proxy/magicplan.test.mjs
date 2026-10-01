@@ -176,7 +176,7 @@ test("sync copies the report, the room-tagged photos and the floor SVG, and buil
   assert.equal(row.floors_svg[0].floor, "1st Floor");
   assert.equal(calls.uploaded.length, 8);   // report, 2 photos, floor SVG + 4 JSON
   assert.ok(calls.uploaded.every((u) => officeIsSitePath(u.path)));
-  assert.ok(calls.mp.includes("/plans/6a45b1435520f/files?format[]=pdf&format[]=jpg&format[]=png&format[]=svg&format[]=dxf&format[]=usdz&format[]=xls&format[]=csv&format[]=ifc&format[]=fml&format[]=xml&format[]=mp&include_photos=true"));
+  assert.ok(calls.mp.includes("/plans/6a45b1435520f/files?format[]=pdf&format[]=jpg&format[]=svg&format[]=png&format[]=usdz&format[]=xls&format[]=csv&format[]=obj&format[]=ifc&format[]=dxf&format[]=fml&format[]=xfif&format[]=xml&format[]=magicplan&include_photos=true"));
   assert.equal(row.synced_at, "2026-09-26T23:00:00Z");
 });
 test("a project that belongs to another job comes back unmatched with nothing downloaded", async () => {
@@ -352,4 +352,15 @@ test("project files in a shape we don't read are noted, not fatal", async () => 
 test("kindOf sorts what a pull brings back", () => {
   assert.deepEqual(["a.pdf", "a.usdz", "a.ifc", "a.MOV", "a.mp4", "a.jpg", "a.svg", "a.dxf", "a.csv", "a.fml", "noext"].map((n) => S.kindOf(n)),
     ["report", "model3d", "model3d", "video", "video", "photo", "drawing", "drawing", "data", "data", "data"]);
+});
+
+test("a refused file listing is noted, and the plan, room plans, measurements and data still land", async () => {
+  const { deps } = fakes({ plan: PLAN_ROOMS });
+  deps.mp = ((mp) => async (p) => { if (p.startsWith("/plans/6a45b1435520f/files")) throw new Error("Magicplan GET /plans/x/files failed (400)"); return mp(p); })(deps.mp);
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.equal(row.floors_svg.length, 1);
+  assert.equal(row.files.filter((f) => f.kind === "room").length, 1);
+  assert.equal(row.statistics.floors[0].rooms[0].floorSF, 214);
+  assert.match(row.error, /^Exported files and photos not imported: .*\(400\)/);
 });
