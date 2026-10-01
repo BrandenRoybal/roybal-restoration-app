@@ -194,7 +194,9 @@ export function createAgentServer() {
     if (req.url === "/draft") { handleDraft(req, res); return; }
     res.writeHead(404); res.end();
   });
-  const wss = new WebSocketServer({ server: http, path: "/relay" });
+  // ConversationRelay messages are small text; the ws default (100 MiB) would
+  // let anyone fill this 256 MB machine before the token check
+  const wss = new WebSocketServer({ server: http, path: "/relay", maxPayload: 1024 * 1024 });
   wss.on("connection", (ws) => {
     const session = newSession(ws);
     ws.on("message", (raw) => {
@@ -230,7 +232,8 @@ if (process.env.NODE_ENV !== "test") {
     process.once(sig, () => {
       const n = liveDraftCount();
       if (n) console.log(`${sig}: queueing ${n} running draft(s) as batches before exit`);
-      Promise.race([drainDrafts(`the draft machine restarted (${sig})`), new Promise((r) => setTimeout(r, 20_000))])
+      // inside fly.toml's kill_timeout (30 s)
+      Promise.race([drainDrafts(`the draft machine restarted (${sig})`), new Promise((r) => setTimeout(r, 28_000))])
         .finally(() => process.exit(0));
     });
   }

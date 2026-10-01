@@ -19,6 +19,7 @@ const LOG = [];
 const writes = [];
 const batches = [];
 let gate = null;          // when set, the Messages stream waits on it before sending
+let writeGate = null;     // when set, the outcome upload waits on it
 const enc = new TextEncoder();
 const sse = (o) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
 const draftText = JSON.stringify({ lossSummary: "Bath", items: [{ desc: "Remove drywall", qty: 8, unit: "SF" }] });
@@ -53,14 +54,18 @@ globalThis.fetch = async (url, opts = {}) => {
     return new Response(JSON.stringify({ id: "msgbatch_fly" + batches.length }), { status: 200 });
   }
   if (u.startsWith("https://stub.supabase.co/storage/v1/object/upload/sign/field-media/sitevisit/drafts/")) {
-    writes.push({ url: u, body: JSON.parse(opts.body), headers: opts.headers });
+    if (writeGate) await writeGate;
+    const sealed = JSON.parse(opts.body);
+    writes.push({ url: u, body: JSON.parse(sealed.body), sealed, headers: opts.headers });
     return new Response('{"Key":"x"}', { status: 200 });
   }
   return new Response("{}", { status: 404 });
 };
 
 const { createAgentServer } = await import("../server.mjs");
-const { drainDrafts, liveDraftCount, MAX_LIVE_DRAFTS } = await import("../draft.mjs");
+const { drainDrafts, liveDraftCount, MAX_LIVE_DRAFTS, MAX_INTAKES } = await import("../draft.mjs");
+const { FLY_MAX_JOB_BYTES } = await import("../../../supabase/functions/_shared/sitedraft.ts");
+const { request } = await import("node:http");
 let http, base;
 before(() => new Promise((r) => { http = createAgentServer(); http.listen(0, () => { base = `http://127.0.0.1:${http.address().port}`; r(); }); }));
 after(() => new Promise((r) => http.close(r)));
@@ -148,24 +153,62 @@ test(`past ${MAX_LIVE_DRAFTS} drafts at once it says busy, and the start sends t
   await until(() => liveDraftCount() === 0);
 });
 
-test("stopping the machine queues every draft still running, once each", async () => {
+test("the public door: no body is read without a well-formed signature and a declared length in bounds", async () => {
+  const bad = await realFetch(`${base}/draft`, { method: "POST", body: "{}", headers: { "x-draft-signature": "nope" } });
+  assert.equal(bad.status, 401);
+  const big = await post(null, { raw: "x".repeat(FLY_MAX_JOB_BYTES + 10) });
+  assert.equal(big.status, 413);
+  // chunked, no length: refused before reading
+  const chunked = await new Promise((resolve) => {
+    const req = request(`${base}/draft`, { method: "POST", headers: { "x-draft-signature": "a".repeat(64), "transfer-encoding": "chunked" } }, (res) => { res.resume(); resolve(res.statusCode); });
+    req.on("error", () => resolve(0));
+    req.write("{");
+  });
+  assert.equal(chunked, 413);
+});
+
+test(`only ${MAX_INTAKES} bodies are read at once; a body that never finishes is dropped`, async () => {
+  const held = [];
+  for (let i = 0; i < MAX_INTAKES; i++) {
+    const req = request(`${base}/draft`, { method: "POST", headers: { "x-draft-signature": "b".repeat(64), "content-length": "1000" } });
+    req.on("error", () => {});
+    req.write("{");          // and nothing more
+    held.push(req);
+  }
+  await sleep(50);
+  const third = await post(jobFor(keyN()));
+  assert.equal(third.status, 503, "the next one is turned away (the start sends it to the edge)");
+  for (const r of held) r.destroy();
+  await sleep(50);
+  assert.equal((await post(jobFor(keyN()))).status, 202, "the slots free up when those callers leave");
+  await until(() => liveDraftCount() === 0);
+});
+
+test("stopping the machine queues every draft still streaming and waits for every outcome write", async () => {
+  // one draft finished and still writing its outcome, two still streaming
+  let openWrite; writeGate = new Promise((r) => { openWrite = r; });
+  const finishing = keyN();
+  assert.equal((await post(jobFor(finishing))).status, 202);
+  await sleep(30);
   let open; gate = new Promise((r) => { open = r; });
   const keys = [keyN(), keyN()];
   for (const k of keys) assert.equal((await post(jobFor(k))).status, 202);
   await sleep(30);
   const b0 = batches.length, w0 = writes.length;
-  await drainDrafts("the draft machine restarted (SIGINT)");
+  let drained = false;
+  const drain = drainDrafts("the draft machine restarted (SIGINT)").then(() => { drained = true; });
+  await sleep(50);
+  assert.equal(drained, false, "the drain waits for the outcome still being written");
+  assert.equal((await post(jobFor(keyN()))).status, 503, "no new drafts while stopping");
+  writeGate = null; openWrite();
+  await drain;
   assert.equal(batches.length, b0 + 2);
   const outs = writes.slice(w0);
-  assert.deepEqual(outs.map((o) => o.body.type), ["batch", "batch"]);
-  for (const k of keys) assert.ok(outs.some((o) => o.url.includes(`/drafts/${k}.json`)));
+  assert.equal(outs.length, 3);
+  assert.equal(outs.find((o) => o.url.includes(`/drafts/${finishing}.json`)).body.type, "message", "the finished draft landed");
+  for (const k of keys) assert.equal(outs.find((o) => o.url.includes(`/drafts/${k}.json`)).body.type, "batch");
   gate = null; open();
   await until(() => liveDraftCount() === 0);
   await sleep(30);
-  assert.equal(writes.length, w0 + 2, "the stream finishing afterwards writes nothing more");
-});
-
-test("an oversized body is refused", async () => {
-  const r = await post(null, { raw: "x".repeat(16 * 1024 * 1024 + 10) });
-  assert.equal(r.status, 413);
+  assert.equal(writes.length, w0 + 3, "the streams stopped after queueing write nothing more");
 });

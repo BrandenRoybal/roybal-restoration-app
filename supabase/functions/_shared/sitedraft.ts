@@ -29,8 +29,9 @@
  * first and wait out FLY_STALE_MS, so every running direct draft is
  * collected; the older office can't read an svd_/svf_ id.
  *
- * The run leaves one file, field-media sitevisit/drafts/<key>.json: the
- * finished message, the batch it fell back to, or the error. The request
+ * The run leaves one file, field-media sitevisit/drafts/<key>.json, sealed
+ * (sealOutcome): the finished message, the batch it fell back to, or the
+ * error. The request
  * itself is never stored (it can carry the owner-only Xactimate reference
  * prices, and the bucket is readable by every login).
  */
@@ -91,6 +92,10 @@ export const DIRECT_STALE_MS = 8 * 60_000;
    no outcome 35 minutes on means the machine died outright. */
 export const FLY_RUN_BUDGET_MS = 25 * 60_000;
 export const FLY_STALE_MS = 35 * 60_000;
+/* The largest job the Fly runner reads (its door is public and its memory
+   small). A real job is under 2 MB: media go by link, the transcript is
+   capped at 400k characters. A bigger one goes straight to the edge. */
+export const FLY_MAX_JOB_BYTES = 4 * 1024 * 1024;
 export const staleAfterMs = (runner: Runner): number => runner === "fly" ? FLY_STALE_MS : DIRECT_STALE_MS;
 /* A signed job older than this is refused (a replayed request). */
 export const JOB_MAX_AGE_MS = 120_000;
@@ -191,6 +196,23 @@ export function sameSignature(a: string, b: string): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
+}
+
+/* ---------- the sealed outcome ---------- */
+/* The bucket lets every login write any file, so the outcome is sealed by
+   the runner: an HMAC under LLM_API_KEY over the draft key and the exact
+   outcome text. The office opens only a sealed file for its own key; a
+   forged or copied file reads as no outcome, and the stale timer applies. */
+export async function sealOutcome(secret: string, key: string, outcome: DirectOutcome): Promise<string> {
+  const body = JSON.stringify(outcome);
+  return JSON.stringify({ v: 2, sig: await signBody(secret, `${key}|${body}`), body });
+}
+
+export async function openOutcome(secret: string, key: string, file: unknown): Promise<DirectOutcome | null> {
+  const f = (file ?? null) as { v?: unknown; sig?: unknown; body?: unknown } | null;
+  if (!f || typeof f !== "object" || f.v !== 2 || typeof f.body !== "string" || typeof f.sig !== "string") return null;
+  if (!sameSignature(f.sig, await signBody(secret, `${key}|${f.body}`))) return null;
+  try { return readOutcome(JSON.parse(f.body)); } catch (_) { return null; }
 }
 
 /* ---------- the stream ---------- */

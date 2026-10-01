@@ -56,7 +56,8 @@ function world(mode, { batchFails = false, writeFails = false, writeAnswers = []
     }
     if (url === `https://proj.supabase.co/storage/v1${RESULT_URL}`) {
       assert.equal(init.method, "PUT");
-      w.writes.push({ body: JSON.parse(init.body), headers: init.headers });
+      const sealed = JSON.parse(init.body);
+      w.writes.push({ body: JSON.parse(sealed.body), sealed, headers: init.headers });
       const a = writeAnswers.shift();
       if (a) return new Response(a.body, { status: a.status });
       return writeFails ? new Response('{"statusCode":"500","error":"internal"}', { status: 500 }) : new Response('{"Key":"x"}', { status: 200 });
@@ -85,6 +86,19 @@ await test("a clean stream writes the finished message once, and queues nothing"
   assert.equal(sent.stream, true);
   assert.deepEqual({ ...sent, stream: undefined }, { ...PARAMS, stream: undefined }, "the params go out as built");
   assert.equal(w.logs.at(-1).outcome, "message");
+});
+
+await test("the outcome is sealed for its own draft, so a login can't forge one", async () => {
+  const { openOutcome } = await import("./sitedraft.ts");
+  const w = world("ok");
+  await w.run().run(60_000);
+  const sealed = w.writes[0].sealed;
+  assert.equal(sealed.v, 2);
+  assert.equal((await openOutcome("sk-test", KEY, sealed)).type, "message");
+  assert.equal(await openOutcome("sk-test", "f".repeat(32), sealed), null, "not another draft's");
+  assert.equal(await openOutcome("other-key", KEY, sealed), null, "not under another key");
+  assert.equal(await openOutcome("sk-test", KEY, { ...sealed, body: sealed.body.replace("Remove drywall", "Remove roof") }), null, "not edited");
+  assert.equal(await openOutcome("sk-test", KEY, JSON.parse(sealed.body)), null, "not unsealed");
 });
 
 await test("the Anthropic key goes only to Anthropic, never to storage", async () => {

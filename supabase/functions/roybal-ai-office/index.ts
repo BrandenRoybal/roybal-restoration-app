@@ -72,7 +72,8 @@ import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtter
 // the direct run (Fly, then roybal-site-draft) and its outcome file — pure,
 // Node-tested in ../_shared/sitedraft.test.mjs
 import {
-  directIdFor, parseDirectId, directPaths, readOutcome, asBatchLine, batchBodyFor, signBody, flyDraftUrl, staleAfterMs,
+  directIdFor, parseDirectId, directPaths, openOutcome, asBatchLine, batchBodyFor, signBody, flyDraftUrl, staleAfterMs,
+  FLY_MAX_JOB_BYTES,
   type LostUsage, type Runner,
 } from "../_shared/sitedraft.ts";
 // line-item pricing (catalog + reference tiers, the estimating rules) — pure,
@@ -112,6 +113,11 @@ const SITE_VISIT_MODE = (Deno.env.get("SITE_VISIT_MODE") ?? "direct").trim().toL
 // clock, so a big draft finishes), found from the phone line's own
 // PHONE_AGENT_WSS; SITE_DRAFT_RUNNER_URL overrides it, "off" skips Fly.
 const FLY_DRAFT_URL = flyDraftUrl(Deno.env.get("SITE_DRAFT_RUNNER_URL") ?? "", Deno.env.get("PHONE_AGENT_WSS") ?? "");
+// A direct draft starts spending the moment it starts, so the start books
+// this much against the monthly cap and the collection books the rest: a
+// draft that is started and never collected (a lost answer on weak signal, a
+// second tap) still counts. About one typical draft at full price.
+const SITE_DRAFT_RESERVE_USD = Math.max(0, Number(Deno.env.get("SITE_DRAFT_RESERVE_USD") ?? "1.5") || 0);
 const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
 // Spoken turns can run a faster model (someone is standing there listening);
 // defaults to the same assistant model until the env override is set.
@@ -903,6 +909,7 @@ async function siteVisitStart(body: Record<string, unknown>) {
   return {
     result: { batchId: id, pricingMode: pm, model: SITE_VISIT_MODEL, mode },
     usage: { inTok: 0, outTok: 0 }, model: SITE_VISIT_MODEL,
+    extraCostUsd: mode === "direct" ? SITE_DRAFT_RESERVE_USD : 0,
     summary: { batchId: id, mode, ...(runner ? { runner } : {}), kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, referenceRows: referenceText ? refRows.length : 0 },
   };
 }
@@ -927,7 +934,7 @@ const storageHeaders = (jwt: string, extra: Record<string, string> = {}) =>
     storage didn't answer cleanly (a hiccup must not end a draft that is
     fine). Storage words most failures as a 400, so only a 404, or a 400
     that says not found, counts as missing. A file that isn't JSON is found
-    and unreadable (readOutcome turns it down), so the stale timer applies. */
+    and unreadable (openOutcome turns it down), so the stale timer applies. */
 async function readDirectFile(path: string, jwt: string): Promise<{ state: "found"; value: unknown } | { state: "missing" } | { state: "unknown" }> {
   try {
     const res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${MEDIA_BUCKET}/${path}`, { headers: storageHeaders(jwt) });
@@ -944,15 +951,20 @@ async function readDirectFile(path: string, jwt: string): Promise<{ state: "foun
 /* Storage unreadable this long past a run's stale mark: stop waiting. */
 const UNREADABLE_GIVE_UP_MS = 30 * 60_000;
 
+/** What a cut-off direct run already streamed, less the reserve its start
+    booked (a direct draft's start books SITE_DRAFT_RESERVE_USD). */
+function lostCostUsd(lost: LostUsage | undefined, reserved: boolean, model = SITE_VISIT_MODEL): number {
+  const p = priceFor(model);
+  const streamed = lost ? (lost.inTok / 1e6) * p.in + (lost.outTok / 1e6) * p.out : 0;
+  return streamed - (reserved ? SITE_DRAFT_RESERVE_USD : 0);
+}
+
 /** A failed draft's error, carrying what a cut-off direct run already
-    streamed so the error path still meters it. */
-function draftError(message: string, lost?: LostUsage): Error {
+    streamed beyond the reserve, so the error path still meters it. */
+function draftError(message: string, lost: LostUsage | undefined, reserved: boolean): Error {
   const e = new Error(message) as Error & { model?: string; extraCostUsd?: number };
-  if (lost) {
-    const p = priceFor(SITE_VISIT_MODEL);
-    e.model = SITE_VISIT_MODEL;
-    e.extraCostUsd = (lost.inTok / 1e6) * p.in + (lost.outTok / 1e6) * p.out;
-  }
+  e.model = SITE_VISIT_MODEL;
+  e.extraCostUsd = lostCostUsd(lost, reserved);
   return e;
 }
 
@@ -973,56 +985,79 @@ async function startDirect(customId: string, params: Record<string, unknown>, jw
   // one runner can ever land an outcome for it
   const body = JSON.stringify({ v: 1, issuedAt: Date.now(), customId, params, resultUrl: signed.url });
   const signature = await signBody(LLM_API_KEY, body);
-  const runners: { runner: Runner; url: string; headers: Record<string, string> }[] = [];
-  if (FLY_DRAFT_URL) runners.push({ runner: "fly", url: FLY_DRAFT_URL, headers: {} });
-  runners.push({ runner: "edge", url: `${SUPABASE_URL}/functions/v1/roybal-site-draft`, headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}` } });
   const why: string[] = [];
+  const runners: { runner: Runner; url: string; headers: Record<string, string>; tries: number }[] = [];
+  if (FLY_DRAFT_URL && new TextEncoder().encode(body).length <= FLY_MAX_JOB_BYTES) runners.push({ runner: "fly", url: FLY_DRAFT_URL, headers: {}, tries: 2 });
+  else if (FLY_DRAFT_URL) why.push("fly: job too large for it");
+  runners.push({ runner: "edge", url: `${SUPABASE_URL}/functions/v1/roybal-site-draft`, headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}` }, tries: 1 });
   for (const r of runners) {
-    try {
-      const res = await fetch(r.url, {
-        method: "POST",
-        headers: { ...r.headers, "Content-Type": "application/json", "x-draft-signature": signature },
-        body,
-        // both answer at once; a runner that hangs must not hold up the start
-        signal: AbortSignal.timeout(20_000),
-      });
-      const raw = await res.text().catch(() => "");
-      if (res.status === 202) return { id: directIdFor(startMs, key, r.runner), runner: r.runner };
-      why.push(`${r.runner} answered ${res.status}: ${raw.slice(0, 160)}`);
-    } catch (e) {
-      why.push(`${r.runner}: ${e instanceof Error ? e.message : String(e)}`);
+    for (let i = 0; i < r.tries; i++) {
+      try {
+        const res = await fetch(r.url, {
+          method: "POST",
+          headers: { ...r.headers, "Content-Type": "application/json", "x-draft-signature": signature },
+          body,
+          // both answer at once; a runner that hangs must not hold up the start
+          signal: AbortSignal.timeout(i ? 8_000 : 20_000),
+        });
+        const raw = await res.text().catch(() => "");
+        if (res.status === 202) return { id: directIdFor(startMs, key, r.runner), runner: r.runner };
+        why.push(`${r.runner} answered ${res.status}: ${raw.slice(0, 160)}`);
+        break;
+      } catch (e) {
+        why.push(`${r.runner}: ${e instanceof Error ? e.message : String(e)}`);
+        // a timeout is unclear: Fly may have taken the job and its answer got
+        // lost. Asked again with the same job, it answers 202 if it has it,
+        // so the draft is never started on two runners
+        if (!(e instanceof DOMException && e.name === "TimeoutError")) break;
+      }
     }
   }
   throw new Error(why.join("; "));
 }
 
 type BatchInfo = { id?: string; processing_status?: string; results_url?: string | null };
+
+/** A batch read that may work on the next poll (no answer, 429, 5xx): the
+    draft is still there, so the poll says "running" rather than ending it. */
+class BatchHiccup extends Error {}
+async function anthropicGet(url: string, what: string): Promise<string> {
+  let res: Response;
+  try { res = await fetch(url, { headers: ANTHROPIC_HEADERS() }); }
+  catch (e) { throw new BatchHiccup(`${what}: ${e instanceof Error ? e.message : String(e)}`); }
+  const raw = await res.text().catch(() => "");
+  if (res.status === 429 || res.status >= 500) throw new BatchHiccup(`${what} (${res.status}): ${raw.slice(0, 300)}`);
+  if (!res.ok) throw new Error(`${what} (${res.status}): ${raw.slice(0, 300)}`);
+  return raw;
+}
+
 async function getBatch(batchId: string): Promise<BatchInfo> {
   if (!/^msgbatch_[A-Za-z0-9]+$/.test(batchId)) throw new Error("That isn't a draft this app started.");
-  const res = await fetch(`https://api.anthropic.com/v1/messages/batches/${batchId}`, { headers: ANTHROPIC_HEADERS() });
-  const raw = await res.text();
-  if (!res.ok) throw new Error(`Couldn't check the draft (${res.status}): ${raw.slice(0, 300)}`);
-  return JSON.parse(raw) as BatchInfo;
+  return JSON.parse(await anthropicGet(`https://api.anthropic.com/v1/messages/batches/${batchId}`, "Couldn't check the draft")) as BatchInfo;
 }
 
 /* Where a draft stands. `running` answers the poll for free; `ready` carries
    the one results line (batch or direct, same shape) and how it is billed. */
 type SiteProbe =
   | { running: true; status: string; mode: "direct" | "batch" }
-  | { running: false; line: Record<string, unknown>; costScale: number; lost?: LostUsage; batchId: string };
+  | { running: false; line: Record<string, unknown>; costScale: number; lost?: LostUsage; reserved?: boolean; batchId: string };
 
 async function batchLine(batch: BatchInfo): Promise<Record<string, unknown>> {
-  const res = await fetch(batch.results_url!, { headers: ANTHROPIC_HEADERS() });
-  const raw = await res.text();
-  if (!res.ok) throw new Error(`Couldn't fetch the draft (${res.status}): ${raw.slice(0, 300)}`);
+  const raw = await anthropicGet(batch.results_url!, "Couldn't fetch the draft");
   const first = raw.split("\n").find((l) => l.trim());
   return first ? JSON.parse(first) : {};
 }
 
 async function probeBatch(batchId: string, lost?: LostUsage): Promise<SiteProbe> {
-  const batch = await getBatch(batchId);
-  if (batch.processing_status !== "ended" || !batch.results_url) return { running: true, status: batch.processing_status ?? "", mode: "batch" };
-  return { running: false, line: await batchLine(batch), costScale: BATCH_DISCOUNT, ...(lost ? { lost } : {}), batchId };
+  try {
+    const batch = await getBatch(batchId);
+    if (batch.processing_status !== "ended" || !batch.results_url) return { running: true, status: batch.processing_status ?? "", mode: "batch" };
+    return { running: false, line: await batchLine(batch), costScale: BATCH_DISCOUNT, ...(lost ? { lost } : {}), batchId };
+  } catch (e) {
+    if (!(e instanceof BatchHiccup)) throw e;
+    console.warn(e.message);
+    return { running: true, status: "unknown", mode: "batch" };
+  }
 }
 
 async function probeSiteDraft(id: string, jwt: string): Promise<SiteProbe> {
@@ -1034,16 +1069,23 @@ async function probeSiteDraft(id: string, jwt: string): Promise<SiteProbe> {
     if (age > staleAfterMs(d.runner) + UNREADABLE_GIVE_UP_MS) throw new Error("Couldn't read the draft's result from storage — start it again");
     return { running: true, status: "direct", mode: "direct" };
   }
-  const out = file.state === "found" ? readOutcome(file.value) : null;
+  // only a file sealed by a runner for this key counts (sealOutcome)
+  const out = file.state === "found" ? await openOutcome(LLM_API_KEY, d.key, file.value) : null;
   if (!out) {
     // the run writes an outcome inside its budget, even when it is cut off;
     // none long after means its worker or machine was killed outright
     if (age > staleAfterMs(d.runner)) throw new Error("the draft stopped before it finished — start it again");
     return { running: true, status: "direct", mode: "direct" };
   }
-  if (out.type === "error") throw draftError(out.error, out.lost);
-  if (out.type === "batch") return probeBatch(out.batchId, out.lost);
-  return { running: false, line: asBatchLine(out.customId, out.message), costScale: 1, batchId: id };
+  // every direct draft's start booked the reserve; the collection books the rest
+  if (out.type === "error") throw draftError(out.error, out.lost, true);
+  if (out.type === "batch") {
+    let pb: SiteProbe;
+    try { pb = await probeBatch(out.batchId, out.lost); }
+    catch (e) { throw draftError(e instanceof Error ? e.message : String(e), out.lost, true); }
+    return pb.running ? pb : { ...pb, reserved: true };
+  }
+  return { running: false, line: asBatchLine(out.customId, out.message), costScale: 1, reserved: true, batchId: id };
 }
 
 async function siteVisitResult(body: Record<string, unknown>) {
@@ -1057,9 +1099,10 @@ async function siteVisitResult(body: Record<string, unknown>) {
   // encoded reads as unknown and is never reference-priced
   const kind = kindFromCustomId((line as { custom_id?: string }).custom_id);
   const model = parsed.model || SITE_VISIT_MODEL;
-  // a direct run cut off and re-queued was billed for what it had streamed
-  const p = priceFor(model);
-  const extraCostUsd = probe.lost ? (probe.lost.inTok / 1e6) * p.in + (probe.lost.outTok / 1e6) * p.out : 0;
+  // a direct run cut off and re-queued was billed for what it had streamed;
+  // a direct draft's start already booked the reserve (serve() floors the
+  // row at $0, so a draft cheaper than the reserve stays booked at it)
+  const extraCostUsd = lostCostUsd(probe.lost, Boolean(probe.reserved), model);
   if (parsed.error || !parsed.draft) {
     const e = new Error(parsed.error ?? "the draft came back empty") as Error & { usage?: Usage; model?: string; costScale?: number; extraCostUsd?: number };
     e.usage = parsed.usage; e.model = model; e.costScale = probe.costScale; e.extraCostUsd = extraCostUsd;

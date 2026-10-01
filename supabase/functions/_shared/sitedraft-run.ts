@@ -17,7 +17,7 @@
  */
 
 import {
-  fallbackForStatus, batchBodyFor, splitSse, StreamAssembler,
+  fallbackForStatus, batchBodyFor, splitSse, StreamAssembler, sealOutcome,
   type DraftJob, type DirectOutcome, type LostUsage,
 } from "./sitedraft.ts";
 
@@ -83,7 +83,9 @@ export class DraftRun {
       hiccup, so it is tried up to WRITE_TRIES times; "already exists" ends
       it (the upload URL takes one write, no upsert). */
   private async write(outcome: DirectOutcome): Promise<void> {
-    const body = JSON.stringify(outcome);
+    let body: string;
+    try { body = await sealOutcome(this.env.apiKey, this.key, outcome); }
+    catch (e) { return this.log("write-failed", { error: `seal: ${e instanceof Error ? e.message : String(e)}` }); }
     let last = "";
     for (let i = 0; i < WRITE_TRIES; i++) {
       if (i) await new Promise((r) => setTimeout(r, (this.env.writeBackoffMs ?? WRITE_BACKOFF_MS) * i));
