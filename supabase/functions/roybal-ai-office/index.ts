@@ -31,6 +31,9 @@
  *                   photos, note pages, the recorded walk and the typed scope,
  *                   read by signed URL and run as a Message Batch (see
  *                   ./sitevisit.ts for why).
+ *   walkExtract   — scope notes from the narrated walk clips (transcripts +
+ *                   captioned stills): per-room cited items the owner reviews
+ *                   before the draft (./walkextract.ts; design V2).
  *
  * fieldAssist personas: body.app (field | board | admin) picks the persona
  * (server-defined text only, registry in ../_shared/personas/) and is stamped on
@@ -68,6 +71,7 @@ import {
   PERSONAS, CTX_LABELS, SPOKEN_RULE, TOOL_RULE, TOOLS, TOOLSETS, ACTION_RULE, ACTION_DEFS, ACTIONSETS,
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
+import { cleanExtractInput, buildExtractContent, parseScopeNotes, SCOPE_NOTES_SCHEMA, SCOPE_SYSTEM } from "./walkextract.ts";
 import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildMessageParams, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
 // the direct run (Fly, then roybal-site-draft) and its outcome file — pure,
 // Node-tested in ../_shared/sitedraft.test.mjs
@@ -101,6 +105,8 @@ const DOC_MODEL = Deno.env.get("OFFICE_DOC_MODEL") ?? "claude-opus-4-8";
 // the recorded walk) — Branden asked for the best model available, so it runs
 // on the most capable one. Env-overridable without a redeploy of the code.
 const SITE_VISIT_MODEL = Deno.env.get("SITE_VISIT_MODEL") ?? "claude-fable-5-1";
+// Walk scope notes (design V2): one direct call, someone is waiting on it.
+const WALK_EXTRACT_MODEL = Deno.env.get("WALK_EXTRACT_MODEL") ?? DOC_MODEL;
 const SITE_VISIT_EFFORT = Deno.env.get("SITE_VISIT_EFFORT") ?? "high";
 // Message Batches bill at half the standard token price.
 const BATCH_DISCOUNT = 0.5;
@@ -867,6 +873,37 @@ async function siteVisitTranscribe(body: Record<string, unknown>) {
   return { result: { transcript, seconds, utterances }, usage: { inTok: 0, outTok: 0 }, model: "deepgram-stt", summary: { seconds, chars: transcript.length, utterances: utterances.length }, audioSeconds: seconds };
 }
 
+/* walkExtract — the narrated clips' transcripts and stills → scope notes
+   (design §3 step 7). Direct, not a batch: a walk is a few clips and up to
+   MAX_STILLS stills, back in a minute or two while the owner waits. */
+async function walkExtract(body: Record<string, unknown>) {
+  const jwt = String(body._jwt ?? "");
+  const who = await db("rpc/role_is", jwt, { method: "POST", body: JSON.stringify({ p_roles: ["owner", "office", "crew_lead"] }) });
+  if (!who.ok || (await who.json().catch(() => null)) !== true) throw new Error("Scope notes are for the owner, office and crew leads.");
+  const input = cleanExtractInput(body);
+  if (!input.clips.length) throw new Error("Transcribe at least one walk clip first.");
+  const signed: Record<string, string> = {};
+  for (const s of input.stills) {
+    try { signed[s.path] = await signMedia(s.path, jwt, 3600); }
+    catch (e) { console.warn(`walkExtract: skipping a still: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+  const { input: out, usage } = await forcedTool({
+    model: WALK_EXTRACT_MODEL,
+    system: SCOPE_SYSTEM,
+    content: buildExtractContent(input, signed),
+    toolName: "scope_notes",
+    schema: SCOPE_NOTES_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 16000,
+  });
+  const { rooms, dropped } = parseScopeNotes(out, input.clips);
+  const items = rooms.reduce((t, r) => t + r.items.length, 0);
+  return {
+    result: { scopeNotes: { rooms, model: WALK_EXTRACT_MODEL, fromClips: input.clips.map((c) => c.n) } },
+    usage, model: WALK_EXTRACT_MODEL,
+    summary: { clips: input.clips.length, stills: Object.keys(signed).length, rooms: rooms.length, items, dropped },
+  };
+}
+
 async function siteVisitStart(body: Record<string, unknown>) {
   if (!LLM_API_KEY) throw new Error("llm_key_missing: set the LLM_API_KEY function secret (Anthropic)");
   const jwt = String(body._jwt ?? "");
@@ -910,7 +947,7 @@ async function siteVisitStart(body: Record<string, unknown>) {
     result: { batchId: id, pricingMode: pm, model: SITE_VISIT_MODEL, mode },
     usage: { inTok: 0, outTok: 0 }, model: SITE_VISIT_MODEL,
     extraCostUsd: mode === "direct" ? SITE_DRAFT_RESERVE_USD : 0,
-    summary: { batchId: id, mode, ...(runner ? { runner } : {}), kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, referenceRows: referenceText ? refRows.length : 0 },
+    summary: { batchId: id, mode, ...(runner ? { runner } : {}), kind, reports: packet.reports.length, photos: packet.photos.length, notes: packet.notes.length, transcriptChars: packet.transcript.length, scopeChars: packet.typedScope.length, scopeNotesChars: packet.scopeNotes.length, referenceRows: referenceText ? refRows.length : 0 },
   };
 }
 
@@ -2101,7 +2138,7 @@ async function portalDraft(body: Record<string, unknown>) {
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number; costScale?: number; extraCostUsd?: number }>> = {
   photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
-  siteVisitTranscribe, siteVisitStart, siteVisitResult,
+  siteVisitTranscribe, siteVisitStart, siteVisitResult, walkExtract,
 };
 
 serve(async (req: Request) => {

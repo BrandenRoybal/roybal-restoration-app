@@ -27,6 +27,7 @@ import { tileCandidates, startBid, findBoardRow, isBidLead } from "./boardpush.j
 import { jobType } from "./model.js";
 import { magicplanBidLine } from "./magicplan.js";
 import { walkSummary } from "./walk.js";
+import { scopeCounts, checkVerify } from "./scopenotes.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -115,6 +116,7 @@ export function bidState(project, d) {
       ...walkSummary(sv.files),   // clips, seconds, stills
       transcript: !!String(sv.transcript || "").trim(),
       scope: !!String(sv.typedScope || "").trim(),
+      notes: scopeCounts(sv),   // V2 walk scope notes: items, open, verify, verifyItems
     },
     estimate: latest ? {
       id: latest.id || "",
@@ -165,7 +167,9 @@ const shortDate = (iso) => {
 };
 
 /* the Packet line: "4 clips · 11 min · transcript ✓" once walk clips exist,
-   "3 files · transcript ✓ · scope typed ✓" for a packet without them */
+   "3 files · transcript ✓ · scope typed ✓" for a packet without them, and
+   the walk scope notes once drafted: "scope notes ✓ (2 to verify)" or
+   "scope notes: 5 to check" */
 export function packetText(packet) {
   const p = packet || {};
   const n = (x, one) => `${x} ${one}${x === 1 ? "" : "s"}`;
@@ -175,6 +179,9 @@ export function packetText(packet) {
     p.clips && secs ? (secs >= 60 ? `${Math.round(secs / 60)} min` : `${Math.round(secs)} sec`) : "",
     p.transcript ? "transcript ✓" : "",
     p.scope ? "scope typed ✓" : "",
+    p.notes && p.notes.items
+      ? (p.notes.open ? `scope notes: ${p.notes.open} to check` : "scope notes ✓") + (p.notes.verify ? ` (${p.notes.verify} to verify)` : "")
+      : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -576,6 +583,22 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
       s.packet.files || s.packet.transcript ? "Open packet" : "Start packet");
     packetBtn.addEventListener("click", () => openEstimate && openEstimate());
     wrap.append(line("📎", "Packet", packetTxt, packetBtn));
+
+    // 🔎 Verify — the scope notes' open unknowns, the thing to look at
+    // before leaving the driveway (design §5). A tick clears one.
+    const vItems = (s.packet.notes && s.packet.notes.verifyItems) || [];
+    if (vItems.length) {
+      const list = h("div", {}, ...vItems.map((v) => {
+        const box = h("input", { type: "checkbox", style: "width:auto;margin:0 6px 0 0" });
+        box.addEventListener("change", async () => {
+          if (!checkVerify(project.siteVisit, v.id, box.checked)) return;
+          await Store.put(project);
+          if (onChanged) onChanged(); else paint(d);
+        });
+        return h("label", { style: "display:flex;align-items:flex-start;margin-top:2px;font-weight:400" }, box, v.text);
+      }));
+      wrap.append(line("🔎", "Verify", list, null));
+    }
 
     // 📐 Magicplan — docs/Magicplan_Integration_Design.md §5
     wrap.append(mpLine.setTile(d));
