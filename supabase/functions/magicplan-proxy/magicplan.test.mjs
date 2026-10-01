@@ -176,7 +176,9 @@ test("sync copies the report, the room-tagged photos and the floor SVG, and buil
   assert.equal(row.floors_svg[0].floor, "1st Floor");
   assert.equal(calls.uploaded.length, 8);   // report, 2 photos, floor SVG + 4 JSON
   assert.ok(calls.uploaded.every((u) => officeIsSitePath(u.path)));
-  assert.ok(calls.mp.includes("/plans/6a45b1435520f/files?format[]=pdf&format[]=jpg&format[]=svg&format[]=png&format[]=usdz&format[]=xls&format[]=csv&format[]=obj&format[]=ifc&format[]=dxf&format[]=fml&format[]=xfif&format[]=xml&format[]=magicplan&include_photos=true"));
+  // one format per call: the live API refuses several format[] in one request
+  for (const f of S.ALL_FORMATS) assert.ok(calls.mp.includes(`/plans/6a45b1435520f/files?format[]=${f}&include_photos=true`), f);
+  assert.ok(!calls.mp.some((p) => (p.match(/format\[\]=/g) || []).length > 1));
   assert.equal(row.synced_at, "2026-09-26T23:00:00Z");
 });
 test("a project that belongs to another job comes back unmatched with nothing downloaded", async () => {
@@ -363,4 +365,31 @@ test("a refused file listing is noted, and the plan, room plans, measurements an
   assert.equal(row.files.filter((f) => f.kind === "room").length, 1);
   assert.equal(row.statistics.floors[0].rooms[0].floorSF, 214);
   assert.match(row.error, /^Exported files and photos not imported: .*\(400\)/);
+});
+
+test("a format Magicplan refuses is named; the other formats still come in", async () => {
+  const { deps } = fakes({ plan: PLAN_ROOMS });
+  deps.mp = ((mp) => async (p) => { if (/format\[\]=(xfif|fml)&/.test(p)) throw new Error("Magicplan GET /plans/x/files failed (400)"); return mp(p); })(deps.mp);
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.equal(row.files.filter((f) => f.name === "Report.pdf").length, 1);   // listed by every format, copied once
+  assert.equal(row.photos.length, 2);
+  assert.match(row.error, /Magicplan refused these formats: fml, xfif/);
+});
+
+test("room figures in metres on an imperial project are converted to feet", () => {
+  // the live 10/1 bedroom: floor 14, perimeter 13.5, walls 37 (net 31), volume 35, no height
+  const live = { data: { plan_data: { floors: [{ name: "Ground Floor", rooms: [{ name: "Bedroom",
+    statistics: { area_without_walls: 14, ground_perimeter: 13.5, walls_surface: 37, walls_surface_without_openings: 31, volume: 35, door_count: 0, window_count: 0 } }] }] } } };
+  const rm = S.statsFromPlan(live, "imperial").floors[0].rooms[0];
+  assert.deepEqual(rm, { name: "Bedroom", floorSF: 151, perimLF: 44.5, ceilingFt: 8, wallSF: 398, wallSFNet: 334, doors: 0, windows: 0, volumeCF: 1236, dims: "" });
+  // the same verdict from the plan totals, when they are in square feet
+  assert.equal(S.roomScale(live.data.plan_data.floors, { area_without_walls: 150.7 }), "metric-in-imperial");
+  // feet stay feet (8 ft walls), and a metric project is left to the normalizer
+  assert.equal(S.roomScale(PLAN.data.plan_data.floors, STATS.data.project_statistics), "same");
+  assert.equal(S.roomScale(live.data.plan_data.floors, null, "metric"), "same");
+  assert.equal(S.statsFromPlan(live, "metric").floors[0].rooms[0].floorSF, 151);
+  // no height anywhere: ceiling from volume / floor area
+  const noH = JSON.parse(JSON.stringify(PLAN)); delete noH.data.plan_data.floors[0].rooms[0].statistics.height; delete noH.data.plan_data.floors[0].statistics;
+  assert.equal(S.statsFromPlan(noH, "imperial").floors[0].rooms[0].ceilingFt, 8);
 });
