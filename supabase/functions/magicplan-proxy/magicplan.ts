@@ -119,13 +119,13 @@ export const isSitePath = (p: unknown): p is string => typeof p === "string" && 
 export function mpHeaders(key: string, customer: string, json = false): Record<string, string> {
   return { key, customer, accept: "application/json", ...(json ? { "content-type": "application/json" } : {}) };
 }
-/** GET /plans/{id}/files query: Report PDF(s) + the photos pinned in the scan. */
-/** Every export format the API lists (design §1): the Report PDF, drawings
-    (svg/png/jpg/dxf), the 3D model (usdz, ifc), Magicplan's own plan files
-    (fml, xml, mp) and the spreadsheets (xls, csv). A format only comes back
-    once it has been exported in the app or by the workspace's export
-    configuration. */
-export const ALL_FORMATS = ["pdf", "jpg", "png", "svg", "dxf", "usdz", "xls", "csv", "ifc", "fml", "xml", "mp"];
+/** Every export format the API accepts — the list is Magicplan's own,
+    copied from its 400 reply on 10/1 ("Please use the following formats:
+    …"): the Report PDF, drawings (svg/png/jpg/dxf), the 3D model (usdz,
+    obj, ifc), Magicplan's plan files (fml, xfif, xml, magicplan) and the
+    spreadsheets (xls, csv). A format only comes back once it has been
+    exported in the app or by the workspace's export configuration. */
+export const ALL_FORMATS = ["pdf", "jpg", "svg", "png", "usdz", "xls", "csv", "obj", "ifc", "dxf", "fml", "xfif", "xml", "magicplan"];
 export const filesPath = (planId: string) =>
   `/plans/${encodeURIComponent(planId)}/files?${ALL_FORMATS.map((f) => `format[]=${f}`).join("&")}&include_photos=true`;
 
@@ -476,7 +476,9 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
 
   // 1. Every exported file and every pinned photo (videos included, when
   //    Magicplan lists them with the photos)
-  const { files, photos } = filesOf(await deps.mp(filesPath(project.planId)));
+  let listed: ReturnType<typeof filesOf> = { files: [], photos: [] };
+  try { listed = filesOf(await deps.mp(filesPath(project.planId))); } catch (e) { note("Exported files and photos not imported", e); }
+  const { files, photos } = listed;
   for (const f of files) {
     const s = await fetchOne(f, f.name || "Magicplan file");
     if (s) base.files.push({ ...s, folder: f.folder, kind: kindOf(f.name, f.fileType) });
