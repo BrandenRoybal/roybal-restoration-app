@@ -260,6 +260,24 @@ export async function uploadSiteFileResumable(path, blob, contentType, opts = {}
   }
 }
 
+/** A short-lived signed URL for one Site Visit packet file — the ▶ player
+    streams a walk clip from it (Storage answers range requests) instead of
+    downloading a few hundred MB first. */
+export async function signSiteFile(path, expiresIn = 3600) {
+  await ensureFresh();
+  const send = () => fetch(`${SUPABASE_URL}/storage/v1/object/sign/${MEDIA_BUCKET}/${path}`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ expiresIn }),
+  });
+  let res = await send();
+  if (res.status === 401 && session && session.refresh_token) { await refresh(); res = await send(); }
+  const out = await res.json().catch(() => ({}));
+  const rel = out.signedURL || out.signedUrl;
+  if (!res.ok || !rel) throw new Error(res.status === 404 || res.status === 400 ? "That clip isn't in storage" : "Couldn't open the clip (" + res.status + ")");
+  return `${SUPABASE_URL}/storage/v1${rel.startsWith("/") ? rel : "/" + rel}`;
+}
+
 /** Download one Site Visit packet file as a Blob; null when it's gone.
     (Photos on Won: the bid's site-visit stills become Job Photos.) */
 export async function downloadSiteFile(path) {

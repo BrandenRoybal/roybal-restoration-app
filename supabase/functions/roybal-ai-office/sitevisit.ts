@@ -60,6 +60,7 @@ export type SitePacket = {
   notes?: SiteFile[];        // photographed handwritten note pages
   transcript?: string;       // site-walk transcript (from siteVisitTranscribe)
   typedScope?: string;       // Branden's typed scope / instructions
+  scopeNotes?: string;       // WALK SCOPE NOTES the owner reviewed (design V2), each with its [N#] id
   magicplanQuantities?: MagicplanQuantities | null;   // measured rooms (M3), or absent
 };
 
@@ -113,6 +114,7 @@ export function cleanPacket(raw: unknown): Required<SitePacket> {
     reports, photos, notes,
     transcript: String(p.transcript ?? "").slice(0, MAX_TRANSCRIPT_CHARS),
     typedScope: String(p.typedScope ?? "").slice(0, MAX_SCOPE_CHARS),
+    scopeNotes: String(p.scopeNotes ?? "").slice(0, MAX_SCOPE_CHARS),
     magicplanQuantities: cleanQuantities(p.magicplanQuantities),
   };
 }
@@ -140,7 +142,7 @@ export function quantitiesText(q: MagicplanQuantities | null | undefined): strin
 /** True when the packet carries enough evidence to draft from. */
 export function packetHasEvidence(p: Required<SitePacket>): boolean {
   return p.reports.length > 0 || p.photos.length > 0 || p.notes.length > 0 ||
-    p.transcript.trim().length > 0 || p.typedScope.trim().length > 0;
+    p.transcript.trim().length > 0 || p.typedScope.trim().length > 0 || p.scopeNotes.trim().length > 0;
 }
 
 /* ---------- Deepgram → readable transcript ----------
@@ -376,11 +378,13 @@ export function buildContent(a: BuildArgs): Block[] {
   const sections = [
     ...(measured ? [measured] : []),
     "OWNER'S TYPED SCOPE:\n" + (packet.typedScope.trim() || "(none)"),
+    ...(packet.scopeNotes.trim() ? ["WALK SCOPE NOTES (pulled from the walk clips and reviewed by the owner; each has an id in brackets and the clip and second it came from; INSTRUCTIONS are the owner's instructions, VERIFY items are unknowns — never price a VERIFY quantity as fact):\n" + packet.scopeNotes.trim()] : []),
     "SITE WALK TRANSCRIPT (one or more narrated clips; each clip opens with a header line — Clip n · Room · length — and every timestamp inside a clip is minutes:seconds into THAT clip, not into the visit; a recording with no header is timed from its own start):\n" + (packet.transcript.trim() || "(no recording)"),
     "JOB HEADER AND ANY DOCUMENTED FACTS:\n```json\n" + JSON.stringify(a.facts ?? {}, null, 2) + "\n```",
     "HOW TO WRITE IT:\n" +
       "- Cite evidence in every basis: report page, walk clip room and timestamp, photo number, notes page, or typed scope.\n" +
       (measured ? "- Use MEASURED QUANTITIES over anything read off the report PDF: they are the LiDAR scan's own figures. Cite them as 'Magicplan: 214 ft² floor, 58 LF perimeter' (the room's measured numbers, not a page). Wall areas there are net of openings; only derive what the scan does not give.\n" : "") +
+      (packet.scopeNotes.trim() ? "- When a line comes from a WALK SCOPE NOTE, put its id in the basis ('[N4] walk Kitchen 02:14: \"take it to four feet\"'). Every INSTRUCTION note gets a line or a question saying why it has none.\n" : "") +
       "- The room named at the top of a clip is the room every line from that clip belongs to unless the speaker names another.\n" +
       "- Fairbanks realism: freight and lead times, winter conditions (heat, protection, snow removal for access when the season calls for it), frost-depth and snow-load considerations on any exterior or structural scope.\n" +
       "- No overhead, profit or tax lines; they are applied separately.\n\n" +

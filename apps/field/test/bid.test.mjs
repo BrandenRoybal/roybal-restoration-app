@@ -85,6 +85,20 @@ const walked = bidState({ ...file, siteVisit: { files: [
   { kind: "frames", videoId: "w1" }, { kind: "report" } ], transcript: "— Clip 1 · Kitchen · 2:45 —\n[00:02] Kitchen." } }, tileD);
 ok("the Packet line counts clips and minutes once walk clips exist", walked.packet.clips === 4 && walked.packet.seconds === 660 && walked.packet.stills === 40
   && packetText(walked.packet) === "4 clips · 11 min · transcript ✓");
+ok("packetText: scope notes to check, then checked with verify items left",
+  packetText({ clips: 1, seconds: 60, notes: { items: 6, open: 4, verify: 0 } }) === "1 clip · 1 min · scope notes: 4 to check"
+  && packetText({ clips: 1, seconds: 60, notes: { items: 6, open: 0, verify: 2 } }) === "1 clip · 1 min · scope notes ✓ (2 to verify)"
+  && packetText({ clips: 1, seconds: 60, notes: { items: 0, open: 0, verify: 0 } }) === "1 clip · 1 min");
+{
+  const sv = { files: [], scopeNotes: { rooms: [{ room: "Kitchen", items: [
+    { id: "N1", bucket: "verify", text: "check the subfloor", clipId: "w", at: 1 },
+    { id: "N2", bucket: "verify", text: "already checked", clipId: "w", at: 2, checked: true },
+    { id: "N3", bucket: "instructions", text: "four feet", clipId: "w", at: 3, state: "accepted" },
+  ] }] } };
+  const st = bidState({ bidOf: "b1", siteVisit: sv }, tileD);
+  ok("bidState carries the scope-note counts and the open Verify items",
+    st.packet.notes.items === 3 && st.packet.notes.open === 2 && st.packet.notes.verify === 1 && st.packet.notes.verifyItems[0].id === "N1");
+}
 ok("packetText: seconds under a minute, typed scope, and nothing at all", packetText({ clips: 1, seconds: 42, scope: true }) === "1 clip · 42 sec · scope typed ✓" && packetText({}) === "" && packetText(null) === "");
 ok("estimate: number, lines, total", s1.estimate.no === "RC-MIK-0926" && s1.estimate.lines === 1 && s1.estimate.total === 12000);
 ok("the customer's ask comes from the file first", s1.lead.message === "Kitchen remodel" && s1.lead.channel === "web-form");

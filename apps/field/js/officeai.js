@@ -260,6 +260,11 @@ function siteVisitFacts(project) {
 export function transcribeSiteAudio(project, path) {
   return callOffice(project, "siteVisitTranscribe", { path });
 }
+/** Scope notes from the transcribed walk clips (scopenotes.js extractInput)
+    → { scopeNotes: { rooms, model, fromClips } }. A minute or two. */
+export function extractWalkScope(project, input) {
+  return callOffice(project, "walkExtract", input);
+}
 /** Submit the draft → { batchId, model }. It runs in the background. */
 export function startSiteVisitDraft(project, packet, pricingMode, rates = "") {
   return callOffice(project, "siteVisitStart", { packet, facts: siteVisitFacts(project), pricingMode, rates });

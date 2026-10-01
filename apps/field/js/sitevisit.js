@@ -18,11 +18,15 @@
         room is read from its first five seconds, and sv.transcript is
         rebuilt from every clip in order (js/walk.js, the pure half —
         docs/Narrated_Walkthrough_Design.md);
-     3. one tap drafts the estimate: the most capable Claude model reads
+     3. ✨ Draft scope notes (V2): the clips become cited per-room notes
+        the owner reviews ✓ / ✎ / ✕, each with a ▶ that plays its clip at
+        the second it was said (js/scopenotes.js, roybal-ai-office
+        walkExtract); only accepted notes reach the draft;
+     4. one tap drafts the estimate: the most capable Claude model reads
         the files themselves plus the typed scope, the company estimating
         rules and the Fairbanks price catalog (roybal-ai-office
         siteVisitStart). It runs in the background — a few minutes;
-     4. the finished draft lands in this editor: room-by-room lines with
+     5. the finished draft lands in this editor: room-by-room lines with
         sheet prices stamped, assumptions / exclusions / pricing basis in
         the printed notes, open questions on screen, and a plain-language
         per-room summary kept on the estimate (inv.customerScope) for the
@@ -31,9 +35,13 @@
    The pure helpers at the top are Node-tested (test/sitevisit.test.mjs).
    ============================================================ */
 import { h, toast, fileToDataURL, uid, likelyOffline } from "./core.js";
-import { uploadSiteFile, isSignedIn } from "./supa.js";
-import { enqueueMedia, queueRows, queueSummary, onMedia, retryMedia, removeMedia, drainMediaQueue, fmtMB } from "./mediaqueue.js";
-import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft } from "./officeai.js";
+import { uploadSiteFile, isSignedIn, signSiteFile } from "./supa.js";
+import { enqueueMedia, queueRows, queueSummary, onMedia, retryMedia, removeMedia, drainMediaQueue, fmtMB, queuedBlob } from "./mediaqueue.js";
+import { aiAvailable, transcribeSiteAudio, startSiteVisitDraft, checkSiteVisitDraft, extractWalkScope } from "./officeai.js";
+import {
+  BUCKETS, extractInput, canExtract, untranscribed, adoptScopeNotes, setItemState, editItem, acceptAll, scopeCounts,
+  citeOf, scopeNotesText, typedScopeFromNotes, uncoveredInstructions,
+} from "./scopenotes.js";
 import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
 import { magicplanBanner, officeRole } from "./magicplan.js";
@@ -86,13 +94,14 @@ export function packetForDraft(sv) {
     notes: of("notes").map(pick),
     transcript: String((sv && sv.transcript) || ""),
     typedScope: String((sv && sv.typedScope) || ""),
+    scopeNotes: scopeNotesText(sv),   // V2: the reviewed walk scope notes, accepted only
     // M3: measured rooms from the Magicplan scan (feet), or absent
     ...(function () { const q = magicplanQuantities(sv); return q ? { magicplanQuantities: q } : {}; })(),
   };
 }
 export function packetReady(sv) {
   const p = packetForDraft(sv);
-  return p.reports.length + p.photos.length + p.notes.length > 0 || !!p.transcript.trim() || !!p.typedScope.trim();
+  return p.reports.length + p.photos.length + p.notes.length > 0 || !!p.transcript.trim() || !!p.typedScope.trim() || !!p.scopeNotes.trim();
 }
 
 /* ---------- pure: where each drafted price came from ----------
@@ -362,6 +371,38 @@ export async function videoFrames(file, times = FRAMES_PER_VIDEO) {
   }
 }
 
+/* ---------- browser: ▶ play a walk clip ----------
+   From the phone while the clip still waits in the media queue (recorded
+   with no signal), else streamed from storage by a signed URL. `at` seeks
+   to just before that second — a scope note's ▶ lands on the words. */
+export async function openClipPlayer(row, at = 0, title = "") {
+  if (!row || !row.path) return;
+  const blob = await queuedBlob(row.id);
+  let src = "", local = false;
+  try {
+    if (blob) { src = URL.createObjectURL(blob); local = true; }
+    else src = await signSiteFile(row.path);
+  } catch (e) {
+    toast((e && e.message ? e.message : "Couldn't open the clip") + (likelyOffline() ? " — no signal right now." : "."), 4000);
+    return;
+  }
+  const v = h("video", { controls: true, playsinline: true, preload: "metadata", style: "width:100%;max-height:70vh;background:#000;border-radius:8px" });
+  v.setAttribute("playsinline", "");
+  const start = Math.max(0, (Number(at) || 0) - 2);
+  v.addEventListener("loadedmetadata", () => { if (start) { try { v.currentTime = Math.min(start, (v.duration || start) - 0.1); } catch { /* seek when it can */ } } v.play().catch(() => {}); }, { once: true });
+  v.addEventListener("error", () => toast("This phone can't play that clip here. It's still in the packet.", 4000), { once: true });
+  const close = () => { try { v.pause(); } catch { /* gone */ } v.removeAttribute("src"); v.load(); if (local) URL.revokeObjectURL(src); wrap.remove(); };
+  const wrap = h("div", { class: "clipplayer", style: "position:fixed;inset:0;z-index:9999;background:rgba(15,27,45,.85);display:flex;align-items:center;justify-content:center;padding:16px" },
+    h("div", { style: "width:100%;max-width:760px;background:#fff;border-radius:10px;padding:10px" },
+      h("div", { style: "display:flex;align-items:center;gap:8px;margin-bottom:8px" },
+        h("strong", { style: "flex:1;min-width:0;font-size:14px;color:#16395a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, title || clipLabel(row)),
+        h("button", { type: "button", class: "btn btn--sm", style: "width:auto", onclick: close }, "Close")),
+      v));
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
+  document.body.append(wrap);
+  v.src = src;
+}
+
 /* ---------- browser: the panel ----------
    ctx: { project, inv, save(), onApplied(summary) } */
 export function siteVisitPanel(ctx) {
@@ -542,6 +583,28 @@ export function siteVisitPanel(ctx) {
     }
   }
 
+  /* ✨ Draft scope notes (design §3 step 7): every transcribed clip and its
+     uploaded stills → cited notes per room. A re-run keeps every decision
+     already made (scopenotes.js adoptScopeNotes). */
+  let extracting = false;
+  async function draftScopeNotes() {
+    if (extracting || !aiAvailable()) return;
+    if (!canExtract(sv)) { toast("Record and transcribe a walk clip first."); return; }
+    extracting = true;
+    paint("");
+    try {
+      const r = await extractWalkScope(project, extractInput(sv, project));
+      const c = adoptScopeNotes(sv, r.scopeNotes || {});
+      ctx.save();
+      toast(c.items ? `${c.items} scope note${c.items === 1 ? "" : "s"} from the walk${c.kept ? ` (${c.kept} you'd already reviewed kept)` : ""}. Check each one.` : "Nothing in the walk clips to note.", 4000);
+    } catch (e) {
+      toast("Scope notes didn't finish: " + (e && e.message ? e.message : e), 5000);
+    } finally {
+      extracting = false;
+      paint("");
+    }
+  }
+
   async function start(btn) {
     if (!aiAvailable()) return;
     if (!packetReady(sv)) { toast("Add the report, photos, notes, a recording or a typed scope first."); return; }
@@ -587,6 +650,9 @@ export function siteVisitPanel(ctx) {
       const mq = job.magicplanScannedAt != null ? { scannedAt: job.magicplanScannedAt } : (job.magicplanScannedAt === undefined ? magicplanQuantities(sv) : null);
       if (mq) draft.pricingNotes = scanBasisNotes(draft, mq.scannedAt);   // scrubbed before the sentence goes on
       const sum = applySiteDraft(target, draft);
+      // V2: an accepted walk instruction the draft never cited by its [N#]
+      const said = uncoveredInstructions(sv, [...arr(draft.items).map((li) => li && li.basis), ...arr(draft.questions)]);
+      if (target.siteVisitDraft) target.siteVisitDraft.uncovered = said;
       sv.pending = null;
       sv.lastDraftAt = new Date().toISOString();
       ctx.save();
@@ -714,13 +780,14 @@ export function siteVisitPanel(ctx) {
       captionStills(sv, f); rebuildTranscript(sv);
       ctx.save(); paint("");
     });
+    const play = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Play this clip", onclick: () => openClipPlayer(f, 0, `${f.room || "Clip " + n} · ${mmss(f.duration || 0)}`) }, "▶");
     const tb = f.status === "uploaded" && !busy.has(f.id)
       ? h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", onclick: () => transcribeWalk(f) }, "Transcribe")
       : null;
     return h("div", { "data-clip": f.id, style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px;flex-wrap:wrap" },
       h("span", { style: "flex:1;min-width:8em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.room ? f.room : `Clip ${n}`,
         h("span", { class: "subtle" }, ` · ${mmss(f.duration || 0)} · ${f.frames || 0} stills`)),
-      room, status, retry, tb, del);
+      play, room, status, retry, tb, del);
   }
 
   function slot(kind) {
@@ -779,6 +846,78 @@ export function siteVisitPanel(ctx) {
 
   const imageCount = () => sv.files.filter((f) => f.path && (f.kind === "photos" || f.kind === "frames" || f.kind === "notes")).length;
 
+  /* 📝 Scope notes — room accordions of amber items with ✓ / ✎ / ✕ and a
+     ▶ chip that plays the clip at the second the item was said. */
+  const openRooms = new Set();   // which rooms are expanded survive a repaint
+  function scopeSection() {
+    const notes = sv.scopeNotes;
+    const c = scopeCounts(sv);
+    const waiting = untranscribed(sv);
+    const head = h("div", { style: "font-weight:600;font-size:13px;color:#16395a" }, "📝 Scope notes");
+    const btn = (label, onclick, primary, title) => h("button", { type: "button", class: primary ? "btn btn--primary btn--sm" : "btn btn--ghost btn--sm", style: "width:auto", onclick, ...(title ? { title } : {}) }, label);
+    const ready = canExtract(sv);
+    const go = btn(extracting ? "Reading the walk…" : notes ? "↻ Draft again" : "✨ Draft scope notes", () => draftScopeNotes(), !notes, "Reads every transcribed walk clip and its stills");
+    if (extracting || !ready || office === false) go.disabled = true;
+    const hint = extracting ? "Reading the clips and their stills. A minute or two; you can keep working."
+      : !ready ? "Record a walk clip; once it's transcribed, this turns it into notes you check room by room."
+      : waiting ? `${waiting} clip${waiting === 1 ? " isn't" : "s aren't"} transcribed yet and will be left out.`
+      : notes ? "" : "Turns the walk clips into notes you check before drafting. Only the ones you ✓ go to the estimate.";
+    if (!notes || !c.items) {
+      return h("div", { style: "padding:8px 0;border-top:1px solid #e2e6ed" },
+        h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
+          h("div", { style: "flex:1;min-width:0" }, head, hint ? h("div", { class: "subtle", style: "font-size:11px" }, hint) : null), go),
+        notes && !c.items && !extracting ? h("div", { class: "subtle", style: "font-size:12px;margin-top:4px" }, "The last run found nothing to note.") : null);
+    }
+    const counts = [`${c.items} note${c.items === 1 ? "" : "s"}`, c.open ? `${c.open} to check` : "all checked ✓", c.verify ? `${c.verify} to verify` : ""].filter(Boolean).join(" · ");
+    const tools = [];
+    if (c.open) tools.push(btn("✓ Accept the rest", () => { acceptAll(sv); ctx.save(); paint(""); }, false, "Accepts every note you haven't checked"));
+    const typed = typedScopeFromNotes(sv);
+    if (typed) tools.push(btn("Use as typed scope", () => {
+      sv.typedScope = [String(sv.typedScope || "").trim(), typed].filter(Boolean).join("\n\n");
+      ctx.save(); paint(""); toast("Added the accepted instructions, quantities and trades to the typed scope.");
+    }, false, "Copies the accepted instructions, quantities and trades into the typed scope box"));
+    tools.push(go);
+    const rooms = arr(notes.rooms).map((r) => {
+      const open = r.items.filter((it) => !it.state).length;
+      const d = h("details", { style: "margin-top:4px;border:1px solid #e2e6ed;border-radius:8px;background:#fff" },
+        h("summary", { style: "cursor:pointer;padding:6px 8px;font-size:13px;font-weight:600;color:#16395a" },
+          r.room, h("span", { class: "subtle", style: "font-weight:400" }, ` · ${r.items.length}${open ? ` · ${open} to check` : " ✓"}`)),
+        ...r.items.map(noteRow));
+      if (open || openRooms.has(r.room)) d.open = true;
+      d.addEventListener("toggle", () => { if (d.open) openRooms.add(r.room); else openRooms.delete(r.room); });
+      return d;
+    });
+    return h("div", { style: "padding:8px 0;border-top:1px solid #e2e6ed" },
+      head,
+      h("div", { class: "subtle", style: "font-size:11px" }, counts + (hint ? " — " + hint : "")),
+      h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px" }, ...tools),
+      ...rooms);
+  }
+  function noteRow(it) {
+    const st = it.state;
+    const bg = st === "accepted" ? "#f1f8f2" : st === "rejected" ? "#f6f7f9" : "#fff4e5";
+    const b = BUCKETS[it.bucket] || { label: it.bucket };
+    const row = sv.files.find((f) => f && f.id === it.clipId);
+    const qty = it.bucket === "quantities" && it.value != null ? ` (${it.value}${it.unit ? " " + it.unit : ""})`
+      : it.cause ? ` (cause: ${it.cause})` : "";
+    const icon = (label, title, onclick, on) => h("button", { type: "button", class: "btn btn--ghost btn--sm", style: `width:auto;padding:2px 8px${on ? ";font-weight:700;background:#e3f3e6" : ""}`, title, onclick }, label);
+    const set = (state) => () => { setItemState(sv, it.id, it.state === state ? null : state); ctx.save(); paint(""); };
+    // two lines so a phone never splits the buttons: the note, then ▶ … ✓ ✎ ✕
+    return h("div", { "data-note": it.id, style: `padding:6px 8px;border-top:1px solid #eef1f5;background:${bg};font-size:12px` },
+      h("div", { style: "display:flex;gap:6px;align-items:baseline" },
+        h("span", { style: "font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;background:#e7eef7;color:#1e4a72;white-space:nowrap" }, b.label),
+        h("span", { style: `flex:1;min-width:0${st === "rejected" ? ";text-decoration:line-through;color:#8a94a3" : ""}` }, it.text + qty + (it.edited ? " ✎" : ""))),
+      h("div", { style: "display:flex;gap:6px;align-items:center;margin-top:4px" },
+        row ? h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto;padding:2px 8px;font-size:11px", title: "Play the clip at this moment", onclick: () => openClipPlayer(row, it.at, citeOf(sv, it)) }, "▶ " + citeOf(sv, it).replace(/^walk /, "")) : null,
+        h("span", { style: "flex:1" }),
+        icon("✓", "Keep this note", set("accepted"), st === "accepted"),
+        icon("✎", "Reword it (that keeps it)", () => {
+          const t = window.prompt("Reword this note:", it.text);
+          if (t != null && editItem(sv, it.id, t)) { ctx.save(); paint(""); }
+        }),
+        icon("✕", "Leave it out of the estimate", set("rejected"), false)));
+  }
+
   function paint(status) {
     const job = sv.pending;
     const scope = h("textarea", { rows: "4", placeholder: "Type the scope the way you would in Claude: what's in, what's out, materials, anything the photos won't show.", style: "flex:1;min-width:0;font-size:13px" });
@@ -801,12 +940,13 @@ export function siteVisitPanel(ctx) {
           sv.lastDraftAt ? h("span", { class: "subtle", style: "font-size:12px" }, `Last drafted ${ago(sv.lastDraftAt)}`) : null);
 
     const questions = arr(inv.siteVisitDraft && inv.siteVisitDraft.questions);
+    const said = arr(inv.siteVisitDraft && inv.siteVisitDraft.uncovered);
     root.replaceChildren(...[   // a null slot must not become a "null" text node
       h("div", { style: "font-weight:700;font-size:14px;color:#16395a" }, "📋 Site visit"),
       h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
         "Add what you collected on the walk. The draft reads all of it, prices from the Fairbanks list, and fills this estimate room by room."),
       mpBanner,
-      slot("walk"), slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
+      slot("walk"), scopeSection(), slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
       imageCount() > MAX_IMAGES
         ? h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },
             `${imageCount()} pictures in the packet; the draft reads the first ${MAX_IMAGES} (note pages first, then photos, then the newest stills are dropped). Remove clips or photos you don't need.`)
@@ -821,6 +961,12 @@ export function siteVisitPanel(ctx) {
             h("strong", {}, "Open questions from the last draft"),
             h("div", { class: "subtle", style: "font-size:11px" }, "Answer them in the typed scope and draft again."),
             ...questions.map((q) => h("div", { style: "margin-top:3px" }, "• " + q)))
+        : null,
+      said.length && !job
+        ? h("div", { style: "margin-top:10px;font-size:12px;padding:8px 10px;border-radius:8px;background:#fff4e5;border:1px solid #f0b463" },
+            h("strong", {}, "Said on the walk, not in this estimate"),
+            h("div", { class: "subtle", style: "font-size:11px" }, "Instructions you kept that no line cites. Add a line, or say why in the typed scope and draft again."),
+            ...said.map((x) => h("div", { style: "margin-top:3px" }, `• [${x.id}] ${x.text} — ${x.cite}`)))
         : null].filter(Boolean));
     if (job && !timer) timer = setInterval(() => check(false), 30000);
     if (!job) stopTimer();

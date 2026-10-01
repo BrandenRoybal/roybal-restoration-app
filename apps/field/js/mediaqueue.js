@@ -77,6 +77,12 @@ export async function queueSummary(projectId = null) {
     projects: [...new Set(rows.map((r) => r.projectId))],
   };
 }
+/** The bytes of a file still waiting in the queue (a clip recorded with no
+    signal plays from the phone), or null once it has uploaded. */
+export async function queuedBlob(id) {
+  try { const r = await MediaStore.get(id); return (r && r.blob) || null; } catch { return null; }
+}
+
 export async function retryMedia(id) {
   const row = await MediaStore.get(id);
   if (!row) return null;
