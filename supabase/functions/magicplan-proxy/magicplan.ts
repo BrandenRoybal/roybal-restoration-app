@@ -181,9 +181,21 @@ export function floorImagesOf(resp: unknown) {
   const pd = (d.plan_data && typeof d.plan_data === "object" ? d.plan_data : {}) as Json;
   return arr<Json>(pd.floors).map((f, i) => ({ name: str(f && f.name) || `Floor ${i + 1}`, image: str(f && f.image) })).filter((f) => f.image);
 }
+/** The keys of a response, two levels deep, with no values: what the logs
+    carry when a shape surprises us, so the next fix reads the live shape
+    instead of guessing it. Never a value — no addresses, no URLs, no key. */
+export function shapeOutline(v: unknown, depth = 2): string {
+  if (Array.isArray(v)) return v.length ? `[${shapeOutline(v[0], depth)}]` : "[]";
+  if (!v || typeof v !== "object") return v === null ? "null" : typeof v;
+  const keys = Object.keys(v as Json).slice(0, 20);
+  if (depth <= 0) return `{${keys.join(",")}}`;
+  return `{${keys.map((k) => `${k}:${shapeOutline((v as Json)[k], depth - 1)}`).join(",")}}`;
+}
 /** Unwrapped — GET /plans/statistics/{id} */
 export function statisticsOf(resp: unknown) {
-  need(resp && typeof resp === "object" && (resp as Json).statistics && typeof (resp as Json).statistics === "object", "statistics");
+  if (!(resp && typeof resp === "object" && (resp as Json).statistics && typeof (resp as Json).statistics === "object")) {
+    throw new Error(`Magicplan statistics: unexpected response shape ${shapeOutline(resp)}`.slice(0, 900));
+  }
   return normalizeStatistics(resp);
 }
 /** Unwrapped — GET /workspace */
@@ -287,6 +299,7 @@ export type SyncDeps = {
   upload: (path: string, bytes: Uint8Array, mime: string) => Promise<void>;  // field-media, service role, upsert
   priorRows: (planId: string) => Promise<unknown[]>;            // ready|imported rows for this plan
   now: () => string;
+  warn?: (message: string) => void;                             // the function log
 };
 
 /** Builds the magicplan_exports row for one pull. Never writes field_projects
@@ -334,11 +347,28 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
     base.photos.push({ ...s, room, floor, caption, symbol_instance_id: f.symbolInstanceId || "" });
   }
 
-  base.statistics = statisticsOf(await deps.mp(`/plans/statistics/${encodeURIComponent(project.planId)}`));
+  // Measurements are the one part of a pull the packet can live without: a
+  // statistics call that fails or answers in a shape we don't read leaves
+  // statistics null and says why on the row, and the report, photos and
+  // floor plans still land (2026-10-01: a statistics surprise sank the
+  // whole pull after every photo had already been copied).
+  try {
+    base.statistics = statisticsOf(await deps.mp(`/plans/statistics/${encodeURIComponent(project.planId)}`));
+  } catch (e) {
+    base.error = `Room measurements not imported: ${e instanceof Error ? e.message : String(e)}`.slice(0, 1000);
+    deps.warn?.(base.error);
+  }
 
-  for (const fl of floorImagesOf(await deps.mp(`/projects/${encodeURIComponent(project.id)}/plan`))) {
-    const s = await store({ name: `${fl.name}.svg`, folder: "floor", url: fl.image, lastModified: project.userModified, size: 0, fileType: "svg" }, `${fl.name}.svg`);
-    base.floors_svg.push({ ...s, floor: fl.name });
+  // The floor SVGs are optional the same way.
+  try {
+    for (const fl of floorImagesOf(await deps.mp(`/projects/${encodeURIComponent(project.id)}/plan`))) {
+      const s = await store({ name: `${fl.name}.svg`, folder: "floor", url: fl.image, lastModified: project.userModified, size: 0, fileType: "svg" }, `${fl.name}.svg`);
+      base.floors_svg.push({ ...s, floor: fl.name });
+    }
+  } catch (e) {
+    const note = `Floor plan images not imported: ${e instanceof Error ? e.message : String(e)}`;
+    base.error = [base.error, note].filter(Boolean).join(" · ").slice(0, 1000);
+    deps.warn?.(note);
   }
 
   base.synced_at = deps.now();
