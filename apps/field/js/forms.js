@@ -1483,7 +1483,10 @@ export function invoice(project, inv) {
       if (!who.has(k)) { who.set(k, 0); whoOrder.push(k); }
       who.set(k, who.get(k) + ext);
     }
-    const whoRows = whoOrder.length > 1 && total
+    // estimates carry no performer recap (Branden, 9/30): the By column
+    // already names each line's trade, and the customer doesn't need a
+    // who-does-what split; invoices keep it
+    const whoRows = !isEst && whoOrder.length > 1 && total
       ? [h("div", { class: "invrecap__title", style: "margin-top:10px" }, "Recap by Performer"),
          ...whoOrder.map((k) => h("div", { class: "invrecap__row" },
            h("span", {}, k),
