@@ -122,13 +122,15 @@ export function mpHeaders(key: string, customer: string, json = false): Record<s
 /** Every export format the API accepts — the list is Magicplan's own,
     copied from its 400 reply on 10/1 ("Please use the following formats:
     …"): the Report PDF, drawings (svg/png/jpg/dxf), the 3D model (usdz,
-    obj, ifc), Magicplan's plan files (fml, xfif, xml, magicplan) and the
+    ifc), Magicplan's plan files (fml, xml) and the
     spreadsheets (xls, csv). A format only comes back once it has been
     exported in the app or by the workspace's export configuration.
     Asked ONE FORMAT PER CALL: the live API refuses several format[] values
     in one request (10/1 18:00, "Value [...] for argument format is
-    invalid"), while a single format[]=pdf has always worked. */
-export const ALL_FORMATS = ["pdf", "jpg", "svg", "png", "usdz", "xls", "csv", "obj", "ifc", "dxf", "fml", "xfif", "xml", "magicplan"];
+    invalid"), while a single format[]=pdf has always worked. obj, xfif and
+    magicplan are left out: that 400 reply lists them, but the files call
+    itself refuses each one alone (10/1 18:06). */
+export const ALL_FORMATS = ["pdf", "jpg", "svg", "png", "usdz", "xls", "csv", "ifc", "dxf", "fml", "xml"];
 export const filesPath = (planId: string, format: string) =>
   `/plans/${encodeURIComponent(planId)}/files?format[]=${encodeURIComponent(format)}&include_photos=true`;
 

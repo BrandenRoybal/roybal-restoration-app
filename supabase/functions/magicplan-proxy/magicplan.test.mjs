@@ -369,12 +369,12 @@ test("a refused file listing is noted, and the plan, room plans, measurements an
 
 test("a format Magicplan refuses is named; the other formats still come in", async () => {
   const { deps } = fakes({ plan: PLAN_ROOMS });
-  deps.mp = ((mp) => async (p) => { if (/format\[\]=(xfif|fml)&/.test(p)) throw new Error("Magicplan GET /plans/x/files failed (400)"); return mp(p); })(deps.mp);
+  deps.mp = ((mp) => async (p) => { if (/format\[\]=(xml|fml)&/.test(p)) throw new Error("Magicplan GET /plans/x/files failed (400)"); return mp(p); })(deps.mp);
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
   assert.equal(row.files.filter((f) => f.name === "Report.pdf").length, 1);   // listed by every format, copied once
   assert.equal(row.photos.length, 2);
-  assert.match(row.error, /Magicplan refused these formats: fml, xfif/);
+  assert.match(row.error, /Magicplan refused these formats: fml, xml/);
 });
 
 test("room figures in metres on an imperial project are converted to feet", () => {
