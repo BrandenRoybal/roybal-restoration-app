@@ -135,7 +135,8 @@ test("mime types follow the file name", () => {
 });
 
 /* ---------- the sync, with fakes ---------- */
-function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN } = {}) {
+const FORMS = { data: [{ symbol_type: "room", symbol_instance_id: "r1", forms: [{ title: "Site walk", sections: [{ fields: [{ label: "Damage", value: "Wet drywall 2 ft" }] }] }] }] };
+function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN, projectFiles = { data: [] }, timeLeft } = {}) {
   const calls = { mp: [], fetched: [], uploaded: [], warned: [] };
   const deps = {
     mp: async (p) => {
@@ -144,6 +145,9 @@ function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN } =
       if (p.startsWith("/plans/6a45b1435520f/files")) return FILES;
       if (p === "/plans/statistics/6a45b1435520f") { if (stats instanceof Error) throw stats; return stats; }
       if (p === `/projects/${project.data.id}/plan`) { if (plan instanceof Error) throw plan; return plan; }
+      if (p === `/projects/${project.data.id}/files`) return projectFiles;
+      if (p === "/plans/forms/6a45b1435520f") return FORMS;
+      if (p === "/plans/get/6a45b1435520f") return { data: { id: "6a45b1435520f", name: "plan" } };
       throw new Error("unexpected call " + p);
     },
     fetchBytes: async (url) => { calls.fetched.push(url); return new TextEncoder().encode(url); },
@@ -152,6 +156,7 @@ function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN } =
     priorRows: async () => prior,
     now: () => "2026-09-26T23:00:00Z",
     warn: (m) => calls.warned.push(m),
+    ...(timeLeft ? { timeLeft } : {}),
   };
   return { deps, calls };
 }
@@ -162,15 +167,16 @@ test("sync copies the report, the room-tagged photos and the floor SVG, and buil
   assert.equal(row.status, "ready");
   assert.equal(row.field_project_id, "bj-lead_42");
   assert.equal(row.mp_plan_id, "6a45b1435520f");
-  assert.equal(row.files.length, 1);
+  assert.equal(row.files.filter((f) => f.kind === "report").length, 1);
+  assert.deepEqual(row.files.filter((f) => f.kind === "data").map((f) => f.name), ["Magicplan plan.json", "Magicplan statistics.json", "Magicplan forms.json", "Magicplan project.json"]);
   assert.equal(row.files[0].mime, "application/pdf");
   assert.match(row.files[0].path, /^sitevisit\/bj-lead_42\/mp-[0-9a-f]{8}-Report\.pdf$/);
   assert.deepEqual(row.photos.map((p) => [p.room, p.caption, p.symbol_instance_id]), [["Living Room", "Window", "sym-1"], ["Living Room", "Outlet", "sym-2"]]);
   assert.equal(row.statistics.floors[0].rooms[0].floorSF, 214);
   assert.equal(row.floors_svg[0].floor, "1st Floor");
-  assert.equal(calls.uploaded.length, 4);
+  assert.equal(calls.uploaded.length, 8);   // report, 2 photos, floor SVG + 4 JSON
   assert.ok(calls.uploaded.every((u) => officeIsSitePath(u.path)));
-  assert.ok(calls.mp.includes("/plans/6a45b1435520f/files?format[]=pdf&include_photos=true"));
+  assert.ok(calls.mp.includes("/plans/6a45b1435520f/files?format[]=pdf&format[]=jpg&format[]=png&format[]=svg&format[]=dxf&format[]=usdz&format[]=xls&format[]=csv&format[]=ifc&format[]=fml&format[]=xml&format[]=mp&include_photos=true"));
   assert.equal(row.synced_at, "2026-09-26T23:00:00Z");
 });
 test("a project that belongs to another job comes back unmatched with nothing downloaded", async () => {
@@ -198,7 +204,7 @@ test("a second pull downloads nothing it already holds for this job", async () =
   // …but the same scan relinked to ANOTHER job gets its own copies
   const other = fakes({ prior: [first], project: PROJECT({ external_reference_id: "bj-other" }) });
   const moved = await S.runSync(other.deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-other" });
-  assert.equal(other.calls.uploaded.length, 4);
+  assert.equal(other.calls.uploaded.length, 8);
   assert.ok(moved.files[0].path.startsWith("sitevisit/bj-other/"));
 });
 test("a failing Magicplan call propagates (the caller records a failed row and toasts it)", async () => {
@@ -257,7 +263,7 @@ test("statistics in a shape we don't read: the report, photos and floor plan sti
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
   assert.equal(row.statistics, null);
-  assert.equal(row.files.length, 1);
+  assert.equal(row.files.filter((f) => f.kind === "report").length, 1);
   assert.equal(row.photos.length, 2);
   assert.equal(row.floors_svg.length, 1);
   assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape \{id:string,statistics:\{floors:\[\]\}\}/);
@@ -271,7 +277,7 @@ test("a failing statistics or plan call never sinks the pull", async () => {
   assert.match(r2.error, /^Room measurements not imported: .*\(404\)$/);
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
-  assert.equal(row.files.length, 1);
+  assert.equal(row.files.filter((f) => f.kind === "report").length, 1);
   assert.equal(row.floors_svg.length, 0);
   assert.match(row.error, /^Floor plan not read: .*\(500\)$/);
 });
@@ -300,4 +306,50 @@ test("room measurements come from the plan's rooms, in the statistics endpoint's
   assert.throws(() => S.statsFromPlan(odd, "imperial"), /no measurements we read in room statistics \{surface_area:number,len:number,name:string\}/);
   // a plan with no rooms is an empty, valid result
   assert.deepEqual(S.statsFromPlan({ data: { plan_data: { floors: [] } } }, "imperial"), { units: "imperial", floors: [] });
+});
+
+/* ---------- everything in the project (Branden 10/1: "download everything") ---------- */
+const PLAN_ROOMS = { data: { ...PLAN.data, plan_data: { floors: [{ ...PLAN.data.plan_data.floors[0],
+  rooms: [{ ...PLAN.data.plan_data.floors[0].rooms[0], image: "https://cloud.magicplan.app/api/v2/images/plan/6a45b1435520f/svg/r1.svg" }] }] } } };
+const FILES_ALL = { data: {
+  files: [...FILES.data.files,
+    { name: "Scan.usdz", folder: "3D", url: "https://files.example.invalid/s.usdz?sig=1", last_modified: "2026-09-26T22:39:00Z", size: 7, file_type: "usdz" },
+    { name: "Plan.dxf", folder: "DXF", url: "https://files.example.invalid/p.dxf?sig=1", last_modified: "2026-09-26T22:39:00Z", size: 7, file_type: "dxf" },
+    { name: "Huge.ifc", folder: "IFC", url: "https://files.example.invalid/h.ifc?sig=1", last_modified: "2026-09-26T22:39:00Z", size: S.MAX_FILE_BYTES + 1, file_type: "ifc" }],
+  photos: [...FILES.data.photos,
+    { symbol_instance_id: "sym-3", name: "1st Floor - Living Room - Ceiling - 3.mov", folder: "Captured photos", url: "https://files.example.invalid/v.mov?sig=1", last_modified: "2026-09-26T22:32:00Z", size: 9, file_type: "mov" }],
+} };
+test("a pull keeps everything: 3D, drawings, videos, attachments, each room's plan, and the raw data", async () => {
+  const { deps } = fakes({ plan: PLAN_ROOMS, projectFiles: { data: [{ name: "Walkthrough.mp4", url: "https://files.example.invalid/w.mp4?sig=1", size: 11 }] } });
+  deps.mp = ((mp) => async (p) => (p.startsWith("/plans/6a45b1435520f/files") ? FILES_ALL : mp(p)))(deps.mp);
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  const by = (k) => row.files.filter((f) => f.kind === k).map((f) => f.name);
+  assert.deepEqual(by("report"), ["Report.pdf"]);
+  assert.deepEqual(by("model3d"), ["Scan.usdz"]);
+  assert.deepEqual(by("drawing"), ["Plan.dxf"]);
+  assert.deepEqual(by("video"), ["1st Floor - Living Room - Ceiling - 3.mov", "Walkthrough.mp4"]);
+  assert.deepEqual(row.files.filter((f) => f.kind === "room").map((f) => [f.floor, f.room]), [["1st Floor", "Living Room"]]);
+  assert.equal(row.photos.length, 2);   // the video isn't a photo
+  assert.equal(row.files.find((f) => f.name === "Scan.usdz").mime, "model/vnd.usdz+zip");
+  assert.ok(row.files.every((f) => officeIsSitePath(f.path)));
+  assert.match(row.error, /Too large to copy: Huge\.ifc \(150 MB\)/);
+  assert.equal(row.status, "ready");
+});
+test("a pull that runs low on time stops starting downloads and says to pull again", async () => {
+  let left = 200_000;
+  const { deps, calls } = fakes({ timeLeft: () => (left -= 50_000) });
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.ok(calls.fetched.length < 4);
+  assert.match(row.error, /press ⟳ Pull again for the rest/);
+});
+test("project files in a shape we don't read are noted, not fatal", async () => {
+  const { deps } = fakes({ projectFiles: { files: [] } });
+  const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.match(row.error, /^Project attachments not imported: Magicplan project files: unexpected response shape \{files:\[\]\}/);
+});
+test("kindOf sorts what a pull brings back", () => {
+  assert.deepEqual(["a.pdf", "a.usdz", "a.ifc", "a.MOV", "a.mp4", "a.jpg", "a.svg", "a.dxf", "a.csv", "a.fml", "noext"].map((n) => S.kindOf(n)),
+    ["report", "model3d", "model3d", "video", "video", "photo", "drawing", "drawing", "data", "data", "data"]);
 });

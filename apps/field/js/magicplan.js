@@ -198,6 +198,7 @@ export async function pullMagicplan(project) {
 
 const adoptedToast = (c) => `Magicplan scan added: ${c.reports} report${c.reports === 1 ? "" : "s"}, ${c.photos} photo${c.photos === 1 ? "" : "s"}` +
   (c.rooms ? `, ${c.rooms} room${c.rooms === 1 ? "" : "s"} measured` + (c.accepted ? "" : " (amber in Floor Plan — check them)") : "") +
+  (c.others ? `, ${c.others} more file${c.others === 1 ? "" : "s"} under 📐 Magicplan files` : "") +
   (c.esx ? ", ESX sketch in Supporting Docs" : "") + ".";
 
 /* ============================================================

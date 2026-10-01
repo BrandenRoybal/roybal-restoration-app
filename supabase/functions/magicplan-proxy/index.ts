@@ -173,7 +173,12 @@ async function sha256(bytes: Uint8Array) {
 /* ============================================================
    Sync — design §4.2 (the algorithm lives in magicplan.ts runSync)
    ============================================================ */
+/** The edge worker's wall clock (the same 400 s roybal-site-draft budgets
+    against); a pull of a big scan stops starting downloads before it. */
+const WORKER_MS = 400_000;
+
 async function syncInto(sb: Db, projectId: string, fieldProjectId: string, trustLink = false) {
+  const started = Date.now();
   let row: ExportRow;
   try {
     row = await runSync({
@@ -191,6 +196,7 @@ async function syncInto(sb: Db, projectId: string, fieldProjectId: string, trust
       },
       now: () => new Date().toISOString(),
       warn: (m) => console.error(`magicplan-proxy sync: ${m}`),
+      timeLeft: () => WORKER_MS - (Date.now() - started),
     }, { projectId, fieldProjectId, trustLink });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import {
   mpFileId, mpFilePath, parsePhotoName, normalizeStatistics, dedupeRoomNames, splitAddress, projectName,
-  mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF,
+  mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF, isMpReport, mpKindLabel,
   magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE, ESX_DOC_ID,
 } from "../js/magicplancalc.js";
 import { siteFilePath, packetForDraft } from "../js/sitevisit.js";
@@ -281,3 +281,34 @@ test("adoptEsx: the sketch becomes one Supporting Doc, replaced in place on a ne
 });
 
 console.log(`\n${pass} passed`);
+
+/* ---------- everything a pull brings back (10/1) ---------- */
+test("only PDFs become reports; the 3D model, drawings, videos, room plans and data land as Magicplan files, never in the draft", () => {
+  const h = (c) => c.repeat(64);
+  const row = { ...ROW, id: "exp-all", files: [
+    ...ROW.files,
+    { path: mpFilePath("bj-lead_42", h("e"), "Scan.usdz"), name: "Scan.usdz", mime: "model/vnd.usdz+zip", size: 7, hash: h("e"), folder: "3D", kind: "model3d" },
+    { path: mpFilePath("bj-lead_42", h("f"), "walk.mov"), name: "walk.mov", mime: "video/quicktime", size: 9, hash: h("f"), folder: "Captured photos", kind: "video", room: "Living Room" },
+    { path: mpFilePath("bj-lead_42", "1".repeat(64), "room.svg"), name: "1st Floor - Living Room.svg", mime: "image/svg+xml", size: 3, hash: "1".repeat(64), folder: "Room plans", kind: "room", room: "Living Room" },
+    { path: mpFilePath("bj-lead_42", "2".repeat(64), "forms.json"), name: "Magicplan forms.json", mime: "application/json", size: 2, hash: "2".repeat(64), folder: "Magicplan data", kind: "data" },
+  ] };
+  const p = job();
+  const n = adoptExport(p, row, "2026-10-01T18:00:00Z");
+  assert.deepEqual([n.reports, n.photos, n.others], [1, 2, 4]);
+  const mp = p.siteVisit.files.filter((f) => f.kind === "mpfiles");
+  assert.deepEqual(mp.map((f) => [f.name, f.mpKind, f.room]), [["Scan.usdz", "model3d", ""], ["walk.mov", "video", "Living Room"], ["1st Floor - Living Room.svg", "room", "Living Room"], ["Magicplan forms.json", "data", ""]]);
+  assert.ok(mp.every((f) => f.source === "magicplan"));
+  const pk = packetForDraft(p.siteVisit);
+  assert.deepEqual(pk.reports.map((r) => r.name), ["Report.pdf"]);
+  assert.ok(![...pk.reports, ...pk.photos, ...pk.notes].some((x) => /usdz|mov|svg|json/.test(x.name)));
+  assert.equal(exportSummary(row), "1 report, 2 photos, 2 rooms measured, 4 other files");
+  // a re-pull replaces in place, never duplicates
+  adoptExport(p, row);
+  assert.equal(p.siteVisit.files.filter((f) => f.kind === "mpfiles").length, 4);
+});
+test("a row from before 10/1 (no kind on its files) still reads its PDFs as reports", () => {
+  assert.equal(isMpReport({ name: "Report.pdf", mime: "application/pdf" }), true);
+  assert.equal(isMpReport({ name: "x.svg", mime: "image/svg+xml" }), false);
+  assert.equal(isMpReport({ name: "x.pdf", mime: "application/pdf", kind: "data" }), false);
+  assert.equal(mpKindLabel("model3d"), "3D");
+});

@@ -45,7 +45,7 @@ import {
 import { subRatesText } from "./pricing.js";
 import { dictateBtn } from "./dictate.js";
 import { magicplanBanner, officeRole } from "./magicplan.js";
-import { magicplanQuantities, withMagicplanBasis } from "./magicplancalc.js";
+import { magicplanQuantities, withMagicplanBasis, mpKindLabel } from "./magicplancalc.js";
 import {
   FRAMES_PER_VIDEO, frameTimes, mmss, frameCaption, stillTimes, clipTooBig, WALK_MAX_BYTES, OVERSIZE_MSG, LONG_CLIP_SECONDS, LONG_CLIP_NOTE,
   roomFromOpening, magicplanRoomNames, captionStills, rebuildTranscript, adoptLegacyTranscript, clipNumber, clipLabel, walkSummary,
@@ -62,6 +62,7 @@ export const KINDS = {
   photos: { label: "Extra photos", accept: "image/*", multiple: true, hint: "Anything not already in the report." },
   notes:  { label: "Handwritten notes", accept: "image/*", multiple: true, hint: "A photo of each page." },
   videos: { label: "Silent clips (Magicplan)", accept: "video/*,.mp4,.mov", multiple: true, hint: "Still frames are pulled from each clip so the draft can see the room." },
+  mpfiles: { label: "📐 Magicplan files", accept: "", multiple: true, readOnly: true, hint: "Everything else the Magicplan pull brought in: the 3D model, drawings, videos, each room's plan and the raw data. Tap ⤓ to open one. Not sent to the estimate draft." },
   audio:  { label: "Site walk recording", accept: "audio/*,video/*,.m4a,.mp3,.wav,.aac", multiple: false, hint: "A voice memo of the whole walk, if you made one instead of clips. It's transcribed for you." },
 };
 
@@ -686,10 +687,19 @@ export function siteVisitPanel(ctx) {
       ctx.save(); paint("");
     });
     if (f.kind === "walk") return walkRow(f, del);
+    const open = f.kind === "mpfiles" && f.path
+      ? h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Open this file", onclick: async () => {
+          // opened by a short-lived signed link: a .usdz opens in the iPhone's 3D viewer
+          const w = window.open("", "_blank");
+          try { const url = await signSiteFile(f.path); if (w) w.location.href = url; else location.href = url; }
+          catch (e) { if (w) w.close(); toast(e && e.message ? e.message.replace(/clip/g, "file") : "Couldn't open the file", 4000); }
+        } }, "⤓")
+      : null;
     return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px" },
-      h("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.name || f.kind),
+      h("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.name || f.kind,
+        f.kind === "mpfiles" ? h("span", { class: "subtle" }, ` · ${mpKindLabel(f.mpKind)}${f.room ? " · " + f.room : ""}`) : null),
       f.source === "magicplan" ? h("span", { style: "font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;background:#e7eef7;color:#1e4a72" }, "Magicplan") : null,
-      h("span", { class: "subtle" }, f.kind === "videos" ? `${f.frames || 0} stills` : fmtSize(f.size || 0)), del);
+      h("span", { class: "subtle" }, f.kind === "videos" ? `${f.frames || 0} stills` : fmtSize(f.size || 0)), open, del);
   }
 
   /* ---------- the media queue ↔ this packet ----------
@@ -799,7 +809,7 @@ export function siteVisitPanel(ctx) {
     btn.addEventListener("click", () => input.click());
     const many = kind === "photos" || kind === "notes" || kind === "videos" || kind === "walk";
     const extra = [];
-    let buttons = [btn, input];
+    let buttons = k.readOnly ? [] : [btn, input];
     if (kind === "walk") {
       // 🎥 Record opens the phone's Camera (capture=environment); Add from
       // Photos is the same input without it. Both land in addFiles("walk").
@@ -825,7 +835,7 @@ export function siteVisitPanel(ctx) {
     return h("div", { style: "padding:8px 0;border-top:1px solid #e2e6ed" },
       h("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" },
         h("div", { style: "flex:1;min-width:0" },
-          h("div", { style: "font-weight:600;font-size:13px;color:#16395a" }, k.label + (many && files.length ? ` (${files.length})` : "")),
+          h("div", { style: "font-weight:600;font-size:13px;color:#16395a" }, k.label + ((many || k.readOnly) && files.length ? ` (${files.length})` : "")),
           h("div", { class: "subtle", style: "font-size:11px" }, k.hint)),
         ...buttons),
       ...(many && kind !== "walk" && files.length > 3   // walk rows always list: each carries its room, status and retry
@@ -946,7 +956,8 @@ export function siteVisitPanel(ctx) {
       h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" },
         "Add what you collected on the walk. The draft reads all of it, prices from the Fairbanks list, and fills this estimate room by room."),
       mpBanner,
-      slot("walk"), scopeSection(), slot("report"), slot("photos"), slot("videos"), slot("notes"), slot("audio"),
+      slot("walk"), scopeSection(), slot("report"), slot("photos"), slot("videos"), slot("notes"),
+      ...(sv.files.some((f) => f.kind === "mpfiles") ? [slot("mpfiles")] : []), slot("audio"),
       imageCount() > MAX_IMAGES
         ? h("div", { style: "font-size:12px;margin-top:4px;color:#b45309" },
             `${imageCount()} pictures in the packet; the draft reads the first ${MAX_IMAGES} (note pages first, then photos, then the newest stills are dropped). Remove clips or photos you don't need.`)
