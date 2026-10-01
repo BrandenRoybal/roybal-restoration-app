@@ -224,6 +224,35 @@ export function projectFilesOf(resp: unknown): MpFile[] {
     };
   }).filter((f) => f.url);
 }
+/** One file's identity across listings and pages: the signed url changes
+    from call to call, the name, size and timestamp don't. The plan listing
+    and the project listing give the same export the same name and size. */
+export const fileKey = (f: { name: string; size: number }) => `${f.name}|${f.size}`;
+export const PROJECT_FILES_PAGES = 20;
+export const projectFilesPath = (projectId: string, page: number) =>
+  `/projects/${encodeURIComponent(projectId)}/files${page > 1 ? `?page=${page}` : ""}`;
+const listLength = (resp: unknown) => {
+  const d = resp && typeof resp === "object" ? (resp as Json).data : null;
+  return Array.isArray(d) ? d.length : 0;
+};
+/** Is there a page after `page`? Read from a list response's page_info
+    (GET /projects answers {data, page_info}), whichever of the usual
+    spellings it uses; null when it doesn't say. */
+export function moreAfter(resp: unknown, page: number): boolean | null {
+  const r = resp && typeof resp === "object" ? resp as Json : null;
+  const pi = r ? (r.page_info ?? r.pagination ?? r.meta) : null;
+  if (!pi || typeof pi !== "object") return null;
+  const p = pi as Json;
+  for (const k of ["has_next_page", "hasNextPage", "has_more", "has_next"]) if (typeof p[k] === "boolean") return p[k] as boolean;
+  if ("next_page" in p) return p.next_page != null && p.next_page !== false && p.next_page !== "";
+  if ("next_page_url" in p) return !!p.next_page_url;
+  const cur = num(p.current_page ?? p.page) || page;
+  const last = num(p.last_page ?? p.total_pages ?? p.page_count);
+  if (last) return cur < last;
+  const total = num(p.total ?? p.total_count), per = num(p.per_page ?? p.page_size ?? p.limit);
+  if (total && per) return cur * per < total;
+  return null;
+}
 /** The keys of a response, two levels deep, with no values: what the logs
     carry when a shape surprises us, so the next fix reads the live shape
     instead of guessing it. Never a value — no addresses, no URLs, no key. */
@@ -552,13 +581,40 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
     else base.photos.push({ ...s, room, floor, caption, symbol_instance_id: f.symbolInstanceId || "" });
   }
 
-  // 2. Files attached to the project itself (videos, documents)
-  try {
-    for (const f of projectFilesOf(await deps.mp(`/projects/${encodeURIComponent(project.id)}/files`))) {
+  // 2. Files attached to the project itself (videos, documents), page by
+  //    page: on 10/1 18:13 the listing held exactly 10 and the two oldest (a
+  //    video and the plan thumbnail) dropped off once the exports joined it.
+  //    The exports are listed here too; one the plan listing already brought
+  //    in (same name and size) is not copied a second time.
+  const fromPlan = new Set([...files, ...photos].map(fileKey));
+  const seenProj = new Set<string>();
+  let fullPage = 0;
+  for (let page = 1; page <= PROJECT_FILES_PAGES; page++) {
+    let resp: unknown, list: MpFile[];
+    try {
+      resp = await deps.mp(projectFilesPath(project.id, page));
+      list = projectFilesOf(resp);
+    } catch (e) {
+      note(page === 1 ? "Project attachments not imported" : `Project attachments after page ${page - 1} not imported`, e);
+      break;
+    }
+    const fresh = list.filter((f) => !seenProj.has(fileKey(f)));
+    if (!fresh.length) break;          // the end, or a server that ignores ?page=
+    for (const f of fresh) {
+      if (seenProj.has(fileKey(f))) continue;
+      seenProj.add(fileKey(f));
+      if (fromPlan.has(fileKey(f))) continue;
       const s = await fetchOne(f, f.name || "attachment");
       if (s) base.files.push({ ...s, folder: f.folder || "Project files", kind: kindOf(f.name, f.fileType) });
     }
-  } catch (e) { note("Project attachments not imported", e); }
+    const listed = listLength(resp);
+    if (page === 1) fullPage = listed;
+    const more = moreAfter(resp, page);
+    if (more === false) break;
+    // page_info silent: ask again only while pages come back full
+    if (more === null && !(fullPage >= 10 && listed >= fullPage)) break;
+    if (page === PROJECT_FILES_PAGES) note("Project attachments", new Error(`stopped after ${PROJECT_FILES_PAGES} pages`));
+  }
 
   // 3. The plan: floor drawings, every room's own drawing, room measurements
   let plan: unknown = null;

@@ -145,7 +145,13 @@ function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN, pr
       if (p.startsWith("/plans/6a45b1435520f/files")) return FILES;
       if (p === "/plans/statistics/6a45b1435520f") { if (stats instanceof Error) throw stats; return stats; }
       if (p === `/projects/${project.data.id}/plan`) { if (plan instanceof Error) throw plan; return plan; }
-      if (p === `/projects/${project.data.id}/files`) return projectFiles;
+      if (p.startsWith(`/projects/${project.data.id}/files`)) {
+        const m = p.match(/\?page=(\d+)$/);
+        const page = m ? Number(m[1]) : 1;
+        const r = typeof projectFiles === "function" ? projectFiles(page) : projectFiles;
+        if (r instanceof Error) throw r;
+        return r;
+      }
       if (p === "/plans/forms/6a45b1435520f") return FORMS;
       if (p === "/plans/get/6a45b1435520f") return { data: { id: "6a45b1435520f", name: "plan" } };
       throw new Error("unexpected call " + p);
@@ -392,4 +398,66 @@ test("room figures in metres on an imperial project are converted to feet", () =
   // no height anywhere: ceiling from volume / floor area
   const noH = JSON.parse(JSON.stringify(PLAN)); delete noH.data.plan_data.floors[0].rooms[0].statistics.height; delete noH.data.plan_data.floors[0].statistics;
   assert.equal(S.statsFromPlan(noH, "imperial").floors[0].rooms[0].ceilingFt, 8);
+});
+
+/* ---------- project attachments: paging, and exports listed twice ---------- */
+const PID = "5d0c3a3e-0000-4000-8000-000000000001";
+const att = (name, page = 1, size = 4) => ({ name, url: `https://files.example.invalid/${name}?sig=${page}`, size });
+const tenJpgs = (page = 1) => Array.from({ length: 10 }, (_, i) => att(`att${i}.jpg`, page));
+test("an export listed by both the plan and the project is copied once, under the plan's folder", async () => {
+  const { deps, calls } = fakes({ projectFiles: { data: [att("Report.pdf", 1, 5), att("a.jpg")] } });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  const reports = row.files.filter((f) => f.name === "Report.pdf");
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].folder, "Report PDF");
+  assert.ok(!calls.fetched.some((u) => u.includes("Report.pdf?sig=1")));   // the project copy is never downloaded
+  assert.equal(row.files.filter((f) => f.name === "a.jpg").length, 1);
+});
+test("project attachments past the first page are fetched (page_info silent, a full first page)", async () => {
+  const { deps, calls } = fakes({ projectFiles: (page) => ({ data: page === 1 ? tenJpgs() : page === 2 ? [att("walk.mp4", 2, 9), att("plan.thumb", 2)] : [] }) });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(calls.mp.includes(`/projects/${PID}/files`));
+  assert.ok(calls.mp.includes(`/projects/${PID}/files?page=2`));
+  assert.ok(!calls.mp.includes(`/projects/${PID}/files?page=3`));   // page 2 wasn't full
+  assert.deepEqual(row.files.filter((f) => f.kind === "video").map((f) => f.name), ["walk.mp4"]);
+  assert.ok(row.files.some((f) => f.name === "plan.thumb"));
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.equal(row.error, null);
+});
+test("page_info decides when it speaks: no next page, or a total that ends on this page", async () => {
+  const a = fakes({ projectFiles: { data: tenJpgs(), page_info: { has_next_page: false } } });
+  await S.runSync(a.deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(!a.calls.mp.some((p) => p.includes("?page=")));
+  const b = fakes({ projectFiles: (page) => ({ data: page === 1 ? tenJpgs() : [att("late.pdf", 2)], page_info: { current_page: page, per_page: 10, total: 11 } }) });
+  const row = await S.runSync(b.deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(b.calls.mp.includes(`/projects/${PID}/files?page=2`));
+  assert.ok(!b.calls.mp.includes(`/projects/${PID}/files?page=3`));
+  assert.ok(row.files.some((f) => f.name === "late.pdf"));
+});
+test("a server that ignores ?page= is asked once more, then left; nothing is copied twice", async () => {
+  const { deps, calls } = fakes({ projectFiles: (page) => ({ data: tenJpgs(page) }) });   // same files, fresh signatures
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(calls.mp.includes(`/projects/${PID}/files?page=2`));
+  assert.ok(!calls.mp.includes(`/projects/${PID}/files?page=3`));
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.equal(calls.fetched.filter((u) => /\/att\d\.jpg\?/.test(u)).length, 10);
+});
+test("a refused second page keeps the first page and says what was missed", async () => {
+  const { deps } = fakes({ projectFiles: (page) => (page === 1 ? { data: tenJpgs() } : new Error("Magicplan GET /projects/x/files failed (400)")) });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.match(row.error, /^Project attachments after page 1 not imported: .*\(400\)/);
+});
+test("moreAfter reads the usual page_info spellings, and says null when there is none", () => {
+  assert.equal(S.moreAfter({ data: [] }, 1), null);
+  assert.equal(S.moreAfter({ page_info: {} }, 1), null);
+  assert.equal(S.moreAfter({ page_info: { has_next_page: true } }, 1), true);
+  assert.equal(S.moreAfter({ page_info: { hasNextPage: false } }, 1), false);
+  assert.equal(S.moreAfter({ page_info: { next_page: null } }, 1), false);
+  assert.equal(S.moreAfter({ page_info: { next_page: 3 } }, 2), true);
+  assert.equal(S.moreAfter({ page_info: { current_page: 2, last_page: 2 } }, 2), false);
+  assert.equal(S.moreAfter({ page_info: { total_pages: 3 } }, 1), true);
+  assert.equal(S.moreAfter({ meta: { current_page: 1, per_page: 10, total: 10 } }, 1), false);
+  assert.equal(S.moreAfter({ pagination: { page: 1, page_size: 10, total_count: 25 } }, 1), true);
 });
