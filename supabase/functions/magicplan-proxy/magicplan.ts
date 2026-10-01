@@ -228,6 +228,10 @@ export function projectFilesOf(resp: unknown): MpFile[] {
     from call to call, the name, size and timestamp don't. The plan listing
     and the project listing give the same export the same name and size. */
 export const fileKey = (f: { name: string; size: number }) => `${f.name}|${f.size}`;
+/** A storage name without "..": a photo captioned "Stain near window..." made
+    a path the site-path guard refuses on every pull. Only the path changes;
+    the row keeps Magicplan's own name. */
+export const dotsOut = (name: string) => name.replace(/\.{2,}/g, ".");
 /** Within one listing (the plan's files, asked format by format), the
     timestamp is consistent too, so it joins the key. */
 export const stableKey = (f: { name: string; size: number; lastModified: string; folder: string }) =>
@@ -526,7 +530,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
     if (hit && hit.path.startsWith(jobDir)) return hit;
     const bytes = await deps.fetchBytes(f.url);
     const hash = await deps.sha256(bytes);
-    const path = mpFilePath(job, hash, name);
+    const path = mpFilePath(job, hash, dotsOut(name));
     if (!isSitePath(path)) throw new Error(`Refusing to store ${name}: ${path} is not a site-visit path`);
     const mime = mimeOf(name, f.fileType);
     await deps.upload(path, bytes, mime);
@@ -535,7 +539,9 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
 
   const note = (what: string, e: unknown) => {
     const line = `${what}: ${e instanceof Error ? e.message : String(e)}`;
-    base.error = [base.error, line].filter(Boolean).join(" · ").slice(0, 1000);
+    // each line capped so a long shape outline can't push the later, more
+    // useful notes (not copied, stopped early) off the row; the log keeps it whole
+    base.error = [base.error, line.length > 400 ? `${line.slice(0, 399)}…` : line].filter(Boolean).join(" · ").slice(0, 1000);
     deps.warn?.(line);
   };
   // Every download goes through here: too big → listed as skipped; out of
@@ -559,7 +565,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   const storeJson = async (name: string, value: unknown) => {
     const bytes = new TextEncoder().encode(JSON.stringify(value, null, 2));
     const hash = await deps.sha256(bytes);
-    const path = mpFilePath(job, hash, name);
+    const path = mpFilePath(job, hash, dotsOut(name));
     if (!isSitePath(path)) throw new Error(`Refusing to store ${name}: ${path} is not a site-visit path`);
     const hit = prior.get(reuseKey(name, project.userModified, bytes.byteLength));
     if (hit && hit.path === path) return hit;   // unchanged since the last pull
@@ -602,7 +608,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   //    in (same name and size) is not copied a second time.
   const fromPlan = new Set([...files, ...photos].map(fileKey));
   const seenProj = new Set<string>();
-  let fullPage = 0;
+  let fullPage = 0, firstSig = "";
   for (let page = 1; page <= PROJECT_FILES_PAGES && !outOfTime; page++) {
     let resp: unknown, list: MpFile[];
     try {
@@ -612,18 +618,19 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
       note(page === 1 ? "Project attachments not imported" : `Project attachments after page ${page - 1} not imported`, e);
       break;
     }
-    const fresh = list.filter((f) => !seenProj.has(fileKey(f)));
-    if (!fresh.length) {
-      // an empty page is the end; a page of files already seen means
-      // Magicplan ignored ?page= — say so, with the keys of its answer
-      // (never values), so the real paging parameter can be read
-      if (page > 1 && list.length) {
-        note(`Project attachments after page ${page - 1} may be missing`,
-          new Error(`Magicplan answered ?page=${page} with files already listed ${shapeOutline(resp, 1)}`));
-      }
+    if (!list.length) break;           // an empty page is the end
+    // The very same page back means Magicplan ignored ?page=: say so, with
+    // the keys of its answer (never values), so the real paging parameter
+    // can be read. A page of older copies of exports we already hold (a
+    // report exported again) is not that: paging goes on past it.
+    const sig = list.map((f) => `${fileKey(f)}|${f.lastModified}`).join("\n");
+    if (page === 1) firstSig = sig;
+    else if (sig === firstSig) {
+      note(`Project attachments after page ${page - 1} may be missing`,
+        new Error(`Magicplan answered ?page=${page} with page 1 again ${shapeOutline(resp, 1)}`));
       break;
     }
-    for (const f of fresh) {
+    for (const f of list) {
       if (seenProj.has(fileKey(f))) continue;
       seenProj.add(fileKey(f));
       if (fromPlan.has(fileKey(f))) continue;

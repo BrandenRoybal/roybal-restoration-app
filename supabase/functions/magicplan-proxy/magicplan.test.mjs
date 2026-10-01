@@ -441,7 +441,7 @@ test("a server that ignores ?page= is asked once more, then left; nothing is cop
   assert.ok(!calls.mp.includes(`/projects/${PID}/files?page=3`));
   assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
   assert.equal(calls.fetched.filter((u) => /\/att\d\.jpg\?/.test(u)).length, 10);
-  assert.match(row.error, /^Project attachments after page 1 may be missing: Magicplan answered \?page=2 with files already listed \{data:\[\{name,url,size\}\]\}$/);
+  assert.match(row.error, /^Project attachments after page 1 may be missing: Magicplan answered \?page=2 with page 1 again \{data:\[\{name,url,size\}\]\}$/);
 });
 test("a refused second page keeps the first page and says what was missed", async () => {
   const { deps } = fakes({ projectFiles: (page) => (page === 1 ? { data: tenJpgs() } : new Error("Magicplan GET /projects/x/files failed (400)")) });
@@ -493,4 +493,37 @@ test("photos listed with every format's call, freshly signed each time, are copi
 });
 test("the formats the files call refuses on its own are never asked for", () => {
   for (const f of ["obj", "xfif", "magicplan", "mp"]) assert.ok(!S.ALL_FORMATS.includes(f), f);
+});
+test("a page of older copies of exports is paged past, not mistaken for an ignored ?page=", async () => {
+  // a report exported again and again: page 2 holds only older copies (same
+  // name and size, earlier timestamps); the video sits on page 3
+  const old = (n) => Array.from({ length: 10 }, (_, i) => ({ ...att(i % 2 ? "Report.pdf" : "Sketch.pdf", 2, 5), last_modified: `2026-09-2${i % 10}T10:00:00Z` }));
+  const first = [...tenJpgs().slice(0, 8), { ...att("Report.pdf", 1, 5), last_modified: "2026-10-01T18:00:00Z" }, { ...att("Sketch.pdf", 1, 5), last_modified: "2026-10-01T18:00:00Z" }];
+  const { deps, calls } = fakes({ projectFiles: (page) => ({ data: page === 1 ? first : page === 2 ? old() : page === 3 ? [att("walk.mp4", 3, 9)] : [] }) });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(calls.mp.includes(`/projects/${PID}/files?page=3`));
+  assert.ok(row.files.some((f) => f.name === "walk.mp4"));
+  assert.equal(row.files.filter((f) => f.name === "Sketch.pdf").length, 1);   // older copies: one kept
+  assert.ok(!/may be missing/.test(row.error || ""));
+});
+test("a long note can't push the later notes off the row", async () => {
+  // statistics in a shape we don't read: a ~900-character keys-only outline
+  const { deps } = fakes({ stats: { data: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}_${"y".repeat(60)}`, 1])) } });
+  const upload = deps.upload;
+  deps.upload = async (path, bytes, mime) => { if (path.endsWith("Report.pdf")) throw new Error("Storage upload failed"); return upload(path, bytes, mime); };
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(row.error.length <= 1000);
+  assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape .{100,}…/);
+  assert.match(row.error, / · Not copied \(1\): Report\.pdf — first error: Storage upload failed$/);
+});
+test("a photo whose name has '...' is stored under a name without '..'", async () => {
+  const { deps } = fakes();
+  deps.mp = ((mp) => async (p) => (p.startsWith("/plans/6a45b1435520f/files")
+    ? { data: { files: [], photos: [{ symbol_instance_id: "s", name: "1st Floor - Living Room - Stain near window... - 1.jpg", folder: "Captured photos", url: "https://files.example.invalid/e.jpg?sig=1", last_modified: "2026-09-26T22:30:00Z", size: 3, file_type: "jpg" }] } }
+    : mp(p)))(deps.mp);
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(row.photos.length, 1);
+  assert.equal(row.photos[0].name, "1st Floor - Living Room - Stain near window... - 1.jpg");
+  assert.ok(officeIsSitePath(row.photos[0].path));
+  assert.ok(!row.photos[0].path.includes(".."));
 });
