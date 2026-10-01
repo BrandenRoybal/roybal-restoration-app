@@ -2104,7 +2104,8 @@ function sendEstimatePanel(project, inv) {
       h("div", { style: "font-weight:800;margin-bottom:4px" }, "✉️ Send estimate"),
       h("div", { class: "subtle", style: "font-size:12px;margin-bottom:8px" },
         "Save the PDF (or an editable Word copy) first, then open the email and attach it. Opening the email marks the estimate sent" +
-        (project.bidOf ? " and logs it on the lead, with a follow-up." : ".")),
+        (project.bidOf ? " and logs it on the lead, with a follow-up." : ".") +
+        (jobType(project) === "construction" ? " To have the customer sign it online, send it from the 🌐 Client Portal, under Documents to sign." : "")),
       sentLine, to, subj, bodyTa,
       h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-top:8px" }, pdfBtn, wordBtn, mailBtn, closeBtn));
   };

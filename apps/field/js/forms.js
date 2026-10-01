@@ -24,7 +24,8 @@ import {
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
 import { photoShareControl, photoShareSheetLine, buildPacketHtml, ensureUploaded, requireOnline } from "./photoshare.js";
 import { sha256Hex } from "./media.js";
-import { signableDocs, approvalEntry, signRequestMessages, applyPortalSignatures, signState } from "./signdocs.js";
+import { signableDocs, approvalEntry, signRequestMessages, applyPortalSignatures, signState, resendable } from "./signdocs.js";
+import { estimateTotal, markEstimateSent } from "./bid.js";
 import { selectionSheetFromXlsx } from "./xactimate.js";
 import { publishSelections, fetchSelections, saveSelectionSettings, selectionStatus } from "./selections.js";
 import { narrativeFacts, narrativeInfoRows } from "./narrative.js";
@@ -1555,9 +1556,11 @@ export function invoice(project, inv) {
     const total = rcv - (Number(inv.deductible) || 0) - (Number(inv.previousPayments) || 0) + tax;
     totalEl.textContent = money(total);
     const acc = isEst ? Number(inv.accuracyPct) || 0 : 0;
-    rangeEl.replaceChildren(
+    // replaceChildren prints a null as the text "null", so only real lines go in
+    rangeEl.replaceChildren(...[
       acc > 0 && total > 0 ? h("div", {}, `Expected range at ±${acc}%: ${money(total * (1 - acc / 100))} – ${money(total * (1 + acc / 100))}`) : null,
-      isEst && String(inv.duration || "").trim() ? h("div", {}, "Estimated duration: " + String(inv.duration).trim()) : null);
+      isEst && String(inv.duration || "").trim() ? h("div", {}, "Estimated duration: " + String(inv.duration).trim()) : null,
+    ].filter(Boolean));
     rangeEl.hidden = !rangeEl.childNodes.length;
     refreshAlts();
     paintRecap();
@@ -1910,7 +1913,8 @@ export function invoice(project, inv) {
       uploadedDocSheet(att.pages || [], "Supporting Documentation" + (att.label ? " — " + att.label : ""))));
   }
   function paintAttachList() {
-    attachNote.hidden = !inv.attachments.length;
+    // print.css shows .print-only even when [hidden], so with nothing attached the note says nothing
+    attachNote.textContent = inv.attachments.length ? "Supporting documentation attached: see following page(s)." : "";
     attachList.replaceChildren(...inv.attachments.map((att, i) => {
       const label = h("input", { value: att.label || "", placeholder: "Label (e.g. Dump receipt 6/21)", style: "flex:1" });
       label.addEventListener("input", () => { att.label = label.value; commit(); });
@@ -2063,6 +2067,14 @@ export function invoice(project, inv) {
     altsEl,
     recapEl,
     field(isEst ? "Notes, Assumptions & Exclusions" : "Notes / Supporting Documentation", notesTa),
+    // a construction estimate is the contract: the customer signs it here,
+    // on the device or in the portal (signdocs.js), and the signature prints
+    ...(buildEst ? [
+      sectionTitle("Acceptance"),
+      h("div", { class: "certstmt" },
+        h("p", {}, "By signing below, the Owner accepts the scope of work and pricing in this estimate, including its notes, assumptions and exclusions, and authorizes Roybal Construction, LLC to proceed. Any change to the scope or price will be made by a signed change order.")),
+      sigBlock(inv, "sigOwner", "sigOwnerName", "sigOwnerDate", "Owner — acceptance of this estimate"),
+    ] : []),
     h("div", { class: "app-only", style: "margin:4px 0 10px" },
       h("div", { class: "subtle", style: "font-size:12px" },
         "Attach receipts, subcontractor invoices or other supporting documents — each prints as its own page after the invoice."),
@@ -3914,7 +3926,7 @@ export function portalShareForm(project) {
   async function paintMoney() {
     moneyBox.replaceChildren(sectionTitle("Documents to sign"),
       h("p", { class: "subtle", style: "font-size:12px;margin:2px 0 8px" },
-        "Send a form for e-signature. The customer sees the whole document, and can save it as a PDF, before they can sign. Their signature comes back into the form."));
+        "Send a form for e-signature, including the estimate on a construction job. The customer sees the whole document, and can save it as a PDF, before they can sign. Their signature comes back into the form."));
     if (!s.enabled || !s.shareToken) { moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" }, "Turn the portal on first.")); return; }
     const { rest } = await import("./supa.js");
     const { billingSummary, lineSubtotal, money: fmtMoney } = await import("./fincalc.js");
@@ -3932,13 +3944,14 @@ export function portalShareForm(project) {
     if (applyPortalSignatures(project, approvals, lineSubtotal)) { commit(); toast("Portal signature added to the form."); }
     const byId = new Map(approvals.map((a) => [String(a.id), a]));
 
-    const docs = signableDocs(project, lineSubtotal);
+    const docs = signableDocs(project, lineSubtotal, (inv) => estimateTotal(inv, true));
     if (!docs.length) moneyBox.append(h("p", { class: "subtle", style: "font-size:12px" },
-      "Nothing to sign yet. Change orders, the work authorization, certificates, the punch list and the pack-back receipt show up here once they're filled in."));
+      "Nothing to sign yet. The estimate (construction jobs), change orders, the work authorization, certificates, the punch list and the pack-back receipt show up here once they're filled in."));
     docs.forEach((doc) => {
       const cur = byId.get(doc.id);
       const state = signState(doc, cur);
-      const label = doc.title + (doc.amountDelta != null ? ` — ${fmtMoney(doc.amountDelta)}` : "");
+      const amt = doc.amountDelta != null ? doc.amountDelta : doc.total;
+      const label = doc.title + (amt != null ? ` — ${fmtMoney(amt)}` : "");
       const small = (text, color) => h("span", { class: "subtle", style: `font-size:12px${color ? ";color:" + color : ""}` }, text);
 
       // send (or re-send) this document: snapshot, upload, write the approval, tell the customer
@@ -3948,16 +3961,22 @@ export function portalShareForm(project) {
           b.disabled = true; const was = b.textContent; b.textContent = "Preparing the document…";
           try {
             const ref = await snapshotForSigning(doc);
+            // drawing the estimate can settle its O&P (the sub rule), so its total is read after
+            if (doc.key === "reconEstimates") doc.total = estimateTotal(doc.inst, true);
             // re-read right before writing, so a customer's answer since the page loaded isn't overwritten
             const fresh = (await loadApprovals()).approvals;
             const prev = fresh.find((a) => String(a.id) === doc.id);
-            if (prev && prev.status && prev.status !== "pending") { toast("The customer already answered this one."); paintMoney(); return; }
-            const next = [...fresh.filter((a) => String(a.id) !== doc.id), approvalEntry(doc, ref, prev, new Date().toISOString())];
+            if (!resendable(doc, prev)) { toast("The customer already answered this one."); paintMoney(); return; }
+            const next = [...fresh.filter((a) => String(a.id) !== doc.id), approvalEntry(doc, ref, prev, new Date().toISOString(), { money: fmtMoney })];
             const up = await rest(`portal_jobs?id=eq.${s.id}`, { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ approvals: next }) });
             if (!up.ok) throw new Error("save failed (" + up.status + ")");
             const msg = signRequestMessages(doc, { update: !!prev, money: fmtMoney });
             await sendOfficeReply(s.id, msg.thread, "office", { ping: msg.ping });
-            toast(prev ? "Updated — the customer can read the full document now." : "Sent — the customer was asked to read and sign it.");
+            // the estimate counts as sent: stamped on it, and on the lead with its follow-up (bid.js)
+            let lead = null;
+            if (doc.key === "reconEstimates") lead = await markEstimateSent(project, doc.inst, { to: "client portal", via: "portal" }).catch(() => null);
+            toast((prev ? "Updated — the customer can read the full document now." : "Sent — the customer was asked to read and sign it.")
+              + (lead && lead.board ? " Logged on the lead, with a follow-up." : ""));
             paintMoney(); paintThread();
           } catch (e) { toast("Couldn't send: " + (e.message || e)); b.disabled = false; b.textContent = was; }
         });
@@ -3966,7 +3985,10 @@ export function portalShareForm(project) {
 
       let stateEl;
       if (state === "signed-portal") stateEl = small(`✓ signed in the portal${cur.signedName ? " — " + cur.signedName : ""}${cur.respondedAt ? ", " + fmtDate(String(cur.respondedAt).slice(0, 10)) : ""}`, "var(--green,#1f7a45)");
-      else if (state === "declined") stateEl = small("✗ declined" + (cur.note ? ` — "${cur.note}"` : ""), "#c0392b");
+      else if (state === "declined") stateEl = resendable(doc, cur)
+        ? h("span", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end" },
+            small("✗ declined" + (cur.note ? ` — "${cur.note}"` : ""), "#c0392b"), sendBtn("Send revised estimate", false))
+        : small("✗ declined" + (cur.note ? ` — "${cur.note}"` : ""), "#c0392b");
       else if (state === "signed-onsite") stateEl = small("✓ signed on site", "var(--green,#1f7a45)");
       else if (state === "no-document") stateEl = h("span", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end" },
         small("⚠ the customer can't read this yet", "#b35c00"), sendBtn("Put the document up", true));

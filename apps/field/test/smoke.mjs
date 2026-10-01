@@ -323,6 +323,12 @@ function setInput(el, val) {
   await tick(40);
   ok([...view().querySelectorAll("button")].some((b) => /Transcribe/.test(b.textContent)),
     "change order mounts the voice-capture widget");
+  // the construction estimate is the contract: the customer signs it (in the portal or on the device)
+  await nav(`#/p/${conId}/f/reconEstimates`);
+  [...view().querySelectorAll("button")].find((b) => /New/.test(b.textContent))?.click();
+  await tick(40);
+  ok(/Owner — acceptance of this estimate/.test(text()) && /authorizes Roybal Construction, LLC to proceed/.test(text()),
+    "construction estimate carries the owner's acceptance block");
   await nav(`#/p/${conId}`);
   await tick(40);
   ok([...view().querySelectorAll("button")].some((b) => /Progress Update/.test(b.textContent)),

@@ -18,6 +18,10 @@ for (const k of ["document", "window", "navigator", "location", "HTMLElement", "
   catch { Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true }); }
 }
 globalThis.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0);
+// jsdom has no 2d canvas, and a construction estimate carries the owner's signature pad
+const ctxStub = new Proxy({}, { get: () => () => {} });
+window.HTMLCanvasElement.prototype.getContext = () => ctxStub;
+window.HTMLCanvasElement.prototype.toDataURL = () => "data:image/png;base64,stub";
 globalThis.confirm = () => true;
 window.confirm = () => true;
 window.localStorage.setItem("roybal-offline", "1");
