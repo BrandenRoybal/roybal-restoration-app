@@ -8,8 +8,11 @@ import {
   mpFileId, mpFilePath, parsePhotoName, normalizeStatistics, dedupeRoomNames, splitAddress, projectName,
   mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF, isMpReport, mpKindLabel,
   magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE, ESX_DOC_ID,
+  linkMagicplan, linkedByHand, magicplanOnJob, mpTileLine, mpMatches, isMpEsx, pruneForeignMeasured,
 } from "../js/magicplancalc.js";
-import { siteFilePath, packetForDraft } from "../js/sitevisit.js";
+import { readFileSync } from "node:fs";
+import { mergeProjects, tombstoneItems } from "../js/merge.js";
+import { siteFilePath, packetForDraft, openSiteVisitNext, takeSiteVisitOpen } from "../js/sitevisit.js";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -267,7 +270,7 @@ test("adoptEsx: the sketch becomes one Supporting Doc, replaced in place on a ne
   const esx = { path: "sitevisit/lead_42/mp-abcdef01-Test.esx", name: "Test.esx", size: 4321, mime: "application/octet-stream", hash: "abcdef0123456789" };
   assert.deepEqual(adoptEsx(p, esx, "2026-09-27T00:00:00Z"), { added: 1, updated: 0 });
   assert.equal(p.supportDocs.length, 1);
-  assert.equal(p.supportDocs[0].id, ESX_DOC_ID);
+  assert.match(p.supportDocs[0].id, new RegExp(`^${ESX_DOC_ID}-abcdef01-[0-9a-z]+$`));   // no link on this job: the id falls back to the file's hash
   assert.equal(p.supportDocs[0].title, ESX_DOC_TITLE);
   assert.equal(p.supportDocs[0].mode, "file");
   assert.deepEqual(p.supportDocs[0].uploadedPages, []);   // nothing prints, nothing for the AI to read
@@ -312,3 +315,250 @@ test("a row from before 10/1 (no kind on its files) still reads its PDFs as repo
   assert.equal(isMpReport({ name: "x.pdf", mime: "application/pdf", kind: "data" }), false);
   assert.equal(mpKindLabel("model3d"), "3D");
 });
+
+/* ---------- the Floor plan chip (10/2): link a project scanned before the job ---------- */
+const PICKED = { projectId: "proj-old", planId: "plan-old", cloudUrl: "https://example.invalid/p", createdAt: "2026-09-20T17:00:00Z", name: "Gina — 631 Eberhardt", externalReferenceId: "" };
+test("linking a job with no Magicplan project keeps the pick and marks it linked by hand", () => {
+  const p = { id: "bj-9" };
+  const r = linkMagicplan(p, PICKED, { by: "office@x", at: "2026-10-02T02:00:00Z" });
+  assert.deepEqual(r, { switching: false, dropped: { files: 0, rooms: 0, esx: 0 } });
+  assert.deepEqual(p.siteVisit.magicplan, { projectId: "proj-old", planId: "plan-old", cloudUrl: "https://example.invalid/p", createdAt: "2026-09-20T17:00:00Z",
+    name: "Gina — 631 Eberhardt", by: "office@x", units: null, linked: "proj-old", linkedAt: "2026-10-02T02:00:00Z", linkedBy: "office@x" });
+  assert.equal(linkedByHand(p.siteVisit.magicplan), true);
+  assert.deepEqual(p.siteVisit.files, []);
+});
+test("only the project picked by hand is trusted: a created project, or one that replaced the pick, is not", () => {
+  assert.equal(linkedByHand(job().siteVisit.magicplan), false);
+  assert.equal(linkedByHand({ projectId: "b", linked: "a" }), false);
+  assert.equal(linkedByHand(null), false);
+  assert.equal(linkedByHand({ projectId: "", linked: "" }), false);
+});
+test("switching projects takes the old scan's imports out: packet files, measured rows, the ESX sketch — typed rows stay", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  p.floorPlan.dimensions.rooms.push({ name: "Garage", floorSF: "400", perimLF: "80", conf: 1 });
+  adoptEsx(p, { path: "sitevisit/bj-lead_42/mp-x.esx", name: "x.esx", hash: "e".repeat(64) });
+  const before = magicplanOnJob(p);
+  assert.ok(before.files > 0 && before.rooms > 0 && before.esx === 1);
+  const r = linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(r.switching, true);
+  assert.deepEqual(r.dropped, before);
+  assert.deepEqual(magicplanOnJob(p), { files: 0, rooms: 0, esx: 0 });
+  assert.deepEqual(p.siteVisit.files.map((f) => f.id), ["u1"]);              // the note page someone added stays
+  assert.deepEqual(p.floorPlan.dimensions.rooms.map((x) => x.name), ["Garage"]);
+  const mp = p.siteVisit.magicplan;
+  assert.equal(mp.projectId, "proj-old");
+  assert.ok(!mp.importedAt && !mp.statistics && !mp.exportId && !mp.removed, "the old scan's stamps are gone");
+  assert.equal(mpState(p).key, "ready");
+});
+test("linking the same project again keeps its import stamps and its files", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  const files = p.siteVisit.files.length;
+  const r = linkMagicplan(p, { projectId: "proj-1", planId: "plan-1" }, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(r.switching, false);
+  assert.equal(p.siteVisit.files.length, files);
+  assert.equal(p.siteVisit.magicplan.importedAt, "2026-10-01T18:00:00Z");
+  assert.equal(p.siteVisit.magicplan.by, "office");
+  assert.equal(linkedByHand(p.siteVisit.magicplan), true);
+});
+test("a pull after linking fills the job from the linked project", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" }, "2026-10-02T02:01:00Z");
+  assert.equal(p.siteVisit.magicplan.projectId, "proj-old");
+  assert.equal(p.siteVisit.magicplan.linked, "proj-old");
+  assert.ok(p.floorPlan.dimensions.rooms.some((x) => x.source === "magicplan"));
+});
+test("the Floor plan tile line: blank with no project, linked before a pull, pulled with rooms and files after", () => {
+  assert.equal(mpTileLine({ id: "x" }), "");
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(mpTileLine(p), "📐 Magicplan linked — scan, export, then ⟳ Pull in here");
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", synced_at: "2026-10-01T20:00:00" }, "2026-10-01T20:00:00");
+  const sv = p.siteVisit.files.filter((f) => f.source === "magicplan");
+  const ph = sv.filter((f) => f.kind === "photos").length;
+  assert.equal(mpTileLine(p), `📐 Magicplan pulled Oct 1 · 2 rooms · ${sv.length - ph} file${sv.length - ph === 1 ? "" : "s"} · ${ph} photos`);
+});
+test("the picker's filter: every word, name or address, any order and case", () => {
+  const it = { name: "Gina Da Silva", address: "631 Eberhardt Rd, Fairbanks" };
+  assert.equal(mpMatches(it, ""), true);
+  assert.equal(mpMatches(it, "  eberhardt  GINA "), true);
+  assert.equal(mpMatches(it, "gina north"), false);
+  assert.equal(mpMatches({}, "a"), false);
+});
+test("📋 Open in Site Visit is one shot, for that job, and only right after the tap", () => {
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-8", 2000), false);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), false, "a different job's open used it up");
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), true);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), false);
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-9", 60_000), false);
+});
+test("a job linked by hand never adopts a ready row from another Magicplan project", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  const c = adoptExport(p, { ...ROW, mp_project_id: "proj-A", mp_plan_id: "plan-A" });
+  assert.equal(c.skipped, true);
+  assert.deepEqual(p.siteVisit.files, []);
+  assert.equal(p.siteVisit.magicplan.planId, "plan-old");
+  assert.ok(!p.floorPlan);
+  // a job the app created (no hand link) adopts as before — the admin's Link to job still lands
+  const q = job();
+  assert.ok(!adoptExport(q, { ...ROW, mp_project_id: "proj-other" }).skipped);
+});
+test("measured rows carry the scan that measured them; an adopt prunes another scan's rows and keeps the table's own array", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  p.floorPlan = { dimensions: { rooms: [
+    { name: "Old den", floorSF: "99", source: "magicplan", mpProjectId: "proj-A", conf: 1 },   // brought back by a merge from a stale phone
+    { name: "Typed hall", floorSF: "40", conf: 1 } ] } };
+  const bound = p.floorPlan.dimensions.rooms;   // what an open Floor Plan table holds
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" });
+  assert.equal(p.floorPlan.dimensions.rooms, bound, "same array, mutated in place");
+  const names = bound.map((r) => r.name);
+  assert.ok(!names.includes("Old den"));
+  assert.ok(names.includes("Typed hall"));
+  assert.ok(bound.filter((r) => r.source === "magicplan").every((r) => r.mpProjectId === "proj-old"));
+});
+test("a switch empties the job's arrays in place and tombstones the old ESX sketch, so a stale phone's merge can't bring it back", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  adoptEsx(p, { path: "sitevisit/bj-lead_42/mp-x.esx", name: "x.esx", hash: "e".repeat(64) }, "2026-10-01T18:01:00Z");
+  p.supportDocs.push({ id: "mp-esx-1a2b3c4d", source: "magicplan", mode: "file", title: "v188 sketch" });   // the v188 id shape
+  const stale = JSON.parse(JSON.stringify(p));
+  const files = p.siteVisit.files, docs = p.supportDocs;
+  assert.equal(magicplanOnJob(p).esx, 2);
+  const r = linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  assert.equal(r.dropped.esx, 2);
+  assert.equal(p.siteVisit.files, files);
+  assert.equal(p.supportDocs, docs);
+  assert.ok(!p.supportDocs.some(isMpEsx));
+  p.updatedAt = "2026-10-02T02:00:01Z"; stale.updatedAt = "2026-10-01T18:02:00Z";
+  const { merged } = mergeProjects(p, stale);
+  assert.ok(!(merged.supportDocs || []).some(isMpEsx), "the old sketch stays gone after the merge");
+  assert.equal(isMpEsx({ id: "x", source: "magicplan", mode: "file" }), true);
+  assert.equal(isMpEsx({ id: "doc-1" }), false);
+});
+test("a phone that missed a switch can't put the old scan's measured rows back: every merge sync stores is pruned", () => {
+  // the job pulled project A on v199: its rows carry no scan tag
+  const p = { id: "bj-9", siteVisit: { files: [], magicplan: { projectId: "proj-A", planId: "plan-A", importedAt: "2026-10-01T18:00:00Z" } },
+    floorPlan: { dimensions: { rooms: [{ name: "Kitchen", floorSF: "120", source: "magicplan", conf: 1 }, { name: "Den", floorSF: "90", source: "magicplan", conf: 1 }] } } };
+  const phone = JSON.parse(JSON.stringify(p));
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  assert.equal(p.siteVisit.magicplan.switchedFrom, "proj-A");
+  assert.deepEqual(p.floorPlan.dimensions.rooms, []);
+  p.updatedAt = "2026-10-02T02:00:01Z"; phone.updatedAt = "2026-10-01T18:00:00Z";
+  const { merged } = mergeProjects(p, phone);
+  assert.equal(merged.floorPlan.dimensions.rooms.length, 2, "filled beats empty: the merge alone brings them back");
+  assert.equal(pruneForeignMeasured(merged), 2);
+  assert.deepEqual(merged.floorPlan.dimensions.rooms, []);
+  // then B's scan lands: only B's rows, and a later stale merge + prune keeps it that way
+  adoptExport(merged, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" });
+  const again = mergeProjects(merged, phone).merged;
+  pruneForeignMeasured(again);
+  assert.ok(again.floorPlan.dimensions.rooms.length > 0);
+  assert.ok(again.floorPlan.dimensions.rooms.every((r) => r.mpProjectId === "proj-old"));
+  // a relink of the same project keeps the switch mark
+  linkMagicplan(again, PICKED, { by: "o", at: "2026-10-02T03:00:00Z" });
+  assert.equal(again.siteVisit.magicplan.switchedFrom, "proj-A");
+});
+test("the prune takes only what the link switched away from: that project's rows and untagged ones; never a third project's or typed rows", () => {
+  const rows = () => [
+    { name: "Old", source: "magicplan", mpProjectId: "proj-A" },
+    { name: "Mine", source: "magicplan", mpProjectId: "proj-B" },
+    { name: "Other", source: "magicplan", mpProjectId: "proj-C" },
+    { name: "Untagged", source: "magicplan" },
+    { name: "Typed", floorSF: "40" }];
+  const at = (mp) => ({ siteVisit: { magicplan: mp }, floorPlan: { dimensions: { rooms: rows() } } });
+  assert.equal(pruneForeignMeasured(at({ projectId: "proj-B" })), 0, "a job never switched: nothing");
+  const b = at({ projectId: "proj-B", switchedFrom: "proj-A" });
+  const bound = b.floorPlan.dimensions.rooms;
+  assert.equal(pruneForeignMeasured(b), 2);
+  assert.equal(b.floorPlan.dimensions.rooms, bound, "in place");
+  assert.deepEqual(bound.map((r) => r.name), ["Mine", "Other", "Typed"]);
+  assert.equal(pruneForeignMeasured(at(null)), 0);
+  assert.equal(pruneForeignMeasured({ siteVisit: { magicplan: { projectId: "x", switchedFrom: "y" } } }), 0);
+  assert.equal(pruneForeignMeasured(null), 0);
+});
+test("a stale phone whose newer edit takes the link back never costs the office's new rows", () => {
+  // the merge takes siteVisit (the link) whole from the newer copy; the
+  // empty table side falls back to the other copy's rows
+  const phone = { id: "bj-9", updatedAt: "2026-10-02T03:00:00Z", siteVisit: { files: [], magicplan: { projectId: "proj-X", planId: "plan-X" } } };
+  const office = JSON.parse(JSON.stringify(phone));
+  linkMagicplan(office, { ...PICKED, projectId: "proj-Y" }, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  adoptExport(office, { ...ROW, mp_project_id: "proj-Y", mp_plan_id: "plan-Y" });
+  office.updatedAt = "2026-10-02T02:10:00Z";
+  const { merged } = mergeProjects(phone, office);
+  assert.equal(merged.siteVisit.magicplan.projectId, "proj-X", "the link went back (the merge's rule, not ours)");
+  const n = merged.floorPlan.dimensions.rooms.length;
+  assert.ok(n > 0);
+  assert.equal(pruneForeignMeasured(merged), 0, "but the measured rows the office pulled stay");
+  assert.equal(merged.floorPlan.dimensions.rooms.length, n);
+});
+test("a deleted switched job isn't revived just because the prune ran on one side only", () => {
+  // sync's revive check: our copy vs the tombstone, both after the same rule
+  const tomb = { id: "bj-9", updatedAt: "2026-10-02T04:00:00Z", siteVisit: { files: [], magicplan: { projectId: "proj-Y", switchedFrom: "proj-X", linked: "proj-Y" } },
+    floorPlan: { dimensions: { rooms: [{ name: "Kitchen", source: "magicplan", mpProjectId: "proj-X" }] } } };
+  const cur = JSON.parse(JSON.stringify(tomb)); cur.floorPlan.dimensions.rooms = []; cur.updatedAt = "2026-10-02T03:00:00Z";
+  pruneForeignMeasured(tomb);
+  const { merged } = mergeProjects(cur, tomb);
+  pruneForeignMeasured(merged);
+  const strip = ({ updatedAt, ...c }) => JSON.stringify(c);
+  assert.equal(strip(merged), strip(tomb));
+});
+test("sync prunes after every merge it stores (sync.js)", () => {
+  const src = readFileSync(new URL("../js/sync.js", import.meta.url), "utf8");
+  const lines = src.split("\n");
+  const merges = lines.map((l, i) => (/mergeProjects\(/.test(l) && !/^\s*(\/\/|\*|import)/.test(l) ? i : -1)).filter((i) => i >= 0);
+  assert.ok(merges.length >= 2);
+  for (const i of merges) assert.ok(lines.slice(i, i + 5).some((l) => /settleMerged\(merged\)/.test(l)), `sync.js:${i + 1} merges without settleMerged`);
+  assert.match(src, /settleMerged\(serverFull\);[^\n]*\n\s*const \{ merged \} = mergeProjects\(cur, serverFull\)/, "the revive check prunes the tombstone's copy first");
+  assert.ok(/settleMerged\(full\);\s*\/\/ the server's union/.test(src), "the server's own union (push 'merged') is pruned too");
+  assert.ok((src.match(/settleMerged\(full\)/g) || []).length >= 3, "and a clean pull, and Take the cloud copy");
+});
+test("two devices adopting the same project's ESX sketch write one Supporting Doc; a relink back never lands on a tombstoned id", () => {
+  const esx = { path: "sitevisit/bj-9/mp-eeeeeeee-x.esx", name: "x.esx", hash: "e".repeat(64) };
+  const desk = { id: "bj-9" }, phone = { id: "bj-9" };
+  linkMagicplan(desk, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  phone.siteVisit = JSON.parse(JSON.stringify(desk.siteVisit));
+  adoptEsx(desk, esx, "2026-10-02T02:05:00Z");
+  adoptEsx(phone, esx, "2026-10-02T02:09:00Z");
+  assert.equal(desk.supportDocs[0].id, phone.supportDocs[0].id);
+  desk.updatedAt = "2026-10-02T02:05:01Z"; phone.updatedAt = "2026-10-02T02:09:01Z";
+  assert.equal(mergeProjects(desk, phone).merged.supportDocs.filter(isMpEsx).length, 1);
+  // A → B → A: three ids, and the switches' tombstones never block the new sketch
+  const p = { id: "bj-9" };
+  const ids = [];
+  for (const [proj, at] of [["proj-A", "2026-10-02T03:00:00Z"], ["proj-B", "2026-10-02T04:00:00Z"], ["proj-A", "2026-10-02T05:00:00Z"]]) {
+    linkMagicplan(p, { ...PICKED, projectId: proj }, { by: "o", at, tombstone: tombstoneItems });
+    adoptEsx(p, { ...esx, hash: proj + "e".repeat(58) }, at);
+    ids.push(p.supportDocs.find(isMpEsx).id);
+  }
+  assert.equal(new Set(ids).size, 3);
+  assert.ok(!(ids[2] in p.deletedIds));
+  assert.ok(ids[0] in p.deletedIds && ids[1] in p.deletedIds);
+});
+test("a switch never tombstones the fixed \"mp-esx\" id (builds before v200 put every sketch there): that sketch is kept out by its file", () => {
+  const p = job();
+  p.supportDocs = [{ id: ESX_DOC_ID, source: "magicplan", mode: "file", title: ESX_DOC_TITLE, file: { path: "x/old.esx", hash: "old1" } }];
+  const stale = JSON.parse(JSON.stringify(p));
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  assert.ok(!p.supportDocs.some(isMpEsx), "it still comes out of the job");
+  assert.ok(!(p.deletedIds && ESX_DOC_ID in p.deletedIds));
+  assert.deepEqual(p.siteVisit.magicplan.droppedEsx, ["old1"]);
+  p.updatedAt = "2026-10-02T02:00:01Z"; stale.updatedAt = "2026-10-01T18:00:00Z";
+  const { merged } = mergeProjects(p, stale);
+  assert.equal(merged.supportDocs.filter(isMpEsx).length, 1, "the union brings it back...");
+  assert.equal(pruneForeignMeasured(merged), 1);
+  assert.equal(merged.supportDocs.filter(isMpEsx).length, 0, "...and sync's settle takes it out");
+  // a sketch a pre-v200 phone puts on that id for the NEW project is another file: kept
+  merged.supportDocs.push({ id: ESX_DOC_ID, source: "magicplan", mode: "file", file: { path: "x/new.esx", hash: "new1" } });
+  assert.equal(pruneForeignMeasured(merged), 0);
+  // a second switch carries the list on
+  linkMagicplan(merged, { ...PICKED, projectId: "proj-C" }, { by: "o", at: "2026-10-02T05:00:00Z", tombstone: tombstoneItems });
+  assert.deepEqual(merged.siteVisit.magicplan.droppedEsx, ["old1", "new1"]);
+});
+console.log(`${pass} passed (with the Floor plan chip)`);

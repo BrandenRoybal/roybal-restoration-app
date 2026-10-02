@@ -22,6 +22,13 @@
  *                    test project)
  *   linkExport     — the Settings panel's "Link to job" for an unmatched row:
  *                    re-sync that scan onto the job the office picked
+ *   listProjects   — the workspace's live projects, newest first, for the
+ *                    Floor plan chip's "Link an existing project" (a scan
+ *                    started in the app before the job existed in ours)
+ *   linkProject    — read the one project picked (plan id, link, archived?);
+ *                    the link is kept on the job and Pull sends `linked`,
+ *                    which skips the external_reference_id check. Nothing
+ *                    is written to Magicplan.
  *
  * AUTH: the default-deny ACTION_AUTH gate from gmail-proxy (findings F-003).
  * verify_jwt=true only proves the caller holds SOME key — the publishable key
@@ -41,7 +48,7 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   MP_BASE, mpHeaders, mpErrorText, retryDelayMs, createProjectBody, projectName, projectOf, findOurs,
-  workspaceOf, runSync, isSitePath, mpFilePath, esxOf, type ExportRow,
+  listProjects, workspaceOf, runSync, isSitePath, mpFilePath, esxOf, type ExportRow,
 } from "./magicplan.ts";
 
 const CORS = {
@@ -80,6 +87,8 @@ const ACTION_AUTH: Record<string, AuthKind[]> = {
   archiveProject: ["office"],
   linkExport: ["office"],
   esxExport: ["office"],
+  listProjects: ["office"],
+  linkProject: ["office"],
 };
 
 /** The caller's bearer token, or "" when it is not a user JWT at all (the
@@ -266,7 +275,27 @@ serve(async (req) => {
     if (action === "sync") {
       const fieldProjectId = String(body.fieldProjectId ?? "");
       if (!safeJob(fieldProjectId)) return err("fieldProjectId is missing or malformed");
-      return ok(await syncInto(sb, String(body.projectId ?? ""), fieldProjectId));
+      // linked: the office picked this project for the job by hand (the
+      // Floor plan chip's Link), so its external_reference_id may be empty or
+      // another job's: the same trust as the Settings panel's Link to job
+      return ok(await syncInto(sb, String(body.projectId ?? ""), fieldProjectId, body.linked === true));
+    }
+
+    // ── listProjects ──────────────────────────────────────────────────────
+    if (action === "listProjects") {
+      const started = Date.now();
+      return ok(await listProjects({ mp: (p) => mpCall("GET", p), timeLeft: () => 60_000 - (Date.now() - started) },
+        String(body.query ?? "")));
+    }
+
+    // ── linkProject ───────────────────────────────────────────────────────
+    if (action === "linkProject") {
+      const projectId = String(body.projectId ?? "");
+      if (!projectId) return err("Pick a Magicplan project");
+      const p = projectOf(await mpCall("GET", `/projects/${encodeURIComponent(projectId)}`));
+      if (p.archivedAt) return err("That Magicplan project is archived. Restore it in Magicplan first.");
+      return ok({ projectId: p.id, planId: p.planId, cloudUrl: p.cloudUrl, createdAt: p.createdAt, name: p.name,
+        externalReferenceId: p.externalReferenceId });
     }
 
     // ── markImported ──────────────────────────────────────────────────────

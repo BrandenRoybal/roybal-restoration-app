@@ -25,7 +25,7 @@ import { h, Store, toast, fmtDate, uid, fileToDataURL } from "./core.js";
 import { rest, currentEmail, downloadSiteFile } from "./supa.js";
 import { tileCandidates, startBid, findBoardRow, isBidLead } from "./boardpush.js";
 import { jobType } from "./model.js";
-import { magicplanBidLine } from "./magicplan.js";
+import { magicplanAuto } from "./magicplan.js";
 import { walkSummary } from "./walk.js";
 import { scopeCounts, checkVerify } from "./scopenotes.js";
 
@@ -543,8 +543,12 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
     h("div", { style: "font-weight:700" }, icon + " " + label),
     h("div", { class: value ? "" : "subtle" }, value || "—"),
     btn || h("span"));
-  // 📐 Magicplan: built once so its state (pending scan, busy) survives repaints
-  const mpLine = magicplanBidLine(project, { line, onChanged: () => (onChanged ? onChanged() : load()) });
+  // 📐 Magicplan: no line here since 10/2 (it lives in the Floor plan chip);
+  // the card still creates the project at scheduling and adopts a ready scan
+  const mpAuto = magicplanAuto(project, { onChanged: () => {
+    if (!wrap.isConnected) return;   // the user already moved on (e.g. into the Floor plan): don't paint the home over it
+    if (onChanged) onChanged(); else load();
+  } });
   const paint = (d) => {
     const s = bidState(project, d);
     wrap.replaceChildren();
@@ -600,8 +604,8 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
       wrap.append(line("🔎", "Verify", list, null));
     }
 
-    // 📐 Magicplan — docs/Magicplan_Integration_Design.md §5
-    wrap.append(mpLine.setTile(d));
+    // 📐 Magicplan — docs/Magicplan_Integration_Design.md §5 (silent: create + adopt)
+    mpAuto.setTile(d);
 
     // 📄 Estimate
     const est = s.estimate;

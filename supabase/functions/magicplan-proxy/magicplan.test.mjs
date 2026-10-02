@@ -527,3 +527,113 @@ test("a photo whose name has '...' is stored under a name without '..'", async (
   assert.ok(officeIsSitePath(row.photos[0].path));
   assert.ok(!row.photos[0].path.includes(".."));
 });
+
+/* ---------- the project list (Floor plan chip: link a project scanned first) ---------- */
+const listed = (n, from = 0, extra = {}) => Array.from({ length: n }, (_, i) => ({
+  id: `p${from + i}`, name: `Customer ${from + i} — ${from + i} Main St`, external_reference_id: i % 3 ? "" : `bj-${from + i}`,
+  address: { street: `${from + i} Main St`, city: "Fairbanks", postal_code: "99701", country: "US" },
+  user_created: new Date(Date.UTC(2026, 0, 1) + (from + i) * 86400e3).toISOString(),
+  user_modified: new Date(Date.UTC(2026, 0, 1) + (from + i) * 86400e3).toISOString(), archived_at: null, ...extra }));
+const lister = (pages, { byName = null } = {}) => {
+  const calls = [];
+  return { calls, mp: async (p) => {
+    calls.push(p);
+    const u = new URL("https://x.invalid" + p);
+    assert.equal(u.pathname, "/projects");
+    assert.equal(u.searchParams.get("page_size"), "50");
+    if (u.searchParams.get("name") != null) {
+      if (byName instanceof Error) throw byName;
+      return byName || { data: [], page_info: {} };
+    }
+    const page = Number(u.searchParams.get("page") || 1);
+    const r = typeof pages === "function" ? pages(page) : pages[page - 1];
+    if (r instanceof Error) throw r;
+    return r || { data: [], page_info: {} };
+  } };
+};
+test("listProjects: one short page is the whole list — live ones only, newest first, compact", async () => {
+  const data = [...listed(3), ...listed(1, 3, { archived_at: "2026-09-01T00:00:00Z" })];
+  const L = lister([{ data, page_info: {} }]);
+  const r = await S.listProjects({ mp: L.mp });
+  assert.equal(r.complete, true);
+  assert.deepEqual(r.projects.map((p) => p.id), ["p2", "p1", "p0"]);
+  assert.deepEqual(r.projects[2], { id: "p0", name: "Customer 0 — 0 Main St", address: "0 Main St, Fairbanks, 99701",
+    createdAt: "2026-01-01T00:00:00.000Z", modifiedAt: "2026-01-01T00:00:00.000Z", externalReferenceId: "bj-0" });
+  assert.deepEqual(L.calls, ["/projects?page_size=50"]);
+});
+test("listProjects pages on: page_info when it speaks, full pages when it doesn't", async () => {
+  const a = lister((page) => ({ data: listed(50, (page - 1) * 50), page_info: { has_next_page: page < 3 } }));
+  const ra = await S.listProjects({ mp: a.mp });
+  assert.equal(ra.projects.length, 150);
+  assert.equal(ra.complete, true);
+  assert.deepEqual(a.calls, ["/projects?page_size=50", "/projects?page_size=50&page=2", "/projects?page_size=50&page=3"]);
+  const b = lister((page) => ({ data: listed(page < 2 ? 50 : 7, (page - 1) * 50) }));
+  const rb = await S.listProjects({ mp: b.mp });
+  assert.equal(rb.projects.length, 57);
+  assert.equal(rb.complete, true);
+});
+test("listProjects: page 1 back again (?page= ignored), a refused later page, or the page cap leave it incomplete", async () => {
+  const same = lister(() => ({ data: listed(50), page_info: {} }));
+  const r1 = await S.listProjects({ mp: same.mp });
+  assert.equal(r1.projects.length, 50);
+  assert.equal(r1.complete, false);
+  assert.equal(same.calls.length, 2);
+  const refused = lister((page) => (page === 1 ? { data: listed(50) } : new Error("Magicplan GET /projects failed (400)")));
+  const r2 = await S.listProjects({ mp: refused.mp });
+  assert.equal(r2.projects.length, 50);
+  assert.equal(r2.complete, false);
+  const endless = lister((page) => ({ data: listed(50, (page - 1) * 50), page_info: { has_next_page: true } }));
+  const r3 = await S.listProjects({ mp: endless.mp });
+  assert.equal(endless.calls.length, S.PROJECT_LIST_PAGES);
+  assert.equal(r3.complete, false);
+  const first = lister([new Error("Magicplan GET /projects failed (401): bad key")]);
+  await assert.rejects(S.listProjects({ mp: first.mp }), /401/);
+  await assert.rejects(S.listProjects({ mp: lister([{ projects: [] }]).mp }), /project list: unexpected response shape/);
+});
+test("listProjects stops starting pages when the worker is nearly out of time", async () => {
+  const L = lister((page) => ({ data: listed(50, (page - 1) * 50), page_info: { has_next_page: true } }));
+  let left = 60_000;
+  const r = await S.listProjects({ mp: async (p) => { left -= 30_000; return L.mp(p); }, timeLeft: () => left });
+  assert.equal(L.calls.length, 2);
+  assert.equal(r.complete, false);
+});
+test("a search matches every word in the name or address, any case, and also asks ?name= once", async () => {
+  const old = { id: "old1", name: "Gina Da Silva water", address: { street: "631 Eberhardt Rd", city: "Fairbanks" }, user_created: "2025-01-01T00:00:00Z", archived_at: null };
+  const L = lister([{ data: listed(5), page_info: {} }], { byName: { data: [old], page_info: {} } });
+  const r = await S.listProjects({ mp: L.mp }, "  eberhardt GINA ");
+  assert.deepEqual(r.projects.map((p) => p.id), ["old1"]);
+  assert.equal(L.calls[0], "/projects?page_size=50&name=eberhardt%20GINA");
+  const r2 = await S.listProjects({ mp: L.mp }, "3 main");
+  assert.deepEqual(r2.projects.map((p) => p.id), ["p3"]);
+  // a name search the API refuses doesn't sink the list
+  const R = lister([{ data: listed(5), page_info: {} }], { byName: new Error("400") });
+  assert.deepEqual((await S.listProjects({ mp: R.mp }, "customer 4")).projects.map((p) => p.id), ["p4"]);
+  assert.equal(S.matchesQuery({ name: "A", address: "" }, ""), true);
+});
+test("the server's search filter and the field picker's agree", () => {
+  const items = [{ name: "Gina Da Silva", address: "631 Eberhardt Rd, Fairbanks" }, { name: "Stevens", address: "" }, { name: "", address: "" }];
+  for (const it of items) for (const q of ["", "gina", "EBERHARDT gina", "stev", "631 north", "  "]) {
+    assert.equal(S.matchesQuery(it, q), C.mpMatches(it, q), `${it.name} / ${q}`);
+  }
+});
+test("listProjects keeps what it has when a later page comes back odd, or a search's paged list is refused", async () => {
+  const odd = lister((page) => (page === 1 ? { data: listed(50) } : { message: "try later" }));
+  const r1 = await S.listProjects({ mp: odd.mp });
+  assert.equal(r1.projects.length, 50);
+  assert.equal(r1.complete, false);
+  const old = { id: "old1", name: "Gina Da Silva", address: { street: "631 Eberhardt Rd" }, user_created: "2025-01-01T00:00:00Z", archived_at: null };
+  const busy = lister([new Error("Magicplan GET /projects failed (429)")], { byName: { data: [old] } });
+  const r2 = await S.listProjects({ mp: busy.mp }, "gina");
+  assert.deepEqual(r2.projects.map((p) => p.id), ["old1"]);
+  assert.equal(r2.complete, false);
+  // with nothing from ?name=, a refused first page is still an error
+  const none = lister([new Error("Magicplan GET /projects failed (429)")], { byName: { data: [] } });
+  await assert.rejects(S.listProjects({ mp: none.mp }, "gina"), /429/);
+  // a first page that answers 200 with no list keeps the ?name= hits the same way
+  const shape = lister([{ message: "try later" }], { byName: { data: [old] } });
+  const r3 = await S.listProjects({ mp: shape.mp }, "gina");
+  assert.deepEqual(r3.projects.map((p) => p.id), ["old1"]);
+  assert.equal(r3.complete, false);
+  await assert.rejects(S.listProjects({ mp: lister([{ message: "try later" }], { byName: { data: [] } }).mp }, "gina"),
+    /project list: unexpected response shape/);
+});

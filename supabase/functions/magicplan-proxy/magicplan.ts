@@ -172,6 +172,85 @@ export function findOurs(resp: unknown, fieldProjectId: string) {
   const hit = (list as Json[]).find((p) => p && str(p.external_reference_id) === fieldProjectId && !p.archived_at);
   return hit ? str(hit.id) : null;
 }
+
+/* ---------- the workspace's projects, for "Link an existing project" ----------
+   A project scanned in the Magicplan app before the job existed in ours has
+   no external_reference_id (or another job's). The Floor plan chip lists the
+   live projects so the office can pick it; the link then lives on our side
+   (siteVisit.magicplan.linked) and Pull passes it as trustLink. Nothing here
+   writes to Magicplan. */
+export type MpListItem = { id: string; name: string; address: string; createdAt: string; modifiedAt: string; externalReferenceId: string };
+const addressText = (a: unknown) => {
+  if (!a) return "";
+  if (typeof a === "string") return a.trim();
+  if (typeof a !== "object") return "";
+  const o = a as Json;
+  return [o.street, o.city, o.postal_code].map((v) => str(v).trim()).filter(Boolean).join(", ");
+};
+export function listItemOf(p: Json): MpListItem {
+  return {
+    id: str(p.id), name: str(p.name).trim(), address: addressText(p.address),
+    createdAt: str(p.user_created ?? p.created_at ?? p.creation_date),
+    modifiedAt: str(p.user_modified ?? p.updated_at ?? p.modified_at),
+    externalReferenceId: str(p.external_reference_id),
+  };
+}
+/** Every word of the search appears in the name or the address (any order,
+    any case). An empty search matches everything. */
+export function matchesQuery(item: MpListItem, q: string) {
+  const hay = `${item.name} ${item.address}`.toLowerCase();
+  return String(q || "").toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+}
+export const PROJECT_LIST_PAGES = 10;
+export const PROJECT_LIST_SIZE = 50;
+export const projectsPath = (page: number, name = "") =>
+  `/projects?page_size=${PROJECT_LIST_SIZE}${name ? `&name=${encodeURIComponent(name)}` : ""}${page > 1 ? `&page=${page}` : ""}`;
+const newestFirst = (a: MpListItem, b: MpListItem) =>
+  (Date.parse(b.modifiedAt || b.createdAt) || 0) - (Date.parse(a.modifiedAt || a.createdAt) || 0);
+
+/** The live (not archived) projects, newest first. Pages through GET
+    /projects the same careful way as the project attachments: page_info when
+    it speaks, full pages when it doesn't, and a page 1 that comes back again
+    ends it. A search also asks GET /projects?name= once (exact or partial,
+    whichever the API does) so an old project is found even when paging
+    stops early. `complete` is false when the list may be missing projects. */
+export async function listProjects(deps: { mp: (path: string) => Promise<unknown>; timeLeft?: () => number }, query = "") {
+  const q = String(query || "").trim().slice(0, 80);
+  const seen = new Map<string, MpListItem>();
+  const take = (resp: unknown) => {
+    const list = resp && typeof resp === "object" ? (resp as Json).data : null;
+    need(Array.isArray(list), "project list");
+    for (const p of list as Json[]) {
+      if (!p || typeof p !== "object" || !p.id || p.archived_at) continue;
+      const it = listItemOf(p);
+      if (!seen.has(it.id)) seen.set(it.id, it);
+    }
+    return (list as Json[]).length;
+  };
+  if (q) { try { take(await deps.mp(projectsPath(1, q))); } catch (_) { /* the paged list below still answers */ } }
+  let complete = false, firstSig = "";
+  for (let page = 1; page <= PROJECT_LIST_PAGES; page++) {
+    if (page > 1 && deps.timeLeft && deps.timeLeft() < 5_000) break;
+    let resp: unknown;
+    try { resp = await deps.mp(projectsPath(page)); }
+    // a refused later page keeps what came back; so does a refused first
+    // page of a search whose ?name= call already found something
+    catch (e) { if (page === 1 && !(q && seen.size)) throw e; break; }
+    const data = (resp && typeof resp === "object" ? (resp as Json).data : null);
+    // an odd page: same, keep what came back (a later page, or page 1 after
+    // the ?name= search already found something)
+    if (!Array.isArray(data) && (page > 1 || (q && seen.size))) break;
+    const sig = Array.isArray(data) ? data.map((p) => str((p as Json)?.id)).join(",") : "";
+    if (page === 1) firstSig = sig;
+    else if (sig === firstSig) break;    // ?page= ignored: what page 1 showed is all we can see
+    const listed = take(resp);
+    if (!listed) { complete = true; break; }
+    const more = moreAfter(resp, page);
+    if (more === false || (more === null && listed < PROJECT_LIST_SIZE)) { complete = true; break; }
+  }
+  const projects = [...seen.values()].filter((it) => matchesQuery(it, q)).sort(newestFirst);
+  return { projects: projects.slice(0, 500), complete };
+}
 export type MpFile = { name: string; folder: string; url: string; lastModified: string; size: number; fileType: string; symbolInstanceId?: string };
 /** {data: {files: [...], photos: [...]}} — GET /plans/{id}/files */
 export function filesOf(resp: unknown) {

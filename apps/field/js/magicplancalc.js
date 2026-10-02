@@ -135,16 +135,17 @@ export function projectName(customer, street) {
    keeps whatever the user decided. Rows anyone else wrote are never touched. */
 export const MEASURED_CONF = 0.5;
 const cell = (v) => (num(v) > 0 ? String(v) : "");
-export function measuredRow(room, units, conf) {
+export function measuredRow(room, units, conf, projectId = "") {
   return {
     name: room.label || room.name, dims: room.dims || "",
     floorSF: cell(room.floorSF), perimLF: cell(room.perimLF),
     ceiling: num(room.ceilingFt) > 0 ? `${room.ceilingFt} ft` : "",
     notes: "", conf, source: "magicplan", unit: units === "metric" ? "m → ft" : "ft",
     volumeCF: num(room.volumeCF) > 0 ? Math.round(num(room.volumeCF)) : 0,   // M3: measured room volume, offered to the dehu sizing
+    ...(projectId ? { mpProjectId: String(projectId) } : {}),   // 10/2: which scan measured it (a relink prunes the old one's)
   };
 }
-export function mergeMeasuredRooms(rows, stats) {
+export function mergeMeasuredRooms(rows, stats, projectId = "") {
   const list = arr(rows);
   const units = (stats && stats.units) || "imperial";
   const rooms = dedupeRoomNames(stats && stats.floors);
@@ -155,12 +156,12 @@ export function mergeMeasuredRooms(rows, stats) {
   const out = [...list];
   let added = 0, updated = 0;
   for (const rm of rooms) {
-    const next = measuredRow(rm, units, conf);
+    const next = measuredRow(rm, units, conf, projectId);
     const i = out.findIndex((r) => r && r.source === "magicplan" && String(r.name || "").toLowerCase() === next.name.toLowerCase());
     if (i < 0) { out.push(next); added++; continue; }
     const prev = out[i];
     const same = ["dims", "floorSF", "perimLF", "ceiling", "unit", "volumeCF"].every((k) => String(prev[k] || "") === String(next[k] || ""));
-    if (same) continue;
+    if (same) { if (projectId && prev.mpProjectId !== String(projectId)) out[i] = { ...prev, mpProjectId: String(projectId) }; continue; }
     out[i] = { ...prev, ...next, notes: prev.notes || "" };
     updated++;
   }
@@ -179,6 +180,10 @@ export function adoptExport(project, row, at = new Date().toISOString()) {
   const sv = p.siteVisit;
   if (!Array.isArray(sv.files)) sv.files = [];
   const mp = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : {};
+  // a job the office linked by hand takes scans of THAT project only: a ready
+  // row left over from the project it was switched away from never mixes in
+  if (linkedByHand(mp) && row && row.mp_project_id && row.mp_project_id !== mp.projectId)
+    return { reports: 0, photos: 0, others: 0, rooms: 0, dimsAdded: 0, dimsUpdated: 0, accepted: false, skipped: true };
   const removed = new Set(arr(mp.removed));
   const put = (f) => {
     if (removed.has(f.id)) return false;
@@ -209,8 +214,13 @@ export function adoptExport(project, row, at = new Date().toISOString()) {
     if (!p.floorPlan || typeof p.floorPlan !== "object") p.floorPlan = { createdAt: at, mode: "upload", uploadedPages: [] };
     const fp = p.floorPlan;
     if (!fp.dimensions || typeof fp.dimensions !== "object") fp.dimensions = { rooms: [], notes: [] };
-    const m = mergeMeasuredRooms(fp.dimensions.rooms, stats);
-    fp.dimensions.rooms = m.rows;
+    const pid = mp.projectId || (row && row.mp_project_id) || "";
+    // rows another scan measured (a merge from a phone that missed a relink
+    // can bring them back) go before this scan's rows are merged in
+    const cur = Array.isArray(fp.dimensions.rooms) ? fp.dimensions.rooms : (fp.dimensions.rooms = []);
+    if (pid) spliceOut(cur, (r) => foreignMeasured(r, pid, !!mp.switchedFrom));
+    const m = mergeMeasuredRooms(cur, stats, pid);
+    cur.splice(0, cur.length, ...m.rows);   // in place: the open Floor Plan table is bound to this array
     dims = m;
   }
   sv.magicplan = {
@@ -311,11 +321,20 @@ export function withMagicplanBasis(pricingNotes, scannedAt) {
    hash → same entry, replaced in place; the sheet offers it as a download. */
 export const ESX_DOC_TITLE = "Magicplan ESX sketch (Xactimate)";
 export const ESX_DOC_ID = "mp-esx";   // one sketch per job: a new export replaces the file on this one entry
+/* The job's Magicplan sketch, whatever id it was given: "mp-esx" (M3),
+   "mp-esx-<hash8>" (v188) or "mp-esx-<project8>-<link time>" (10/2). The
+   10/2 id comes from the job's link, so two devices adopting the same
+   project's sketch write ONE entry; a relink (even back to an earlier
+   project) stamps a new link time, so a new sketch never lands on an id a
+   switch tombstoned. */
+export const isMpEsx = (d) => !!d && (d.id === ESX_DOC_ID || String(d.id || "").startsWith(ESX_DOC_ID + "-") || (d.source === "magicplan" && d.mode === "file"));
 export function adoptEsx(project, esx, at = new Date().toISOString()) {
   if (!project || !esx || !esx.path || !esx.hash) return { added: 0, updated: 0 };
   if (!Array.isArray(project.supportDocs)) project.supportDocs = [];
   const file = { path: esx.path, name: esx.name || "sketch.esx", size: num(esx.size), mime: esx.mime || "application/octet-stream", hash: String(esx.hash) };
-  const i = project.supportDocs.findIndex((d) => d && (d.id === ESX_DOC_ID || (d.source === "magicplan" && d.mode === "file")));
+  const sv = project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : {};
+  const link = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : {};
+  const i = project.supportDocs.findIndex(isMpEsx);
   if (i >= 0) {
     const prev = project.supportDocs[i];
     if (String((prev.file || {}).hash || "") === file.hash) return { added: 0, updated: 0 };
@@ -323,8 +342,144 @@ export function adoptEsx(project, esx, at = new Date().toISOString()) {
     return { added: 0, updated: 1 };
   }
   project.supportDocs.push({
-    id: ESX_DOC_ID, by: "", createdAt: at, title: ESX_DOC_TITLE, docType: "Other", mode: "file",
+    id: `${ESX_DOC_ID}-${String(link.projectId || file.hash).slice(0, 8)}-${(Date.parse(link.linkedAt || link.createdAt || at) || 0).toString(36)}`,
+    by: "", createdAt: at, title: ESX_DOC_TITLE, docType: "Other", mode: "file",
     uploadedPages: [], aiDigest: "", source: "magicplan", file,
   });
   return { added: 1, updated: 0 };
+}
+
+/* ============================================================
+   The Floor plan chip (10/2): link a project scanned before the job existed
+   ============================================================ */
+
+/** What the job holds from Magicplan today: packet files, measured Floor
+    Plan rows, the ESX sketch. The 🔗 Link confirm names these before a
+    switch takes them out. */
+export function magicplanOnJob(project) {
+  const sv = project && project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : {};
+  const fp = project && project.floorPlan && project.floorPlan.dimensions ? project.floorPlan.dimensions : {};
+  return {
+    files: arr(sv.files).filter((f) => f && f.source === "magicplan").length,
+    rooms: arr(fp.rooms).filter((r) => r && r.source === "magicplan").length,
+    esx: arr(project && project.supportDocs).filter(isMpEsx).length,
+  };
+}
+
+/** Link this job to the Magicplan project the office picked (the proxy's
+    linkProject answer: {projectId, planId, cloudUrl, createdAt, name}).
+    `linked` holds the project id that was picked by hand, so Pull trusts
+    exactly that project and nothing a later create puts in its place.
+    Switching from another project takes the old one's imports out (files
+    from the packet, measured rows from the Floor Plan table, its ESX
+    sketch) so two scans never mix in one estimate; the storage copies stay
+    and rows anyone typed are never touched. The same project again keeps
+    its import stamps. Mutates; returns { switching, dropped }. */
+export function linkMagicplan(project, picked, { by = "", at = new Date().toISOString(), tombstone = null } = {}) {
+  const p = project;
+  if (!p.siteVisit || typeof p.siteVisit !== "object") p.siteVisit = { files: [], transcript: "", transcriptSeconds: 0, typedScope: "", pending: null };
+  const sv = p.siteVisit;
+  if (!Array.isArray(sv.files)) sv.files = [];
+  const prev = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : null;
+  const switching = !!(prev && prev.projectId && prev.projectId !== picked.projectId);
+  const dropped = { files: 0, rooms: 0, esx: 0 };
+  let legacyEsx = [];
+  if (switching) {
+    const had = magicplanOnJob(p);
+    // in place: an open form stays bound to the job's own arrays
+    spliceOut(sv.files, (f) => f && f.source === "magicplan");
+    const dims = p.floorPlan && p.floorPlan.dimensions;
+    if (dims && Array.isArray(dims.rooms)) spliceOut(dims.rooms, (r) => r && r.source === "magicplan");
+    if (Array.isArray(p.supportDocs)) {
+      const gone = spliceOut(p.supportDocs, isMpEsx);
+      // Supporting Docs union across devices by id: the delete needs a mark
+      // (merge.js tombstoneItems, passed in so this module keeps no imports).
+      // Never on the fixed "mp-esx": builds before v200 put EVERY sketch on
+      // that id, so a mark on it would strip the new project's sketch too.
+      if (gone.length && tombstone) tombstone(p, gone.map((d) => d.id).filter((id) => id && id !== ESX_DOC_ID));
+      // ...so that one is kept out by its file instead (pruneForeignMeasured)
+      legacyEsx = gone.filter((d) => d && d.id === ESX_DOC_ID).map((d) => String((d.file || {}).hash || "")).filter(Boolean);
+    }
+    Object.assign(dropped, had);
+  }
+  const keep = switching || !prev ? {} : prev;
+  sv.magicplan = {
+    ...keep,
+    projectId: String(picked.projectId || ""), planId: String(picked.planId || keep.planId || ""),
+    cloudUrl: String(picked.cloudUrl || keep.cloudUrl || ""), createdAt: String(picked.createdAt || keep.createdAt || at),
+    name: String(picked.name || ""), by: keep.by || by, units: keep.units || null,
+    linked: String(picked.projectId || ""), linkedAt: at, linkedBy: by,
+    // what a merge must keep out after a switch: see pruneForeignMeasured
+    ...(switching ? { switchedFrom: String(prev.projectId), droppedEsx: [...arr(prev.droppedEsx), ...legacyEsx] } : {}),
+  };
+  return { switching, dropped };
+}
+
+/* A measured Floor Plan row from a scan other than the job's linked project.
+   Rows adopted since 10/2 carry mpProjectId; an untagged one predates that,
+   so on a job that was ever switched it can only be the old project's. Rows
+   anyone typed (no "magicplan" source) are never foreign. */
+const foreignMeasured = (r, pid, switched) => !!(r && r.source === "magicplan" &&
+  (r.mpProjectId ? r.mpProjectId !== pid : switched));
+
+/** Keep out what a switch took off the job. A switch empties the old scan's
+    measured rows, but the Floor Plan table merges filled-beats-empty
+    (merge.js, and the server's merge), so a phone that missed the switch
+    puts them back; and the pre-v200 ESX sketch id "mp-esx" can't carry a
+    tombstone. Sync runs this after every merge it stores. Only what THIS
+    link switched away from goes: rows of the old project (or untagged, so
+    pulled before v200), and the dropped sketch by its file. A row tagged
+    with any other project stays — it may be a newer link's, on a copy whose
+    link lost the merge. Mutates in place (an open table is bound to the
+    array); returns how many went. */
+export function pruneForeignMeasured(project) {
+  const mp = project && project.siteVisit && project.siteVisit.magicplan;
+  if (!mp || typeof mp !== "object" || !mp.projectId || !mp.switchedFrom) return 0;
+  const from = String(mp.switchedFrom);
+  const rows = project.floorPlan && project.floorPlan.dimensions && project.floorPlan.dimensions.rooms;
+  let n = Array.isArray(rows) ? spliceOut(rows, (r) => !!(r && r.source === "magicplan" && (r.mpProjectId ? r.mpProjectId === from : true))).length : 0;
+  const esx = new Set(arr(mp.droppedEsx).map(String));
+  if (esx.size && Array.isArray(project.supportDocs))
+    n += spliceOut(project.supportDocs, (d) => !!d && d.id === ESX_DOC_ID && esx.has(String((d.file || {}).hash || ""))).length;
+  return n;
+}
+
+/* remove every element that matches, in place; returns what was removed */
+function spliceOut(list, test) {
+  const gone = [];
+  for (let i = list.length - 1; i >= 0; i--) if (test(list[i])) gone.unshift(...list.splice(i, 1));
+  return gone;
+}
+
+/** Did the office pick this project by hand? Then Pull sends `linked` and
+    the server skips its external_reference_id check for it. */
+export const linkedByHand = (mp) => !!(mp && mp.projectId && mp.linked === mp.projectId);
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const shortDay = (iso) => {   // the phone's own day: an evening pull in Alaska is still that day
+  const d = new Date(String(iso || ""));
+  return isNaN(d) ? "" : `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+};
+
+/** The Floor plan tile's line on the job page, from what the job holds
+    (offline). "" when the job has no Magicplan project: the tile keeps its
+    own blurb. */
+export function mpTileLine(project) {
+  const sv = project && project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : {};
+  const mp = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : null;
+  if (!mp || !mp.projectId) return "";
+  if (!mp.importedAt) return "📐 Magicplan linked — scan, export, then ⟳ Pull in here";
+  const rooms = dedupeRoomNames(mp.statistics && mp.statistics.floors).length;
+  const mine = arr(sv.files).filter((f) => f && f.source === "magicplan");
+  const photos = mine.filter((f) => f.kind === "photos").length, files = mine.length - photos;
+  const n = (x, one) => (x ? `${x} ${one}${x === 1 ? "" : "s"}` : "");
+  return ["📐 Magicplan pulled " + shortDay(mp.importedAt || mp.syncedAt), n(rooms, "room"), n(files, "file"), n(photos, "photo")].filter(Boolean).join(" · ");
+}
+
+/** The 🔗 Link picker's filter: every word of the search in the name or the
+    address, any order, any case — the proxy's matchesQuery, held to the
+    same answers by its lockstep test. */
+export function mpMatches(item, q) {
+  const hay = `${(item && item.name) || ""} ${(item && item.address) || ""}`.toLowerCase();
+  return String(q || "").toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
 }
