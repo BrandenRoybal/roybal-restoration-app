@@ -44,8 +44,8 @@ import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
 import { myWeekPage, clearMyWeekCache, fetchEntriesSafe } from "./myweek.js";
 import { helpPage } from "./help.js";
-import { magicplanPanel } from "./magicplan.js";
-import { mpTileLine } from "./magicplancalc.js";
+import { magicplanPanel, onMagicplanWrote } from "./magicplan.js";
+import { mpTileLine, pruneForeignMeasured } from "./magicplancalc.js";
 import { openSiteVisitNext } from "./sitevisit.js";
 
 const view = $("#view");
@@ -157,11 +157,10 @@ function startSyncUI() {
   // screen, graft the fresh copy into the SAME in-memory object the form is
   // bound to — otherwise the next autosave would write the stale on-screen
   // fork back over the merged one and quietly re-erase the other device's work.
-  onSyncRowChanged(async (id) => {
-    if (!liveProject || liveProject.id !== id) return;
-    const fresh = await Store.get(id);
-    if (fresh) graftProject(liveProject, fresh);
-  });
+  onSyncRowChanged(refreshLive);
+  // the same for a Magicplan write made on another page's copy of the job
+  // (the home's auto-create or ESX sketch landing after the user moved on)
+  onMagicplanWrote((id, wrote) => (liveProject && liveProject !== wrote ? refreshLive(id) : null));
   startSync(updateSyncStatus);
 }
 function boot() {
@@ -177,6 +176,11 @@ function boot() {
 /* the project object the current page's inputs are bound to (null on the
    list/login screens) — sync grafts merged changes into it, see startSyncUI */
 let liveProject = null;
+async function refreshLive(id) {
+  if (!liveProject || liveProject.id !== id) return;
+  const fresh = await Store.get(id);
+  if (fresh) graftProject(liveProject, fresh);
+}
 
 async function route() {
   await flushPending();              // persist any in-flight edit before reloading
@@ -1225,6 +1229,7 @@ function backupsCard(project) {
           : { merged: snap, added: 0, filledForms: 0 };
         merged.id = project.id;
         delete merged.rev;
+        pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring the old scan's rows back
         await Store.put(merged);     // fresh updatedAt → re-syncs
         const bits = [];
         if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);

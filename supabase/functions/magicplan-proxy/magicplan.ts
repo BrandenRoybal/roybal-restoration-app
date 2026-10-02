@@ -237,7 +237,9 @@ export async function listProjects(deps: { mp: (path: string) => Promise<unknown
     // page of a search whose ?name= call already found something
     catch (e) { if (page === 1 && !(q && seen.size)) throw e; break; }
     const data = (resp && typeof resp === "object" ? (resp as Json).data : null);
-    if (page > 1 && !Array.isArray(data)) break;   // an odd later page: same, keep what came back
+    // an odd page: same, keep what came back (a later page, or page 1 after
+    // the ?name= search already found something)
+    if (!Array.isArray(data) && (page > 1 || (q && seen.size))) break;
     const sig = Array.isArray(data) ? data.map((p) => str((p as Json)?.id)).join(",") : "";
     if (page === 1) firstSig = sig;
     else if (sig === firstSig) break;    // ?page= ignored: what page 1 showed is all we can see

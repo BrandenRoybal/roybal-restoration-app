@@ -218,7 +218,7 @@ export function adoptExport(project, row, at = new Date().toISOString()) {
     // rows another scan measured (a merge from a phone that missed a relink
     // can bring them back) go before this scan's rows are merged in
     const cur = Array.isArray(fp.dimensions.rooms) ? fp.dimensions.rooms : (fp.dimensions.rooms = []);
-    if (pid) spliceOut(cur, (r) => r && r.source === "magicplan" && r.mpProjectId && r.mpProjectId !== pid);
+    if (pid) spliceOut(cur, (r) => foreignMeasured(r, pid, !!mp.switchedFrom));
     const m = mergeMeasuredRooms(cur, stats, pid);
     cur.splice(0, cur.length, ...m.rows);   // in place: the open Floor Plan table is bound to this array
     dims = m;
@@ -322,14 +322,18 @@ export function withMagicplanBasis(pricingNotes, scannedAt) {
 export const ESX_DOC_TITLE = "Magicplan ESX sketch (Xactimate)";
 export const ESX_DOC_ID = "mp-esx";   // one sketch per job: a new export replaces the file on this one entry
 /* The job's Magicplan sketch, whatever id it was given: "mp-esx" (M3),
-   "mp-esx-<hash8>" (v188) or "mp-esx-<hash8>-<t>" (10/2). A relink tombstones
-   the old one's id so a merge can't bring it back; ids are never reused, so
-   a new sketch is never caught by that tombstone. */
+   "mp-esx-<hash8>" (v188) or "mp-esx-<project8>-<link time>" (10/2). The
+   10/2 id comes from the job's link, so two devices adopting the same
+   project's sketch write ONE entry; a relink (even back to an earlier
+   project) stamps a new link time, so a new sketch never lands on an id a
+   switch tombstoned. */
 export const isMpEsx = (d) => !!d && (d.id === ESX_DOC_ID || String(d.id || "").startsWith(ESX_DOC_ID + "-") || (d.source === "magicplan" && d.mode === "file"));
 export function adoptEsx(project, esx, at = new Date().toISOString()) {
   if (!project || !esx || !esx.path || !esx.hash) return { added: 0, updated: 0 };
   if (!Array.isArray(project.supportDocs)) project.supportDocs = [];
   const file = { path: esx.path, name: esx.name || "sketch.esx", size: num(esx.size), mime: esx.mime || "application/octet-stream", hash: String(esx.hash) };
+  const sv = project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : {};
+  const link = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : {};
   const i = project.supportDocs.findIndex(isMpEsx);
   if (i >= 0) {
     const prev = project.supportDocs[i];
@@ -338,7 +342,8 @@ export function adoptEsx(project, esx, at = new Date().toISOString()) {
     return { added: 0, updated: 1 };
   }
   project.supportDocs.push({
-    id: `${ESX_DOC_ID}-${String(file.hash).slice(0, 8)}-${(Date.parse(at) || 0).toString(36)}`, by: "", createdAt: at, title: ESX_DOC_TITLE, docType: "Other", mode: "file",
+    id: `${ESX_DOC_ID}-${String(link.projectId || file.hash).slice(0, 8)}-${(Date.parse(link.linkedAt || link.createdAt || at) || 0).toString(36)}`,
+    by: "", createdAt: at, title: ESX_DOC_TITLE, docType: "Other", mode: "file",
     uploadedPages: [], aiDigest: "", source: "magicplan", file,
   });
   return { added: 1, updated: 0 };
@@ -387,8 +392,10 @@ export function linkMagicplan(project, picked, { by = "", at = new Date().toISOS
     if (Array.isArray(p.supportDocs)) {
       const gone = spliceOut(p.supportDocs, isMpEsx);
       // Supporting Docs union across devices by id: the delete needs a mark
-      // (merge.js tombstoneItems, passed in so this module keeps no imports)
-      if (gone.length && tombstone) tombstone(p, gone.map((d) => d.id).filter(Boolean));
+      // (merge.js tombstoneItems, passed in so this module keeps no imports).
+      // Never on the fixed "mp-esx": builds before v200 put EVERY sketch on
+      // that id, so a mark on it would strip the new project's sketch too.
+      if (gone.length && tombstone) tombstone(p, gone.map((d) => d.id).filter((id) => id && id !== ESX_DOC_ID));
     }
     Object.assign(dropped, had);
   }
@@ -399,8 +406,30 @@ export function linkMagicplan(project, picked, { by = "", at = new Date().toISOS
     cloudUrl: String(picked.cloudUrl || keep.cloudUrl || ""), createdAt: String(picked.createdAt || keep.createdAt || at),
     name: String(picked.name || ""), by: keep.by || by, units: keep.units || null,
     linked: String(picked.projectId || ""), linkedAt: at, linkedBy: by,
+    // a switched job prunes measured rows with no scan tag too (pulled before
+    // v200, so from the old project): see pruneForeignMeasured
+    ...(switching ? { switchedFrom: String(prev.projectId) } : {}),
   };
   return { switching, dropped };
+}
+
+/* A measured Floor Plan row from a scan other than the job's linked project.
+   Rows adopted since 10/2 carry mpProjectId; an untagged one predates that,
+   so on a job that was ever switched it can only be the old project's. Rows
+   anyone typed (no "magicplan" source) are never foreign. */
+const foreignMeasured = (r, pid, switched) => !!(r && r.source === "magicplan" &&
+  (r.mpProjectId ? r.mpProjectId !== pid : switched));
+
+/** Take out measured rows another scan left on the job. A switch empties the
+    old scan's rows, but the Floor Plan table merges filled-beats-empty
+    (merge.js, and the server's merge), so a phone that missed the switch
+    puts them back: sync runs this after every merge it stores. Mutates in
+    place (an open table is bound to the array); returns how many went. */
+export function pruneForeignMeasured(project) {
+  const mp = project && project.siteVisit && project.siteVisit.magicplan;
+  const rows = project && project.floorPlan && project.floorPlan.dimensions && project.floorPlan.dimensions.rooms;
+  if (!mp || typeof mp !== "object" || !mp.projectId || !Array.isArray(rows)) return 0;
+  return spliceOut(rows, (r) => foreignMeasured(r, String(mp.projectId), !!mp.switchedFrom)).length;
 }
 
 /* remove every element that matches, in place; returns what was removed */

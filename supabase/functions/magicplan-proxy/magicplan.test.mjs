@@ -629,4 +629,11 @@ test("listProjects keeps what it has when a later page comes back odd, or a sear
   // with nothing from ?name=, a refused first page is still an error
   const none = lister([new Error("Magicplan GET /projects failed (429)")], { byName: { data: [] } });
   await assert.rejects(S.listProjects({ mp: none.mp }, "gina"), /429/);
+  // a first page that answers 200 with no list keeps the ?name= hits the same way
+  const shape = lister([{ message: "try later" }], { byName: { data: [old] } });
+  const r3 = await S.listProjects({ mp: shape.mp }, "gina");
+  assert.deepEqual(r3.projects.map((p) => p.id), ["old1"]);
+  assert.equal(r3.complete, false);
+  await assert.rejects(S.listProjects({ mp: lister([{ message: "try later" }], { byName: { data: [] } }).mp }, "gina"),
+    /project list: unexpected response shape/);
 });

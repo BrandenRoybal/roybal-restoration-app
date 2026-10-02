@@ -42,7 +42,7 @@ globalThis.fetch = async (url, opts = {}) => {
   return resp(404, {});
 };
 
-const { magicplanPanel, magicplanAuto } = await import("../js/magicplan.js");
+const { magicplanPanel, magicplanAuto, onMagicplanWrote, adoptRow, pendingExport } = await import("../js/magicplan.js");
 const { Store } = await import("../js/core.js");
 
 let pass = 0;
@@ -100,12 +100,18 @@ await test("a job adopted through the admin's Link to job can pick the same proj
   el.remove();
 });
 
-await test("after a switch, a ready row left from the old project is never asked for, offered or adopted", async () => {
+// the magicplan_exports table, as PostgREST filters it
+const table = (rows) => async (u) => rows.filter((r) => r.status === "ready" &&
+  (!/mp_project_id=eq\./.test(u) || u.includes(`mp_project_id=eq.${r.mp_project_id}`)) &&
+  (!/mp_project_id=neq\./.test(u) || !u.includes(`mp_project_id=neq.${r.mp_project_id}`)));
+
+await test("after a switch, a ready row left from the old project is stamped done at once, never offered or adopted", async () => {
   calls.length = 0;
   const project = { id: "job1", customer: "Gina", address: "1 Elm St",
     siteVisit: { files: [], magicplan: { projectId: "pA", planId: "plA" } } };
   const rows = [readyRow("pA", "a1", "A report.pdf")];
-  routes.exports = async (u) => rows.filter((r) => !/mp_project_id=eq\./.test(u) || u.includes(`mp_project_id=eq.${r.mp_project_id}`));
+  routes.exports = table(rows);
+  routes.proxy.markImported = async (b) => { const r = rows.find((x) => x.id === b.exportId); r.status = "imported"; return { id: r.id }; };
   routes.proxy.listProjects = async () => ({ projects: [{ id: "pB", name: "Scan B", address: "", createdAt: "", modifiedAt: "", externalReferenceId: "" }], complete: true });
   routes.proxy.linkProject = async (b) => ({ projectId: b.projectId, planId: "plB", name: "Scan B", externalReferenceId: "" });
   routes.proxy.sync = async () => { throw new Error("Magicplan GET /projects/pB failed (503)"); };
@@ -119,11 +125,11 @@ await test("after a switch, a ready row left from the old project is never asked
   await sleep(50);
   assert.ok(!btn(el, /Add to packet/), "the old row isn't offered under the new link");
   assert.ok(btn(el, /⟳ Pull/), "Pull is there to try again");
+  assert.deepEqual(proxyCalls("markImported").map((c) => c.body.exportId), ["a1"], "the old project's scan is done with: no copy can adopt it now");
+  rows[0].status = "ready";   // even if that stamp had failed, this job never offers it
   const el2 = magicplanPanel(project, { onChanged: () => {} });   // the re-render after the failed pull
   document.body.append(el2);
   await sleep(60);
-  const asked = calls.filter((c) => c.u.includes("magicplan_exports")).pop();
-  assert.match(asked.u, /mp_project_id=eq\.pB/);
   assert.ok(!btn(el2, /Add to packet/));
   assert.deepEqual(project.siteVisit.files, []);
   assert.equal(project.siteVisit.magicplan.planId, "plB");
@@ -190,6 +196,122 @@ await test("no automatic create over a link another device made; a failed check 
   magicplanAuto(c, {}).setTile(tile);
   await until(() => proxyCalls("createProject").length === 1);
   await until(() => c.siteVisit.magicplan && c.siteVisit.magicplan.projectId === "dup");
+});
+
+await test("a hand-linked job's adopt takes its own project's scan and stamps the old project's leftovers with it", async () => {
+  calls.length = 0;
+  const project = { id: "job1", siteVisit: { files: [], magicplan: { projectId: "pB", linked: "pB" } } };
+  const rows = [readyRow("pA", "a2", "A.pdf"), readyRow("pB", "b2", "B.pdf")];
+  routes.exports = table(rows);
+  const pending = await pendingExport(project);
+  assert.equal(pending.row.id, "b2");
+  assert.deepEqual(pending.older.map((r) => r.id), ["a2"]);
+  routes.proxy.markImported = async (b) => ({ id: b.exportId });
+  routes.proxy.esxExport = async () => ({ available: false });
+  await adoptRow(project, pending);
+  assert.deepEqual(proxyCalls("markImported").map((c) => c.body.exportId).sort(), ["a2", "b2"]);
+  assert.ok(project.siteVisit.files.every((f) => !/A\.pdf/.test(f.name)));
+});
+
+await test("a scan that can't be saved is offered again", async () => {
+  calls.length = 0;
+  const project = { id: "job7", siteVisit: { files: [], magicplan: { projectId: "pA" } } };
+  routes.exports = table([readyRow("pA", "a3", "A.pdf")]);
+  const put = Store.put;
+  Store.put = async () => { throw new Error("QuotaExceededError"); };
+  try { await assert.rejects(adoptRow(project, await pendingExport(project)), /Quota/); }
+  finally { Store.put = put; }
+  const again = await pendingExport(project);
+  assert.equal(again && again.row.id, "a3");
+});
+
+await test("the home's auto-adopt after the user moved on lands on the stored copy and is grafted into the page on screen", async () => {
+  calls.length = 0;
+  localStorage.setItem("roybal-mp-autoadopt", "1");
+  await Store.put({ id: "job8", bidOf: "lead_8", customer: "Gina", siteVisit: { files: [], magicplan: { projectId: "pA", planId: "plA" } } });
+  const home = await Store.get("job8"), floor = await Store.get("job8");   // route() gives each page its own copy
+  floor.notes = "typed in the Floor plan";
+  await Store.put(floor);
+  const wrote = [];
+  onMagicplanWrote((id, obj) => wrote.push([id, obj]));
+  routes.exports = async () => [];
+  routes.proxy.markImported = async (b) => ({ id: b.exportId });
+  routes.proxy.esxExport = async () => ({ available: false });
+  routes.proxy.status = async () => ({ userModified: "" });
+  let rerendered = 0;
+  const el = magicplanPanel(floor, { onChanged: () => { rerendered++; } });   // the Floor plan, open, nothing waiting yet
+  document.body.append(el);
+  await sleep(30);
+  routes.exports = table([readyRow("pA", "a8", "A8.pdf")]);   // the export lands
+  magicplanAuto(home, { isLive: () => false }).setTile({ siteVisit: { at: "2026-10-03T17:00" } });
+  await until(() => wrote.length === 1);
+  const stored = await Store.get("job8");
+  assert.equal(stored.notes, "typed in the Floor plan", "the Floor plan's save is kept");
+  assert.ok(stored.siteVisit.files.some((f) => f.name === "A8.pdf"), "and the scan is in");
+  assert.deepEqual(wrote[0], ["job8", home]);
+  await until(() => rerendered === 1);   // the open Floor plan re-renders onto the new rows
+  assert.equal(proxyCalls("markImported").length, 1);
+  el.remove();
+  onMagicplanWrote(null);
+  localStorage.removeItem("roybal-mp-autoadopt");
+});
+
+await test("an auto-create that finishes after a link was saved leaves the link alone, and Link waits while a create runs", async () => {
+  calls.length = 0;
+  await Store.put({ id: "job9", bidOf: "lead_9", customer: "Gina", address: "", siteVisit: { files: [] } });
+  const home = await Store.get("job9"), floor = await Store.get("job9");
+  routes.server = async () => [];
+  let release;
+  routes.proxy.createProject = () => new Promise((r) => { release = () => r({ projectId: "dup", planId: "pl", cloudUrl: "", createdAt: "" }); });
+  routes.proxy.listProjects = async () => ({ projects: [{ id: "pB", name: "Scan B", address: "", createdAt: "", modifiedAt: "", externalReferenceId: "" }], complete: true });
+  routes.exports = async () => [];
+  magicplanAuto(home, {}).setTile({ siteVisit: { at: "2026-10-03T17:00" } });
+  await until(() => proxyCalls("createProject").length === 1);
+  const el = magicplanPanel(floor, { onChanged: () => {} });
+  document.body.append(el);
+  await sleep(20);
+  btn(el, /Link existing/).click();
+  await until(() => btn(el, /Scan B/));
+  btn(el, /Scan B/).click();
+  await sleep(30);
+  assert.equal(proxyCalls("linkProject").length, 0, "Link waits for the create");
+  // a link that reached the stored copy meanwhile (here: saved straight, as sync would) wins
+  floor.siteVisit.magicplan = { projectId: "pB", linked: "pB" };
+  await Store.put(floor);
+  release();
+  await sleep(60);
+  assert.equal((await Store.get("job9")).siteVisit.magicplan.projectId, "pB");
+  assert.ok(!home.siteVisit.magicplan, "the home's copy isn't handed the duplicate either");
+  el.remove();
+});
+
+await test("a scan landing while the picker is open waits to re-render the form until the picker closes", async () => {
+  calls.length = 0;
+  localStorage.setItem("roybal-mp-autoadopt", "1");
+  const project = { id: "job10", siteVisit: { files: [], magicplan: { projectId: "pA", planId: "plA" } } };
+  routes.exports = table([readyRow("pA", "a10", "A10.pdf")]);
+  routes.proxy.markImported = async (b) => { await sleep(150); return { id: b.exportId }; };
+  routes.proxy.esxExport = async () => ({ available: false });
+  routes.proxy.status = async () => ({ userModified: "" });
+  routes.proxy.listProjects = async () => ({ projects: [], complete: true });
+  let rerendered = 0;
+  const el = magicplanPanel(project, { onChanged: () => { rerendered++; } });
+  document.body.append(el);
+  await sleep(5);
+  btn(el, /Link a different/).click();
+  await sleep(10);
+  const input = el.querySelector("input[type=search]");
+  input.focus();
+  await until(() => proxyCalls("markImported").length === 1);
+  await sleep(250);
+  assert.ok(project.siteVisit.files.some((f) => f.name === "A10.pdf"), "the scan is in");
+  assert.equal(rerendered, 0, "no re-render under the open picker");
+  assert.ok(el.contains(input));
+  assert.equal(document.activeElement, input);
+  btn(el, /^Cancel$/).click();
+  assert.equal(rerendered, 1, "closing the picker shows it");
+  el.remove();
+  localStorage.removeItem("roybal-mp-autoadopt");
 });
 
 await Store.all();   // let IndexedDB writes settle before exit

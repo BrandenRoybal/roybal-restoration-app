@@ -40,6 +40,7 @@ import { deflateProject, inflateProject } from "./media.js";
 import { thumbKey, makeThumb, previewPhotos, restorePhotoMarkers } from "./thumbs.js";
 import { shrinkDataURL } from "./core.js";
 import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "./merge.js";
+import { pruneForeignMeasured } from "./magicplancalc.js";
 import { isBlankProject } from "./model.js";
 
 const K_CURSOR = "roybal-sync-cursor";
@@ -96,6 +97,17 @@ function sameContent(a, b) {
   return JSON.stringify(canon(strip(a))) === JSON.stringify(canon(strip(b)));
 }
 
+/* Rules a merge can't hold on its own, applied to every copy sync stores
+   from a merge or from the server. Today one: a job switched to another
+   Magicplan project keeps only that project's measured Floor Plan rows —
+   the table merges filled-beats-empty (here and in the server's merge), so
+   a phone that missed the switch would put the old scan's rows back.
+   magicplan.test.mjs checks every mergeProjects call here is followed by it. */
+function settleMerged(p) {
+  try { pruneForeignMeasured(p); } catch { /* never block a sync on it */ }
+  return p;
+}
+
 /* merge the server's copy into ours, adopt the server's rev, and leave the
    union locally as an UNSYNCED edit — the next pass pushes it guarded on the
    rev we just adopted. Both inputs must be INFLATED (real media, no markers).
@@ -114,6 +126,7 @@ async function absorb(localRef, serverFull, why) {
     const { merged, added, filledForms } = mergeProjects(local, serverFull);
     merged.id = localRef.id;
     delete merged.rev;                             // revs live in sync bookkeeping, not the blob
+    settleMerged(merged);                          // before the echo check: a pruned union differs and re-pushes
     if (sameContent(merged, serverFull)) {
       // nothing to assert over the server — take its copy and go clean
       merged.updatedAt = serverFull.updatedAt || local.updatedAt;
@@ -172,6 +185,7 @@ async function adoptServerMerge(localRef, res, fetchMedia, have) {
   }
   const local = (await Store.get(id)) || localRef;
   await Store.backup(local);                       // our side stays restorable
+  settleMerged(full);                              // the server's union follows the same rules as ours
   const { added, filledForms } = countRecovered(local, full);
   full.id = id;
   delete full.rev;                                 // revs live in sync bookkeeping
@@ -530,6 +544,7 @@ async function push() {
         const { merged } = mergeProjects(cur, serverFull);
         merged.id = p.id;
         delete merged.rev;
+        settleMerged(merged);
         if (isBlankProject(cur) || sameContent(merged, serverFull)) {
           // a repeat-tap blank scaffold, or content the tombstone already
           // preserves — accept the delete instead of resurrecting junk
@@ -697,6 +712,7 @@ async function pull() {
     } else {
       if (local) await Store.backup(local); // safety net: the outgoing copy stays restorable on-device
       delete full.rev;                      // revs live in sync bookkeeping, not the blob
+      settleMerged(full);                   // the server's copy may hold a union its merge built
       await Store.put(full, { quiet: true, bump: false });
       revs[row.id] = Number(remote.rev) || 0; saveRevs();
       pushed[row.id] = remote.updatedAt;             // local now matches server
@@ -801,6 +817,7 @@ export async function reloadFromCloud(id) {
   if (local) await Store.backup(local);       // the discarded copy stays restorable on this device
   full.id = id;
   delete full.rev;                            // revs live in sync bookkeeping, not the blob
+  settleMerged(full);
   await Store.put(full, { quiet: true, bump: false });
   revs[id] = Number(row.data.rev) || 0; saveRevs();
   pushed[id] = full.updatedAt; savePushed();  // clean: nothing left to assert back
