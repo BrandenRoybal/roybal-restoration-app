@@ -13,8 +13,11 @@
      adoptIfReady(project) — a ready magicplan_exports row for this job:
         adopted at once on the owner's device (per-device setting, default
         on for the owner), offered as a banner everywhere else
-     magicplanBidLine / magicplanBanner — the Bid card line and the Site
-        Visit panel's 📥 banner
+     magicplanPanel — the 📐 Magicplan card inside the Floor plan chip (10/2):
+        the link, Create, 🔗 Link an existing project, ⟳ Pull and the files
+     magicplanAuto — the Bid card's silent half: auto-create at scheduling,
+        auto-adopt on the owner's device (no line, no buttons since 10/2)
+     magicplanBanner — the Site Visit panel's 📥 banner
 
    The server never writes the job (design decision 4): adoptExport() here
    is the only thing that puts a scan into project.siteVisit, and it goes
@@ -22,8 +25,9 @@
    ============================================================ */
 import { h, Store, toast, likelyOffline, fmtDate } from "./core.js";
 import { SYNC_ENABLED } from "./config.js";
-import { callFunction, rest, isSignedIn, currentEmail } from "./supa.js";
-import { adoptExport, exportSummary, mpState, splitAddress, adoptEsx } from "./magicplancalc.js";
+import { callFunction, rest, isSignedIn, currentEmail, signSiteFile } from "./supa.js";
+import { adoptExport, exportSummary, mpState, splitAddress, adoptEsx, projectName, linkMagicplan, linkedByHand, magicplanOnJob,
+  mpMatches, mpKindLabel } from "./magicplancalc.js";
 import { jobType } from "./model.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -43,6 +47,9 @@ export const mpArchive = (projectId) => mpProxy("archiveProject", { projectId })
 export const mpLinkExport = (exportId, fieldProjectId) => mpProxy("linkExport", { exportId, fieldProjectId });
 /** M3: run the workspace's export configuration and keep its ESX sketch (claims). */
 export const mpEsx = (planId, fieldProjectId) => mpProxy("esxExport", { planId, fieldProjectId });
+/** The workspace's live projects, newest first: {projects:[{id, name, address,
+    createdAt, modifiedAt, externalReferenceId}], complete}. */
+export const mpListProjects = (query = "") => mpProxy("listProjects", { query });
 
 /* ---------- who is this? ----------
    Owner/office only (the proxy refuses anyone else anyway — this just keeps
@@ -191,9 +198,20 @@ export async function adoptIfReady(project, { force = false } = {}) {
 export async function pullMagicplan(project) {
   const mp = project && project.siteVisit && project.siteVisit.magicplan;
   if (!mp || !mp.projectId) throw new Error("No Magicplan project on this job yet");
-  const row = await mpProxy("sync", { projectId: mp.projectId, fieldProjectId: project.id });
-  if (row && row.status === "unmatched") throw new Error("That Magicplan project belongs to a different job — link it from ⚙ Settings in the admin.");
+  // a project the office linked by hand may carry no job id (scanned before
+  // the job existed) or another job's: `linked` tells the server it's meant
+  const row = await mpProxy("sync", { projectId: mp.projectId, fieldProjectId: project.id, ...(linkedByHand(mp) ? { linked: true } : {}) });
+  if (row && row.status === "unmatched") throw new Error("Magicplan has that project on a different job. Open the Floor plan and use 🔗 Link a different project to pick this job's scan.");
   return adoptIfReady(project, { force: true });
+}
+
+/** 🔗 Link: read the picked project (plan id, archived?) and keep the link on
+    the job. Nothing is written to Magicplan. → { switching, dropped, picked } */
+export async function linkMagicplanProject(project, projectId) {
+  const picked = await mpProxy("linkProject", { projectId });
+  const out = linkMagicplan(project, picked, { by: currentEmail() });
+  await Store.put(project);
+  return { ...out, picked };
 }
 
 const adoptedToast = (c) => `Magicplan scan added: ${c.reports} report${c.reports === 1 ? "" : "s"}, ${c.photos} photo${c.photos === 1 ? "" : "s"}` +
@@ -204,52 +222,229 @@ const adoptedToast = (c) => `Magicplan scan added: ${c.reports} report${c.report
 /* ============================================================
    UI
    ============================================================ */
-const STATE_TEXT = {
-  none: "not created",
-  ready: "ready on phone",
-  received: "scan received",
-  imported: "imported",
-  updated: "updated since import",
-};
+/** The Bid card's silent half. When the board tile loads, a bid file with a
+    scheduled visit gets its Magicplan project (§6 ruling 8), and a ready
+    scan is adopted on the owner's device. The visible controls moved to the
+    Floor plan chip on 10/2 (Branden: Magicplan in one place). */
+export function magicplanAuto(project, { onChanged } = {}) {
+  let checked = false;
+  const setTile = (tile) => {
+    if (!tile || checked || !online()) return;
+    checked = true;
+    (async () => {
+      const role = await callerRole();
+      if (role !== "owner" && role !== "office") return;
+      try {
+        const mp = project.siteVisit && project.siteVisit.magicplan;
+        if (!mp || !mp.projectId) {
+          const made = await ensureMagicplanProject(project, tile);
+          if (made) toast("Magicplan project created — it's on the phone for the visit.");
+          return;
+        }
+        const r = await adoptIfReady(project);
+        if (r.adopted) { toast(adoptedToast(r.counts), 5000); if (onChanged) onChanged(); }
+      } catch (_) { /* the Floor plan chip shows the state when it's opened */ }
+    })();
+  };
+  return { setTile };
+}
 
-/** The 📐 Magicplan line on the Bid card. `line(icon, label, value, btn)` is
-    the card's own row builder. The returned element has setTile(d) — the
-    card calls it each time it repaints with the board tile. */
-export function magicplanBidLine(project, { line, onChanged } = {}) {
-  const box = h("div");
-  let tile = null, pending = null, userModified = "", checked = false, busy = "";
+/** "3 files, 2 photos, 1 room measured" — what the last pull left on the job. */
+function pulledSummary(project) {
+  const sv = project.siteVisit || {};
+  const mine = arr(sv.files).filter((f) => f && f.source === "magicplan");
+  const photos = mine.filter((f) => f.kind === "photos").length, files = mine.length - photos;
+  const rooms = arr(sv.magicplan && sv.magicplan.statistics && sv.magicplan.statistics.floors).reduce((t, f) => t + arr(f.rooms).length, 0);
+  const n = (x, one, many) => `${x} ${x === 1 ? one : many}`;
+  return [n(files, "file", "files"), n(photos, "photo", "photos"), n(rooms, "room measured", "rooms measured")].join(", ");
+}
 
-  const paint = () => {
-    const mp = project.siteVisit && project.siteVisit.magicplan;
-    const st = mpState(project, { pending: pending && pending.row, userModified });
-    const bits = [busy || STATE_TEXT[st.key]];
-    if (!busy && mp && mp.projectId) {
-      if (st.key === "ready" && mp.createdAt) bits.push("created " + fmtDate(String(mp.createdAt).slice(0, 10)));
-      if (pending) bits.push(exportSummary(pending.row));
-      else if (mp.importedAt && mp.statistics) bits.push(exportSummaryFromBlob(project));
-    }
-    let btn = null;
-    if (!busy && (!mp || !mp.projectId)) {
-      btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto", title: "Creates the project on the phone with the customer's name and address" }, "📐 Create Magicplan project");
-      btn.addEventListener("click", () => run("Creating…", async () => {
-        const r = await ensureMagicplanProject(project, tile, { manual: true });
+const fmtSize = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1e3)) + " KB");
+const newestFirst = (a, b) => (Date.parse(b.modifiedAt || b.createdAt) || 0) - (Date.parse(a.modifiedAt || a.createdAt) || 0);
+const PICK_ROWS = 40;
+
+/* ============================================================
+   📐 Magicplan inside the Floor plan chip (10/2)
+   ------------------------------------------------------------
+   One place for Magicplan on a job: which project it's linked to, Create,
+   🔗 Link an existing project (a scan started in the Magicplan app before
+   the job existed here), ⟳ Pull, and the files the pull brought in. The
+   files stay in the estimate's Site Visit panel too — that is what the
+   draft reads; "📋 Open in Site Visit" goes there.
+   Owner/office only for Create, Link and Pull (the proxy enforces it; a
+   crew phone sees the state and the files).
+   ============================================================ */
+export function magicplanPanel(project, { onChanged, openSiteVisit } = {}) {
+  const root = h("div", { class: "card app-only", style: "border-left:4px solid #1e4a72;margin:0 0 12px" });
+  let pending = null, userModified = "", busy = "", office = null, pick = null;
+  const svOf = () => (project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : {});
+  const mpOf = () => { const m = svOf().magicplan; return m && typeof m === "object" && m.projectId ? m : null; };
+  const btn = (label, cls, title, onclick) => h("button", { type: "button", class: `btn ${cls} btn--sm`, style: "width:auto", title, onclick }, label);
+
+  const linkedName = (mp) => mp.name || projectName(project.customer, splitAddress(project.address || "").street);
+
+  function stateLine(mp, st) {
+    if (busy) return busy;
+    if (!mp) return pending ? "A Magicplan scan is waiting for this job: " + exportSummary(pending.row) + "."
+      : "Not linked yet. Create the project before the visit, or link the one you already scanned.";
+    const name = h("strong", {}, linkedName(mp));
+    // full timestamps: fmtDate shows the phone's own day (an evening in Alaska is not tomorrow)
+    const when = mp.linked === mp.projectId && mp.linkedAt ? "linked " + fmtDate(String(mp.linkedAt))
+      : mp.createdAt ? "created " + fmtDate(String(mp.createdAt)) : "";
+    const tail = st.key === "received" ? " A scan is ready: " + exportSummary(pending.row) + "."
+      : st.key === "updated" ? " Changed in Magicplan since the last pull — ⟳ Pull to bring it in."
+      : st.key === "imported" ? ` Pulled ${fmtDate(String(mp.importedAt))}: ${pulledSummary(project)}.`
+      : " Scan it, export in the Magicplan app, then ⟳ Pull.";
+    return h("span", {}, "Linked to ", name, when ? ` (${when}).` : ".", tail);
+  }
+
+  function buttons(mp, st) {
+    if (busy) return [];
+    if (!online()) return [h("span", { class: "subtle", style: "font-size:12px" }, "Create, Link and Pull need signal.")];
+    if (office === false) return [h("span", { class: "subtle", style: "font-size:12px" }, "Create, Link and Pull are for the owner and the office.")];
+    const out = [];
+    if (pending) out.push(btn("📥 Add to packet", "btn--primary", "Bring this scan into the job", () => run("Adding…", async () => {
+      const c = await adoptRow(project, pending); pending = null; toast(adoptedToast(c), 5000);
+    })));
+    if (!mp) {
+      if (!pending) out.push(btn("📐 Create Magicplan project", "btn--ghost", "Creates the project on the phone with the customer's name and address", () => run("Creating…", async () => {
+        const r = await ensureMagicplanProject(project, null, { manual: true });
         toast(r ? "Magicplan project ready — it's on the phone now." : "Couldn't create it right now — check your connection.");
-      }));
-    } else if (!busy && pending) {
-      btn = h("button", { class: "btn btn--primary btn--sm", style: "width:auto" }, "📥 Add to packet");
-      btn.addEventListener("click", () => run("Adding…", async () => {
-        const c = await adoptRow(project, pending); pending = null; toast(adoptedToast(c), 5000);
-      }));
-    } else if (!busy) {
-      btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto", title: "Copy the report, pinned photos and room measurements from Magicplan into this bid" }, "⟳ Pull");
-      btn.addEventListener("click", () => run("Pulling from Magicplan…", async () => {
+      })));
+      out.push(btn("🔗 Link existing project", pending ? "btn--ghost" : "btn--primary", "For a scan you started in the Magicplan app before this job existed", openPicker));
+      return out;
+    }
+    if (!pending) out.push(btn("⟳ Pull", st.key === "updated" ? "btn--primary" : "btn--ghost",
+      "Copy everything in the Magicplan project into this job: report, photos, 3D model, drawings, room measurements", () => run("Pulling from Magicplan…", async () => {
         const r = await pullMagicplan(project);
         userModified = "";
-        toast(r.adopted ? adoptedToast(r.counts) : "Nothing new in Magicplan yet — export the report on the phone first.", 5000);
-      }));
+        toast(r.adopted ? adoptedToast(r.counts) : "Nothing new in Magicplan yet — export the scan in the Magicplan app first.", 5000);
+      })));
+    out.push(btn("🔗 Link a different project", "btn--ghost", "Pick another Magicplan project for this job", openPicker));
+    return out;
+  }
+
+  function fileRow(f) {
+    const open = f.path ? btn("⤓", "btn--ghost", "Open this file", async () => {
+      // a short-lived signed link: a .usdz opens in the iPhone's 3D viewer
+      const w = window.open("", "_blank");
+      try { const url = await signSiteFile(f.path); if (w) w.location.href = url; else location.href = url; }
+      catch (e) { if (w) w.close(); toast(e && e.message ? e.message.replace(/clip/g, "file") : "Couldn't open the file", 4000); }
+    }) : null;
+    const kind = f.kind === "report" ? "report" : mpKindLabel(f.mpKind);
+    return h("div", { style: "display:flex;gap:8px;align-items:center;font-size:12px;margin-top:4px" },
+      h("span", { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, f.name || "file",
+        h("span", { class: "subtle" }, ` · ${kind}${f.room ? " · " + f.room : ""}`)),
+      h("span", { class: "subtle" }, fmtSize(f.size || 0)), open);
+  }
+
+  function filesBox() {
+    const files = arr(svOf().files).filter((f) => f && f.source === "magicplan");
+    const docs = files.filter((f) => f.kind === "report" || f.kind === "mpfiles");
+    const photos = files.filter((f) => f.kind === "photos").length;
+    const toSv = openSiteVisit ? btn("📋 Open in Site Visit", "btn--ghost", "The estimate's Site Visit panel: what the estimate draft reads", openSiteVisit) : null;
+    if (!files.length) return toSv && mpOf() ? h("div", { style: "margin-top:8px" }, toSv) : null;
+    const n = (x, one) => `${x} ${one}${x === 1 ? "" : "s"}`;
+    return h("details", { style: "margin-top:8px" },
+      h("summary", { style: "cursor:pointer;font-size:13px;font-weight:600;color:#16395a" },
+        "📁 Files from Magicplan (" + [docs.length ? n(docs.length, "file") : "", photos ? n(photos, "photo") : ""].filter(Boolean).join(", ") + ")"),
+      ...docs.map(fileRow),
+      photos ? h("div", { class: "subtle", style: "font-size:12px;margin-top:6px" },
+        photos === 1 ? "The photo sits in the Site Visit packet with its room caption." : `The ${photos} photos sit in the Site Visit packet with their room captions.`) : null,
+      toSv ? h("div", { style: "margin-top:8px" }, toSv) : null);
+  }
+
+  /* ---- 🔗 the picker: built once per opening so typing keeps focus ---- */
+  function openPicker() {
+    const me = { items: null, complete: true, error: "", seq: 0, timer: null };
+    const input = h("input", { type: "search", placeholder: "Search by customer or street", autocomplete: "off", style: "flex:1;min-width:0;font-size:14px" });
+    const list = h("div");
+    me.paintList = () => {
+      if (pick !== me) return;
+      if (!me.items) { list.replaceChildren(h("div", { class: "subtle", style: "font-size:12px;margin-top:6px" }, me.error || "Loading your Magicplan projects…")); return; }
+      const hits = me.items.filter((it) => mpMatches(it, input.value));
+      const mp = mpOf();
+      list.replaceChildren(
+        ...hits.slice(0, PICK_ROWS).map((it) => {
+          const tag = it.externalReferenceId === project.id ? "this job" : it.externalReferenceId ? "on another job file" : "";
+          const row = h("button", { type: "button", style: "display:block;width:100%;text-align:left;padding:8px 10px;margin-top:6px;border:1px solid #d5dde8;border-radius:8px;background:#fff;color:inherit;font:inherit" },
+            h("div", { style: "font-weight:700;font-size:13px" }, (it.name || "(no name)") + (mp && mp.projectId === it.id ? " ✓" : "")),
+            h("div", { class: "subtle", style: "font-size:12px" },
+              [it.address, it.createdAt ? "created " + fmtDate(String(it.createdAt)) : "", tag].filter(Boolean).join(" · ")));
+          row.addEventListener("click", () => choose(it));
+          return row;
+        }),
+        h("div", { class: "subtle", style: "font-size:12px;margin-top:6px" },
+          !hits.length ? (input.value.trim() ? "No project matches." : "No projects in Magicplan yet.")
+            : hits.length > PICK_ROWS ? `Showing ${PICK_ROWS} of ${hits.length}. Type to narrow it.` : "",
+          me.complete ? "" : " Older projects may not be listed: type three letters of the name and Magicplan is searched too."));
+    };
+    const load = async (q) => {
+      const seq = ++me.seq;
+      try {
+        const r = await mpListProjects(q);
+        if (pick !== me) return;
+        const byId = new Map(arr(me.items).map((it) => [it.id, it]));
+        for (const it of arr(r && r.projects)) if (it && it.id) byId.set(it.id, it);
+        me.items = [...byId.values()].sort(newestFirst);
+        if (!q) me.complete = !!(r && r.complete);
+      } catch (e) {
+        if (pick !== me) return;
+        if (!me.items) me.error = "Couldn't load your Magicplan projects: " + String((e && e.message) || e);
+        else if (seq === me.seq) toast("Magicplan search failed: " + String((e && e.message) || e), 4000);
+      }
+      me.paintList();
+    };
+    input.addEventListener("input", () => {
+      me.paintList();
+      clearTimeout(me.timer);
+      const q = input.value.trim();
+      if (!me.complete && q.length >= 3) me.timer = setTimeout(() => load(q), 600);
+    });
+    me.el = h("div", { style: "margin-top:10px;padding:10px;border:1px solid #b9c4d4;border-radius:10px;background:#f7f9fc" },
+      h("div", { style: "font-weight:700;font-size:13px;color:#16395a" }, "🔗 Pick this job's Magicplan project"),
+      h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 6px" }, "Your Magicplan projects, newest first. Archived ones aren't listed."),
+      h("div", { style: "display:flex;gap:8px;align-items:center" }, input,
+        btn("Cancel", "btn--ghost", "", () => { pick = null; paint(); })),
+      list);
+    pick = me;
+    paint();
+    me.paintList();
+    setTimeout(() => { try { input.focus(); } catch (_) { /* ignore */ } }, 0);
+    load("");
+  }
+
+  async function choose(it) {
+    const mp = mpOf();
+    const name = it.name || "this project";
+    if (mp && mp.projectId === it.id) { toast("That project is already linked to this job."); pick = null; paint(); return; }
+    let msg = `Link “${name}” to this job and pull it in?`;
+    if (it.externalReferenceId && it.externalReferenceId !== project.id) {
+      let other = null;
+      try { other = await Store.get(it.externalReferenceId); } catch (_) { /* not on this phone */ }
+      msg = `Magicplan has “${name}” on another job file${other && other.customer ? ` (${other.customer})` : ""}. Link it to this job too and pull it in?`;
     }
-    box.replaceChildren(line("📐", "Magicplan", bits.filter(Boolean).join(" · "), btn));
-  };
+    if (mp) {
+      const had = magicplanOnJob(project);
+      const bits = [had.files ? `${had.files} file${had.files === 1 ? "" : "s"} in the packet` : "",
+        had.rooms ? `${had.rooms} measured room${had.rooms === 1 ? "" : "s"} in the Floor Plan table` : "",
+        had.esx ? "the ESX sketch in Supporting Docs" : ""].filter(Boolean);
+      msg += `\n\nThis replaces “${linkedName(mp)}” on this job` +
+        (bits.length ? `, and what it brought in comes out: ${bits.join(", ")}. The copies stay in storage.` : ".") +
+        " The old project stays in Magicplan.";
+    }
+    if (!window.confirm(msg)) return;
+    pick = null;
+    await run("Linking…", async () => {
+      await linkMagicplanProject(project, it.id);
+      busy = "Linked. Pulling from Magicplan…"; paint();
+      let r;
+      try { r = await pullMagicplan(project); }
+      catch (e) { toast("Linked, but the pull didn't finish: " + String((e && e.message) || e) + " Tap ⟳ Pull to try again.", 6000); return; }
+      userModified = "";
+      toast(r.adopted ? "Linked. " + adoptedToast(r.counts) : "Linked. Nothing to pull yet — export the scan in the Magicplan app, then ⟳ Pull.", 6000);
+    });
+  }
 
   async function run(label, fn) {
     busy = label; paint();
@@ -258,40 +453,38 @@ export function magicplanBidLine(project, { line, onChanged } = {}) {
     if (onChanged) onChanged();
   }
 
-  async function check() {
-    if (checked || !online()) return;
-    checked = true;
-    const role = await callerRole();
-    if (role !== "owner" && role !== "office") return;
-    try {
-      const mp = project.siteVisit && project.siteVisit.magicplan;
-      if (!mp || !mp.projectId) {
-        const made = await ensureMagicplanProject(project, tile);
-        if (made) { toast("Magicplan project created — it's on the phone for the visit."); paint(); }
-        return;
-      }
-      const r = await adoptIfReady(project);
-      if (r.adopted) { toast(adoptedToast(r.counts), 5000); if (onChanged) onChanged(); }
-      pending = r.pending;
-      if (mp.importedAt && !pending) {
-        const s = await mpProxy("status", { projectId: mp.projectId });
-        userModified = s.userModified || "";
-      }
-      paint();
-    } catch (_) { /* the line stays on what the file knows */ }
+  function paint() {
+    const mp = mpOf();
+    const st = mpState(project, { pending: pending && pending.row, userModified });
+    root.replaceChildren(...[
+      h("div", { style: "font-weight:800;letter-spacing:.3px;color:#16395a" }, "📐 MAGICPLAN"),
+      h("div", { style: "font-size:13px;margin-top:4px" }, stateLine(mp, st)),
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px" }, ...buttons(mp, st)),
+      pick ? pick.el : null,
+      filesBox(),
+    ].filter(Boolean));
   }
 
-  box.setTile = (d) => { tile = d || tile; if (d) check(); paint(); return box; };
-  paint();
-  return box;
-}
+  async function check() {
+    if (!online()) return;
+    office = await officeRole();
+    if (office === false) { paint(); return; }
+    try {
+      const r = await adoptIfReady(project);
+      if (r.adopted) { toast(adoptedToast(r.counts), 5000); if (onChanged) { onChanged(); return; } }
+      pending = r.pending;
+      const mp = mpOf();
+      if (mp && mp.importedAt && !pending) {
+        const s = await mpProxy("status", { projectId: mp.projectId });
+        userModified = (s && s.userModified) || "";
+      }
+    } catch (_) { /* the card stays on what the job knows */ }
+    if (!busy) paint();
+  }
 
-function exportSummaryFromBlob(project) {
-  const sv = project.siteVisit || {};
-  const photos = arr(sv.files).filter((f) => f && f.source === "magicplan" && f.kind === "photos").length;
-  const rooms = arr(sv.magicplan && sv.magicplan.statistics && sv.magicplan.statistics.floors).reduce((t, f) => t + arr(f.rooms).length, 0);
-  const at = sv.magicplan && sv.magicplan.syncedAt ? fmtDate(String(sv.magicplan.syncedAt).slice(0, 10)) : "";
-  return [at ? "scanned " + at : "", `${photos} photo${photos === 1 ? "" : "s"}`, `${rooms} room${rooms === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+  paint();
+  check();
+  return root;
 }
 
 /** The Site Visit panel's 📥 banner. Empty until a ready scan is found for

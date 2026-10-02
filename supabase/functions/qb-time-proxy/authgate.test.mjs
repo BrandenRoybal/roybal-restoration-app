@@ -69,6 +69,8 @@ const EXPECTED = {
     archiveProject: ["office"],
     linkExport: ["office"],
     esxExport: ["office"],     // M3: the ESX sketch — runs the export configuration, so office only
+    listProjects: ["office"],  // the Floor plan chip's Link: every project name and address in the workspace
+    linkProject: ["office"],
   },
 };
 

@@ -8,8 +8,9 @@ import {
   mpFileId, mpFilePath, parsePhotoName, normalizeStatistics, dedupeRoomNames, splitAddress, projectName,
   mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF, isMpReport, mpKindLabel,
   magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE, ESX_DOC_ID,
+  linkMagicplan, linkedByHand, magicplanOnJob, mpTileLine, mpMatches,
 } from "../js/magicplancalc.js";
-import { siteFilePath, packetForDraft } from "../js/sitevisit.js";
+import { siteFilePath, packetForDraft, openSiteVisitNext, takeSiteVisitOpen } from "../js/sitevisit.js";
 
 let pass = 0;
 const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
@@ -312,3 +313,86 @@ test("a row from before 10/1 (no kind on its files) still reads its PDFs as repo
   assert.equal(isMpReport({ name: "x.pdf", mime: "application/pdf", kind: "data" }), false);
   assert.equal(mpKindLabel("model3d"), "3D");
 });
+
+/* ---------- the Floor plan chip (10/2): link a project scanned before the job ---------- */
+const PICKED = { projectId: "proj-old", planId: "plan-old", cloudUrl: "https://example.invalid/p", createdAt: "2026-09-20T17:00:00Z", name: "Gina — 631 Eberhardt", externalReferenceId: "" };
+test("linking a job with no Magicplan project keeps the pick and marks it linked by hand", () => {
+  const p = { id: "bj-9" };
+  const r = linkMagicplan(p, PICKED, { by: "office@x", at: "2026-10-02T02:00:00Z" });
+  assert.deepEqual(r, { switching: false, dropped: { files: 0, rooms: 0, esx: 0 } });
+  assert.deepEqual(p.siteVisit.magicplan, { projectId: "proj-old", planId: "plan-old", cloudUrl: "https://example.invalid/p", createdAt: "2026-09-20T17:00:00Z",
+    name: "Gina — 631 Eberhardt", by: "office@x", units: null, linked: "proj-old", linkedAt: "2026-10-02T02:00:00Z", linkedBy: "office@x" });
+  assert.equal(linkedByHand(p.siteVisit.magicplan), true);
+  assert.deepEqual(p.siteVisit.files, []);
+});
+test("only the project picked by hand is trusted: a created project, or one that replaced the pick, is not", () => {
+  assert.equal(linkedByHand(job().siteVisit.magicplan), false);
+  assert.equal(linkedByHand({ projectId: "b", linked: "a" }), false);
+  assert.equal(linkedByHand(null), false);
+  assert.equal(linkedByHand({ projectId: "", linked: "" }), false);
+});
+test("switching projects takes the old scan's imports out: packet files, measured rows, the ESX sketch — typed rows stay", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  p.floorPlan.dimensions.rooms.push({ name: "Garage", floorSF: "400", perimLF: "80", conf: 1 });
+  adoptEsx(p, { path: "sitevisit/bj-lead_42/mp-x.esx", name: "x.esx", hash: "e".repeat(64) });
+  const before = magicplanOnJob(p);
+  assert.ok(before.files > 0 && before.rooms > 0 && before.esx === 1);
+  const r = linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(r.switching, true);
+  assert.deepEqual(r.dropped, before);
+  assert.deepEqual(magicplanOnJob(p), { files: 0, rooms: 0, esx: 0 });
+  assert.deepEqual(p.siteVisit.files.map((f) => f.id), ["u1"]);              // the note page someone added stays
+  assert.deepEqual(p.floorPlan.dimensions.rooms.map((x) => x.name), ["Garage"]);
+  const mp = p.siteVisit.magicplan;
+  assert.equal(mp.projectId, "proj-old");
+  assert.ok(!mp.importedAt && !mp.statistics && !mp.exportId && !mp.removed, "the old scan's stamps are gone");
+  assert.equal(mpState(p).key, "ready");
+});
+test("linking the same project again keeps its import stamps and its files", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  const files = p.siteVisit.files.length;
+  const r = linkMagicplan(p, { projectId: "proj-1", planId: "plan-1" }, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(r.switching, false);
+  assert.equal(p.siteVisit.files.length, files);
+  assert.equal(p.siteVisit.magicplan.importedAt, "2026-10-01T18:00:00Z");
+  assert.equal(p.siteVisit.magicplan.by, "office");
+  assert.equal(linkedByHand(p.siteVisit.magicplan), true);
+});
+test("a pull after linking fills the job from the linked project", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" }, "2026-10-02T02:01:00Z");
+  assert.equal(p.siteVisit.magicplan.projectId, "proj-old");
+  assert.equal(p.siteVisit.magicplan.linked, "proj-old");
+  assert.ok(p.floorPlan.dimensions.rooms.some((x) => x.source === "magicplan"));
+});
+test("the Floor plan tile line: blank with no project, linked before a pull, pulled with rooms and files after", () => {
+  assert.equal(mpTileLine({ id: "x" }), "");
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(mpTileLine(p), "📐 Magicplan linked — scan, export, then ⟳ Pull in here");
+  adoptExport(p, { ...ROW, synced_at: "2026-10-01T20:00:00" }, "2026-10-01T20:00:00");
+  const sv = p.siteVisit.files.filter((f) => f.source === "magicplan");
+  const ph = sv.filter((f) => f.kind === "photos").length;
+  assert.equal(mpTileLine(p), `📐 Magicplan pulled Oct 1 · 2 rooms · ${sv.length - ph} file${sv.length - ph === 1 ? "" : "s"} · ${ph} photos`);
+});
+test("the picker's filter: every word, name or address, any order and case", () => {
+  const it = { name: "Gina Da Silva", address: "631 Eberhardt Rd, Fairbanks" };
+  assert.equal(mpMatches(it, ""), true);
+  assert.equal(mpMatches(it, "  eberhardt  GINA "), true);
+  assert.equal(mpMatches(it, "gina north"), false);
+  assert.equal(mpMatches({}, "a"), false);
+});
+test("📋 Open in Site Visit is one shot, for that job, and only right after the tap", () => {
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-8", 2000), false);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), false, "a different job's open used it up");
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), true);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), false);
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-9", 60_000), false);
+});
+console.log(`${pass} passed (with the Floor plan chip)`);

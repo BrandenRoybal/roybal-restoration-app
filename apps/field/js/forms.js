@@ -34,7 +34,7 @@ import { pickJobcode, pullRange as qbPullRange, allEntriesFor as qbAllEntriesFor
 import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, photoAiOutdated, draftInvoice, auditInvoice, draftReconEstimate, auditReconEstimate, runScopeInterview, extractPlanDimensions, digestSupportDoc, importEstimate, draftPortalMessage } from "./officeai.js";
 import { pushInvoiceToQbo } from "./qbo.js";
 import { dictateBtn } from "./dictate.js";
-import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText } from "./sitevisit.js";
+import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, takeSiteVisitOpen } from "./sitevisit.js";
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
@@ -1899,6 +1899,11 @@ export function invoice(project, inv) {
   siteBtn.addEventListener("click", () => { if (aiAvailable()) openSiteVisit(); });
   // a draft still running for THIS estimate: reopen the panel so it loads when done
   if (isEst && project.siteVisit && project.siteVisit.pending && project.siteVisit.pending.invId === inv.id) openSiteVisit();
+  // 📋 Open in Site Visit (the Floor plan chip's Magicplan card): open it and bring it into view
+  else if (isEst && takeSiteVisitOpen(project.id)) {
+    openSiteVisit();
+    setTimeout(() => { try { aiPanel.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_) { /* ignore */ } }, 80);
+  }
 
   const aiBar = h("div", { class: "app-only", style: "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px" },
     ...(isEst ? [siteBtn, scopeBtn, draftBtn, importBtn, auditBtn] : [scopeBtn, draftBtn, importBtn, auditBtn, qboBtn, qboStatusEl]), importInput);

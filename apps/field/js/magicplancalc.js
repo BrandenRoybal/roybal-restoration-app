@@ -328,3 +328,89 @@ export function adoptEsx(project, esx, at = new Date().toISOString()) {
   });
   return { added: 1, updated: 0 };
 }
+
+/* ============================================================
+   The Floor plan chip (10/2): link a project scanned before the job existed
+   ============================================================ */
+
+/** What the job holds from Magicplan today: packet files, measured Floor
+    Plan rows, the ESX sketch. The 🔗 Link confirm names these before a
+    switch takes them out. */
+export function magicplanOnJob(project) {
+  const sv = project && project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : {};
+  const fp = project && project.floorPlan && project.floorPlan.dimensions ? project.floorPlan.dimensions : {};
+  return {
+    files: arr(sv.files).filter((f) => f && f.source === "magicplan").length,
+    rooms: arr(fp.rooms).filter((r) => r && r.source === "magicplan").length,
+    esx: arr(project && project.supportDocs).filter((d) => d && d.id === ESX_DOC_ID).length,
+  };
+}
+
+/** Link this job to the Magicplan project the office picked (the proxy's
+    linkProject answer: {projectId, planId, cloudUrl, createdAt, name}).
+    `linked` holds the project id that was picked by hand, so Pull trusts
+    exactly that project and nothing a later create puts in its place.
+    Switching from another project takes the old one's imports out (files
+    from the packet, measured rows from the Floor Plan table, its ESX
+    sketch) so two scans never mix in one estimate; the storage copies stay
+    and rows anyone typed are never touched. The same project again keeps
+    its import stamps. Mutates; returns { switching, dropped }. */
+export function linkMagicplan(project, picked, { by = "", at = new Date().toISOString() } = {}) {
+  const p = project;
+  if (!p.siteVisit || typeof p.siteVisit !== "object") p.siteVisit = { files: [], transcript: "", transcriptSeconds: 0, typedScope: "", pending: null };
+  const sv = p.siteVisit;
+  if (!Array.isArray(sv.files)) sv.files = [];
+  const prev = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : null;
+  const switching = !!(prev && prev.projectId && prev.projectId !== picked.projectId);
+  const dropped = { files: 0, rooms: 0, esx: 0 };
+  if (switching) {
+    const had = magicplanOnJob(p);
+    sv.files = sv.files.filter((f) => !(f && f.source === "magicplan"));
+    const dims = p.floorPlan && p.floorPlan.dimensions;
+    if (dims && Array.isArray(dims.rooms)) dims.rooms = dims.rooms.filter((r) => !(r && r.source === "magicplan"));
+    if (Array.isArray(p.supportDocs)) p.supportDocs = p.supportDocs.filter((d) => !(d && d.id === ESX_DOC_ID));
+    Object.assign(dropped, had);
+  }
+  const keep = switching || !prev ? {} : prev;
+  sv.magicplan = {
+    ...keep,
+    projectId: String(picked.projectId || ""), planId: String(picked.planId || keep.planId || ""),
+    cloudUrl: String(picked.cloudUrl || keep.cloudUrl || ""), createdAt: String(picked.createdAt || keep.createdAt || at),
+    name: String(picked.name || ""), by: keep.by || by, units: keep.units || null,
+    linked: String(picked.projectId || ""), linkedAt: at, linkedBy: by,
+  };
+  return { switching, dropped };
+}
+
+/** Did the office pick this project by hand? Then Pull sends `linked` and
+    the server skips its external_reference_id check for it. */
+export const linkedByHand = (mp) => !!(mp && mp.projectId && mp.linked === mp.projectId);
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const shortDay = (iso) => {   // the phone's own day: an evening pull in Alaska is still that day
+  const d = new Date(String(iso || ""));
+  return isNaN(d) ? "" : `${MONTHS[d.getMonth()]} ${d.getDate()}`;
+};
+
+/** The Floor plan tile's line on the job page, from what the job holds
+    (offline). "" when the job has no Magicplan project: the tile keeps its
+    own blurb. */
+export function mpTileLine(project) {
+  const sv = project && project.siteVisit && typeof project.siteVisit === "object" ? project.siteVisit : {};
+  const mp = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : null;
+  if (!mp || !mp.projectId) return "";
+  if (!mp.importedAt) return "📐 Magicplan linked — scan, export, then ⟳ Pull in here";
+  const rooms = dedupeRoomNames(mp.statistics && mp.statistics.floors).length;
+  const mine = arr(sv.files).filter((f) => f && f.source === "magicplan");
+  const photos = mine.filter((f) => f.kind === "photos").length, files = mine.length - photos;
+  const n = (x, one) => (x ? `${x} ${one}${x === 1 ? "" : "s"}` : "");
+  return ["📐 Magicplan pulled " + shortDay(mp.importedAt || mp.syncedAt), n(rooms, "room"), n(files, "file"), n(photos, "photo")].filter(Boolean).join(" · ");
+}
+
+/** The 🔗 Link picker's filter: every word of the search in the name or the
+    address, any order, any case — the proxy's matchesQuery, held to the
+    same answers by its lockstep test. */
+export function mpMatches(item, q) {
+  const hay = `${(item && item.name) || ""} ${(item && item.address) || ""}`.toLowerCase();
+  return String(q || "").toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+}

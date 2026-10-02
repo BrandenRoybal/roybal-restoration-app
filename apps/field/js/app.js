@@ -44,6 +44,9 @@ import { AI_FORM_KEYS, rebuildChips, applyRebuildChips } from "./ai.js";
 import { pickTech, techName } from "./tech.js";
 import { myWeekPage, clearMyWeekCache, fetchEntriesSafe } from "./myweek.js";
 import { helpPage } from "./help.js";
+import { magicplanPanel } from "./magicplan.js";
+import { mpTileLine } from "./magicplancalc.js";
+import { openSiteVisitNext } from "./sitevisit.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -1450,14 +1453,7 @@ function projectHome(project) {
   // Site visit · Packet · Estimate · Sent. The card hides itself once the
   // tile is past the lead stage — then the file is the job, nothing else.
   const bid = bidCard(project, {
-    openEstimate: async () => {
-      // the Site Visit panel lives on the estimate form; open the latest
-      // estimate, or start the first one
-      const meta = formByKey("reconEstimates");
-      const list = project.reconEstimates || [];
-      if (list.length) go(`#/p/${project.id}/f/${meta.key}/${list[list.length - 1].id}`);
-      else await addInstance(project, meta);
-    },
+    openEstimate: () => openLatestEstimate(project),
     onChanged: () => projectHome(project),
   });
   if (bid) body.append(bid);
@@ -1491,6 +1487,8 @@ function projectHome(project) {
   }
 
   const tiles = h("div", { class: "tiles" });
+  // the Floor plan tile carries the job's Magicplan state (10/2: one chip)
+  const mpLine = mpTileLine(project);
   formsFor(project).forEach((f) => {
     const count = formCount(project, f.key);
     const isList = f.multi || Array.isArray(project[f.key]); // moisture/drying/photos/contents…
@@ -1501,7 +1499,7 @@ function projectHome(project) {
     tiles.append(h("a", { class: "tile" + (f.hero ? " tile--hero" : ""), href: `#/p/${project.id}/f/${f.key}` },
       h("div", { class: "tile__icon" }, f.icon),
       h("div", { class: "tile__name" }, f.name),
-      h("div", { class: "tile__count" }, f.blurb),
+      h("div", { class: "tile__count" }, f.key === "floorPlan" && mpLine ? mpLine : f.blurb),
       badge));
   });
   body.append(tiles);
@@ -1969,6 +1967,17 @@ function instanceTitle(key, inst) {
   }
 }
 
+/* The Site Visit panel lives on the estimate form: open the latest
+   estimate, or start the first one. siteVisit:true opens the panel there
+   (the Floor plan chip's "📋 Open in Site Visit"). */
+async function openLatestEstimate(project, { siteVisit = false } = {}) {
+  const meta = formByKey("reconEstimates");
+  const list = project.reconEstimates || [];
+  if (siteVisit) openSiteVisitNext(project.id);
+  if (list.length) go(`#/p/${project.id}/f/${meta.key}/${list[list.length - 1].id}`);
+  else await addInstance(project, meta);
+}
+
 async function addInstance(project, meta) {
   const inst = FACTORY[meta.key]();
   project[meta.key].push(inst);
@@ -1991,6 +2000,15 @@ function formEditor(project, meta, instance) {
     h("div", { class: "app-only", style: "display:flex;align-items:center;justify-content:space-between;margin-bottom:10px" },
       h("div", {}, h("strong", { style: "font-size:18px" }, meta.icon + " " + meta.name)),
       pill));
+
+  // 📐 Magicplan lives in the Floor plan chip (10/2): the link, Create,
+  // 🔗 Link an existing project, ⟳ Pull and the files. A pull re-renders the
+  // form so the measured rooms show in the table below.
+  if (meta.key === "floorPlan")
+    body.append(magicplanPanel(project, {
+      onChanged: () => { if (location.hash === `#/p/${project.id}/f/floorPlan`) formEditor(project, meta, project.floorPlan || instance); },
+      openSiteVisit: () => openLatestEstimate(project, { siteVisit: true }),
+    }));
 
   // 🎙️ Voice capture (Step D) — online-only enhancement above the typed form.
   if (AI_FORM_KEYS.includes(meta.key))

@@ -404,6 +404,17 @@ export async function openClipPlayer(row, at = 0, title = "") {
   v.src = src;
 }
 
+/* "📋 Open in Site Visit" from the Floor plan chip: the estimate this job
+   opens next shows its Site Visit panel. One shot, this job only, and only
+   for the next few seconds (the tap navigates straight there). */
+let openOnNext = null;
+export function openSiteVisitNext(projectId, now = Date.now()) { openOnNext = { id: String(projectId || ""), at: now }; }
+export function takeSiteVisitOpen(projectId, now = Date.now()) {
+  const o = openOnNext;
+  openOnNext = null;
+  return !!(o && o.id && o.id === String(projectId || "") && now - o.at < 15_000);
+}
+
 /* ---------- browser: the panel ----------
    ctx: { project, inv, save(), onApplied(summary) } */
 export function siteVisitPanel(ctx) {

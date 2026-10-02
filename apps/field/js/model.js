@@ -31,7 +31,7 @@ export const COMPANY = {
 export const FORMS = [
   { key: "floorPlan",        name: "Floor Plan",         icon: "📏", multi: false,
     types: ["restoration", "construction"],
-    blurb: "Dimensioned plan — prints FULL PAGE so measurements stay readable" },
+    blurb: "Magicplan scan (link, ⟳ Pull, files) + the dimensioned plan — prints FULL PAGE" },
   { key: "supportDocs",      name: "Supporting Docs",    icon: "📎", multi: true,
     types: ["restoration", "construction"],
     blurb: "Engineer's reports, estimates, letters — print full page + the AI reads them" },
