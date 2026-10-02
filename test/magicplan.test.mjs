@@ -1,0 +1,564 @@
+/* Magicplan — the client's pure half (js/magicplancalc.js).
+   docs/Magicplan_Integration_Design.md §4.3, §6 rulings 10 and 11.
+   Fixtures are hand-written from the live OpenAPI shapes (API v1.2) — never a
+   recorded response, never a key or a customer's address.
+   Run: node apps/field/test/magicplan.test.mjs   (from repo root) */
+import assert from "node:assert/strict";
+import {
+  mpFileId, mpFilePath, parsePhotoName, normalizeStatistics, dedupeRoomNames, splitAddress, projectName,
+  mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF, isMpReport, mpKindLabel,
+  magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE, ESX_DOC_ID,
+  linkMagicplan, linkedByHand, magicplanOnJob, mpTileLine, mpMatches, isMpEsx, pruneForeignMeasured,
+} from "../js/magicplancalc.js";
+import { readFileSync } from "node:fs";
+import { mergeProjects, tombstoneItems } from "../js/merge.js";
+import { siteFilePath, packetForDraft, openSiteVisitNext, takeSiteVisitOpen } from "../js/sitevisit.js";
+
+let pass = 0;
+const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
+console.log("Magicplan");
+
+/* GET /plans/statistics/{id} — the live response is NOT wrapped in {data} */
+const room = (name, o = {}) => ({
+  uid: "r-" + name, name, area: 0, perimeter: 0, ground_perimeter: 0, area_without_walls: 0,
+  height: 0, volume: 0, walls_surface: 0, walls_surface_without_openings: 0,
+  door_count: 0, window_count: 0, dimensions: "", ...o,
+});
+const IMPERIAL = {
+  id: "plan-1", project_id: "proj-1", units: "imperial",
+  statistics: {
+    floors: [{
+      uid: "f1", name: "1st Floor", height: 8,
+      rooms: [
+        room("Living Room", { area_without_walls: 214.37, ground_perimeter: 58.2, height: 8, volume: 1715.2,
+          walls_surface: 465.4, walls_surface_without_openings: 402.9, door_count: 2, window_count: 3, dimensions: "14' 6\" x 14' 9\"" }),
+        room("Bathroom", { area_without_walls: 40, ground_perimeter: 26, walls_surface: 208, walls_surface_without_openings: 190, volume: 320 }),
+      ],
+    }],
+  },
+};
+const METRIC = {
+  id: "plan-2", project_id: "proj-2", units: "metric",
+  statistics: { floors: [{ uid: "f1", name: "Ground", height: 2.44, rooms: [
+    room("Kitchen", { area_without_walls: 10, ground_perimeter: 13, height: 2.44, volume: 24.4, walls_surface: 31.7, walls_surface_without_openings: 27 }),
+  ] }] },
+};
+
+/* ---------- paths ---------- */
+test("mpFilePath is siteFilePath with the mp-<hash8> id — the same cleaning, the same shape", () => {
+  const hash = "9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08";
+  assert.equal(mpFileId(hash), "mp-9f86d081");
+  for (const [job, name] of [["bj-lead_42", "Magicplan Report.pdf"], ["p_abc123", "1st Floor - Living Room - Window - 2.jpg"],
+    ["bj-x", "../../etc/passwd"], ["bj-y", ""], ["bj-z", "a".repeat(200) + ".pdf"]]) {
+    assert.equal(mpFilePath(job, hash, name), siteFilePath(job, mpFileId(hash), name), `${job} / ${name}`);
+  }
+  assert.equal(mpFilePath("bj-lead_42", hash, "Magicplan Report.pdf"), "sitevisit/bj-lead_42/mp-9f86d081-Magicplan_Report.pdf");
+});
+
+/* ---------- photo names ---------- */
+test("a pinned photo's name gives its floor, room and caption", () => {
+  assert.deepEqual(parsePhotoName("1st Floor - Living Room - Window - 2.jpg"), { floor: "1st Floor", room: "Living Room", caption: "Window" });
+  assert.deepEqual(parsePhotoName("Basement - Utility - Water Heater - 1.JPG"), { floor: "Basement", room: "Utility", caption: "Water Heater" });
+  assert.deepEqual(parsePhotoName("1st Floor - Kitchen - Sink - Base - 3.jpg"), { floor: "1st Floor", room: "Kitchen", caption: "Sink - Base" });
+});
+test("a name that doesn't split stays uncaptioned with room \"\" — never a guess", () => {
+  for (const n of ["IMG_1234.jpg", "Living Room - 2.jpg", "1st Floor - Living Room - Window.jpg", "", null, "a - b - c - x.jpg"]) {
+    assert.deepEqual(parsePhotoName(n), { floor: "", room: "", caption: "" }, String(n));
+  }
+});
+
+/* ---------- units ---------- */
+test("imperial statistics pass through, rounded (1 ft², 0.5 ft, 1 ft³)", () => {
+  const s = normalizeStatistics(IMPERIAL);
+  assert.equal(s.units, "imperial");
+  assert.deepEqual(s.floors[0].rooms[0], {
+    name: "Living Room", floorSF: 214, perimLF: 58, ceilingFt: 8, wallSF: 465, wallSFNet: 403,
+    doors: 2, windows: 3, volumeCF: 1715, dims: "14' 6\" x 14' 9\"",
+  });
+});
+test("metric statistics convert to feet once (m² × 10.764, m × 3.281, m³ × 35.315)", () => {
+  const k = normalizeStatistics(METRIC).floors[0].rooms[0];
+  assert.equal(normalizeStatistics(METRIC).units, "metric");
+  assert.equal(k.floorSF, 108);        // 10 m² → 107.64 ft²
+  assert.equal(k.perimLF, 42.5);       // 13 m → 42.65 ft → nearest half foot
+  assert.equal(k.ceilingFt, 8);        // 2.44 m → 8.006 ft
+  assert.equal(k.volumeCF, 862);       // 24.4 m³ → 861.7 ft³
+  assert.equal(k.wallSF, 341);
+  assert.equal(k.wallSFNet, 291);
+});
+test("a room with no height takes its floor's; a missing name gets a placeholder", () => {
+  const s = normalizeStatistics({ units: "imperial", statistics: { floors: [{ name: "", height: 9, rooms: [room("", {})] }] } });
+  assert.equal(s.floors[0].name, "Floor 1");
+  assert.equal(s.floors[0].rooms[0].name, "Room 1");
+  assert.equal(s.floors[0].rooms[0].ceilingFt, 9);
+  assert.deepEqual(normalizeStatistics(null), { units: "imperial", floors: [] });
+});
+test("rooms come from rooms[], so the uncounted bathroom is still imported", () => {
+  const s = normalizeStatistics({ ...IMPERIAL, statistics: { ...IMPERIAL.statistics, room_count: 1 } });
+  assert.deepEqual(s.floors[0].rooms.map((r) => r.name), ["Living Room", "Bathroom"]);
+});
+
+/* ---------- room names ---------- */
+test("the floor prefix appears only when the same room name is on two floors", () => {
+  const labels = dedupeRoomNames([
+    { name: "1st Floor", rooms: [{ name: "Bedroom" }, { name: "Kitchen" }] },
+    { name: "Basement", rooms: [{ name: "Bedroom" }, { name: "Utility" }] },
+  ]).map((r) => r.label);
+  assert.deepEqual(labels, ["1st Floor — Bedroom", "Kitchen", "Basement — Bedroom", "Utility"]);
+});
+test("a name repeated on one floor is numbered", () => {
+  const labels = dedupeRoomNames([{ name: "1st Floor", rooms: [{ name: "Closet" }, { name: "closet" }, { name: "Hall" }] }]).map((r) => r.label);
+  assert.deepEqual(labels, ["Closet", "closet 2", "Hall"]);
+});
+
+/* ---------- address + name ---------- */
+test("the job's one-line address splits for Magicplan", () => {
+  assert.deepEqual(splitAddress("3850 Royal Rd, Fairbanks, AK 99701"), { street: "3850 Royal Rd", city: "Fairbanks", postal_code: "99701", country: "US" });
+  assert.deepEqual(splitAddress("12 Elm St, North Pole AK 99705"), { street: "12 Elm St", city: "North Pole", postal_code: "99705", country: "US" });
+  assert.deepEqual(splitAddress("12 Elm St, AK 99705"), { street: "12 Elm St", city: "", postal_code: "99705", country: "US" });
+  assert.deepEqual(splitAddress("Mile 5 Chena Hot Springs"), { street: "Mile 5 Chena Hot Springs", city: "", postal_code: "", country: "US" });
+  assert.equal(projectName("Kennedy", "12 Elm St"), "Kennedy — 12 Elm St");
+  assert.equal(projectName("", ""), "Site visit");
+});
+
+/* ---------- Floor Plan table (ruling 10) ---------- */
+const stats = normalizeStatistics(IMPERIAL);
+test("an empty Floor Plan table takes measured rows accepted (conf 1) with their unit", () => {
+  const m = mergeMeasuredRooms([], stats);
+  assert.equal(m.accepted, true);
+  assert.equal(m.added, 2);
+  assert.deepEqual(m.rows[0], { name: "Living Room", dims: "14' 6\" x 14' 9\"", floorSF: "214", perimLF: "58", ceiling: "8 ft", notes: "", conf: 1, source: "magicplan", unit: "ft", volumeCF: 1715 });
+  assert.equal(m.rows[1].ceiling, "8 ft");   // the room's own height is 0 → the floor's
+});
+test("a table someone already filled gets the measured rows amber, and keeps its own rows", () => {
+  const mine = { name: "Living Room", dims: "", floorSF: "200", perimLF: "", ceiling: "", notes: "AI read", conf: 0.9 };
+  const m = mergeMeasuredRooms([mine], stats);
+  assert.equal(m.accepted, false);
+  assert.equal(m.rows[0], mine);
+  assert.ok(m.rows.slice(1).every((r) => r.conf === MEASURED_CONF && r.source === "magicplan"));
+});
+test("a blank row the form added doesn't make the table 'filled'", () => {
+  const blank = { name: "", dims: "", floorSF: "", perimLF: "", ceiling: "", notes: "", conf: 1 };
+  assert.equal(mergeMeasuredRooms([blank], stats).accepted, true);
+});
+test("a re-pull updates Magicplan's rows in place and keeps an unchanged row's decision", () => {
+  const first = mergeMeasuredRooms([{ name: "Den", floorSF: "90", conf: 0.8 }], stats).rows;
+  first[1].conf = 1;                      // ✓ Use measured on Living Room
+  first[1].notes = "checked";
+  const again = mergeMeasuredRooms(first, stats);
+  assert.equal(again.added + again.updated, 0);
+  assert.equal(again.rows.length, 3);
+  assert.equal(again.rows[1].conf, 1);
+  const rescan = normalizeStatistics({ ...IMPERIAL, statistics: { floors: [{ ...IMPERIAL.statistics.floors[0],
+    rooms: [room("Living Room", { area_without_walls: 220, ground_perimeter: 59 }), IMPERIAL.statistics.floors[0].rooms[1]] }] } });
+  const moved = mergeMeasuredRooms(first, rescan);
+  assert.equal(moved.updated, 1);
+  assert.equal(moved.rows[1].floorSF, "220");
+  assert.equal(moved.rows[1].conf, MEASURED_CONF);   // new numbers → amber again
+  assert.equal(moved.rows[1].notes, "checked");
+});
+
+/* ---------- adopt ---------- */
+const H1 = "a".repeat(64), H2 = "b".repeat(64), H3 = "c".repeat(64);
+const ROW = {
+  id: "exp-1", mp_project_id: "proj-1", mp_plan_id: "plan-1", field_project_id: "bj-lead_42", status: "ready",
+  synced_at: "2026-09-26T22:41:00Z",
+  files: [{ path: mpFilePath("bj-lead_42", H1, "Report.pdf"), name: "Report.pdf", mime: "application/pdf", size: 900000, hash: H1, folder: "Report PDF" }],
+  photos: [
+    { path: mpFilePath("bj-lead_42", H2, "p1.jpg"), name: "1st Floor - Living Room - Window - 1.jpg", mime: "image/jpeg", size: 300000, hash: H2, room: "Living Room", floor: "1st Floor", caption: "Window" },
+    { path: mpFilePath("bj-lead_42", H3, "p2.jpg"), name: "IMG_9.jpg", mime: "image/jpeg", size: 200000, hash: H3, room: "", floor: "", caption: "" },
+  ],
+  statistics: stats,
+  floors_svg: [{ floor: "1st Floor", path: mpFilePath("bj-lead_42", "d".repeat(64), "1st_Floor.svg"), hash: "d".repeat(64) }],
+};
+const job = () => ({ id: "bj-lead_42", bidOf: "lead_42", siteVisit: { files: [{ id: "u1", kind: "notes", path: "sitevisit/bj-lead_42/u1-n.jpg", mime: "image/jpeg" }], magicplan: { projectId: "proj-1", planId: "plan-1", createdAt: "2026-09-25T10:00:00Z", by: "office" } } });
+
+test("adopting puts the report and the room-captioned photos in the packet, tagged Magicplan", () => {
+  const p = job();
+  const n = adoptExport(p, ROW, "2026-09-26T23:00:00Z");
+  assert.deepEqual([n.reports, n.photos, n.rooms], [1, 2, 2]);
+  const mpFiles = p.siteVisit.files.filter((f) => f.source === "magicplan");
+  assert.deepEqual(mpFiles.map((f) => [f.id, f.kind]), [["mp-aaaaaaaa", "report"], ["mp-bbbbbbbb", "photos"], ["mp-cccccccc", "photos"]]);
+  assert.equal(mpFiles[1].room, "Living Room");
+  assert.equal(mpFiles[1].caption, "Window");
+  // the estimator reads them with no special case
+  const pk = packetForDraft(p.siteVisit);
+  assert.equal(pk.reports[0].path, ROW.files[0].path);
+  assert.deepEqual(pk.photos.map((f) => f.room), ["Living Room", ""]);
+  assert.equal(pk.notes.length, 1);
+});
+test("adopting fills rooms (only when empty), the Floor Plan table and the link stamps", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-09-26T23:00:00Z");
+  assert.deepEqual(p.rooms, ["Living Room", "Bathroom"]);
+  assert.equal(p.floorPlan.dimensions.rooms.length, 2);
+  assert.equal(p.floorPlan.dimensions.rooms[0].conf, 1);
+  const mp = p.siteVisit.magicplan;
+  assert.equal(mp.createdAt, "2026-09-25T10:00:00Z");   // kept
+  assert.equal(mp.exportId, "exp-1");
+  assert.equal(mp.syncedAt, "2026-09-26T22:41:00Z");
+  assert.equal(mp.units, "imperial");
+  assert.equal(mp.floors[0].floor, "1st Floor");
+  assert.equal(mp.statistics.floors[0].rooms[0].floorSF, 214);
+  const q = job(); q.rooms = ["Kitchen"];
+  adoptExport(q, ROW);
+  assert.deepEqual(q.rooms, ["Kitchen"]);
+});
+test("a second adopt of the same scan adds nothing — same hash, same row", () => {
+  const p = job();
+  adoptExport(p, ROW);
+  const before = JSON.stringify(p.siteVisit.files);
+  adoptExport(p, { ...ROW, id: "exp-2" });
+  assert.equal(JSON.stringify(p.siteVisit.files.map((f) => f.id)), JSON.stringify(JSON.parse(before).map((f) => f.id)));
+  assert.equal(p.floorPlan.dimensions.rooms.length, 2);
+});
+test("a Magicplan file the user removed stays out on the next pull", () => {
+  const p = job();
+  adoptExport(p, ROW);
+  p.siteVisit.files = p.siteVisit.files.filter((f) => f.id !== "mp-cccccccc");
+  p.siteVisit.magicplan.removed = ["mp-cccccccc"];
+  const n = adoptExport(p, { ...ROW, id: "exp-2" });
+  assert.equal(n.photos, 1);
+  assert.ok(!p.siteVisit.files.some((f) => f.id === "mp-cccccccc"));
+});
+test("a job with no site visit yet gets one", () => {
+  const p = { id: "bj-lead_42" };
+  adoptExport(p, ROW);
+  assert.equal(p.siteVisit.files.length, 3);
+  assert.equal(p.siteVisit.magicplan.projectId, "proj-1");
+});
+
+/* ---------- summaries and state ---------- */
+test("the banner summary counts reports, photos and measured rooms", () => {
+  assert.equal(exportSummary(ROW), "1 report, 2 photos, 2 rooms measured");
+});
+test("the Bid card state walks not created → ready → received → imported → updated", () => {
+  assert.equal(mpState({}).key, "none");
+  const p = job();
+  assert.equal(mpState(p).key, "ready");
+  assert.equal(mpState(p, { pending: ROW }).key, "received");
+  adoptExport(p, ROW);
+  assert.equal(mpState(p).key, "imported");
+  assert.equal(mpState(p, { userModified: "2026-09-26T20:00:00Z" }).key, "imported");
+  assert.equal(mpState(p, { userModified: "2026-09-27T08:00:00Z" }).key, "updated");
+});
+
+/* ---------- M3: measured quantities into the draft packet ---------- */
+test("magicplanQuantities: the adopted scan becomes the packet's measured block (feet, dedupe labels), or nothing", () => {
+  const p = { id: "lead_42", siteVisit: { files: [] } };
+  assert.equal(magicplanQuantities(p.siteVisit), null);
+  adoptExport(p, { id: "x1", mp_project_id: "proj-1", mp_plan_id: "plan-1", synced_at: "2026-09-26T22:41:00Z", files: [], photos: [], statistics: normalizeStatistics(IMPERIAL), floors_svg: [] }, "2026-09-27T00:00:00Z");
+  const q = magicplanQuantities(p.siteVisit);
+  assert.equal(q.units, "imperial");
+  assert.equal(q.sourceUnits, "imperial");
+  assert.equal(q.scannedAt, "2026-09-26T22:41:00Z");
+  assert.equal(q.rooms[0].name, "Living Room");
+  assert.deepEqual(q.rooms[0], { name: "Living Room", floorSF: 214, perimLF: 58, ceilingFt: 8, wallSF: 465, wallSFNet: 403, doors: 2, windows: 3, volumeCF: 1715 });
+  assert.equal(packetForDraft(p.siteVisit).magicplanQuantities.rooms.length, q.rooms.length);   // rides the packet
+  assert.equal("magicplanQuantities" in packetForDraft({ files: [] }), false);                  // absent, not null, without a scan
+});
+test("the Pricing Basis sentence names the scan date and lands once", () => {
+  assert.equal(magicplanBasisSentence("2026-09-26T22:41:00Z"), "Quantities from Magicplan LiDAR scan dated Sep 26, 2026; wall areas net of openings.");
+  assert.equal(magicplanBasisSentence(""), "Quantities from Magicplan LiDAR scan; wall areas net of openings.");
+  const once = withMagicplanBasis("Fairbanks freight adds 12%.", "2026-09-26");
+  assert.equal(once, "Fairbanks freight adds 12%. Quantities from Magicplan LiDAR scan dated Sep 26, 2026; wall areas net of openings.");
+  assert.equal(withMagicplanBasis(once, "2026-09-26"), once);
+  assert.equal(withMagicplanBasis("", "2026-09-26"), "Quantities from Magicplan LiDAR scan dated Sep 26, 2026; wall areas net of openings.");
+});
+test("adoptEsx: the sketch becomes one Supporting Doc, replaced in place on a new file, never duplicated", () => {
+  const p = { id: "lead_42" };
+  const esx = { path: "sitevisit/lead_42/mp-abcdef01-Test.esx", name: "Test.esx", size: 4321, mime: "application/octet-stream", hash: "abcdef0123456789" };
+  assert.deepEqual(adoptEsx(p, esx, "2026-09-27T00:00:00Z"), { added: 1, updated: 0 });
+  assert.equal(p.supportDocs.length, 1);
+  assert.match(p.supportDocs[0].id, new RegExp(`^${ESX_DOC_ID}-abcdef01-[0-9a-z]+$`));   // no link on this job: the id falls back to the file's hash
+  assert.equal(p.supportDocs[0].title, ESX_DOC_TITLE);
+  assert.equal(p.supportDocs[0].mode, "file");
+  assert.deepEqual(p.supportDocs[0].uploadedPages, []);   // nothing prints, nothing for the AI to read
+  assert.deepEqual(p.supportDocs[0].file, esx);
+  assert.deepEqual(adoptEsx(p, esx), { added: 0, updated: 0 });                                        // same hash: nothing
+  assert.deepEqual(adoptEsx(p, { ...esx, hash: "fedcba98", path: "sitevisit/lead_42/mp-fedcba98-Test.esx", size: 5000 }), { added: 0, updated: 1 });   // a re-export replaces the file
+  assert.equal(p.supportDocs.length, 1);
+  assert.equal(p.supportDocs[0].file.hash, "fedcba98");
+  assert.deepEqual(adoptEsx(p, null), { added: 0, updated: 0 });
+  assert.deepEqual(adoptEsx(p, { path: "", hash: "" }), { added: 0, updated: 0 });
+});
+
+console.log(`\n${pass} passed`);
+
+/* ---------- everything a pull brings back (10/1) ---------- */
+test("only PDFs become reports; the 3D model, drawings, videos, room plans and data land as Magicplan files, never in the draft", () => {
+  const h = (c) => c.repeat(64);
+  const row = { ...ROW, id: "exp-all", files: [
+    ...ROW.files,
+    { path: mpFilePath("bj-lead_42", h("e"), "Scan.usdz"), name: "Scan.usdz", mime: "model/vnd.usdz+zip", size: 7, hash: h("e"), folder: "3D", kind: "model3d" },
+    { path: mpFilePath("bj-lead_42", h("f"), "walk.mov"), name: "walk.mov", mime: "video/quicktime", size: 9, hash: h("f"), folder: "Captured photos", kind: "video", room: "Living Room" },
+    { path: mpFilePath("bj-lead_42", "1".repeat(64), "room.svg"), name: "1st Floor - Living Room.svg", mime: "image/svg+xml", size: 3, hash: "1".repeat(64), folder: "Room plans", kind: "room", room: "Living Room" },
+    { path: mpFilePath("bj-lead_42", "2".repeat(64), "forms.json"), name: "Magicplan forms.json", mime: "application/json", size: 2, hash: "2".repeat(64), folder: "Magicplan data", kind: "data" },
+  ] };
+  const p = job();
+  const n = adoptExport(p, row, "2026-10-01T18:00:00Z");
+  assert.deepEqual([n.reports, n.photos, n.others], [1, 2, 4]);
+  const mp = p.siteVisit.files.filter((f) => f.kind === "mpfiles");
+  assert.deepEqual(mp.map((f) => [f.name, f.mpKind, f.room]), [["Scan.usdz", "model3d", ""], ["walk.mov", "video", "Living Room"], ["1st Floor - Living Room.svg", "room", "Living Room"], ["Magicplan forms.json", "data", ""]]);
+  assert.ok(mp.every((f) => f.source === "magicplan"));
+  const pk = packetForDraft(p.siteVisit);
+  assert.deepEqual(pk.reports.map((r) => r.name), ["Report.pdf"]);
+  assert.ok(![...pk.reports, ...pk.photos, ...pk.notes].some((x) => /usdz|mov|svg|json/.test(x.name)));
+  assert.equal(exportSummary(row), "1 report, 2 photos, 2 rooms measured, 4 other files");
+  // a re-pull replaces in place, never duplicates
+  adoptExport(p, row);
+  assert.equal(p.siteVisit.files.filter((f) => f.kind === "mpfiles").length, 4);
+});
+test("a row from before 10/1 (no kind on its files) still reads its PDFs as reports", () => {
+  assert.equal(isMpReport({ name: "Report.pdf", mime: "application/pdf" }), true);
+  assert.equal(isMpReport({ name: "x.svg", mime: "image/svg+xml" }), false);
+  assert.equal(isMpReport({ name: "x.pdf", mime: "application/pdf", kind: "data" }), false);
+  assert.equal(mpKindLabel("model3d"), "3D");
+});
+
+/* ---------- the Floor plan chip (10/2): link a project scanned before the job ---------- */
+const PICKED = { projectId: "proj-old", planId: "plan-old", cloudUrl: "https://example.invalid/p", createdAt: "2026-09-20T17:00:00Z", name: "Gina — 631 Eberhardt", externalReferenceId: "" };
+test("linking a job with no Magicplan project keeps the pick and marks it linked by hand", () => {
+  const p = { id: "bj-9" };
+  const r = linkMagicplan(p, PICKED, { by: "office@x", at: "2026-10-02T02:00:00Z" });
+  assert.deepEqual(r, { switching: false, dropped: { files: 0, rooms: 0, esx: 0 } });
+  assert.deepEqual(p.siteVisit.magicplan, { projectId: "proj-old", planId: "plan-old", cloudUrl: "https://example.invalid/p", createdAt: "2026-09-20T17:00:00Z",
+    name: "Gina — 631 Eberhardt", by: "office@x", units: null, linked: "proj-old", linkedAt: "2026-10-02T02:00:00Z", linkedBy: "office@x" });
+  assert.equal(linkedByHand(p.siteVisit.magicplan), true);
+  assert.deepEqual(p.siteVisit.files, []);
+});
+test("only the project picked by hand is trusted: a created project, or one that replaced the pick, is not", () => {
+  assert.equal(linkedByHand(job().siteVisit.magicplan), false);
+  assert.equal(linkedByHand({ projectId: "b", linked: "a" }), false);
+  assert.equal(linkedByHand(null), false);
+  assert.equal(linkedByHand({ projectId: "", linked: "" }), false);
+});
+test("switching projects takes the old scan's imports out: packet files, measured rows, the ESX sketch — typed rows stay", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  p.floorPlan.dimensions.rooms.push({ name: "Garage", floorSF: "400", perimLF: "80", conf: 1 });
+  adoptEsx(p, { path: "sitevisit/bj-lead_42/mp-x.esx", name: "x.esx", hash: "e".repeat(64) });
+  const before = magicplanOnJob(p);
+  assert.ok(before.files > 0 && before.rooms > 0 && before.esx === 1);
+  const r = linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(r.switching, true);
+  assert.deepEqual(r.dropped, before);
+  assert.deepEqual(magicplanOnJob(p), { files: 0, rooms: 0, esx: 0 });
+  assert.deepEqual(p.siteVisit.files.map((f) => f.id), ["u1"]);              // the note page someone added stays
+  assert.deepEqual(p.floorPlan.dimensions.rooms.map((x) => x.name), ["Garage"]);
+  const mp = p.siteVisit.magicplan;
+  assert.equal(mp.projectId, "proj-old");
+  assert.ok(!mp.importedAt && !mp.statistics && !mp.exportId && !mp.removed, "the old scan's stamps are gone");
+  assert.equal(mpState(p).key, "ready");
+});
+test("linking the same project again keeps its import stamps and its files", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  const files = p.siteVisit.files.length;
+  const r = linkMagicplan(p, { projectId: "proj-1", planId: "plan-1" }, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(r.switching, false);
+  assert.equal(p.siteVisit.files.length, files);
+  assert.equal(p.siteVisit.magicplan.importedAt, "2026-10-01T18:00:00Z");
+  assert.equal(p.siteVisit.magicplan.by, "office");
+  assert.equal(linkedByHand(p.siteVisit.magicplan), true);
+});
+test("a pull after linking fills the job from the linked project", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" }, "2026-10-02T02:01:00Z");
+  assert.equal(p.siteVisit.magicplan.projectId, "proj-old");
+  assert.equal(p.siteVisit.magicplan.linked, "proj-old");
+  assert.ok(p.floorPlan.dimensions.rooms.some((x) => x.source === "magicplan"));
+});
+test("the Floor plan tile line: blank with no project, linked before a pull, pulled with rooms and files after", () => {
+  assert.equal(mpTileLine({ id: "x" }), "");
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  assert.equal(mpTileLine(p), "📐 Magicplan linked — scan, export, then ⟳ Pull in here");
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", synced_at: "2026-10-01T20:00:00" }, "2026-10-01T20:00:00");
+  const sv = p.siteVisit.files.filter((f) => f.source === "magicplan");
+  const ph = sv.filter((f) => f.kind === "photos").length;
+  assert.equal(mpTileLine(p), `📐 Magicplan pulled Oct 1 · 2 rooms · ${sv.length - ph} file${sv.length - ph === 1 ? "" : "s"} · ${ph} photos`);
+});
+test("the picker's filter: every word, name or address, any order and case", () => {
+  const it = { name: "Gina Da Silva", address: "631 Eberhardt Rd, Fairbanks" };
+  assert.equal(mpMatches(it, ""), true);
+  assert.equal(mpMatches(it, "  eberhardt  GINA "), true);
+  assert.equal(mpMatches(it, "gina north"), false);
+  assert.equal(mpMatches({}, "a"), false);
+});
+test("📋 Open in Site Visit is one shot, for that job, and only right after the tap", () => {
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-8", 2000), false);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), false, "a different job's open used it up");
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), true);
+  assert.equal(takeSiteVisitOpen("bj-9", 2000), false);
+  openSiteVisitNext("bj-9", 1000);
+  assert.equal(takeSiteVisitOpen("bj-9", 60_000), false);
+});
+test("a job linked by hand never adopts a ready row from another Magicplan project", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  const c = adoptExport(p, { ...ROW, mp_project_id: "proj-A", mp_plan_id: "plan-A" });
+  assert.equal(c.skipped, true);
+  assert.deepEqual(p.siteVisit.files, []);
+  assert.equal(p.siteVisit.magicplan.planId, "plan-old");
+  assert.ok(!p.floorPlan);
+  // a job the app created (no hand link) adopts as before — the admin's Link to job still lands
+  const q = job();
+  assert.ok(!adoptExport(q, { ...ROW, mp_project_id: "proj-other" }).skipped);
+});
+test("measured rows carry the scan that measured them; an adopt prunes another scan's rows and keeps the table's own array", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  p.floorPlan = { dimensions: { rooms: [
+    { name: "Old den", floorSF: "99", source: "magicplan", mpProjectId: "proj-A", conf: 1 },   // brought back by a merge from a stale phone
+    { name: "Typed hall", floorSF: "40", conf: 1 } ] } };
+  const bound = p.floorPlan.dimensions.rooms;   // what an open Floor Plan table holds
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" });
+  assert.equal(p.floorPlan.dimensions.rooms, bound, "same array, mutated in place");
+  const names = bound.map((r) => r.name);
+  assert.ok(!names.includes("Old den"));
+  assert.ok(names.includes("Typed hall"));
+  assert.ok(bound.filter((r) => r.source === "magicplan").every((r) => r.mpProjectId === "proj-old"));
+});
+test("a switch empties the job's arrays in place and tombstones the old ESX sketch, so a stale phone's merge can't bring it back", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  adoptEsx(p, { path: "sitevisit/bj-lead_42/mp-x.esx", name: "x.esx", hash: "e".repeat(64) }, "2026-10-01T18:01:00Z");
+  p.supportDocs.push({ id: "mp-esx-1a2b3c4d", source: "magicplan", mode: "file", title: "v188 sketch" });   // the v188 id shape
+  const stale = JSON.parse(JSON.stringify(p));
+  const files = p.siteVisit.files, docs = p.supportDocs;
+  assert.equal(magicplanOnJob(p).esx, 2);
+  const r = linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  assert.equal(r.dropped.esx, 2);
+  assert.equal(p.siteVisit.files, files);
+  assert.equal(p.supportDocs, docs);
+  assert.ok(!p.supportDocs.some(isMpEsx));
+  p.updatedAt = "2026-10-02T02:00:01Z"; stale.updatedAt = "2026-10-01T18:02:00Z";
+  const { merged } = mergeProjects(p, stale);
+  assert.ok(!(merged.supportDocs || []).some(isMpEsx), "the old sketch stays gone after the merge");
+  assert.equal(isMpEsx({ id: "x", source: "magicplan", mode: "file" }), true);
+  assert.equal(isMpEsx({ id: "doc-1" }), false);
+});
+test("a phone that missed a switch can't put the old scan's measured rows back: every merge sync stores is pruned", () => {
+  // the job pulled project A on v199: its rows carry no scan tag
+  const p = { id: "bj-9", siteVisit: { files: [], magicplan: { projectId: "proj-A", planId: "plan-A", importedAt: "2026-10-01T18:00:00Z" } },
+    floorPlan: { dimensions: { rooms: [{ name: "Kitchen", floorSF: "120", source: "magicplan", conf: 1 }, { name: "Den", floorSF: "90", source: "magicplan", conf: 1 }] } } };
+  const phone = JSON.parse(JSON.stringify(p));
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  assert.equal(p.siteVisit.magicplan.switchedFrom, "proj-A");
+  assert.deepEqual(p.floorPlan.dimensions.rooms, []);
+  p.updatedAt = "2026-10-02T02:00:01Z"; phone.updatedAt = "2026-10-01T18:00:00Z";
+  const { merged } = mergeProjects(p, phone);
+  assert.equal(merged.floorPlan.dimensions.rooms.length, 2, "filled beats empty: the merge alone brings them back");
+  assert.equal(pruneForeignMeasured(merged), 2);
+  assert.deepEqual(merged.floorPlan.dimensions.rooms, []);
+  // then B's scan lands: only B's rows, and a later stale merge + prune keeps it that way
+  adoptExport(merged, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" });
+  const again = mergeProjects(merged, phone).merged;
+  pruneForeignMeasured(again);
+  assert.ok(again.floorPlan.dimensions.rooms.length > 0);
+  assert.ok(again.floorPlan.dimensions.rooms.every((r) => r.mpProjectId === "proj-old"));
+  // a relink of the same project keeps the switch mark
+  linkMagicplan(again, PICKED, { by: "o", at: "2026-10-02T03:00:00Z" });
+  assert.equal(again.siteVisit.magicplan.switchedFrom, "proj-A");
+});
+test("the prune takes only what the link switched away from: that project's rows and untagged ones; never a third project's or typed rows", () => {
+  const rows = () => [
+    { name: "Old", source: "magicplan", mpProjectId: "proj-A" },
+    { name: "Mine", source: "magicplan", mpProjectId: "proj-B" },
+    { name: "Other", source: "magicplan", mpProjectId: "proj-C" },
+    { name: "Untagged", source: "magicplan" },
+    { name: "Typed", floorSF: "40" }];
+  const at = (mp) => ({ siteVisit: { magicplan: mp }, floorPlan: { dimensions: { rooms: rows() } } });
+  assert.equal(pruneForeignMeasured(at({ projectId: "proj-B" })), 0, "a job never switched: nothing");
+  const b = at({ projectId: "proj-B", switchedFrom: "proj-A" });
+  const bound = b.floorPlan.dimensions.rooms;
+  assert.equal(pruneForeignMeasured(b), 2);
+  assert.equal(b.floorPlan.dimensions.rooms, bound, "in place");
+  assert.deepEqual(bound.map((r) => r.name), ["Mine", "Other", "Typed"]);
+  assert.equal(pruneForeignMeasured(at(null)), 0);
+  assert.equal(pruneForeignMeasured({ siteVisit: { magicplan: { projectId: "x", switchedFrom: "y" } } }), 0);
+  assert.equal(pruneForeignMeasured(null), 0);
+});
+test("a stale phone whose newer edit takes the link back never costs the office's new rows", () => {
+  // the merge takes siteVisit (the link) whole from the newer copy; the
+  // empty table side falls back to the other copy's rows
+  const phone = { id: "bj-9", updatedAt: "2026-10-02T03:00:00Z", siteVisit: { files: [], magicplan: { projectId: "proj-X", planId: "plan-X" } } };
+  const office = JSON.parse(JSON.stringify(phone));
+  linkMagicplan(office, { ...PICKED, projectId: "proj-Y" }, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  adoptExport(office, { ...ROW, mp_project_id: "proj-Y", mp_plan_id: "plan-Y" });
+  office.updatedAt = "2026-10-02T02:10:00Z";
+  const { merged } = mergeProjects(phone, office);
+  assert.equal(merged.siteVisit.magicplan.projectId, "proj-X", "the link went back (the merge's rule, not ours)");
+  const n = merged.floorPlan.dimensions.rooms.length;
+  assert.ok(n > 0);
+  assert.equal(pruneForeignMeasured(merged), 0, "but the measured rows the office pulled stay");
+  assert.equal(merged.floorPlan.dimensions.rooms.length, n);
+});
+test("a deleted switched job isn't revived just because the prune ran on one side only", () => {
+  // sync's revive check: our copy vs the tombstone, both after the same rule
+  const tomb = { id: "bj-9", updatedAt: "2026-10-02T04:00:00Z", siteVisit: { files: [], magicplan: { projectId: "proj-Y", switchedFrom: "proj-X", linked: "proj-Y" } },
+    floorPlan: { dimensions: { rooms: [{ name: "Kitchen", source: "magicplan", mpProjectId: "proj-X" }] } } };
+  const cur = JSON.parse(JSON.stringify(tomb)); cur.floorPlan.dimensions.rooms = []; cur.updatedAt = "2026-10-02T03:00:00Z";
+  pruneForeignMeasured(tomb);
+  const { merged } = mergeProjects(cur, tomb);
+  pruneForeignMeasured(merged);
+  const strip = ({ updatedAt, ...c }) => JSON.stringify(c);
+  assert.equal(strip(merged), strip(tomb));
+});
+test("sync prunes after every merge it stores (sync.js)", () => {
+  const src = readFileSync(new URL("../js/sync.js", import.meta.url), "utf8");
+  const lines = src.split("\n");
+  const merges = lines.map((l, i) => (/mergeProjects\(/.test(l) && !/^\s*(\/\/|\*|import)/.test(l) ? i : -1)).filter((i) => i >= 0);
+  assert.ok(merges.length >= 2);
+  for (const i of merges) assert.ok(lines.slice(i, i + 5).some((l) => /settleMerged\(merged\)/.test(l)), `sync.js:${i + 1} merges without settleMerged`);
+  assert.match(src, /settleMerged\(serverFull\);[^\n]*\n\s*const \{ merged \} = mergeProjects\(cur, serverFull\)/, "the revive check prunes the tombstone's copy first");
+  assert.ok(/settleMerged\(full\);\s*\/\/ the server's union/.test(src), "the server's own union (push 'merged') is pruned too");
+  assert.ok((src.match(/settleMerged\(full\)/g) || []).length >= 3, "and a clean pull, and Take the cloud copy");
+});
+test("two devices adopting the same project's ESX sketch write one Supporting Doc; a relink back never lands on a tombstoned id", () => {
+  const esx = { path: "sitevisit/bj-9/mp-eeeeeeee-x.esx", name: "x.esx", hash: "e".repeat(64) };
+  const desk = { id: "bj-9" }, phone = { id: "bj-9" };
+  linkMagicplan(desk, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  phone.siteVisit = JSON.parse(JSON.stringify(desk.siteVisit));
+  adoptEsx(desk, esx, "2026-10-02T02:05:00Z");
+  adoptEsx(phone, esx, "2026-10-02T02:09:00Z");
+  assert.equal(desk.supportDocs[0].id, phone.supportDocs[0].id);
+  desk.updatedAt = "2026-10-02T02:05:01Z"; phone.updatedAt = "2026-10-02T02:09:01Z";
+  assert.equal(mergeProjects(desk, phone).merged.supportDocs.filter(isMpEsx).length, 1);
+  // A → B → A: three ids, and the switches' tombstones never block the new sketch
+  const p = { id: "bj-9" };
+  const ids = [];
+  for (const [proj, at] of [["proj-A", "2026-10-02T03:00:00Z"], ["proj-B", "2026-10-02T04:00:00Z"], ["proj-A", "2026-10-02T05:00:00Z"]]) {
+    linkMagicplan(p, { ...PICKED, projectId: proj }, { by: "o", at, tombstone: tombstoneItems });
+    adoptEsx(p, { ...esx, hash: proj + "e".repeat(58) }, at);
+    ids.push(p.supportDocs.find(isMpEsx).id);
+  }
+  assert.equal(new Set(ids).size, 3);
+  assert.ok(!(ids[2] in p.deletedIds));
+  assert.ok(ids[0] in p.deletedIds && ids[1] in p.deletedIds);
+});
+test("a switch never tombstones the fixed \"mp-esx\" id (builds before v200 put every sketch there): that sketch is kept out by its file", () => {
+  const p = job();
+  p.supportDocs = [{ id: ESX_DOC_ID, source: "magicplan", mode: "file", title: ESX_DOC_TITLE, file: { path: "x/old.esx", hash: "old1" } }];
+  const stale = JSON.parse(JSON.stringify(p));
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  assert.ok(!p.supportDocs.some(isMpEsx), "it still comes out of the job");
+  assert.ok(!(p.deletedIds && ESX_DOC_ID in p.deletedIds));
+  assert.deepEqual(p.siteVisit.magicplan.droppedEsx, ["old1"]);
+  p.updatedAt = "2026-10-02T02:00:01Z"; stale.updatedAt = "2026-10-01T18:00:00Z";
+  const { merged } = mergeProjects(p, stale);
+  assert.equal(merged.supportDocs.filter(isMpEsx).length, 1, "the union brings it back...");
+  assert.equal(pruneForeignMeasured(merged), 1);
+  assert.equal(merged.supportDocs.filter(isMpEsx).length, 0, "...and sync's settle takes it out");
+  // a sketch a pre-v200 phone puts on that id for the NEW project is another file: kept
+  merged.supportDocs.push({ id: ESX_DOC_ID, source: "magicplan", mode: "file", file: { path: "x/new.esx", hash: "new1" } });
+  assert.equal(pruneForeignMeasured(merged), 0);
+  // a second switch carries the list on
+  linkMagicplan(merged, { ...PICKED, projectId: "proj-C" }, { by: "o", at: "2026-10-02T05:00:00Z", tombstone: tombstoneItems });
+  assert.deepEqual(merged.siteVisit.magicplan.droppedEsx, ["old1", "new1"]);
+});
+console.log(`${pass} passed (with the Floor plan chip)`);
