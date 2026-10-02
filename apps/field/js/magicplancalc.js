@@ -383,6 +383,7 @@ export function linkMagicplan(project, picked, { by = "", at = new Date().toISOS
   const prev = sv.magicplan && typeof sv.magicplan === "object" ? sv.magicplan : null;
   const switching = !!(prev && prev.projectId && prev.projectId !== picked.projectId);
   const dropped = { files: 0, rooms: 0, esx: 0 };
+  let legacyEsx = [];
   if (switching) {
     const had = magicplanOnJob(p);
     // in place: an open form stays bound to the job's own arrays
@@ -396,6 +397,8 @@ export function linkMagicplan(project, picked, { by = "", at = new Date().toISOS
       // Never on the fixed "mp-esx": builds before v200 put EVERY sketch on
       // that id, so a mark on it would strip the new project's sketch too.
       if (gone.length && tombstone) tombstone(p, gone.map((d) => d.id).filter((id) => id && id !== ESX_DOC_ID));
+      // ...so that one is kept out by its file instead (pruneForeignMeasured)
+      legacyEsx = gone.filter((d) => d && d.id === ESX_DOC_ID).map((d) => String((d.file || {}).hash || "")).filter(Boolean);
     }
     Object.assign(dropped, had);
   }
@@ -406,9 +409,8 @@ export function linkMagicplan(project, picked, { by = "", at = new Date().toISOS
     cloudUrl: String(picked.cloudUrl || keep.cloudUrl || ""), createdAt: String(picked.createdAt || keep.createdAt || at),
     name: String(picked.name || ""), by: keep.by || by, units: keep.units || null,
     linked: String(picked.projectId || ""), linkedAt: at, linkedBy: by,
-    // a switched job prunes measured rows with no scan tag too (pulled before
-    // v200, so from the old project): see pruneForeignMeasured
-    ...(switching ? { switchedFrom: String(prev.projectId) } : {}),
+    // what a merge must keep out after a switch: see pruneForeignMeasured
+    ...(switching ? { switchedFrom: String(prev.projectId), droppedEsx: [...arr(prev.droppedEsx), ...legacyEsx] } : {}),
   };
   return { switching, dropped };
 }
@@ -420,16 +422,26 @@ export function linkMagicplan(project, picked, { by = "", at = new Date().toISOS
 const foreignMeasured = (r, pid, switched) => !!(r && r.source === "magicplan" &&
   (r.mpProjectId ? r.mpProjectId !== pid : switched));
 
-/** Take out measured rows another scan left on the job. A switch empties the
-    old scan's rows, but the Floor Plan table merges filled-beats-empty
+/** Keep out what a switch took off the job. A switch empties the old scan's
+    measured rows, but the Floor Plan table merges filled-beats-empty
     (merge.js, and the server's merge), so a phone that missed the switch
-    puts them back: sync runs this after every merge it stores. Mutates in
-    place (an open table is bound to the array); returns how many went. */
+    puts them back; and the pre-v200 ESX sketch id "mp-esx" can't carry a
+    tombstone. Sync runs this after every merge it stores. Only what THIS
+    link switched away from goes: rows of the old project (or untagged, so
+    pulled before v200), and the dropped sketch by its file. A row tagged
+    with any other project stays — it may be a newer link's, on a copy whose
+    link lost the merge. Mutates in place (an open table is bound to the
+    array); returns how many went. */
 export function pruneForeignMeasured(project) {
   const mp = project && project.siteVisit && project.siteVisit.magicplan;
-  const rows = project && project.floorPlan && project.floorPlan.dimensions && project.floorPlan.dimensions.rooms;
-  if (!mp || typeof mp !== "object" || !mp.projectId || !Array.isArray(rows)) return 0;
-  return spliceOut(rows, (r) => foreignMeasured(r, String(mp.projectId), !!mp.switchedFrom)).length;
+  if (!mp || typeof mp !== "object" || !mp.projectId || !mp.switchedFrom) return 0;
+  const from = String(mp.switchedFrom);
+  const rows = project.floorPlan && project.floorPlan.dimensions && project.floorPlan.dimensions.rooms;
+  let n = Array.isArray(rows) ? spliceOut(rows, (r) => !!(r && r.source === "magicplan" && (r.mpProjectId ? r.mpProjectId === from : true))).length : 0;
+  const esx = new Set(arr(mp.droppedEsx).map(String));
+  if (esx.size && Array.isArray(project.supportDocs))
+    n += spliceOut(project.supportDocs, (d) => !!d && d.id === ESX_DOC_ID && esx.has(String((d.file || {}).hash || ""))).length;
+  return n;
 }
 
 /* remove every element that matches, in place; returns what was removed */

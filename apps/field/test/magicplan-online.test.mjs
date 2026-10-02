@@ -42,7 +42,7 @@ globalThis.fetch = async (url, opts = {}) => {
   return resp(404, {});
 };
 
-const { magicplanPanel, magicplanAuto, onMagicplanWrote, adoptRow, pendingExport } = await import("../js/magicplan.js");
+const { magicplanPanel, magicplanAuto, onMagicplanLive, adoptRow, pendingExport } = await import("../js/magicplan.js");
 const { Store } = await import("../js/core.js");
 
 let pass = 0;
@@ -225,15 +225,13 @@ await test("a scan that can't be saved is offered again", async () => {
   assert.equal(again && again.row.id, "a3");
 });
 
-await test("the home's auto-adopt after the user moved on lands on the stored copy and is grafted into the page on screen", async () => {
+await test("the home's auto-adopt after the user moved on lands on the page on screen, with what was typed there", async () => {
   calls.length = 0;
   localStorage.setItem("roybal-mp-autoadopt", "1");
   await Store.put({ id: "job8", bidOf: "lead_8", customer: "Gina", siteVisit: { files: [], magicplan: { projectId: "pA", planId: "plA" } } });
   const home = await Store.get("job8"), floor = await Store.get("job8");   // route() gives each page its own copy
-  floor.notes = "typed in the Floor plan";
-  await Store.put(floor);
-  const wrote = [];
-  onMagicplanWrote((id, obj) => wrote.push([id, obj]));
+  floor.notes = "typed in the Floor plan";   // not saved yet (the autosave waits 350 ms)
+  onMagicplanLive((id) => (id === "job8" ? floor : null));   // app.js: the Floor plan is on screen
   routes.exports = async () => [];
   routes.proxy.markImported = async (b) => ({ id: b.exportId });
   routes.proxy.esxExport = async () => ({ available: false });
@@ -243,16 +241,15 @@ await test("the home's auto-adopt after the user moved on lands on the stored co
   document.body.append(el);
   await sleep(30);
   routes.exports = table([readyRow("pA", "a8", "A8.pdf")]);   // the export lands
-  magicplanAuto(home, { isLive: () => false }).setTile({ siteVisit: { at: "2026-10-03T17:00" } });
-  await until(() => wrote.length === 1);
+  magicplanAuto(home, {}).setTile({ siteVisit: { at: "2026-10-03T17:00" } });
+  await until(() => proxyCalls("markImported").length === 1);
   const stored = await Store.get("job8");
-  assert.equal(stored.notes, "typed in the Floor plan", "the Floor plan's save is kept");
+  assert.equal(stored.notes, "typed in the Floor plan", "what was typed on the Floor plan is kept");
   assert.ok(stored.siteVisit.files.some((f) => f.name === "A8.pdf"), "and the scan is in");
-  assert.deepEqual(wrote[0], ["job8", home]);
+  assert.ok(floor.siteVisit.files.some((f) => f.name === "A8.pdf"), "in the page's own copy too");
   await until(() => rerendered === 1);   // the open Floor plan re-renders onto the new rows
-  assert.equal(proxyCalls("markImported").length, 1);
   el.remove();
-  onMagicplanWrote(null);
+  onMagicplanLive(null);
   localStorage.removeItem("roybal-mp-autoadopt");
 });
 
@@ -275,13 +272,15 @@ await test("an auto-create that finishes after a link was saved leaves the link 
   btn(el, /Scan B/).click();
   await sleep(30);
   assert.equal(proxyCalls("linkProject").length, 0, "Link waits for the create");
-  // a link that reached the stored copy meanwhile (here: saved straight, as sync would) wins
+  // a link that reached the page on screen meanwhile (as a sync would graft it) wins
+  onMagicplanLive((id) => (id === "job9" ? floor : null));
   floor.siteVisit.magicplan = { projectId: "pB", linked: "pB" };
-  await Store.put(floor);
   release();
   await sleep(60);
-  assert.equal((await Store.get("job9")).siteVisit.magicplan.projectId, "pB");
+  assert.equal(floor.siteVisit.magicplan.projectId, "pB");
+  assert.ok(!(await Store.get("job9")).siteVisit.magicplan, "nothing saved over it");
   assert.ok(!home.siteVisit.magicplan, "the home's copy isn't handed the duplicate either");
+  onMagicplanLive(null);
   el.remove();
 });
 
@@ -310,6 +309,49 @@ await test("a scan landing while the picker is open waits to re-render the form 
   assert.equal(document.activeElement, input);
   btn(el, /^Cancel$/).click();
   assert.equal(rerendered, 1, "closing the picker shows it");
+  el.remove();
+  localStorage.removeItem("roybal-mp-autoadopt");
+});
+
+await test("a sketch exported for the old plan never lands on a job relinked while it ran", async () => {
+  calls.length = 0;
+  localStorage.setItem("roybal-mp-autoadopt", "1");
+  await Store.put({ id: "job11", siteVisit: { files: [], magicplan: { projectId: "pA", planId: "pl-pA" } } });
+  const home = await Store.get("job11");
+  routes.exports = table([readyRow("pA", "a11", "A11.pdf")]);
+  routes.proxy.markImported = async (b) => ({ id: b.exportId });
+  let release;
+  routes.proxy.esxExport = () => new Promise((r) => { release = () => r({ available: true, esx: { path: "sitevisit/job11/mp-pl-pA.esx", name: "a.esx", hash: "e".repeat(64) } }); });
+  magicplanAuto(home, {}).setTile({ siteVisit: { at: "2026-10-03T17:00" } });
+  await until(() => proxyCalls("esxExport").length === 1);
+  const floor = await Store.get("job11");   // the user opens the Floor plan and links pB
+  floor.siteVisit.magicplan = { projectId: "pB", planId: "pl-pB", linked: "pB", switchedFrom: "pA" };
+  await Store.put(floor);
+  release();
+  await sleep(60);
+  assert.ok(!((await Store.get("job11")).supportDocs || []).length, "no old sketch on the relinked job");
+  localStorage.removeItem("roybal-mp-autoadopt");
+});
+
+await test("picking the project that's already linked also shows a scan that landed under the picker", async () => {
+  calls.length = 0;
+  localStorage.setItem("roybal-mp-autoadopt", "1");
+  const project = { id: "job12", siteVisit: { files: [], magicplan: { projectId: "pA", planId: "plA", linked: "pA" } } };
+  routes.exports = table([readyRow("pA", "a12", "A12.pdf")]);
+  routes.proxy.markImported = async (b) => { await sleep(150); return { id: b.exportId }; };
+  routes.proxy.esxExport = async () => ({ available: false });
+  routes.proxy.status = async () => ({ userModified: "" });
+  routes.proxy.listProjects = async () => ({ projects: [{ id: "pA", name: "Scan A", address: "", createdAt: "", modifiedAt: "", externalReferenceId: "" }], complete: true });
+  let rerendered = 0;
+  const el = magicplanPanel(project, { onChanged: () => { rerendered++; } });
+  document.body.append(el);
+  await sleep(5);
+  btn(el, /Link a different/).click();
+  await until(() => proxyCalls("markImported").length === 1);
+  await sleep(250);
+  assert.equal(rerendered, 0);
+  btn(el, /Scan A/).click();
+  assert.equal(rerendered, 1);
   el.remove();
   localStorage.removeItem("roybal-mp-autoadopt");
 });

@@ -541,6 +541,7 @@ async function push() {
           mediaWait.delete(p.id);
           continue;
         }
+        settleMerged(serverFull);                      // the tombstone's copy follows the same rules as ours
         const { merged } = mergeProjects(cur, serverFull);
         merged.id = p.id;
         delete merged.rev;

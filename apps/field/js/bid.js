@@ -545,18 +545,10 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
     btn || h("span"));
   // 📐 Magicplan: no line here since 10/2 (it lives in the Floor plan chip);
   // the card still creates the project at scheduling and adopts a ready scan
-  const mpAuto = magicplanAuto(project, {
-    // still on this job's home? Once the user moves on (e.g. into the Floor
-    // plan) that page holds its own copy of the job and adopts the scan itself
-    isLive: () => {
-      const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-      return wrap.isConnected && parts.length === 2 && parts[0] === "p" && parts[1] === project.id;
-    },
-    onChanged: () => {
-      if (!wrap.isConnected) return;   // the user already moved on: don't paint the home over it
-      if (onChanged) onChanged(); else load();
-    },
-  });
+  const mpAuto = magicplanAuto(project, { onChanged: () => {
+    if (!wrap.isConnected) return;   // the user already moved on (e.g. into the Floor plan): don't paint the home over it
+    if (onChanged) onChanged(); else load();
+  } });
   const paint = (d) => {
     const s = bidState(project, d);
     wrap.replaceChildren();
