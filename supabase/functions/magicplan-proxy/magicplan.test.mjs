@@ -145,7 +145,13 @@ function fakes({ project = PROJECT(), prior = [], stats = STATS, plan = PLAN, pr
       if (p.startsWith("/plans/6a45b1435520f/files")) return FILES;
       if (p === "/plans/statistics/6a45b1435520f") { if (stats instanceof Error) throw stats; return stats; }
       if (p === `/projects/${project.data.id}/plan`) { if (plan instanceof Error) throw plan; return plan; }
-      if (p === `/projects/${project.data.id}/files`) return projectFiles;
+      if (p.startsWith(`/projects/${project.data.id}/files`)) {
+        const m = p.match(/\?page=(\d+)$/);
+        const page = m ? Number(m[1]) : 1;
+        const r = typeof projectFiles === "function" ? projectFiles(page) : projectFiles;
+        if (r instanceof Error) throw r;
+        return r;
+      }
       if (p === "/plans/forms/6a45b1435520f") return FORMS;
       if (p === "/plans/get/6a45b1435520f") return { data: { id: "6a45b1435520f", name: "plan" } };
       throw new Error("unexpected call " + p);
@@ -369,12 +375,12 @@ test("a refused file listing is noted, and the plan, room plans, measurements an
 
 test("a format Magicplan refuses is named; the other formats still come in", async () => {
   const { deps } = fakes({ plan: PLAN_ROOMS });
-  deps.mp = ((mp) => async (p) => { if (/format\[\]=(xfif|fml)&/.test(p)) throw new Error("Magicplan GET /plans/x/files failed (400)"); return mp(p); })(deps.mp);
+  deps.mp = ((mp) => async (p) => { if (/format\[\]=(xml|fml)&/.test(p)) throw new Error("Magicplan GET /plans/x/files failed (400)"); return mp(p); })(deps.mp);
   const row = await S.runSync(deps, { projectId: "5d0c3a3e-0000-4000-8000-000000000001", fieldProjectId: "bj-lead_42" });
   assert.equal(row.status, "ready");
   assert.equal(row.files.filter((f) => f.name === "Report.pdf").length, 1);   // listed by every format, copied once
   assert.equal(row.photos.length, 2);
-  assert.match(row.error, /Magicplan refused these formats: fml, xfif/);
+  assert.match(row.error, /Magicplan refused these formats: fml, xml/);
 });
 
 test("room figures in metres on an imperial project are converted to feet", () => {
@@ -392,4 +398,132 @@ test("room figures in metres on an imperial project are converted to feet", () =
   // no height anywhere: ceiling from volume / floor area
   const noH = JSON.parse(JSON.stringify(PLAN)); delete noH.data.plan_data.floors[0].rooms[0].statistics.height; delete noH.data.plan_data.floors[0].statistics;
   assert.equal(S.statsFromPlan(noH, "imperial").floors[0].rooms[0].ceilingFt, 8);
+});
+
+/* ---------- project attachments: paging, and exports listed twice ---------- */
+const PID = "5d0c3a3e-0000-4000-8000-000000000001";
+const att = (name, page = 1, size = 4) => ({ name, url: `https://files.example.invalid/${name}?sig=${page}`, size });
+const tenJpgs = (page = 1) => Array.from({ length: 10 }, (_, i) => att(`att${i}.jpg`, page));
+test("an export listed by both the plan and the project is copied once, under the plan's folder", async () => {
+  const { deps, calls } = fakes({ projectFiles: { data: [att("Report.pdf", 1, 5), att("a.jpg")] } });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  const reports = row.files.filter((f) => f.name === "Report.pdf");
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].folder, "Report PDF");
+  assert.ok(!calls.fetched.some((u) => u.includes("Report.pdf?sig=1")));   // the project copy is never downloaded
+  assert.equal(row.files.filter((f) => f.name === "a.jpg").length, 1);
+});
+test("project attachments past the first page are fetched (page_info silent, a full first page)", async () => {
+  const { deps, calls } = fakes({ projectFiles: (page) => ({ data: page === 1 ? tenJpgs() : page === 2 ? [att("walk.mp4", 2, 9), att("plan.thumb", 2)] : [] }) });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(calls.mp.includes(`/projects/${PID}/files`));
+  assert.ok(calls.mp.includes(`/projects/${PID}/files?page=2`));
+  assert.ok(!calls.mp.includes(`/projects/${PID}/files?page=3`));   // page 2 wasn't full
+  assert.deepEqual(row.files.filter((f) => f.kind === "video").map((f) => f.name), ["walk.mp4"]);
+  assert.ok(row.files.some((f) => f.name === "plan.thumb"));
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.equal(row.error, null);
+});
+test("page_info decides when it speaks: no next page, or a total that ends on this page", async () => {
+  const a = fakes({ projectFiles: { data: tenJpgs(), page_info: { has_next_page: false } } });
+  await S.runSync(a.deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(!a.calls.mp.some((p) => p.includes("?page=")));
+  const b = fakes({ projectFiles: (page) => ({ data: page === 1 ? tenJpgs() : [att("late.pdf", 2)], page_info: { current_page: page, per_page: 10, total: 11 } }) });
+  const row = await S.runSync(b.deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(b.calls.mp.includes(`/projects/${PID}/files?page=2`));
+  assert.ok(!b.calls.mp.includes(`/projects/${PID}/files?page=3`));
+  assert.ok(row.files.some((f) => f.name === "late.pdf"));
+});
+test("a server that ignores ?page= is asked once more, then left; nothing is copied twice", async () => {
+  const { deps, calls } = fakes({ projectFiles: (page) => ({ data: tenJpgs(page) }) });   // same files, fresh signatures
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(calls.mp.includes(`/projects/${PID}/files?page=2`));
+  assert.ok(!calls.mp.includes(`/projects/${PID}/files?page=3`));
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.equal(calls.fetched.filter((u) => /\/att\d\.jpg\?/.test(u)).length, 10);
+  assert.match(row.error, /^Project attachments after page 1 may be missing: Magicplan answered \?page=2 with page 1 again \{data:\[\{name,url,size\}\]\}$/);
+});
+test("a refused second page keeps the first page and says what was missed", async () => {
+  const { deps } = fakes({ projectFiles: (page) => (page === 1 ? { data: tenJpgs() } : new Error("Magicplan GET /projects/x/files failed (400)")) });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.match(row.error, /^Project attachments after page 1 not imported: .*\(400\)/);
+});
+test("moreAfter reads the usual page_info spellings, and says null when there is none", () => {
+  assert.equal(S.moreAfter({ data: [] }, 1), null);
+  assert.equal(S.moreAfter({ page_info: {} }, 1), null);
+  assert.equal(S.moreAfter({ page_info: { has_next_page: true } }, 1), true);
+  assert.equal(S.moreAfter({ page_info: { hasNextPage: false } }, 1), false);
+  assert.equal(S.moreAfter({ page_info: { next_page: null } }, 1), false);
+  assert.equal(S.moreAfter({ page_info: { next_page: 3 } }, 2), true);
+  assert.equal(S.moreAfter({ page_info: { current_page: 2, last_page: 2 } }, 2), false);
+  assert.equal(S.moreAfter({ page_info: { total_pages: 3 } }, 1), true);
+  assert.equal(S.moreAfter({ meta: { current_page: 1, per_page: 10, total: 10 } }, 1), false);
+  assert.equal(S.moreAfter({ pagination: { page: 1, page_size: 10, total_count: 25 } }, 1), true);
+});
+test("one file that won't copy is listed on the row; the rest of the pull still lands", async () => {
+  const { deps } = fakes({ projectFiles: (page) => ({ data: page === 1 ? tenJpgs() : page === 2 ? [att("walk.mp4", 2, 9), att("plan.thumb", 2)] : [] }) });
+  const fetchBytes = deps.fetchBytes;
+  deps.fetchBytes = async (url) => { if (url.includes("walk.mp4")) throw new Error("Couldn't download a Magicplan file (403)"); return fetchBytes(url); };
+  const upload = deps.upload;
+  deps.upload = async (path, bytes, mime) => { if (path.endsWith("Report.pdf")) throw new Error("Storage upload failed for Report.pdf: Payload too large"); return upload(path, bytes, mime); };
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(row.status, "ready");
+  assert.ok(row.files.some((f) => f.name === "plan.thumb"));
+  assert.equal(row.files.filter((f) => /^att\d\.jpg$/.test(f.name)).length, 10);
+  assert.equal(row.photos.length, 2);
+  assert.ok(!row.files.some((f) => f.name === "walk.mp4" || f.name === "Report.pdf"));
+  assert.match(row.error, /Not copied \(2\): Report\.pdf, walk\.mp4 — first error: Storage upload failed/);
+});
+test("photos listed with every format's call, freshly signed each time, are copied once", async () => {
+  const { deps, calls } = fakes();
+  let n = 0;
+  deps.mp = ((mp) => async (p) => {
+    if (!p.startsWith("/plans/6a45b1435520f/files")) return mp(p);
+    n++;
+    const sign = (f) => ({ ...f, url: `${f.url}&call=${n}` });
+    return { data: { files: FILES.data.files.map(sign), photos: FILES.data.photos.map(sign) } };
+  })(deps.mp);
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(n, S.ALL_FORMATS.length);
+  assert.equal(row.photos.length, 2);
+  assert.equal(row.files.filter((f) => f.name === "Report.pdf").length, 1);
+  assert.equal(calls.fetched.filter((u) => u.includes("/p1.jpg")).length, 1);
+});
+test("the formats the files call refuses on its own are never asked for", () => {
+  for (const f of ["obj", "xfif", "magicplan", "mp"]) assert.ok(!S.ALL_FORMATS.includes(f), f);
+});
+test("a page of older copies of exports is paged past, not mistaken for an ignored ?page=", async () => {
+  // a report exported again and again: page 2 holds only older copies (same
+  // name and size, earlier timestamps); the video sits on page 3
+  const old = (n) => Array.from({ length: 10 }, (_, i) => ({ ...att(i % 2 ? "Report.pdf" : "Sketch.pdf", 2, 5), last_modified: `2026-09-2${i % 10}T10:00:00Z` }));
+  const first = [...tenJpgs().slice(0, 8), { ...att("Report.pdf", 1, 5), last_modified: "2026-10-01T18:00:00Z" }, { ...att("Sketch.pdf", 1, 5), last_modified: "2026-10-01T18:00:00Z" }];
+  const { deps, calls } = fakes({ projectFiles: (page) => ({ data: page === 1 ? first : page === 2 ? old() : page === 3 ? [att("walk.mp4", 3, 9)] : [] }) });
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(calls.mp.includes(`/projects/${PID}/files?page=3`));
+  assert.ok(row.files.some((f) => f.name === "walk.mp4"));
+  assert.equal(row.files.filter((f) => f.name === "Sketch.pdf").length, 1);   // older copies: one kept
+  assert.ok(!/may be missing/.test(row.error || ""));
+});
+test("a long note can't push the later notes off the row", async () => {
+  // statistics in a shape we don't read: a ~900-character keys-only outline
+  const { deps } = fakes({ stats: { data: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`k${i}_${"y".repeat(60)}`, 1])) } });
+  const upload = deps.upload;
+  deps.upload = async (path, bytes, mime) => { if (path.endsWith("Report.pdf")) throw new Error("Storage upload failed"); return upload(path, bytes, mime); };
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.ok(row.error.length <= 1000);
+  assert.match(row.error, /^Room measurements not imported: Magicplan statistics: unexpected response shape .{100,}…/);
+  assert.match(row.error, / · Not copied \(1\): Report\.pdf — first error: Storage upload failed$/);
+});
+test("a photo whose name has '...' is stored under a name without '..'", async () => {
+  const { deps } = fakes();
+  deps.mp = ((mp) => async (p) => (p.startsWith("/plans/6a45b1435520f/files")
+    ? { data: { files: [], photos: [{ symbol_instance_id: "s", name: "1st Floor - Living Room - Stain near window... - 1.jpg", folder: "Captured photos", url: "https://files.example.invalid/e.jpg?sig=1", last_modified: "2026-09-26T22:30:00Z", size: 3, file_type: "jpg" }] } }
+    : mp(p)))(deps.mp);
+  const row = await S.runSync(deps, { projectId: PID, fieldProjectId: "bj-lead_42" });
+  assert.equal(row.photos.length, 1);
+  assert.equal(row.photos[0].name, "1st Floor - Living Room - Stain near window... - 1.jpg");
+  assert.ok(officeIsSitePath(row.photos[0].path));
+  assert.ok(!row.photos[0].path.includes(".."));
 });

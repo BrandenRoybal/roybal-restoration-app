@@ -122,13 +122,15 @@ export function mpHeaders(key: string, customer: string, json = false): Record<s
 /** Every export format the API accepts — the list is Magicplan's own,
     copied from its 400 reply on 10/1 ("Please use the following formats:
     …"): the Report PDF, drawings (svg/png/jpg/dxf), the 3D model (usdz,
-    obj, ifc), Magicplan's plan files (fml, xfif, xml, magicplan) and the
+    ifc), Magicplan's plan files (fml, xml) and the
     spreadsheets (xls, csv). A format only comes back once it has been
     exported in the app or by the workspace's export configuration.
     Asked ONE FORMAT PER CALL: the live API refuses several format[] values
     in one request (10/1 18:00, "Value [...] for argument format is
-    invalid"), while a single format[]=pdf has always worked. */
-export const ALL_FORMATS = ["pdf", "jpg", "svg", "png", "usdz", "xls", "csv", "obj", "ifc", "dxf", "fml", "xfif", "xml", "magicplan"];
+    invalid"), while a single format[]=pdf has always worked. obj, xfif and
+    magicplan are left out: that 400 reply lists them, but the files call
+    itself refuses each one alone (10/1 18:06). */
+export const ALL_FORMATS = ["pdf", "jpg", "svg", "png", "usdz", "xls", "csv", "ifc", "dxf", "fml", "xml"];
 export const filesPath = (planId: string, format: string) =>
   `/plans/${encodeURIComponent(planId)}/files?format[]=${encodeURIComponent(format)}&include_photos=true`;
 
@@ -221,6 +223,43 @@ export function projectFilesOf(resp: unknown): MpFile[] {
       fileType: str(f.file_type || f.filetype),
     };
   }).filter((f) => f.url);
+}
+/** One file's identity across listings and pages: the signed url changes
+    from call to call, the name, size and timestamp don't. The plan listing
+    and the project listing give the same export the same name and size. */
+export const fileKey = (f: { name: string; size: number }) => `${f.name}|${f.size}`;
+/** A storage name without "..": a photo captioned "Stain near window..." made
+    a path the site-path guard refuses on every pull. Only the path changes;
+    the row keeps Magicplan's own name. */
+export const dotsOut = (name: string) => name.replace(/\.{2,}/g, ".");
+/** Within one listing (the plan's files, asked format by format), the
+    timestamp is consistent too, so it joins the key. */
+export const stableKey = (f: { name: string; size: number; lastModified: string; folder: string }) =>
+  `${f.folder}|${f.name}|${f.size}|${f.lastModified}`;
+export const PROJECT_FILES_PAGES = 20;
+export const projectFilesPath = (projectId: string, page: number) =>
+  `/projects/${encodeURIComponent(projectId)}/files${page > 1 ? `?page=${page}` : ""}`;
+const listLength = (resp: unknown) => {
+  const d = resp && typeof resp === "object" ? (resp as Json).data : null;
+  return Array.isArray(d) ? d.length : 0;
+};
+/** Is there a page after `page`? Read from a list response's page_info
+    (GET /projects answers {data, page_info}), whichever of the usual
+    spellings it uses; null when it doesn't say. */
+export function moreAfter(resp: unknown, page: number): boolean | null {
+  const r = resp && typeof resp === "object" ? resp as Json : null;
+  const pi = r ? (r.page_info ?? r.pagination ?? r.meta) : null;
+  if (!pi || typeof pi !== "object") return null;
+  const p = pi as Json;
+  for (const k of ["has_next_page", "hasNextPage", "has_more", "has_next"]) if (typeof p[k] === "boolean") return p[k] as boolean;
+  if ("next_page" in p) return p.next_page != null && p.next_page !== false && p.next_page !== "";
+  if ("next_page_url" in p) return !!p.next_page_url;
+  const cur = num(p.current_page ?? p.page) || page;
+  const last = num(p.last_page ?? p.total_pages ?? p.page_count);
+  if (last) return cur < last;
+  const total = num(p.total ?? p.total_count), per = num(p.per_page ?? p.page_size ?? p.limit);
+  if (total && per) return cur * per < total;
+  return null;
 }
 /** The keys of a response, two levels deep, with no values: what the logs
     carry when a shape surprises us, so the next fix reads the live shape
@@ -491,7 +530,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
     if (hit && hit.path.startsWith(jobDir)) return hit;
     const bytes = await deps.fetchBytes(f.url);
     const hash = await deps.sha256(bytes);
-    const path = mpFilePath(job, hash, name);
+    const path = mpFilePath(job, hash, dotsOut(name));
     if (!isSitePath(path)) throw new Error(`Refusing to store ${name}: ${path} is not a site-visit path`);
     const mime = mimeOf(name, f.fileType);
     await deps.upload(path, bytes, mime);
@@ -500,23 +539,33 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
 
   const note = (what: string, e: unknown) => {
     const line = `${what}: ${e instanceof Error ? e.message : String(e)}`;
-    base.error = [base.error, line].filter(Boolean).join(" · ").slice(0, 1000);
+    // each line capped so a long shape outline can't push the later, more
+    // useful notes (not copied, stopped early) off the row; the log keeps it whole
+    base.error = [base.error, line.length > 400 ? `${line.slice(0, 399)}…` : line].filter(Boolean).join(" · ").slice(0, 1000);
     deps.warn?.(line);
   };
   // Every download goes through here: too big → listed as skipped; out of
   // time → stop, the next Pull picks up where this one ended.
   let outOfTime = false;
-  const skipped: string[] = [];
+  const skipped: string[] = [], failed: string[] = [];
+  let failedWhy: string | null = null;
   const fetchOne = async (f: MpFile, name: string) => {
     if (outOfTime) return null;
     if (deps.timeLeft && deps.timeLeft() < STOP_WITH_MS_LEFT) { outOfTime = true; return null; }
     if (f.size > MAX_FILE_BYTES) { skipped.push(`${f.name} (${Math.round(f.size / 1048576)} MB)`); return null; }
-    return await store(f, name);
+    // one file Magicplan won't hand over, or storage won't take, is listed
+    // on the row; the rest of the pull still lands
+    try { return await store(f, name); } catch (e) {
+      failed.push(f.name || name);
+      failedWhy ??= e instanceof Error ? e.message : String(e);
+      deps.warn?.(`${f.name || name} not copied: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    }
   };
   const storeJson = async (name: string, value: unknown) => {
     const bytes = new TextEncoder().encode(JSON.stringify(value, null, 2));
     const hash = await deps.sha256(bytes);
-    const path = mpFilePath(job, hash, name);
+    const path = mpFilePath(job, hash, dotsOut(name));
     if (!isSitePath(path)) throw new Error(`Refusing to store ${name}: ${path} is not a site-visit path`);
     const hit = prior.get(reuseKey(name, project.userModified, bytes.byteLength));
     if (hit && hit.path === path) return hit;   // unchanged since the last pull
@@ -532,8 +581,10 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   for (const fmt of ALL_FORMATS) {
     try {
       const got = filesOf(await deps.mp(filesPath(project.planId, fmt)));
-      for (const f of got.files) if (!seenFile.has(f.url)) { seenFile.add(f.url); files.push(f); }
-      for (const f of got.photos) if (!seenFile.has(f.url)) { seenFile.add(f.url); photos.push(f); }
+      // keyed on what stays put between calls, not the signed url: photos
+      // come back with every format's call, freshly signed each time
+      for (const f of got.files) if (!seenFile.has(stableKey(f))) { seenFile.add(stableKey(f)); files.push(f); }
+      for (const f of got.photos) if (!seenFile.has(stableKey(f))) { seenFile.add(stableKey(f)); photos.push(f); }
     } catch (e) { refused.push(fmt); firstErr ??= e; }
   }
   if (refused.length === ALL_FORMATS.length) note("Exported files and photos not imported", firstErr);
@@ -550,13 +601,50 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
     else base.photos.push({ ...s, room, floor, caption, symbol_instance_id: f.symbolInstanceId || "" });
   }
 
-  // 2. Files attached to the project itself (videos, documents)
-  try {
-    for (const f of projectFilesOf(await deps.mp(`/projects/${encodeURIComponent(project.id)}/files`))) {
+  // 2. Files attached to the project itself (videos, documents), page by
+  //    page: on 10/1 18:13 the listing held exactly 10 and the two oldest (a
+  //    video and the plan thumbnail) dropped off once the exports joined it.
+  //    The exports are listed here too; one the plan listing already brought
+  //    in (same name and size) is not copied a second time.
+  const fromPlan = new Set([...files, ...photos].map(fileKey));
+  const seenProj = new Set<string>();
+  let fullPage = 0, firstSig = "";
+  for (let page = 1; page <= PROJECT_FILES_PAGES && !outOfTime; page++) {
+    let resp: unknown, list: MpFile[];
+    try {
+      resp = await deps.mp(projectFilesPath(project.id, page));
+      list = projectFilesOf(resp);
+    } catch (e) {
+      note(page === 1 ? "Project attachments not imported" : `Project attachments after page ${page - 1} not imported`, e);
+      break;
+    }
+    if (!list.length) break;           // an empty page is the end
+    // The very same page back means Magicplan ignored ?page=: say so, with
+    // the keys of its answer (never values), so the real paging parameter
+    // can be read. A page of older copies of exports we already hold (a
+    // report exported again) is not that: paging goes on past it.
+    const sig = list.map((f) => `${fileKey(f)}|${f.lastModified}`).join("\n");
+    if (page === 1) firstSig = sig;
+    else if (sig === firstSig) {
+      note(`Project attachments after page ${page - 1} may be missing`,
+        new Error(`Magicplan answered ?page=${page} with page 1 again ${shapeOutline(resp, 1)}`));
+      break;
+    }
+    for (const f of list) {
+      if (seenProj.has(fileKey(f))) continue;
+      seenProj.add(fileKey(f));
+      if (fromPlan.has(fileKey(f))) continue;
       const s = await fetchOne(f, f.name || "attachment");
       if (s) base.files.push({ ...s, folder: f.folder || "Project files", kind: kindOf(f.name, f.fileType) });
     }
-  } catch (e) { note("Project attachments not imported", e); }
+    const listed = listLength(resp);
+    if (page === 1) fullPage = listed;
+    const more = moreAfter(resp, page);
+    if (more === false) break;
+    // page_info silent: ask again only while pages come back full
+    if (more === null && !(fullPage >= 10 && listed >= fullPage)) break;
+    if (page === PROJECT_FILES_PAGES) note("Project attachments", new Error(`stopped after ${PROJECT_FILES_PAGES} pages`));
+  }
 
   // 3. The plan: floor drawings, every room's own drawing, room measurements
   let plan: unknown = null;
@@ -600,6 +688,7 @@ export async function runSync(deps: SyncDeps, input: { projectId: string; fieldP
   }
 
   if (skipped.length) note("Too large to copy", new Error(skipped.join(", ")));
+  if (failed.length) note(`Not copied (${failed.length})`, new Error(`${failed.slice(0, 8).join(", ")}${failed.length > 8 ? ", …" : ""} — first error: ${failedWhy}`));
   if (outOfTime) note("Stopped early", new Error("ran out of time — press ⟳ Pull again for the rest"));
   base.synced_at = deps.now();
   return base;
