@@ -545,7 +545,10 @@ export function bidCard(project, { openEstimate, onChanged } = {}) {
     btn || h("span"));
   // 📐 Magicplan: no line here since 10/2 (it lives in the Floor plan chip);
   // the card still creates the project at scheduling and adopts a ready scan
-  const mpAuto = magicplanAuto(project, { onChanged: () => (onChanged ? onChanged() : load()) });
+  const mpAuto = magicplanAuto(project, { onChanged: () => {
+    if (!wrap.isConnected) return;   // the user already moved on (e.g. into the Floor plan): don't paint the home over it
+    if (onChanged) onChanged(); else load();
+  } });
   const paint = (d) => {
     const s = bidState(project, d);
     wrap.replaceChildren();

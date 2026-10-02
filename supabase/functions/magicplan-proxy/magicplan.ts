@@ -233,8 +233,11 @@ export async function listProjects(deps: { mp: (path: string) => Promise<unknown
     if (page > 1 && deps.timeLeft && deps.timeLeft() < 5_000) break;
     let resp: unknown;
     try { resp = await deps.mp(projectsPath(page)); }
-    catch (e) { if (page === 1) throw e; break; }   // a refused later page: keep what came back
+    // a refused later page keeps what came back; so does a refused first
+    // page of a search whose ?name= call already found something
+    catch (e) { if (page === 1 && !(q && seen.size)) throw e; break; }
     const data = (resp && typeof resp === "object" ? (resp as Json).data : null);
+    if (page > 1 && !Array.isArray(data)) break;   // an odd later page: same, keep what came back
     const sig = Array.isArray(data) ? data.map((p) => str((p as Json)?.id)).join(",") : "";
     if (page === 1) firstSig = sig;
     else if (sig === firstSig) break;    // ?page= ignored: what page 1 showed is all we can see

@@ -1980,6 +1980,7 @@ async function openLatestEstimate(project, { siteVisit = false } = {}) {
 
 async function addInstance(project, meta) {
   const inst = FACTORY[meta.key]();
+  if (!Array.isArray(project[meta.key])) project[meta.key] = [];   // older jobs predate some multi forms
   project[meta.key].push(inst);
   await Store.put(project);
   go(`#/p/${project.id}/f/${meta.key}/${inst.id}`);

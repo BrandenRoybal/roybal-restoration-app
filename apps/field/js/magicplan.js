@@ -29,6 +29,7 @@ import { callFunction, rest, isSignedIn, currentEmail, signSiteFile } from "./su
 import { adoptExport, exportSummary, mpState, splitAddress, adoptEsx, projectName, linkMagicplan, linkedByHand, magicplanOnJob,
   mpMatches, mpKindLabel } from "./magicplancalc.js";
 import { jobType } from "./model.js";
+import { tombstoneItems } from "./merge.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 export const online = () => !!(SYNC_ENABLED && isSignedIn() && !likelyOffline());
@@ -116,6 +117,16 @@ export async function ensureMagicplanProject(project, tile, { manual = false } =
   }
   creating.add(project.id);
   try {
+    // This copy may predate a link made on another device (a project linked
+    // by hand has no external_reference_id, so the server's own name search
+    // can't find it): ask the job's server copy first. Can't tell → no
+    // automatic create this pass.
+    const onServer = await serverMagicplanId(project.id);
+    if (onServer === null && !manual) return null;
+    if (onServer) {
+      if (manual) throw new Error("Another device already linked a Magicplan project to this job. Let this phone sync, then open the Floor plan again.");
+      return null;
+    }
     const r = await mpProxy("createProject", {
       fieldProjectId: project.id,
       customer: project.customer || (tile && tile.customer) || "",
@@ -123,6 +134,8 @@ export async function ensureMagicplanProject(project, tile, { manual = false } =
       by: tsv.by || currentEmail(),
     });
     if (!project.siteVisit || typeof project.siteVisit !== "object") project.siteVisit = { files: [], transcript: "", transcriptSeconds: 0, typedScope: "", pending: null };
+    // a link made on this phone while the create was in flight wins
+    if (project.siteVisit.magicplan && project.siteVisit.magicplan.projectId) return null;
     project.siteVisit.magicplan = {
       ...(project.siteVisit.magicplan || {}),
       projectId: r.projectId, planId: r.planId, cloudUrl: r.cloudUrl, createdAt: r.createdAt || new Date().toISOString(),
@@ -135,6 +148,17 @@ export async function ensureMagicplanProject(project, tile, { manual = false } =
   }
 }
 
+/** The Magicplan project id on the job's server copy: "" when it has none
+    (or the job isn't on the server yet), null when the read failed. */
+async function serverMagicplanId(id) {
+  try {
+    const res = await rest(`field_projects?id=eq.${encodeURIComponent(id)}&select=mp:data->siteVisit->magicplan->>projectId`, { method: "GET" });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return (Array.isArray(rows) && rows[0] && rows[0].mp) ? String(rows[0].mp) : "";
+  } catch (_) { return null; }
+}
+
 /* ---------- read the queue ----------
    Rows this device already merged are skipped even if their markImported
    stamp failed — otherwise a failed stamp would re-adopt (and re-render the
@@ -143,7 +167,11 @@ const adoptedIds = new Set();
 /** The newest ready, not-yet-imported scan for this job (owner/office RLS). */
 export async function pendingExport(project) {
   if (!online() || !project) return null;
-  const q = `magicplan_exports?field_project_id=eq.${encodeURIComponent(project.id)}&status=eq.ready&imported_at=is.null&order=synced_at.desc&limit=5`;
+  // a job linked by hand takes that project's scans only: a ready row left
+  // from the project it was switched away from is never offered or adopted
+  const mp = project.siteVisit && project.siteVisit.magicplan;
+  const only = linkedByHand(mp) ? `&mp_project_id=eq.${encodeURIComponent(mp.projectId)}` : "";
+  const q = `magicplan_exports?field_project_id=eq.${encodeURIComponent(project.id)}${only}&status=eq.ready&imported_at=is.null&order=synced_at.desc&limit=5`;
   const res = await rest(q, { method: "GET" });
   if (!res.ok) return null;
   const rows = (await res.json()).filter((r) => r && !adoptedIds.has(r.id));
@@ -153,6 +181,10 @@ export async function pendingExport(project) {
 /** Merge one row into the job and stamp it imported (and any older ready
     rows it supersedes). Returns the counts. */
 export async function adoptRow(project, pending) {
+  // the Bid card and the Floor plan card can both find the same row on one
+  // open; the first one in adopts it, the other gets null
+  if (adoptedIds.has(pending.row.id)) return null;
+  adoptedIds.add(pending.row.id);
   const counts = adoptExport(project, pending.row);
   await Store.put(project);
   for (const r of [pending.row, ...arr(pending.older)]) {
@@ -188,7 +220,7 @@ export async function adoptIfReady(project, { force = false } = {}) {
   if (!pending) return { adopted: false, pending: null };
   if (force || await autoAdopt()) {
     const counts = await adoptRow(project, pending);
-    return { adopted: true, pending: null, counts };
+    return counts ? { adopted: true, pending: null, counts } : { adopted: false, pending: null };
   }
   return { adopted: false, pending };
 }
@@ -201,7 +233,7 @@ export async function pullMagicplan(project) {
   // a project the office linked by hand may carry no job id (scanned before
   // the job existed) or another job's: `linked` tells the server it's meant
   const row = await mpProxy("sync", { projectId: mp.projectId, fieldProjectId: project.id, ...(linkedByHand(mp) ? { linked: true } : {}) });
-  if (row && row.status === "unmatched") throw new Error("Magicplan has that project on a different job. Open the Floor plan and use 🔗 Link a different project to pick this job's scan.");
+  if (row && row.status === "unmatched") throw new Error("Magicplan has that project on a different job. In this Floor plan tap 🔗 Link a different project and pick this job's scan (the same one is fine).");
   return adoptIfReady(project, { force: true });
 }
 
@@ -209,7 +241,7 @@ export async function pullMagicplan(project) {
     the job. Nothing is written to Magicplan. → { switching, dropped, picked } */
 export async function linkMagicplanProject(project, projectId) {
   const picked = await mpProxy("linkProject", { projectId });
-  const out = linkMagicplan(project, picked, { by: currentEmail() });
+  const out = linkMagicplan(project, picked, { by: currentEmail(), tombstone: tombstoneItems });
   await Store.put(project);
   return { ...out, picked };
 }
@@ -242,7 +274,7 @@ export function magicplanAuto(project, { onChanged } = {}) {
           return;
         }
         const r = await adoptIfReady(project);
-        if (r.adopted) { toast(adoptedToast(r.counts), 5000); if (onChanged) onChanged(); }
+        if (r.adopted && !r.counts.skipped) { toast(adoptedToast(r.counts), 5000); if (onChanged) onChanged(); }
       } catch (_) { /* the Floor plan chip shows the state when it's opened */ }
     })();
   };
@@ -304,7 +336,7 @@ export function magicplanPanel(project, { onChanged, openSiteVisit } = {}) {
     if (office === false) return [h("span", { class: "subtle", style: "font-size:12px" }, "Create, Link and Pull are for the owner and the office.")];
     const out = [];
     if (pending) out.push(btn("📥 Add to packet", "btn--primary", "Bring this scan into the job", () => run("Adding…", async () => {
-      const c = await adoptRow(project, pending); pending = null; toast(adoptedToast(c), 5000);
+      const c = await adoptRow(project, pending); pending = null; if (c && !c.skipped) toast(adoptedToast(c), 5000);
     })));
     if (!mp) {
       if (!pending) out.push(btn("📐 Create Magicplan project", "btn--ghost", "Creates the project on the phone with the customer's name and address", () => run("Creating…", async () => {
@@ -387,7 +419,12 @@ export function magicplanPanel(project, { onChanged, openSiteVisit } = {}) {
         const byId = new Map(arr(me.items).map((it) => [it.id, it]));
         for (const it of arr(r && r.projects)) if (it && it.id) byId.set(it.id, it);
         me.items = [...byId.values()].sort(newestFirst);
-        if (!q) me.complete = !!(r && r.complete);
+        if (!q) {
+          me.complete = !!(r && r.complete);
+          // typed while the first list was still loading: search for it now
+          const cur = input.value.trim();
+          if (!me.complete && cur.length >= 3) { clearTimeout(me.timer); me.timer = setTimeout(() => load(cur), 0); }
+        }
       } catch (e) {
         if (pick !== me) return;
         if (!me.items) me.error = "Couldn't load your Magicplan projects: " + String((e && e.message) || e);
@@ -415,16 +452,19 @@ export function magicplanPanel(project, { onChanged, openSiteVisit } = {}) {
   }
 
   async function choose(it) {
+    if (busy) return;
     const mp = mpOf();
     const name = it.name || "this project";
-    if (mp && mp.projectId === it.id) { toast("That project is already linked to this job."); pick = null; paint(); return; }
+    // the same project again is how a job adopted through the admin's Link to
+    // job (no `linked` stamp) gets marked as picked by hand, so Pull works
+    if (mp && mp.projectId === it.id && linkedByHand(mp)) { toast("That project is already linked to this job."); pick = null; paint(); return; }
     let msg = `Link “${name}” to this job and pull it in?`;
     if (it.externalReferenceId && it.externalReferenceId !== project.id) {
       let other = null;
       try { other = await Store.get(it.externalReferenceId); } catch (_) { /* not on this phone */ }
       msg = `Magicplan has “${name}” on another job file${other && other.customer ? ` (${other.customer})` : ""}. Link it to this job too and pull it in?`;
     }
-    if (mp) {
+    if (mp && mp.projectId !== it.id) {
       const had = magicplanOnJob(project);
       const bits = [had.files ? `${had.files} file${had.files === 1 ? "" : "s"} in the packet` : "",
         had.rooms ? `${had.rooms} measured room${had.rooms === 1 ? "" : "s"} in the Floor Plan table` : "",
@@ -433,10 +473,11 @@ export function magicplanPanel(project, { onChanged, openSiteVisit } = {}) {
         (bits.length ? `, and what it brought in comes out: ${bits.join(", ")}. The copies stay in storage.` : ".") +
         " The old project stays in Magicplan.";
     }
-    if (!window.confirm(msg)) return;
+    if (!window.confirm(msg) || busy) return;
     pick = null;
     await run("Linking…", async () => {
       await linkMagicplanProject(project, it.id);
+      pending = null; userModified = "";   // whatever waited was the old link's
       busy = "Linked. Pulling from Magicplan…"; paint();
       let r;
       try { r = await pullMagicplan(project); }
@@ -447,22 +488,31 @@ export function magicplanPanel(project, { onChanged, openSiteVisit } = {}) {
   }
 
   async function run(label, fn) {
-    busy = label; paint();
+    if (busy) return;
+    busy = label; pick = null; paint();
     try { await fn(); } catch (e) { toast(String((e && e.message) || e), 5000); }
     busy = ""; paint();
     if (onChanged) onChanged();
   }
 
+  // fixed slots: a repaint (check() landing, a busy label) refills the top and
+  // the files but never detaches an open picker, so typing keeps its focus
+  const topSlot = h("div"), pickSlot = h("div"), filesSlot = h("div");
+  root.append(topSlot, pickSlot, filesSlot);
   function paint() {
     const mp = mpOf();
     const st = mpState(project, { pending: pending && pending.row, userModified });
-    root.replaceChildren(...[
+    topSlot.replaceChildren(
       h("div", { style: "font-weight:800;letter-spacing:.3px;color:#16395a" }, "📐 MAGICPLAN"),
       h("div", { style: "font-size:13px;margin-top:4px" }, stateLine(mp, st)),
-      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px" }, ...buttons(mp, st)),
-      pick ? pick.el : null,
-      filesBox(),
-    ].filter(Boolean));
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px" }, ...buttons(mp, st)));
+    if (!pick) pickSlot.replaceChildren();
+    else if (pickSlot.firstChild !== pick.el) pickSlot.replaceChildren(pick.el);
+    const files = filesBox();
+    // keep an expanded files list expanded across repaints
+    const wasOpen = !!(filesSlot.firstChild && filesSlot.firstChild.open);
+    if (files && wasOpen && files.tagName === "DETAILS") files.open = true;
+    filesSlot.replaceChildren(...(files ? [files] : []));
   }
 
   async function check() {
@@ -471,7 +521,7 @@ export function magicplanPanel(project, { onChanged, openSiteVisit } = {}) {
     if (office === false) { paint(); return; }
     try {
       const r = await adoptIfReady(project);
-      if (r.adopted) { toast(adoptedToast(r.counts), 5000); if (onChanged) { onChanged(); return; } }
+      if (r.adopted && !r.counts.skipped) { toast(adoptedToast(r.counts), 5000); if (onChanged) { onChanged(); return; } }
       pending = r.pending;
       const mp = mpOf();
       if (mp && mp.importedAt && !pending) {
@@ -497,7 +547,7 @@ export function magicplanBanner(project, { onAdopted } = {}) {
     if (role !== "owner" && role !== "office") return;
     let r;
     try { r = await adoptIfReady(project); } catch (_) { return; }
-    if (r.adopted) { toast(adoptedToast(r.counts), 5000); if (onAdopted) onAdopted(); return; }
+    if (r.adopted) { if (!r.counts.skipped) toast(adoptedToast(r.counts), 5000); if (onAdopted) onAdopted(); return; }
     if (!r.pending) return;
     const add = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "Add to packet");
     add.addEventListener("click", async () => {
@@ -505,7 +555,7 @@ export function magicplanBanner(project, { onAdopted } = {}) {
       try {
         const c = await adoptRow(project, r.pending);
         box.replaceChildren();
-        toast(adoptedToast(c), 5000);
+        if (c && !c.skipped) toast(adoptedToast(c), 5000);
         if (onAdopted) onAdopted();
       } catch (e) { add.disabled = false; toast(String((e && e.message) || e), 4000); }
     });

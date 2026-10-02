@@ -8,8 +8,9 @@ import {
   mpFileId, mpFilePath, parsePhotoName, normalizeStatistics, dedupeRoomNames, splitAddress, projectName,
   mergeMeasuredRooms, adoptExport, exportSummary, mpState, MEASURED_CONF, isMpReport, mpKindLabel,
   magicplanQuantities, magicplanBasisSentence, withMagicplanBasis, adoptEsx, ESX_DOC_TITLE, ESX_DOC_ID,
-  linkMagicplan, linkedByHand, magicplanOnJob, mpTileLine, mpMatches,
+  linkMagicplan, linkedByHand, magicplanOnJob, mpTileLine, mpMatches, isMpEsx,
 } from "../js/magicplancalc.js";
+import { mergeProjects, tombstoneItems } from "../js/merge.js";
 import { siteFilePath, packetForDraft, openSiteVisitNext, takeSiteVisitOpen } from "../js/sitevisit.js";
 
 let pass = 0;
@@ -268,7 +269,7 @@ test("adoptEsx: the sketch becomes one Supporting Doc, replaced in place on a ne
   const esx = { path: "sitevisit/lead_42/mp-abcdef01-Test.esx", name: "Test.esx", size: 4321, mime: "application/octet-stream", hash: "abcdef0123456789" };
   assert.deepEqual(adoptEsx(p, esx, "2026-09-27T00:00:00Z"), { added: 1, updated: 0 });
   assert.equal(p.supportDocs.length, 1);
-  assert.equal(p.supportDocs[0].id, ESX_DOC_ID);
+  assert.match(p.supportDocs[0].id, new RegExp(`^${ESX_DOC_ID}-abcdef01-[0-9a-z]+$`));   // a fresh id per sketch: a relink's tombstone never catches a new one
   assert.equal(p.supportDocs[0].title, ESX_DOC_TITLE);
   assert.equal(p.supportDocs[0].mode, "file");
   assert.deepEqual(p.supportDocs[0].uploadedPages, []);   // nothing prints, nothing for the AI to read
@@ -373,7 +374,7 @@ test("the Floor plan tile line: blank with no project, linked before a pull, pul
   const p = { id: "bj-9" };
   linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
   assert.equal(mpTileLine(p), "📐 Magicplan linked — scan, export, then ⟳ Pull in here");
-  adoptExport(p, { ...ROW, synced_at: "2026-10-01T20:00:00" }, "2026-10-01T20:00:00");
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", synced_at: "2026-10-01T20:00:00" }, "2026-10-01T20:00:00");
   const sv = p.siteVisit.files.filter((f) => f.source === "magicplan");
   const ph = sv.filter((f) => f.kind === "photos").length;
   assert.equal(mpTileLine(p), `📐 Magicplan pulled Oct 1 · 2 rooms · ${sv.length - ph} file${sv.length - ph === 1 ? "" : "s"} · ${ph} photos`);
@@ -394,5 +395,50 @@ test("📋 Open in Site Visit is one shot, for that job, and only right after th
   assert.equal(takeSiteVisitOpen("bj-9", 2000), false);
   openSiteVisitNext("bj-9", 1000);
   assert.equal(takeSiteVisitOpen("bj-9", 60_000), false);
+});
+test("a job linked by hand never adopts a ready row from another Magicplan project", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  const c = adoptExport(p, { ...ROW, mp_project_id: "proj-A", mp_plan_id: "plan-A" });
+  assert.equal(c.skipped, true);
+  assert.deepEqual(p.siteVisit.files, []);
+  assert.equal(p.siteVisit.magicplan.planId, "plan-old");
+  assert.ok(!p.floorPlan);
+  // a job the app created (no hand link) adopts as before — the admin's Link to job still lands
+  const q = job();
+  assert.ok(!adoptExport(q, { ...ROW, mp_project_id: "proj-other" }).skipped);
+});
+test("measured rows carry the scan that measured them; an adopt prunes another scan's rows and keeps the table's own array", () => {
+  const p = { id: "bj-9" };
+  linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z" });
+  p.floorPlan = { dimensions: { rooms: [
+    { name: "Old den", floorSF: "99", source: "magicplan", mpProjectId: "proj-A", conf: 1 },   // brought back by a merge from a stale phone
+    { name: "Typed hall", floorSF: "40", conf: 1 } ] } };
+  const bound = p.floorPlan.dimensions.rooms;   // what an open Floor Plan table holds
+  adoptExport(p, { ...ROW, mp_project_id: "proj-old", mp_plan_id: "plan-old" });
+  assert.equal(p.floorPlan.dimensions.rooms, bound, "same array, mutated in place");
+  const names = bound.map((r) => r.name);
+  assert.ok(!names.includes("Old den"));
+  assert.ok(names.includes("Typed hall"));
+  assert.ok(bound.filter((r) => r.source === "magicplan").every((r) => r.mpProjectId === "proj-old"));
+});
+test("a switch empties the job's arrays in place and tombstones the old ESX sketch, so a stale phone's merge can't bring it back", () => {
+  const p = job();
+  adoptExport(p, ROW, "2026-10-01T18:00:00Z");
+  adoptEsx(p, { path: "sitevisit/bj-lead_42/mp-x.esx", name: "x.esx", hash: "e".repeat(64) }, "2026-10-01T18:01:00Z");
+  p.supportDocs.push({ id: "mp-esx-1a2b3c4d", source: "magicplan", mode: "file", title: "v188 sketch" });   // the v188 id shape
+  const stale = JSON.parse(JSON.stringify(p));
+  const files = p.siteVisit.files, docs = p.supportDocs;
+  assert.equal(magicplanOnJob(p).esx, 2);
+  const r = linkMagicplan(p, PICKED, { by: "o", at: "2026-10-02T02:00:00Z", tombstone: tombstoneItems });
+  assert.equal(r.dropped.esx, 2);
+  assert.equal(p.siteVisit.files, files);
+  assert.equal(p.supportDocs, docs);
+  assert.ok(!p.supportDocs.some(isMpEsx));
+  p.updatedAt = "2026-10-02T02:00:01Z"; stale.updatedAt = "2026-10-01T18:02:00Z";
+  const { merged } = mergeProjects(p, stale);
+  assert.ok(!(merged.supportDocs || []).some(isMpEsx), "the old sketch stays gone after the merge");
+  assert.equal(isMpEsx({ id: "x", source: "magicplan", mode: "file" }), true);
+  assert.equal(isMpEsx({ id: "doc-1" }), false);
 });
 console.log(`${pass} passed (with the Floor plan chip)`);

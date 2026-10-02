@@ -616,3 +616,17 @@ test("the server's search filter and the field picker's agree", () => {
     assert.equal(S.matchesQuery(it, q), C.mpMatches(it, q), `${it.name} / ${q}`);
   }
 });
+test("listProjects keeps what it has when a later page comes back odd, or a search's paged list is refused", async () => {
+  const odd = lister((page) => (page === 1 ? { data: listed(50) } : { message: "try later" }));
+  const r1 = await S.listProjects({ mp: odd.mp });
+  assert.equal(r1.projects.length, 50);
+  assert.equal(r1.complete, false);
+  const old = { id: "old1", name: "Gina Da Silva", address: { street: "631 Eberhardt Rd" }, user_created: "2025-01-01T00:00:00Z", archived_at: null };
+  const busy = lister([new Error("Magicplan GET /projects failed (429)")], { byName: { data: [old] } });
+  const r2 = await S.listProjects({ mp: busy.mp }, "gina");
+  assert.deepEqual(r2.projects.map((p) => p.id), ["old1"]);
+  assert.equal(r2.complete, false);
+  // with nothing from ?name=, a refused first page is still an error
+  const none = lister([new Error("Magicplan GET /projects failed (429)")], { byName: { data: [] } });
+  await assert.rejects(S.listProjects({ mp: none.mp }, "gina"), /429/);
+});
