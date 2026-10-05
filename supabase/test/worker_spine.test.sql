@@ -8,7 +8,8 @@
 -- 03 §2.2: a lease is held by exactly one worker and outlives its transaction,
 -- only the holder may settle a row, an expired lease becomes a retry (never a
 -- silent loss, never a second holder), a spent row is dead, and the dead-worker
--- alarm fires once.
+-- alarm keeps posting every 15 minutes while the worker is stale (the edge
+-- function texts at most once per 24 h).
 --
 -- The behaviour blocks run as service_role (the worker's role) inside one
 -- transaction and roll it back at the end.
@@ -321,6 +322,7 @@ declare
   o public.outbox;
   c public.outbox;
   f public.outbox;
+  before timestamptz;
 begin
   insert into public.outbox (channel, operation, payload, idempotency_key)
   values ('email', 'email.send@1', '{"to": "pm@example.invalid", "subject": "x", "body": "y"}'::jsonb, 'test.outbox:email1')
@@ -329,6 +331,21 @@ begin
   select * into c from public.outbox_claim('w-test-1', array['email', 'sms'], 60, 10);
   if c.id is distinct from o.id or c.status <> 'sending' or c.attempts <> 1 or c.locked_by <> 'w-test-1' or c.lease_until is null then
     raise exception 'outbox_claim left status % attempts % locked_by %', c.status, c.attempts, c.locked_by;
+  end if;
+
+  -- 0017: the heartbeat extends only the outbox leases it names, and only the holder's
+  before := c.lease_until;
+  perform public.worker_heartbeat('w-test-1', 'test', 0, 0, 1, '{}'::jsonb, null, 600, null, null);
+  if (select lease_until from public.outbox where id = o.id) <> before then
+    raise exception 'worker_heartbeat extended an outbox lease it was not told about';
+  end if;
+  perform public.worker_heartbeat('w-test-2', 'test', 0, 0, 0, '{}'::jsonb, null, 600, null, array[o.id]);
+  if (select lease_until from public.outbox where id = o.id) <> before then
+    raise exception 'another worker extended an outbox lease it does not hold';
+  end if;
+  perform public.worker_heartbeat('w-test-1', 'test', 0, 0, 1, '{}'::jsonb, null, 600, null, array[o.id]);
+  if (select lease_until from public.outbox where id = o.id) <= before then
+    raise exception 'worker_heartbeat did not extend the outbox lease it named';
   end if;
   if exists (select 1 from public.outbox_claim('w-test-2', null, 60, 10)) then
     raise exception 'a sending row was claimed by a second worker';

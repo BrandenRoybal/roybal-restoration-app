@@ -22,6 +22,14 @@
    silently is the worse failure; the duplicate window (Twilio accepted, the
    settle PATCH failed, the function died in between) is far narrower.
 
+   Campaign texts are refused here (permanent, before any call). roybal-notify
+   dedupes kind=campaign by tag + number BEFORE it sends and counts a pending,
+   sid-less row as "already texted", so a campaign row whose first attempt died
+   between that insert and Twilio would be killed on its retry with an error
+   saying it was sent. Campaigns go out from the campaigns page (which posts to
+   roybal-notify directly) until that loop is lifted into the spine, when the
+   dedupe gets the same sid rule findPrior has.
+
    Verdicts: roybal-notify answers HTTP 400 for EVERY error it throws, its own
    transient database failures included, so the status code carries no
    information. Permanent is only what the explicit list below names; all
@@ -46,7 +54,7 @@ const PERMANENT = [
   /^Provide `to`/,                 // not a US number
   /^Provide `body`/,               // empty text
   /^Unknown action/,               // the worker is speaking the wrong protocol
-  /is not a valid phone number/i,  // Twilio 21211 and friends
+  /The 'To' number .*is not a valid phone number/i,  // Twilio 21211 (the From-side 21212, a mistyped TWILIO_FROM, stays transient: operator config)
   /not a mobile number/i,          // Twilio 21614
   /unsubscribed|blacklist|opted out|STOP/,   // Twilio 21610
   /Permission to send an SMS has not been enabled/i,
@@ -88,6 +96,10 @@ export function smsAdapter(ctx) {
       const body = String(p.body ?? "").trim();
       if (!to) throw new DeliveryError("sms row has no `to`", { permanent: true });
       if (!body) throw new DeliveryError("sms row has no `body`", { permanent: true });
+      if (String(p.kind ?? "") === "campaign") {
+        throw new DeliveryError("kind 'campaign' is not carried by the outbox: send campaign texts from the campaigns page " +
+          "(roybal-notify's campaign dedupe counts a half-sent pending row as sent, so a retry here could die unsent)", { permanent: true });
+      }
       let res;
       try {
         res = await doFetch(cfg.notifyUrl, {

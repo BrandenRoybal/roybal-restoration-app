@@ -15,7 +15,10 @@
  *                   app_settings `worker.alert_texted`. The database re-posts
  *                   every 15 minutes while the worker is stale (migration
  *                   0017), so one lost POST costs 15 minutes, not a day; this
- *                   record is the only 24 h guard.
+ *                   record is the only 24 h guard, so both reads below fail
+ *                   CLOSED: a read error answers 503 and the next knock retries,
+ *                   never "no record" (which would text again inside the day,
+ *                   or say the worker never checked in).
  *
  *   GET  /healthz — 200, for a thread checking the function is deployed.
  *
@@ -60,11 +63,21 @@ async function handleAlert(req: Request): Promise<Response> {
   const body = parseAlertBody(await req.json().catch(() => ({})));
   if (body.kind !== "worker_down") return json({ ok: false, error: "unknown alert kind" }, 400);
 
-  // The floor: the heartbeat table itself, under the service key.
+  // The floor: the heartbeat table itself, under the service key. A failed
+  // read is "try again on the next knock", never "no heartbeat on record".
   const hb = await rest("worker_heartbeats?select=worker_id,at&order=at.desc&limit=1");
-  const rows = hb.ok ? ((await hb.json().catch(() => [])) as Array<{ worker_id: string; at: string }>) : [];
+  if (!hb.ok) {
+    console.error("alert: heartbeat read failed", hb.status);
+    return json({ ok: false, error: `heartbeat read ${hb.status}` }, 503);
+  }
+  const rows = (await hb.json().catch(() => [])) as Array<{ worker_id: string; at: string }>;
+  // The 24 h guard; a failed read must not become "never texted".
   const st = await rest("app_settings?select=value&key=eq.worker.alert_texted");
-  const prev = st.ok ? ((await st.json().catch(() => [])) as Array<{ value: { texted_at?: string } }>)[0]?.value : undefined;
+  if (!st.ok) {
+    console.error("alert: alert_texted read failed", st.status);
+    return json({ ok: false, error: `alert_texted read ${st.status}` }, 503);
+  }
+  const prev = ((await st.json().catch(() => [])) as Array<{ value: { texted_at?: string } }>)[0]?.value;
 
   const now = Date.now();
   const decision = decideAlert({ now, lastHeartbeatAt: rows[0]?.at ?? null, lastTextedAt: prev?.texted_at ?? null });

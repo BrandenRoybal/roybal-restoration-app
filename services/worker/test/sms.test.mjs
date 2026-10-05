@@ -15,6 +15,8 @@ test("roybal-notify refusals are classified: bad input permanent, everything els
   perm("Provide `to` as a valid US phone number.", 400);
   perm("Provide `body` — the message text.", 400);
   perm("send_failed: The 'To' number +1907 is not a valid phone number.", 400);
+  tran("send_failed: The 'From' number +15555550100 is not a valid phone number, shortcode, or alphanumeric sender ID.", 400); // Twilio 21212: TWILIO_FROM is wrong, fix the secret, rows must survive
+  perm("campaign_duplicate: this campaign already texted this number — skipped, not resent.", 400);
   perm("send_failed: To number is not a mobile number", 400);
   perm("send_failed: The message From/To pair violates a blacklist rule.", 400);
   tran("quiet_hours: customer texts send between 7am and 8pm Alaska time — it's 2am there now.", 400);
@@ -75,6 +77,13 @@ test("an unreachable roybal-notify is transient; an empty `to` is permanent befo
   let called = false;
   const ctx2 = { ...ctx, fetch: async () => { called = true; } };
   await assert.rejects(smsAdapter(ctx2).send(outboxRow({ payload: { to: "", body: "x" } })), (e) => e.permanent === true);
+  assert.equal(called, false);
+});
+
+test("a campaign row is refused as permanent before any call: the campaigns page sends those", async () => {
+  let called = false;
+  const ctx = { cfg: testConfig(), supa: fakeSupa(), log: recordingLog(), fetch: async () => { called = true; } };
+  await assert.rejects(smsAdapter(ctx).send(outboxRow({ payload: { to: "+19075550100", body: "sale", kind: "campaign" } })), (e) => e.permanent === true && /campaign/.test(e.message));
   assert.equal(called, false);
 });
 

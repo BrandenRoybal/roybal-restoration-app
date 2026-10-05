@@ -14,8 +14,11 @@
       the sweeper makes a retry, and step 1 adopts.
    A failed send → outbox_failed with the adapter's verdict on permanence.
 
-   ctx.active.outbox holds the ids this process is working this instant; the
-   heartbeat extends only those leases. Add on entry, delete on every exit.
+   ctx.active.outbox holds every id this process has claimed and not yet
+   settled: the whole batch from the moment outbox_claim returns (every row's
+   lease starts there), each row leaving as its deliverOne exits. The
+   heartbeat extends only those leases, so a slow first row cannot let the
+   sweeper take the tail this loop still intends to send.
 
    Every attempt writes an integration_runs row (connection twilio/gmail,
    kind push) so the office's integrations page shows the lane breathing. */
@@ -126,9 +129,18 @@ export async function runOutboxOnce(ctx) {
     p_limit: ctx.cfg.outboxBatch,
   });
   if (!Array.isArray(rows) || !rows.length) return 0;
-  for (const row of rows) {
-    if (ctx.stopping?.()) break;   // a stop mid-batch: unsent rows keep their lease and expire into a retry
-    await deliverOne(ctx, row);
+  // Every claimed row is ours to renew until it settles (see the header).
+  for (const row of rows) ctx.active?.outbox?.add(row.id);
+  let done = 0;
+  try {
+    for (const row of rows) {
+      if (ctx.stopping?.()) break;   // a stop mid-batch: unsent rows leave the set below, keep their lease and expire into a retry
+      await deliverOne(ctx, row);
+      done += 1;
+    }
+  } finally {
+    for (const row of rows) ctx.active?.outbox?.delete(row.id);
+    if (done < rows.length) ctx.log("outbox.batch_cut_short", { claimed: rows.length, delivered: done });
   }
   return rows.length;
 }

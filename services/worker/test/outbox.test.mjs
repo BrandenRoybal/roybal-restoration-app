@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { deliverOne, runOutboxOnce } from "../lanes/outbox.mjs";
 import { DeliveryError } from "../adapters/sms.mjs";
 import { fakeSupa, testConfig, recordingLog, outboxRow } from "./helpers.mjs";
+import { beat } from "../heartbeat.mjs";
 
 function fakeAdapter({ prior = null, send = async () => ({ providerId: "P1", providerStatus: "sent" }) } = {}) {
   const calls = { findPrior: 0, send: 0 };
@@ -186,4 +187,27 @@ test("a stop mid-batch leaves the rest leased for the sweeper", async () => {
   await runOutboxOnce(ctx);
   assert.equal(adapter.calls.send, 1);
   assert.equal(supa.rpcs("outbox_sent").length, 1);
+  assert.equal(ctx.active.outbox.size, 0, "the unsent tail leaves the active set: the final beat renews nothing and the sweeper retries it");
+  assert.ok(ctx.log.events().includes("outbox.batch_cut_short"));
+});
+
+test("every claimed row is active from the claim until its own delivery ends, so a heartbeat mid-batch renews the whole batch", async () => {
+  const ids = ["aaaaaaaa-0000-0000-0000-000000000001", "aaaaaaaa-0000-0000-0000-000000000002", "aaaaaaaa-0000-0000-0000-000000000003"];
+  const rows = ids.map((id) => outboxRow({ id }));
+  const supa = fakeSupa({ rpc: { outbox_claim: rows, worker_heartbeat: { worker_id: "w-test" } } });
+  const seen = [];
+  const state = { bootIso: "2026-10-05T18:00:00.000Z", lastBeatAt: 0, lastBeatError: null, depth: null };
+  const adapter = fakeAdapter({ send: async () => {
+    seen.push([...ctx.active.outbox].sort());
+    if (seen.length === 1) await beat(ctx, state);   // the 30 s timer firing while row 1 is at the provider
+    return { providerId: "P", providerStatus: "sent" };
+  } });
+  const ctx = ctxWith(adapter, supa);
+  await runOutboxOnce(ctx);
+  assert.deepEqual(seen[0], ids, "during row 1 the whole batch is in flight");
+  assert.deepEqual(seen[1], ids.slice(1), "row 1 left the set when it settled");
+  assert.deepEqual(seen[2], ids.slice(2));
+  assert.equal(ctx.active.outbox.size, 0);
+  assert.deepEqual(supa.rpcs("worker_heartbeat")[0].p_active_outbox.slice().sort(), ids, "the heartbeat named every claimed row, not only the one being sent");
+  assert.ok(!ctx.log.events().includes("outbox.batch_cut_short"));
 });

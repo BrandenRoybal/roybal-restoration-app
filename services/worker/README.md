@@ -46,7 +46,11 @@ database property, not a promise this process makes:
    attempt got as far as the provider accepting it, reports that send instead
    of making another. For texts, "accepted" means a Twilio SID on the row:
    roybal-notify writes the row as `pending` before it calls Twilio, so a
-   pending row with no SID proves nothing and the text is sent.
+   pending row with no SID proves nothing and the text is sent. Campaign
+   texts are the one kind the worker refuses (dead on attempt 1, with the
+   reason on the row): roybal-notify's own campaign dedupe counts a pending
+   row as sent, so a half-sent campaign row would die here unsent. Campaigns
+   go out from the campaigns page until that loop is lifted into the spine.
 5. **A spent row is dead**, and the owner hears about it (below).
 
 Two narrow windows remain, both on the duplicate side, never the lost side:
@@ -137,11 +141,20 @@ Order matters: the database first, then the edge function, then the app.
      `eyJ`): this project's legacy keys are disabled, and the worker refuses
      one at boot rather than run with every call failing.
    - **The Gmail pair** is the OAuth client the office Gmail connection was
-     made with: Google Cloud Console → APIs & Services → Credentials → that
-     OAuth 2.0 Client → Client ID and Client secret. (Supabase shows its own
-     copy of these as digests only, so they cannot be read back from the
-     gmail-proxy secrets.) Optional: without both, the email lane stays off
-     (logged at boot) and email rows wait as `pending`; texts still flow.
+     made with: Google Cloud Console → Google Auth Platform (or APIs &
+     Services → Credentials) → that OAuth client. The Client ID is on the
+     page. The client secret is shown in full only when it is created (the
+     console masks it to its last four characters afterwards), and Supabase
+     shows its own copy as a digest only, so it cannot be read back from the
+     gmail-proxy secrets either. If you kept the `client_secret_….json` you
+     downloaded when the client was made, use its `client_secret`. Otherwise,
+     under **Client secrets**, click **Add secret**: a client holds two, both
+     stay valid, and the new one is shown once — copy it into
+     `GMAIL_CLIENT_SECRET`. Do NOT reset, disable or delete the existing
+     secret: gmail-proxy refreshes the office connection with it, and losing
+     it breaks the inbox pull within the hour. Optional: without both, the
+     email lane stays off (logged at boot) and email rows wait as `pending`;
+     texts still flow.
    - `OWNER_CELL` is optional too (no dead-letter text without it; the
      dead-worker text is the database's and needs nothing here).
    - `--ha=false` = ONE machine, on purpose.
@@ -166,7 +179,7 @@ which re-applies `fly.toml`.
 
 - **Kill switch**: `fly scale count 0 -a roybal-worker`. Approvals still
   record, sends wait in line as `pending`, and the owner gets the down text
-  within ~15 minutes (that is the alarm working). `fly scale count 1` resumes;
+  within ~15 minutes (that is the alarm working). `fly scale count 1 -a roybal-worker` resumes;
   everything queued goes out, each row once.
 - **Test the alarm**: scale to 0, wait 15 minutes, expect the text; scale back
   to 1 and `select public.worker_liveness_check(true)` reports `fresh` on the
