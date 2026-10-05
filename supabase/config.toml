@@ -61,7 +61,7 @@ verify_jwt = false # Twilio webhooks (status callbacks, approve-by-text inbound 
 [functions.roybal-portal]
 verify_jwt = false # customers call with a share token, no session — in-code auth
 
-# Added 2026-10-05 (migration 0015): the database calls THIS. pg_cron's
+# Added 2026-10-05 (migration 0016): the database calls THIS. pg_cron's
 # worker_liveness_check() POSTs /alert through pg_net with the vault secret
 # worker_alert_secret in x-roybal-secret; no JWT exists on that path. The
 # function verifies the secret and re-reads worker_heartbeats before texting.

@@ -1,7 +1,7 @@
 # Roybal worker — the operations spine's hands (Fly app `roybal-worker`)
 
 The always-on Node process that turns an approved proposal into a sent text
-or email. The spine (migrations 0013–0015) decides *what* may happen and
+or email. The spine (migrations 0013–0016) decides *what* may happen and
 records that it did; this process is the only thing that *does* it. It is its
 own Fly app, never co-hosted with the phone agent: a stalled send must never
 touch a live call, and the dead-worker alarm assumes this app is the only
@@ -89,12 +89,12 @@ Both alarm states live in `app_settings` (`worker.liveness_alert`,
 `worker.alert_texted`, `worker.deadletter_alert`), so a restart never
 re-texts, and a recovery clears the liveness state (event `worker.recovered`).
 
-## One-time setup (owner steps, after the PR merges and 0015 is live)
+## One-time setup (owner steps, after the PR merges and 0016 is live)
 
 Order matters: the database first, then the edge function, then the app.
 
 1. **Database** — the usual words in the thread: "staging", then "production"
-   (DB push workflow, project `djpgvcvhvgrzgaziruze`). Migration 0015 adds the
+   (DB push workflow, project `djpgvcvhvgrzgaziruze`). Migration 0016 adds the
    lease columns, the functions, the vault secret and the two cron rows.
 2. **Edge function** — "deploy roybal-webhooks" (Function deploy workflow,
    production). It uses secrets that already exist (`OWNER_CELL`, the
@@ -147,7 +147,7 @@ saving once it has run a week.
   dead rows carry the provider's last word in `error`. To retry a dead row
   after fixing the cause: `update public.outbox set status = 'failed', attempts = 0, next_attempt_at = now() where id = …`.
 - **Rotate the alert secret**: `delete from vault.secrets where name = 'worker_alert_secret'`
-  and re-run the DO block in 0015 (or `select vault.create_secret(…, 'worker_alert_secret')`);
+  and re-run the DO block in 0016 (or `select vault.create_secret(…, 'worker_alert_secret')`);
   the edge function reads it live.
 - **Env knobs** (fly.toml `[env]` or secrets, restart to apply):
   `WORKER_POLL_MS` 5000, `WORKER_HEARTBEAT_MS` 30000, `QUEUE_LEASE_S` 300,

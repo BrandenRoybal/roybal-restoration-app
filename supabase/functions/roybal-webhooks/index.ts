@@ -4,7 +4,7 @@
  * Inbound calls from the database itself. One route today:
  *
  *   POST /alert   — the dead-worker alarm. pg_cron runs worker_liveness_check()
- *                   every 5 minutes (migration 0015); when no worker has
+ *                   every 5 minutes (migration 0016); when no worker has
  *                   checked in for 10 minutes it POSTs here through pg_net with
  *                   the vault secret `worker_alert_secret` in x-roybal-secret.
  *                   This function verifies the secret, RE-READS worker_heartbeats

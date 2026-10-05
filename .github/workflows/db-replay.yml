@@ -42,11 +42,11 @@ env:
   # If a migration legitimately changes one of these, change it here in the
   # same PR — that is the point: the number is a decision, not a reading.
   EXPECT_TABLES: 67   # +9: the contract tables (migration 0004); +1: magicplan_exports (0010);
-                      # +2: xact_ref_prices and xact_ref_lines (0011); +1: worker_heartbeats (0015)
+                      # +2: xact_ref_prices and xact_ref_lines (0011); +1: worker_heartbeats (0016)
   EXPECT_POLICIES: 128   # +12: read-only policies on the contract tables (0004);
                          # +1: magicplan_exports owner/office read (0010);
                          # +0: the xact_ref_* tables have none on purpose (0011);
-                         # +1: worker_heartbeats owner/office read (0015)
+                         # +1: worker_heartbeats owner/office read (0016)
   EXPECT_TRIGGERS: 43   # +10: 6 touch_updated_at, the proposals input guard, and the three
                         #      append-only guards on events (0004)
   EXPECT_VIEWS: 5
@@ -61,9 +61,9 @@ env:
                          #     and the three op_exec_* executors (0014); +8: the worker's
                          #     half — worker_heartbeat, finish_job, sweep_leases, outbox_claim,
                          #     outbox_sent, outbox_failed, worker_liveness_check and
-                         #     worker_alert_secret (0015)
+                         #     worker_alert_secret (0016)
   EXPECT_PKUNIQUE: 91   # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010);
-                        # +2: the xact_ref_prices and xact_ref_lines pkeys (0011); +1: worker_heartbeats pkey (0015)
+                        # +2: the xact_ref_prices and xact_ref_lines pkeys (0011); +1: worker_heartbeats pkey (0016)
 
 jobs:
   replay:

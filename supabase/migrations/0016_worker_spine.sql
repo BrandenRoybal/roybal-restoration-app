@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0015 — the worker's half of the spine.
+-- 0016 — the worker's half of the spine.
 --
 -- 0013 gave the spine claim_job: a worker can lease a jobs_queue row. Nothing
 -- could finish one, nothing swept a lease a dead worker left behind, and the
@@ -658,7 +658,7 @@ grant execute on function public.worker_alert_secret() to service_role;
 do $$
 begin
   if not exists (select 1 from pg_extension where extname = 'supabase_vault') then
-    raise notice '0015: supabase_vault is not installed here; worker_alert_secret not created';
+    raise notice '0016: supabase_vault is not installed here; worker_alert_secret not created';
     return;
   end if;
   if exists (select 1 from vault.secrets where name = 'worker_alert_secret') then
@@ -667,7 +667,7 @@ begin
   perform vault.create_secret(
     replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''),
     'worker_alert_secret',
-    'Shared secret worker_liveness_check() sends to roybal-webhooks/alert (migration 0015).');
+    'Shared secret worker_liveness_check() sends to roybal-webhooks/alert (migration 0016).');
 end
 $$;
 
@@ -680,7 +680,7 @@ $$;
 do $$
 begin
   if not exists (select 1 from pg_extension where extname = 'pg_cron') then
-    raise notice '0015: pg_cron is not installed here; sweeper and liveness check not scheduled';
+    raise notice '0016: pg_cron is not installed here; sweeper and liveness check not scheduled';
     return;
   end if;
   perform cron.schedule('jobs-queue-sweep-leases', '* * * * *',   'select public.sweep_leases()');

@@ -1,5 +1,5 @@
 -- ============================================================================
--- Assertions for 0015_worker_spine.sql.
+-- Assertions for 0016_worker_spine.sql.
 --
 -- Run by the DB replay workflow after the census, against the database
 -- `supabase db reset` rebuilt from supabase/migrations/. Every block raises on
