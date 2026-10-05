@@ -72,6 +72,7 @@ import {
   PROPOSE_TOOL_NAME, proposeToolDef, supportsStrictTools, checkActionParams,
 } from "../_shared/personas/index.ts";
 import { cleanExtractInput, buildExtractContent, parseScopeNotes, SCOPE_NOTES_SCHEMA, SCOPE_SYSTEM } from "./walkextract.ts";
+import { RECEIPT_READ_SCHEMA, RECEIPT_SYSTEM, receiptReadText, normalizeReceiptRead } from "./receipt.ts";
 import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildMessageParams, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
 // the direct run (Fly, then roybal-site-draft) and its outcome file — pure,
 // Node-tested in ../_shared/sitedraft.test.mjs
@@ -1418,6 +1419,40 @@ async function docDigest(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: receiptRead — the 🧾 Receipts tile. A receipt photographed
+   at the counter (page 1 + up to 3 more pages of a PDF receipt) →
+   vendor, date, total, tax, card, receipt #, payment method, category
+   and EVERY line item, so the job's running cost is right and the
+   office can find an item for a return. Vision on the document
+   model; receipt.ts holds the schema, the prompt and the normaliser.
+   The crew member checks the result before it counts (receipts.js).
+   ============================================================ */
+async function receiptRead(body: Record<string, unknown>) {
+  const pages = Array.isArray(body.pages) ? (body.pages as string[]).slice(0, 4) : [];
+  if (!pages.length) throw new Error("Snap the receipt first.");
+  const content: unknown[] = [];
+  for (const src of pages) {
+    const img = dataUrlToImage(src);
+    if (img) content.push({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } });
+  }
+  if (!content.length) throw new Error("Couldn't read that photo as an image.");
+  content.push({ type: "text", text: receiptReadText(content.length) });
+  const { input, usage } = await forcedTool({
+    model: DOC_MODEL,
+    system: RECEIPT_SYSTEM,
+    content,
+    toolName: "receipt",
+    schema: RECEIPT_READ_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 4096,
+  });
+  const receipt = { ...normalizeReceiptRead(input), model: DOC_MODEL };
+  return {
+    result: { receipt }, usage, model: DOC_MODEL,
+    summary: { pages: content.length - 1, vendor: receipt.vendor, total: receipt.total, items: receipt.items.length, confidence: receipt.confidence },
+  };
+}
+
+/* ============================================================
    Action: estimateImport — read an uploaded Xactimate / Symbility /
    carrier estimate PDF into structured line items + O&P/tax totals so
    the invoice or reconstruction estimate is built FROM the carrier's
@@ -2138,7 +2173,7 @@ async function portalDraft(body: Record<string, unknown>) {
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number; costScale?: number; extraCostUsd?: number }>> = {
   photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
-  siteVisitTranscribe, siteVisitStart, siteVisitResult, walkExtract,
+  siteVisitTranscribe, siteVisitStart, siteVisitResult, walkExtract, receiptRead,
 };
 
 serve(async (req: Request) => {
