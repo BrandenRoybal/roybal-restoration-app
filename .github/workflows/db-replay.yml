@@ -50,10 +50,14 @@ env:
                         #      append-only guards on events (0004)
   EXPECT_VIEWS: 5
   EXPECT_ENUMS: 6   # -1: user_role dropped, profiles.role is text + check (0012)
-  EXPECT_FUNCTIONS: 57   # +1: contact_same_value (0001); +5: current_org, current_principal,
+  EXPECT_FUNCTIONS: 76   # +1: contact_same_value (0001); +5: current_org, current_principal,
                          #     current_role_name, and the two trigger functions (0004);
                          #     +1: role_is (0006); +2: xact_ref_prices_for and
-                         #     xact_ref_reload (0011)
+                         #     xact_ref_reload (0011); +15: the op spine — emit_event,
+                         #     op_propose, op_proposal_approve, op_proposal_decline,
+                         #     enqueue, claim_job, op_execute, op_expire_proposals and
+                         #     seven internal helpers (0013); +4: op_quiet_hours_release
+                         #     and the three op_exec_* executors (0014)
   EXPECT_PKUNIQUE: 90   # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010);
                         # +2: the xact_ref_prices and xact_ref_lines pkeys (0011)
 
