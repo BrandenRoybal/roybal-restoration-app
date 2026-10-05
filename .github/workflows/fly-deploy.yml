@@ -1,0 +1,106 @@
+name: Fly deploy
+
+# Deploys a Fly app from main on the owner's word — the fn-deploy.yml pattern
+# for the always-on services. Nothing here runs on push: the owner merges,
+# says the word in the thread, and the thread dispatches this with the app
+# name and the confirm word.
+#
+# What it needs once: a repository secret FLY_API_TOKEN holding a Fly deploy
+# token scoped to the app —
+#   fly tokens create deploy -a roybal-worker
+# pasted under Settings → Secrets and variables → Actions. Without it the run
+# stops in the first step with that instruction; nothing is half-deployed.
+#
+# The same `fly deploy … --ha=false .` the README shows for a laptop deploy,
+# built on Fly's remote builder (no Docker on the runner), ONE machine on
+# purpose: the worker's exactly-once path assumes a single process holds a
+# lease (the database would still be correct with two, but one is the design).
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Which Fly app"
+        type: choice
+        required: true
+        default: roybal-worker
+        options:
+          - roybal-worker
+      confirm:
+        description: "Type the word deploy"
+        type: string
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+# One deploy per app at a time; a second click queues.
+concurrency:
+  group: fly-deploy-${{ inputs.app }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      # Inputs reach the shell through env, never through ${{ }} in a run: block.
+      APP: ${{ inputs.app }}
+      CONFIRM: ${{ inputs.confirm }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide what this run may do
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Fly deploys take code from main only; this run is on '$GITHUB_REF_NAME'."
+            exit 1
+          fi
+          if [ "$CONFIRM" != "deploy" ]; then
+            echo "::error::To deploy, type the word deploy in the confirm box."
+            exit 1
+          fi
+          if [ -z "${FLY_API_TOKEN:-}" ]; then
+            echo "::error::The FLY_API_TOKEN repository secret is not set. On the Mac: fly tokens create deploy -a $APP — then paste it under Settings → Secrets and variables → Actions as FLY_API_TOKEN."
+            exit 1
+          fi
+          case "$APP" in
+            roybal-worker) DIR=services/worker ;;
+            *) echo "::error::unknown app '$APP'"; exit 1 ;;
+          esac
+          for f in "$DIR/fly.toml" "$DIR/Dockerfile"; do
+            if [ ! -f "$f" ]; then echo "::error::$f is not in this checkout."; exit 1; fi
+          done
+          if ! grep -q "^app = \"$APP\"" "$DIR/fly.toml"; then
+            echo "::error::$DIR/fly.toml does not name app $APP."
+            exit 1
+          fi
+          echo "DIR=$DIR" >> "$GITHUB_ENV"
+          {
+            echo "### Fly deploy — $APP"
+            echo ""
+            echo "From \`$GITHUB_REF_NAME\` at \`${GITHUB_SHA::7}\`, config \`$DIR/fly.toml\`."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          flyctl deploy \
+            --app "$APP" \
+            --config "$DIR/fly.toml" \
+            --dockerfile "$DIR/Dockerfile" \
+            --remote-only \
+            --ha=false \
+            .
+
+      - name: Status
+        if: always()
+        run: |
+          set -euo pipefail
+          flyctl status --app "$APP" | tee -a "$GITHUB_STEP_SUMMARY" || true
