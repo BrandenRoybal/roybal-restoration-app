@@ -95,6 +95,9 @@ export const FORMS = [
   { key: "portalShare",      name: "Client Portal",      icon: "🌐", multi: false,
     types: ["restoration", "construction"],
     blurb: "The customer's page: status, photos, drying, documents, e-sign change orders, balance & closeout — internal only, never in the packet" },
+  { key: "receipts",         name: "Receipts",           icon: "🧾", multi: true,
+    types: ["restoration", "construction"],
+    blurb: "Snap every material, rental and dump receipt — the AI reads it, the job keeps a running cost total (internal — not in packet)" },
 ];
 
 /* Job kind. Jobs created before this field existed carry no jobType, so
@@ -208,6 +211,29 @@ export function newProject() {
 
 export function newPhoto() {
   return { id: uid(), by: AUTHOR, src: "", caption: "", room: "", stage: "during", ts: new Date().toISOString() };
+}
+
+/* A job receipt (the 🧾 Receipts tile). Same field names the office
+   assistant's receiptLog chip, the narrative digest and the budget flag
+   already read — vendor, amount (the receipt TOTAL), category, date, notes —
+   plus what the camera + AI read add. The photo is a data URL like any job
+   photo: sync offloads it to the field-media bucket (media.js) and migration
+   0015 projects the row into public.job_receipts for the office. */
+export function newReceipt() {
+  return {
+    id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
+    vendor: "", date: todayISO(),
+    amount: "",                       // the receipt total — what the running job total and the budget flag sum
+    subtotal: "", tax: "",
+    category: "materials",            // receiptcalc.js RECEIPT_CATEGORIES: materials | equipment | dump | other
+    paidWith: "",                     // receiptcalc.js PAID_WITH — the QuickBooks link (plan phase 3) keys off it
+    cardLast4: "", receiptNo: "",
+    notes: "",
+    photo: "",                        // the receipt image (page 1 of a PDF receipt)
+    extraPages: [],                   // further pages of a PDF receipt, if any
+    items: [],                        // [{id, desc, qty, unit, price, sku}] as read by the AI and corrected in the field
+    ai: null,                         // { at, model, confidence } once the AI has read it
+  };
 }
 
 /* ---------- blank-scaffold detection (sync uses this) ----------

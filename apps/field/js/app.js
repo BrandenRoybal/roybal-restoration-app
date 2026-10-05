@@ -8,7 +8,7 @@ import {
   newMoistureMap, newDryingLog, newConstructionLog, newChangeOrder,
   newInvoice, newReconEstimate, newPortalShare, newWorkAuth, newCertDrying, newLaborLog, newFloorPlan, newSupportDoc,
   newScopeOfWork, newPreConChecklist, newSelections, newSubSchedule,
-  newInspection, newPunchList, newDrawSchedule, newCertCompletion,
+  newInspection, newPunchList, newDrawSchedule, newCertCompletion, newReceipt,
   blankScopeArea, blankScopeItem, blankSubRow, blankSelectionRow, TRADES,
   newContentsItem, newBox, CONDITIONS, DISPOSITIONS, CONTENT_CATEGORIES,
   BOX_DESTINATIONS, POROUS_CATEGORIES, dispositionShort, dispositionLabel, depreciation,
@@ -47,6 +47,8 @@ import { helpPage } from "./help.js";
 import { magicplanPanel, onMagicplanLive } from "./magicplan.js";
 import { mpTileLine, pruneForeignMeasured } from "./magicplancalc.js";
 import { openSiteVisitNext } from "./sitevisit.js";
+import { receiptsPage } from "./receipts.js";
+import { receiptTileLine } from "./receiptcalc.js";
 
 const view = $("#view");
 const topbarSub = $("#topbarSub");
@@ -70,6 +72,7 @@ const FACTORY = {
   selections: newSelections, subSchedule: newSubSchedule,
   inspections: newInspection, punchList: newPunchList,
   drawSchedule: newDrawSchedule, certCompletion: newCertCompletion,
+  receipts: newReceipt,
 };
 
 /* ---------- router ---------- */
@@ -1491,19 +1494,22 @@ function projectHome(project) {
   }
 
   const tiles = h("div", { class: "tiles" });
-  // the Floor plan tile carries the job's Magicplan state (10/2: one chip)
+  // the Floor plan tile carries the job's Magicplan state (10/2: one chip);
+  // the Receipts tile carries the running job cost ("$1,234.50 · 5 receipts")
   const mpLine = mpTileLine(project);
+  const rcLine = receiptTileLine(project);
   formsFor(project).forEach((f) => {
     const count = formCount(project, f.key);
     const isList = f.multi || Array.isArray(project[f.key]); // moisture/drying/photos/contents…
-    const noun = f.key === "contents" ? "items" : (f.key === "photos" ? "photos" : "saved");
+    const noun = f.key === "contents" ? "items" : (f.key === "photos" ? "photos" : (f.key === "receipts" ? "receipts" : "saved"));
     const badge = isList
       ? h("span", { class: "tile__count" }, count ? `${count} ${noun}` : "None yet")
       : h("span", { class: "tile__badge " + (count ? "done" : "todo") }, count ? "Started" : "Not started");
+    const line = (f.key === "floorPlan" && mpLine) ? mpLine : ((f.key === "receipts" && rcLine) ? rcLine : f.blurb);
     tiles.append(h("a", { class: "tile" + (f.hero ? " tile--hero" : ""), href: `#/p/${project.id}/f/${f.key}` },
       h("div", { class: "tile__icon" }, f.icon),
       h("div", { class: "tile__name" }, f.name),
-      h("div", { class: "tile__count" }, f.key === "floorPlan" && mpLine ? mpLine : f.blurb),
+      h("div", { class: "tile__count" }, line),
       badge));
   });
   body.append(tiles);
@@ -1541,6 +1547,8 @@ function packetGroups(project) {
     if (f.key === "constructionLogs") continue;
     // Client Portal is internal office config for the customer share — never packet material.
     if (f.key === "portalShare") continue;
+    // Receipts are our costs, not the claim's documentation — internal only.
+    if (f.key === "receipts") continue;
     const v = project[f.key];
     const render = RENDERERS[f.key];
     if (!render) continue;
@@ -1894,6 +1902,13 @@ async function formPage(project, key, instId) {
     const item = project.contents.find((x) => x.id === instId);
     if (!item) return go(`#/p/${project.id}/f/contents`);
     return contentsItemEditor(project, item);
+  }
+
+  // receipts have their own page (camera snap, AI read, running job total);
+  // the array heal is quiet for the same reason as the ones below
+  if (key === "receipts") {
+    if (!Array.isArray(project.receipts)) { project.receipts = []; await Store.put(project, { bump: false, quiet: true }); }
+    return receiptsPage(project, instId, { view, setChrome });
   }
 
   // single-instance forms: open editor directly
