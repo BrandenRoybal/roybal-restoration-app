@@ -1,0 +1,41 @@
+# Roybal worker — the operations spine's hands (docs/architecture/03 §2.5,
+# ADR-06). One always-on machine that claims queue rows, delivers outbox rows
+# exactly once, and heartbeats every 30 s. Its own app, never co-hosted with
+# roybal-phone: a stalled send must never touch a live call, and the dead-worker
+# alert (pg_cron → roybal-webhooks /alert) assumes this app is the only writer
+# of worker_heartbeats.
+#
+# Deploy from the REPO ROOT (the Function deploy pattern, by hand or through
+# .github/workflows/fly-deploy.yml):
+#   fly deploy --config services/worker/fly.toml --dockerfile services/worker/Dockerfile --ha=false .
+app = "roybal-worker"
+primary_region = "sjc"
+# time on a stop to finish the send in flight; the poller exits between polls
+kill_timeout = 30
+
+[env]
+  PORT = "8080"
+  WORKER_POLL_MS = "5000"
+  WORKER_HEARTBEAT_MS = "30000"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "3s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/healthz"
+
+[[vm]]
+  # 1 GB is the roadmap's floor for this machine (A-0.1: PDF rendering lands
+  # here at P4 and Chromium alone wants 300–500 MB). The P1 skeleton would run
+  # in 256 MB; `fly scale memory 512 -a roybal-worker` is the one-line saving
+  # until rendering arrives.
+  size = "shared-cpu-1x"
+  memory = "1gb"

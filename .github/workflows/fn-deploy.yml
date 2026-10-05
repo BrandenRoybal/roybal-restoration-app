@@ -52,6 +52,7 @@ on:
           - qbo-proxy
           - magicplan-proxy
           - roybal-site-draft
+          - roybal-webhooks
       target:
         description: "Project to deploy to"
         type: choice

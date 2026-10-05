@@ -88,3 +88,12 @@ jobs:
         run: |
           npm install --omit=dev --no-audit --no-fund
           npm test
+
+      # The operations spine's worker (services/worker, Fly app roybal-worker):
+      # the lanes, the adapters' exactly-once adopt step, the heartbeat and the
+      # dead-letter text, against a stubbed Supabase. Zero dependencies, so
+      # nothing to install.
+      - name: Worker tests
+        if: '!cancelled()'
+        working-directory: services/worker
+        run: npm test
