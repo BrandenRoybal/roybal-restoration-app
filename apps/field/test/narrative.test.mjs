@@ -160,4 +160,25 @@ ok("empty construction job -> safe facts",
   ok("no receipts -> null", narrativeFacts({}).receipts === null);
 }
 
+/* ---------- returns the office logged fold into their receipt (receipts phase 2) ---------- */
+{
+  const many = Array.from({ length: 30 }, (_, i) => ({ label: "doc " + i, ai: { docType: "Receipt", vendor: "V" + i, totalAmount: 10 } }));
+  const job = {
+    invoices: [{ invoiceNo: "1", attachments: many }],
+    receipts: [
+      { id: "R1", vendor: "Home Depot", date: "2026-10-01", amount: "200.00", category: "materials", notes: "lumber" },
+      { id: "C1", kind: "return", returnOf: "R1", vendor: "Home Depot", date: "2026-10-09", amount: "-45.97", category: "materials", notes: "↩ Return of Home Depot" },
+      { id: "C2", kind: "return", returnOf: "GONE", vendor: "Spenard", date: "2026-10-09", amount: "-20.00", category: "materials", notes: "↩ Return of Spenard" },
+    ],
+  };
+  const all = narrativeFacts({ receipts: job.receipts }).receipts;
+  const r1 = all.find((r) => r.vendor === "Home Depot");
+  ok("a linked return folds into its receipt: one entry, net total", all.length === 2 && r1.total === 154.03 && r1.returned === 45.97);
+  ok("the folded entry says what was returned", /after \$45\.97 returned \(2026-10-09\)/.test(r1.summary) && r1.summary.startsWith("lumber"));
+  ok("an orphan return leads as its own credit", all[0].docType === "return" && all[0].total === -20 && all[0].label === "return credit");
+  const capped = narrativeFacts(job).receipts;
+  ok("the 25-entry cap never cuts an orphan credit", capped.length === 25 && capped[0].docType === "return");
+  ok("a receipt with no return keeps its exact total", narrativeFacts({ receipts: [{ id: "x", amount: "12.345" }] }).receipts[0].total === 12.345);
+}
+
 console.log(`\n${pass} checks passed.`);

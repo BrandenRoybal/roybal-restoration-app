@@ -218,7 +218,9 @@ export function newPhoto() {
    already read — vendor, amount (the receipt TOTAL), category, date, notes —
    plus what the camera + AI read add. The photo is a data URL like any job
    photo: sync offloads it to the field-media bucket (media.js) and migration
-   0015 projects the row into public.job_receipts for the office. */
+   0015 projects the row into public.job_receipts for the office.
+   A return logged in the office is the same shape plus kind: "return",
+   returnOf and a negative amount (receiptlib.js buildReturnCredit). */
 export function newReceipt() {
   return {
     id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),
@@ -339,6 +341,8 @@ export const formByKey = (k) => FORMS.find((f) => f.key === k);
 /* count of completed/started instances for the project home tiles */
 export function formCount(project, key) {
   const v = project[key];
+  // an office-logged return (kind "return") is a credit, not a receipt
+  if (key === "receipts" && Array.isArray(v)) return v.filter((r) => !(r && r.kind === "return")).length;
   if (Array.isArray(v)) return v.length;
   return v ? 1 : 0;
 }

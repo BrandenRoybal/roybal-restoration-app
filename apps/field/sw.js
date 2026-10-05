@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v201";
+const CACHE = "roybal-field-v202";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
@@ -38,8 +38,8 @@ const CORE = [
   "js/myweek.js", "js/myweekcalc.js", "board/js/schedule.js", "board/js/schedulewatch.js",
   // ❓ Help: app.js statically imports help.js (which reads model.js's FORMS)
   "js/help.js",
-  // 🧾 Receipts: app.js statically imports receipts.js (→ receiptcalc.js)
-  "js/receipts.js", "js/receiptcalc.js",
+  // 🧾 Receipts: app.js statically imports receipts.js (→ receiptcalc.js, receiptlib.js)
+  "js/receipts.js", "js/receiptcalc.js", "js/receiptlib.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];

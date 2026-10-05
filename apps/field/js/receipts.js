@@ -15,6 +15,12 @@
    offloads the photo on sync); migration 0015 projects them into
    public.job_receipts for the office. Nothing here touches
    QuickBooks — that is the plan's phase 3.
+
+   Returns (plan phase 2) are logged in the office app: each is its
+   own element with kind "return" and a negative amount (a credit,
+   receiptlib.js). Here a credit is read-only — a retake or a re-read
+   would flip its sign or drop its links — and the receipt it returns
+   carries a "↩ Returned" badge.
    ============================================================ */
 import { h, Store, toast, fmtDate, money, fileToDataURL } from "./core.js";
 import { setCtx, commit, field, inp, ta, sel, seg, lineItems } from "./formkit.js";
@@ -28,6 +34,7 @@ import {
   RECEIPT_CATEGORIES, PAID_WITH, receiptCategory, receiptTotals, receiptAmount,
   itemsTotal, amountNum, applyReceiptRead,
 } from "./receiptcalc.js";
+import { isReturn, buildIndex, returnStatus, norm } from "./receiptlib.js";
 
 /* Receipts snapped a moment ago whose first AI read should fire as soon as
    the editor opens (the snap navigates there through the router, which
@@ -50,6 +57,7 @@ export async function receiptsPage(project, instId, ctx) {
   if (!instId) return receiptsList(project, ctx);
   const r = project.receipts.find((x) => x && x.id === instId);
   if (!r) { location.hash = listHash(project); return; }
+  if (isReturn(r)) return returnView(project, r, ctx);
   return receiptEditor(project, r, ctx);
 }
 
@@ -132,10 +140,13 @@ function receiptsList(project, { view, setChrome }) {
   const list = h("div", { class: "joblist" });
   body.append(list);
 
-  const hay = (r) => [r.vendor, r.notes, r.receiptNo, r.cardLast4, ...(r.items || []).map((it) => it && (it.desc + " " + (it.sku || "")))]
-    .filter(Boolean).join(" ").toLowerCase();
+  // every word somewhere on the receipt: "3/4 plywood" finds 3/4" CDX plywood 4x8
+  const hay = (r) => norm([r.vendor, r.notes, r.receiptNo, r.cardLast4, ...(r.items || []).map((it) => it && (it.desc + " " + (it.sku || "")))]
+    .filter(Boolean).join(" "));
+  const matches = (r) => norm(q).split(" ").filter(Boolean).every((w) => hay(r).includes(w));
+  const state = new Map(buildIndex([project]).map((e) => [e.id, e]));
   function paint() {
-    const rows = project.receipts.filter((r) => r && (!fCat || receiptCategory(r.category) === fCat) && (!q || hay(r).includes(q)))
+    const rows = project.receipts.filter((r) => r && (!fCat || receiptCategory(r.category) === fCat) && (!q || matches(r)))
       .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     if (!rows.length) {
       list.replaceChildren(h("div", { class: "empty" }, h("p", {}, "No receipts match.")));
@@ -146,15 +157,21 @@ function receiptsList(project, { view, setChrome }) {
       const n = (r.items || []).length;
       const sub = [fmtDate(r.date), cat.label, n ? `${n} item${n === 1 ? "" : "s"}` : "", r.cardLast4 ? "••" + r.cardLast4 : "", r.receiptNo ? "#" + r.receiptNo : ""]
         .filter(Boolean).join(" · ");
-      const needs = !receiptAmount(r) || !String(r.vendor || "").trim();
+      const ret = isReturn(r);
+      const needs = !ret && (!receiptAmount(r) || !String(r.vendor || "").trim());
+      const e = state.get(r.id);
+      const st = returnStatus(e);
+      const badges = [
+        ret ? h("span", { class: "badge disp-b" }, "↩ Return") : null,
+        st ? h("span", { class: "badge disp-b" }, (st === "all" ? "↩ All returned " : "↩ Partly returned ") + money(-e.returned)) : null,
+        needs ? h("span", { class: "badge", style: "background:var(--brand-tint);color:var(--brand-dark)" }, "Needs vendor / total") : null,
+        r.ai && !ret ? h("span", { class: "badge" }, "✨ AI read") : null].filter(Boolean);
       return h("a", { class: "card card--tap citem", href: editHash(project, r) },
-        thumbEl(r.photo, cat.icon),
+        thumbEl(r.photo, ret ? "↩" : cat.icon),
         h("div", { class: "jobrow__main" },
           h("div", { class: "jobrow__title" }, (String(r.vendor || "").trim() || "Unknown vendor") + " — " + money(receiptAmount(r))),
           h("div", { class: "jobrow__sub" }, sub),
-          needs || r.ai ? h("div", { class: "badgeline", style: "margin:4px 0 0" },
-            needs ? h("span", { class: "badge", style: "background:var(--brand-tint);color:var(--brand-dark)" }, "Needs vendor / total") : null,
-            r.ai ? h("span", { class: "badge" }, "✨ AI read") : null) : null),
+          badges.length ? h("div", { class: "badgeline", style: "margin:4px 0 0" }, ...badges) : null),
         h("div", { class: "jobrow__chev" }, "›"));
     }));
   }
@@ -174,6 +191,9 @@ function totalsCard(project) {
     .map((c) => h("div", { class: "trow" },
       h("span", {}, `${c.icon} ${c.label} `, h("span", { class: "subtle", style: "font-size:12px" }, `(${t.byCategory[c.value].count})`)),
       h("span", {}, money(t.byCategory[c.value].total))));
+  if (t.returns) rows.push(h("div", { class: "trow" },
+    h("span", {}, "↩ Returns (included above) ", h("span", { class: "subtle", style: "font-size:12px" }, `(${t.returns})`)),
+    h("span", {}, money(t.credits))));
   const b = budgetStatus(project);
   const vendors = t.vendors.slice(0, 3).map((v) => `${v.vendor} ${money(v.total)}`).join(" · ");
   return h("div", { class: "card" },
@@ -298,9 +318,15 @@ function receiptEditor(project, r, ctx) {
     h("div", { class: "sticky-actions" },
       h("button", { type: "button", class: "btn btn--primary", onclick: async () => { commit(); location.hash = listHash(project); } }, "✓ Done"),
       h("button", { type: "button", class: "btn btn--danger", style: "flex:0 0 auto;width:auto", onclick: async () => {
-        if (!confirm("Delete this receipt from the job?")) return;
-        project.receipts = project.receipts.filter((x) => x && x.id !== r.id);
-        tombstoneItems(project, [r.id]);   // so the delete sticks across devices (merge.js)
+        // returns logged against it go with it — a credit with no receipt
+        // would sit on the job total with nothing to explain it
+        const credits = (buildIndex([project]).find((e) => e.id === r.id) || { returnIds: [] }).returnIds;
+        if (!confirm(credits.length
+          ? `Delete this receipt and the ${credits.length === 1 ? "return" : credits.length + " returns"} logged against it from the job?`
+          : "Delete this receipt from the job?")) return;
+        const gone = new Set([r.id, ...credits]);
+        project.receipts = project.receipts.filter((x) => x && !gone.has(x.id));
+        tombstoneItems(project, [...gone]);   // so the delete sticks across devices (merge.js)
         await Store.put(project);
         toast("Receipt deleted.");
         location.hash = listHash(project);
@@ -313,6 +339,41 @@ function receiptEditor(project, r, ctx) {
     if (aiReady()) runRead();
     else toast("Saved. No signal — tap ✨ Read receipt when you're back online, or type it in.", 3500);
   }
+}
+
+/* ---------- a return (credit) — read-only here ----------
+   Logged and changed in the office app (Receipts). A retake or AI read on
+   a credit would rewrite its amount as a cost and drop its item links, and
+   the phone's decimal keypad has no minus key — so nothing here edits it. */
+function returnView(project, r, ctx) {
+  const { view, setChrome } = ctx;
+  setChrome("Return", listHash(project), "Return — " + (r.vendor || ""));
+  view.replaceChildren();
+  setCtx(project, null);
+  const orig = project.receipts.find((x) => x && x.id === r.returnOf && !isReturn(x));
+  const pages = [r.photo, ...(Array.isArray(r.extraPages) ? r.extraPages : [])].filter(Boolean);
+  const lines = (Array.isArray(r.items) ? r.items : []).filter(Boolean);
+  view.append(
+    h("h1", {}, "↩ Return"),
+    h("div", { class: "card" },
+      h("div", { style: "display:flex;justify-content:space-between;align-items:baseline;gap:10px" },
+        h("strong", {}, String(r.vendor || "").trim() || "Unknown vendor"),
+        h("span", { style: "font-size:22px;font-weight:800;color:var(--green)" }, money(receiptAmount(r)))),
+      h("p", { class: "subtle", style: "margin:6px 0 0" }, [fmtDate(r.date), r.receiptNo ? "Slip #" + r.receiptNo : ""].filter(Boolean).join(" · ")),
+      h("p", { style: "margin:8px 0 0" }, orig
+        ? h("a", { href: editHash(project, orig) }, `Return of ${String(orig.vendor || "").trim() || "a receipt"} — ${fmtDate(orig.date)} · ${money(receiptAmount(orig))} ›`)
+        : h("span", { class: "subtle" }, "The receipt it returns is no longer on this job.")),
+      r.notes ? h("p", { class: "subtle", style: "margin:8px 0 0" }, r.notes) : null),
+    pages.length
+      ? h("div", { class: "card", style: "padding:8px" }, ...pages.map((src) => isMediaMarker(src)
+          ? h("div", { class: "empty", style: "padding:18px" }, h("div", { class: "big" }, "☁️"), h("p", {}, "The slip photo loads the next time this device syncs online."))
+          : h("img", { src, alt: "Return slip", style: "display:block;max-width:100%;max-height:280px;margin:0 auto 6px;border-radius:8px;cursor:zoom-in", onclick: () => lightbox(src) })))
+      : null,
+    lines.length ? h("div", { class: "card" }, h("strong", {}, "Taken back"),
+      h("div", { class: "totals", style: "margin-top:6px" }, ...lines.map((it) => h("div", { class: "trow" },
+        h("span", {}, `${it.desc || "Item"}${amountNum(it.qty) ? " × " + amountNum(it.qty) : ""}`),
+        h("span", {}, money(amountNum(it.qty) * amountNum(it.price))))))) : null,
+    h("p", { class: "subtle", style: "font-size:13px" }, `Logged in the office${r.by ? " by " + r.by : ""}. Returns are changed or removed in the office app (Receipts), so the job total stays right.`));
 }
 
 /* ---------- full-screen photo (the returns-counter view) ----------

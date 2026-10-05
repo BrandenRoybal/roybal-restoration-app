@@ -66,7 +66,7 @@ test("receiptTotals: by category and vendor, assistant receipts included", () =>
   assert.deepEqual(t.vendors.map((v) => v.vendor), ["Spenard Builders", "Alaska Rent-All", "THE HOME DEPOT #1234", "FNSB Landfill", "Unknown vendor"]);
   assert.equal(t.vendors[2].total, 150.1, "store numbers and THE fold into one vendor");
   assert.equal(t.vendors[2].count, 2);
-  assert.deepEqual(receiptTotals({}), { total: 0, count: 0, byCategory: {
+  assert.deepEqual(receiptTotals({}), { total: 0, count: 0, returns: 0, credits: 0, byCategory: {
     materials: { total: 0, count: 0 }, equipment: { total: 0, count: 0 }, dump: { total: 0, count: 0 }, other: { total: 0, count: 0 } }, vendors: [] });
   // the budget flag (fincalc.js) sums the same array to the same figure —
   // amounts are stored as plain numbers/strings (the form's number inputs and
@@ -80,6 +80,37 @@ test("vendorKey folds store numbers, THE, and punctuation", () => {
   assert.equal(vendorKey("Home Depot"), "home depot");
   assert.equal(vendorKey("Sherwin-Williams"), "sherwin williams");
   assert.equal(vendorKey(""), "unknown");
+  // phase 2: the office's return windows are keyed by it, so the obvious
+  // spellings of one store must land on one key
+  assert.equal(vendorKey("THE HOME DEPOT 1234"), "home depot", "a store number with no #");
+  assert.equal(vendorKey(" The Home Depot"), "home depot", "a leading space no longer keeps THE");
+  assert.equal(vendorKey("Lowe's #2345"), "lowes");
+  assert.equal(vendorKey("Lowes"), "lowes");
+  assert.equal(vendorKey("Home Depot Pro"), "home depot pro", "a different store stays different");
+  assert.equal(vendorKey("84 Lumber"), "84 lumber", "leading digits are part of the name");
+  assert.equal(vendorKey("Highway 2 Hardware"), "highway 2 hardware");
+  assert.equal(vendorKey("#1234"), "unknown");
+});
+
+test("returns (kind: return, negative amount) net the totals and count apart", () => {
+  const p = { receipts: [
+    { id: "R1", vendor: "Home Depot", amount: "200.00", category: "materials" },
+    { id: "R2", vendor: "Spenard", amount: "100", category: "materials" },
+    { id: "C1", kind: "return", returnOf: "R1", vendor: "Home Depot", amount: "-45.97", category: "materials" },
+  ] };
+  const t = receiptTotals(p);
+  assert.equal(t.total, 254.03);
+  assert.equal(t.count, 2, "purchases only");
+  assert.equal(t.returns, 1);
+  assert.equal(t.credits, -45.97);
+  assert.equal(t.byCategory.materials.total, 254.03);
+  assert.equal(t.byCategory.materials.count, 2);
+  assert.equal(t.vendors.find((v) => v.vendor === "Home Depot").total, 154.03);
+  assert.equal(t.vendors.find((v) => v.vendor === "Home Depot").count, 1);
+  assert.equal(loggedCosts(p), 254.03, "the budget flag nets the credit the same way");
+  assert.equal(receiptTileLine(p), "$254.03 · 2 receipts · 1 return");
+  assert.equal(receiptTileLine({ receipts: [p.receipts[2]] }), "−$45.97 · 1 return", "a job holding only a credit still shows it");
+  assert.equal(formCount(p, "receipts"), 2, "the tile badge counts receipts, not returns");
 });
 
 test("tile line: money and count, empty when nothing is logged", () => {

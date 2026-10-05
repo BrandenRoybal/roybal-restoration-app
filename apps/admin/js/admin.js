@@ -43,14 +43,18 @@ function onStatus(s) {
   // refresh the current section as data arrives — but never clobber an open
   // contact page (its edit form would lose keystrokes to a background sync),
   // the campaigns composer (curation gone, and a rebuilt panel would hide a
-  // send loop still running in a detached node — duplicate-SMS bait), or an
-  // open lead-triage form
-  if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy() && !leadsBusy()) route();
+  // send loop still running in a detached node — duplicate-SMS bait), an
+  // open lead-triage form; or the Receipts tab (a return form mid-typing,
+  // or a receipt up full screen at a returns counter)
+  if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy() && !leadsBusy() &&
+      !location.hash.startsWith("#/receipts")) route();
 }
 
 /* ---------- routes (the CRM home's hash router — doc §13.1) ----------
    ''            → Today: KPIs + company texting
    #/jobs        → the all-jobs table
+   #/receipts    → every job's receipts: search, returns, return windows
+                   (receiptlibrary.js, loaded on first visit)
    #/contacts    → the contact directory
    #/campaigns   → CF-5 campaigns
    #/settings    → QB Time / QBO / Gmail / Magicplan connections
@@ -58,7 +62,7 @@ function onStatus(s) {
    #/help        → how the office admin fits together */
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
 const TABS = [
-  ["", "Today"], ["#/leads", "Leads"], ["#/jobs", "Jobs"], ["#/contacts", "Contacts"],
+  ["", "Today"], ["#/leads", "Leads"], ["#/jobs", "Jobs"], ["#/receipts", "Receipts"], ["#/contacts", "Contacts"],
   ["#/campaigns", "Campaigns"], ["#/analytics", "Analytics"], ["#/settings", "⚙ Settings"],
 ];
 function sectionOf() {
@@ -98,6 +102,7 @@ function route() {
   if (cid) return renderContactPage(view, cid);
   if (hs.startsWith("#/leads")) return renderLeadsTab();
   if (hs.startsWith("#/jobs")) return renderJobs();
+  if (hs.startsWith("#/receipts")) return renderReceiptsTab();
   if (hs.startsWith("#/contacts")) return renderContactsTab();
   if (hs.startsWith("#/campaigns")) return renderCampaignsTab();
   if (hs.startsWith("#/analytics")) { clear(view).append(analyticsTab()); return; }
@@ -120,7 +125,8 @@ function renderHelp() {
         h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number) and ",
         h("strong", {}, "📧 Job email waiting"), " (the brief's number, now visible — mail handled in Gmail clears itself within 15 minutes); ", h("strong", {}, "🆕 Leads"),
         " — the inbox for new business; ", h("strong", {}, "Jobs"),
-        " — every field job; ", h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; ",
+        " — every field job; ", h("strong", {}, "🧾 Receipts"), " — every job's receipts, searchable down to the item, with returns and store return windows; ",
+        h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; ",
         h("strong", {}, "📊 Analytics"), "; and ",
         h("strong", {}, "⚙ Settings"), " — the ", h("strong", {}, "QuickBooks Time"), " (crew hours), ",
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
@@ -136,6 +142,18 @@ function renderHelp() {
         " (the same notes the board chip shows — jot “left a voicemail” here and the board picks it up), or ", h("strong", {}, "✕ Lost / spam"),
         " (picks a reason and files it in the board's 🗄 Archive). The first action on a lead stamps its response time. Every change lands on the same board card the crew sees — the board picks it up on its next sync instead of overwriting it."),
       p("Won stays on the board: open the job there and use the 🎯 Lead section to mark it Won when the work is booked.")),
+    sec("🧾 Receipts — every receipt, every job",
+      p("Every receipt a crew snaps from a job's 🧾 Receipts tile lands here once their phone syncs. Search finds any word on any receipt: an item (",
+        h("strong", {}, "3/4 plywood"), ", ", h("strong", {}, "Kilz"), "), a store, a job's address or claim number, a receipt or card number, or a dollar amount. Filter by store, job and date, or show only returns, or receipts that still need a total. Click 🧾 on a row, or ",
+        h("strong", {}, "Show at the counter"), " on a receipt, to put the photo full screen; click the photo to zoom."),
+      p(h("strong", {}, "Returns: "), "open the receipt and click ", h("strong", {}, "↩ Log a return"),
+        ". Enter how many of each item went back (items from another receipt from the same store on the same job can go on the same return), the refund from the slip, and snap or upload the slip, or pick a slip a crew member already snapped as a receipt. The refund comes off the job's receipts total everywhere: the job tile, its costs, the morning brief. The original receipt is never changed. ",
+        h("strong", {}, "Change"), " or ", h("strong", {}, "Delete"), " a return from the receipt's page; crews see returns in Field Forms but can't change them."),
+      p(h("strong", {}, "Return windows: "), "set each store's window once under ", h("strong", {}, "Return windows"),
+        " (Home Depot 90 days, and so on; a store's name covers its branches). When materials from a store ($50 or more on the receipt) reach the last two weeks of the window (the last half of a window under four weeks) with nothing returned, Receipts and Today show ",
+        h("strong", {}, "↩ Return windows closing"), " for that job and store. The app can't know what got used, so it asks: take anything left over back and log the return, or click ",
+        h("strong", {}, "Nothing left over"), " and that reminder goes away for good."),
+      p("At a returns counter with only a phone, the job's 🧾 Receipts tile in Field Forms shows the same photos.")),
     sec("👤 Contacts — the customer directory",
       p("Every customer, adjuster, and lead the business has ever touched, deduplicated automatically across the website, phone line, AI chat, texting, email, and field jobs. Search by name, phone, or email, filter by role with the chips (customers, adjusters, subs…), or click a recent contact — a green ", h("strong", {}, "marketing ✓"), " shows who's opted in to outreach."),
       p("A contact's page shows their identity (edit in place; the ", h("strong", {}, "marketing opt-in"), " checkbox lives here), every job on both the field and board sides, and the whole conversation — texts, emails, portal messages, and phone calls — in one timeline."),
@@ -269,7 +287,11 @@ async function renderToday() {
         kpi(s.estimatesWaiting, "Estimates out, no answer > 5d", s.estimatesWaiting > 0, toLeads));
       crmRow.hidden = false;
     });
-    body.append(messagesPanel(), emailsPanel());
+    // ↩ "Home Depot on 1192 Bemis Ct — return window closes in 10 days"
+    // (receipts library; only shows when a window is closing)
+    const returnsSlot = h("div");
+    body.append(returnsSlot, messagesPanel(), emailsPanel());
+    receiptsModule().then((m) => m.fillReturnsToday(returnsSlot, projects)).catch(() => {});
   }
 }
 
@@ -322,6 +344,23 @@ async function renderJobs() {
   paintTable();
 }
 
+/* ---------- 🧾 Receipts (#/receipts) — receiptlibrary.js, loaded on first
+   visit (a failed load is a fresh deploy meeting a stale cached page) ---------- */
+function receiptsModule() { return import("./receiptlibrary.js"); }
+function renderReceiptsTab() {
+  receiptsModule().then((m) => {
+    if (!location.hash.startsWith("#/receipts")) return;
+    m.renderReceipts(view).catch((e) => {
+      clear(view).append(h("div", { class: "empty" }, h("p", {}, "Couldn't open Receipts: " + String(e && e.message || e))));
+    });
+  }).catch(() => {
+    if (!location.hash.startsWith("#/receipts")) return;
+    clear(view).append(h("div", { class: "empty" },
+      h("p", {}, "The office app just updated. Reload to open Receipts."),
+      h("button", { class: "btn btn--primary btn--sm", style: "margin:8px auto 0", onclick: () => location.reload() }, "Reload")));
+  });
+}
+
 /* ---------- Leads (#/leads) — the inbox lives in leads.js ---------- */
 function renderLeadsTab() {
   clear(view).append(leadsTab());
@@ -352,6 +391,9 @@ function renderSettings() {
     h("p", { class: "muted", style: "font-size:13px;margin:0 0 4px" },
       "Set-once connections. Each panel shows its status; reconnect from here if a password change breaks one."),
     qbPanel(), qboPanel(), gmailPanel(), magicplanPanel());
+  const returnsSlot = h("div");
+  body.append(returnsSlot);
+  receiptsModule().then((m) => m.fillSettingsCard(returnsSlot)).catch(() => {});
 }
 
 boot();

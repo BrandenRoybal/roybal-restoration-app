@@ -167,6 +167,27 @@ function equipmentSizingSummary(p) {
    pass-throughs and the assistant can cite them. */
 function receiptsSummary(p) {
   const out = [];
+  // Returns the office logged (kind "return", plan phase 2) fold into the
+  // receipt they return — one net entry, so a draft never bills the full
+  // purchase with the credit cut off by the cap below, nor a negative
+  // pass-through on its own. A return whose receipt is gone leads the list.
+  const jobReceipts = arr(p.receipts).filter(Boolean);
+  const purchaseIds = new Set(jobReceipts.filter((r) => r.kind !== "return").map((r) => r.id));
+  const creditsOf = new Map();
+  for (const r of jobReceipts) {
+    if (r.kind !== "return") continue;
+    if (purchaseIds.has(r.returnOf)) {
+      if (!creditsOf.has(r.returnOf)) creditsOf.set(r.returnOf, []);
+      creditsOf.get(r.returnOf).push(r);
+    } else {
+      out.push({
+        attachedTo: "job receipts", label: "return credit", docType: "return",
+        vendor: r.vendor || "", date: r.date || "",
+        ...(r.amount != null && r.amount !== "" ? { total: Number(r.amount) } : {}),
+        summary: String(r.notes || "").slice(0, 400),
+      });
+    }
+  }
   for (const [key, docLabel] of [["invoices", "invoice"], ["reconEstimates", "estimate"]]) {
     for (const inv of arr(p[key])) {
       for (const att of arr(inv.attachments)) {
@@ -186,17 +207,24 @@ function receiptsSummary(p) {
       }
     }
   }
-  // job-level receipts logged by the office assistant (receiptLog chip)
-  for (const r of arr(p.receipts)) {
-    if (!r) continue;
+  // job receipts: the 🧾 Receipts tile and the office assistant's receiptLog chip
+  for (const r of jobReceipts) {
+    if (r.kind === "return") continue;
+    const credits = creditsOf.get(r.id) || [];
+    const returned = credits.reduce((a, c) => a + Math.abs(Number(c.amount) || 0), 0);
+    const hasTotal = r.amount != null && r.amount !== "";
+    const notes = String(r.notes || "");
     out.push({
       attachedTo: "job receipts",
       label: r.category || "receipt",
       docType: "receipt",
       vendor: r.vendor || "",
       date: r.date || "",
-      ...(r.amount != null && r.amount !== "" ? { total: Number(r.amount) } : {}),
-      summary: String(r.notes || "").slice(0, 400),
+      ...(hasTotal ? { total: returned ? Math.round((Number(r.amount) - returned) * 100) / 100 : Number(r.amount) } : {}),
+      ...(returned ? { returned: Math.round(returned * 100) / 100 } : {}),
+      summary: (returned
+        ? `${notes ? notes + " — " : ""}total is after $${returned.toFixed(2)} returned (${credits.map((c) => c.date).filter(Boolean).join(", ") || "date not recorded"})`
+        : notes).slice(0, 400),
     });
   }
   return out.length ? out.slice(0, 25) : null;
