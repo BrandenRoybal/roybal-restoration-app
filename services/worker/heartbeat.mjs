@@ -1,9 +1,12 @@
 /* The 30 s check-in, and the dead-letter text.
 
-   beat(): worker_heartbeat() upserts this worker's row, extends every lease
-   it holds, and records SUPABASE_URL as app_settings edge.base_url — which is
-   how the database's liveness check (pg_cron → worker_liveness_check) knows
-   where roybal-webhooks/alert lives for THIS project. The dead-WORKER text is
+   beat(): worker_heartbeat() upserts this worker's row, extends the leases of
+   the rows this process is working RIGHT NOW (ctx.active — never every row
+   stamped with this worker id: a crashed predecessor on the same machine, or
+   a row whose settle call failed, must expire into a retry), and records
+   SUPABASE_URL as app_settings edge.base_url — which is how the database's
+   liveness check (pg_cron → worker_liveness_check) knows where
+   roybal-webhooks/alert lives for THIS project. The dead-WORKER text is
    therefore the database's to send, never this process's: a process that is
    down cannot report itself.
 
@@ -11,14 +14,23 @@
    the last watermark → one text to OWNER_CELL through roybal-notify (kind
    brief: owner-directed, quiet-hours exempt), at most once per 24 h; the
    watermark moves only when a text goes out, so nothing is swallowed by the
-   guard. State lives in app_settings worker.deadletter_alert so a restart
-   does not re-text. */
+   guard. With no watermark yet the window starts a day before boot, so rows
+   that died while the worker was down or restarting are still counted.
+   State lives in app_settings worker.deadletter_alert so a restart does not
+   re-text. */
 
 import { errText } from "./log.mjs";
 
 const DAY_MS = 24 * 3600 * 1000;
 
-export async function beat(ctx, state) {
+const activeIds = (set) => {
+  const ids = set ? [...set] : [];
+  return ids.length ? ids : null;
+};
+
+/** One heartbeat. `extend: false` (the last beat before exit) renews no lease,
+    so whatever this process is abandoning expires at its own lease_until. */
+export async function beat(ctx, state, { extend = true } = {}) {
   const { cfg, supa } = ctx;
   const [queueDepth, leased, outboxPending] = await Promise.all([
     supa.count("jobs_queue", "status=in.(queued,failed)"),
@@ -39,9 +51,12 @@ export async function beat(ctx, state) {
       channels: cfg.channels,
       kinds: cfg.queueKinds,
       email: cfg.emailEnabled,
+      active: { jobs: ctx.active?.jobs?.size ?? 0, outbox: ctx.active?.outbox?.size ?? 0 },
     },
     p_edge_base_url: cfg.supabaseUrl,
     p_lease_seconds: Math.max(cfg.queueLeaseS, cfg.outboxLeaseS),
+    p_active_jobs: extend ? activeIds(ctx.active?.jobs) : null,
+    p_active_outbox: extend ? activeIds(ctx.active?.outbox) : null,
   });
   state.lastBeatAt = Date.now();
   state.lastBeatError = null;
@@ -64,7 +79,7 @@ export async function deadLetterCheck(ctx, state) {
 
   const rows = await supa.select("app_settings", "select=key,value&key=eq.worker.deadletter_alert");
   const st = rows[0]?.value ?? {};
-  const since = st.watermark || state.bootIso;
+  const since = st.watermark || new Date(Date.parse(state.bootIso) - DAY_MS).toISOString();
   const [deadOutbox, deadJobs] = await Promise.all([
     supa.count("outbox", `status=eq.dead&updated_at=gt.${encodeURIComponent(since)}`),
     supa.count("jobs_queue", `status=eq.dead&finished_at=gt.${encodeURIComponent(since)}`),

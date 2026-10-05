@@ -12,9 +12,15 @@
    not checking in is the database's (worker_liveness_check).
 
    SIGTERM: stop claiming, let in-flight work finish (up to SHUTDOWN_GRACE_MS,
-   under fly.toml's kill_timeout), one last heartbeat, exit 0. A send still
-   running when the grace runs out keeps its lease; the sweeper turns it into
-   a retry that adopts the provider record if the send actually completed. */
+   under fly.toml's kill_timeout), one last heartbeat that renews NO lease,
+   exit 0. A send still running when the grace runs out keeps its lease until
+   it expires on its own; the sweeper turns it into a retry that adopts the
+   provider record if the send actually completed.
+
+   ctx.active (two Sets of ids) is what the heartbeat is allowed to extend:
+   the rows the lanes are working this instant, never every row this worker
+   id holds. A predecessor on the same machine, or a row whose settle call
+   failed, is not in it, so its lease expires and the sweeper retries it. */
 
 import http from "node:http";
 import { loadConfig } from "./config.mjs";
@@ -42,6 +48,7 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
     cfg, supa, log, fetch: fetchImpl,
     adapters: {},
     handlers,
+    active: { jobs: new Set(), outbox: new Set() },
     stopping: () => state.stopping,
   };
   ctx.adapters.sms = smsAdapter(ctx);
@@ -49,6 +56,17 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
 
   const loops = [];
   let beatTimer = null;
+
+  // One tick at a time: the next is scheduled only after this one finishes,
+  // so a slow database cannot stack ticks (and the dead-letter check cannot
+  // run twice over the same rows).
+  function scheduleBeat() {
+    if (state.stopping) return;
+    beatTimer = setTimeout(async () => {
+      await heartbeatTick(ctx, state);
+      scheduleBeat();
+    }, cfg.heartbeatMs);
+  }
 
   async function runLoop(name, once) {
     const lane = state.lanes[name];
@@ -81,6 +99,7 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
         last_heartbeat_ago_s: state.lastBeatAt ? Math.round((Date.now() - state.lastBeatAt) / 1000) : null,
         last_heartbeat_error: state.lastBeatError,
         depth: state.depth,
+        active: { jobs: ctx.active.jobs.size, outbox: ctx.active.outbox.size },
         lanes: state.lanes,
         channels: cfg.channels,
         kinds: cfg.queueKinds,
@@ -102,7 +121,7 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
     if (!cfg.emailEnabled) log("email.disabled", { reason: "GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET not set; email rows wait as pending" });
     if (!cfg.ownerCell) log("deadletter.disabled", { reason: "OWNER_CELL not set" });
     await heartbeatTick(ctx, state);
-    beatTimer = setInterval(() => { heartbeatTick(ctx, state); }, cfg.heartbeatMs);
+    scheduleBeat();
     loops.push(runLoop("queue", runQueueOnce));
     loops.push(runLoop("outbox", runOutboxOnce));
   }
@@ -111,10 +130,15 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
     if (state.stopping) return;
     state.stopping = true;
     log("worker.stopping", { reason });
-    if (beatTimer) clearInterval(beatTimer);
+    if (beatTimer) clearTimeout(beatTimer);
     const deadline = sleep(cfg.shutdownGraceMs).then(() => "timeout");
     const outcome = await Promise.race([Promise.allSettled(loops).then(() => "drained"), deadline]);
-    try { await beat(ctx, state); } catch (e) { log("heartbeat.failed", { error: errText(e), at: "stop" }); }
+    // The last word: counts only, no lease renewed — whatever is still in
+    // ctx.active is being abandoned and must expire into a retry.
+    try { await beat(ctx, state, { extend: false }); } catch (e) { log("heartbeat.failed", { error: errText(e), at: "stop" }); }
+    if (ctx.active.jobs.size || ctx.active.outbox.size) {
+      log("worker.abandoned", { jobs: ctx.active.jobs.size, outbox: ctx.active.outbox.size, note: "leases expire into retries" });
+    }
     await new Promise((resolve) => server.close(() => resolve()));
     log("worker.stopped", { outcome });
   }

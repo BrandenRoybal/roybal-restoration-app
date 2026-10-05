@@ -1,5 +1,6 @@
 -- ============================================================================
--- Assertions for 0016_worker_spine.sql.
+-- Assertions for 0016_worker_spine.sql and 0017_worker_leases.sql (the
+-- heartbeat extends only the leases it names; the alarm re-posts every 15 min).
 --
 -- Run by the DB replay workflow after the census, against the database
 -- `supabase db reset` rebuilt from supabase/migrations/. Every block raises on
@@ -178,8 +179,29 @@ begin
   end if;
   before := c.lease_until;
 
-  -- the heartbeat extends the lease and records where the edge functions live
+  -- a heartbeat that does not name the job (nothing in flight, or a successor
+  -- process on the same machine) leaves its lease alone — that lease must be
+  -- allowed to expire into a retry (0017)
   perform public.worker_heartbeat('w-test-1', 'test', 0, 1, 0, '{"pid": 1}'::jsonb, 'https://example.supabase.co/', 600);
+  if (select lease_until from public.jobs_queue where id = j.id) <> before then
+    raise exception 'worker_heartbeat extended a lease it was not told about';
+  end if;
+  perform public.worker_heartbeat('w-test-1', 'test', 0, 1, 0, '{"pid": 1}'::jsonb, 'https://example.supabase.co/', 600, array[]::uuid[], null);
+  if (select lease_until from public.jobs_queue where id = j.id) <> before then
+    raise exception 'worker_heartbeat extended a lease with an empty active list';
+  end if;
+  perform public.worker_heartbeat('w-test-1', 'test', 0, 1, 0, '{"pid": 1}'::jsonb, 'https://example.supabase.co/', 600, array[gen_random_uuid()], null);
+  if (select lease_until from public.jobs_queue where id = j.id) <> before then
+    raise exception 'worker_heartbeat extended a lease outside its active list';
+  end if;
+  -- another worker naming our job cannot extend it either
+  perform public.worker_heartbeat('w-other', 'test', 0, 0, 0, '{}'::jsonb, null, 600, array[j.id], null);
+  if (select lease_until from public.jobs_queue where id = j.id) <> before then
+    raise exception 'another worker extended a lease it does not hold';
+  end if;
+
+  -- the heartbeat extends the lease it names, and records where the edge functions live
+  perform public.worker_heartbeat('w-test-1', 'test', 0, 1, 0, '{"pid": 1}'::jsonb, 'https://example.supabase.co/', 600, array[j.id], null);
   if (select lease_until from public.jobs_queue where id = j.id) <= before then
     raise exception 'worker_heartbeat did not extend the lease';
   end if;
@@ -450,15 +472,22 @@ begin
   s := public.worker_liveness_check(true);
   if s <> 'stale-would-alert' then raise exception 'liveness 11 minutes after the last heartbeat: %', s; end if;
 
+  -- a POST in the last 15 minutes holds the next one; after that the database
+  -- knocks again (the edge function owns the once-per-24-h text) — 0017
   insert into public.app_settings (key, value)
-  values ('worker.liveness_alert', jsonb_build_object('alerted_at', now() - interval '1 hour'));
+  values ('worker.liveness_alert', jsonb_build_object('alerted_at', now() - interval '5 minutes', 'first_stale_at', now() - interval '16 minutes'));
   s := public.worker_liveness_check(true);
-  if s <> 'stale-guarded' then raise exception 'liveness inside the 24 h guard: %', s; end if;
+  if s <> 'stale-guarded' then raise exception 'liveness 5 minutes after a POST: %', s; end if;
 
-  update public.app_settings set value = jsonb_build_object('alerted_at', now() - interval '25 hours')
+  update public.app_settings set value = jsonb_build_object('alerted_at', now() - interval '16 minutes', 'first_stale_at', now() - interval '27 minutes')
    where key = 'worker.liveness_alert';
   s := public.worker_liveness_check(true);
-  if s <> 'stale-would-alert' then raise exception 'liveness after the guard lapsed: %', s; end if;
+  if s <> 'stale-would-alert' then raise exception 'liveness 16 minutes after a POST: %', s; end if;
+
+  update public.app_settings set value = jsonb_build_object('alerted_at', now() - interval '1 hour')
+   where key = 'worker.liveness_alert';
+  s := public.worker_liveness_check(true);
+  if s <> 'stale-would-alert' then raise exception 'liveness an hour after a POST (the old 24 h guard must be gone): %', s; end if;
 
   -- a fresh heartbeat clears the alarm state and records the recovery
   perform public.worker_heartbeat('w-live', 'test', 0, 0, 0, '{}'::jsonb);

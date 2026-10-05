@@ -6,9 +6,19 @@
    op_execute as the job's own principal (the approver), exactly as the SQL
    runtime path does. A proposal whose executor fails is NOT a failed job: the
    proposal records its failure and a re-run would return the same row, so the
-   job is done with that outcome in its result. */
+   job is done with that outcome in its result.
+
+   Only the kinds in QUEUE_KINDS are ever claimed; any other kind waits as
+   `queued` until a worker that knows it is deployed. A kind that IS listed
+   but has no handler here is dead on arrival, never retried.
+
+   ctx.active.jobs holds the job id while it runs; the heartbeat extends only
+   that lease. Add on entry, delete on every exit. */
 
 import { errText } from "../log.mjs";
+
+const SETTLE_RETRY_MS = [500, 1500, 3000];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class JobError extends Error {
   constructor(message, { permanent = false } = {}) {
@@ -32,41 +42,55 @@ export const handlers = {
 };
 
 export async function finishJob(ctx, job, { ok, result = null, error = null, permanent = false }) {
-  try {
-    const row = await ctx.supa.rpc("finish_job", {
-      p_job_id: job.id,
-      p_worker_id: ctx.cfg.workerId,
-      p_ok: ok,
-      p_error: error ? String(error).slice(0, 2000) : null,
-      p_result: result,
-      p_permanent: permanent,
-    });
-    ctx.log(ok ? "job.done" : "job.failed", {
-      job_id: job.id, kind: job.kind, attempts: job.attempts, status: row?.status ?? null,
-      ...(error ? { error: String(error).slice(0, 300) } : {}),
-    });
-    return row;
-  } catch (e) {
-    // 55000: the sweeper took the lease while we worked — another worker (or
-    // a retry) owns the outcome now. Anything else is an outage; the lease
-    // will expire into a retry on its own.
-    ctx.log(e?.code === "55000" ? "job.lease_lost" : "job.finish_failed", {
-      job_id: job.id, kind: job.kind, error: errText(e),
-    });
-    return null;
+  const args = {
+    p_job_id: job.id,
+    p_worker_id: ctx.cfg.workerId,
+    p_ok: ok,
+    p_error: error ? String(error).slice(0, 2000) : null,
+    p_result: result,
+    p_permanent: permanent,
+  };
+  const delays = ctx.settleRetryMs ?? SETTLE_RETRY_MS;
+  for (let i = 0; ; i++) {
+    try {
+      const row = await ctx.supa.rpc("finish_job", args);
+      ctx.log(ok ? "job.done" : "job.failed", {
+        job_id: job.id, kind: job.kind, attempts: job.attempts, status: row?.status ?? null,
+        ...(error ? { error: String(error).slice(0, 300) } : {}),
+      });
+      return row;
+    } catch (e) {
+      // 55000: the sweeper took the lease while we worked — another worker (or
+      // a retry) owns the outcome now. Anything else is an outage: retry the
+      // settle a few times, then let the lease expire into a retry on its own.
+      if (e?.code !== "55000" && i < delays.length) {
+        ctx.log("job.finish_retry", { job_id: job.id, try: i + 1, error: errText(e) });
+        await sleep(delays[i]);
+        continue;
+      }
+      ctx.log(e?.code === "55000" ? "job.lease_lost" : "job.finish_failed", {
+        job_id: job.id, kind: job.kind, error: errText(e),
+      });
+      return null;
+    }
   }
 }
 
 export async function runJob(ctx, job) {
-  const handler = (ctx.handlers ?? handlers)[job.kind];
-  if (!handler) {
-    return finishJob(ctx, job, { ok: false, error: `no handler for kind ${job.kind}`, permanent: true });
-  }
+  ctx.active?.jobs?.add(job.id);
   try {
-    const result = await handler(ctx, job);
-    return await finishJob(ctx, job, { ok: true, result: result ?? {} });
-  } catch (e) {
-    return finishJob(ctx, job, { ok: false, error: errText(e, 2000), permanent: e?.permanent === true });
+    const handler = (ctx.handlers ?? handlers)[job.kind];
+    if (!handler) {
+      return await finishJob(ctx, job, { ok: false, error: `no handler for kind ${job.kind}`, permanent: true });
+    }
+    try {
+      const result = await handler(ctx, job);
+      return await finishJob(ctx, job, { ok: true, result: result ?? {} });
+    } catch (e) {
+      return await finishJob(ctx, job, { ok: false, error: errText(e, 2000), permanent: e?.permanent === true });
+    }
+  } finally {
+    ctx.active?.jobs?.delete(job.id);
   }
 }
 

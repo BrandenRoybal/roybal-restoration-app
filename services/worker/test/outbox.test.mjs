@@ -16,14 +16,15 @@ function fakeAdapter({ prior = null, send = async () => ({ providerId: "P1", pro
 }
 
 const ctxWith = (adapter, supa = fakeSupa(), cfg = testConfig()) =>
-  ({ cfg, supa, log: recordingLog(), adapters: { sms: adapter }, stopping: () => false });
+  ({ cfg, supa, log: recordingLog(), adapters: { sms: adapter }, stopping: () => false,
+     active: { jobs: new Set(), outbox: new Set() }, settleRetryMs: [5, 5] });
 
-test("first attempt: send, then outbox_sent as agent:outbox, plus an integration run", async () => {
+test("first attempt: adopt lookup (finds nothing), send, then outbox_sent as agent:outbox, plus an integration run", async () => {
   const adapter = fakeAdapter();
   const ctx = ctxWith(adapter);
   const row = outboxRow({ attempts: 1 });
   await deliverOne(ctx, row);
-  assert.equal(adapter.calls.findPrior, 0, "no adopt lookup on a first attempt");
+  assert.equal(adapter.calls.findPrior, 1, "every attempt checks for an earlier provider record first");
   assert.equal(adapter.calls.send, 1);
   const sent = ctx.supa.rpcs("outbox_sent");
   assert.equal(sent.length, 1);
@@ -87,21 +88,63 @@ test("a plain Error from an adapter is a retry, never permanent", async () => {
   assert.equal(ctx.supa.rpcs("outbox_failed")[0].p_permanent, false);
 });
 
-test("outbox_sent failing after a real send is NOT reported as a failure (the retry adopts)", async () => {
+test("outbox_sent failing after a real send is retried, then NOT reported as a failure (the retry adopts)", async () => {
   const adapter = fakeAdapter();
   const supa = fakeSupa({ rpc: { outbox_sent: () => { const e = new Error("db down"); e.code = null; throw e; } } });
   const ctx = ctxWith(adapter, supa);
   await deliverOne(ctx, outboxRow());
   assert.equal(adapter.calls.send, 1);
+  assert.equal(supa.rpcs("outbox_sent").length, 3, "one call plus one retry per configured delay");
   assert.equal(supa.rpcs("outbox_failed").length, 0, "no outbox_failed: the lease expires into a retry");
+  assert.ok(ctx.log.events().includes("outbox.sent_report_retry"));
   assert.ok(ctx.log.events().includes("outbox.sent_report_failed"));
+  assert.equal(ctx.active.outbox.size, 0, "the row left the active set, so the heartbeat stops renewing its lease");
 });
 
-test("a lost lease (55000) on outbox_sent is logged as such", async () => {
+test("a settle that succeeds on the second try is recorded once and not reported failed", async () => {
+  let n = 0;
+  const supa = fakeSupa({ rpc: { outbox_sent: () => { n += 1; if (n === 1) throw new Error("blip"); return { status: "sent" }; } } });
+  const ctx = ctxWith(fakeAdapter(), supa);
+  await deliverOne(ctx, outboxRow());
+  assert.equal(n, 2);
+  assert.ok(ctx.log.events().includes("outbox.sent"));
+  assert.ok(!ctx.log.events().includes("outbox.sent_report_failed"));
+});
+
+test("a lost lease (55000) on outbox_sent is logged as such and never retried", async () => {
   const supa = fakeSupa({ rpc: { outbox_sent: () => { const e = new Error("not sending for w-test"); e.code = "55000"; throw e; } } });
   const ctx = ctxWith(fakeAdapter(), supa);
   await deliverOne(ctx, outboxRow());
+  assert.equal(supa.rpcs("outbox_sent").length, 1);
   assert.ok(ctx.log.events().includes("outbox.lease_lost_after_send"));
+});
+
+test("the row is in ctx.active.outbox while the adapter works and gone afterwards, on every path", async () => {
+  const row = outboxRow();
+  let seenDuring = null;
+  const adapter = fakeAdapter({ send: async () => { seenDuring = ctx.active.outbox.has(row.id); return { providerId: "P", providerStatus: "sent" }; } });
+  const ctx = ctxWith(adapter);
+  await deliverOne(ctx, row);
+  assert.equal(seenDuring, true);
+  assert.equal(ctx.active.outbox.size, 0);
+  const failing = fakeAdapter({ send: async () => { throw new DeliveryError("nope", { permanent: true }); } });
+  const ctx2 = ctxWith(failing);
+  await deliverOne(ctx2, row);
+  assert.equal(ctx2.active.outbox.size, 0);
+  const ctx3 = ctxWith(fakeAdapter());
+  await deliverOne(ctx3, outboxRow({ channel: "qbo" }));
+  assert.equal(ctx3.active.outbox.size, 0);
+});
+
+test("a provider error carrying the customer's number is redacted in the log line but kept whole in the database", async () => {
+  const msg = "send_failed: To number: +19075551234, is not a mobile number";
+  const adapter = fakeAdapter({ send: async () => { throw new DeliveryError(msg, { permanent: true }); } });
+  const ctx = ctxWith(adapter);
+  await deliverOne(ctx, outboxRow());
+  const line = ctx.log.lines.find((l) => l.event === "outbox.failed");
+  assert.doesNotMatch(line.error, /9075551234/);
+  assert.match(line.error, /\[number\]/);
+  assert.equal(ctx.supa.rpcs("outbox_failed")[0].p_error, msg);
 });
 
 test("a channel with no adapter is failed as a retry, not dropped", async () => {

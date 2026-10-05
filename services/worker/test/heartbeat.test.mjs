@@ -12,8 +12,12 @@ test("beat reports depth, leases and the edge base url, and extends the longer l
     rpc: { worker_heartbeat: { worker_id: "w-test" } },
   });
   const state = freshState();
-  await beat({ cfg, supa, log: recordingLog() }, state);
+  const active = { jobs: new Set(["44444444-4444-4444-4444-444444444444"]), outbox: new Set(["11111111-1111-1111-1111-111111111111", "11111111-1111-1111-1111-111111111112"]) };
+  await beat({ cfg, supa, log: recordingLog(), active }, state);
   const hb = supa.rpcs("worker_heartbeat")[0];
+  assert.deepEqual(hb.p_active_jobs, ["44444444-4444-4444-4444-444444444444"], "only the job being run is extended");
+  assert.deepEqual(hb.p_active_outbox, ["11111111-1111-1111-1111-111111111111", "11111111-1111-1111-1111-111111111112"]);
+  assert.deepEqual(hb.p_meta.active, { jobs: 1, outbox: 2 });
   assert.equal(hb.p_worker_id, "w-test");
   assert.equal(hb.p_version, "test");
   assert.equal(hb.p_queue_depth, 7);
@@ -29,6 +33,22 @@ test("beat reports depth, leases and the edge base url, and extends the longer l
   assert.match(leasedQuery, /locked_by=eq\.w-test/);
 });
 
+test("with nothing in flight the heartbeat names no lease; the final beat (extend: false) names none even mid-work", async () => {
+  const supa = fakeSupa({ rpc: { worker_heartbeat: { worker_id: "w-test" } } });
+  await beat({ cfg: testConfig(), supa, log: recordingLog(), active: { jobs: new Set(), outbox: new Set() } }, freshState());
+  let hb = supa.rpcs("worker_heartbeat")[0];
+  assert.equal(hb.p_active_jobs, null);
+  assert.equal(hb.p_active_outbox, null);
+  const busy = { jobs: new Set(["44444444-4444-4444-4444-444444444444"]), outbox: new Set(["11111111-1111-1111-1111-111111111111"]) };
+  await beat({ cfg: testConfig(), supa, log: recordingLog(), active: busy }, freshState(), { extend: false });
+  hb = supa.rpcs("worker_heartbeat")[1];
+  assert.equal(hb.p_active_jobs, null, "a stopping worker renews nothing: abandoned rows must expire into retries");
+  assert.equal(hb.p_active_outbox, null);
+  // a context without active sets (older callers) still beats
+  await beat({ cfg: testConfig(), supa, log: recordingLog() }, freshState());
+  assert.equal(supa.rpcs("worker_heartbeat")[2].p_active_outbox, null);
+});
+
 test("the dead-letter check is off without OWNER_CELL and quiet when nothing is dead", async () => {
   const supa = fakeSupa();
   const r1 = await deadLetterCheck({ cfg: testConfig({ ownerCell: "" }), supa, log: recordingLog() }, freshState());
@@ -38,7 +58,7 @@ test("the dead-letter check is off without OWNER_CELL and quiet when nothing is 
   assert.equal(r2.texted, false);
   assert.equal(r2.reason, "nothing dead");
   const since = supa.calls.count[0].query;
-  assert.match(since, /status=eq\.dead&updated_at=gt\.2026-10-05T18%3A00%3A00\.000Z/, "counts from boot when there is no watermark");
+  assert.match(since, /status=eq\.dead&updated_at=gt\.2026-10-04T18%3A00%3A00\.000Z/, "counts from a day before boot when there is no watermark, so rows that died during a restart are not missed");
 });
 
 test("dead rows text the owner once through roybal-notify (kind brief) and move the watermark", async () => {

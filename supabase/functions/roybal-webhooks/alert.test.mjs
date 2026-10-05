@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideAlert, alertText, safeEqual, parseAlertBody, STALE_MS, GUARD_MS } from "./alert.ts";
+import { decideAlert, alertText, safeEqual, parseAlertBody, projectRef, STALE_MS, GUARD_MS } from "./alert.ts";
 
 const T0 = Date.parse("2026-10-05T19:00:00Z");
 const iso = (ms) => new Date(ms).toISOString();
@@ -33,7 +33,18 @@ test("the text names the gap in Alaska time, fits an SMS, and says what to run",
   assert.match(t, /^Roybal worker is down: no check-in since Oct 5, 10:46 AM Alaska time \(14 min\)\./);
   assert.match(t, /fly status -a roybal-worker/);
   assert.ok(t.length <= 300, `length ${t.length}`);
+  assert.doesNotMatch(t, /Project/, "no project line when none is known");
   assert.match(alertText({ now: T0, lastHeartbeatAt: null }), /never checked in/);
+  const p = alertText({ now: T0, lastHeartbeatAt: iso(T0 - 14 * 60_000), project: "djpgvcvhvgrzgaziruze" });
+  assert.match(p, /\(14 min\)\. Project djpgvcvhvgrzgaziruze\. Approved texts/);
+  assert.ok(p.length <= 300, `length ${p.length}`);
+});
+
+test("projectRef reads the ref out of a Supabase URL and nothing else", () => {
+  assert.equal(projectRef("https://djpgvcvhvgrzgaziruze.supabase.co"), "djpgvcvhvgrzgaziruze");
+  assert.equal(projectRef("http://localhost:54321"), null);
+  assert.equal(projectRef(""), null);
+  assert.equal(projectRef(undefined), null);
 });
 
 test("safeEqual is exact and refuses empties", () => {

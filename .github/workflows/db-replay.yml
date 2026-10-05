@@ -65,7 +65,9 @@ env:
                          #     and the project_job_receipts trigger function (0015); +8: the
                          #     worker's half — worker_heartbeat, finish_job, sweep_leases,
                          #     outbox_claim, outbox_sent, outbox_failed, worker_liveness_check
-                         #     and worker_alert_secret (0016)
+                         #     and worker_alert_secret (0016); 0017 drops and re-creates
+                         #     worker_heartbeat under a new signature and replaces
+                         #     worker_liveness_check: no change
   EXPECT_PKUNIQUE: 92   # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010);
                         # +2: the xact_ref_prices and xact_ref_lines pkeys (0011); +1: job_receipts pkey (0015);
                         # +1: worker_heartbeats pkey (0016)

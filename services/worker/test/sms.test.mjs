@@ -3,9 +3,15 @@ import assert from "node:assert/strict";
 import { smsAdapter, classifySmsError, tagFor, DeliveryError } from "../adapters/sms.mjs";
 import { fakeSupa, testConfig, recordingLog, fakeFetch, outboxRow } from "./helpers.mjs";
 
-test("roybal-notify refusals are classified: bad input permanent, caps and quiet hours transient", () => {
+test("roybal-notify refusals are classified: bad input permanent, everything else transient (its status is always 400)", () => {
   const perm = (m, s) => assert.equal(classifySmsError(m, s).permanent, true, m);
   const tran = (m, s) => assert.equal(classifySmsError(m, s).permanent, false, m);
+  // roybal-notify's own transient failures arrive as HTTP 400 too — never permanent
+  tran("send-count read failed (503)", 400);
+  tran("send-count read failed (401)", 400);
+  tran("log insert failed (503): upstream connect error", 400);
+  tran("some message nobody has seen before", 400);
+  tran("campaign_duplicate".slice(0, 3), 400);
   perm("Provide `to` as a valid US phone number.", 400);
   perm("Provide `body` — the message text.", 400);
   perm("send_failed: The 'To' number +1907 is not a valid phone number.", 400);
@@ -72,7 +78,7 @@ test("an unreachable roybal-notify is transient; an empty `to` is permanent befo
   assert.equal(called, false);
 });
 
-test("findPrior adopts the sms_messages row the earlier attempt wrote, and ignores a failed one", async () => {
+test("findPrior adopts only a tagged row Twilio accepted (a sid), never a failed or sid-less pending one", async () => {
   const cfg = testConfig();
   const row = outboxRow({ attempts: 2 });
   const supa = fakeSupa({ select: { sms_messages: [{ id: "m1", twilio_sid: "SM999", status: "sent" }] } });
@@ -82,6 +88,7 @@ test("findPrior adopts the sms_messages row the earlier attempt wrote, and ignor
   assert.match(q, /sent_by=eq\.outbox%3A11111111/);
   assert.match(q, /direction=eq\.outbound/);
   assert.match(q, /status=neq\.failed/);
+  assert.match(q, /twilio_sid=not\.is\.null/, "a pending row with no sid proves nothing and is not adopted");
   const none = await smsAdapter({ cfg, supa: fakeSupa(), log: recordingLog() }).findPrior(row);
   assert.equal(none, null);
 });

@@ -44,14 +44,28 @@ const fmtAk = (ms: number) =>
     timeZone: "America/Anchorage", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   });
 
-/** The owner's text. Under 300 characters, Alaska time, says what to do. */
-export function alertText(args: { now: number; lastHeartbeatAt: string | null; workerId?: string | null }): string {
+/** The owner's text. Under 300 characters, Alaska time, names the project
+    (staging and production each alarm through their own copy of this
+    function), says what to do. */
+export function alertText(args: { now: number; lastHeartbeatAt: string | null; workerId?: string | null; project?: string | null }): string {
   const last = args.lastHeartbeatAt ? Date.parse(args.lastHeartbeatAt) : NaN;
   const when = Number.isFinite(last)
     ? `no check-in since ${fmtAk(last)} Alaska time (${Math.floor((args.now - last) / 60_000)} min)`
     : "it has never checked in";
-  return `Roybal worker is down: ${when}. Approved texts and emails are waiting in the outbox. ` +
+  const where = args.project ? ` Project ${String(args.project).slice(0, 40)}.` : "";
+  return `Roybal worker is down: ${when}.${where} Approved texts and emails are waiting in the outbox. ` +
     `Check it with: fly status -a roybal-worker`;
+}
+
+/** The project ref out of a Supabase URL (https://<ref>.supabase.co), or null. */
+export function projectRef(supabaseUrl: string | null | undefined): string | null {
+  try {
+    const host = new URL(String(supabaseUrl ?? "")).hostname;
+    const ref = host.split(".")[0];
+    return ref && ref !== "localhost" ? ref : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Constant-time string compare over UTF-8 bytes. */

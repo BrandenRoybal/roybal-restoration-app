@@ -16,6 +16,13 @@ export function loadConfig(env = process.env) {
   if (!/^https:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(url)) missing.push("SUPABASE_URL (https://<ref>.supabase.co)");
   if (!key) missing.push("SUPABASE_SERVICE_ROLE_KEY");
   if (missing.length) throw new Error(`worker: missing ${missing.join(", ")}`);
+  // This project's legacy JWT keys are dead (03 §A). A pasted legacy
+  // `service_role` JWT would boot fine and then 401 on every call, with the
+  // machine showing healthy and the alarm never armed. Refuse it at boot.
+  if (/^eyJ/.test(key)) {
+    throw new Error("worker: SUPABASE_SERVICE_ROLE_KEY looks like a legacy JWT key, which this project has disabled. " +
+      "Use a secret key (sb_secret_…): Supabase Dashboard → Project Settings → API Keys → Publishable and secret keys.");
+  }
 
   const num = (name, dflt, lo, hi) => {
     const n = Number(env[name] ?? dflt);
@@ -32,6 +39,11 @@ export function loadConfig(env = process.env) {
   return {
     supabaseUrl: url,
     serviceKey: key,
+    // The machine's identity, stable across restarts and deploys on purpose:
+    // one worker_heartbeats row per machine. Rows a dead process left leased
+    // under this same id are NOT ours to renew — the heartbeat extends only
+    // the ids this process is working (ctx.active), so they expire and the
+    // sweeper retries them.
     workerId: String(env.WORKER_ID ?? "").trim()
       || `${env.FLY_APP_NAME || "roybal-worker"}-${env.FLY_MACHINE_ID || os.hostname()}`,
     version: String(env.WORKER_VERSION || env.FLY_IMAGE_REF || "dev").slice(0, 120),

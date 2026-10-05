@@ -12,7 +12,10 @@
  *                   texts the owner once per 24 h through roybal-notify (kind
  *                   `brief`: owner-directed, quiet-hours exempt — a dead worker
  *                   at 2am is the whole point), and records the text in
- *                   app_settings `worker.alert_texted`.
+ *                   app_settings `worker.alert_texted`. The database re-posts
+ *                   every 15 minutes while the worker is stale (migration
+ *                   0017), so one lost POST costs 15 minutes, not a day; this
+ *                   record is the only 24 h guard.
  *
  *   GET  /healthz — 200, for a thread checking the function is deployed.
  *
@@ -21,7 +24,7 @@
  * The rules live in alert.ts and are tested under Node (alert.test.mjs).
  */
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { decideAlert, alertText, safeEqual, parseAlertBody } from "./alert.ts";
+import { decideAlert, alertText, safeEqual, parseAlertBody, projectRef } from "./alert.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -72,7 +75,7 @@ async function handleAlert(req: Request): Promise<Response> {
     return json({ ok: false, texted: false, error: "OWNER_CELL unset" }, 500);
   }
 
-  const text = alertText({ now, lastHeartbeatAt: rows[0]?.at ?? null, workerId: rows[0]?.worker_id ?? body.worker_id });
+  const text = alertText({ now, lastHeartbeatAt: rows[0]?.at ?? null, workerId: rows[0]?.worker_id ?? body.worker_id, project: projectRef(SUPABASE_URL) });
   const send = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify`, {
     method: "POST",
     headers: svc,
