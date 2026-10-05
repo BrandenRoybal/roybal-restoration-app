@@ -347,6 +347,15 @@ export function digestSupportDoc(project, pages, hint) {
   return callOffice(project, "docDigest", { pages: pages.slice(0, 8), hint: hint || {} }).then((b) => b.digest);
 }
 
+/* ---------- receipt read (🧾 Receipts tile) ---------- */
+/** Read a snapped receipt (page images, page 1 first) into
+    { vendor, date, total, subtotal, tax, cardLast4, receiptNo, paidWith,
+      category, items:[{desc, qty, unit, price, sku}], confidence, notes, model }.
+    receiptcalc.js applyReceiptRead lands it on the receipt. */
+export function readReceipt(project, pages) {
+  return callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }).then((b) => b.receipt || {});
+}
+
 /* ---------- Xactimate / carrier estimate import ----------
    Read an uploaded Xactimate (or Symbility / carrier) estimate PDF into
    structured line items + O&P/tax totals so the invoice or reconstruction
