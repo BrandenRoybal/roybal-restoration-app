@@ -1,7 +1,7 @@
 # Roybal worker — the operations spine's hands (Fly app `roybal-worker`)
 
 The always-on Node process that turns an approved proposal into a sent text
-or email. The spine (migrations 0013–0016) decides *what* may happen and
+or email. The spine (migrations 0013–0017) decides *what* may happen and
 records that it did; this process is the only thing that *does* it. It is its
 own Fly app, never co-hosted with the phone agent: a stalled send must never
 touch a live call, and the dead-worker alarm assumes this app is the only
@@ -32,27 +32,45 @@ database property, not a promise this process makes:
 2. **Only the holder settles.** `outbox_sent`, `outbox_failed`, `finish_job`
    refuse any other worker id (`object_not_in_prerequisite_state`).
 3. **A dead holder's lease expires into a retry**, never a loss:
-   `sweep_leases()` runs from pg_cron every minute.
-4. **A retry adopts before it resends.** Every send is tagged
+   `sweep_leases()` runs from pg_cron every minute. The heartbeat renews only
+   the leases this process is working at that instant (`p_active_jobs`,
+   `p_active_outbox`), never every row stamped with its worker id: a crashed
+   predecessor on the same machine, a batch cut short by a deploy, or a row
+   whose settle call failed all expire on their own and get retried. The last
+   heartbeat before exit renews nothing.
+4. **Every attempt adopts before it sends.** Every send is tagged
    `outbox:<outbox id>` in the provider log the lane already writes
    (`sms_messages.sent_by` via roybal-notify's `captured_by`;
-   `email_messages.sent_by`). On attempt 2+, the adapter looks the tag up first
-   and, when the dead attempt got as far as the provider, reports the earlier
-   send instead of making another.
+   `email_messages.sent_by`). The adapter looks the tag up first — on attempt 1
+   too, so a dead row the owner revives is checked — and, when an earlier
+   attempt got as far as the provider accepting it, reports that send instead
+   of making another. For texts, "accepted" means a Twilio SID on the row:
+   roybal-notify writes the row as `pending` before it calls Twilio, so a
+   pending row with no SID proves nothing and the text is sent. Campaign
+   texts are the one kind the worker refuses (dead on attempt 1, with the
+   reason on the row): roybal-notify's own campaign dedupe counts a pending
+   row as sent, so a half-sent campaign row would die here unsent. Campaigns
+   go out from the campaigns page until that loop is lifted into the spine.
 5. **A spent row is dead**, and the owner hears about it (below).
 
-The one remaining window is between Gmail accepting a message and the
-`email_messages` row landing; it is as small as the code can make it (the
-record is written before `outbox_sent`), and a crash exactly there would send
-one email twice, never a text.
+Two narrow windows remain, both on the duplicate side, never the lost side:
+between Gmail accepting a message and the `email_messages` row landing, and
+between Twilio accepting a text and roybal-notify writing the SID. Both are a
+few milliseconds inside one request.
 
 ## What it sends, and through what
 
 - **Texts** go through the `roybal-notify` edge function (`action: sendSms`)
-  under the service role key — the one copy of quiet hours by kind, the
-  monthly cap and reserve floor, the `sms_messages` log and the Twilio status
-  callback. `sms.send` rows are already scheduled into the quiet-hours window
-  by the executor; a failed one is rescheduled into it again.
+  under the service role key — the monthly cap and reserve floor, the
+  `sms_messages` log and the Twilio status callback. `sms.send` rows are
+  already scheduled into the quiet-hours window by the executor; a failed one
+  is rescheduled into it again. Quiet hours therefore exist in two places
+  that must agree: `role_permissions` (the database's window) and the
+  `SMS_QUIET_START` / `SMS_QUIET_END` function secrets (roybal-notify's).
+  roybal-notify answers HTTP 400 for every refusal, its own transient
+  database errors included, so the worker treats only the explicitly
+  permanent messages (bad number, not a mobile, opted out, empty text) as
+  final; everything else retries.
 - **Emails** go straight to the Gmail API as the connected office account
   (`gmail_tokens`, newest row), the same send `gmail-proxy` makes. The proxy
   itself cannot be called from here (it takes a signed-in office user), so
@@ -63,7 +81,9 @@ one email twice, never a text.
   wait as `pending` until a later phase.
 - **Queue kinds**: `proposal.execute` only (runs `op_execute` as the approver;
   a proposal whose executor fails is recorded on the proposal, and the job is
-  done with that outcome). An unknown kind is dead on arrival, never retried.
+  done with that outcome). Only the kinds in `QUEUE_KINDS` are claimed; a row
+  of any other kind waits as `queued` until a worker that knows it is
+  deployed. A kind that is listed but has no handler is dead on arrival.
 
 Retry policy for a failed send: `now() + 2^attempts` minutes, capped at an
 hour, 6 attempts by default (`outbox.max_attempts`) — about an hour of
@@ -74,28 +94,32 @@ trying. A permanent refusal (bad number, bad address) is dead at once.
 - **The worker is down** (no heartbeat for 10 minutes): the DATABASE notices
   — `worker_liveness_check()` on pg_cron every 5 minutes POSTs to the
   `roybal-webhooks` edge function's `/alert` with a secret the migration
-  minted into the vault; the function re-reads `worker_heartbeats` itself,
+  minted into the vault, and keeps posting every 15 minutes for as long as
+  the worker is stale; the function re-reads `worker_heartbeats` itself,
   texts `OWNER_CELL` through roybal-notify (kind `brief`, quiet-hours exempt),
   and holds the next text for 24 h. So the text arrives within about 15
-  minutes of the worker dying, and the process that is down has no part in
-  sending it. The database learns where the edge functions live from the
-  worker's own heartbeat (`app_settings.edge.base_url`), so staging and
-  production each alert their own function with no setup.
+  minutes of the worker dying (a lost POST costs 15 more, not a day), and
+  the process that is down has no part in sending it. The database learns
+  where the edge functions live from the worker's own heartbeat
+  (`app_settings.edge.base_url`), so staging and production each alert their
+  own function with no setup; the text names the project.
 - **Something gave up** (an outbox row or job went `dead`): the worker's
-  heartbeat tick counts dead rows since the last watermark and texts the
-  owner once per 24 h. Needs `OWNER_CELL` on the Fly app.
+  heartbeat tick counts dead rows since the last watermark (a day before boot
+  until the first text, so a restart hides nothing) and texts the owner once
+  per 24 h. Needs `OWNER_CELL` on the Fly app.
 
 Both alarm states live in `app_settings` (`worker.liveness_alert`,
 `worker.alert_texted`, `worker.deadletter_alert`), so a restart never
 re-texts, and a recovery clears the liveness state (event `worker.recovered`).
 
-## One-time setup (owner steps, after the PR merges and 0016 is live)
+## One-time setup (owner steps, after the PRs merge and 0017 is live)
 
 Order matters: the database first, then the edge function, then the app.
 
 1. **Database** — the usual words in the thread: "staging", then "production"
    (DB push workflow, project `djpgvcvhvgrzgaziruze`). Migration 0016 adds the
-   lease columns, the functions, the vault secret and the two cron rows.
+   lease columns, the functions, the vault secret and the two cron rows; 0017
+   scopes the heartbeat's lease renewal and the alarm's re-post.
 2. **Edge function** — "deploy roybal-webhooks" (Function deploy workflow,
    production). It uses secrets that already exist (`OWNER_CELL`, the
    service role key). Check: `https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-webhooks/healthz`
@@ -105,17 +129,35 @@ Order matters: the database first, then the edge function, then the app.
    fly apps create roybal-worker
    fly secrets set -a roybal-worker \
      SUPABASE_URL="https://djpgvcvhvgrzgaziruze.supabase.co" \
-     SUPABASE_SERVICE_ROLE_KEY="<Supabase Dashboard → Project Settings → API keys → service_role (secret)>" \
-     GMAIL_CLIENT_ID="<the same value as the gmail-proxy edge secret>" \
-     GMAIL_CLIENT_SECRET="<the same value as the gmail-proxy edge secret>" \
+     SUPABASE_SERVICE_ROLE_KEY="<a SECRET key, sb_secret_…, see below>" \
+     GMAIL_CLIENT_ID="<Google Cloud Console OAuth client id, see below>" \
+     GMAIL_CLIENT_SECRET="<its client secret>" \
      OWNER_CELL="<your cell, e.g. 907xxxxxxx>"
    fly deploy --config services/worker/fly.toml --dockerfile services/worker/Dockerfile --ha=false .
    ```
-   `--ha=false` = ONE machine, on purpose. The Gmail pair is optional: without
-   both, the email lane stays off (logged at boot) and email rows wait as
-   `pending`; texts still flow. `OWNER_CELL` is optional too (no dead-letter
-   text without it; the dead-worker text is the database's and needs nothing
-   here).
+   - **The service key**: Supabase Dashboard → Project Settings → API Keys →
+     the **Publishable and secret keys** tab → copy (or create) a *Secret key*;
+     it begins `sb_secret_`. NOT the *Legacy* tab's `service_role` JWT (begins
+     `eyJ`): this project's legacy keys are disabled, and the worker refuses
+     one at boot rather than run with every call failing.
+   - **The Gmail pair** is the OAuth client the office Gmail connection was
+     made with: Google Cloud Console → Google Auth Platform (or APIs &
+     Services → Credentials) → that OAuth client. The Client ID is on the
+     page. The client secret is shown in full only when it is created (the
+     console masks it to its last four characters afterwards), and Supabase
+     shows its own copy as a digest only, so it cannot be read back from the
+     gmail-proxy secrets either. If you kept the `client_secret_….json` you
+     downloaded when the client was made, use its `client_secret`. Otherwise,
+     under **Client secrets**, click **Add secret**: a client holds two, both
+     stay valid, and the new one is shown once — copy it into
+     `GMAIL_CLIENT_SECRET`. Do NOT reset, disable or delete the existing
+     secret: gmail-proxy refreshes the office connection with it, and losing
+     it breaks the inbox pull within the hour. Optional: without both, the
+     email lane stays off (logged at boot) and email rows wait as `pending`;
+     texts still flow.
+   - `OWNER_CELL` is optional too (no dead-letter text without it; the
+     dead-worker text is the database's and needs nothing here).
+   - `--ha=false` = ONE machine, on purpose.
 4. **Watch it come up**: `fly logs -a roybal-worker` prints one JSON line per
    event — `worker.start`, then `job.claimed` / `outbox.sent` / `outbox.failed`
    as work arrives. Never a message body. `https://roybal-worker.fly.dev/healthz`
@@ -129,25 +171,31 @@ Order matters: the database first, then the edge function, then the app.
 
 `fly.toml` asks for 1 GB. The process idles far below that; the number is a
 floor against a Node heap spike during a big email with a long body, and Fly
-bills by the second. `fly scale memory 512 -a roybal-worker` is a safe
-saving once it has run a week.
+bills by the second. To save, change `memory = "1gb"` in `fly.toml` (a PR)
+and redeploy: a one-off `fly scale memory 512` is undone by the next deploy,
+which re-applies `fly.toml`.
 
 ## Day-2 ops
 
 - **Kill switch**: `fly scale count 0 -a roybal-worker`. Approvals still
   record, sends wait in line as `pending`, and the owner gets the down text
-  within ~15 minutes (that is the alarm working). `fly scale count 1` resumes;
+  within ~15 minutes (that is the alarm working). `fly scale count 1 -a roybal-worker` resumes;
   everything queued goes out, each row once.
 - **Test the alarm**: scale to 0, wait 15 minutes, expect the text; scale back
   to 1 and `select public.worker_liveness_check(true)` reports `fresh` on the
-  next cron tick (event `worker.recovered`). The 24 h guard means a second
-  test the same day is silent by design — clear it with
-  `delete from public.app_settings where key in ('worker.liveness_alert', 'worker.alert_texted')`.
+  next cron tick (event `worker.recovered`). The edge function's 24 h guard
+  means a second test the same day is silent by design — clear it with
+  `delete from public.app_settings where key = 'worker.alert_texted'`.
+- **A project nobody runs a worker on** (staging after a rehearsal, a laptop
+  run): its database keeps alarming on the stale heartbeat it was left with.
+  Disarm it there: `delete from public.worker_heartbeats; delete from public.app_settings where key in ('edge.base_url', 'worker.liveness_alert', 'worker.alert_texted')`.
 - **What is waiting**: `select channel, status, count(*) from public.outbox group by 1, 2`;
   dead rows carry the provider's last word in `error`. To retry a dead row
-  after fixing the cause: `update public.outbox set status = 'failed', attempts = 0, next_attempt_at = now() where id = …`.
-- **Rotate the alert secret**: `delete from vault.secrets where name = 'worker_alert_secret'`
-  and re-run the DO block in 0016 (or `select vault.create_secret(…, 'worker_alert_secret')`);
+  after fixing the cause: `update public.outbox set status = 'failed', attempts = 0, next_attempt_at = now() where id = …`
+  (the adopt check runs on every attempt, so a text the dead row's last try
+  did deliver is adopted, not resent).
+- **Rotate the alert secret** in place, so there is never a moment without one:
+  `select vault.update_secret((select id from vault.secrets where name = 'worker_alert_secret'), replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''))`;
   the edge function reads it live.
 - **Env knobs** (fly.toml `[env]` or secrets, restart to apply):
   `WORKER_POLL_MS` 5000, `WORKER_HEARTBEAT_MS` 30000, `QUEUE_LEASE_S` 300,
@@ -159,9 +207,11 @@ saving once it has run a week.
 `npm test` in this directory (no install; zero dependencies): the RFC 822
 builder, both adapters against a stubbed fetch (token refresh, adopt lookup,
 error verdicts), the outbox lane's order of operations (adopt → send →
-report; a failed report keeps the lease), the queue lane, the heartbeat and
-dead-letter text with its 24 h guard, and the real HTTP server booting,
-answering `/healthz` through an outage, and stopping clean. The database
+report with retries; a failed report leaves the row to expire; the active
+set is kept exact on every path), the queue lane, the heartbeat (which
+leases it names, and that the final one names none) and dead-letter text
+with its 24 h guard, and the real HTTP server booting, answering `/healthz`
+through an outage, and stopping clean. The database
 half is `supabase/test/worker_spine.test.sql`, run by the DB replay workflow
 against a database rebuilt from the migrations. The alert function's rules
 are `supabase/functions/roybal-webhooks/alert.test.mjs` (root `npm run fn:test`).

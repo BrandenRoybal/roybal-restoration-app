@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { runQueueOnce, runJob, handlers, JobError } from "../lanes/queue.mjs";
 import { fakeSupa, testConfig, recordingLog, jobRow } from "./helpers.mjs";
 
-const ctxWith = (supa = fakeSupa(), extra = {}) => ({ cfg: testConfig(), supa, log: recordingLog(), handlers, ...extra });
+const ctxWith = (supa = fakeSupa(), extra = {}) =>
+  ({ cfg: testConfig(), supa, log: recordingLog(), handlers, active: { jobs: new Set(), outbox: new Set() }, settleRetryMs: [5, 5], ...extra });
 
 test("runQueueOnce claims with the configured kinds and lease; an empty queue is 0", async () => {
   const supa = fakeSupa({ rpc: { claim_job: [] } });
@@ -86,4 +87,37 @@ test("a lost lease on finish_job (55000) is logged, not thrown", async () => {
   const out = await runJob(ctx, jobRow());
   assert.equal(out, null);
   assert.ok(ctx.log.events().includes("job.lease_lost"));
+});
+
+test("the job is in ctx.active.jobs while its handler runs and gone afterwards, success or failure", async () => {
+  const job = jobRow({ kind: "x.look" });
+  let seen = null;
+  const ctx = ctxWith(fakeSupa(), { handlers: { "x.look": async (c) => { seen = c.active.jobs.has(job.id); return {}; } } });
+  await runJob(ctx, job);
+  assert.equal(seen, true);
+  assert.equal(ctx.active.jobs.size, 0);
+  const ctx2 = ctxWith(fakeSupa(), { handlers: { "x.boom": async () => { throw new Error("later"); } } });
+  await runJob(ctx2, jobRow({ kind: "x.boom" }));
+  assert.equal(ctx2.active.jobs.size, 0);
+  const ctx3 = ctxWith(fakeSupa());
+  await runJob(ctx3, jobRow({ kind: "nobody.knows" }));
+  assert.equal(ctx3.active.jobs.size, 0);
+});
+
+test("an outage on finish_job is retried per configured delay, then logged as finish_failed (the lease expires into a retry)", async () => {
+  let n = 0;
+  const supa = fakeSupa({ rpc: { op_execute: { status: "executed" }, finish_job: () => { n += 1; throw new Error("db down"); } } });
+  const ctx = ctxWith(supa);
+  const out = await runJob(ctx, jobRow());
+  assert.equal(out, null);
+  assert.equal(n, 3, "one call plus one retry per configured delay");
+  assert.ok(ctx.log.events().includes("job.finish_retry"));
+  assert.ok(ctx.log.events().includes("job.finish_failed"));
+  assert.equal(ctx.active.jobs.size, 0);
+  let m = 0;
+  const supa2 = fakeSupa({ rpc: { op_execute: { status: "executed" }, finish_job: () => { m += 1; if (m === 1) throw new Error("blip"); return { status: "done" }; } } });
+  const ctx2 = ctxWith(supa2);
+  const row = await runJob(ctx2, jobRow());
+  assert.equal(row.status, "done");
+  assert.ok(ctx2.log.events().includes("job.done"));
 });

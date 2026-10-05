@@ -35,7 +35,8 @@ kill_timeout = 30
 [[vm]]
   # 1 GB is the roadmap's floor for this machine (A-0.1: PDF rendering lands
   # here at P4 and Chromium alone wants 300–500 MB). The P1 skeleton would run
-  # in 256 MB; `fly scale memory 512 -a roybal-worker` is the one-line saving
-  # until rendering arrives.
+  # in 256 MB; to save until rendering arrives, lower `memory` below and
+  # redeploy. A one-off `fly scale memory 512` is reverted by the next
+  # `fly deploy`, which re-applies this section.
   size = "shared-cpu-1x"
   memory = "1gb"

@@ -1,14 +1,39 @@
 /* SMS adapter — delivers an outbox `sms` row through the roybal-notify edge
    function (action sendSms) under the service role key. Going through
    roybal-notify rather than Twilio directly keeps ONE copy of the rules every
-   text already obeys: quiet hours by kind, the monthly cap and the reserve
-   floor, the sms_messages log row, and the Twilio status callback that later
-   settles that row. The worker adds only the outbox lease around it.
+   text already obeys: the monthly cap and the reserve floor, the sms_messages
+   log row, and the Twilio status callback that later settles that row. The
+   worker adds only the outbox lease around it.
+
+   Quiet hours exist twice and must agree: the database schedules sms rows
+   into the role_permissions window (op_quiet_hours_release), and
+   roybal-notify refuses outside its SMS_QUIET_START/END secrets. A refusal
+   is transient here (the row is rescheduled into the database's window), so
+   if the two windows ever drift apart a row burns an attempt per claim —
+   keep them the same.
 
    Exactly-once: the sms_messages row roybal-notify writes carries
-   `sent_by = outbox:<outbox id>` (its captured_by). A retry after a lost
-   lease looks that tag up FIRST and adopts the earlier send instead of
-   texting the customer twice. */
+   `sent_by = outbox:<outbox id>` (its captured_by). A retry looks that tag up
+   FIRST and adopts the earlier send instead of texting the customer twice —
+   but only a row Twilio accepted (twilio_sid set). roybal-notify inserts the
+   row as `pending` BEFORE calling Twilio and settles it after, so a pending
+   row with no sid proves nothing: the function may have died before the
+   call. That row is not adopted; the text is sent. Losing an approved text
+   silently is the worse failure; the duplicate window (Twilio accepted, the
+   settle PATCH failed, the function died in between) is far narrower.
+
+   Campaign texts are refused here (permanent, before any call). roybal-notify
+   dedupes kind=campaign by tag + number BEFORE it sends and counts a pending,
+   sid-less row as "already texted", so a campaign row whose first attempt died
+   between that insert and Twilio would be killed on its retry with an error
+   saying it was sent. Campaigns go out from the campaigns page (which posts to
+   roybal-notify directly) until that loop is lifted into the spine, when the
+   dedupe gets the same sid rule findPrior has.
+
+   Verdicts: roybal-notify answers HTTP 400 for EVERY error it throws, its own
+   transient database failures included, so the status code carries no
+   information. Permanent is only what the explicit list below names; all
+   else gets the backoff and dies after max_attempts with the error on the row. */
 
 import { errText } from "../log.mjs";
 
@@ -23,26 +48,27 @@ export class DeliveryError extends Error {
   }
 }
 
-/* roybal-notify's refusals, as its error strings begin. Permanent means the
-   row can never succeed as written; everything else gets the backoff. */
+/* roybal-notify's refusals, as its error strings begin or contain. Permanent
+   means the row can never succeed as written. */
 const PERMANENT = [
   /^Provide `to`/,                 // not a US number
   /^Provide `body`/,               // empty text
-  /is not a valid phone number/i,  // Twilio 21211 and friends
+  /^Unknown action/,               // the worker is speaking the wrong protocol
+  /The 'To' number .*is not a valid phone number/i,  // Twilio 21211 (the From-side 21212, a mistyped TWILIO_FROM, stays transient: operator config)
   /not a mobile number/i,          // Twilio 21614
   /unsubscribed|blacklist|opted out|STOP/,   // Twilio 21610
   /Permission to send an SMS has not been enabled/i,
   /^campaign_duplicate/,
 ];
-const TRANSIENT_HINT = [/^quiet_hours/, /^sms_cap_reached/, /^sms_reserve_reached/, /^texting_not_configured/, /^send_failed/];
+/* Named here only so a reader sees them; anything not PERMANENT is transient. */
+export const TRANSIENT = [
+  /^quiet_hours/, /^sms_cap_reached/, /^sms_reserve_reached/, /^texting_not_configured/, /^send_failed/,
+  /^send-count read failed/, /^log insert failed/, /^Missing Authorization/,
+];
 
 export function classifySmsError(message, status = null) {
   const m = String(message ?? "").trim() || `roybal-notify refused (${status ?? "no status"})`;
-  if (PERMANENT.some((re) => re.test(m))) return new DeliveryError(m, { permanent: true, status });
-  if (TRANSIENT_HINT.some((re) => re.test(m))) return new DeliveryError(m, { permanent: false, status });
-  // 4xx other than the known refusals: the request itself is wrong → permanent;
-  // 5xx or unknown: try again later.
-  const permanent = status != null && status >= 400 && status < 500 && status !== 401 && status !== 403 && status !== 429;
+  const permanent = PERMANENT.some((re) => re.test(m));
   return new DeliveryError(m, { permanent, status });
 }
 
@@ -53,15 +79,15 @@ export function smsAdapter(ctx) {
     channel: "sms",
     connection: "twilio",
 
-    /** The earlier attempt's provider record, if the dead attempt got that far. */
+    /** The earlier attempt's provider record, if Twilio accepted that send. */
     async findPrior(row) {
       const rows = await supa.select(
         "sms_messages",
-        `select=id,twilio_sid,status&direction=eq.outbound&status=neq.failed` +
+        `select=id,twilio_sid,status&direction=eq.outbound&status=neq.failed&twilio_sid=not.is.null` +
         `&sent_by=eq.${encodeURIComponent(tagFor(row))}&order=created_at.desc&limit=1`,
       );
       if (!rows.length) return null;
-      return { providerId: rows[0].twilio_sid || "", providerStatus: rows[0].status || "sent" };
+      return { providerId: rows[0].twilio_sid, providerStatus: rows[0].status || "sent" };
     },
 
     async send(row) {
@@ -70,6 +96,10 @@ export function smsAdapter(ctx) {
       const body = String(p.body ?? "").trim();
       if (!to) throw new DeliveryError("sms row has no `to`", { permanent: true });
       if (!body) throw new DeliveryError("sms row has no `body`", { permanent: true });
+      if (String(p.kind ?? "") === "campaign") {
+        throw new DeliveryError("kind 'campaign' is not carried by the outbox: send campaign texts from the campaigns page " +
+          "(roybal-notify's campaign dedupe counts a half-sent pending row as sent, so a retry here could die unsent)", { permanent: true });
+      }
       let res;
       try {
         res = await doFetch(cfg.notifyUrl, {
