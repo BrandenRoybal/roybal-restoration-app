@@ -30,7 +30,7 @@ const servers = [
 ];
 const F = `http://localhost:${ADMIN}`;
 const P = `http://localhost:${PORTAL}`;
-const PHONE = { width: 390, height: 844 }, DESK = { width: 1280, height: 800 };
+const PHONE = { width: 390, height: 844 }, DESK = { width: 1280, height: 800 }, TABLET = { width: 820, height: 1180 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* A shot: name, url, viewport, signedIn, optional steps(page), fullPage/clip height. */
@@ -70,6 +70,15 @@ const SHOTS = [
       await p.click("text=Read the change order"); await sleep(800); await p.click("text=Done reading").catch(() => {}); await sleep(800);
       await p.evaluate(() => { const el = [...document.querySelectorAll("*")].find((e) => /Type your full legal name/.test(e.placeholder || "")); if (el) el.scrollIntoView({ block: "center" }); }); await sleep(400); } },
   { name: "portal-home", url: `${P}/j/${PORTAL_TOKEN}`, vp: PHONE, full: 2600 },
+  /* Water mitigation SOP (sop-water-mitigation.html): the finished demo job "demo-job-sop" */
+  { name: "sop-job-home", url: `${F}/#/p/demo-job-sop`, vp: PHONE, full: 1900 },
+  { name: "sop-job-edit", url: `${F}/#/p/demo-job-sop/edit`, vp: PHONE, full: 2250 },
+  { name: "sop-map", url: `${F}/#/p/demo-job-sop/f/moistureMaps/sop-mm1`, vp: PHONE, full: 3300 },
+  { name: "sop-map-tablet", url: `${F}/#/p/demo-job-sop/f/moistureMaps/sop-mm1`, vp: TABLET, full: 3200 },
+  { name: "sop-drying", url: `${F}/#/p/demo-job-sop/f/dryingLogs/sop-dl1`, vp: PHONE, full: 3200, steps: async (p) => { await p.click("text=Size the equipment").catch(() => {}); await sleep(600); } },
+  { name: "sop-drying-tablet", url: `${F}/#/p/demo-job-sop/f/dryingLogs/sop-dl1`, vp: TABLET, full: 3200, steps: async (p) => { await p.click("text=Size the equipment").catch(() => {}); await sleep(600); } },
+  { name: "sop-cert", url: `${F}/#/p/demo-job-sop/f/certDrying`, vp: PHONE, full: 3000 },
+  { name: "sop-cert-tablet", url: `${F}/#/p/demo-job-sop/f/certDrying`, vp: TABLET, full: 2600 },
 ];
 
 const filter = process.argv[2] || "";

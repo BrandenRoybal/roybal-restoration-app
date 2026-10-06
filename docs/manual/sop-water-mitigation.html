@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Roybal Water Mitigation SOP</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<!--
+  SOURCE OF THE FIELD SOP (water mitigation, first visit to Certificate of Drying).
+  Same look and tooling as the app manual. Edit this file, then rebuild:
+    node docs/manual/tools/shoot.mjs sop-        (re-shoot the SOP screens; optional)
+    node docs/manual/tools/build.mjs sop         (writes docs/manual/dist/Roybal_Water_Mitigation_SOP.pdf)
+  Screens show the made-up demo job "demo-job-sop" (tools/demo-data.mjs).
+  Company rules (the dry goal formula, visit window, escalation list) are Branden's
+  to change: change them here and in the quick-reference cards in chapter 8.
+-->
+
+<!-- ============================ COVER ============================ -->
+<section class="cover">
+  <div class="sheet-head">
+    <div>
+      <div class="sheet-head__name"><span class="r">ROYBAL</span><span class="c"> CONSTRUCTION, LLC</span></div>
+      <div class="sheet-head__tag">General Contracting | Restoration &amp; Mitigation | IICRC WRT Certified</div>
+    </div>
+    <div class="sheet-head__addr">3850 Royal Rd, Fairbanks, AK 99701<br>907-371-9868 | branden@roybalconstruction.com<br>roybalconstruction.com</div>
+  </div>
+  <img class="cover__logo" src="../../apps/field/assets/emblem-mark.svg" alt="">
+  <div class="cover__band">
+    <h1>Water Mitigation<br>Standard Operating Procedure</h1>
+    <div class="sub">From the first knock on the door to the signed Certificate of Drying, with the moisture-reading protocol every Roybal tech follows the same way on every job.</div>
+  </div>
+  <div class="cover__meta">
+    <div><b>Edition</b>{{EDITION}}</div>
+    <div><b>Field app build</b>{{BUILD}}</div>
+    <div><b>For</b>Crew, crew leads, owner</div>
+  </div>
+  <div class="cover__who">
+    Written to the IICRC S500 Standard for Professional Water Damage Restoration and the IICRC WRT worksheets the field app already uses, adjusted for Fairbanks and North Pole conditions.
+    Where this SOP sets a company rule (the dry goal, the visit window, when to call), the rule is Roybal's and Branden can change it.
+    Screens show a made-up demo job; nothing shown is a real customer.
+    <div style="margin-top:6pt">{{LICENSES}}</div>
+  </div>
+</section>
+
+<!-- ============================ CONTENTS ============================ -->
+<section>
+  <h2 class="sec">Contents</h2>
+  <nav class="toc">
+    <a class="ch" href="#ch1">1. How this SOP works</a>
+    <a href="#s-flow">The job from start to finish</a>
+    <a href="#s-roles">Who does what</a>
+    <a href="#s-rules">The six rules that never bend</a>
+    <a class="ch" href="#ch2">2. Before you roll</a>
+    <a href="#s-kit">Truck kit</a>
+    <a href="#s-meters">Meter check</a>
+    <a class="ch" href="#ch3">3. Day 0: the first visit</a>
+    <a href="#s-arrive">Arrive and make it safe</a>
+    <a href="#s-sign">Authorization and the job header</a>
+    <a href="#s-classify">Category and class</a>
+    <a href="#s-day0map">Map the wet area</a>
+    <a href="#s-extract">Extract, remove, treat</a>
+    <a href="#s-equip">Size and set equipment</a>
+    <a href="#s-leave">Before you leave</a>
+    <a class="ch" href="#ch4">4. The moisture reading protocol</a>
+    <a href="#s-mr-meter">One meter, one setting</a>
+    <a href="#s-mr-ref">The reference reading</a>
+    <a href="#s-mr-goal">Setting the dry goal</a>
+    <a href="#s-mr-points">Placing reading points</a>
+    <a href="#s-mr-mark">Numbering and marking</a>
+    <a href="#s-mr-take">Taking a reading</a>
+    <a href="#s-mr-log">Logging it in the app</a>
+    <a class="ch" href="#ch5">5. Psychrometric readings</a>
+    <a class="ch" href="#ch6">6. Daily monitoring visits</a>
+    <a href="#s-visit">The visit, in order</a>
+    <a href="#s-trend">Reading the trend</a>
+    <a href="#s-triage">When it isn't drying</a>
+    <a class="ch" href="#ch7">7. Fairbanks cold-weather rules</a>
+    <a class="ch" href="#ch8">8. Dry verification and the certificate</a>
+    <a href="#s-dry">Is it dry?</a>
+    <a href="#s-pull">Pulling equipment</a>
+    <a href="#s-cert">Filling the Certificate of Drying</a>
+    <a href="#s-close">Closeout and hand-off</a>
+    <a class="ch" href="#ch9">9. Quick reference cards</a>
+  </nav>
+</section>
+
+<!-- ============================ 1. HOW THIS SOP WORKS ============================ -->
+<section class="chapter" id="ch1">
+  <div class="chapter__head"><div class="num">Chapter 1</div><h1>How this SOP works</h1><div class="who">Everyone reads this chapter</div></div>
+
+  <p>Every water job we run ends with a carrier deciding whether to pay for it. The adjuster was not there. All they will ever see is what we wrote down: the photos, the moisture map, the drying log and the Certificate of Drying. This SOP exists so that every tech documents a job the same way, in the same order, with numbers that can be repeated by anyone who walks in after us.</p>
+  <p>Each step names the screen in the field app where it gets recorded. If a step is done but not in the app, for billing purposes it did not happen.</p>
+
+  <h2 class="sec" id="s-flow">The job from start to finish</h2>
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 210" font-family="Helvetica Neue, Arial" font-size="11">
+    <defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#f26a21"/></marker></defs>
+    <g font-weight="800" fill="#fff" font-size="11.5" text-anchor="middle">
+      <rect x="4" y="14" width="132" height="52" rx="8" fill="#0f1b2d"/><text x="70" y="37">Day 0</text><text x="70" y="53" font-weight="400" font-size="10">first visit</text>
+      <rect x="150" y="14" width="132" height="52" rx="8" fill="#1c5fb0"/><text x="216" y="37">Days 1, 2, 3…</text><text x="216" y="53" font-weight="400" font-size="10">monitoring visits</text>
+      <rect x="296" y="14" width="132" height="52" rx="8" fill="#f26a21"/><text x="362" y="37">Dry check</text><text x="362" y="53" font-weight="400" font-size="10">every point at goal</text>
+      <rect x="442" y="14" width="132" height="52" rx="8" fill="#8a6fb0"/><text x="508" y="37">Pull equipment</text><text x="508" y="53" font-weight="400" font-size="10">after-photos</text>
+      <rect x="588" y="14" width="128" height="52" rx="8" fill="#1f9d55"/><text x="652" y="37">Certificate</text><text x="652" y="53" font-weight="400" font-size="10">signed, to office</text>
+    </g>
+    <g stroke="#f26a21" stroke-width="2" marker-end="url(#fa)"><path d="M137 40h11"/><path d="M283 40h11"/><path d="M429 40h11"/><path d="M575 40h11"/></g>
+    <path d="M216 72 C 216 92, 250 92, 250 80" fill="none" stroke="#1c5fb0" stroke-width="1.6" stroke-dasharray="4 3"/>
+    <g fill="#44556b" font-size="10.2">
+      <text x="4" y="92">Safety, stop source,</text><text x="4" y="106">work authorization,</text><text x="4" y="120">before photos, category</text><text x="4" y="134">and class, reference,</text><text x="4" y="148">moisture map, extract,</text><text x="4" y="162">remove, treat, size and</text><text x="4" y="176">set equipment, day 0</text><text x="4" y="190">readings.</text>
+      <text x="150" y="106">Every 24 hours. Same</text><text x="150" y="120">meter, same points,</text><text x="150" y="134">same order. Psych first,</text><text x="150" y="148">then moisture, then</text><text x="150" y="162">equipment and photos.</text><text x="150" y="176">Read the trend before</text><text x="150" y="190">leaving.</text>
+      <text x="296" y="92">All points at or below</text><text x="296" y="106">goal on the same visit.</text><text x="296" y="120">CJ or Branden confirms</text><text x="296" y="134">before anything is</text><text x="296" y="148">unplugged.</text>
+      <text x="442" y="92">Removed date and time</text><text x="442" y="106">on every unit, dry-out</text><text x="442" y="120">finish date, after</text><text x="442" y="134">photos with captions.</text>
+      <text x="588" y="92">Filled from the maps</text><text x="588" y="106">and log. Branden signs</text><text x="588" y="120">as the IICRC WRT, the</text><text x="588" y="134">owner signs. Packet</text><text x="588" y="148">goes to the carrier.</text>
+    </g>
+  </svg>
+  </div>
+
+  <h2 class="sec" id="s-roles">Who does what</h2>
+  <table>
+    <tr><th style="width:20%">Role</th><th>Owns</th></tr>
+    <tr><td><b>Tech</b> (crew)</td><td>Takes every reading, photo and equipment entry in the app, on site, at the time. Follows the protocol exactly and calls the crew lead the moment something on the escalation list shows up.</td></tr>
+    <tr><td><b>Crew lead</b> (CJ)</td><td>Sets the category, class and reference points on day 0 when on site, checks each day's readings before the crew leaves, verifies dry before equipment is pulled, and prepares the Certificate of Drying.</td></tr>
+    <tr><td><b>Branden</b> (IICRC WRT)</td><td>Approves any departure from the equipment worksheet, any Cat 3 or asbestos decision and any change of meter mid-job. Signs the Certificate of Drying as the certified technician.</td></tr>
+  </table>
+
+  <h2 class="sec" id="s-rules">The six rules that never bend</h2>
+  <ol class="steps">
+    <li><b>Photos before you touch anything.</b> The first picture of a room shows it the way the customer found it.</li>
+    <li><b>Same meter, same setting, same spot, same order, every day.</b> A reading that can't be repeated is worthless to an adjuster.</li>
+    <li><b>Reference first.</b> Every material gets an unaffected reference reading on every visit, and its dry goal comes from that reference.</li>
+    <li><b>Record it at the point.</b> Readings go into the app where you are standing, not from memory in the truck.</li>
+    <li><b>Every 24 hours.</b> A job with no reading in 36 hours shows a red flag on the job list. Don't let it.</li>
+    <li><b>Nothing gets unplugged until it's verified dry,</b> and nothing gets cut, torn out or bagged without a photo and a reason written down.</li>
+  </ol>
+</section>
+
+<!-- ============================ 2. BEFORE YOU ROLL ============================ -->
+<section class="chapter" id="ch2">
+  <div class="chapter__head"><div class="num">Chapter 2</div><h1>Before you roll</h1><div class="who">Every tech, every morning</div></div>
+
+  <h2 class="sec" id="s-kit">Truck kit</h2>
+  <div class="pair" style="justify-content:space-between;gap:16pt">
+  <div style="flex:1">
+    <h3>Meters and documentation</h3>
+    <ul class="check">
+      <li>Pin meter with insulated pins (wood and drywall, WME scale)</li>
+      <li>Non-penetrating meter (search / REL scale)</li>
+      <li>Thermo-hygrometer (temperature and RH)</li>
+      <li>Thermal camera, if assigned (it finds suspects; it never replaces a meter)</li>
+      <li>Calibration check block or the meter's built-in check</li>
+      <li>Spare batteries for every meter</li>
+      <li>Blue painter's tape and a fine Sharpie for marking points</li>
+      <li>Phone charged, Field Forms opened once on Wi-Fi this morning</li>
+    </ul>
+  </div>
+  <div style="flex:1">
+    <h3>Safety and work gear</h3>
+    <ul class="check">
+      <li>Nitrile gloves, N95s, safety glasses; Tyvek and P100 for Cat 3</li>
+      <li>GFCI cords; know the panel before anything plugs in</li>
+      <li>Moisture-proof flashlight and a non-contact voltage tester</li>
+      <li>Extraction gear, 6-mil poly, zip poles, antimicrobial</li>
+      <li>Drill and bits for weep holes (only with an OK)</li>
+      <li>Asset tags on every dehu, air mover, scrubber and heater</li>
+      <li>Winter: ice cleats, a heater, and a warm spot for the meters</li>
+    </ul>
+  </div>
+  </div>
+
+  <h2 class="sec" id="s-meters">Meter check</h2>
+  <p>Do this before the first job of the day, at room temperature, not in the truck.</p>
+  <ol class="steps">
+    <li>Fresh battery check on each meter. A low battery reads wrong before it reads nothing.</li>
+    <li>Run the calibration check (test block or the meter's built-in check) and confirm it reads in range. If it fails, don't use that meter today; tell CJ.</li>
+    <li>Look at the pins: bent, dull or missing insulation sleeves change the reading.</li>
+    <li>On the first drying-log row of the day, write <span class="ui">Cal OK</span> in Notes. That one line answers the adjuster's first question about every number on the page.</li>
+  </ol>
+  <div class="warn"><b>Cold meters lie</b>A meter or hygrometer that rode in a cold truck reads low and slow until it warms up. Carry them in the cab, and give a hygrometer 10 to 15 minutes inside the house before you trust it. See chapter 7.</div>
+</section>
+
+<!-- ============================ 3. DAY 0 ============================ -->
+<section class="chapter" id="ch3">
+  <div class="chapter__head"><div class="num">Chapter 3</div><h1>Day 0: the first visit</h1><div class="who">Tech and crew lead; follow the steps in order</div></div>
+
+  <h2 class="sec" id="s-arrive">Arrive and make it safe</h2>
+  <div class="sopstep"><div class="n">1</div><div>
+    <h3>Walk the outside, then the inside, before you unload</h3>
+    <p>Look for live electrical in or near water, sagging ceilings, a gas smell, sewage, and anyone in the home who is vulnerable (infant, elderly, ill). If power has to come off, it comes off at the panel before anyone walks in standing water.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">2</div><div>
+    <h3>Confirm the source is stopped</h3>
+    <p>Shut-off closed, line capped, or the leak otherwise stopped. If it isn't, stopping it is the first job. Write the cause in plain words; you will type it into <span class="ui">Loss Cause</span> in step 5.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">3</div><div>
+    <h3>Check the house's age before anything gets cut</h3>
+    <p>Built before 1981: drywall mud, textured ceilings, plaster and some flooring can contain asbestos. Built before 1978: paint can contain lead. <span class="must">Don't cut, sand or tear out until Branden has cleared it</span> (testing, or work under his EPA RRP certification). Drying can start; demolition waits.</p>
+  </div></div>
+
+  <h2 class="sec" id="s-sign">Authorization and the job header</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:3.4in"><img src="shots/field-work-auth.jpg" alt=""></div><figcaption><b>Work Authorization.</b> The owner signs on the phone before work starts.</figcaption></figure>
+    <div class="text">
+    <div class="sopstep"><div class="n">4</div><div>
+      <h3>Get the Work Authorization signed</h3>
+      <p>Open the job, then <span class="ui">✍️ Work Authorization</span>. Walk the owner through the scope list, check the boxes, and have them sign on the phone with <span class="ui">Sign on device</span>. Sign as the Roybal representative. Emergency stop-the-source work can happen first; nothing else does.</p>
+      <p>The owner must be the property owner or someone they've authorized in writing. A tenant can't authorize work on the structure; call Branden.</p>
+    </div></div>
+    <div class="sopstep"><div class="n">5</div><div>
+      <h3>Take before photos, then fill in the job header</h3>
+      <p>In <span class="ui">📷 Job Photos</span>, shoot every affected room from the doorway, then the source, then close-ups of damage, before you move anything. Stage: <b>Before</b>. Every photo needs a room and a caption.</p>
+      <p>Then tap the job's edit button and fill in Customer, Address, Claim #, Date of Loss, Carrier, Adjuster and Loss Cause. These flow into every form, so they're typed once.</p>
+    </div></div>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-classify">Category and class</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:2.36in"><img src="shots/sop-job-edit.jpg" alt="" style="margin-top:-4.88in"></div><figcaption><b>Loss classification</b> on the job's edit screen. Category, class and drying system are set once here and appear on the drying log and certificate.</figcaption></figure>
+    <div class="text">
+    <div class="sopstep"><div class="n">6</div><div>
+      <h3>Set the category from the source and the time</h3>
+      <p>Category is about what's in the water. Under <span class="ui">Loss classification</span>, pick <span class="ui">Water</span>, then the category. When in doubt, go up a category, never down, and tell CJ.</p>
+    </div></div>
+    </div>
+  </div>
+  <table>
+    <tr><th style="width:15%">Category</th><th style="width:40%">What it looks like</th><th>What changes for us</th></tr>
+    <tr><td><b>Cat 1</b> Clean</td><td>Supply line, faucet, water heater tank, ice melt that hasn't touched dirty materials; under 48 hours.</td><td>Dry in place where possible. Pad and drywall can often be saved.</td></tr>
+    <tr><td><b>Cat 2</b> Gray</td><td>Dishwasher or washer discharge, aquarium, toilet overflow with urine only, Cat 1 left more than 48 hours.</td><td>Antimicrobial on affected surfaces. Carpet pad is removed. Air scrubber when the worksheet calls for one, or a written reason it isn't needed.</td></tr>
+    <tr><td><b>Cat 3</b> Black</td><td>Sewage, toilet with feces, ground or flood water, anything that sat long enough to smell, Cat 2 left more than 48 hours.</td><td>PPE, containment and HEPA air scrubbers. Porous materials it touched are removed and bagged. <span class="must">Call Branden before demo.</span></td></tr>
+  </table>
+  <div class="sopstep"><div class="n">7</div><div>
+    <h3>Set the class from how much got wet</h3>
+    <p>Class drives the dehumidifier math. Pick it after your day 0 moisture scan (step 9), and change it on the edit screen if the scan shows more than you thought.</p>
+  </div></div>
+  <table>
+    <tr><th style="width:15%">Class</th><th>What got wet</th></tr>
+    <tr><td><b>Class 1</b></td><td>Part of one room, mostly low-porosity materials (plywood, concrete). Little water absorbed.</td></tr>
+    <tr><td><b>Class 2</b></td><td>A whole room or more; carpet and pad; water wicked up walls 12 to 24 in.</td></tr>
+    <tr><td><b>Class 3</b></td><td>Water came from above: ceilings, insulation, walls wet more than 24 in. up, carpet and subfloor saturated.</td></tr>
+    <tr><td><b>Class 4</b></td><td>Deep-held water in dense materials: hardwood, plaster, concrete, crawlspace soil. Needs low-grain or desiccant dehus and more time.</td></tr>
+  </table>
+  <p>Also set the <b>Drying System</b>: <b>Closed</b> (doors and windows shut, dehus do the work) is our default in Fairbanks for most of the year. <b>Open</b> or <b>Hybrid</b> uses outside air and needs Branden's OK; see chapter 7.</p>
+
+  <h2 class="sec" id="s-day0map">Map the wet area</h2>
+  <div class="sopstep"><div class="n">8</div><div>
+    <h3>Take the reference readings</h3>
+    <p>Before any affected reading, find an unaffected spot of each material that got wet and read it. Chapter 4 covers how. Write it down; it becomes the dry goal.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">9</div><div>
+    <h3>Find the wet boundary and draw the map</h3>
+    <p>Start at the source and scan outward with the non-penetrating meter until the readings match the reference. Then open <span class="ui">🗺️ Moisture Map</span>, import the floor plan (or draw one), and follow chapter 4 to set the material, meter, dry goal and numbered reading points. One map per material.</p>
+  </div></div>
+
+  <h2 class="sec" id="s-extract">Extract, remove, treat</h2>
+  <div class="sopstep"><div class="n">10</div><div>
+    <h3>Extract standing water</h3>
+    <p>Extraction removes far more water than any dehumidifier. Make passes until no water is pulled. Photo during, stage <b>During</b>.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">11</div><div>
+    <h3>Remove what can't be dried, and write down why</h3>
+    <p>Flood cuts, pad, wet insulation, swollen particle board, Cat 3 porous materials. Before anything comes out: a photo of it in place and a reading on it. Flood cuts go at least 12 in. above the highest wet reading, at a standard height (2 ft or 4 ft) so the rebuild is clean. Any reading point that gets cut out keeps its number; note <span class="ui">removed day 0</span> in that day's Notes and leave the column blank after.</p>
+    <p>On a Cat 3 job, the app won't let the packet clear until the flood cut, containment and HEPA work is documented. Write it as a <span class="ui">🔁 Change Order</span> that names the flood cut, containment, HEPA and antimicrobial work.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">12</div><div>
+    <h3>Clean and apply antimicrobial (Cat 2 and Cat 3)</h3>
+    <p>EPA-registered product, label directions, on the affected structural surfaces after removal. Photo it and add a caption naming the product.</p>
+  </div></div>
+
+  <h2 class="sec" id="s-equip">Size and set equipment</h2>
+  <div class="sopstep"><div class="n">13</div><div>
+    <h3>Run the equipment worksheet before you unload the dehus</h3>
+    <p>Open <span class="ui">💧 Drying Log</span>. Under <span class="ui">Equipment Sizing</span>, enter the wet floor SF, affected wall LF, wet wall and ceiling above 2 ft, insets over 18 in., ceiling height and the dehu you have, then tap <span class="ui">🧮 Size the equipment</span>. This is the IICRC WRT worksheet. It gives a recommended range for air movers, dehumidifiers, scrubbers and heat.</p>
+  </div></div>
+  <figure class="tab"><div class="frame" style="height:2.28in"><img src="shots/sop-drying-tablet.jpg" alt="" style="margin-top:-5.24in"></div><figcaption><b>Equipment Sizing results</b> (shown on a tablet). Recommended vs. deployed for each kind of unit. Where we set less than the worksheet says, the Deviation column holds the reason, and that reason prints for the adjuster.</figcaption></figure>
+  <div class="sopstep"><div class="n">14</div><div>
+    <h3>Set the equipment and log every unit</h3>
+    <p>Air movers aim along the wet wall at 15 to 45 degrees to the surface, all turning the same way around the room. Dehus go central, exhaust into the room and away from walls, drain line run to a sink or pump. Then in <span class="ui">Equipment Deployment &amp; Runtime</span> add a row per unit: asset tag, type, room, placed date and time. Place the same units on the map's <span class="ui">Equipment Placement</span> plan so the adjuster can see the layout.</p>
+    <p>If what you set is below the worksheet range, type the reason in the <b>Deviation</b> column (power limits, staged demo, Branden's call). A blank deviation next to a red number is the first line an adjuster cuts.</p>
+  </div></div>
+  <figure class="tab"><div class="frame" style="height:2.52in"><img src="shots/sop-drying-tablet.jpg" alt="" style="margin-top:-7.64in"></div><figcaption><b>Equipment Deployment &amp; Runtime.</b> One row per tagged unit; Days and Hrs fill in from the placed and removed times. A unit still on site after 7 days is flagged.</figcaption></figure>
+
+  <h2 class="sec" id="s-leave">Before you leave</h2>
+  <div class="sopstep"><div class="n">15</div><div>
+    <h3>Take the day 0 readings, after the equipment is running</h3>
+    <p>One psychrometric row in the drying log (chapter 5) and one reading row on each moisture map (chapter 4). These are the numbers every later day is compared to.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">16</div><div>
+    <h3>Brief the owner and set the next visit</h3>
+    <p>Tell them: don't turn equipment off, don't open windows, don't move air movers, keep the heat on, and expect us within 24 hours. Leave the office number. If the job has a customer portal, the office turns it on; don't promise dates.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">17</div><div>
+    <h3>Write the day's Field Report</h3>
+    <p><span class="ui">📋 Field Report</span>: what was done, what was found, materials used, anything the office needs to know. It stays internal; it isn't sent to the carrier.</p>
+  </div></div>
+</section>
+
+<!-- ============================ 4. MOISTURE PROTOCOL ============================ -->
+<section class="chapter" id="ch4">
+  <div class="chapter__head"><div class="num">Chapter 4</div><h1>The moisture reading protocol</h1><div class="who">The standard every reading on every Roybal job follows</div></div>
+
+  <p>A moisture reading is only useful if the next tech can stand in the same place, with the same meter on the same setting, and get a number you can compare. Everything in this chapter is there to make that true. The protocol has seven parts, and they happen in this order on day 0. From day 1 on, parts 6 and 7 repeat on every visit.</p>
+
+  <h2 class="sec" id="s-mr-meter">1 · One meter, one setting, per material</h2>
+  <ul>
+    <li>Pick the meter and setting for each material on day 0 and record it in the map's <span class="ui">Meter / Setting</span> box. Use <span class="ui">➕ New meter / setting…</span> the first time; the phone remembers it after that. Write the setting, not just the brand: <i>Protimeter MMS3 · Search (REL)</i> or <i>Protimeter MMS3 · Pin (WME)</i>.</li>
+    <li>Drywall and plaster: non-penetrating (search / REL) for mapping, with pins to confirm. Wood, subfloor and framing: pins on the WME or wood scale. Concrete: the meter's concrete setting, or a reading at a drilled hole if Branden calls for it.</li>
+    <li><b>Never switch meters or settings mid-job.</b> If a meter dies, the next meter starts a new map page: re-read the reference and every point with it, and write <span class="ui">meter changed</span> in that row's Notes. Tell Branden.</li>
+  </ul>
+
+  <h2 class="sec" id="s-mr-ref">2 · The reference reading</h2>
+  <p>The reference is the same material, read with the same meter and setting, in a spot the water never reached. It tells us what "dry" is for that material in that house, in that season.</p>
+  <ul>
+    <li>Same kind of spot: interior wall for interior walls, exterior wall for exterior walls. In winter an exterior wall reads differently than an interior one.</li>
+    <li>Same building, same floor level, preferably a room on the same heat. A closet on the far side of the house is ideal.</li>
+    <li>Take it <b>first on every visit</b>, before any affected reading, and write it as the first words of that row's Notes: <span class="ui">REF 12 (bedroom closet)</span>.</li>
+    <li>If the reference moves by more than 2 points from day 0, something changed (season, heat, meter). Note it and tell CJ before using today's numbers to call anything dry.</li>
+  </ul>
+
+  <h2 class="sec" id="s-mr-goal">3 · Setting the dry goal</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:1.55in"><img src="shots/sop-map.jpg" alt="" style="margin-top:-4.0in"></div><figcaption><b>Material, meter and dry goal</b> at the top of the moisture map. The material fills in a textbook goal; type our reference-based goal over it.</figcaption></figure>
+    <div class="text">
+      <div class="card">
+        <h3>Roybal rule: dry goal = reference + 10%</h3>
+        <p style="margin:0">Take the reference reading and add 10% of it. Round to the nearest whole number. If that adds less than 1 point, add 1 point.</p>
+        <table style="margin:6pt 0 0">
+          <tr><th>Reference</th><th>+10%</th><th>Dry goal</th></tr>
+          <tr><td>12 REL (drywall)</td><td>13.2</td><td><b>13</b></td></tr>
+          <tr><td>11 WME (subfloor)</td><td>12.1</td><td><b>12</b></td></tr>
+          <tr><td>8 REL (drywall)</td><td>8.8</td><td><b>9</b> (minimum +1)</td></tr>
+        </table>
+      </div>
+      <p>Type the goal into <span class="ui">Dry Goal (MC%)</span>. Picking a <span class="ui">Material</span> fills in a textbook goal (for example drywall ≤ 1%), which only fits some meters' scales. Our goal comes from the reference, so it always replaces the textbook number.</p>
+      <p>No unaffected reference anywhere (the whole level got wet)? Use the meter maker's dry value for that setting, write <span class="ui">no ref, maker's dry value</span> in Notes, and tell Branden.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-mr-points">4 · Placing reading points</h2>
+  <p>Reading points go where the water was worst, where it stopped, and in between, so the trend shows the whole area drying and not just one easy spot.</p>
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 260" font-family="Helvetica Neue, Arial" font-size="11">
+    <!-- wall elevation -->
+    <text x="10" y="16" font-weight="800" fill="#0f1b2d" font-size="12.5">Wall (elevation view)</text>
+    <rect x="10" y="26" width="420" height="190" fill="#f3f0ea" stroke="#1f3354" stroke-width="2"/>
+    <rect x="10" y="204" width="420" height="12" fill="#c9b79a"/>
+    <path d="M10 140 C 60 120, 110 150, 170 128 S 260 110, 300 138 S 360 160, 330 204 L 10 204 Z" fill="#7aa3c9" opacity=".35"/>
+    <path d="M10 140 C 60 120, 110 150, 170 128 S 260 110, 300 138 S 360 160, 330 204" fill="none" stroke="#1c5fb0" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="20" y="110" fill="#1c5fb0" font-size="10.5">wet line (highest wet reading)</text>
+    <g font-weight="800" font-size="11" text-anchor="middle" fill="#fff">
+      <circle cx="40" cy="196" r="10" fill="#f26a21"/><text x="40" y="200">1</text>
+      <circle cx="136" cy="196" r="10" fill="#f26a21"/><text x="136" y="200">2</text>
+      <circle cx="232" cy="196" r="10" fill="#f26a21"/><text x="232" y="200">3</text>
+      <circle cx="136" cy="146" r="10" fill="#f26a21"/><text x="136" y="150">4</text>
+      <circle cx="390" cy="196" r="10" fill="#1f9d55"/><text x="390" y="200">5</text>
+    </g>
+    <g stroke="#44556b" stroke-width="1" fill="#44556b" font-size="10">
+      <path fill="none" d="M40 228 V236 M136 228 V236 M40 232 H136"/><text x="62" y="248" stroke="none">4 ft max</text>
+      <path fill="none" d="M232 218 V230"/><text x="238" y="238" stroke="none">2 in. above the plate / base</text>
+      <path fill="none" d="M150 146 H200 V60"/><text x="150" y="52" stroke="none">high point, just under the wet line</text>
+      <path fill="none" d="M390 184 V96"/><text x="330" y="78" stroke="none">boundary point, 12 in.</text><text x="330" y="90" stroke="none">past the wet edge</text>
+    </g>
+    <!-- floor plan -->
+    <text x="460" y="16" font-weight="800" fill="#0f1b2d" font-size="12.5">Floor (plan view)</text>
+    <rect x="460" y="26" width="250" height="190" fill="#fff" stroke="#1f3354" stroke-width="2"/>
+    <rect x="460" y="26" width="250" height="34" fill="#e3d9c8" stroke="#1f3354" stroke-width="1"/>
+    <text x="585" y="47" text-anchor="middle" fill="#44556b" font-size="10">cabinets (read at the toe kick)</text>
+    <path d="M478 66 H690 V190 H478 Z" fill="#7aa3c9" opacity=".25" stroke="#1c5fb0" stroke-dasharray="6 4"/>
+    <g font-weight="800" font-size="10.5" text-anchor="middle" fill="#fff">
+      <circle cx="505" cy="80" r="9" fill="#f26a21"/><text x="505" y="84">6</text>
+      <circle cx="585" cy="80" r="9" fill="#f26a21"/><text x="585" y="84">7</text>
+      <circle cx="665" cy="80" r="9" fill="#f26a21"/><text x="665" y="84">8</text>
+      <circle cx="505" cy="130" r="9" fill="#f26a21"/><text x="505" y="134">9</text>
+      <circle cx="585" cy="130" r="9" fill="#f26a21"/><text x="585" y="134">10</text>
+      <circle cx="665" cy="130" r="9" fill="#f26a21"/><text x="665" y="134">11</text>
+      <circle cx="545" cy="176" r="9" fill="#f26a21"/><text x="545" y="180">12</text>
+      <circle cx="625" cy="205" r="9" fill="#1f9d55"/><text x="625" y="209">13</text>
+    </g>
+    <text x="462" y="236" fill="#44556b" font-size="10">Grid no wider than 4 ft; one at each doorway;</text>
+    <text x="462" y="250" fill="#44556b" font-size="10">a green boundary point just outside the wet edge.</text>
+  </svg>
+  </div>
+  <table>
+    <tr><th style="width:19%">Surface</th><th>Where the points go</th></tr>
+    <tr><td><b>Walls</b></td><td>One point every 4 ft (no wider) along each wet wall, 2 in. above the bottom plate or the top of the base. If water wicked more than 12 in., add a high point just under the wet line. Corners and both sides of a wet wall cavity count as separate points.</td></tr>
+    <tr><td><b>Floors</b></td><td>A grid no wider than 4 ft across the wet area, plus one at the source, one at each doorway the water crossed, and one at the toe kick of each cabinet run (pull the toe kick).</td></tr>
+    <tr><td><b>Ceilings</b></td><td>The center of the stain and each edge. Only after the ceiling is confirmed safe to stand under.</td></tr>
+    <tr><td><b>Boundary</b></td><td>At least one point 12 in. past the wet edge on each map. It should read like the reference. If it climbs, the water is spreading and the map has to grow.</td></tr>
+    <tr><td><b>Hidden cavities</b></td><td>Behind cabinets, tubs and built-ins: read through a weep hole only after CJ or Branden OKs drilling it. Photo the hole.</td></tr>
+  </table>
+  <p>Each map holds one material and up to 13 points on screen (<span class="ui">+ Add locations 14–26</span> adds more). A room with wet drywall and a wet subfloor gets two maps, because each material has its own meter setting and its own goal.</p>
+
+  <h2 class="sec" id="s-mr-mark">5 · Numbering and marking</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:1.49in"><img src="shots/sop-map.jpg" alt="" style="margin-top:-6.65in"></div><figcaption><b>Numbered reading points</b> placed with <span class="ui">① Number</span>, and the day 0 wet boundary drawn as a dashed line.</figcaption></figure>
+    <div class="text">
+    <ol class="steps">
+      <li><b>Number clockwise from the source</b> (or from the entry door when the source is in the middle). Boundary points get the last numbers.</li>
+      <li>On the map, tap <span class="ui">① Number</span> and tap each point's spot on the plan in that order. The app numbers them for you. Draw the day 0 wet boundary with a color.</li>
+      <li><b>Mark each point on the wall or floor:</b> a 1-in. square of painter's tape with the number in Sharpie, set just beside the point. Read next to the tape, never through it.</li>
+      <li>Pin readings go back in the same holes every day.</li>
+      <li><b>Numbers are never reused.</b> A point that gets cut out keeps its number with <span class="ui">removed day 2</span> in Notes. A new point gets the next unused number.</li>
+    </ol>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-mr-take">6 · Taking a reading</h2>
+  <ol class="steps">
+    <li><b>Reference first,</b> written into Notes, then points in number order, one map at a time.</li>
+    <li><b>Non-penetrating:</b> the pad flat and fully on the surface, at least 2 in. from screws, corner bead, nail plates and pipes. Metal reads wet.</li>
+    <li><b>Pins:</b> same depth every time, in the same holes, held the way the meter maker says for the grain. Do it the same way each day.</li>
+    <li>Hold until the number settles. If it jumps around, take three readings and record the middle one.</li>
+    <li>Readings that look wrong (a dry point suddenly at 99) get re-read and photographed with the meter on the spot before you record them.</li>
+    <li><b>Same time window every day</b>: within 2 hours of the day 0 time, and never more than 24 hours apart.</li>
+    <li><b>Photo the meter on the point</b> for the worst point and the reference on every visit, and for every point on day 0 and on the final day. Caption: <span class="ui">Pt 3, 74 REL, day 0</span>.</li>
+  </ol>
+
+  <h2 class="sec" id="s-mr-log">7 · Logging it in the app</h2>
+  <figure class="tab"><div class="frame" style="height:2.26in"><img src="shots/sop-map-tablet.jpg" alt="" style="margin-top:-13.84in"></div><figcaption><b>Moisture Reading Locations.</b> One row per visit, one column per numbered point. Cells turn red when wetter than the dry goal and green at or below it. On a phone, swipe sideways for the rest of the points.</figcaption></figure>
+  <ul>
+    <li>On each visit tap <span class="ui">+ Add reading date</span> (the date fills in) and type each point's value into its numbered column while standing at the point.</li>
+    <li>Notes for the row: the reference first (<span class="ui">REF 12</span>), then anything that changed: a point removed, equipment moved, a new point added, a meter change.</li>
+    <li>A blank cell means "not read." Never leave a point blank because it was dry; read it and write the number.</li>
+    <li>The <span class="ui">🎙️ Transcribe</span> button at the top of the form takes spoken readings when there's signal. Read back every value before you confirm it.</li>
+    <li>Paper only if the phone is dead. Then type the paper readings in before you leave the driveway, and photo the paper sheet.</li>
+  </ul>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:1.93in"><img src="shots/sop-map.jpg" alt="" style="margin-top:-14.42in"></div><figcaption><b>Drying Trend.</b> One line per point; the dashed line is the dry goal.</figcaption></figure>
+    <div class="text">
+      <p>Before you leave the job, open the map's <span class="ui">Drying Trend</span>. Every line should be lower than yesterday and heading to the dashed goal line. A line that went flat or went up is the job's problem for today; chapter 6 says what to do about it.</p>
+      <p>The trend chart prints with the map in the carrier packet. A clean, steady drop on that chart is the best argument for our equipment days.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 5. PSYCHROMETRICS ============================ -->
+<section class="chapter" id="ch5">
+  <div class="chapter__head"><div class="num">Chapter 5</div><h1>Psychrometric readings</h1><div class="who">Air readings, taken first on every visit</div></div>
+
+  <p>Moisture readings tell us how wet the materials are. Psychrometric readings tell us whether the air is able to pull that water out. Take them <b>first</b>, before you open doors, move equipment or start working, so they show the drying conditions we left overnight.</p>
+
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 200" font-family="Helvetica Neue, Arial" font-size="11">
+    <rect x="160" y="20" width="540" height="160" fill="#fff" stroke="#1f3354" stroke-width="2.5"/>
+    <path d="M420 20 V180" stroke="#1f3354" stroke-width="2"/>
+    <rect x="160" y="20" width="260" height="160" fill="#7aa3c9" opacity=".18"/>
+    <text x="290" y="40" text-anchor="middle" font-weight="800" fill="#0f1b2d">Affected room</text>
+    <text x="560" y="40" text-anchor="middle" font-weight="800" fill="#0f1b2d">Unaffected room (door shut)</text>
+    <rect x="300" y="120" width="44" height="34" rx="4" fill="#1f6feb"/><text x="322" y="141" text-anchor="middle" fill="#fff" font-weight="800" font-size="10">LGR</text>
+    <g font-weight="800" font-size="12" text-anchor="middle" fill="#fff">
+      <circle cx="60" cy="100" r="15" fill="#0f1b2d"/><text x="60" y="104">O</text>
+      <circle cx="560" cy="110" r="15" fill="#0f1b2d"/><text x="560" y="114">U</text>
+      <circle cx="235" cy="100" r="15" fill="#f26a21"/><text x="235" y="104">A</text>
+      <circle cx="372" cy="137" r="15" fill="#1c5fb0"/><text x="372" y="141">D</text>
+    </g>
+    <path d="M345 137 H355" stroke="#1c5fb0" stroke-width="2"/>
+    <g fill="#44556b" font-size="10">
+      <text x="10" y="128">Outside: shade,</text><text x="10" y="141">10 ft from the house,</text><text x="10" y="154">away from vents</text>
+      <text x="180" y="128">Center of the room,</text><text x="180" y="141">chest high, out of the</text><text x="180" y="154">air mover stream</text>
+      <text x="345" y="168">Dehu exhaust</text>
+      <text x="500" y="140">Same height, same spot</text><text x="500" y="153">every day</text>
+    </g>
+  </svg>
+  </div>
+
+  <table>
+    <tr><th style="width:16%">Reading</th><th style="width:34%">Where</th><th>Drying-log columns</th></tr>
+    <tr><td><b>O</b> Outside</td><td>In shade, about 10 ft from the house, away from dryer and furnace vents.</td><td>Outside / Ambient T and RH</td></tr>
+    <tr><td><b>U</b> Unaffected</td><td>A room the water never reached, door shut, same floor if possible.</td><td>Unaffected (Ref.) T and RH</td></tr>
+    <tr><td><b>A</b> Affected</td><td>Center of each affected room, chest high, at least 3 ft out of any air mover's stream and the dehu's exhaust.</td><td>Affected T and RH (one row per room if there are several, room in Notes)</td></tr>
+    <tr><td><b>D</b> Dehu exhaust</td><td>In the dehu's exhaust stream.</td><td>Notes, as <span class="ui">Dehu out 84°F / 17%</span></td></tr>
+  </table>
+
+  <figure class="tab"><div class="frame" style="height:2.68in"><img src="shots/sop-drying-tablet.jpg" alt="" style="margin-top:-11.22in"></div><figcaption><b>Daily Psychrometric Readings.</b> Type temperature and RH; GPP (grains per pound) and GD fill in on their own. Here the affected room starts at 63 GPP on day 0 and falls to 34 by day 4.</figcaption></figure>
+
+  <h3>How to take them</h3>
+  <ol class="steps">
+    <li>Let the hygrometer settle: at least 2 minutes in each spot, and 10 to 15 minutes after coming in from a cold truck.</li>
+    <li>Tap <span class="ui">+ Add reading</span> on the drying log. Date and time, then T and RH for outside, unaffected and affected.</li>
+    <li>Fill in the equipment counts (Dehu, AM, Scrb) for what is running right now, and your name under Tech.</li>
+    <li>Put <span class="ui">Cal OK</span> (first row of the day) and the dehu exhaust reading in Notes.</li>
+  </ol>
+
+  <h3>What good looks like</h3>
+  <table>
+    <tr><th style="width:30%">Number</th><th>Good</th><th style="width:36%">If not</th></tr>
+    <tr><td>Affected temperature</td><td>70 to 90°F. The sizing check flags auxiliary heat below 70°F.</td><td>Add heat (chapter 7). Cold air dries slowly and dehus lose capacity.</td></tr>
+    <tr><td>Affected GPP</td><td>Lower every day, heading toward the unaffected GPP.</td><td>More dehu capacity, check the dehu, look for a new water source.</td></tr>
+    <tr><td>GD on this log (unaffected GPP minus affected GPP)</td><td>Negative at the start, climbing toward 0 as the room dries.</td><td>A GD that stops climbing while materials are still wet means the air has stalled.</td></tr>
+    <tr><td>Dehu exhaust vs. affected air</td><td>Exhaust GPP well below the room's; an LGR in a warm room drops 20 grains or more.</td><td>Less than 10: clean the filter, check for coil icing, warm the room, and call CJ.</td></tr>
+  </table>
+</section>
+
+<!-- ============================ 6. DAILY VISITS ============================ -->
+<section class="chapter" id="ch6">
+  <div class="chapter__head"><div class="num">Chapter 6</div><h1>Daily monitoring visits</h1><div class="who">Every 24 hours until verified dry</div></div>
+
+  <h2 class="sec" id="s-visit">The visit, in order</h2>
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 96" font-family="Helvetica Neue, Arial" font-size="10.5">
+    <defs><marker id="va" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#f26a21"/></marker></defs>
+    <g text-anchor="middle">
+      <rect x="2" y="10" width="106" height="54" rx="7" fill="#0f1b2d"/><text x="55" y="33" fill="#fff" font-weight="800">1 · Look</text><text x="55" y="49" fill="#c9d6e8">walk, listen, smell</text>
+      <rect x="124" y="10" width="106" height="54" rx="7" fill="#1c5fb0"/><text x="177" y="33" fill="#fff" font-weight="800">2 · Air</text><text x="177" y="49" fill="#d7e5f8">O · U · A · D</text>
+      <rect x="246" y="10" width="106" height="54" rx="7" fill="#f26a21"/><text x="299" y="33" fill="#fff" font-weight="800">3 · Materials</text><text x="299" y="49" fill="#fff">ref, then 1, 2, 3…</text>
+      <rect x="368" y="10" width="106" height="54" rx="7" fill="#8a6fb0"/><text x="421" y="33" fill="#fff" font-weight="800">4 · Equipment</text><text x="421" y="49" fill="#fff">adjust and log</text>
+      <rect x="490" y="10" width="106" height="54" rx="7" fill="#5b6b80"/><text x="543" y="33" fill="#fff" font-weight="800">5 · Photos</text><text x="543" y="49" fill="#fff">meter on points</text>
+      <rect x="612" y="10" width="106" height="54" rx="7" fill="#1f9d55"/><text x="665" y="33" fill="#fff" font-weight="800">6 · Trend</text><text x="665" y="49" fill="#fff">then field report</text>
+    </g>
+    <g stroke="#f26a21" stroke-width="2" marker-end="url(#va)"><path d="M109 37h13"/><path d="M231 37h13"/><path d="M353 37h13"/><path d="M475 37h13"/><path d="M597 37h13"/></g>
+    <text x="2" y="86" fill="#44556b">Air readings come before anyone opens a door or touches a unit; material readings come before equipment is moved.</text>
+  </svg>
+  </div>
+  <ol class="steps">
+    <li><b>Look.</b> Walk every affected room before touching anything. Is everything running? Any new staining, smell, sag or water? Did the owner move or unplug anything? Photo anything new.</li>
+    <li><b>Air.</b> Psychrometric row in the drying log (chapter 5).</li>
+    <li><b>Materials.</b> Reference, then every point on every map, in number order (chapter 4).</li>
+    <li><b>Equipment.</b> Empty or check the dehu drain, clean filters, re-aim air movers onto the wettest points. Units removed today get a <b>Removed</b> date and time on their row; units added get a new row. Update the plan on the map if the layout changed.</li>
+    <li><b>Photos.</b> Meter on the worst point and on the reference; anything removed or changed today. Stage <b>During</b>.</li>
+    <li><b>Trend.</b> Check the Drying Trend on each map and the flags on the job list. Then write the Field Report.</li>
+  </ol>
+  <div class="note"><b>Pull equipment as areas dry</b>When every point a unit serves is at goal, that unit comes out that day: Removed date and time, and a Notes line such as <span class="ui">pulled, area at goal</span>. Running equipment on dry material is the second line an adjuster cuts.</div>
+
+  <h2 class="sec" id="s-trend">Reading the trend</h2>
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 190" font-family="Helvetica Neue, Arial" font-size="10.5">
+    <line x1="60" y1="20" x2="60" y2="160" stroke="#44556b"/><line x1="60" y1="160" x2="700" y2="160" stroke="#44556b"/>
+    <text x="10" y="24" fill="#44556b">reading</text>
+    <g fill="#44556b" text-anchor="middle"><text x="100" y="176">Day 0</text><text x="220" y="176">Day 1</text><text x="340" y="176">Day 2</text><text x="460" y="176">Day 3</text><text x="580" y="176">Day 4</text></g>
+    <line x1="60" y1="138" x2="700" y2="138" stroke="#1f9d55" stroke-width="2" stroke-dasharray="7 5"/><text x="640" y="132" fill="#1f9d55" font-weight="700">dry goal</text>
+    <polyline points="100,30 220,70 340,110 460,134 580,138" fill="none" stroke="#1c5fb0" stroke-width="3"/>
+    <polyline points="100,40 220,78 340,92 460,94" fill="none" stroke="#c0392b" stroke-width="3"/>
+    <polyline points="460,94 580,128" fill="none" stroke="#c0392b" stroke-width="3" stroke-dasharray="4 4"/>
+    <g fill="#c0392b"><circle cx="340" cy="92" r="4"/><circle cx="460" cy="94" r="4"/></g>
+    <rect x="300" y="48" width="200" height="36" rx="5" fill="#fdecea" stroke="#c0392b"/>
+    <text x="400" y="63" text-anchor="middle" fill="#c0392b" font-weight="800">Stalled: day 3 no lower than day 2</text>
+    <text x="400" y="77" text-anchor="middle" fill="#c0392b">act today (table below)</text>
+    <text x="230" y="60" fill="#1c5fb0" font-weight="700">steady drop</text>
+    <text x="500" y="122" fill="#c0392b">after the fix</text>
+  </svg>
+  </div>
+  <p>The job list does part of this watching for you. A water job that isn't certified yet shows a flag when:</p>
+  <table>
+    <tr><th style="width:36%">Flag on the job list</th><th>What it means</th><th style="width:30%">What to do</th></tr>
+    <tr><td><b>No reading in 1+ days</b> (red)</td><td>The newest moisture reading on the job is 36 hours old or more.</td><td>Get there today. Note why it was missed.</td></tr>
+    <tr><td><b>Area not drying down</b></td><td>On a map, the highest reading today isn't lower than last visit's, and it's still above goal.</td><td>Triage table below, same visit.</td></tr>
+    <tr><td><b>Unit on site 7+ days</b></td><td>Equipment placed 7 or more days ago with no removed date.</td><td>Pull it if its area is dry; otherwise write why it's still needed in its Notes.</td></tr>
+  </table>
+
+  <h2 class="sec" id="s-triage">When it isn't drying</h2>
+  <table>
+    <tr><th style="width:28%">What you see</th><th style="width:34%">Likely cause</th><th>Do this</th></tr>
+    <tr><td>One point flat or up, others dropping</td><td>Trapped water: behind a cabinet, under base trim, inside insulation, or air isn't reaching it.</td><td>Re-aim an air mover at it, pull the base trim or toe kick, check behind. Weep holes or a cut only with an OK. Photo and note what you did.</td></tr>
+    <tr><td>A whole map flat</td><td>Air is saturated or cold, or the dehu isn't working.</td><td>Check the psych numbers: affected under 70°F means add heat; affected GPP not falling means add dehu capacity or fix the dehu.</td></tr>
+    <tr><td>Points going up, or the boundary point climbing</td><td>New water. The source isn't fixed, or there's a second leak, ice dam or condensation.</td><td>Stop and find it. Call CJ. Photo, new points where the water spread.</td></tr>
+    <tr><td>Reference moved more than 2 points</td><td>Meter, calibration or a seasonal swing.</td><td>Re-check the meter; tell CJ before calling anything dry.</td></tr>
+    <tr><td>Day 3 and still far from goal</td><td>Class or category set too low, dense materials (Class 4), or equipment below the worksheet.</td><td>CJ reviews the job in person or by photos; Branden decides any added equipment or removal.</td></tr>
+    <tr><td>Musty smell, visible growth</td><td>Microbial growth.</td><td>Stop disturbing it. Photos. Call Branden; this can change the scope and needs its own approval.</td></tr>
+  </table>
+</section>
+
+<!-- ============================ 7. FAIRBANKS ============================ -->
+<section class="chapter" id="ch7">
+  <div class="chapter__head"><div class="num">Chapter 7</div><h1>Fairbanks cold-weather rules</h1><div class="who">Interior Alaska changes the drying math; these rules apply October through April and any cold night</div></div>
+
+  <div class="sopstep"><div class="n">C1</div><div>
+    <h3>Frozen water reads dry</h3>
+    <p>Meters read liquid water. Ice in drywall, framing or a crawlspace reads like dry material. On any freeze-up loss, or in a garage, crawlspace or unheated addition, warm the area to above 50°F and hold it for several hours before taking day 0 readings. Check material temperature with the IR thermometer and put it in Notes (<span class="ui">material 52°F</span>). Re-read everything after it thaws; the real wet area is often bigger than the frozen one looked.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">C2</div><div>
+    <h3>Keep the heat on, and add heat when the room runs cold</h3>
+    <p>Affected air below 70°F slows drying and cuts LGR capacity. Keep the house thermostat up, and add a heater when the sizing check says so. Log heaters as equipment rows like any other unit; they show on the certificate's equipment summary.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">C3</div><div>
+    <h3>Closed drying is the default in winter</h3>
+    <p>Fairbanks winter air is extremely dry (often under 10 GPP outside), which is tempting, but opening a house at 20 below freezes pipes and wastes the customer's heat. Open or hybrid drying with outside air only with Branden's OK, and it gets written on the drying log as the Drying System.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">C4</div><div>
+    <h3>Watch combustion appliances</h3>
+    <p>Oil furnaces, boilers, wood and pellet stoves and gas water heaters need their air. Never set an air scrubber to run as negative air in the same space as a fuel-burning appliance without Branden's OK; it can pull exhaust back into the house. A CO alarm goes in any job with containment and a fuel-burning appliance.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">C5</div><div>
+    <h3>Exterior walls and condensation</h3>
+    <p>Exterior wall references read differently from interior ones in winter, so match the reference to the wall type. Frost on window frames, sill plates or rim joists can melt into new water and look like a stalled point. Check for it before calling a point stalled.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">C6</div><div>
+    <h3>Ice dams and snowmelt</h3>
+    <p>Ice-dam water that ran through insulation and the ceiling is at least Cat 2. It can keep coming in on warm afternoons, so read the ceiling points at the same time each day and look outside at the eaves. Tell the office if the roof still has a dam; drying won't finish until it's dealt with.</p>
+  </div></div>
+  <div class="sopstep"><div class="n">C7</div><div>
+    <h3>Cold gear and cold drains</h3>
+    <p>Meters ride in the cab. Dehu drain lines never run outside in winter; drain to a sink, tub or a pump into the house's plumbing. If a visit is missed because of roads or weather, write that in the next Field Report and in the next reading row's Notes so the gap is explained.</p>
+  </div></div>
+</section>
+
+<!-- ============================ 8. DRY + CERT ============================ -->
+<section class="chapter" id="ch8">
+  <div class="chapter__head"><div class="num">Chapter 8</div><h1>Dry verification and the certificate</h1><div class="who">Crew lead verifies and prepares; Branden signs</div></div>
+
+  <h2 class="sec" id="s-dry">Is it dry?</h2>
+  <p>A job is dry when <b>all</b> of these are true on the same visit:</p>
+  <ol class="steps">
+    <li>Every reading point on every map is at or below its dry goal (every cell green).</li>
+    <li>The reference reads within 2 points of its day 0 value.</li>
+    <li>Wood, subfloor and framing that were mapped with the non-penetrating meter are confirmed with pins.</li>
+    <li>No point reached goal for the first time today. If one did, keep the equipment running on it and confirm it at the next visit.</li>
+    <li>CJ or Branden has looked at the numbers (in person or in the app) and said "dry."</li>
+  </ol>
+
+  <h2 class="sec" id="s-pull">Pulling equipment</h2>
+  <ol class="steps">
+    <li>Final reading row on every map and a final psychrometric row, Notes <span class="ui">Dry verified</span> with who verified it.</li>
+    <li>Every remaining unit gets its <b>Removed</b> date and time in the drying log. Set the <b>Dry-out Finish Date</b>; the banner switches to "Drying complete — N days."</li>
+    <li>After photos of every affected room from the same doorway spots as the before photos, plus the meter on the worst point at its final reading. Stage <b>After</b>, captioned.</li>
+    <li>Leave the tape on the points for the rebuild crew and the adjuster, unless the owner asks for it off.</li>
+  </ol>
+
+  <h2 class="sec" id="s-cert">Filling the Certificate of Drying</h2>
+  <p>Open <span class="ui">✅ Cert. of Drying</span>. The customer, claim and category fields fill in from the job. Everything else comes from the maps and the drying log, so there's nothing new to measure.</p>
+  <table>
+    <tr><th style="width:30%">Field</th><th>Where it comes from</th></tr>
+    <tr><td>Certificate #</td><td>The work order number plus <span class="ui">-CD</span>, e.g. RC-1005-CD.</td></tr>
+    <tr><td>Drying start and completion dates, duration</td><td>The drying log's dry-out start and finish dates, counting both days.</td></tr>
+    <tr><td>Affected Areas &amp; Materials</td><td>Rooms and materials, the flood-cut height, and anything removed.</td></tr>
+    <tr><td>Dry Standard Verification, one row per map</td><td>Material and its points; meter and setting; Goal = the map's dry goal; Final = the <b>highest</b> point on the final row; Ref = the final reference; tick ✓ Dry.</td></tr>
+    <tr><td>Equipment Deployment Summary</td><td>Units × days for each kind, from the equipment rows: e.g. <i>6 × 3, 4 × 2</i> when two air movers came out early.</td></tr>
+  </table>
+  <figure class="tab"><div class="frame" style="height:1.67in"><img src="shots/sop-cert-tablet.jpg" alt="" style="margin-top:-6.38in"></div><figcaption><b>Dry Standard Verification</b> on the certificate: one row per moisture map, with the goal, the final (highest) reading and the reference.</figcaption></figure>
+  <figure class="tab"><div class="frame" style="height:2.6in"><img src="shots/sop-cert-tablet.jpg" alt="" style="margin-top:-10.41in"></div><figcaption><b>Signatures.</b> The IICRC-certified technician signs first, then the owner. The adjuster signs only when the carrier asks for a witness.</figcaption></figure>
+  <ul>
+    <li><b>The technician signature is Branden's</b> as the IICRC WRT. The crew lead prepares the form; Branden reviews and signs on the phone or the office signs the uploaded copy.</li>
+    <li>The owner signs on the phone with <span class="ui">Sign on device</span>. If they won't sign, write why in the Field Report; the certificate still goes out with our signature.</li>
+    <li>A certificate signed on paper goes in with <span class="ui">Upload signed copy</span>.</li>
+    <li>Once the technician signature is on it, the job stops showing drying flags on the job list.</li>
+  </ul>
+
+  <h2 class="sec" id="s-close">Closeout and hand-off</h2>
+  <ol class="steps">
+    <li>Final Field Report: equipment out, what's left for rebuild, anything the owner said.</li>
+    <li>Check the job page's packet check. Anything it lists as missing (a caption, an equipment type, a signature) gets fixed before the job leaves the field.</li>
+    <li>Tell the office the job is certified. Branden builds the carrier packet and invoice from what's in the app.</li>
+  </ol>
+</section>
+
+<!-- ============================ 9. QUICK REFERENCE ============================ -->
+<section class="chapter" id="ch9">
+  <div class="chapter__head"><div class="num">Chapter 9</div><h1>Quick reference cards</h1><div class="who">Print this page for the truck</div></div>
+
+  <div class="pair" style="align-items:stretch;gap:12pt">
+    <div class="card" style="flex:1;margin:0">
+      <h3>Day 0 checklist</h3>
+      <ul class="check small">
+        <li>Safety walk; power off at panel if needed</li>
+        <li>Source stopped; cause written down</li>
+        <li>Pre-1981? No cutting until Branden clears it</li>
+        <li>Work Authorization signed in the app</li>
+        <li>Before photos, every room, captioned</li>
+        <li>Job header: claim, carrier, cause, date of loss</li>
+        <li>Category, class, drying system</li>
+        <li>Reference reading per material</li>
+        <li>Wet boundary found; maps, goals, numbered points</li>
+        <li>Points taped and numbered on site</li>
+        <li>Extract; remove with photos and reasons</li>
+        <li>Antimicrobial (Cat 2 and 3); Cat 3 change order</li>
+        <li>Size the equipment; deviations written</li>
+        <li>Every unit logged with asset tag and time</li>
+        <li>Day 0 psych row and reading rows</li>
+        <li>Owner briefed; Field Report written</li>
+      </ul>
+    </div>
+    <div class="card" style="flex:1;margin:0">
+      <h3>Daily visit checklist</h3>
+      <ul class="check small">
+        <li>Within 24 hours of the last visit, same time window</li>
+        <li>Walk it: running, new water, smell, owner changes</li>
+        <li>Meters warm; Cal OK in Notes</li>
+        <li>Psych: outside, unaffected, affected, dehu exhaust</li>
+        <li>Reference first, written in Notes</li>
+        <li>Every point, in number order, at the point</li>
+        <li>Dehu drained, filters clean, air movers re-aimed</li>
+        <li>Dry areas: equipment out, removed time logged</li>
+        <li>Photos: meter on worst point and reference</li>
+        <li>Drying Trend checked; job list flags cleared</li>
+        <li>Field Report written</li>
+      </ul>
+      <h3 style="margin-top:8pt">Call CJ, then Branden, for</h3>
+      <ul class="small" style="margin:0">
+        <li>Cat 3, sewage, or growth</li>
+        <li>Pre-1981 materials to cut</li>
+        <li>Points rising or boundary growing</li>
+        <li>Day 3 and still far from goal</li>
+        <li>Less equipment than the worksheet</li>
+        <li>Meter change, adjuster on site, owner refuses</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 class="sec">The reading protocol on one card</h2>
+  <table>
+    <tr><th style="width:25%">Step</th><th>Rule</th></tr>
+    <tr><td><b>Meter</b></td><td>One meter and setting per material for the whole job, written in Meter / Setting. Checked every morning.</td></tr>
+    <tr><td><b>Reference</b></td><td>Same material, same meter, unaffected, matched wall type. First reading every visit, first words in Notes.</td></tr>
+    <tr><td><b>Dry goal</b></td><td>Reference + 10%, rounded; at least +1 point. Typed over the material's textbook goal.</td></tr>
+    <tr><td><b>Points</b></td><td>Walls every 4 ft, 2 in. above the plate, plus a high point if wicking passed 12 in. Floors on a 4-ft grid plus source, doorways, toe kicks. A boundary point 12 in. past the wet edge.</td></tr>
+    <tr><td><b>Numbers</b></td><td>Clockwise from the source; tape beside each point; never reused.</td></tr>
+    <tr><td><b>Reading</b></td><td>Full contact, 2 in. off metal, pins in the same holes, settle, middle of three if it jumps.</td></tr>
+    <tr><td><b>Timing</b></td><td>Every 24 hours, within 2 hours of the day 0 time. 36 hours raises a red flag.</td></tr>
+    <tr><td><b>Dry</b></td><td>Every point at goal on the same visit, reference steady, wood confirmed with pins, verified by CJ or Branden.</td></tr>
+  </table>
+
+</section>
+</body>
+</html>

@@ -7,6 +7,7 @@ it prints as a branded PDF that matches the field forms packet.
 | File | What it is |
 |---|---|
 | `manual.html` | The manual itself. Edit this when a feature ships. |
+| `sop-water-mitigation.html` | The crew's water mitigation SOP (first visit to Certificate of Drying, moisture-reading protocol). Same look and tools. |
 | `manual.css` | Print styles (letterhead, section bands, tables), from `apps/field/css/print.css`. |
 | `shots/` | Screenshots used by the manual. Made-up demo data only. |
 | `tools/shoot.mjs` | Re-shoots every screen from the apps in this checkout. |
@@ -21,6 +22,8 @@ From the repo root (needs Node and Playwright with Chromium):
 ```sh
 node docs/manual/tools/shoot.mjs            # all screens, or pass a name filter: field-, admin-, board-, portal
 node docs/manual/tools/build.mjs            # docs/manual/dist/Roybal_App_Manual.pdf
+node docs/manual/tools/shoot.mjs sop-       # just the SOP's screens (demo job "demo-job-sop")
+node docs/manual/tools/build.mjs sop        # docs/manual/dist/Roybal_Water_Mitigation_SOP.pdf
 ```
 
 `build.mjs` stamps the edition date, the field build from `apps/field/js/config.js`

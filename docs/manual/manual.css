@@ -88,3 +88,16 @@ tr:nth-child(even) td { background: #f7f9fc; }
 /* ---------- diagrams ---------- */
 svg.diagram { width: 100%; height: auto; display: block; margin: 4pt 0 2pt; }
 .diagram-wrap { break-inside: avoid; margin: 4pt 0 10pt; }
+
+/* ---------- SOP additions ---------- */
+figure.tab { width: 5in; margin: 4pt auto 10pt; }
+figure.tab .frame { border: 3pt solid var(--navy-2); border-radius: 9pt; }
+.sopstep { display: grid; grid-template-columns: 34pt 1fr; gap: 0 9pt; margin: 0 0 8pt; break-inside: avoid; }
+.sopstep > .n { background: var(--navy); color: #fff; font-weight: 800; font-size: 13pt; text-align: center; border-radius: 4pt; padding: 5pt 0; height: fit-content; border-bottom: 3pt solid var(--orange); }
+.sopstep > div > h3 { margin-top: 1pt; }
+.must { color: var(--red); font-weight: 800; }
+.card { border: 1.2pt solid var(--navy); border-radius: 4pt; padding: 8pt 10pt; break-inside: avoid; margin: 6pt 0 10pt; }
+.card h3 { margin-top: 0; }
+.check { list-style: none; padding-left: 0; }
+.check > li { padding-left: 15pt; position: relative; }
+.check > li::before { content: ""; position: absolute; left: 0; top: 2.5pt; width: 8pt; height: 8pt; border: 1pt solid var(--navy); border-radius: 1.5pt; }

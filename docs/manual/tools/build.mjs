@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-/* Build the branded PDF from docs/manual/manual.html.
-   Usage (repo root):  node docs/manual/tools/build.mjs [out.pdf]
-   Default output: docs/manual/dist/Roybal_App_Manual.pdf (git-ignored).
+/* Build a branded PDF from docs/manual/: the app manual or the field SOP.
+   Usage (repo root):  node docs/manual/tools/build.mjs [manual|sop] [out.pdf]
+   Default: the manual, written to docs/manual/dist/Roybal_App_Manual.pdf
+   (git-ignored); "sop" builds sop-water-mitigation.html into
+   dist/Roybal_Water_Mitigation_SOP.pdf. A lone .pdf argument still means
+   the manual, written there.
    Page numbers in the contents are filled by a second pass when python3 +
    pypdf are available; without them the contents still links, unnumbered. */
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
@@ -15,7 +18,13 @@ const { chromium } = (() => { for (const p of ["playwright", "/opt/node-tools/no
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const DIR = join(ROOT, "docs/manual");
-const out = resolve(process.argv[2] || join(DIR, "dist/Roybal_App_Manual.pdf"));
+const DOCS = {
+  manual: { src: "manual.html", pdf: "Roybal_App_Manual.pdf", label: "App Manual" },
+  sop: { src: "sop-water-mitigation.html", pdf: "Roybal_Water_Mitigation_SOP.pdf", label: "Water Mitigation SOP" },
+};
+const args = process.argv.slice(2);
+const doc = DOCS[DOCS[args[0]] ? args.shift() : "manual"];
+const out = resolve(args[0] || join(DIR, "dist", doc.pdf));
 mkdirSync(dirname(out), { recursive: true });
 
 const BUILD = (readFileSync(join(ROOT, "apps/field/js/config.js"), "utf8").match(/BUILD = "(v\d+)"/) || [])[1] || "";
@@ -25,7 +34,7 @@ const EDITION = new Date().toLocaleDateString("en-US", { month: "long", day: "nu
 
 const SHORT_LIC = LICENSES.split(" · ").filter((l) => /GC Lic|WRT/.test(l)).join(" · ");
 const footer = `<div style="width:100%;font-family:Helvetica Neue,Arial;font-size:7.5pt;color:#5b6b80;padding:0 0.5in;display:flex;justify-content:space-between;white-space:nowrap">
-  <span>Roybal Construction, LLC · App Manual · ${EDITION}</span><span>${SHORT_LIC}</span><span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>`;
+  <span>Roybal Construction, LLC · ${doc.label} · ${EDITION}</span><span>${SHORT_LIC}</span><span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>`;
 
 function fill(html, pages) {
   html = html.replaceAll("{{EDITION}}", EDITION).replaceAll("{{BUILD}}", BUILD).replaceAll("{{LICENSES}}", LICENSES);
@@ -53,7 +62,7 @@ async function render(html, file) {
   } finally { await browser.close(); rmSync(tmp, { force: true }); }
 }
 
-const src = readFileSync(join(DIR, "manual.html"), "utf8");
+const src = readFileSync(join(DIR, doc.src), "utf8");
 const targets = await render(fill(src), out);
 
 let pages = null;
