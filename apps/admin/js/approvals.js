@@ -19,11 +19,12 @@
                   and reads P0002 as "needs update", which here means
                   "no such proposal".
 
-   Owner only (callerRole): any other login gets one line and no
-   badge. The page never repaints under his hands: admin.js leaves
+   Owner only (ownerCheck, below): any other login gets one line and
+   no badge; a check that couldn't answer says so and offers Retry.
+   The page never repaints under his hands: admin.js leaves
    #/approvals out of the sync repaint, and the page refreshes itself
-   every 45 s while it is open, visible and not mid-answer, and when
-   the tab comes back into view.
+   every 45 s while it is open, visible and no answer is in flight,
+   and when the tab comes back into view.
 
    admin.js loads this file by dynamic import, and it imports only
    names that existed in the field modules before it was written (the
@@ -33,8 +34,7 @@
    ============================================================ */
 import { h, clear, toast, likelyOffline } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
-import { rest, callFunction, isSignedIn } from "../../js/supa.js";
-import { callerRole } from "../../js/magicplan.js";
+import { rest, callFunction, isSignedIn, currentEmail } from "../../js/supa.js";
 import * as A from "../../js/approvals.js";
 
 const HASH = "#/approvals";
@@ -42,6 +42,7 @@ const REFRESH_MS = 45000;
 const enc = encodeURIComponent;
 /* the shared .badge tones: the chip by kind, the outcome line by how it went */
 const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", other: "disp-x" };
+const tone = (kind) => (Object.hasOwn(TONE, kind) ? TONE[kind] : TONE.other);
 
 const TEXT_COLS = "id,code,kind,label,params,job_id,proposed_by,status,result,created_at,expires_at,executed_at";
 const SPINE_COLS = "id,operation,input,edited_params,proposed_by_kind,proposed_by_id,rationale,evidence_refs," +
@@ -92,11 +93,36 @@ async function load(now) {
   return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2 };
 }
 
+/* ---------- is this the owner? ----------
+   Three answers, not two: true or false once role_is said so (kept for the
+   page's life, per login), or null when it couldn't say (a 5xx, a token it
+   turned down, no connection). null is never kept, so one blip at boot
+   can't tell the owner the tab isn't his until he reloads: the next paint
+   asks again. Not magicplan.js's callerRole(), which keeps a failed check
+   as "no role". The server gates stay the real ones (the proposals RLS,
+   decidePending's own owner check). */
+let owner = { who: "", is: null, asking: null };
+function ownerCheck() {
+  const who = currentEmail();
+  if (owner.who !== who) owner = { who, is: null, asking: null };     // another login: ask afresh
+  if (owner.is !== null) return Promise.resolve(owner.is);
+  if (!owner.asking) {
+    const mine = owner;
+    mine.asking = (async () => {
+      const res = await rest("rpc/role_is", { method: "POST", body: JSON.stringify({ p_roles: ["owner"] }) });
+      if (res.status !== 200) return null;
+      const yes = await res.json().catch(() => null);
+      return yes === true || yes === false ? yes : null;
+    })().catch(() => null).then((yes) => { mine.asking = null; if (yes !== null) mine.is = yes; return yes; });
+  }
+  return owner.asking;
+}
+
 /* ---------- nav badge: what's waiting, both queues ---------- */
-let badgeCache = { n: 0, at: 0 };
+let badgeCache = { n: 0, at: 0, who: "" };
 const paintBadge = (el, n) => { el.hidden = !n; el.textContent = String(n); };
 function setBadge(n) {
-  badgeCache = { n, at: Date.now() };
+  badgeCache = { n, at: Date.now(), who: currentEmail() };
   const el = document.getElementById("approvalsBadge");
   if (el) paintBadge(el, n);
 }
@@ -105,12 +131,13 @@ async function count(path) {
   if (!res.ok) throw new Error(String(res.status));
   return Number((res.headers.get("content-range") || "").split("/")[1]) || 0;
 }
-/** admin.js paintNav(): fills #approvalsBadge, owner only, 20 s cache. */
+/** admin.js paintNav(): fills #approvalsBadge, owner only, 20 s cache. Hidden
+    while the owner check can't answer; the next paint asks again. */
 export async function refreshApprovalsBadge() {
   const el = document.getElementById("approvalsBadge");
   if (!el || !SYNC_ENABLED || !isSignedIn()) return;
-  if (Date.now() - badgeCache.at < 20_000) { paintBadge(el, badgeCache.n); return; }
-  if ((await callerRole()) !== "owner") {
+  if (Date.now() - badgeCache.at < 20_000 && badgeCache.who === currentEmail()) { paintBadge(el, badgeCache.n); return; }
+  if ((await ownerCheck()) !== true) {
     const cur = document.getElementById("approvalsBadge");     // paintNav may have repainted meanwhile
     if (cur) paintBadge(cur, 0);
     return;
@@ -126,13 +153,16 @@ export async function refreshApprovalsBadge() {
 
 /* ---------- the page ---------- */
 let seq = 0;
-let busy = false;                // an answer in flight: no refresh repaints under it
+/* card key → "approve" | "decline": the answers in flight. Each card latches
+   on its own (its buttons off, the pressed one saying so) and the others stay
+   usable; no refresh repaints while any is out. */
+const inflight = new Map();
 let epoch = 0;                   // bumps on every answer; a refresh that started before one drops its paint
 let timer = null;
 let onShow = null;               // the open page's refresh, for coming back to the tab
-const notes = new Map();         // card key → { text, gone }: the error line under a card, kept across repaints
+const notes = new Map();         // card key → { text, gone, declineOnly }: the error line under a card, kept across repaints
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && onShow && !busy) onShow();
+  if (document.visibilityState === "visible" && onShow && !inflight.size) onShow();
 });
 
 /** admin.js route(): #/approvals lands here. */
@@ -146,19 +176,28 @@ export async function renderApprovals(view) {
       h("p", { class: "muted" }, "Approvals need the cloud connection."));
     return;
   }
-  const role = await callerRole();
+  const isOwner = await ownerCheck();
   if (!live()) return;
   const body = clear(view);
   const refreshBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "↻ Refresh");
-  body.append(h("div", { class: "atoolbar" }, h("h1", {}, "✅ Approvals"), role === "owner" ? refreshBtn : null));
-  if (role !== "owner") {
+  body.append(h("div", { class: "atoolbar" }, h("h1", {}, "✅ Approvals"), isOwner === true ? refreshBtn : null));
+  if (isOwner === false) {
+    body.append(h("p", { class: "muted" }, "Approvals belong to the owner's login."));
+    return;
+  }
+  if (isOwner !== true) {
+    // the check couldn't answer: say so, never "not yours"; Retry (or coming back to the tab) asks again
+    const again = () => { if (live()) renderApprovals(view); };
+    onShow = again;
     body.append(h("p", { class: "muted" }, likelyOffline()
-      ? "You're offline. Approvals load when you're back online."
-      : "Approvals belong to the owner's login."));
+        ? "You're offline. Approvals load when you're back online."
+        : "Couldn't check your login just now."),
+      h("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: again }, "Retry"));
     return;
   }
 
   const page = h("div");
+  const uis = new Map();          // card key → its waiting card on screen now (paint rebuilds them)
   body.append(h("p", { class: "ap-intro" },
     "Everything waiting on your yes. A card that says “or text YES 12” can also be answered by text; the first answer counts."), page);
   let state = await load(Date.now()).catch(() => ({ box: { waiting: [], recent: [], expired: 0 }, look: {},
@@ -167,11 +206,11 @@ export async function renderApprovals(view) {
   show();
 
   async function refresh() {
-    if (busy || !live()) return;
+    if (inflight.size || !live()) return;
     const at = epoch;
     let next;
     try { next = await load(Date.now()); } catch { return; }
-    if (!live() || busy || at !== epoch) return;
+    if (!live() || inflight.size || at !== epoch) return;
     state = next;
     show();
   }
@@ -195,6 +234,7 @@ export async function renderApprovals(view) {
   function paint() {
     const now = Date.now();
     const { box } = state;
+    uis.clear();
     const kids = state.warn.map((w) => h("div", { class: "warn" }, w));
     if (state.failed) {
       kids.push(h("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => refresh() }, "Try again"));
@@ -218,12 +258,23 @@ export async function renderApprovals(view) {
     const decline = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Decline");
     const err = h("div", { class: "warn ap-err", role: "alert", hidden: !note }, note ? note.text : "");
     const ui = {
-      lock: (on) => { approve.disabled = on; decline.disabled = on; },
+      // its answer is out: both off, the pressed one says so
+      working: (decision) => {
+        approve.disabled = decline.disabled = true;
+        (decision === "approve" ? approve : decline).textContent = "Working…";
+      },
+      // settled: the labels back; both off if the ask is gone, Approve alone if only Decline can answer it
+      idle: (n) => {
+        approve.textContent = c.approveLabel; decline.textContent = "Decline";
+        approve.disabled = !!(n && (n.gone || n.declineOnly)); decline.disabled = !!(n && n.gone);
+      },
       note: (t) => { err.textContent = t; err.hidden = !t; },
     };
-    if (note && note.gone) ui.lock(true);
-    approve.addEventListener("click", () => decide(c, "approve", ui));
-    decline.addEventListener("click", () => decide(c, "decline", ui));
+    uis.set(c.key, ui);
+    if (inflight.has(c.key)) ui.working(inflight.get(c.key));
+    else ui.idle(note);
+    approve.addEventListener("click", () => decide(c, "approve"));
+    decline.addEventListener("click", () => decide(c, "decline"));
     return h("div", { class: "card ap-card", dataset: { key: c.key } },
       head(c),
       meta(c.job, c.by && "from " + c.by, "asked " + A.akTime(c.createdAt, now), A.expiresIn(c.expiresAt, now)),
@@ -234,9 +285,11 @@ export async function renderApprovals(view) {
 
   /* Approve: one confirm naming the action. Decline: a confirm on the text
      queue, a prompt for an optional reason on the spine (op_proposal_decline
-     keeps it). While it runs both buttons are off and no refresh repaints. */
-  async function decide(c, decision, ui) {
-    if (busy) return;
+     keeps it). While it runs that card's buttons are off, the other cards
+     stay usable, and no refresh repaints. Another card's answer can repaint
+     the page meanwhile, so the card is found again (uis) when this one lands. */
+  async function decide(c, decision) {
+    if (inflight.has(c.key)) return;
     let reason = "";
     if (decision === "approve") { if (!confirm(A.approveConfirm(c))) return; }
     else if (c.lane === "text") { if (!confirm(A.declineConfirm(c))) return; }
@@ -245,57 +298,65 @@ export async function renderApprovals(view) {
       if (r === null) return;
       reason = r;
     }
-    busy = true; epoch++;
-    ui.lock(true); ui.note(""); notes.delete(c.key);
+    inflight.set(c.key, decision); epoch++;
+    notes.delete(c.key);
+    const ui0 = uis.get(c.key);
+    if (ui0) { ui0.working(decision); ui0.note(""); }
     const req = A.decisionRequest(c, decision, reason);
     let res = null, b = null;
     try {
       res = req.fn ? await callFunction(req.fn, req.body)
         : await rest("rpc/" + req.rpc, { method: "POST", body: JSON.stringify(req.body) });
       b = await res.json().catch(() => null);
-    } catch { /* no answer at all */ } finally { busy = false; }
+    } catch { /* no answer at all */ } finally { inflight.delete(c.key); }
     badgeCache.at = 0;
     refreshApprovalsBadge();
     const ans = !res ? { ok: false, error: isSignedIn() ? A.NO_CONNECTION : A.SIGNED_OUT }
       : c.lane === "text" ? A.pendingAnswer(res.status, b, c, decision) : A.spineAnswer(res.status, b);
-    if (!ans.ok) {
-      notes.set(c.key, { text: ans.error, gone: !!ans.gone });
-      ui.lock(!!ans.gone); ui.note(ans.error);
-      return;
+    if (ans.ok) {
+      const done = c.lane === "text" ? A.decidedText(c, ans) : A.fromProposal(ans.row, state.look);
+      state = { ...state, box: A.settle(state.box, c, done) };
+      toast(A.outcome(done).text);
+    } else {
+      notes.set(c.key, { text: ans.error, gone: !!ans.gone, declineOnly: !!ans.declineOnly });
     }
-    const done = c.lane === "text" ? A.decidedText(c, ans) : A.fromProposal(ans.row, state.look);
-    state = { ...state, box: A.settle(state.box, c, done) };
-    if (live()) paint();
-    toast(A.outcome(done).text);
+    // the office moved off this page while it was out; if it came back, that page reads where things stand
+    if (!live()) { if (onShow) onShow(); return; }
+    const ui = !ans.ok && uis.get(c.key);
+    if (ui) { ui.idle(notes.get(c.key)); ui.note(ans.error); }
+    else paint();
   }
 }
 
 /* ---------- card parts ---------- */
 const meta = (...parts) => h("div", { class: "ap-meta" }, parts.filter(Boolean).join(" · "));
 const head = (c) => h("div", { class: "ap-head" },
-  h("span", { class: "badge " + (TONE[c.kind] || TONE.other) }, c.chip),
+  h("span", { class: "badge " + tone(c.kind) }, c.chip),
   h("strong", { class: "ap-title" }, c.title));
 const kv = (k, v) => (v ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, k), h("span", { class: "ap-v" }, v)) : null);
 
-/* what would happen, in full: the whole email, the whole text, the phase */
+/* what would happen, in full: the whole email, the whole text, the phase
+   (the body is never clamped, so nothing he approves is out of sight) */
 function evidence(c) {
   const e = c.evidence;
   const parts = [];
   if (c.kind === "email") {
     parts.push(kv("To", e.to), kv("Cc", e.cc), kv("Subject", e.subject),
-      e.body ? h("div", { class: "ap-mail", tabindex: "0", "aria-label": "Email body" }, e.body) : null);
+      e.body ? h("div", { class: "ap-mail" }, e.body) : null);
   } else if (c.kind === "text") {
-    parts.push(kv("To", e.to), e.message ? h("div", { class: "ap-mail", tabindex: "0", "aria-label": "Text message" }, e.message) : null);
+    parts.push(kv("To", e.to), e.message ? h("div", { class: "ap-mail" }, e.message) : null);
   } else if (c.kind === "phase") {
     parts.push(kv("Phase", e.phase), kv("Hours", e.hours != null ? `${e.hours} h logged` : ""));
   } else if (c.kind === "stage") {
     parts.push(kv("Job", c.job || "a board job"), kv("New stage", e.stage));
   }
   parts.push(kv("Why", e.rationale));
+  // a link's label is the proposer's words; the host beside it is where it really goes
   if (e.refs.length) {
     parts.push(h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Evidence"),
       h("ul", { class: "ap-v ap-refs" }, ...e.refs.map((r) => h("li", {},
-        r.url ? h("a", { href: r.url, target: "_blank", rel: "noopener" }, r.text) : r.text)))));
+        r.url ? [h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.text), " ",
+          h("span", { class: "ap-host" }, `(${r.host})`)] : r.text)))));
   }
   const shown = parts.filter(Boolean);
   return shown.length ? h("div", { class: "ap-ev" }, ...shown) : null;

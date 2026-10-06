@@ -7,7 +7,7 @@ import {
   parseApproval, matchProposal, stillLive, proposalLine, replyText,
   validateBoardEdit, buildNextSubtasks, revGuard,
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, replyFor,
-  parseDecideRequest, decideResponse,
+  parseDecideRequest, decideResponse, ownerGate,
 } from "./approve.ts";
 
 let pass = 0;
@@ -188,9 +188,33 @@ test("each decide() outcome gets the text reply the YES/NO path has always sent"
   assert.equal(replyFor("approve", { status: "failed", error: "that job is no longer on the board" }, a, w),
     replyText("failed", a, "that job is no longer on the board"));
   assert.equal(replyFor("approve", { status: "quiet_hours" }, a, w), replyText("quiet-hours", a, w));
-  // a NO answers "Cancelled" whether or not its flip landed, as it always has
   assert.equal(replyFor("decline", { status: "declined" }, a, w), replyText("cancelled", a));
-  assert.equal(replyFor("decline", { status: "not_open" }, a, w), replyText("cancelled", a));
+});
+
+test("a NO that didn't land says so instead of 'Cancelled'", () => {
+  const a = { code: 12, label: "email the INV-4 reminder to Hebard" };
+  // a YES or a tap got there first: the row may already have run
+  assert.equal(replyFor("decline", { status: "not_open" }, a, sendWindowText(7, 20)),
+    "That one was already answered — nothing was cancelled.");
+});
+
+test("a board that couldn't be reached: nothing added, text the same YES again", () => {
+  const a = { code: 13, label: "add phase Punch list to Pollen" };
+  const t = replyFor("approve", { status: "try_again", error: "couldn't reach the board just now. Nothing was added" }, a, "");
+  assert.equal(t, "⏳ Couldn't reach the board just now. Nothing was added — text YES 13 again in a minute.");
+});
+
+test("a phase that was already on the board says nothing was added, on the text too", () => {
+  const a = { code: 13, label: "add phase Punch list to Pollen" };
+  assert.equal(replyFor("approve", { status: "executed", skipped: "phase already exists" }, a, ""),
+    "✅ Phase was already on the board — nothing was added (add phase Punch list to Pollen).");
+});
+
+test("a YES or NO that couldn't be recorded asks for the same word again", () => {
+  const a = { code: 12, label: "x" };
+  assert.equal(replyText("not-recorded", a, "YES"), "Couldn't record that just now — text YES 12 again in a minute.");
+  // a NO must never be told to text YES
+  assert.equal(replyText("not-recorded", a, "NO"), "Couldn't record that just now — text NO 12 again in a minute.");
 });
 
 /* ---------- decidePending: the request, and every answer ---------- */
@@ -221,13 +245,19 @@ test("decidePending: 200 when the decision was recorded, { ok:false, error, mess
     params: { to: "hebard@example.com", body: "…" }, status: "pending" };
   const action = { id: ID, code: 12, kind: "emailSend", label: "email the INV-4 reminder to Hebard" };
   const w = sendWindowText(7, 20);
-  assert.deepEqual(decideResponse({ status: "executed" }, a, w),
-    { code: 200, body: { ok: true, status: "executed", message: "Done — email the INV-4 reminder to Hebard.", action } });
-  assert.deepEqual(decideResponse({ status: "declined" }, a, w),
-    { code: 200, body: { ok: true, status: "declined", message: "Declined — email the INV-4 reminder to Hebard.", action } });
+  // `after` = the row re-read once the decision settled
+  const sent = { ...a, status: "executed", result: { gmailId: "g1", threadId: "t1" } };
+  assert.deepEqual(decideResponse({ status: "executed" }, a, w, sent),
+    { code: 200, body: { ok: true, status: "executed", message: "Done — email the INV-4 reminder to Hebard.",
+      action: { ...action, status: "executed", result: { gmailId: "g1", threadId: "t1" } } } });
+  assert.deepEqual(decideResponse({ status: "declined" }, a, w, { ...a, status: "declined", result: null }),
+    { code: 200, body: { ok: true, status: "declined", message: "Declined — email the INV-4 reminder to Hebard.",
+      action: { ...action, status: "declined", result: null } } });
   // failed is still a recorded decision; the error rides in message
-  assert.deepEqual(decideResponse({ status: "failed", error: "Invalid 'to' address" }, a, w),
-    { code: 200, body: { ok: true, status: "failed", message: "Invalid 'to' address", action } });
+  assert.deepEqual(decideResponse({ status: "failed", error: "Invalid 'to' address" }, a, w,
+    { ...a, status: "failed", result: { error: "Invalid 'to' address" } }),
+    { code: 200, body: { ok: true, status: "failed", message: "Invalid 'to' address",
+      action: { ...action, status: "failed", result: { error: "Invalid 'to' address" } } } });
   assert.deepEqual(decideResponse({ status: "not_open" }, a, w),
     { code: 404, body: { ok: false, error: "not_open", message: "Already answered, or it expired." } });
   const q = decideResponse({ status: "quiet_hours" }, a, w);
@@ -242,6 +272,59 @@ test("decidePending: 200 when the decision was recorded, { ok:false, error, mess
     { code: 500, body: { ok: false, error: "server_error", message: "pending_actions read failed (503)" } });
   // the row's params (the email body, the customer's number) never ride back
   assert.equal(JSON.stringify(decideResponse({ status: "executed" }, a, w)).includes("hebard@example.com"), false);
+  assert.equal(JSON.stringify(decideResponse({ status: "executed" }, a, w, { ...sent, params: a.params })).includes("hebard@example.com"), false);
+});
+
+test("decidePending: a 200's action is the row after the decision, or the outcome when that read failed", () => {
+  const a = { id: ID, code: 12, kind: "emailSend", label: "email the INV-4 reminder to Hebard", status: "pending", result: null };
+  const w = sendWindowText(7, 20);
+  const act = (out, after) => decideResponse(out, a, w, after).body.action;
+  // the read failed: never "pending", which is what the row said before
+  assert.deepEqual([act({ status: "executed" }).status, act({ status: "executed" }).result], ["executed", null]);
+  assert.deepEqual([act({ status: "declined" }).status, act({ status: "declined" }).result], ["declined", null]);
+  assert.deepEqual(act({ status: "failed", error: "twilio 400" }).result, { error: "twilio 400" });
+  // the read says what really happened, even when it differs from the outcome
+  assert.equal(act({ status: "failed", error: "x" }, { ...a, status: "approved", result: null }).status, "approved");
+});
+
+test("decidePending: a phase already on the board says nothing was added", () => {
+  const a = { id: ID, code: 13, kind: "boardEdit", label: "add phase Punch list to Pollen", status: "pending" };
+  const w = sendWindowText(7, 20);
+  const skip = "Phase was already on the board — nothing was added.";
+  // from decide()'s outcome…
+  const r = decideResponse({ status: "executed", skipped: "phase already exists" }, a, w);
+  assert.equal(r.body.message, skip);
+  assert.deepEqual(r.body.action.result, { skipped: "phase already exists" });
+  // …or from the re-read row's stamp
+  const after = { ...a, status: "executed", result: { rowId: "job-1", skipped: "phase already exists" } };
+  assert.equal(decideResponse({ status: "executed" }, a, w, after).body.message, skip);
+  // a phase that was added is Done
+  assert.equal(decideResponse({ status: "executed" }, a, w, { ...a, status: "executed", result: { rowId: "job-1", rev: 4 } }).body.message,
+    "Done — add phase Punch list to Pollen.");
+});
+
+test("decidePending: the board didn't answer is 409 try_again, still pending", () => {
+  const a = { id: ID, code: 13, kind: "boardEdit", label: "add phase Punch list to Pollen" };
+  assert.deepEqual(decideResponse({ status: "try_again", error: "couldn't reach the board just now. Nothing was added" }, a, ""),
+    { code: 409, body: { ok: false, error: "try_again",
+      message: "Couldn't reach the board just now. Nothing was added; try again in a minute." } });
+});
+
+test("role_is: only a 200 literal true is the owner; a refused token is 401, an outage 503", () => {
+  assert.equal(ownerGate(200, true), null);
+  for (const body of [false, null, "true", 1, {}, [true]]) {
+    assert.deepEqual(ownerGate(200, body), { status: "not_owner" }, JSON.stringify(body));
+  }
+  assert.deepEqual(ownerGate(401, null), { status: "auth" });
+  // a 403 from PostgREST, a 5xx, a 204, or no answer at all (0): not a verdict on who he is
+  for (const s of [0, 204, 403, 404, 500, 502, 503, 504]) assert.deepEqual(ownerGate(s, null), { status: "role_check_failed" }, String(s));
+  const w = sendWindowText(7, 20);
+  assert.deepEqual(decideResponse({ status: "auth" }, null, w),
+    { code: 401, body: { ok: false, error: "auth", message: "Your login expired. Sign in again." } });
+  assert.deepEqual(decideResponse({ status: "role_check_failed" }, null, w),
+    { code: 503, body: { ok: false, error: "role_check_failed", message: "Couldn't check your login just now. Try again." } });
+  assert.deepEqual(decideResponse({ status: "not_owner" }, null, w),
+    { code: 403, body: { ok: false, error: "not_owner", message: "Approvals belong to the owner's login." } });
 });
 
 console.log(`\n${pass} approve-by-text checks passed.`);

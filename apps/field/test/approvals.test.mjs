@@ -10,7 +10,7 @@ import {
   fromPending, fromProposal, inbox, needs, lookFrom, outcome, isLive, isExpired, isRecent,
   akTime, expiresIn, expiredLine, firstSentence, jobName, agentName, stageLabel,
   approveConfirm, declineConfirm, declinePrompt, decisionRequest, pendingAnswer, spineAnswer,
-  decidedText, settle, NO_CONNECTION, SIGNED_OUT,
+  decidedText, settle, NO_CONNECTION, SIGNED_OUT, NEVER_REPORTED,
 } from "../js/approvals.js";
 
 // 10:00 AM Alaska (AKDT, UTC-8) on Tue Oct 6 2026
@@ -146,9 +146,9 @@ test("spine: email.send reads the catalog's first sentence and the key input, wi
   assert.equal(c.job, "", "a job the lookup missed is just left off");
   assert.equal(c.evidence.rationale, "The adjuster asked for it on Monday.");
   assert.deepEqual(c.evidence.refs, [
-    { text: "Email from the adjuster, Oct 5", url: "https://mail.google.com/mail/u/0/#inbox/1" },
-    { text: "INV-1001", url: "" },
-    { text: "Sneaky", url: "" },              // only an https link becomes a link
+    { text: "Email from the adjuster, Oct 5", url: "https://mail.google.com/mail/u/0/#inbox/1", host: "mail.google.com" },
+    { text: "INV-1001", url: "", host: "" },
+    { text: "Sneaky", url: "", host: "" },              // only an https link becomes a link
   ]);
   // the catalog unreadable: the operation's name stands in
   assert.equal(fromProposal(email).title, "email.send: adjuster@carrier.com");
@@ -249,7 +249,7 @@ test("outcomes: sent, phase added, already there, queued with the quiet-hours ti
   const t = fromPending(phase);
   assert.equal(outcome({ ...t, status: "executed" }).text, "Phase added");
   assert.equal(outcome({ ...t, status: "declined" }).text, "Declined");
-  assert.equal(outcome({ ...t, status: "approved" }).text, "Approved, still running");
+  assert.equal(outcome({ ...t, status: "approved", answeredHere: true }).text, "Approved, still running");
   assert.equal(outcome({ ...t, status: "failed", error: "" }).text, "Failed: no reason given");
   const e = fromProposal({ ...email, status: "executed" });
   assert.equal(outcome(e).text, "Queued to send", "no outbox row readable");
@@ -312,16 +312,16 @@ test("decidePending: every answer in the contract, and the not-deployed fallback
   assert.deepEqual(ok(404, null), { ok: false, error: "The server can't take this answer from the app yet. Text YES 12 to approve it." });
   assert.deepEqual(ok(404, { code: "NOT_FOUND", message: "Requested function was not found" }).error,
     "The server can't take this answer from the app yet. Text YES 12 to approve it.");
-  assert.deepEqual(ok(502, null).error, "The server can't take this answer from the app yet. Text YES 12 to approve it.");
+  assert.deepEqual(ok(502, null).error, "The server didn't answer. Refresh to see whether it went through.");
   assert.deepEqual(ok(500, { ok: false, error: "server_error", message: "gmail-proxy timed out" }).error,
-    "Something went wrong on the server (500: gmail-proxy timed out). Text YES 12 to approve it.");
+    "Something went wrong on the server (500: gmail-proxy timed out). Refresh to see whether it went through.");
   assert.deepEqual(ok(401, { ok: false, error: "Missing Authorization bearer token" }), { ok: false, error: SIGNED_OUT });
   assert.deepEqual(ok(403, { ok: false, error: "not_owner", message: "Approvals belong to the owner's login." }),
     { ok: false, error: "Only the owner's login can answer this." });
   assert.deepEqual(ok(404, { ok: false, error: "not_open", message: "Already answered, or it expired." }),
     { ok: false, error: "Already answered, or it expired.", gone: true });
-  assert.deepEqual(ok(409, { ok: false, error: "quiet_hours", message: "…" }),
-    { ok: false, error: "Customer texts go out only between 7 AM and 8 PM Alaska time. This one is still waiting: approve it again after 7 AM." });
+  assert.deepEqual(ok(409, { ok: false, error: "quiet_hours", message: "Customer texts go out between 7am and 8pm Alaska time. It's still waiting; approve it then." }),
+    { ok: false, error: "Customer texts go out between 7am and 8pm Alaska time. It's still waiting; approve it then." });
   assert.deepEqual(ok(418, { message: "short and stout" }), { ok: false, error: "short and stout" });
   assert.deepEqual(ok(418, null), { ok: false, error: "Couldn't record that (418)." });
   assert.equal(ok(200, { ok: false }).ok, false, "a 200 that isn't ok:true recorded nothing");
@@ -359,4 +359,161 @@ test("an answered card moves off Waiting onto the top of Recently decided with i
   const failed = decidedText(card, { ok: true, status: "failed", message: "gmail refused" }, NOW);
   assert.equal(outcome(failed).text, "Failed: gmail refused");
   assert.equal(after.expired, box.expired);
+});
+
+/* ---------- review round 1 ---------- */
+
+test("job.set_stage names the job the executor moves: edited_params.job_id, then input.job_id; proposals.job_id only when neither is set", () => {
+  const OTHER = "55555555-5555-4555-8555-555555555555";
+  const look = { ...LOOK, jobs: { ...LOOK.jobs, [BOARD2]: "Jones roof", [OTHER]: "Okafor basement" } };
+  // op_propose stored p_job_id (BOARD2) while input.job_id says BOARD1: BOARD1 is the one that moves
+  const c = fromProposal({ ...stage, job_id: BOARD2 }, look);
+  assert.deepEqual([c.jobId, c.job], [BOARD1, "Smith remodel"]);
+  assert.equal(approveConfirm(c), "Move Smith remodel to Final / Punch on the board?");
+  assert.deepEqual(needs([c]).board, [BOARD1], "the lookup asks for the job that moves");
+  // an edit that names a job wins, as it does in op_execute's input || edited_params
+  const e = fromProposal({ ...stage, job_id: BOARD2, edited_params: { stage: "done", job_id: OTHER } }, look);
+  assert.deepEqual([e.jobId, e.job], [OTHER, "Okafor basement"]);
+  assert.equal(approveConfirm(e), "Move Okafor basement to Complete on the board?");
+  // params with no job: the row's own job_id stands in
+  const f = fromProposal({ ...stage, job_id: BOARD2, input: { stage: "done" }, edited_params: null }, look);
+  assert.deepEqual([f.jobId, f.job], [BOARD2, "Jones roof"]);
+  // other kinds still name proposals.job_id
+  assert.equal(fromProposal({ ...email, input: { ...email.input, job_id: BOARD1 } }, look).jobId, BOARD2);
+});
+
+test("a row naming Object.prototype's members is just unknown, and a row that won't read is left off with a warning", () => {
+  for (const k of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+    const c = fromPending({ ...reminder, kind: k, proposed_by: k }, LOOK);
+    assert.deepEqual([c.kind, c.chip, c.approveLabel, c.by], ["other", k, "Approve", k], k);
+    const s = fromProposal({ ...email, operation: k + "@1", proposed_by_kind: k, proposed_by_id: k }, LOOK);
+    assert.deepEqual([s.kind, s.chip, s.by], ["other", k, ""], k);
+    assert.equal(fromProposal({ ...stage, input: { job_id: BOARD1, stage: k }, edited_params: null }, LOOK).evidence.stage, k);
+    assert.equal(stageLabel(k), k);
+    assert.equal(outcome({ ...fromProposal(delivered), outbox: { status: k } }).text, "Queued to send");
+    assert.equal(fromPending({ ...reminder, job_id: k }, LOOK).job, "", "no job is named by a prototype member");
+  }
+  // a prototype-named id in a lookup read can't swap a map's prototype
+  const look = lookFrom({ jobs: [{ id: "__proto__", title: "Poison" }], outbox: [{ proposal_id: "__proto__", status: "dead" }] });
+  assert.equal(Object.getPrototypeOf(look.outbox), Object.prototype);
+  assert.equal(fromProposal(delivered, look).outbox, null);
+  assert.equal(fromPending({ ...reminder, job_id: "__proto__" }, look).job, "Poison", "an own key still counts");
+  // one row whose label can't become text: the others still make the list
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (...a) => warned.push(a.join(" "));
+  try {
+    const box = inbox([reminder, { ...phase, id: "bad-1", label: { toString: 1 } }], [email, { ...email, id: "bad-2", rationale: { toString: 1 } }], LOOK, NOW);
+    assert.deepEqual(box.waiting.map((c) => c.key), ["spine:" + email.id, "text:" + reminder.id]);
+  } finally { console.warn = warn; }
+  assert.equal(warned.length, 2);
+  assert.match(warned[0], /left off a text row .*bad-1/);
+  assert.match(warned[1], /left off a spine row .*bad-2/);
+});
+
+test("evidence links carry the host they really open, past userinfo and as punycode; only a parseable https link is one", () => {
+  const refs = fromProposal({ ...email, evidence_refs: [
+    { label: "QuickBooks invoice INV-4", url: "https://qb-login.example.net/signin" },
+    { label: "Gmail thread", url: "https://mail.google.com@evil.example/x" },
+    { label: "Look-alike", href: "https://gооgle.com/" },          // Cyrillic o's
+    "https://mail.google.com/mail/u/0/#inbox/2",
+    { label: "Plain http", url: "http://mail.google.com/" },
+    { label: "Broken", url: "https://" },
+  ] }).evidence.refs;
+  assert.deepEqual(refs.map((r) => [r.text, r.host]), [
+    ["QuickBooks invoice INV-4", "qb-login.example.net"],
+    ["Gmail thread", "evil.example"],
+    ["Look-alike", "xn--ggle-55da.com"],
+    ["https://mail.google.com/mail/u/0/#inbox/2", "mail.google.com"],
+    ["Plain http", ""],
+    ["Broken", ""],
+  ]);
+  assert.deepEqual(refs.slice(4).map((r) => r.url), ["", ""]);
+});
+
+test("decidePending's newer answers: an expired login, a role check that couldn't answer, quiet hours and try-again in the server's words", () => {
+  const c = fromPending(text);
+  const ok = (status, body) => pendingAnswer(status, body, c, "approve");
+  assert.deepEqual(ok(401, { ok: false, error: "auth", message: "Your login expired. Sign in again." }),
+    { ok: false, error: "Your login expired. Sign in again." });
+  assert.deepEqual(ok(401, { ok: false, error: "Missing Authorization bearer token" }), { ok: false, error: SIGNED_OUT }, "unchanged");
+  assert.deepEqual(ok(503, { ok: false, error: "role_check_failed", message: "Couldn't check your login just now. Try again." }),
+    { ok: false, error: "Couldn't check your login just now. Try again." });
+  assert.deepEqual(ok(403, { ok: false, error: "not_owner", message: "Approvals belong to the owner's login." }),
+    { ok: false, error: "Only the owner's login can answer this." }, "unchanged");
+  // the window is roybal-notify's setting: its sentence, not one with hours baked in here
+  assert.deepEqual(ok(409, { ok: false, error: "quiet_hours", message: "Customer texts go out between 8am and 9pm Alaska time. It's still waiting; approve it then." }),
+    { ok: false, error: "Customer texts go out between 8am and 9pm Alaska time. It's still waiting; approve it then." });
+  assert.deepEqual(ok(409, { ok: false, error: "try_again", message: "Couldn't reach the board just now. Nothing was added; try again in a minute." }),
+    { ok: false, error: "Couldn't reach the board just now. Nothing was added; try again in a minute." });
+  for (const body of [{ ok: false, error: "quiet_hours" }, { ok: false, error: "try_again" }, null]) {
+    const a = ok(409, body);
+    assert.equal(a.ok, false);
+    assert.ok(!a.gone, "the card stays live");
+    assert.ok(a.error && !/\d/.test(a.error), `the fallback names no hours: ${a.error}`);
+  }
+  assert.match(ok(409, { error: "try_again" }).error, /try again in a minute/i);
+});
+
+test("a row read back still 'approved' never reported back; one this tab just answered is still running; a 5xx with no JSON says to refresh", () => {
+  const stuck = fromPending({ ...reminder, status: "approved" });
+  assert.deepEqual(outcome(stuck), { text: NEVER_REPORTED, tone: "bad" });
+  assert.equal(NEVER_REPORTED, "Approved, but it never reported back. Check whether it went out before sending it again.");
+  assert.deepEqual(outcome(fromPending({ ...reminder, status: "approved", result: { error: "gmail token expired" } })),
+    { text: "Failed: gmail token expired", tone: "bad" });
+  const box = inbox([{ ...reminder, status: "approved" }], [], LOOK, NOW);
+  assert.equal(outcome(box.recent[0], NOW).text, NEVER_REPORTED, "on Recently decided as read from the server");
+  const mine = decidedText(fromPending(reminder), { ok: true, status: "executed", message: "", action: { status: "approved", result: {} } }, NOW);
+  assert.deepEqual(outcome(mine), { text: "Approved, still running", tone: "wait" });
+  const c = fromPending(reminder);
+  for (const st of [500, 502, 503, 504, 546]) {
+    assert.equal(pendingAnswer(st, null, c, "approve").error, "The server didn't answer. Refresh to see whether it went through.", String(st));
+  }
+  // "text YES n" is kept for the two answers that mean decidePending never ran
+  assert.match(pendingAnswer(400, { ok: false, error: "Unknown action. Expected one of: sendSms" }, c, "approve").error, /Text YES 12/);
+  assert.match(pendingAnswer(404, null, c, "approve").error, /Text YES 12/);
+  assert.ok(!/YES/.test(pendingAnswer(500, { ok: false, error: "server_error", message: "x" }, c, "approve").error));
+});
+
+test("the decided card takes the row as the server re-read it: a phase that was already there says so at once", () => {
+  const card = fromPending(phase, LOOK);
+  const ans = pendingAnswer(200, { ok: true, status: "executed", message: "Phase was already on the board — nothing was added.",
+    action: { id: phase.id, code: 13, kind: "boardEdit", label: phase.label, status: "executed", result: { rowId: BOARD1, skipped: "phase already exists" } } }, card, "approve");
+  assert.deepEqual(ans.action, { status: "executed", result: { rowId: BOARD1, skipped: "phase already exists" } });
+  const done = decidedText(card, ans, NOW);
+  assert.equal(outcome(done).text, "Phase was already on the board");
+  assert.equal(done.result.rowId, BOARD1);
+  // a failed answer whose re-read shows gmail-proxy already stamped it executed: the row's word wins
+  const sentAnyway = decidedText(fromPending(reminder), { ok: true, status: "failed", message: "connection reset",
+    action: { status: "executed", result: {} } }, NOW);
+  assert.equal(outcome(sentAnyway).text, "Sent");
+  // a failure carries its reason from the stamped result, else the message
+  assert.equal(outcome(decidedText(card, { ok: true, status: "failed", message: "x", action: { status: "failed", result: { error: "the board job changed" } } }, NOW)).text,
+    "Failed: the board job changed");
+  assert.equal(outcome(decidedText(card, { ok: true, status: "failed", message: "board said no" }, NOW)).text, "Failed: board said no");
+  // a body without action (an older function) still works as before
+  assert.equal(outcome(decidedText(card, { ok: true, status: "executed", message: "" }, NOW)).text, "Phase added");
+});
+
+test("Alaska 'yesterday' is the calendar day before, across both DST changes", () => {
+  // Mar 9 2026, 00:30 AKDT, the night after the 23-hour day
+  const spring = Date.parse("2026-03-09T08:30:00Z");
+  assert.equal(akTime("2026-03-08T08:45:00Z", spring), "Sat, Mar 7, 11:45 PM", "two days back is a date");
+  assert.equal(akTime("2026-03-08T19:00:00Z", spring), "yesterday 11:00 AM");
+  assert.equal(akTime("2026-03-09T08:10:00Z", spring), "12:10 AM");
+  // Nov 1 2026, 11:30 PM AKST, the end of the 25-hour day
+  const fall = Date.parse("2026-11-02T08:30:00Z");
+  assert.equal(akTime("2026-10-31T18:00:00Z", fall), "yesterday 10:00 AM");
+  assert.equal(akTime("2026-11-01T08:30:00Z", fall), "12:30 AM", "the first minutes of the long day are today");
+  assert.equal(akTime("2026-10-31T07:30:00Z", fall), "Fri, Oct 30, 11:30 PM");
+  // across a month and a year end
+  assert.equal(akTime("2026-12-31T20:00:00Z", Date.parse("2027-01-01T20:00:00Z")), "yesterday 11:00 AM");
+  assert.equal(akTime("2026-10-07T18:00:00Z", NOW), "Wed, Oct 7, 10:00 AM", "tomorrow is a date, not 'yesterday'");
+});
+
+test("P0002 'no live operation': the ask was retired, only Decline can answer it; 'no proposal' is gone", () => {
+  assert.deepEqual(spineAnswer(500, { code: "P0002", message: "op spine: no live operation email.send@1" }),
+    { ok: false, error: "This kind of ask was retired before you answered it. Decline it; nothing was sent.", declineOnly: true });
+  assert.deepEqual(spineAnswer(500, { code: "P0002", message: "op spine: no proposal bbbbbbbb-0000-4000-8000-000000000001" }),
+    { ok: false, error: "This ask no longer exists.", gone: true });
 });

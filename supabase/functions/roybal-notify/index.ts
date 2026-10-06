@@ -14,19 +14,23 @@
  *   decidePending — { id, decision: "approve" | "decline" }
  *             the admin app's Approvals tab answering a pending_actions row,
  *             the inbox twin of a YES/NO text. Owner only: role_is('owner')
- *             under the CALLER's JWT, and only a literal true passes. Then
+ *             under the CALLER's JWT, and only a 200 literal true passes. Then
  *             the service role runs the row through decide() (approve.ts),
  *             the same path a text takes: one quiet-hours preflight, guarded
  *             flips, one executor, so a tap and a text can never both
  *             execute. No text goes back to the owner; the response is the
  *             answer, and it is always JSON:
  *               200 { ok:true, status:"executed"|"declined"|"failed", message,
- *                     action:{ id, code, kind, label } }   (failed = recorded;
- *                     the error is the message)
- *               400 bad_request · 403 not_owner · 404 not_open (already
- *               answered, or expired) · 409 quiet_hours (a customer text
- *               outside the window; it stays pending) · 500 server_error,
- *               each { ok:false, error, message }
+ *                     action:{ id, code, kind, label, status, result } }
+ *                     (failed = recorded; the error is the message. action is
+ *                     the row re-read after the decision)
+ *               400 bad_request · 401 auth (role_is refused the token) ·
+ *               403 not_owner · 404 not_open (already answered, or expired) ·
+ *               409 quiet_hours (a customer text outside the window) or
+ *               try_again (the board didn't answer; nothing was added) — both
+ *               leave the row pending · 500 server_error (a PATCH errored:
+ *               nothing moved) · 503 role_check_failed (role_is didn't
+ *               answer), each { ok:false, error, message }
  *
  * Inbound (POST …/roybal-notify/inbound):
  *   Twilio's incoming-message webhook (form-encoded, no JWT). Auth is the
@@ -115,7 +119,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import {
   parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard,
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, decide, replyFor, parseDecideRequest, decideResponse,
-  type DecideIO, type DecideAnswer,
+  ownerGate, TryAgain, type DecideIO, type DecideAnswer, type Outcome,
 } from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
 import { mapTwilioStatus, blockedStatuses } from "./status.mjs";
@@ -300,9 +304,10 @@ export function anchorageHour(d = new Date()): number {
     timeZone: "America/Anchorage", hour: "numeric", hourCycle: "h23",
   }).format(d));
 }
-function assertSendWindow(kind: string) {
+/* `hr` defaults to now; an approval passes the hour its decision was judged
+   on, so the preflight and this backstop can never read two clocks. */
+function assertSendWindow(kind: string, hr = anchorageHour()) {
   if (CREW_KINDS.has(kind)) return;
-  const hr = anchorageHour();
   if (inSendWindow(hr, QUIET_START, QUIET_END)) return;
   const fmt = hourLabel;
   throw new Error(
@@ -492,9 +497,15 @@ type Admin = (path: string, opts?: RequestInit) => Promise<Response>;
 
 /* The executor: runs a row that one channel's guarded pending → approved
    flip just landed, and throws a sentence the owner can read (decide()
-   stamps the row failed with it). The executor re-verifies the approved
-   row itself where it can: gmail-proxy re-reads it before sending. */
-async function executeApproved(act: Record<string, unknown>, admin: Admin): Promise<void> {
+   stamps the row failed with it, or puts it back at pending for a
+   TryAgain). The executor re-verifies the approved row itself where it
+   can: gmail-proxy re-reads it before sending. Its executed stamps are
+   guarded on approved too, like gmail-proxy's. `hour` is the Alaska hour
+   this decision's preflight was judged on. Resolves { skipped } when
+   there was nothing to do. */
+async function executeApproved(
+  act: Record<string, unknown>, admin: Admin, hour: number,
+): Promise<{ skipped: string } | void> {
   const params = (act.params ?? {}) as Record<string, unknown>;
   if (act.kind === "emailSend") {
     const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
@@ -513,14 +524,16 @@ async function executeApproved(act: Record<string, unknown>, admin: Admin): Prom
     if (!to) throw new Error("no valid recipient number on the proposal");
     // A customer text approved at 9pm never gets here: decide()'s preflight
     // refuses it before the flip and it stays pending for the morning. This
-    // is the window sendSms enforces, kept as the backstop for an hour that
-    // turns between the preflight and the send. Only an explicit customer
-    // audience is gated (the SMS assistant's proposals always carry one);
-    // crew texts are exempt exactly as assistCrew is.
-    if (params.audience === "customer") assertSendWindow("assist");
+    // is the window sendSms enforces, checked against the SAME hour the
+    // preflight read: an answer given at 7:59:59pm was given in the window,
+    // and re-reading the clock after the flip's round trip would burn it as
+    // failed at 8:00:00. Only an explicit customer audience is gated (the SMS
+    // assistant's proposals always carry one); crew texts are exempt exactly
+    // as assistCrew is.
+    if (params.audience === "customer") assertSendWindow("assist", hour);
     const r = await twilioPost(to, String(params.message ?? ""));
     if (!r.ok) throw new Error(String(r.body.message ?? `twilio ${r.status}`));
-    await admin(`pending_actions?id=eq.${act.id}`, {
+    await admin(`pending_actions?id=eq.${act.id}&status=eq.approved`, {
       method: "PATCH",
       body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result: { sid: r.body.sid ?? "" } }),
     });
@@ -529,10 +542,13 @@ async function executeApproved(act: Record<string, unknown>, admin: Admin): Prom
     // it to the board. Rev-guarded like every other board write.
     const { rowId, phase } = validateBoardEdit(params);
     const got = await admin(
-      `coordination_jobs?id=eq.${encodeURIComponent(rowId)}&select=id,data,deleted`, { method: "GET" });
+      `coordination_jobs?id=eq.${encodeURIComponent(rowId)}&select=id,data,deleted`, { method: "GET" })
+      .catch(() => null);
     // A lookup that never landed is not a missing job — saying "no longer on
     // the board" would send the owner hunting for a job that's sitting there.
-    if (!got.ok) throw new Error("couldn't reach the board just now — text YES again in a minute");
+    // Nothing has been written yet, so this one is retryable: decide() puts
+    // the row back at pending and the same YES (or tap) can try again.
+    if (!got || !got.ok) throw new TryAgain("couldn't reach the board just now. Nothing was added");
     const row = ((await got.json().catch(() => [])) as Record<string, unknown>[])[0];
     if (!row || row.deleted) throw new Error("that job is no longer on the board");
     const data = (row.data ?? {}) as Record<string, unknown>;
@@ -545,7 +561,7 @@ async function executeApproved(act: Record<string, unknown>, admin: Admin): Prom
     }
 
     const stamp = (result: Record<string, unknown>) =>
-      admin(`pending_actions?id=eq.${act.id}`, {
+      admin(`pending_actions?id=eq.${act.id}&status=eq.approved`, {
         method: "PATCH",
         body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result }),
       });
@@ -553,8 +569,10 @@ async function executeApproved(act: Record<string, unknown>, admin: Admin): Prom
     const nextSubtasks = buildNextSubtasks(data.subtasks as Record<string, unknown>[], phase);
     if (!nextSubtasks) {
       // already there (added by hand while this sat) — the owner's intent is
-      // satisfied, so this is done, not failed
-      await stamp({ rowId, skipped: "phase already exists" });
+      // satisfied, so this is done, not failed; the answer says nothing was added
+      const skipped = "phase already exists";
+      await stamp({ rowId, skipped });
+      return { skipped };
     } else {
       const base = Number(data.rev) || 0;
       const next = { ...data, subtasks: nextSubtasks, rev: base + 1, updatedAt: new Date().toISOString() };
@@ -573,25 +591,35 @@ async function executeApproved(act: Record<string, unknown>, admin: Admin): Prom
   }
 }
 
-/* decide()'s I/O for one row, the same for both channels. Both flips are
-   guarded on status=pending, so a second answer (a double YES, or a YES
-   racing a tap) matches zero rows and never reaches the executor. */
+/* decide()'s I/O for one row, the same for both channels. Every state change
+   is a PATCH guarded on the status it expects: both flips on pending, so a
+   second answer (a double YES, or a YES racing a tap) matches zero rows and
+   never reaches the executor; the revert and the failed stamp on approved, so
+   neither can overwrite an executed stamp gmail-proxy already wrote. A PATCH
+   that errored is not a lost race: it throws, and the caller says nothing
+   moved. One Alaska clock read per decision: the preflight and the
+   executor's send-window backstop judge the same hour. */
 function decideIO(act: Record<string, unknown>, admin: Admin): DecideIO {
+  const hour = anchorageHour();
+  const move = async (from: string, patch: Record<string, unknown>) => {
+    const r = await admin(`pending_actions?id=eq.${act.id}&status=eq.${from}`, {
+      method: "PATCH", headers: { Prefer: "return=representation" },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) throw new Error(`pending_actions update failed (${r.status})`);
+    return ((await r.json().catch(() => [])) as unknown[]).length > 0;
+  };
   return {
-    held: quietHoursHold(act.kind, act.params as Record<string, unknown> | null, anchorageHour(), QUIET_START, QUIET_END),
-    flip: async (to) => {
-      const r = await admin(`pending_actions?id=eq.${act.id}&status=eq.pending`, {
-        method: "PATCH", headers: { Prefer: "return=representation" },
-        body: JSON.stringify({ status: to }),
-      });
-      return r.ok && ((await r.json().catch(() => [])) as unknown[]).length > 0;
+    held: quietHoursHold(act.kind, act.params as Record<string, unknown> | null, hour, QUIET_START, QUIET_END),
+    flip: (to) => move("pending", { status: to }),
+    execute: () => executeApproved(act, admin, hour),
+    revert: () => move("approved", { status: "pending" }),
+    fail: (error) => move("approved", { status: "failed", result: { error } }),
+    reread: async () => {
+      const r = await admin(`pending_actions?id=eq.${act.id}&select=id,code,kind,label,status,result&limit=1`, { method: "GET" });
+      if (!r.ok) throw new Error(`pending_actions read failed (${r.status})`);
+      return ((await r.json()) as Record<string, unknown>[])[0] ?? null;
     },
-    execute: () => executeApproved(act, admin),
-    fail: (error) =>
-      admin(`pending_actions?id=eq.${act.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "failed", result: { error } }),
-      }),
   };
 }
 
@@ -628,10 +656,21 @@ async function handleApproval(from: string, text: string, admin: Admin): Promise
   const act = m.hit as Record<string, unknown>;
 
   // NO declines; YES clears the quiet-hours preflight, approves first (guarded
-  // on still-pending), then executes; a throw stamps the row failed. One reply
-  // either way: done, failed, cancelled, nothing open, or "text YES n again".
+  // on still-pending), then executes; a throw stamps the row failed, or puts
+  // it back at pending when nothing was written (a board that didn't answer).
+  // One reply either way: done, failed, cancelled, already answered, nothing
+  // open, or "text YES n again". A flip whose PATCH errored moved nothing: say
+  // so here, or the throw would carry "YES 12" on to the SMS assistant as a
+  // question.
   const decision = p.no ? "decline" : "approve";
-  const out = await decide(decision, decideIO(act, admin));
+  let out: Outcome;
+  try {
+    out = await decide(decision, decideIO(act, admin));
+  } catch (e) {
+    console.error("approval not recorded", e);
+    await say(replyText("not-recorded", act, p.no ? "NO" : "YES")!);
+    return true;
+  }
   await say(replyFor(decision, out, act, sendWindowText(QUIET_START, QUIET_END)));
   return true;
 }
@@ -639,18 +678,24 @@ async function handleApproval(from: string, text: string, admin: Admin): Promise
 /* The inbox channel: decidePending from the admin app's Approvals tab.
    verify_jwt is off for this function, so the action guards itself: the
    router's bearer check (401), then role_is('owner') under the CALLER's JWT.
-   PostgREST refuses a forged or expired token, and only a literal true
-   passes. Then the same lookup a text does (live = pending and unexpired),
-   by id this time, and the same decide(). No text goes back to the owner:
-   the JSON is the answer, including when something throws. */
+   PostgREST refuses a forged or expired token, and only a 200 literal true
+   passes (ownerGate: a refused token answers 401 so the app refreshes it, an
+   outage 503, a no 403). Then the same lookup a text does (live = pending
+   and unexpired), by id this time, and the same decide(). No text goes back
+   to the owner: the JSON is the answer, including when something throws,
+   and a recorded decision carries the row as it stands afterwards. */
 async function decidePending(body: Record<string, unknown>, jwt: string): Promise<Response> {
-  const answer = (out: DecideAnswer, act: Record<string, unknown> | null = null) => {
-    const r = decideResponse(out, act, sendWindowText(QUIET_START, QUIET_END));
+  const answer = (out: DecideAnswer, act: Record<string, unknown> | null = null, after: Record<string, unknown> | null = null) => {
+    const r = decideResponse(out, act, sendWindowText(QUIET_START, QUIET_END), after);
     return json(r.body, r.code);
   };
   try {
-    const who = await db("rpc/role_is", jwt, { method: "POST", body: JSON.stringify({ p_roles: ["owner"] }) });
-    if (!who.ok || (await who.json().catch(() => null)) !== true) return answer({ status: "not_owner" });
+    let who: Response | null = null;
+    try {
+      who = await db("rpc/role_is", jwt, { method: "POST", body: JSON.stringify({ p_roles: ["owner"] }) });
+    } catch (e) { console.error("decidePending: role_is never answered", e); }
+    const refused = ownerGate(who?.status ?? 0, who?.status === 200 ? await who.json().catch(() => null) : null);
+    if (refused) return answer(refused);
     const ask = parseDecideRequest(body);
     if (!ask.ok) return answer({ status: "bad_request", error: ask.message });
 
@@ -663,9 +708,14 @@ async function decidePending(body: Record<string, unknown>, jwt: string): Promis
     const act = ((await got.json()) as Record<string, unknown>[])[0];
     if (!act) return answer({ status: "not_open" });
 
-    const out = await decide(ask.decision, decideIO(act, admin));
+    const io = decideIO(act, admin);
+    const out = await decide(ask.decision, io);
     console.log(`decidePending: ${ask.decision} #${act.code} (${act.kind}) -> ${out.status}`);
-    return answer(out, act);
+    // a recorded decision answers with the row as it now stands; a read that
+    // fails still answers what was decided, with the outcome for its status
+    const recorded = out.status === "executed" || out.status === "declined" || out.status === "failed";
+    const after = recorded ? await io.reread().catch(() => null) : null;
+    return answer(out, act, after);
   } catch (e) {
     console.error("decidePending failed", e);
     return answer({ status: "server_error", error: String((e as Error)?.message ?? e).slice(0, 200) });

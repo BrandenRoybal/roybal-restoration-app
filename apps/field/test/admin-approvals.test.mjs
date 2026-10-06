@@ -6,21 +6,26 @@
    card; the "function not updated yet" fallback sends him to YES / NO by
    text; Recently decided says what came of each; the expired line; the nav
    badge; and any other login sees one line and nothing is read for it.
+   Then review round 1: one card's answer in flight leaves the others usable;
+   an owner check that can't answer offers Retry and is asked again; a
+   retired kind of ask can still be declined; a row that never reported back
+   says so; a skipped phase says so at once; evidence links show their host;
+   the whole email shows; one hand-made row can't take the tab down.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { register } from "node:module";
 import { JSDOM } from "jsdom";
 import "fake-indexeddb/auto";
 
 // the office admin imports field modules as "../../js/x.js" (one origin, two
 // folders on the server); on disk they live in apps/field/js. A second copy
-// of the tab (approvals.js?as=crew) gets its own magicplan.js, so
-// callerRole()'s once-per-page answer starts over for the other login.
+// of the tab (approvals.js?as=crew) keeps its own once-per-page owner check,
+// so it starts over for the other login.
 register("data:text/javascript," + encodeURIComponent(`
 export async function resolve(spec, ctx, next) {
   if (ctx.parentURL && ctx.parentURL.includes("/apps/admin/js/") && spec.startsWith("../../js/")) {
-    const q = spec === "../../js/magicplan.js" ? new URL(ctx.parentURL).search : "";
-    return next(new URL(spec.replace("../../js/", "../../field/js/"), ctx.parentURL).href + q, ctx);
+    return next(new URL(spec.replace("../../js/", "../../field/js/"), ctx.parentURL).href, ctx);
   }
   const r = await next(spec, ctx);
   return r.url.includes("/apps/admin/js/") ? { ...r, format: "module" } : r;   // no package.json there
@@ -80,6 +85,7 @@ const OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_a
 /* ---------- Supabase and roybal-notify, faked ---------- */
 const calls = [];
 let roles = { owner: true, office: false };
+let roleIs = null;                    // (body) => Response: overrides role_is's answer (a 503, a throw)
 let notify = null;                    // (body) => Response | Promise<Response>
 let spine = null;                     // (fn, body) => Response
 const json = (status, data, headers = {}) =>
@@ -93,7 +99,7 @@ globalThis.fetch = async (url, opts = {}) => {
   const headers = opts.headers || {};
   calls.push({ u, body, headers });
   const counted = (rows) => json(200, [], { "Content-Range": rows.length ? `0-0/${rows.length}` : "*/0" });
-  if (u.includes("/rest/v1/rpc/role_is")) return json(200, roles[body.p_roles.join(",")] === true);
+  if (u.includes("/rest/v1/rpc/role_is")) return roleIs ? roleIs(body) : json(200, roles[body.p_roles.join(",")] === true);
   if (u.includes("/auth/v1/token?grant_type=refresh_token")) return json(200, { access_token: "t", refresh_token: "r", expires_in: 3600 });
   if (u.includes("/functions/v1/roybal-notify")) return notify(body);
   if (u.includes("/rest/v1/rpc/op_proposal_")) return spine(u.match(/rpc\/(\w+)/)[1], body);
@@ -164,6 +170,8 @@ await test("the owner sees both queues merged, soonest expiry first, with the ev
   assert.match(e.querySelector(".ap-meta").textContent, /^Smith remodel · from Brief agent · asked .+ · expires in [34] h$/);
   assert.match(e.textContent, /Why\s*The adjuster asked for it on Monday\./);
   assert.equal(e.querySelector(".ap-refs a").getAttribute("href"), "https://mail.google.com/mail/u/0/#inbox/1");
+  assert.equal(e.querySelector(".ap-refs a").getAttribute("rel"), "noopener noreferrer");
+  assert.equal(e.querySelector(".ap-refs li").textContent, "Email from the adjuster (mail.google.com)", "the host it opens, beside its label");
   assert.equal(e.querySelector(".ap-yes"), null, "no YES hint on the spine");
   assert.equal(btn(e, "Approve and send").disabled, false);
   const r = card("text:" + reminder.id);
@@ -211,8 +219,10 @@ await test("Approve on the text queue: one confirm, decidePending with exactly {
   const sentCall = calls.slice(before).find((x) => x.u.includes("/functions/v1/roybal-notify"));
   assert.deepEqual(sentCall.body, { action: "decidePending", id: reminder.id, decision: "approve" });
   assert.equal(sentCall.headers.Authorization, "Bearer t");
-  assert.equal(btn(c, "Approve and send").disabled, true);
+  assert.equal(btn(c, "Approve and send"), undefined, "the pressed one says it's working");
+  assert.equal(btn(c, "Working…").disabled, true);
   assert.equal(btn(c, "Decline").disabled, true);
+  assert.equal(btn(card("text:" + phase.id), "Approve and add phase").disabled, false, "the other cards stay usable");
   // a refresh asked for mid-answer repaints nothing
   const reads = since0();
   document.dispatchEvent(new window.Event("visibilitychange"));
@@ -295,11 +305,16 @@ await test("every decidePending refusal renders its sentence under the card, whi
       'The server didn\'t accept this request: Provide `decision`, "approve" or "decline". Nothing changed.'],
     [() => json(401, { ok: false, error: "Missing Authorization bearer token" }), "Your sign-in has expired. Sign out, sign back in, and try again."],
     [() => json(403, { ok: false, error: "not_owner", message: "Approvals belong to the owner's login." }), "Only the owner's login can answer this."],
-    [() => json(409, { ok: false, error: "quiet_hours", message: "quiet_hours: customer texts send between 7 AM and 8 PM" }),
-      "Customer texts go out only between 7 AM and 8 PM Alaska time. This one is still waiting: approve it again after 7 AM."],
+    [() => json(409, { ok: false, error: "quiet_hours", message: "Customer texts go out between 8am and 9pm Alaska time. It's still waiting; approve it then." }),
+      "Customer texts go out between 8am and 9pm Alaska time. It's still waiting; approve it then."],
+    [() => json(409, { ok: false, error: "try_again", message: "Couldn't reach the board just now. Nothing was added; try again in a minute." }),
+      "Couldn't reach the board just now. Nothing was added; try again in a minute."],
+    [() => json(401, { ok: false, error: "auth", message: "Your login expired. Sign in again." }), "Your login expired. Sign in again."],
+    [() => json(503, { ok: false, error: "role_check_failed", message: "Couldn't check your login just now. Try again." }),
+      "Couldn't check your login just now. Try again."],
     [() => json(500, { ok: false, error: "server_error", message: "gmail-proxy timed out" }),
-      "Something went wrong on the server (500: gmail-proxy timed out). Text YES 12 to approve it."],
-    [() => new Response("<html>Bad gateway</html>", { status: 502 }), "The server can't take this answer from the app yet. Text YES 12 to approve it."],
+      "Something went wrong on the server (500: gmail-proxy timed out). Refresh to see whether it went through."],
+    [() => new Response("<html>Bad gateway</html>", { status: 502 }), "The server didn't answer. Refresh to see whether it went through."],
     [() => { throw new TypeError("Failed to fetch"); }, "No connection. Try again when you're online."],
     [() => json(404, { ok: false, error: "not_open", message: "Already answered, or it expired." }), "Already answered, or it expired.", true],
   ];
@@ -380,6 +395,162 @@ await test("a lane that won't load says so; both down shows only the warning and
   globalThis.fetch = real;
 });
 
+/* ---------- review round 1 ---------- */
+const fresh = () => { PA = [reminder, phase, sent, failed, lapsed, swept]; PR = [email, delivered, declined, stale]; };
+const onTimer = async (mod = M) => {         // render with the page's 45 s timer caught, so the test can fire it
+  const real = globalThis.setInterval;
+  let tick = null;
+  globalThis.setInterval = (fn, ms) => (ms === 45000 ? ((tick = fn), 0) : real(fn, ms));
+  try { await go(mod); } finally { globalThis.setInterval = real; }
+  return () => tick();
+};
+const listReads = (from) => calls.slice(from).filter((x) => x.u.includes("/pending_actions?select=id,code")).length;
+
+await test("one card's answer in flight: its buttons off and the pressed one says Working…, the others still answer, no refresh until all land", async () => {
+  fresh();
+  const tick = await onTimer();
+  asked.length = 0;
+  const holds = {};
+  notify = (body) => new Promise((res) => { holds[body.id] = (b) => res(json(200, b)); });
+  const r = "text:" + reminder.id, p = "text:" + phase.id;
+  btn(card(r), "Approve and send").click();
+  await settle(10);
+  assert.equal(btn(card(r), "Working…").disabled, true);
+  assert.equal(btn(card(r), "Decline").disabled, true);
+  assert.equal(btn(card(p), "Approve and add phase").disabled, false);
+  assert.equal(btn(card("spine:" + email.id), "Decline").disabled, false);
+  // the 45 s timer and Refresh both wait while it's out
+  let reads = since0();
+  tick(); btn(view, "↻ Refresh").click();
+  await settle(10);
+  assert.equal(listReads(reads), 0);
+  // a tap on another card is not swallowed: its own confirm, its own request
+  btn(card(p), "Approve and add phase").click();
+  await settle(10);
+  assert.deepEqual(asked, ["Send this email to pollen@example.com?", 'Add the phase "Demo" to Smith remodel on the board?']);
+  assert.ok(holds[phase.id], "the second request went out");
+  assert.equal(btn(card(p), "Working…").disabled, true);
+  // the first lands and repaints the page; the second is still latched
+  holds[reminder.id]({ ok: true, status: "executed", message: "Done — email the reminder.",
+    action: { id: reminder.id, code: 12, kind: "emailSend", label: reminder.label, status: "executed", result: {} } });
+  await settle();
+  assert.equal(card(r).classList.contains("ap-card--done"), true);
+  assert.equal(btn(card(p), "Working…").disabled, true, "still out after the repaint");
+  assert.equal(btn(card(p), "Decline").disabled, true);
+  reads = since0();
+  tick();
+  await settle(10);
+  assert.equal(listReads(reads), 0, "one still out: the timer still waits");
+  holds[phase.id]({ ok: true, status: "declined", message: "Declined — add phase.",
+    action: { id: phase.id, code: 13, kind: "boardEdit", label: phase.label, status: "declined", result: null } });
+  await settle();
+  assert.equal(card(p).querySelector(".ap-out").textContent, "Declined");
+  assert.deepEqual(recent().slice(0, 2).map((c) => c.dataset.key), [p, r]);
+  // nothing out: the timer refreshes again
+  reads = since0();
+  tick();
+  await settle();
+  assert.equal(listReads(reads), 1);
+});
+
+await test("an Approve that found the phase already there says so at once, in the toast and on the card", async () => {
+  fresh();
+  await go();
+  notify = () => json(200, { ok: true, status: "executed", message: "Phase was already on the board — nothing was added.",
+    action: { id: phase.id, code: 13, kind: "boardEdit", label: phase.label, status: "executed", result: { rowId: BOARD1, skipped: "phase already exists" } } });
+  btn(card("text:" + phase.id), "Approve and add phase").click();
+  await settle();
+  assert.equal(card("text:" + phase.id).querySelector(".ap-out").textContent, "Phase was already on the board");
+  assert.equal(document.getElementById("toast").textContent, "Phase was already on the board");
+});
+
+await test("a refusal that keeps the row open (quiet hours, try again) leaves both buttons usable", async () => {
+  for (const error of ["quiet_hours", "try_again"]) {
+    fresh();
+    await go();
+    notify = () => json(409, { ok: false, error, message: "server words for " + error });
+    btn(card("text:" + phase.id), "Approve and add phase").click();
+    await settle();
+    assert.equal(errText("text:" + phase.id), "server words for " + error);
+    assert.equal(btn(card("text:" + phase.id), "Approve and add phase").disabled, false, error);
+    assert.equal(btn(card("text:" + phase.id), "Decline").disabled, false, error);
+  }
+});
+
+await test("a retired kind of ask (P0002 no live operation): Approve goes off, Decline still answers it", async () => {
+  fresh();
+  await go();
+  const key = "spine:" + email.id;
+  spine = () => json(500, { code: "P0002", message: "op spine: no live operation email.send@1" });
+  btn(card(key), "Approve and send").click();
+  await settle();
+  const line = "This kind of ask was retired before you answered it. Decline it; nothing was sent.";
+  assert.equal(errText(key), line);
+  assert.equal(btn(card(key), "Approve and send").disabled, true);
+  assert.equal(btn(card(key), "Decline").disabled, false);
+  // the server still lists it as open: a refresh keeps the line and the lock
+  btn(view, "↻ Refresh").click();
+  await settle();
+  assert.equal(errText(key), line);
+  assert.equal(btn(card(key), "Approve and send").disabled, true);
+  promptAnswer = "";
+  let release;
+  spine = (fn) => new Promise((res) => { release = () => res(json(200, { ...email, status: "declined", decline_reason: null, updated_at: new Date().toISOString() })); });
+  btn(card(key), "Decline").click();
+  await settle(10);
+  assert.equal(btn(card(key), "Working…").disabled, true, "the pressed one says it's working");
+  assert.equal(btn(card(key), "Approve and send").disabled, true);
+  release();
+  await settle();
+  assert.equal(card(key).querySelector(".ap-out").textContent, "Declined");
+});
+
+await test("Recently decided: a row read back still 'approved' never reported back (unless it carries an error)", async () => {
+  const stuck = { ...reminder, id: id("text", 7), code: 16, status: "approved", created_at: iso(-2), expires_at: iso(22) };
+  const stuckErr = { ...phase, id: id("text", 8), code: 17, status: "approved", created_at: iso(-1), expires_at: iso(23), result: { error: "the board job changed" } };
+  PA = [reminder, phase, stuck, stuckErr];
+  PR = [];
+  await go();
+  const out = (key) => card(key).querySelector(".ap-out");
+  assert.equal(out("text:" + stuck.id).textContent, "Approved, but it never reported back. Check whether it went out before sending it again.");
+  assert.ok(out("text:" + stuck.id).classList.contains("ap-out--bad"));
+  assert.equal(out("text:" + stuckErr.id).textContent, "Failed: the board job changed");
+});
+
+await test("evidence links show the host they really open, beside the label", async () => {
+  PA = [];
+  PR = [{ ...email, evidence_refs: [{ label: "QuickBooks invoice INV-4", url: "https://qb-login.example.net/signin" },
+    { label: "Gmail", url: "https://mail.google.com@evil.example/x" }, { label: "Not a link", url: "http://x.example/" }] }];
+  await go();
+  const items = [...card("spine:" + email.id).querySelectorAll(".ap-refs li")];
+  assert.deepEqual(items.map((li) => li.textContent), ["QuickBooks invoice INV-4 (qb-login.example.net)", "Gmail (evil.example)", "Not a link"]);
+  assert.deepEqual(items.map((li) => li.querySelector("a") && li.querySelector("a").getAttribute("rel")), ["noopener noreferrer", "noopener noreferrer", null]);
+});
+
+await test("the email or text body is shown whole: no height cap and no inner scroll on .ap-mail", async () => {
+  const css = readFileSync(new URL("../../admin/css/admin.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...css.matchAll(/([^{}]*\.ap-mail\b[^{}]*)\{([^}]*)\}/g)];
+  assert.ok(rules.length >= 1, "the .ap-mail rule");
+  for (const [, sel, decl] of rules) assert.ok(!/max-height|overflow(-y)?\s*:/.test(decl), `${sel.trim()} clamps the body: ${decl}`);
+});
+
+await test("one hand-made row (a prototype-named kind, a label that won't read) doesn't take the tab down", async () => {
+  const odd = { ...reminder, id: id("text", 9), code: 77, kind: "constructor", proposed_by: "__proto__", label: "do a thing" };
+  const bad = { ...reminder, id: id("text", 10), code: 78, label: { toString: 1 } };
+  PA = [reminder, phase, odd, bad];
+  PR = [email];
+  const warned = [], warn = console.warn;
+  console.warn = (...a) => warned.push(a.join(" "));
+  try { await go(); } finally { console.warn = warn; }
+  assert.ok(!/didn't load/.test(view.textContent), view.textContent.slice(0, 200));
+  assert.deepEqual(waiting().map((c) => c.dataset.key).sort(), ["spine:" + email.id, "text:" + phase.id, "text:" + reminder.id, "text:" + odd.id].sort());
+  assert.match(card("text:" + odd.id).querySelector(".ap-head").textContent, /^constructorDo a thing$/);
+  assert.ok(btn(card("text:" + odd.id), "Approve"));
+  assert.ok(warned.some((w) => w.includes(bad.id)), "the row left off is named in the console");
+  noJunk(view);
+  fresh();
+});
+
 await test("any other login sees one line, no badge, and nothing beyond the role check is read", async () => {
   roles = { owner: false, office: false };
   const C = await import("../../admin/js/approvals.js?as=crew");
@@ -392,6 +563,51 @@ await test("any other login sees one line, no badge, and nothing beyond the role
   assert.equal(badge().hidden, true);
   const read = calls.slice(before).map((c) => c.u.replace(/^https:\/\/[^/]+/, ""));
   assert.ok(read.length >= 1 && read.every((u) => u === "/rest/v1/rpc/role_is"), read.join(", "));
+  // a definite no is kept for the page
+  const again = since0();
+  await go(C);
+  await C.refreshApprovalsBadge();
+  assert.equal(calls.slice(again).filter((c) => c.u.includes("/rpc/role_is")).length, 0);
+  assert.match(view.textContent, /Approvals belong to the owner's login\./);
+  roles = { owner: true, office: false };
+});
+
+await test("an owner check that can't answer says so with Retry (never \"not yours\"), isn't kept, and the badge asks again on the next paint", async () => {
+  fresh();
+  const roleChecks = (from) => calls.slice(from).filter((c) => c.u.includes("/rpc/role_is")).length;
+  // the page: a 503, then a fetch that throws, then healthy
+  const F = await import("../../admin/js/approvals.js?as=flaky");
+  roleIs = () => json(503, { code: "PGRST002", message: "Could not query the database for the schema cache. Retrying." });
+  let before = since0();
+  await go(F);
+  assert.match(view.textContent, /Couldn't check your login just now\./);
+  assert.ok(!/belong to the owner/.test(view.textContent));
+  assert.equal(view.querySelector(".ap-card"), null);
+  assert.ok(calls.slice(before).every((c) => c.u.endsWith("/rest/v1/rpc/role_is")), "nothing beyond the check is read");
+  roleIs = () => { throw new TypeError("Failed to fetch"); };
+  btn(view, "Retry").click();
+  await settle();
+  assert.match(view.textContent, /Couldn't check your login just now\./, "a throw with the browser online is the same");
+  roleIs = null;
+  before = since0();
+  btn(view, "Retry").click();
+  await settle();
+  assert.equal(roleChecks(before), 1, "Retry asked again");
+  assert.ok(card("text:" + reminder.id), "the owner's cards");
+  before = since0();
+  await go(F);
+  assert.equal(roleChecks(before), 0, "a yes is kept");
+  // the badge: hidden while the check can't answer, then counted on the next paint
+  const G = await import("../../admin/js/approvals.js?as=flaky-badge");
+  roleIs = () => json(503, {});
+  badge().hidden = false; badge().textContent = "9";
+  await G.refreshApprovalsBadge();
+  assert.equal(badge().hidden, true);
+  roleIs = null;
+  before = since0();
+  await G.refreshApprovalsBadge();
+  assert.equal(roleChecks(before), 1, "asked again");
+  assert.deepEqual([badge().hidden, badge().textContent], [false, "3"]);
 });
 
 location.hash = "#/";

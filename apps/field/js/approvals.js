@@ -62,7 +62,15 @@ const str = (v) => (v == null ? "" : String(v)).trim();
 const ms = (iso) => { const t = Date.parse(iso || ""); return Number.isFinite(t) ? t : NaN; };
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : "");
 const opName = (operation) => str(operation).split("@")[0];
-export const stageLabel = (id) => STAGES[id] || str(id);
+/* Every map here is read with a key a row supplied, and any signed-in login
+   can file a text-queue ask, so only an OWN key counts: a kind, proposer or
+   stage of "constructor" or "__proto__" is simply unknown, never one of
+   Object.prototype's members. put() writes the same way (a plain assignment
+   to "__proto__" would swap the map's prototype instead). */
+const own = (map, k) =>
+  map && typeof map === "object" && (typeof k === "string" || typeof k === "number") && Object.hasOwn(map, k) ? map[k] : undefined;
+const put = (map, k, v) => Object.defineProperty(map, k, { value: v, enumerable: true, writable: true, configurable: true });
+export const stageLabel = (id) => own(STAGES, id) || str(id);
 
 /** "Send one email. Execution writes…" → "Send one email"; a trailing
     "(coordination_jobs.data.stage)" is for developers, so it goes too. */
@@ -84,34 +92,47 @@ export function agentName(name) {
 }
 
 /* evidence_refs has no defined shape (0004): a string, or an object that
-   may carry a label and a link. Only an https link becomes a link. */
+   may carry a label and a link. Only an https link becomes a link, and it
+   carries the host it really opens: the label is whatever the proposer
+   wrote ("QuickBooks invoice INV-4" can point anywhere), so the card shows
+   the host beside it. URL() gives the host as the browser will dial it:
+   past any "mail.google.com@" userinfo, and punycode for a look-alike. */
+function linkOf(u) {
+  if (!/^https:\/\//i.test(u)) return null;
+  try {
+    const url = new URL(u);
+    return url.protocol === "https:" && url.hostname ? { url: u, host: url.hostname } : null;
+  } catch { return null; }
+}
 function refsOf(v) {
   const list = Array.isArray(v) ? v : [];
   return list.slice(0, 10).map((x) => {
     if (typeof x === "string" || typeof x === "number") {
       const t = str(x);
-      return { text: t, url: /^https:\/\//i.test(t) ? t : "" };
+      const link = linkOf(t);
+      return { text: t, url: link ? link.url : "", host: link ? link.host : "" };
     }
     const o = obj(x);
-    const url = [o.url, o.href].map(str).find((u) => /^https:\/\//i.test(u)) || "";
+    const link = [o.url, o.href].map(str).map(linkOf).find(Boolean) || null;
     const named = [o.label, o.title, o.name, o.description, o.summary].map(str).find(Boolean);
     const typed = [str(o.kind || o.type), str(o.id || o.ref)].filter(Boolean).join(" ");
-    const text = named || typed || url || JSON.stringify(o).slice(0, 200);
-    return { text, url };
+    const text = named || typed || (link && link.url) || JSON.stringify(o).slice(0, 200);
+    return { text, url: link ? link.url : "", host: link ? link.host : "" };
   }).filter((r) => r.text && r.text !== "{}");
 }
 
 /* ---------- one card shape for both lanes ---------- */
 /* card: { key, lane, id, code, kind, chip, title, approveLabel, yesHint,
            jobId, jobTable, job, by, byKind, byId, status, createdAt,
-           expiresAt, decidedAt, answeredAt, evidence, result, error, outbox }
+           expiresAt, decidedAt, answeredAt, evidence, result, error, outbox,
+           answeredHere (set by decidedText: this tab just answered it) }
    look: { jobs: {id: name}, ops: {"email.send@1": description},
            people: {id: name}, outbox: {proposalId: outbox row} } */
 
 /** One pending_actions row → a card. */
 export function fromPending(row, look = {}) {
   const r = obj(row), p = obj(r.params), res = obj(r.result);
-  const kind = TEXT_KIND[r.kind] || "other";
+  const kind = own(TEXT_KIND, r.kind) || "other";
   // boardEdit names a coordination_jobs row; the brief's emailSend a field job
   const jobTable = kind === "phase" ? "board" : "field";
   const jobId = kind === "phase" ? str(p.rowId || r.job_id) : str(r.job_id || p.jobId);
@@ -124,12 +145,12 @@ export function fromPending(row, look = {}) {
     title: cap(str(r.label)) || str(r.kind) || "An ask",
     approveLabel: KINDS[kind].approve,
     yesHint: code ? `or text YES ${code}` : "",
-    jobId, jobTable, job: obj(look.jobs)[jobId] || "",
-    by: PROPOSERS[r.proposed_by] || str(r.proposed_by), byKind: "", byId: "",
-    status: str(r.status), createdAt: r.created_at || "", expiresAt: r.expires_at || "",
+    jobId, jobTable, job: own(look.jobs, jobId) || "",
+    by: own(PROPOSERS, r.proposed_by) || str(r.proposed_by), byKind: "", byId: "",
+    status: str(r.status), createdAt: str(r.created_at), expiresAt: str(r.expires_at),
     // pending_actions keeps no decision time, only when it ran: a decline or
     // a failure sorts by when it was asked and says so ("asked", not "answered")
-    decidedAt: r.executed_at || r.created_at || "", answeredAt: r.executed_at || "",
+    decidedAt: str(r.executed_at || r.created_at), answeredAt: str(r.executed_at),
     evidence: {
       to: str(p.to), cc: "", subject: str(p.subject), body: str(p.body),
       message: str(p.message), audience: str(p.audience),
@@ -145,12 +166,16 @@ export function fromPending(row, look = {}) {
 export function fromProposal(row, look = {}) {
   const r = obj(row);
   const name = opName(r.operation);
-  const kind = SPINE_KIND[name] || "other";
-  const input = { ...obj(r.input), ...obj(r.edited_params) };
-  const jobId = str(r.job_id || (kind === "stage" ? input.job_id : ""));
-  const job = obj(look.jobs)[jobId] || "";
-  const ops = obj(look.ops);
-  const what = firstSentence(ops[str(r.operation)] || ops[name]) || name || "An ask";
+  const kind = own(SPINE_KIND, name) || "other";
+  const edited = obj(r.edited_params);
+  const input = { ...obj(r.input), ...edited };
+  // job.set_stage moves the job its params name (op_exec_job_set_stage reads
+  // the merged input's job_id), and op_propose lets proposals.job_id differ
+  // from it, so the card, the lookup and the confirm name that job; the
+  // row's own job_id only stands in when the params name none
+  const jobId = kind === "stage" ? str(edited.job_id ?? obj(r.input).job_id) || str(r.job_id) : str(r.job_id);
+  const job = own(look.jobs, jobId) || "";
+  const what = firstSentence(own(look.ops, str(r.operation)) || own(look.ops, name)) || name || "An ask";
   const key = kind === "email" || kind === "text" ? str(input.to) : kind === "stage" ? stageLabel(input.stage) : "";
   const byId = str(r.proposed_by_id);
   return {
@@ -160,11 +185,11 @@ export function fromProposal(row, look = {}) {
     approveLabel: KINDS[kind].approve,
     yesHint: "",                         // YES by text doesn't reach the spine yet
     jobId, jobTable: "board", job,
-    by: proposerName(r.proposed_by_kind, obj(look.people)[byId]),
+    by: proposerName(r.proposed_by_kind, own(look.people, byId)),
     byKind: str(r.proposed_by_kind), byId,
-    status: str(r.status), createdAt: r.created_at || "", expiresAt: r.expires_at || "",
-    decidedAt: r.approved_at || r.updated_at || r.created_at || "",
-    answeredAt: r.approved_at || r.updated_at || "",    // a decline is the row's last update
+    status: str(r.status), createdAt: str(r.created_at), expiresAt: str(r.expires_at),
+    decidedAt: str(r.approved_at || r.updated_at || r.created_at),
+    answeredAt: str(r.approved_at || r.updated_at),     // a decline is the row's last update
     evidence: {
       to: str(input.to), cc: str(input.cc), subject: str(input.subject),
       body: kind === "email" ? str(input.body) : "",
@@ -174,13 +199,13 @@ export function fromProposal(row, look = {}) {
       reason: str(r.decline_reason),
     },
     result: obj(r.result), error: str(r.error),
-    outbox: obj(look.outbox)[str(r.id)] || null,
+    outbox: own(look.outbox, str(r.id)) || null,
   };
 }
+const PROPOSER_KINDS = { human: "Someone in the office", agent: "An agent", policy: "A policy",
+  integration: "An integration", system: "The system" };
 function proposerName(kind, name) {
-  if (name) return name;
-  return { human: "Someone in the office", agent: "An agent", policy: "A policy",
-    integration: "An integration", system: "The system" }[kind] || "";
+  return name || own(PROPOSER_KINDS, kind) || "";
 }
 
 /* ---------- which list a card is on ---------- */
@@ -197,13 +222,25 @@ export const isExpired = (c, now = Date.now()) =>
 export const isRecent = (c, now = Date.now()) =>
   DECIDED[c.lane].includes(c.status) && ms(c.decidedAt) >= now - RECENT_MS;
 
+/* A row that won't make a card (a field of a shape no producer writes, in
+   an ask filed by hand) is left off with a console warning: it never takes
+   the rest of the list down with it. */
+function cardsOf(rows, make, lane, look) {
+  const out = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    try { out.push(make(r, look)); }
+    catch (e) {
+      const id = r && typeof r.id === "string" ? r.id : "no id";
+      console.warn(`Approvals: left off a ${lane} row that didn't read (${id}): ${e && e.message ? e.message : e}`);
+    }
+  }
+  return out;
+}
+
 /** Both queues' rows → { waiting (soonest expiry first), recent (newest
     answer first), expired (a count) }. */
 export function inbox(pendingRows, proposalRows, look = {}, now = Date.now()) {
-  const cards = [
-    ...(Array.isArray(pendingRows) ? pendingRows : []).map((r) => fromPending(r, look)),
-    ...(Array.isArray(proposalRows) ? proposalRows : []).map((r) => fromProposal(r, look)),
-  ];
+  const cards = [...cardsOf(pendingRows, fromPending, "text", look), ...cardsOf(proposalRows, fromProposal, "spine", look)];
   const waiting = cards.filter((c) => isLive(c, now))
     .sort((a, b) => ms(a.expiresAt) - ms(b.expiresAt) || ms(a.createdAt) - ms(b.createdAt));
   const recent = cards.filter((c) => isRecent(c, now))
@@ -230,15 +267,15 @@ export function needs(cards) {
     {id, title, customer, address}; outbox rows newest first. */
 export function lookFrom({ catalog = [], agents = [], profiles = [], jobs = [], outbox = [] } = {}) {
   const look = { jobs: {}, ops: {}, people: {}, outbox: {} };
-  for (const j of jobs) if (j && j.id) look.jobs[j.id] = jobName(j);
+  for (const j of jobs) if (j && j.id) put(look.jobs, str(j.id), jobName(j));
   for (const o of catalog) {
     if (!o || !o.name) continue;
-    look.ops[`${o.name}@${o.version}`] = str(o.description);
-    if (!look.ops[o.name]) look.ops[o.name] = str(o.description);
+    put(look.ops, `${o.name}@${o.version}`, str(o.description));
+    if (!own(look.ops, str(o.name))) put(look.ops, str(o.name), str(o.description));
   }
-  for (const a of agents) if (a && a.id && agentName(a.name)) look.people[a.id] = agentName(a.name);
-  for (const p of profiles) if (p && p.id && str(p.full_name)) look.people[p.id] = str(p.full_name);
-  for (const o of outbox) if (o && o.proposal_id && !look.outbox[o.proposal_id]) look.outbox[o.proposal_id] = o;
+  for (const a of agents) if (a && a.id && agentName(a.name)) put(look.people, str(a.id), agentName(a.name));
+  for (const p of profiles) if (p && p.id && str(p.full_name)) put(look.people, str(p.id), str(p.full_name));
+  for (const o of outbox) if (o && o.proposal_id && !own(look.outbox, str(o.proposal_id))) put(look.outbox, str(o.proposal_id), o);
   return look;
 }
 
@@ -247,13 +284,21 @@ const DAY = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", mo
 const CLOCK = new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" });
 const FULL = new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 const tidy = (s) => s.replace(/[  ]/g, " ");       // ICU puts a narrow space before AM
+/* An instant's Alaska calendar date as a day number (days since 1970-01-01).
+   Two of them differ by the calendar days between, whatever the clock did:
+   "24 h ago" lands on the wrong date next to the 23- and 25-hour DST days. */
+function akDayNo(t) {
+  const d = {};
+  for (const { type, value } of DAY.formatToParts(t)) d[type] = Number(value);
+  return Date.UTC(d.year, d.month - 1, d.day) / 86400000;
+}
 /** "7:02 AM" today, "yesterday 7:02 AM", else "Mon, Oct 5, 7:02 AM" — Alaska time. */
 export function akTime(iso, now = Date.now()) {
   const t = ms(iso);
   if (!Number.isFinite(t)) return "";
-  const day = DAY.format(t);
-  if (day === DAY.format(now)) return tidy(CLOCK.format(t));
-  if (day === DAY.format(now - 86400000)) return "yesterday " + tidy(CLOCK.format(t));
+  const back = akDayNo(now) - akDayNo(t);
+  if (back === 0) return tidy(CLOCK.format(t));
+  if (back === 1) return "yesterday " + tidy(CLOCK.format(t));
   return tidy(FULL.format(t));
 }
 /** "expires in 5 h" (whole hours, rounded down: it never overstates the time left). */
@@ -276,9 +321,13 @@ function delivery(o, now) {
     const at = ms(o.next_attempt_at);
     return at > now + 60000 ? `Queued, goes out ${akTime(o.next_attempt_at, now)}` : "Queued to send";
   }
-  return { sending: "Sending", sent: "Sent", delivered: "Delivered", failed: "Send failed, retrying",
-    dead: "Couldn't send" + (str(o && o.error) ? ": " + str(o.error) : "") }[st] || "";
+  return own({ sending: "Sending", sent: "Sent", delivered: "Delivered", failed: "Send failed, retrying",
+    dead: "Couldn't send" + (str(o && o.error) ? ": " + str(o.error) : "") }, st) || "";
 }
+/* A text-queue row goes pending → approved → executed / failed inside the one
+   request that answered it, so a row still 'approved' when the tab reads it
+   back is one whose request died before it could say how it went. */
+export const NEVER_REPORTED = "Approved, but it never reported back. Check whether it went out before sending it again.";
 /** The outcome line on a Recently decided card: { text, tone: ok|no|bad|wait }. */
 export function outcome(c, now = Date.now()) {
   const failed = { text: "Failed: " + (c.error || "no reason given"), tone: "bad" };
@@ -288,7 +337,11 @@ export function outcome(c, now = Date.now()) {
   }
   if (c.status === "failed") return failed;
   if (c.lane === "text") {
-    if (c.status === "approved") return { text: "Approved, still running", tone: "wait" };
+    if (c.status === "approved") {
+      if (c.error) return failed;
+      // only the answer this tab is holding can still be running
+      return c.answeredHere ? { text: "Approved, still running", tone: "wait" } : { text: NEVER_REPORTED, tone: "bad" };
+    }
     if (c.status === "executed") {
       if (c.kind === "phase") return { text: c.result.skipped ? "Phase was already on the board" : "Phase added", tone: "ok" };
       return { text: c.kind === "other" ? "Done" : "Sent", tone: "ok" };
@@ -336,42 +389,67 @@ export const SIGNED_OUT = "Your sign-in has expired. Sign out, sign back in, and
 const GONE = "Already answered, or it expired.";
 const textInstead = (c, decision) =>
   decision === "decline" ? `Text NO ${c.code} to decline it.` : `Text YES ${c.code} to approve it.`;
+const REFRESH = "Refresh to see whether it went through.";
+/* 409s keep the row open; the server's message says when (the window is
+   roybal-notify's SMS_QUIET_START/END, so these fallbacks name no hours) */
+const STILL_WAITING = {
+  quiet_hours: "Customer texts can't go out at this hour. This one is still waiting: approve it again once texting hours open.",
+  try_again: "That didn't go through just now, and nothing changed. Try again in a minute.",
+};
 
-/** roybal-notify decidePending → { ok: true, status, message } (the decision
-    was recorded: executed, declined, or failed with why), or { ok: false,
+/** roybal-notify decidePending → { ok: true, status, message, action? } (the
+    decision was recorded: executed, declined, or failed with why; action is
+    the row as the server re-read it after, {status, result}), or { ok: false,
     error, gone } where gone means the row is no longer open. Until the
     function carries decidePending, its router answers 400 "Unknown action…";
-    that, a 404 that isn't not_open, or a 5xx with no JSON means "answer
-    this one by text". */
+    that, or a 404 that isn't not_open, means "answer this one by text". A 5xx
+    may have come after the row was approved, so it says to refresh instead:
+    a YES by then could no longer reach it. */
 export function pendingAnswer(status, body, c, decision) {
   const b = body && typeof body === "object" ? body : null;
   const msg = str(b && b.message);
   const err = str(b && b.error);
-  if (status === 200 && b && b.ok === true && str(b.status)) return { ok: true, status: str(b.status), message: msg };
+  if (status === 200 && b && b.ok === true && str(b.status)) {
+    const out = { ok: true, status: str(b.status), message: msg };
+    if (b.action && typeof b.action === "object") out.action = { status: str(b.action.status), result: obj(b.action.result) };
+    return out;
+  }
   if (status === 404 && err === "not_open") return { ok: false, error: GONE, gone: true };
   // a 404 that isn't not_open is the gateway's "no such function"
-  if ((status === 400 && /unknown action/i.test(err || msg)) || status === 404 || (status >= 500 && !b)) {
+  if ((status === 400 && /unknown action/i.test(err || msg)) || status === 404) {
     return { ok: false, error: `The server can't take this answer from the app yet. ${textInstead(c, decision)}` };
   }
-  if (status >= 500) return { ok: false, error: `Something went wrong on the server (${status}${msg || err ? ": " + (msg || err) : ""}). ${textInstead(c, decision)}` };
+  // role_is couldn't answer (nothing ran yet): its message says to try again
+  if (status === 503 && err === "role_check_failed") return { ok: false, error: msg || "Couldn't check your login just now. Try again." };
+  if (status >= 500 && !b) return { ok: false, error: `The server didn't answer. ${REFRESH}` };
+  if (status >= 500) return { ok: false, error: `Something went wrong on the server (${status}${msg || err ? ": " + (msg || err) : ""}). ${REFRESH}` };
   if (status === 400) return { ok: false, error: `The server didn't accept this request${msg ? ": " + msg.replace(/\.$/, "") : ""}. Nothing changed.` };
+  // role_is turned the token down even after callFunction's refresh-and-retry
+  if (status === 401 && err === "auth") return { ok: false, error: "Your login expired. Sign in again." };
   if (status === 401) return { ok: false, error: SIGNED_OUT };
   if (status === 403) return { ok: false, error: "Only the owner's login can answer this." };
-  if (status === 409 || err === "quiet_hours") {
-    return { ok: false, error: "Customer texts go out only between 7 AM and 8 PM Alaska time. This one is still waiting: approve it again after 7 AM." };
+  if (status === 409 || own(STILL_WAITING, err)) {
+    return { ok: false, error: msg || own(STILL_WAITING, err) || STILL_WAITING.quiet_hours };
   }
   return { ok: false, error: msg || err || `Couldn't record that (${status}).` };
 }
 
 /** op_proposal_approve / op_proposal_decline → { ok: true, row } or
-    { ok: false, error, gone }. PostgREST puts the SQLSTATE in body.code
-    and maps 55000 and P0002 to a 500, so the code decides, not the status. */
+    { ok: false, error, gone, declineOnly }. PostgREST puts the SQLSTATE in
+    body.code and maps 55000 and P0002 to a 500, so the code decides, not the
+    status. P0002 is two things: "no proposal x" (it's gone), and
+    op_catalog_lookup's "no live operation x@1" (its catalog version was
+    deprecated while it waited: still open, but only Decline can answer it,
+    since op_proposal_decline never looks at the catalog). */
 export function spineAnswer(status, body) {
   const b = body && typeof body === "object" ? body : null;
   if (status >= 200 && status < 300 && b && b.id) return { ok: true, row: b };
   const code = str(b && b.code);
   const msg = str(b && b.message).replace(/^op spine:\s*/i, "");
   if (code === "42501") return { ok: false, error: "Your login isn't allowed to answer this one." };
+  if (code === "P0002" && /no live operation/i.test(msg)) {
+    return { ok: false, error: "This kind of ask was retired before you answered it. Decline it; nothing was sent.", declineOnly: true };
+  }
   if (code === "P0002") return { ok: false, error: "This ask no longer exists.", gone: true };
   if (code === "55000") return { ok: false, error: GONE, gone: true };
   if (code === "22023") return { ok: false, error: `The server refused this as invalid${msg ? ": " + msg : ""}. Nothing changed.` };
@@ -384,13 +462,17 @@ export function spineAnswer(status, body) {
   return { ok: false, error: msg || `Couldn't record that (${status}).` };
 }
 
-/** A text-queue card after decidePending recorded the decision. */
+/** A text-queue card after decidePending recorded the decision. The row as
+    the server re-read it after (answer.action) wins over the card's copy, so
+    a phase that was already on the board says so now, not at the next
+    refresh. */
 export function decidedText(c, answer, now = Date.now()) {
-  const failed = answer.status === "failed";
+  const a = obj(answer.action);
   const at = new Date(now).toISOString();
-  return { ...c, status: answer.status, decidedAt: at, answeredAt: at,
-    error: failed ? answer.message || c.error : c.error,
-    result: failed ? { ...c.result, error: answer.message } : c.result };
+  const status = DECIDED.text.includes(a.status) ? a.status : answer.status;
+  const result = { ...c.result, ...obj(a.result) };
+  if (answer.status === "failed" && !str(result.error) && str(answer.message)) result.error = str(answer.message);
+  return { ...c, status, decidedAt: at, answeredAt: at, answeredHere: true, error: str(result.error) || c.error, result };
 }
 /** The lists after one card was answered: off Waiting, onto the top of Recently decided. */
 export function settle(box, card, done) {
