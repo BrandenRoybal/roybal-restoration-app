@@ -1180,9 +1180,10 @@ async function adjusterEmail(body: Record<string, unknown>) {
       "Roybal Construction, LLC, 907-371-9868. Call `email` with the draft.",
     content:
       `Draft the email submitting our documentation packet for this claim. Greet the adjuster by name if known, reference the ` +
-      `claim number and property address, summarize the loss and completed mitigation in 2-4 sentences, list the attached ` +
-      `documentation packet (narrative, moisture maps, drying logs, photo report, certificate of drying, invoice), and offer ` +
-      `to answer questions or walk the scope on site.\n\n` +
+      `claim number and property address, summarize the loss and completed mitigation in 2-4 sentences, say what the ` +
+      `documentation packet linked below holds (narrative, moisture maps, drying logs, photo report, certificate of drying, ` +
+      `invoice), and offer to answer questions or walk the scope on site. Nothing is attached: the packet and photo links ` +
+      `are added under your text, so never call the documents attached, and never write a link or URL yourself.\n\n` +
       (narrative ? `SAVED NARRATIVE (source of truth for the summary):\n${narrative.slice(0, 6000)}\n\n` : "") +
       `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "email",

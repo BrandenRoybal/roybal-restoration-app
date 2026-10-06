@@ -1816,6 +1816,14 @@ function narrativePage(project) {
   emailBtn.addEventListener("click", async () => {
     if (!aiAvailable()) return;
     emailBtn.disabled = true; status.textContent = "Drafting the adjuster email…";
+    /* Approve to send (adjustersend.js): for the owner, while the worker's
+       email lane is live, the draft also gets a To field and "Send for
+       approval". Asked alongside the draft and loaded on demand, so a no,
+       a failed check or a module that won't load leaves the panel exactly
+       as it always was. */
+    const sendReady = import("./adjustersend.js")
+      .then((m) => m.sendSetup(project).then((setup) => (setup ? { m, setup } : null)))
+      .catch(() => null);
     try {
       const draft = await draftAdjusterEmail(project);
       /* The claim links are appended DETERMINISTICALLY, never AI-written —
@@ -1823,6 +1831,7 @@ function narrativePage(project) {
          email's whole point, so a missing one publishes right here; the
          photo/contents links ride along only if already live. */
       const links = [];
+      const shares = {};      // the same links, for the approval card's evidence
       try {
         if (!shareLive(project, "packet")) {
           status.textContent = "Publishing the packet link…";
@@ -1830,12 +1839,19 @@ function narrativePage(project) {
             status.textContent = `Publishing the packet link… ${n}/${total}`;
           });
         }
-        links.push(`• Full job packet (view & print): ${packetShareLink(project.photoShares.packet.token)}`);
+        shares.packet = packetShareLink(project.photoShares.packet.token);
+        links.push(`• Full job packet (view & print): ${shares.packet}`);
       } catch (e) {
         toast("Email drafted, but the packet link couldn't publish — " + (e && e.message || e), 5000);
       }
-      if (shareLive(project, "photos")) links.push(`• All job photos, full resolution: ${photoShareLink(project.photoShares.photos.token)}`);
-      if (shareLive(project, "contents")) links.push(`• Contents item photos, full resolution: ${photoShareLink(project.photoShares.contents.token)}`);
+      if (shareLive(project, "photos")) {
+        shares.photos = photoShareLink(project.photoShares.photos.token);
+        links.push(`• All job photos, full resolution: ${shares.photos}`);
+      }
+      if (shareLive(project, "contents")) {
+        shares.contents = photoShareLink(project.photoShares.contents.token);
+        links.push(`• Contents item photos, full resolution: ${shares.contents}`);
+      }
       status.textContent = "";
       const subj = h("input", { value: draft.subject || "", style: "width:100%;padding:8px 10px;border:1px solid #cdd5df;border-radius:10px;font-size:13px" });
       const bodyTa = h("textarea", { style: "width:100%;min-height:200px;font-size:13px;line-height:1.5;padding:10px;border:1px solid #cdd5df;border-radius:10px;margin-top:6px" });
@@ -1850,11 +1866,17 @@ function narrativePage(project) {
       mailBtn.addEventListener("click", () => {
         location.href = `mailto:?subject=${encodeURIComponent(subj.value)}&body=${encodeURIComponent(bodyTa.value)}`;
       });
-      emailPanel.replaceChildren(
-        h("div", { style: "border:1px dashed #b9c4d4;border-radius:12px;padding:12px;margin:10px 0;background:#f7f9fc" },
-          h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "✉️ Adjuster email draft — the packet + photo links are included; review, then copy or open in your mail app:"),
-          subj, bodyTa,
-          h("div", { style: "display:flex;gap:8px;margin-top:8px" }, copyBtn, mailBtn)));
+      const draftBox = h("div", { style: "border:1px dashed #b9c4d4;border-radius:12px;padding:12px;margin:10px 0;background:#f7f9fc" },
+        h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "✉️ Adjuster email draft — the packet + photo links are included; review, then copy or open in your mail app:"),
+        subj, bodyTa,
+        h("div", { style: "display:flex;gap:8px;margin-top:8px" }, copyBtn, mailBtn));
+      emailPanel.replaceChildren(draftBox);
+      // usually answered while the draft was being written; never waited on
+      sendReady.then((send) => {
+        if (!send || !draftBox.isConnected) return;          // a redraft replaced this panel
+        try { draftBox.append(send.m.sendSection({ project, subj, bodyTa, setup: send.setup, links: shares })); }
+        catch (_) { /* the panel stays as it always was */ }
+      });
     } catch (e) {
       status.textContent = ""; toast("Couldn't draft the email — " + (e && e.message ? e.message : "try again"));
     }

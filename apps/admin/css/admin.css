@@ -304,6 +304,8 @@ input.rl-days { width: 90px; flex: 0 0 auto; }
 .ap-host { font-size: 12px; font-weight: 700; color: var(--ink-2); overflow-wrap: anywhere; }
 .ap-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
 .ap-yes { font-size: 12.5px; color: var(--muted); }
+/* a spine email while the worker isn't sending email: approving only queues it */
+.ap-lane { margin-top: 10px; font-size: 12.5px; font-weight: 600; color: #7a5a1a; overflow-wrap: anywhere; }
 .ap-err { margin: 10px 0 0; }
 .ap-skipped { margin: 4px 0 10px; }   /* asks that wouldn't make a card */
 .ap-out { margin-top: 5px; font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }

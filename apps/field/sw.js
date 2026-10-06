@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v202";
+const CACHE = "roybal-field-v203";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
@@ -41,6 +41,9 @@ const CORE = [
   // 🧾 Receipts: app.js statically imports receipts.js (→ receiptcalc.js); receipts.js
   // loads receiptlib.js on demand, precached here so the return badges work offline
   "js/receipts.js", "js/receiptcalc.js", "js/receiptlib.js",
+  // ✉️ Adjuster email: the narrative page loads adjustersend.js on demand (the
+  // owner's approve-to-send); precached like receiptlib.js
+  "js/adjustersend.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];

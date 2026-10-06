@@ -1,5 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { makeSupa, parseCount, SupaError } from "../supa.mjs";
 import { fakeFetch } from "./helpers.mjs";
 import { loadConfig } from "../config.mjs";
@@ -64,6 +69,25 @@ test("loadConfig requires the url and key, clamps numbers, and turns email off w
   assert.equal(half.emailEnabled, false);
 });
 
+test("EMAIL_MAX_AGE_HOURS defaults to 48, is clamped to 1..720, and nonsense keeps the default instead of switching the limit off", () => {
+  const base = { SUPABASE_URL: "https://ref.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k" };
+  const hours = (v) => loadConfig(v === undefined ? base : { ...base, EMAIL_MAX_AGE_HOURS: v }).emailMaxAgeHours;
+  assert.equal(hours(undefined), 48);
+  assert.equal(hours("24"), 24);
+  assert.equal(hours(" 72 "), 72);
+  assert.equal(hours("36.6"), 37);
+  assert.equal(hours("0"), 1, "zero cannot mean 'no limit'");
+  assert.equal(hours("-5"), 1);
+  assert.equal(hours("100000"), 720);
+  assert.equal(hours("abc"), 48);
+  assert.equal(hours("48h"), 48);
+  assert.equal(hours("Infinity"), 48);
+  assert.equal(hours(""), 48, "blank is unset, not zero");
+  assert.equal(hours("   "), 48);
+  // The same blank-is-unset rule for the other knobs: a blank poll no longer clamps to the 250 ms floor.
+  assert.equal(loadConfig({ ...base, WORKER_POLL_MS: "" }).pollMs, 5000);
+});
+
 test("loadConfig refuses the wrong Supabase key and pasted placeholders at boot, naming the variable but never the value", () => {
   const base = { SUPABASE_URL: "https://ref.supabase.co" };
   const refuses = (env, re) => {
@@ -94,4 +118,66 @@ test("loadConfig refuses the wrong Supabase key and pasted placeholders at boot,
   const g = loadConfig({ ...base, SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k",
     GMAIL_CLIENT_ID: "123-abc.apps.googleusercontent.com", GMAIL_CLIENT_SECRET: "GOCSPX-abc_DEF-123" });
   assert.equal(g.emailEnabled, true);
+});
+
+// set-gmail-secret.sh, run the way the README says (from the repo root) with
+// the secret piped in and a stand-in `fly` on PATH that records its
+// arguments. The script must set exactly the pair, never print the secret,
+// and refuse every value the worker would refuse at boot: a value it let
+// through and loadConfig refused would stop the worker and the text lane.
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const FIELD_CLIENT_ID = /export const GMAIL_CLIENT_ID = "([^"]+)"/.exec(
+  fs.readFileSync(path.join(REPO, "apps/field/js/config.js"), "utf8"))?.[1];
+
+function runSetGmailSecret(input, env = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "set-gmail-secret-"));
+  const flyLog = path.join(dir, "fly-args");
+  fs.mkdirSync(path.join(dir, "bin"));
+  fs.writeFileSync(path.join(dir, "bin", "fly"),
+    '#!/bin/sh\n[ "$1" = auth ] && exit 0\nfor a in "$@"; do printf \'%s\\n\' "$a"; done > "$FAKE_FLY_LOG"\n', { mode: 0o755 });
+  try {
+    const r = spawnSync("sh", ["services/worker/set-gmail-secret.sh"], {
+      cwd: REPO, input, encoding: "utf8",
+      env: { ...process.env, PATH: `${path.join(dir, "bin")}:${process.env.PATH}`, FAKE_FLY_LOG: flyLog, ...env },
+    });
+    const flyArgs = fs.existsSync(flyLog) ? fs.readFileSync(flyLog, "utf8").split("\n").filter(Boolean) : null;
+    return { status: r.status, output: `${r.stdout}${r.stderr}`, flyArgs };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("set-gmail-secret.sh sets exactly the pair, never prints the secret, and refuses what the worker would refuse", { skip: process.platform === "win32" }, () => {
+  assert.match(FIELD_CLIENT_ID ?? "", /\.apps\.googleusercontent\.com$/);
+  const secret = "GOCSPX-t3st_Secret-value9";
+  const ok = runSetGmailSecret(`${secret}\n`);
+  assert.equal(ok.status, 0, ok.output);
+  assert.deepEqual(ok.flyArgs, ["secrets", "set", "-a", "roybal-worker",
+    `GMAIL_CLIENT_ID=${FIELD_CLIENT_ID}`, `GMAIL_CLIENT_SECRET=${secret}`]);
+  assert.ok(!ok.output.includes(secret) && !ok.output.includes("t3st_Secret"), "the secret is never printed");
+  assert.match(ok.output, /email\.disabled/);
+  assert.match(ok.output, /"channels":\["sms","email"\]/);
+  // What it set, the worker boots with.
+  const cfg = loadConfig({ SUPABASE_URL: "https://ref.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k",
+    GMAIL_CLIENT_ID: FIELD_CLIENT_ID, GMAIL_CLIENT_SECRET: secret });
+  assert.equal(cfg.emailEnabled, true);
+
+  for (const bad of ["", "GOCSPX-has space", "GOCSPX-\"quoted\"", "GOCSPX-'quoted'", "<its client secret>",
+    "GOCSPX-<x>", "GOCSPX-abc…", "GOCSPX-PASTE_HERE", "GOCSPX-nb sp", "GOCSPX-cr\r"]) {
+    const r = runSetGmailSecret(`${bad}\n`);
+    assert.notEqual(r.status, 0, `refused: ${JSON.stringify(bad)}`);
+    assert.equal(r.flyArgs, null, `fly not called for ${JSON.stringify(bad)}`);
+    assert.match(r.output, /Nothing was changed/);
+  }
+
+  // Not GOCSPX-: a warning, then only an explicit y goes ahead.
+  const no = runSetGmailSecret("oldstyleSecret123\nn\n");
+  assert.notEqual(no.status, 0);
+  assert.equal(no.flyArgs, null);
+  assert.match(no.output, /start with GOCSPX-/);
+  assert.equal(runSetGmailSecret("oldstyleSecret123\n").flyArgs, null, "no answer is a no");
+  const yes = runSetGmailSecret("oldstyleSecret123\ny\n");
+  assert.equal(yes.status, 0, yes.output);
+  assert.equal(yes.flyArgs.at(-1), "GMAIL_CLIENT_SECRET=oldstyleSecret123");
+  assert.ok(!yes.output.includes("oldstyleSecret123"));
 });

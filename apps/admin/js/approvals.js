@@ -31,6 +31,15 @@
    receiptlibrary.js rule: an office browser can run one load on a
    stale cached field module after a deploy, and a missing export
    would blank the tab). What a card says lives in ../../js/approvals.js.
+   That module is no longer new, so the same rule now covers it too:
+   this page calls none of its exports added after step 4. Step 5's
+   additions (the spine's YES number, spine jobs looked up in both job
+   tables, whether the worker is sending email) arrive through calls
+   step 4 already made: fields on the card (yesHint, laneHint), needs'
+   answer (lanes) and lookFrom's options (heartbeats, now). An older
+   cached copy ignores what it doesn't know, and the cards read as
+   they did. Anything added later that has to be a call is checked
+   first (typeof A.x === "function").
    ============================================================ */
 import { h, clear, toast, likelyOffline } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
@@ -46,7 +55,9 @@ const tone = (kind) => (Object.prototype.hasOwnProperty.call(TONE, kind) ? TONE[
 
 const TEXT_COLS = "id,code,kind,label,params,job_id,proposed_by,status,result,created_at,expires_at,executed_at";
 const SPINE_COLS = "id,operation,input,edited_params,proposed_by_kind,proposed_by_id,rationale,evidence_refs," +
-  "job_id,status,expires_at,approved_at,decline_reason,result,error,created_at,updated_at";
+  "job_id,status,expires_at,approved_at,decline_reason,result,error,created_at,updated_at,sms_code";
+/* the newest worker heartbeat: is the worker sending email right now (owner/office RLS, 0016) */
+const BEAT_PATH = "worker_heartbeats?select=at,meta&order=at.desc&limit=1";
 const JOB_COLS = "id,title:data->>title,customer:data->>customer,address:data->>address";
 
 /* ---------- reads ---------- */
@@ -79,7 +90,10 @@ async function load(now) {
 
   const bare = A.inbox(pa, pr, {}, now);              // the cards to name: waiting and recent
   const need = A.needs([...bare.waiting, ...bare.recent]);
-  const [ops, field, board, agents, profiles, outbox] = await Promise.all([
+  // only when a spine email is on the page (an older field module never
+  // asks); a read that fails is null, "can't tell", never "sending is off"
+  const mail = Array.isArray(need.lanes) && need.lanes.includes("email");
+  const [ops, field, board, agents, profiles, outbox, heartbeats] = await Promise.all([
     pr.length && !catalog ? rows("operation_catalog?select=name,version,description&limit=100").catch(() => null) : catalog,
     lookup(need.field, `field_projects?select=${JOB_COLS}&id=${inList(need.field)}&limit=100`),
     lookup(need.board, `coordination_jobs?select=${JOB_COLS}&id=${inList(need.board)}&limit=100`),
@@ -87,9 +101,10 @@ async function load(now) {
     lookup(need.people, `profiles?select=id,full_name&id=${inList(need.people)}&limit=100`),
     lookup(need.outbox, `outbox?select=proposal_id,status,next_attempt_at,error,created_at` +
       `&proposal_id=${inList(need.outbox)}&order=created_at.desc&limit=100`),
+    mail ? rows(BEAT_PATH).then((r) => (Array.isArray(r) ? r : null), () => null) : null,
   ]);
   if (ops) catalog = ops;
-  const look = A.lookFrom({ catalog: catalog || [], agents, profiles, jobs: [...field, ...board], outbox });
+  const look = A.lookFrom({ catalog: catalog || [], agents, profiles, jobs: [...field, ...board], outbox, heartbeats, now });
   return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2, textOk: text.status === "fulfilled", readAt: now };
 }
 
@@ -300,6 +315,8 @@ export async function renderApprovals(view) {
       head(c),
       meta(c.job, c.by && "from " + c.by, "asked " + A.akTime(c.createdAt, now), A.expiresIn(c.expiresAt, now)),
       evidence(c),
+      // what approving does while the worker isn't sending email, read before the tap
+      c.laneHint ? h("div", { class: "ap-lane", role: "note" }, c.laneHint) : null,
       h("div", { class: "ap-actions" }, approve, decline, c.yesHint ? h("span", { class: "ap-yes" }, c.yesHint) : null),
       err);
   }

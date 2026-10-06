@@ -454,10 +454,16 @@ async function aiAssignPhases(entries: AiEntry[], phases: Subtask[]) {
 }
 
 /** Codes the owner texts back ("YES 14") must be unique across every LIVE
-    proposal, not just this kind — the brief hands out 11+ for its own. */
+    proposal, not just this kind — the brief hands out 11+ for its own, and
+    a spine proposal's sms_code answers to the same "YES n". So the pending
+    codes plus whatever rpc/sms_codes_in_use (migration 0019) says is held
+    in either queue; when that RPC errors (before 0019, an outage) the
+    pending codes alone, the rule this sweep always took codes by. */
 async function takeCodes(supabase: ReturnType<typeof createClient>, n: number): Promise<number[]> {
   const { data } = await supabase.from("pending_actions").select("code").eq("status", "pending").limit(200);
   const used = new Set(((data ?? []) as { code: number }[]).map((r) => Number(r.code)));
+  const held = await supabase.rpc("sms_codes_in_use").then((r) => r, () => null);
+  if (held && !held.error && Array.isArray(held.data)) for (const c of held.data) used.add(Number(c));
   const out: number[] = [];
   let next = 11;
   while (out.length < n) {

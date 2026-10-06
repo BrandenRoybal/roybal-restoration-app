@@ -17,6 +17,12 @@
    the real host comes before a link's label; and on a Safari without
    Object.hasOwn every card still shows, with asks that won't read said out
    loud.
+   Then spine step 5: a waiting spine card offers its YES number (and no
+   card does for a number live on both queues), a spine email on a field
+   job names it, the page reads the newest worker heartbeat only when a
+   spine email is shown and says when email sending is off (a heartbeat
+   that won't read says nothing new), and the page calls no field export
+   that a stale cached copy of the field module could lack.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -86,7 +92,11 @@ const stale = { ...email, id: id("spine", 4), expires_at: iso(-20) };
 let PA = [reminder, phase, sent, failed, lapsed, swept];
 let PR = [email, delivered, declined, stale];
 const CATALOG = [{ name: "email.send", version: 1, description: "Send one email. Execution writes one outbox row; the worker delivers it through Gmail." }];
-const OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
+let OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
+/* the newest worker heartbeat, as of the page's clock: sending email unless a test says otherwise */
+const beatAt = (minsAgo, channels) => () => json(200, [{ at: new Date(Date.now() - minsAgo * 60e3).toISOString(),
+  meta: { channels, email: channels.includes("email"), kinds: ["report"] } }]);
+let heartbeat = beatAt(0.5, ["sms", "email"]);       // () => Response, or throws
 
 /* ---------- Supabase and roybal-notify, faked ---------- */
 const calls = [];
@@ -117,7 +127,12 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.includes("/rest/v1/proposals?")) {
     if (headers.Range === "0-0") return counted(live(PR, "proposed"));
     assert.match(u, /select=id,operation,input,edited_params,/);
+    assert.match(u, /select=[^&]*,sms_code&/, "the spine's YES number is read");
     return json(200, PR.filter((r) => Date.parse(r.expires_at) >= since(u)));
+  }
+  if (u.includes("/rest/v1/worker_heartbeats?")) {
+    assert.match(u, /\/rest\/v1\/worker_heartbeats\?select=at,meta&order=at\.desc&limit=1$/);
+    return heartbeat();
   }
   if (u.includes("/rest/v1/operation_catalog?select=name,version,description")) return json(200, CATALOG);
   if (u.includes("/rest/v1/agents?select=id,name&")) return json(200, ids(u, "id").includes(AGENT) ? [{ id: AGENT, name: "agent:brief" }] : []);
@@ -178,7 +193,8 @@ await test("the owner sees both queues merged, soonest expiry first, with the ev
   assert.equal(e.querySelector(".ap-refs a").getAttribute("href"), "https://mail.google.com/mail/u/0/#inbox/1");
   assert.equal(e.querySelector(".ap-refs a").getAttribute("rel"), "noopener noreferrer");
   assert.equal(e.querySelector(".ap-refs li").textContent, "opens mail.google.com — Email from the adjuster", "the host it opens, ahead of its label");
-  assert.equal(e.querySelector(".ap-yes"), null, "no YES hint on the spine");
+  assert.equal(e.querySelector(".ap-yes").textContent, "or text YES 4", "the spine's number, offered the same way");
+  assert.equal(e.querySelector(".ap-lane"), null, "the worker is sending email: nothing about it");
   assert.equal(btn(e, "Approve and send").disabled, false);
   const r = card("text:" + reminder.id);
   assert.match(r.querySelector(".ap-head").textContent, /^EmailEmail the INV-1001 reminder to Pollen$/);
@@ -209,7 +225,11 @@ await test("Recently decided says what came of each, newest first; the expired l
   // the reads it made: select lists, limits, encoded times, lookups only for what's shown
   const pa = calls.find((c) => c.u.includes("/pending_actions?select=id,code"));
   assert.match(pa.u, /&expires_at=gte\.\d{4}-\d\d-\d\dT\d\d%3A\d\d%3A\d\d\.\d{3}Z&order=expires_at\.desc&limit=200$/);
-  assert.ok(calls.some((c) => c.u.includes("/field_projects?") && c.u.includes(`id=in.(${FIELD1})&limit=100`)));
+  // the spine email's job (BOARD1) is asked of both tables: a brief or adjuster email names a field job
+  const fieldRead = calls.findLast((c) => c.u.includes("/field_projects?"));
+  assert.deepEqual(ids(fieldRead.u, "id").sort(), [FIELD1, BOARD1].sort());
+  assert.match(fieldRead.u, /&limit=100$/);
+  assert.ok(calls.some((c) => c.u.includes("/coordination_jobs?") && ids(c.u, "id").includes(BOARD1)));
   assert.ok(calls.some((c) => c.u.includes("/outbox?") && c.u.includes(`proposal_id=in.(${delivered.id})`)));
 });
 
@@ -761,6 +781,148 @@ await test("an owner check that can't answer says so with Retry (never \"not you
   await G.refreshApprovalsBadge();
   assert.equal(roleChecks(before), 1, "asked again");
   assert.deepEqual([badge().hidden, badge().textContent], [false, "3"]);
+});
+
+/* ---------- spine step 5 ---------- */
+const OFF_WAITING = "Email sending is off on the worker right now: approving queues this, and it waits until that's back.";
+const OFF_QUEUED = "Queued, but email sending is off on the worker, so it waits until that's back";
+const beats = (from) => calls.slice(from).filter((c) => c.u.includes("/worker_heartbeats?")).length;
+const reset5 = () => {
+  fresh();
+  OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
+  heartbeat = beatAt(0.5, ["sms", "email"]);
+};
+
+await test("a spine email on a field job (the brief's reminder, the adjuster email) names that job; both job tables are asked", async () => {
+  reset5();
+  const brief = { ...email, id: id("spine", 5), sms_code: 5, job_id: FIELD1,
+    rationale: "email the INV-1001 reminder to Pollen (6 days past due, $1,240.00 open)" };
+  PA = [];
+  PR = [brief];
+  const before = since0();
+  await go();
+  const c = card("spine:" + brief.id);
+  assert.match(c.querySelector(".ap-meta").textContent, /^Pollen, 1192 Bemis Ct · from Brief agent · asked /);
+  assert.equal(c.querySelector(".ap-yes").textContent, "or text YES 5");
+  const reads = calls.slice(before);
+  assert.ok(reads.some((x) => x.u.includes("/field_projects?") && ids(x.u, "id").includes(FIELD1)));
+  assert.ok(reads.some((x) => x.u.includes("/coordination_jobs?") && ids(x.u, "id").includes(FIELD1)), "either table");
+  noJunk(view);
+  reset5();
+});
+
+await test("email sending off on the worker: the waiting email says approving queues it, the approved one says it waits, the toast too", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms"]);                      // production today: no Gmail pair on the worker
+  OUTBOX = [{ proposal_id: delivered.id, status: "pending", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
+  await go();
+  const e = card("spine:" + email.id);
+  const lane = e.querySelector(".ap-lane");
+  assert.equal(lane.textContent, OFF_WAITING);
+  assert.equal(lane.getAttribute("role"), "note");
+  assert.ok(lane.compareDocumentPosition(e.querySelector(".ap-actions")) & window.Node.DOCUMENT_POSITION_FOLLOWING, "read before the buttons");
+  assert.equal(btn(e, "Approve and send").disabled, false, "still answerable");
+  assert.equal(e.querySelector(".ap-yes").textContent, "or text YES 4");
+  assert.equal(card("text:" + reminder.id).querySelector(".ap-lane"), null, "the text queue's email goes through gmail-proxy");
+  const out = card("spine:" + delivered.id).querySelector(".ap-out");
+  assert.equal(out.textContent, OFF_QUEUED);
+  assert.ok(out.classList.contains("ap-out--wait"));
+  assert.equal(card("spine:" + declined.id).querySelector(".ap-out").textContent, "Declined: Already called them");
+  // approving queues it, and the card and the toast say it waits
+  asked.length = 0;
+  spine = () => json(200, { ...email, status: "executed", approved_at: new Date().toISOString(), approved_via: "inbox", result: { outbox_id: "o2" } });
+  btn(e, "Approve and send").click();
+  await settle();
+  assert.deepEqual(asked, ["Send this email to adjuster@carrier.com?"]);
+  assert.equal(card("spine:" + email.id).querySelector(".ap-out").textContent, OFF_QUEUED);
+  assert.equal(document.getElementById("toast").textContent, OFF_QUEUED);
+  noJunk(view);
+  reset5();
+});
+
+await test("a worker that stopped beating reads as not sending; once it beats with email again the line goes", async () => {
+  reset5();
+  heartbeat = beatAt(15, ["sms", "email"]);
+  await go();
+  assert.equal(card("spine:" + email.id).querySelector(".ap-lane").textContent, OFF_WAITING);
+  heartbeat = beatAt(0.2, ["sms", "email"]);
+  btn(view, "↻ Refresh").click();
+  await settle();
+  assert.equal(card("spine:" + email.id).querySelector(".ap-lane"), null);
+  assert.equal(card("spine:" + delivered.id).querySelector(".ap-out").textContent, "Delivered");
+  reset5();
+});
+
+await test("a heartbeat read that fails or won't read never breaks the tab and says nothing new", async () => {
+  OUTBOX = [{ proposal_id: delivered.id, status: "pending", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
+  for (const [what, answer] of [
+    ["a 503", () => json(503, { message: "upstream" })],
+    ["no table yet (before 0016)", () => json(404, { code: "PGRST205", message: "Could not find the table" })],
+    ["no connection", () => { throw new TypeError("Failed to fetch"); }],
+    ["not a list", () => json(200, { at: "x" })],
+    ["a row that won't read", () => json(200, [{ at: "soon", meta: "?" }])],
+    ["not JSON", () => new Response("<html>", { status: 200 })],
+  ]) {
+    fresh();
+    heartbeat = answer;
+    await go();
+    assert.equal(waiting().length, 3, what);
+    assert.ok(!/didn't load/.test(view.textContent), what);
+    assert.equal(view.querySelector(".ap-lane"), null, what);
+    assert.equal(card("spine:" + delivered.id).querySelector(".ap-out").textContent, "Queued to send", what);
+    assert.equal(card("spine:" + email.id).querySelector(".ap-yes").textContent, "or text YES 4", what);
+  }
+  reset5();
+});
+
+await test("the heartbeat is read only while a spine email is on the page", async () => {
+  reset5();
+  PR = [];
+  let before = since0();
+  await go();
+  assert.equal(beats(before), 0, "the text queue alone: no read");
+  PR = [declined];
+  before = since0();
+  await go();
+  assert.equal(beats(before), 0, "a declined email waits on nothing");
+  PR = [email];
+  before = since0();
+  await go();
+  assert.equal(beats(before), 1);
+  reset5();
+});
+
+await test("one number live on both queues: neither card offers it; a tap still answers each", async () => {
+  reset5();
+  PA = [{ ...reminder, code: 4 }, phase];                // the spine email holds 4 as well
+  PR = [email];
+  await go();
+  assert.equal(card("spine:" + email.id).querySelector(".ap-yes"), null);
+  assert.equal(card("text:" + reminder.id).querySelector(".ap-yes"), null);
+  assert.equal(card("text:" + phase.id).querySelector(".ap-yes").textContent, "or text YES 13");
+  assert.equal(btn(card("spine:" + email.id), "Approve and send").disabled, false);
+  assert.equal(btn(card("text:" + reminder.id), "Approve and send").disabled, false);
+  reset5();
+});
+
+await test("the page calls only field exports that step 4 shipped, or checks a newer one first (a stale cached field module can't blank it)", async () => {
+  // what apps/field/js/approvals.js exported at step 4 (origin/main 171e47b)
+  const STEP4 = new Set(["RECENT_MS", "EXPIRED_MS", "stageLabel", "firstSentence", "jobName", "agentName", "labelOf", "fromPending",
+    "fromProposal", "isLive", "isExpired", "isRecent", "inbox", "skippedLine", "needs", "lookFrom", "akTime", "expiresIn", "expiredLine",
+    "WAIT_MS", "NEVER_REPORTED", "NEVER_REPORTED_PHASE", "outcome", "READ_GAP_MS", "sawApproved", "approveConfirm", "declineConfirm",
+    "declinePrompt", "decisionRequest", "NO_CONNECTION", "SIGNED_OUT", "pendingAnswer", "spineAnswer", "decidedText", "settle"]);
+  const src = readFileSync(new URL("../../admin/js/approvals.js", import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  const used = [...new Set([...src.matchAll(/\bA\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]))];
+  assert.ok(used.includes("lookFrom") && used.includes("needs"), "the scan finds the calls");
+  for (const name of used) {
+    if (STEP4.has(name)) continue;
+    assert.ok(src.includes(`typeof A.${name} === "function"`) || src.includes(`A.${name} !== undefined`),
+      `A.${name} is newer than step 4 and isn't checked before it's used`);
+  }
+  // and every step-4 name it calls is still exported, so the newer module serves an older page too
+  const field = await import("../js/approvals.js");
+  for (const name of used.filter((n) => STEP4.has(n))) assert.notEqual(field[name], undefined, name);
 });
 
 location.hash = "#/";

@@ -247,7 +247,15 @@ test("the router names both actions", () => {
    PostgREST that honours the id / status / code filters, eq. and neq., the
    way the UPDATE does, plus gmail-proxy, Twilio and the board.
    `over(method, path, init, w)` answers first (a Response, or an Error to
-   throw); undefined falls through to the world. */
+   throw); undefined falls through to the world.
+   The spine half (step 5): `w.spine` holds public.proposals rows, read
+   with their filters, order and limit honoured; `w.approve` / `w.decline`
+   are op_proposal_approve / op_proposal_decline in the order the SQL runs
+   them (approving twice returns the row; an email.send approval writes one
+   outbox row, keyed, and ends executed); `w.outbox`, the owner profiles,
+   the worker's email lane and sms_codes_in_use sit beside them. An inbox tap
+   on a spine card goes straight to PostgREST, never through roybal-notify,
+   so a test taps by calling w.approve(…, "inbox", OWNER) itself. */
 
 const SERVE = "data:text/javascript," + encodeURIComponent("export const serve = (h) => { globalThis.__roybalNotify = h; };");
 register("data:text/javascript," + encodeURIComponent(`
@@ -278,11 +286,84 @@ const KINDS = {
     params: { op: "addPhase", rowId: JOB, phase: { id: "p-new", name: "Punch list" } } },
 };
 
+const OWNER = "5b0c1d2e-3f4a-4b5c-8d6e-7f8a9b0c1d2e";     // the owner's profiles.id
+const SP = "c0ffee00-1111-4222-8333-444455556666";        // a spine proposal
+const SP_LABEL = "email the INV-4 reminder to Hebard (5 days past due, $1,200.00 open)";
+const spineRow = (o = {}) => ({
+  id: SP, sms_code: 4, operation: "email.send@1", status: "proposed",
+  input: { to: "hebard@example.com", subject: "Payment reminder — invoice INV-4 (Hebard)", body: "…" },
+  edited_params: null, rationale: SP_LABEL, job_id: "9e8d7c6b-5a49-4382-9716-a5b4c3d2e1f0",
+  expires_at: "2999-01-01T00:00:00Z", created_at: "2026-10-06T16:00:00Z", updated_at: new Date().toISOString(),
+  approved_by_kind: null, approved_by_ref: null, approved_via: null, approved_at: null,
+  decline_reason: null, result: null, error: null, ...o,
+});
+
+/** PostgREST's filters, as far as these reads use them: eq/neq/gt/gte/lt,
+    is.null and not.is.null, then order and limit. Timestamps compare as
+    instants. A filter it doesn't know throws, like every unrouted call. */
+const KEYWORDS = new Set(["select", "order", "limit", "offset"]);
+const instant = (v) => (typeof v === "string" && /^\d{4}-\d\d-\d\dT/.test(v) ? Date.parse(v) : v);
+const holds = (v, f) => {
+  if (f === "not.is.null") return v != null;
+  if (f === "is.null") return v == null;
+  const [op, ...rest] = f.split(".");
+  const want = rest.join(".");
+  if (op === "eq") return String(v) === want;
+  if (op === "neq") return String(v) !== want;
+  if (v == null) return false;
+  if (op === "gt") return instant(v) > instant(want);
+  if (op === "gte") return instant(v) >= instant(want);
+  if (op === "lt") return instant(v) < instant(want);
+  throw new Error(`the stub can't filter ${f}`);
+};
+const pick = (list, path) => {
+  const q = new URLSearchParams(path.split("?")[1] || "");
+  let out = list.filter((r) => [...q].every(([col, f]) => KEYWORDS.has(col) || holds(r[col], f)));
+  if (q.get("order")) {
+    const [col, dir] = q.get("order").split(".");
+    out = [...out].sort((x, y) => (instant(x[col]) < instant(y[col]) ? -1 : 1) * (dir === "desc" ? -1 : 1));
+  }
+  return q.get("limit") ? out.slice(0, Number(q.get("limit"))) : out;
+};
+
 function world(kind, over = () => undefined) {
   const w = {
     row: { id: ID, code: 12, kind, status: "pending", result: null, expires_at: "2999-01-01T00:00:00Z", ...KINDS[kind] },
     job: { id: JOB, deleted: false, data: { rev: 3, subtasks: [{ id: "a", name: "Demo" }] } },
     others: [], calls: [], texts: [],
+    spine: [], outbox: [], owners: [{ id: OWNER }], lane: true, minted: [], office: null,
+  };
+  const pg = (code, message, status = 500) => J({ code, message, details: null, hint: null }, status);
+  // op_proposal_approve, in the SQL's order (0013 §12): the caller, the row
+  // lock, "approving twice is approving once", not-open, expiry, then approve
+  // and run it inline (email.send@1 is runtime 'sql': one keyed outbox row)
+  w.approve = (id, via, principal) => {
+    if (!principal) return pg("42501", "op spine: a service-role call must name the principal it acts for", 403);
+    const r = w.spine.find((x) => x.id === id);
+    if (!r) return pg("P0002", `op spine: no proposal ${id}`);
+    if (["approved", "executing", "executed", "failed"].includes(r.status)) return J({ ...r });
+    if (r.status !== "proposed") return pg("55000", `op spine: proposal ${id} is ${r.status}`);
+    if (Date.parse(r.expires_at) <= Date.now()) return pg("55000", `op spine: proposal ${id} expired at ${r.expires_at}`);
+    const at = new Date().toISOString();
+    Object.assign(r, { status: "approved", approved_by_kind: "human", approved_by_ref: principal, approved_via: via, approved_at: at, updated_at: at });
+    if (r.operation === "email.send@1") {
+      const key = `outbox:${r.id}`;
+      let o = w.outbox.find((x) => x.idempotency_key === key);
+      if (!o) w.outbox.push(o = { id: `ob-${w.outbox.length + 1}`, channel: "email", proposal_id: r.id, idempotency_key: key, status: "pending" });
+      Object.assign(r, { status: "executed", result: { outbox_id: o.id } });
+    } else {
+      Object.assign(r, { status: "executed", result: {} });
+    }
+    return J({ ...r });
+  };
+  w.decline = (id, reason, principal) => {
+    if (!principal) return pg("42501", "op spine: a service-role call must name the principal it acts for", 403);
+    const r = w.spine.find((x) => x.id === id);
+    if (!r) return pg("P0002", `op spine: no proposal ${id}`);
+    if (r.status === "declined") return J({ ...r });
+    if (r.status !== "proposed") return pg("55000", `op spine: proposal ${id} is ${r.status}; only a proposed row can be declined`);
+    Object.assign(r, { status: "declined", decline_reason: reason, updated_at: new Date().toISOString() });
+    return J({ ...r });
   };
   const rows = (path) => {
     const q = new URLSearchParams(path.split("?")[1] || "");
@@ -300,6 +381,35 @@ function world(kind, over = () => undefined) {
     if (o instanceof Error) throw o;
     if (o) return o;
     if (path === "/rest/v1/rpc/role_is") return J(init.headers.Authorization === "Bearer owner-jwt");
+    if (path.startsWith("/rest/v1/proposals?") && method === "GET") return J(pick(w.spine, path).map((r) => ({ ...r })));
+    if (path === "/rest/v1/rpc/op_proposal_approve") {
+      const b = JSON.parse(init.body);
+      return w.approve(b.p_proposal_id, b.p_via, b.p_principal_id);
+    }
+    if (path === "/rest/v1/rpc/op_proposal_decline") {
+      const b = JSON.parse(init.body);
+      return w.decline(b.p_proposal_id, b.p_reason, b.p_principal_id);
+    }
+    if (path.startsWith("/rest/v1/profiles?") && method === "GET") {
+      return J(pick(w.owners.map((o) => ({ role: "owner", ...o })), path).map(({ id }) => ({ id })));
+    }
+    if (path === "/rest/v1/rpc/outbox_channel_ready") return J(w.lane);
+    if (path.startsWith("/rest/v1/outbox?") && method === "GET") return J(pick(w.outbox, path).map(({ status }) => ({ status })));
+    // migration 0019: every code a live ask holds, in either queue
+    if (path === "/rest/v1/rpc/sms_codes_in_use") {
+      const codes = [...[w.row, ...w.others].filter((r) => r.status === "pending").map((r) => r.code),
+        ...w.spine.filter((r) => r.status === "proposed" && r.sms_code != null).map((r) => r.sms_code)];
+      return J([...new Set(codes)].sort((a, b) => a - b));
+    }
+    // the SMS assistant's half: its turn, the rows it mints, the cap count
+    if (path === "/functions/v1/roybal-ai-office") return J(w.office ?? { ok: true, reply: "Here you go.", proposedActions: [] });
+    if (path === "/rest/v1/pending_actions" && method === "POST") {
+      w.minted.push(...JSON.parse(init.body));
+      return new Response(null, { status: 201 });
+    }
+    if (path.startsWith("/rest/v1/sms_messages?") && method === "GET") {
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json", "Content-Range": "0-0/0" } });
+    }
     if (path.startsWith("/rest/v1/pending_actions?")) {
       const hit = rows(path);
       if (method === "PATCH") hit.forEach((r) => Object.assign(r, JSON.parse(init.body)));
@@ -692,4 +802,381 @@ test("a held customer text that expires before 7am says it won't go out; one tha
     assert.deepEqual(replies(u),
       ["🌙 Customer texts go out between 7am and 8pm Alaska time — text YES 12 again then. Nothing was sent; it's still waiting."]);
   } finally { t.mock.timers.reset(); }
+});
+
+/* ---------- YES by text on the spine (step 5) ----------
+   The reminder can now be a spine proposal (numbered by sms_code). A YES
+   reads both queues, and a spine hit is approved through
+   op_proposal_approve as the owner's profile, never through decide(). */
+
+/** A world whose only live ask is one spine proposal: its text-lane row is long settled. */
+function spineWorld(over, o = {}) {
+  const w = world("emailSend", over);
+  w.row.status = "executed";
+  w.spine.push(spineRow(o));
+  return w;
+}
+const rpcCalls = (w, name) => w.calls.filter((c) => c.path === `/rest/v1/rpc/${name}`);
+/** The Approvals tab's tap on the spine card: straight to PostgREST under the owner's JWT. */
+const inboxTap = (w) => w.approve(SP, "inbox", OWNER);
+const APPROVED = `✅ Approved — ${SP_LABEL}. It's queued and goes out in a minute.`;
+const ALREADY = `That one was already approved — ${SP_LABEL}. It goes out once.`;
+const WENT = `That one was already approved — ${SP_LABEL}. It went out once.`;
+const AGAIN = (word, code) => `Couldn't record that just now — text ${word}${code == null ? "" : " " + code} again in a minute.`;
+
+test("YES n approves a spine proposal as the owner's profile, through op_proposal_approve with p_via sms", async () => {
+  const w = spineWorld();
+  await text("YES 4");
+  assert.deepEqual(replies(w), [APPROVED]);
+  const [call] = rpcCalls(w, "op_proposal_approve");
+  assert.equal(call.auth, "Bearer service-key");
+  assert.deepEqual(JSON.parse(call.body), { p_proposal_id: SP, p_via: "sms", p_principal_id: OWNER });
+  assert.deepEqual([w.spine[0].status, w.spine[0].approved_via, w.spine[0].approved_by_ref], ["executed", "sms", OWNER]);
+  assert.equal(w.outbox.length, 1, "approving queues one outbox row");
+  assert.equal(reached(w, "gmail-proxy"), false, "the worker delivers it; gmail-proxy is the text lane's");
+  assert.equal(reached(w, "roybal-ai-office"), false, "an answer, never a question");
+  // the live read: proposed, numbered, unexpired, as the service role
+  const live = w.calls.find((c) => c.path.startsWith("/rest/v1/proposals?status=eq.proposed"));
+  assert.equal(live.auth, "Bearer service-key");
+  const q = new URLSearchParams(live.path.split("?")[1]);
+  assert.deepEqual([q.get("sms_code"), q.get("order"), q.get("limit")], ["not.is.null", "created_at.desc", "20"]);
+  assert.match(q.get("expires_at"), /^gt\.\d{4}-\d\d-\d\dT/);
+  // the principal: exactly one owner profile, read as the service role
+  const who = w.calls.find((c) => c.path.startsWith("/rest/v1/profiles?"));
+  assert.equal(who.auth, "Bearer service-key");
+  const p = new URLSearchParams(who.path.split("?")[1]);
+  assert.deepEqual([p.get("role"), p.get("select"), p.get("limit")], ["eq.owner", "id", "2"]);
+});
+
+test("approve the same reminder twice from the inbox and once by text: it is queued exactly once", async () => {
+  const w = spineWorld();
+  inboxTap(w);
+  inboxTap(w);
+  assert.equal(w.outbox.length, 1);
+  await text("YES 4");
+  assert.deepEqual(replies(w), [ALREADY], "the late YES says so");
+  assert.equal(rpcCalls(w, "op_proposal_approve").length, 0, "it reads; nothing runs");
+  assert.equal(w.outbox.length, 1);
+  assert.equal(w.spine[0].approved_via, "inbox");
+  // once the worker has sent it, the text says it went
+  w.outbox[0].status = "sent";
+  await text("YES 4");
+  assert.equal(replies(w).at(-1), WENT);
+  assert.equal(w.outbox.length, 1);
+
+  // the other order: the text first, then two taps
+  const v = spineWorld();
+  await text("YES 4");
+  inboxTap(v);
+  inboxTap(v);
+  assert.deepEqual(replies(v), [APPROVED]);
+  assert.equal(v.outbox.length, 1);
+  assert.equal(v.spine[0].approved_via, "sms");
+});
+
+test("YES then YES: the second says it was already approved, and runs nothing", async () => {
+  const w = spineWorld();
+  await text("YES 4");
+  await text("yes 4");
+  assert.deepEqual(replies(w), [APPROVED, ALREADY]);
+  assert.equal(rpcCalls(w, "op_proposal_approve").length, 1);
+  assert.equal(w.outbox.length, 1);
+  // the late lookup asks for exactly this number, answered in the last 48h, newest first
+  const late = w.calls.filter((c) => c.path.startsWith("/rest/v1/proposals?sms_code=eq.")).at(-1);
+  const q = new URLSearchParams(late.path.split("?")[1]);
+  assert.deepEqual([q.get("sms_code"), q.get("order"), q.get("limit")], ["eq.4", "updated_at.desc", "1"]);
+  const since = Date.parse(q.get("updated_at").replace(/^gte\./, ""));
+  assert.ok(Math.abs(Date.now() - 48 * 3_600_000 - since) < 60_000, "48 hours back");
+});
+
+test("a YES racing an inbox tap: the tap's approval stands, the text says so, one outbox row", async () => {
+  const tapFirst = (extra = () => {}) => (_m, p, _i, w) => {
+    if (p === "/rest/v1/rpc/op_proposal_approve") { inboxTap(w); extra(w); }
+  };
+  const w = spineWorld(tapFirst());
+  await text("YES 4");
+  assert.deepEqual(replies(w), [ALREADY]);
+  assert.equal(w.spine[0].approved_via, "inbox", "the row comes back approved_via inbox");
+  assert.equal(w.outbox.length, 1);
+  assert.equal(reached(w, "outbox_channel_ready"), false, "the lane only words this text's own approval");
+
+  // the worker had already sent it
+  const v = spineWorld(tapFirst((w) => { w.outbox[0].status = "delivered"; }));
+  await text("YES 4");
+  assert.deepEqual(replies(v), [WENT]);
+
+  // an outbox read that fails never claims it went
+  const u = spineWorld((m, p, i, w) => {
+    if (p.startsWith("/rest/v1/outbox?")) return J({ message: "upstream" }, 503);
+    return tapFirst((w) => { w.outbox[0].status = "sent"; })(m, p, i, w);
+  });
+  await text("YES 4");
+  assert.deepEqual(replies(u), [ALREADY]);
+
+  // an inbox approval that failed to run says so
+  const f = spineWorld((m, p, _i, w) => {
+    if (p !== "/rest/v1/rpc/op_proposal_approve") return undefined;
+    Object.assign(w.spine[0], { status: "failed", approved_via: "inbox", error: "outbox insert refused" });
+  });
+  await text("YES 4");
+  assert.deepEqual(replies(f), ["That one was approved, but it didn't run: outbox insert refused"]);
+});
+
+test("the approve wording follows the worker's email lane, and only an email asks about it", async () => {
+  const lanes = [
+    ["ready", () => J(true), "It's queued and goes out in a minute."],
+    ["off", () => J(false), "It's queued, but email sending is off on the worker, so it waits until that's back."],
+    ["before 0019", () => J({ code: "PGRST202", message: "Could not find the function" }, 404), "It's queued to send."],
+    ["outage", () => J({ message: "upstream" }, 503), "It's queued to send."],
+    ["unreachable", () => new TypeError("fetch failed"), "It's queued to send."],
+    ["not a boolean", () => J("true"), "It's queued to send."],
+  ];
+  for (const [label, lane, want] of lanes) {
+    const w = spineWorld((_m, p) => (p === "/rest/v1/rpc/outbox_channel_ready" ? lane() : undefined));
+    await text("YES 4");
+    assert.deepEqual(replies(w), [`✅ Approved — ${SP_LABEL}. ${want}`], label);
+    assert.equal(w.outbox.length, 1, label);
+    assert.deepEqual(JSON.parse(rpcCalls(w, "outbox_channel_ready")[0].body), { p_channel: "email" });
+  }
+  // a text, and a board move, never ask about the email lane
+  const s = spineWorld(undefined, { operation: "sms.send@1", rationale: "", input: { to: "+19075557777", body: "On our way" } });
+  await text("YES 4");
+  assert.deepEqual(replies(s), ["✅ Approved — text +19075557777. It's queued to send."]);
+  const j = spineWorld(undefined, { operation: "job.set_stage@1", rationale: null, input: { job_id: JOB, stage: "scheduled" } });
+  await text("YES 4");
+  assert.deepEqual(replies(j), ["✅ Done — move the job to scheduled."]);
+  for (const x of [s, j]) assert.equal(reached(x, "outbox_channel_ready"), false);
+});
+
+test("a spine approval that came back failed says it didn't run; a one-element list is read as the row", async () => {
+  const w = spineWorld((_m, p, _i, w) => p === "/rest/v1/rpc/op_proposal_approve"
+    ? J({ ...w.spine[0], status: "failed", approved_via: "sms", approved_at: new Date().toISOString(), error: "outbox insert refused" })
+    : undefined);
+  await text("YES 4");
+  assert.deepEqual(replies(w), [`⚠️ Approved, but it didn't run — ${SP_LABEL}: outbox insert refused`]);
+  assert.equal(reached(w, "outbox_channel_ready"), false);
+
+  const v = spineWorld((_m, p, i, w) => {
+    if (p !== "/rest/v1/rpc/op_proposal_approve") return undefined;
+    const b = JSON.parse(i.body);
+    return w.approve(b.p_proposal_id, b.p_via, b.p_principal_id).json().then((row) => J([row]));
+  });
+  await text("YES 4");
+  assert.deepEqual(replies(v), [APPROVED]);
+  assert.equal(v.outbox.length, 1);
+});
+
+test("NO on a spine row declines it through op_proposal_decline; a NO after a tap cancels nothing", async () => {
+  const w = spineWorld();
+  await text("NO 4");
+  assert.deepEqual(replies(w), [`👍 Cancelled — ${SP_LABEL}.`]);
+  assert.equal(w.spine[0].status, "declined");
+  const [call] = rpcCalls(w, "op_proposal_decline");
+  assert.equal(call.auth, "Bearer service-key");
+  assert.deepEqual(JSON.parse(call.body), { p_proposal_id: SP, p_reason: null, p_principal_id: OWNER });
+  assert.equal(rpcCalls(w, "op_proposal_approve").length, 0);
+  assert.equal(w.outbox.length, 0, "nothing queued");
+  // a YES on it afterwards: declined, still nothing sent
+  await text("YES 4");
+  assert.equal(replies(w).at(-1), "That one was declined — nothing was sent.");
+  assert.equal(w.outbox.length, 0);
+
+  // a NO racing an inbox approval
+  const v = spineWorld((_m, p, _i, w) => { if (p === "/rest/v1/rpc/op_proposal_decline") inboxTap(w); });
+  await text("no 4");
+  assert.deepEqual(replies(v), ["That one was already answered — nothing was cancelled."]);
+  assert.equal(v.spine[0].status, "executed");
+  assert.equal(v.outbox.length, 1, "the tap's one email, untouched");
+
+  // a YES racing an inbox decline
+  const d = spineWorld((_m, p, _i, w) => { if (p === "/rest/v1/rpc/op_proposal_approve") w.decline(SP, null, OWNER); });
+  await text("YES 4");
+  assert.deepEqual(replies(d), ["That one was declined — nothing was sent."]);
+  assert.equal(d.outbox.length, 0);
+});
+
+test("a number held by a live ask in each queue is a code clash: neither runs", async () => {
+  for (const said of ["YES 12", "no 12", "y #012"]) {
+    const w = world("emailSend");
+    w.spine.push(spineRow({ sms_code: 12 }));
+    await text(said);
+    assert.deepEqual(replies(w), ["Two asks share number 12 — answer this one from the Approvals tab in the office app."], said);
+    assert.equal(w.row.status, "pending", said);
+    assert.equal(w.spine[0].status, "proposed", said);
+    assert.equal(reached(w, "gmail-proxy"), false, said);
+    assert.equal(reached(w, "/rpc/op_"), false, said);
+    assert.equal(w.calls.some((c) => c.method === "PATCH"), false, said);
+    assert.equal(reached(w, "roybal-ai-office"), false, said);
+  }
+  // numbers apart, each YES reaches its own queue
+  const w = world("emailSend");
+  w.spine.push(spineRow());
+  await text("YES 4");
+  assert.deepEqual([w.spine[0].status, w.row.status], ["executed", "pending"]);
+  await text("YES 12");
+  assert.deepEqual(replies(w), [APPROVED, "✅ Done — email the INV-4 reminder to Hebard."]);
+  assert.equal(w.row.status, "executed");
+  assert.equal(w.calls.filter((c) => c.path === "/functions/v1/gmail-proxy").length, 1);
+  assert.equal(w.outbox.length, 1);
+});
+
+test("a bare YES or NO acts only when exactly one ask is live across both queues", async () => {
+  const ambiguous = "More than one action is waiting — reply YES with its number (e.g. YES 12).";
+  const w = world("emailSend");
+  w.spine.push(spineRow());
+  await text("YES");
+  await text("no");
+  assert.deepEqual(replies(w), [ambiguous, ambiguous]);
+  assert.deepEqual([w.row.status, w.spine[0].status], ["pending", "proposed"]);
+  assert.equal(reached(w, "/rpc/op_"), false);
+  assert.equal(reached(w, "gmail-proxy"), false);
+
+  // one spine ask alone: a bare YES is its answer
+  const s = spineWorld();
+  await text("ok");
+  assert.deepEqual(replies(s), [APPROVED]);
+  // one text ask alone: today's path, untouched
+  const t = world("emailSend");
+  await text("YES");
+  assert.deepEqual(replies(t), ["✅ Done — email the INV-4 reminder to Hebard."]);
+  assert.equal(reached(t, "/rpc/op_"), false);
+});
+
+test("an expired spine row is never approved, and the text says it expired", async () => {
+  const ago = (ms) => new Date(Date.now() - ms).toISOString();
+  // lapsed before the YES and not yet swept (still 'proposed'), or swept to 'expired'
+  for (const o of [{ expires_at: ago(3_600_000) }, { status: "expired", expires_at: ago(3_600_000) }]) {
+    const w = spineWorld(undefined, o);
+    await text("YES 4");
+    assert.deepEqual(replies(w), ["That one expired — nothing was sent."], o.status ?? "proposed");
+    assert.equal(rpcCalls(w, "op_proposal_approve").length, 0);
+    assert.equal(w.outbox.length, 0);
+  }
+  // lapsed between the read and the approve: op_proposal_approve refuses it (55000, "expired at")
+  const v = spineWorld((_m, p, _i, w) => { if (p === "/rest/v1/rpc/op_proposal_approve") w.spine[0].expires_at = ago(1000); });
+  await text("YES 4");
+  assert.deepEqual(replies(v), ["That one expired — nothing was sent."]);
+  assert.equal(v.spine[0].status, "proposed");
+  assert.equal(v.outbox.length, 0);
+
+  // answered more than 48h ago: the number isn't that row's any more
+  const o = spineWorld(undefined, { status: "executed", approved_via: "inbox", updated_at: ago(49 * 3_600_000) });
+  await text("YES 4");
+  assert.deepEqual(replies(o), ["Nothing is waiting for approval right now."]);
+  // a late lookup that fails leaves the matcher's answer, which is still true
+  const f = spineWorld((m, p) => (m === "GET" && p.startsWith("/rest/v1/proposals?sms_code=") ? J({}, 503) : undefined),
+    { status: "executed", approved_via: "inbox" });
+  await text("YES 4");
+  assert.deepEqual(replies(f), ["Nothing is waiting for approval right now."]);
+  // with a text-lane ask live on another number, the same lookup still answers
+  const g = world("emailSend");
+  g.spine.push(spineRow({ status: "declined" }));
+  await text("YES 4");
+  assert.deepEqual(replies(g), ["That one was declined — nothing was sent."]);
+  assert.equal(g.row.status, "pending");
+});
+
+test("a queue read that fails is never 'nothing waiting': text it again, and nothing runs", async () => {
+  const answers = [
+    ["503", () => J({ message: "upstream" }, 503)],
+    ["unreachable", () => new TypeError("fetch failed")],
+    ["not json", () => new Response("<html>", { status: 200 })],
+    ["not a list", () => J({ message: "odd" })],
+  ];
+  for (const [label, answer] of answers) {
+    const w = world("emailSend", (m, p) => (m === "GET" && p.startsWith("/rest/v1/proposals?") ? answer() : undefined));
+    await text("YES 12");
+    assert.deepEqual(replies(w), [AGAIN("YES", 12)], label);
+    assert.equal(w.row.status, "pending", label);
+    assert.equal(reached(w, "gmail-proxy"), false, label);
+    assert.equal(reached(w, "roybal-ai-office"), false, `${label}: an answer, never a question`);
+  }
+  // the pending_actions read too, and a bare NO keeps its word
+  const v = world("emailSend", (m, p) =>
+    m === "GET" && p.startsWith("/rest/v1/pending_actions?status=eq.pending&expires_at=") ? J({}, 503) : undefined);
+  v.spine.push(spineRow());
+  await text("no");
+  assert.deepEqual(replies(v), [AGAIN("NO")]);
+  assert.equal(v.spine[0].status, "proposed");
+  assert.equal(reached(v, "/rpc/op_"), false);
+  assert.equal(reached(v, "roybal-ai-office"), false);
+});
+
+test("no single owner profile: the spine row is never touched, and the text says to try again", async () => {
+  const cases = [
+    ["none", [], undefined],
+    ["two", [{ id: OWNER }, { id: "6c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f" }], undefined],
+    ["no id", [{ id: null }], undefined],
+    ["read failed", [{ id: OWNER }], (_m, p) => (p.startsWith("/rest/v1/profiles?") ? J({ message: "upstream" }, 503) : undefined)],
+    ["unreachable", [{ id: OWNER }], (_m, p) => (p.startsWith("/rest/v1/profiles?") ? new TypeError("fetch failed") : undefined)],
+  ];
+  for (const [label, owners, over] of cases) {
+    for (const [said, word] of [["YES 4", "YES"], ["no", "NO"]]) {
+      const w = spineWorld(over);
+      w.owners = owners;
+      await text(said);
+      assert.deepEqual(replies(w), [AGAIN(word, 4)], `${label}: ${said}`);
+      assert.equal(reached(w, "/rpc/op_"), false, `${label}: ${said}`);
+      assert.equal(w.spine[0].status, "proposed");
+      assert.equal(w.outbox.length, 0);
+      assert.equal(reached(w, "roybal-ai-office"), false);
+    }
+  }
+});
+
+test("an approve answer nobody can read is not recorded: a refusal, a dropped call, a 2xx with no row", async () => {
+  const answers = [
+    ["42501", () => J({ code: "42501", message: "op spine: approvals need the approve permission" }, 403)],
+    ["P0002", () => J({ code: "P0002", message: "op spine: no live operation email.send@1" }, 500)],
+    ["unreachable", () => new TypeError("fetch failed")],
+    ["2xx, no row", () => J([])],
+    ["a gateway page", () => new Response("<html>bad gateway</html>", { status: 502 })],
+  ];
+  for (const [label, answer] of answers) {
+    const w = spineWorld((_m, p) => (p === "/rest/v1/rpc/op_proposal_approve" ? answer() : undefined));
+    await text("YES 4");
+    assert.deepEqual(replies(w), [AGAIN("YES", 4)], label);
+    assert.equal(reached(w, "roybal-ai-office"), false, label);
+    assert.equal(reached(w, "outbox_channel_ready"), false, label);
+  }
+});
+
+test("the only op_* doors index.ts opens are op_proposal_approve and op_proposal_decline; a spine row skips decide()", () => {
+  assert.deepEqual([...new Set(src.match(/rpc\/op_\w+/g))].sort(), ["rpc/op_proposal_approve", "rpc/op_proposal_decline"]);
+  const spine = fnBody("decideSpine");
+  assert.match(spine, /p_via: "sms"/);
+  assert.doesNotMatch(spine, /\bdecide\(|decideIO\(|executeApproved\(|gmail-proxy/);
+  // both queues are read before anything is matched, and a failed read answers before the matcher
+  const body = fnBody("handleApproval");
+  assert.ok(body.indexOf("proposals?status=eq.proposed") < body.indexOf("matchAcross("));
+  assert.ok(body.indexOf("if (!queues)") < body.indexOf("matchAcross("));
+});
+
+test("the SMS assistant mints its YES numbers clear of both queues, or of pending codes when sms_codes_in_use can't answer", async () => {
+  const turn = { ok: true, reply: "Here's the text for Mike.", proposedActions: [{ type: "sendText",
+    label: "text Mike he's on Kertzmann tomorrow", params: { to: "+19075550001", message: "You're on Kertzmann tomorrow.", audience: "crew" } }] };
+  // pending holds 12, the spine holds 11 and 13: the next free number is 14
+  const w = world("emailSend");
+  w.office = turn;
+  w.spine.push(spineRow({ sms_code: 11 }), spineRow({ id: "d1e2f3a4-b5c6-4d7e-8f90-a1b2c3d4e5f6", sms_code: 13 }));
+  await text("can you text Mike his start time");
+  assert.deepEqual(w.minted.map((r) => r.code), [14]);
+  assert.deepEqual(replies(w), ["Here's the text for Mike.\nText YES 14 to text Mike he's on Kertzmann tomorrow"]);
+  assert.equal(rpcCalls(w, "sms_codes_in_use")[0].auth, "Bearer service-key");
+  assert.equal(w.calls.some((c) => c.path.startsWith("/rest/v1/pending_actions?status=eq.pending&select=code")), false);
+
+  // before 0019 (no such function), an outage, or an answer that isn't a list: today's pending read
+  const fallbacks = [
+    ["before 0019", () => J({ code: "PGRST202", message: "Could not find the function" }, 404)],
+    ["unreachable", () => new TypeError("fetch failed")],
+    ["not a list", () => J({ codes: [] })],
+  ];
+  for (const [label, answer] of fallbacks) {
+    const v = world("emailSend", (_m, p) => (p === "/rest/v1/rpc/sms_codes_in_use" ? answer() : undefined));
+    v.office = turn;
+    v.spine.push(spineRow({ sms_code: 11 }));
+    await text("can you text Mike his start time");
+    assert.deepEqual(v.minted.map((r) => r.code), [11], `${label}: clear of the pending 12 only`);
+    assert.ok(v.calls.some((c) => c.path === "/rest/v1/pending_actions?status=eq.pending&select=code&limit=200"), label);
+  }
 });

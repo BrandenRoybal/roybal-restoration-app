@@ -15,10 +15,17 @@
             executor a YES text does.
      spine  public.proposals (migrations 0004, 0013, 0014), answered
             with op_proposal_approve / op_proposal_decline as the
-            signed-in owner. job_id has no foreign key; it is a
-            coordination_jobs id when it is anything. "YES n" by text
-            does not reach these rows yet, so a spine card never
-            offers it, sms_code or not.
+            signed-in owner. job_id has no foreign key: job.set_stage
+            names a coordination_jobs row, while the brief's reminder
+            and the adjuster email name a field_projects one, so the
+            page looks a spine job up in both tables (uuids don't
+            collide). Since step 5, "YES n" by text reaches these rows
+            too (roybal-notify's handleApproval matches sms_code), and a
+            waiting spine card offers it the way a text-queue card does.
+            An email here goes out through the worker, which sends only
+            while its heartbeat lists the "email" channel; the page
+            reads the newest heartbeat so a card can say when sending
+            is off.
 
    The office page (apps/admin/js/approvals.js) reads both queues and
    the names around them; everything that decides what a card says
@@ -28,14 +35,22 @@
    button sends, and a sentence for every refusal either server can
    give.
 
-   Nothing in the field app imports this file. It is new, so the
-   office browser can't hold a stale cached copy of it (sw.js), and
-   it imports nothing, so it can't name an export that isn't there.
+   Nothing in the field app imports this file, and it imports nothing,
+   so it can't name an export that isn't there. It is no longer new,
+   though: the field service worker (sw.js) can hand the office one
+   load of an older cached copy after a deploy, paired with a newer
+   apps/admin/js/approvals.js. So the page calls no export added after
+   step 4; what step 5 added rides on calls it already made (fields on
+   the card, lookFrom's options, needs' answer), and an older copy just
+   leaves the new lines off.
    ============================================================ */
 
 const TZ = "America/Anchorage";
 export const RECENT_MS = 48 * 3600 * 1000;      // "Recently decided" reaches back this far
 export const EXPIRED_MS = 7 * 86400 * 1000;     // and the expired count this far
+/* a heartbeat older than this is a worker that stopped: worker_liveness_check's
+   alarm threshold, and outbox_channel_ready's (migration 0019) */
+export const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
 
 /* proposed_by on the text queue: one label per producer */
 const PROPOSERS = { "morning-brief": "Morning brief", "qb-time": "QuickBooks Time", "sms-assist": "Text assistant" };
@@ -178,12 +193,25 @@ function refsOf(v) {
 
 /* ---------- one card shape for both lanes ---------- */
 /* card: { key, lane, id, code, kind, chip, title, approveLabel, yesHint,
-           jobId, jobTable, job, by, byKind, byId, status, createdAt,
+           jobId, jobTable ("field" | "board" | "either": the table(s) the
+           page looks jobId up in), job, by, byKind, byId, status, createdAt,
            expiresAt, decidedAt, answeredAt, evidence, result, error, outbox,
+           emailLane (a spine email only: true / false while the worker is /
+           isn't sending email, null when the page couldn't tell), laneHint
+           (the line a waiting card shows about that, or ""),
            answeredHere (set by decidedText: this tab just answered it; the
            page sets it too while this tab's answer to it is still out) }
    look: { jobs: {id: name}, ops: {"email.send@1": description},
-           people: {id: name}, outbox: {proposalId: outbox row} } */
+           people: {id: name}, outbox: {proposalId: outbox row},
+           emailLane: true | false | null } */
+
+/* What a spine email says while the worker isn't sending email, in the
+   words roybal-notify texts back when a YES lands in that state ("It's
+   queued, but email sending is off on the worker, so it waits until
+   that's back."). */
+export const LANE_OFF_WAITING = "Email sending is off on the worker right now: approving queues this, and it waits until that's back.";
+export const LANE_OFF_QUEUED = "Queued, but email sending is off on the worker, so it waits until that's back";
+export const LANE_OFF_FAILED = "Send failed, and email sending is off on the worker, so it waits until that's back";
 
 /** One pending_actions row → a card. */
 export function fromPending(row, look = {}) {
@@ -214,6 +242,8 @@ export function fromPending(row, look = {}) {
       stage: "", rationale: "", refs: [], reason: "",
     },
     result: res, error: str(res.error), outbox: null,
+    // the text queue's email goes out through gmail-proxy, not the worker
+    emailLane: null, laneHint: "",
   };
 }
 
@@ -234,16 +264,23 @@ export function fromProposal(row, look = {}) {
   const what = firstSentence(own(look.ops, str(r.operation)) || own(look.ops, name)) || name || "An ask";
   const key = kind === "email" || kind === "text" ? str(input.to) : kind === "stage" ? stageLabel(input.stage) : "";
   const byId = str(r.proposed_by_id);
+  const status = str(r.status);
+  // proposals_sms_code_seq numbers a row while it is proposed (unique only
+  // among those, then free for reuse), so only a waiting row offers its number
+  const code = Number(r.sms_code) || null;
+  const sending = own(look, "emailLane");
+  const emailLane = kind === "email" && (sending === true || sending === false) ? sending : null;
   return {
-    key: "spine:" + str(r.id), lane: "spine", id: str(r.id), code: null, kind,
+    key: "spine:" + str(r.id), lane: "spine", id: str(r.id), code, kind,
     chip: KINDS[kind].chip || name || "Ask",
     title: key ? `${what}: ${key}` : what,
     approveLabel: KINDS[kind].approve,
-    yesHint: "",                         // YES by text doesn't reach the spine yet
-    jobId, jobTable: "board", job,
+    yesHint: code && status === "proposed" ? `or text YES ${code}` : "",
+    // job.set_stage moves a board job; anything else may name either table
+    jobId, jobTable: kind === "stage" ? "board" : "either", job,
     by: proposerName(r.proposed_by_kind, own(look.people, byId)),
     byKind: str(r.proposed_by_kind), byId,
-    status: str(r.status), createdAt: str(r.created_at), expiresAt: str(r.expires_at),
+    status, createdAt: str(r.created_at), expiresAt: str(r.expires_at),
     decidedAt: str(r.approved_at || r.updated_at || r.created_at),
     answeredAt: str(r.approved_at || r.updated_at),     // a decline is the row's last update
     evidence: {
@@ -256,6 +293,8 @@ export function fromProposal(row, look = {}) {
     },
     result: obj(r.result), error: str(r.error),
     outbox: own(look.outbox, str(r.id)) || null,
+    emailLane,
+    laneHint: emailLane === false && status === "proposed" ? LANE_OFF_WAITING : "",
   };
 }
 const PROPOSER_KINDS = { human: "Someone in the office", agent: "An agent", policy: "A policy",
@@ -305,44 +344,77 @@ export function inbox(pendingRows, proposalRows, look = {}, now = Date.now()) {
   const skipped = { text: 0, spine: 0 };
   const cards = [...cardsOf(pendingRows, fromPending, "text", look, now, skipped),
     ...cardsOf(proposalRows, fromProposal, "spine", look, now, skipped)];
-  const waiting = cards.filter((c) => isLive(c, now))
+  const waiting = unclash(cards.filter((c) => isLive(c, now)))
     .sort((a, b) => ms(a.expiresAt) - ms(b.expiresAt) || ms(a.createdAt) - ms(b.createdAt));
   const recent = cards.filter((c) => isRecent(c, now))
     .sort((a, b) => ms(b.decidedAt) - ms(a.decidedAt));
   return { waiting, recent, expired: cards.filter((c) => isExpired(c, now)).length, skipped };
 }
+/* One number live on both queues at once can't be answered by text:
+   roybal-notify reads the same live rows, answers "code-clash" and runs
+   neither. So neither card offers it; a tap here still answers each.
+   sms_codes_in_use keeps new numbers apart; rows minted before it can
+   still collide. Two text-queue rows on one number are today's guard
+   (matchProposal) and are left as they were. */
+function unclash(waiting) {
+  const lanes = new Map();                         // number → the lanes offering it
+  for (const c of waiting) if (c.yesHint && c.code) lanes.set(c.code, (lanes.get(c.code) || new Set()).add(c.lane));
+  return waiting.map((c) => (c.yesHint && c.code && lanes.get(c.code).size > 1 ? { ...c, yesHint: "" } : c));
+}
 /** The line for asks that may be waiting but couldn't be shown. A text-queue
-    ask can still be answered by text (the producer texted him its code); a
-    spine one can't yet. */
+    ask can still be answered by text (the producer texted him its code), and
+    so can a spine one the brief texted him; one that wasn't texted can't be. */
 export function skippedLine(skipped) {
   const s = obj(skipped);
   const text = Number(s.text) || 0, spine = Number(s.spine) || 0, n = text + spine;
   if (n <= 0) return "";
   const head = `${n} ${n === 1 ? "ask" : "asks"} couldn't be shown here.`;
   if (!spine) return `${head} Answer ${n === 1 ? "it" : "them"} by text, or tell Claude.`;
-  if (!text) return `${head} Tell Claude.`;
   return `${head} Any that came to you by text can be answered there; otherwise tell Claude.`;
 }
 
 /** The ids the page must name for the cards it shows: job ids per table
-    (uuids only: one bad id would sink an in.() read), proposers per
-    kind, and the spine sends whose outbox row says how delivery went. */
+    (uuids only: one bad id would sink an in.() read; "either" goes to
+    both), proposers per kind, the spine sends whose outbox row says how
+    delivery went, and lanes: ["email"] when a spine email is waiting or
+    was sent, so the page reads the worker's heartbeat. */
 export function needs(cards) {
-  const out = { field: new Set(), board: new Set(), agents: new Set(), people: new Set(), outbox: new Set() };
+  const out = { field: new Set(), board: new Set(), agents: new Set(), people: new Set(), outbox: new Set(), lanes: new Set() };
   for (const c of cards || []) {
-    if (UUID.test(c.jobId)) out[c.jobTable].add(c.jobId);
+    if (UUID.test(c.jobId)) {
+      if (c.jobTable === "field" || c.jobTable === "either") out.field.add(c.jobId);
+      if (c.jobTable === "board" || c.jobTable === "either") out.board.add(c.jobId);
+    }
     if (c.lane !== "spine") continue;
     if (UUID.test(c.byId) && c.byKind === "agent") out.agents.add(c.byId);
     if (UUID.test(c.byId) && c.byKind === "human") out.people.add(c.byId);
     if (c.status === "executed" && (c.kind === "email" || c.kind === "text")) out.outbox.add(c.id);
+    if (c.kind === "email" && (c.status === "proposed" || c.status === "executed")) out.lanes.add("email");
   }
   return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v]]));
 }
 
+/** The newest worker_heartbeats row ({at, meta}, read newest first) → is the
+    worker sending email: true when it beat within HEARTBEAT_FRESH_MS and
+    its meta.channels lists "email"; false when it didn't (or no worker has
+    ever beaten: outbox_channel_ready's rule); null when the read failed or
+    the row won't read, which says nothing new on any card. */
+export function emailLaneOf(heartbeats, now = Date.now()) {
+  if (!Array.isArray(heartbeats)) return null;
+  if (!heartbeats.length) return false;
+  const row = obj(heartbeats[0]);
+  const at = ms(row.at);
+  const channels = obj(row.meta).channels;
+  if (!Number.isFinite(at) || !Array.isArray(channels)) return null;
+  return at > now - HEARTBEAT_FRESH_MS && channels.includes("email");
+}
+
 /** The lookup reads → the `look` the cards are built with. jobs are
-    {id, title, customer, address}; outbox rows newest first. */
-export function lookFrom({ catalog = [], agents = [], profiles = [], jobs = [], outbox = [] } = {}) {
-  const look = { jobs: {}, ops: {}, people: {}, outbox: {} };
+    {id, title, customer, address}; outbox rows newest first; heartbeats
+    the newest worker_heartbeats row as read (null: not read, or the read
+    failed), judged at now. */
+export function lookFrom({ catalog = [], agents = [], profiles = [], jobs = [], outbox = [], heartbeats = null, now = Date.now() } = {}) {
+  const look = { jobs: {}, ops: {}, people: {}, outbox: {}, emailLane: emailLaneOf(heartbeats, now) };
   for (const j of jobs) if (j && j.id) put(look.jobs, str(j.id), jobName(j));
   for (const o of catalog) {
     if (!o || !o.name) continue;
@@ -440,6 +512,12 @@ export function outcome(c, now = Date.now(), seenAt = now) {
       if (c.kind === "email" || c.kind === "text") {
         const d = delivery(c.outbox, now);
         const st = str(c.outbox && c.outbox.status);
+        // still in line (or between retries) while the worker isn't sending
+        // email: it waits for that, not for its turn. Read as "queued" too
+        // when no outbox row was read, as the line below already does.
+        if (c.emailLane === false && (!d || st === "pending" || st === "failed")) {
+          return { text: st === "failed" ? LANE_OFF_FAILED : LANE_OFF_QUEUED, tone: "wait" };
+        }
         return { text: d || "Queued to send", tone: st === "dead" ? "bad" : st === "sent" || st === "delivered" ? "ok" : "wait" };
       }
       if (c.kind === "stage") return { text: "Moved to " + (stageLabel(c.result.to) || c.evidence.stage), tone: "ok" };

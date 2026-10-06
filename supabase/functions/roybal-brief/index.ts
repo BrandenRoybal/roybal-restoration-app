@@ -20,8 +20,28 @@
  * qb-time-proxy). Reads run as office-brief@roybalconstruction.com — a
  * dedicated machine user whose writes are denied by migration 205, so a
  * compromised brief can read the shop but never change it. The only rows it
- * creates: one capture_events envelope per run (the audit trail) and the
- * sms_messages row roybal-notify logs for the text itself.
+ * creates: one capture_events envelope per run (the audit trail), the
+ * sms_messages row roybal-notify logs for the text itself, and up to two
+ * overdue-invoice reminder ASKS a day, each of which does nothing until the
+ * owner approves it.
+ *
+ * The reminder asks (spine step 5; the rules are pure and unit-tested in
+ * ./reminders.ts). Each reminder is filed in exactly one queue:
+ *   - the spine: an email.send proposal through rpc/op_propose, as
+ *     agent:brief (migration 0019 lets it PROPOSE email.send, nothing
+ *     else). It shows in the Approvals inbox and answers to its YES number;
+ *     approving queues one email the worker sends. Taken only while the
+ *     worker's email lane is live (rpc/outbox_channel_ready) and
+ *     op_propose accepts it.
+ *   - the old lane: a pending_actions emailSend row, sent through
+ *     gmail-proxy on a YES — exactly as before step 5. Taken when the
+ *     email lane is off, op_propose refuses (a 4xx), the address or the
+ *     job id won't fit the spine, or REMINDERS_LANE=text.
+ *   A spine filing that failed on the network or with a 5xx may have
+ *   landed anyway, so that reminder waits for tomorrow. The 7-day
+ *   per-invoice check reads both queues and offers nothing if it can't.
+ *   REMINDERS_LANE (optional secret): unset or "spine" = the above;
+ *   "text" = always the old lane (the rollback); anything else = "text".
  *
  * SETUP (owner, once):
  *   1. Supabase Dashboard → Auth → Add user: office-brief@roybalconstruction.com,
@@ -35,7 +55,11 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { buildBrief, invoiceTotals, reminderEmail, type Blob } from "./digest.ts";
+import { buildBrief, reminderEmail, type Blob } from "./digest.ts";
+import {
+  remindersLane, laneReady, remindedKeys, reminderCandidates, reminderLabel, pendingReminderRow,
+  spineReminder, filingOutcome, yesLine, codesInUseList, codeTaker,
+} from "./reminders.ts";
 import { buildWeekly } from "./weekly.ts";
 import { buildCrewDigest, entriesCutoff } from "./crewdigest.ts";
 
@@ -75,6 +99,44 @@ async function rest(jwt: string, path: string) {
   });
   if (!res.ok) throw new Error(`read ${path.split("?")[0]} failed (${res.status})`);
   return res.json();
+}
+// a POST under the machine login: the reminder asks and the RPCs they need
+// (the same headers the brief's inserts have always carried)
+function post(jwt: string, path: string, body: unknown): Promise<Response> {
+  return fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: "POST",
+    headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/* Would an approved email go out now? Only a clear yes from
+   rpc/outbox_channel_ready (0019) counts; before 0019, or on any error,
+   the reminders take the old lane. */
+async function emailLaneReady(jwt: string): Promise<boolean> {
+  try {
+    const r = await post(jwt, "rpc/outbox_channel_ready", { p_channel: "email" });
+    return laneReady(r.status, await r.json().catch(() => null));
+  } catch (e) {
+    console.error("outbox_channel_ready failed:", (e as Error).message);
+    return false;
+  }
+}
+
+/* Every YES number a live ask holds, in either queue: rpc/sms_codes_in_use
+   (0019). When it doesn't answer a list (before 0019, an outage), the
+   pending codes — the rule the old lane always took codes by. */
+async function codesInUse(jwt: string): Promise<unknown[]> {
+  try {
+    const r = await post(jwt, "rpc/sms_codes_in_use", {});
+    const list = codesInUseList(r.status, await r.json().catch(() => null));
+    if (list) return list;
+    console.log(`sms_codes_in_use didn't answer a list (${r.status}); taking codes clear of pending ones only`);
+  } catch (e) {
+    console.error("sms_codes_in_use failed; taking codes clear of pending ones only:", (e as Error).message);
+  }
+  const live = await rest(jwt, `pending_actions?status=eq.pending&select=code&limit=200`).catch(() => []) as Blob[];
+  return live.map((a) => a.code);
 }
 
 serve(async (req: Request) => {
@@ -240,60 +302,75 @@ serve(async (req: Request) => {
     const boardBaseline: Blob | null =
       (boardRows.find((r: Blob) => r?.id === BOARD_SETTINGS_ID)?.data?.baseline as Blob) || null;
 
-    // ---------- approve-by-text proposals (max 2) ----------
-    // The brief may PROPOSE (an insert changes nothing until the owner texts
-    // YES — migration 210's RLS lets the read-only machine user do exactly
-    // this and nothing else). v1 proposes overdue-invoice reminder emails for
-    // jobs with a customer email on file, skipping invoices already proposed
-    // or reminded within 7 days.
+    // ---------- approve-by-text reminder asks (max 2) ----------
+    // The brief may PROPOSE (an ask changes nothing until the owner approves
+    // it): overdue-invoice reminder emails for jobs with a customer email on
+    // file, skipping invoices already asked about within 7 days in EITHER
+    // queue. Which queue each one goes to is decided in ./reminders.ts (see
+    // the header); this block does the reads and the writes.
     const proposals: { code: number; label: string }[] = [];
     try {
       const today = akDate();
-      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
-      const recent = await rest(jwt,
-        `pending_actions?kind=eq.emailSend&created_at=gte.${encodeURIComponent(weekAgo)}&select=code,status,params,expires_at&limit=100`)
-        .catch(() => []) as Blob[];
-      const alreadyKeys = new Set(recent
-        .filter((a) => a.status === "pending" || a.status === "approved" || a.status === "executed")
-        .map((a) => String(a.params?.invoiceKey || "")));
-      // Codes must be unique across every LIVE proposal, not just this kind —
-      // qb-time proposes board phases into the same queue and the owner
-      // answers them all with one number.
-      const livePending = await rest(jwt,
-        `pending_actions?status=eq.pending&select=code&limit=200`).catch(() => []) as Blob[];
-      const usedCodes = new Set(livePending.map((a) => Number(a.code)));
-      let nextCode = 11;
-      const takeCode = () => { while (usedCodes.has(nextCode)) nextCode++; usedCodes.add(nextCode); return nextCode; };
+      const weekAgo = encodeURIComponent(new Date(Date.now() - 7 * 86400000).toISOString());
+      const raw = Deno.env.get("REMINDERS_LANE");
+      const lane = remindersLane(raw);
+      if (lane.unknown) console.log(`REMINDERS_LANE="${String(raw).slice(0, 40)}" isn't spine or text; reminders take the old lane`);
+      // Both queues, in every lane state: a flip either way must never ask
+      // about one invoice twice. Either read failing means no reminder today.
+      const unread = (what: string) => (e: Error) => {
+        console.error(`reminder check: the ${what} read failed:`, e.message);
+        return null;
+      };
+      const [recentText, recentSpine] = await Promise.all([
+        rest(jwt, `pending_actions?kind=eq.emailSend&created_at=gte.${weekAgo}&select=code,status,params,expires_at&limit=100`)
+          .catch(unread("pending_actions")),
+        rest(jwt, `proposals?operation=eq.email.send@1&created_at=gte.${weekAgo}&select=status,evidence_refs&limit=100`)
+          .catch(unread("proposals")),
+      ]);
+      const reminded = remindedKeys(recentText, recentSpine);
+      if (!reminded) throw new Error("the 7-day check couldn't read both queues, so no reminder is offered today");
 
-      const candidates: { p: Blob; inv: Blob; days: number }[] = [];
-      for (const p of projects) {
-        if (!String(p.email || "").includes("@")) continue;
-        for (const inv of p.invoices || []) {
-          if (!["sent", "viewed", "partially_paid"].includes(inv?.status)) continue;
-          if (!inv.dueDate || inv.dueDate >= today) continue;
-          const key = `${p.id}:${inv.invoiceNo || inv.id || ""}`;
-          if (alreadyKeys.has(key)) continue;
-          candidates.push({ p, inv, days: Math.floor((Date.parse(today) - Date.parse(inv.dueDate)) / 86400000) });
-        }
+      const picks = reminderCandidates(projects, today, reminded);
+      let spine = false;
+      if (picks.length && lane.lane === "spine") {
+        spine = await emailLaneReady(jwt);
+        if (!spine) console.log("reminders: the worker's email lane isn't live; they take the old lane");
       }
-      candidates.sort((a, b) => b.days - a.days);
-      for (const c of candidates.slice(0, 2)) {
-        const balance = invoiceTotals(c.inv).total;
-        if (!(balance > 0)) continue;
-        const mail = reminderEmail(c.p, c.inv, balance);
-        const code = takeCode();
-        const label = `email the ${c.inv.invoiceNo || "overdue invoice"} reminder to ${c.p.customer || c.p.address || "the customer"}`;
-        const ins = await fetch(`${SUPABASE_URL}/rest/v1/pending_actions`, {
-          method: "POST",
-          headers: { apikey: ANON_KEY, Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
-          body: JSON.stringify([{
-            code, kind: "emailSend", label, job_id: c.p.id, proposed_by: "morning-brief",
-            params: {
-              to: String(c.p.email).trim(), subject: mail.subject, body: mail.body,
-              jobId: c.p.id, invoiceKey: `${c.p.id}:${c.inv.invoiceNo || c.inv.id || ""}`,
-            },
-          }]),
-        });
+      // Codes must be unique across every LIVE ask in both queues, not just
+      // this kind — qb-time and the SMS assistant propose into the old queue,
+      // the spine numbers its own, and the owner answers them all with one
+      // number.
+      const codes = codeTaker(picks.length ? await codesInUse(jwt) : []);
+      for (const c of picks) {
+        const mail = reminderEmail(c.p, c.inv, c.balance);
+        const label = reminderLabel(c.p, c.inv);
+        if (spine) {
+          const s = spineReminder(c, mail);
+          if (s.ok) {
+            const r = await post(jwt, "rpc/op_propose", s.body).catch((e) => {
+              console.error(`reminder ${c.key}: op_propose failed:`, (e as Error).message);
+              return null;
+            });
+            const f = filingOutcome(r ? r.status : 0, r ? await r.json().catch(() => null) : null);
+            if (f.kind === "filed") {
+              codes.hold(f.row.sms_code);
+              const line = yesLine(f.row, label, Date.now());
+              if (line) proposals.push(line);
+              else console.log(`reminder ${c.key}: the spine answered a ${f.row.status} ask, so no YES line`);
+              continue;
+            }
+            if (f.kind === "unsure") {
+              // it may have landed: the old lane now could make it two asks
+              console.error(`reminder ${c.key} waits for tomorrow: ${f.why}`);
+              continue;
+            }
+            console.log(`reminder ${c.key} takes the old lane: ${f.why}`);
+          } else {
+            console.log(`reminder ${c.key} takes the old lane: ${s.why}`);
+          }
+        }
+        const code = codes.take();
+        const ins = await post(jwt, "pending_actions", [pendingReminderRow(c, mail, code)]);
         if (ins.ok) proposals.push({ code, label });
       }
     } catch (e) { console.error("proposals skipped:", (e as Error).message); }
