@@ -226,9 +226,11 @@ async function loadWindows(force = false) {
    v202 or later (app_settings min_field_build, which _sync_guard enforces):
    v201 shows a credit as an ordinary receipt, where retyping its total or an
    AI re-read changes the refund and 🗑 deletes it for good. Under the floor
-   an old phone can't save anything until it reloads onto the new build.
-   Counting phones can't stand in for it: the server keeps one row per login,
-   rewritten only by a save. null = go ahead, else why not, for the form. */
+   an old phone saves nothing until it reloads onto the new build (an edit it
+   made first still syncs from v202 after, so the floor is armed once phones
+   have had a day to update on their own). Counting phones can't stand in for
+   it: the server keeps one row per login, rewritten only by a save.
+   null = go ahead, else why not, for the form. */
 function returnsGate() {
   if (!SYNC_ENABLED) return null;
   if (windowsState === "missing") return "Logging returns switches on after this feature's database update is applied.";
@@ -669,10 +671,12 @@ function jobCard(e, jobEntries) {
 async function deleteCredit(jobId, c, after) {
   if (!confirm(`Delete this ${L.fmtMoney(c.amount)} return? The job's receipts total goes back up by ${L.fmtMoney(Math.abs(c.amount))}.`)) return;
   try {
-    // its next ids too: a change another device made before hearing of the
-    // delete can't bring it back (receiptlib.js successorId)
-    const kill = L.returnLineage(c.id);
+    // its derived ids too: a change another device made before hearing of
+    // the delete can't bring it back (receiptlib.js returnFamily)
+    const kill = L.returnFamily(c.id);
     await writeJob(jobId, (fresh) => {
+      // changed past these ids, or deleted, since this page drew it
+      if (!(fresh.receipts || []).some((r) => r && kill.includes(r.id))) throw new Error("This return was changed or deleted on another device. Go back and open it again.");
       fresh.receipts = (fresh.receipts || []).filter((r) => !(r && kill.includes(r.id)));
       tombstoneItems(fresh, kill);
     });
@@ -726,17 +730,17 @@ async function renderReturnForm(view, jobId, id, mode, live) {
   if (!(start.amount > 0)) return stop("This receipt has no total yet. Add its total in Field Forms first, then log the return.");
 
   // ids are settled now, so a double click or a retry saves this one return,
-  // never two. A change that stays on the same receipts takes the derived id
-  // (successorId: two devices changing it at once end up with one, and a
-  // phone deleting its receipt from an older copy takes it along, as it
-  // would the original). A change that moves onto other receipts takes the
-  // fresh one: such a phone must not reach it.
-  const freshId = uid(), sameId = credit ? L.successorId(credit.id) : null;
+  // never two. A change's id is derived, so two devices changing the same
+  // return at once write one id and an office delete reaches it: successorId
+  // when it stays on the same receipts (a phone deleting its receipt from an
+  // older copy takes it along, as it would the original), movedId when it
+  // moves onto others (out of that phone's reach). receiptlib.js has why.
+  const newId = uid(), sameId = credit ? L.successorId(credit.id) : null, movedId = credit ? L.movedId(credit.id) : null;
   const booked = credit ? (include.length ? include : [credit.returnOf]) : [];
   const idFor = (picked) => {
-    if (!credit) return freshId;
+    if (!credit) return newId;
     const now = new Set(L.returnTargets(startId, picked));
-    return now.size === booked.length && booked.every((rid) => now.has(rid)) ? sameId : freshId;
+    return now.size === booked.length && booked.every((rid) => now.has(rid)) ? sameId : movedId;
   };
   const picks = new Map();             // "receiptId|itemId" -> qty
   if (credit) {
@@ -911,9 +915,9 @@ async function renderReturnForm(view, jobId, id, mode, live) {
         c = L.buildReturnCredit({ id: formId, start: now[0], sources: now, picks: picked, refund: amt, date: date.value,
           slipNo: slipNo.value, note: note.value, photo, extraPages,
           by: currentEmail() || "office", nowISO: new Date().toISOString() });
-        // a change that moved receipts also closes the old one's derived ids,
-        // so another device changing it in place at the same time can't add a second copy
-        const old = !credit ? [] : formId === sameId ? [credit.id] : L.returnLineage(credit.id);
+        // a move also closes the old return's other derived ids, so a change
+        // another device made to it at the same time can't add a second copy
+        const old = !credit ? [] : formId === sameId ? [credit.id] : L.returnFamily(credit.id).filter((x) => x !== formId);
         kill = [...old, slipFrom && slipFrom.id].filter(Boolean);
         fresh.receipts = fresh.receipts.filter((r) => !(r && kill.includes(r.id)));
         fresh.receipts.push(c);

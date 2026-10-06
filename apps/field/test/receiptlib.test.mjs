@@ -10,7 +10,7 @@ import {
   returnFlags, leadDays, returnSources, remainingQty, refundLeft, prefillRefund, checkReturn,
   buildReturnCredit, slipCandidates, nextStamp, negMoney, money2, receiptDay, daysBetween,
   addDaysISO, validISO, returnStatus, overReturned, needsTotal, isReturn, vendorMatches,
-  returnTargets, refundCap, successorId, returnLineage, deletePlan,
+  returnTargets, refundCap, successorId, returnLineage, movedId, returnFamily, deletePlan,
 } from "../js/receiptlib.js";
 import { amountNum, receiptTotals } from "../js/receiptcalc.js";
 import { loggedCosts } from "../js/fincalc.js";
@@ -278,6 +278,11 @@ test("a return's id across changes: two devices changing it keep one; a delete b
   assert.equal(successorId("c7k2~1"), "c7k2~2");
   assert.equal(successorId("a~b~9"), "a~b~10");
   assert.deepEqual(returnLineage("c7k2~1"), ["c7k2~1", "c7k2~2", "c7k2~3", "c7k2~4"]);
+  assert.equal(movedId("c7k2"), "c7k2~m1");
+  assert.equal(movedId("c7k2~m1"), "c7k2~m2");
+  assert.equal(successorId("c7k2~m1"), "c7k2~m1~1", "a moved id's in-place change");
+  assert.ok(!returnLineage("c7k2").includes("c7k2~m1"), "a phone's delete cascade never reaches a moved return");
+  assert.deepEqual(returnFamily("c7k2"), ["c7k2", "c7k2~1", "c7k2~2", "c7k2~3", "c7k2~m1", "c7k2~1~m1", "c7k2~2~m1", "c7k2~3~m1"]);
   const base = bemis();
   base.updatedAt = "2026-08-01T00:00:00.000Z";
   base.receipts.push({ id: "C", kind: "return", returnOf: "R2", amount: "-12.00", items: [] });

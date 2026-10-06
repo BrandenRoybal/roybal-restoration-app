@@ -38,8 +38,11 @@
 -- office page logs no return until the server REQUIRES v202: app_settings
 -- min_field_build at 202 or more, the floor _sync_guard already enforces
 -- (0006). A phone below the floor has every save refused with "update the
--- app" until it reloads onto the new build (and v202 counts a return as
--- money back whatever sign an old build left on it). Counting phones from
+-- app" until it reloads onto the new build. That shrinks the risk to an old
+-- phone still open when the first return lands, not removes it: an edit it
+-- made before reloading is pushed by v202 afterwards. So arm the floor once
+-- phones have had a day to update on their own, and v202 counts a return as
+-- money back whatever sign an old build left on it. Counting phones from
 -- sync_clients cannot answer this: it keeps one row per login, rewritten
 -- only by a save, so a second device on the same login hides an old one and
 -- a phone that updated but saved nothing still looks old.

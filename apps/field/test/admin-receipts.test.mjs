@@ -82,6 +82,7 @@ const go = async (hash) => { location.hash = hash; await settle(5); await M.rend
 const enc = encodeURIComponent;
 const btn = (root, text) => [...root.querySelectorAll("button, a")].find((b) => b.textContent.trim() === text);
 const type = (el, v) => { el.value = v; el.dispatchEvent(new window.Event("input", { bubbles: true })); };
+const toastText = () => document.getElementById("toast").textContent;
 const noJunk = (el) => assert.ok(!/\bnull\b|\bundefined\b|NaN/.test(el.textContent), el.textContent.match(/.{0,40}(null|undefined|NaN).{0,40}/));
 
 let pass = 0;
@@ -331,6 +332,7 @@ await test("a return's own page reads read-only facts and deletes cleanly", asyn
   assert.equal(p.receipts.some((r) => r.id === creditId), false);
   assert.ok(p.deletedIds[creditId]);
   assert.ok(p.deletedIds[L.successorId(creditId)], "and the id a change in flight on another device would write");
+  assert.ok(p.deletedIds[L.movedId(creditId)], "or a move in flight");
   assert.equal(location.hash, `#/receipts/${JOB}/R1`);
 });
 
@@ -475,8 +477,9 @@ await Store.put({ id: JOB3, customer: "Keepers", address: "3981 Fahrenkamp", upd
 ] }, { bump: false, quiet: true });
 let movedId = null;
 
-await test("a change that moves a return onto another receipt gets a fresh id, so a phone deleting the first receipt leaves it", async () => {
+await test("a change that moves a return onto another receipt gets a moved id, so a phone deleting the first receipt leaves it", async () => {
   const stale = structuredClone(await Store.get(JOB3));     // a crew phone that synced before the change
+  const desk = structuredClone(stale);                      // a second office device, same copy
   await go(`#/receipts/${JOB3}/c0/change`);
   type(qtyFor("duct tape"), "0");
   type(qtyFor("2x4x8 stud"), "5");
@@ -486,9 +489,28 @@ await test("a change that moves a return onto another receipt gets a fresh id, s
   const office = await Store.get(JOB3);
   const c = office.receipts.find((r) => r && r.kind === "return");
   assert.equal(c.returnOf, "B");
-  assert.ok(!c.id.startsWith("c0~"), "not a derived id: " + c.id);
+  assert.equal(c.id, "c0~m1", "derived, but outside the phone's reach");
   for (const id of L.returnLineage("c0")) assert.ok(office.deletedIds[id], id + " closed, so an in-place change elsewhere can't add a copy");
+  assert.ok(!office.deletedIds["c0~m1"], "never its own id");
   movedId = c.id;
+  // the desk deleted c0 before it heard of the move: the delete wins
+  const del = structuredClone(desk), kill = L.returnFamily("c0");
+  del.receipts = del.receipts.filter((r) => !kill.includes(r.id));
+  tombstoneItems(del, kill);
+  del.updatedAt = "2026-10-06T08:00:00.000Z";
+  for (const { merged } of [mergeProjects(office, del), mergeProjects(del, office)]) {
+    assert.deepEqual(merged.receipts.filter((r) => r.kind === "return"), [], "a deleted return stays deleted");
+    assert.equal(receiptTotals(merged).total, 140);
+  }
+  // the desk made a move of its own (a wider one): the same id, so one return
+  const wide = structuredClone(desk);
+  wide.receipts = wide.receipts.filter((r) => r.id !== "c0");
+  wide.receipts.push({ ...c, amount: "-40.00", items: [...c.items, { id: "c0~m1-2", of: "a1", ofReceipt: "A", desc: "duct tape", qty: "1", price: "-10.00" }] });
+  tombstoneItems(wide, L.returnFamily("c0").filter((x) => x !== "c0~m1"));
+  wide.updatedAt = "2026-10-06T08:30:00.000Z";
+  for (const { merged } of [mergeProjects(office, wide), mergeProjects(wide, office)]) {
+    assert.deepEqual(merged.receipts.filter((r) => r.kind === "return").map((r) => r.id), ["c0~m1"], "one return, not two");
+  }
   // the phone deletes A from its older copy, where c0 still sits on A alone
   const plan = L.deletePlan(stale, "A");
   assert.deepEqual(plan.kill, ["A", ...L.returnLineage("c0")]);
@@ -499,6 +521,34 @@ await test("a change that moves a return onto another receipt gets a fresh id, s
     assert.deepEqual(merged.receipts.map((r) => r.id).sort(), ["B", movedId].sort(), "the moved return survives the phone's delete");
     assert.equal(receiptTotals(merged).total, 90);
   }
+});
+
+await test("a moved return moves again (and back) without tripping over its own ids", async () => {
+  await go(`#/receipts/${JOB3}/${enc(movedId)}/change`);
+  type(qtyFor("2x4x8 stud"), "0");
+  type(qtyFor("duct tape"), "1");
+  type(view.querySelector(".rl-money"), "10.00");
+  btn(view, "Save changes").click();
+  await settle(80);
+  const p = await Store.get(JOB3);
+  const rs = p.receipts.filter((r) => r && r.kind === "return");
+  assert.deepEqual(rs.map((r) => [r.id, r.returnOf, r.amount]), [["c0~m2", "A", "-10.00"]]);
+  assert.ok(p.deletedIds["c0~m1"]);
+  movedId = "c0~m2";
+});
+
+await test("Delete on a return page drawn before another device changed it past reach says so", async () => {
+  await go(`#/receipts/${JOB3}/${enc(movedId)}`);
+  const p = await Store.get(JOB3);                         // that device's delete lands by sync
+  p.receipts = p.receipts.filter((r) => r.id !== movedId);
+  tombstoneItems(p, L.returnFamily(movedId));
+  p.updatedAt = "2026-10-06T09:30:00.000Z";
+  await Store.put(p, { bump: false, quiet: true });
+  btn(view, "Delete return").click();
+  await settle(80);
+  assert.match(toastText(), /changed or deleted on another device/);
+  const after = await Store.get(JOB3);
+  assert.equal(after.updatedAt, "2026-10-06T09:30:00.000Z", "nothing written");
 });
 
 await test("a crew retake that syncs in while the form is open is the slip that moves over", async () => {
@@ -551,7 +601,8 @@ await test("a return whose item was read again since won't open in Change: it sa
   b.items = [{ id: "b9", desc: "STUD 2X4 8FT KD", qty: "20", unit: "ea", price: "6.00" }];   // ✨ Read again on a phone
   p.updatedAt = "2026-10-06T11:00:00.000Z";
   await Store.put(p, { bump: false, quiet: true });
-  await go(`#/receipts/${JOB3}/${enc(movedId)}/change`);
+  const onB = p.receipts.find((r) => r && r.kind === "return" && r.returnOf === "B");
+  await go(`#/receipts/${JOB3}/${enc(onB.id)}/change`);
   assert.match(view.textContent, /no longer matches its receipt.*Delete this return and log it again/s);
   assert.equal(view.querySelector(".rl-form"), null);
 });

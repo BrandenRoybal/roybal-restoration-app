@@ -435,9 +435,9 @@ export function checkReturn({ entries, jobId, returnOf, picks, refund, over }) {
 }
 export const fmtQty = (n) => String(r2(n));
 
-/** The credit element. `id` is minted when the form opens (a new return or
-    a change that moves receipts) or is the return's successorId (a change on
-    the same receipts), so a double tap or a retry saves the same return,
+/** The credit element. `id` is minted when the form opens (a new return) or
+    derived from the return it replaces (successorId on the same receipts,
+    movedId onto others), so a double tap or a retry saves the same return,
     never two. returnOf is the receipt the items came from
     (the starting one when it has picks, or nothing is picked). */
 export function buildReturnCredit({ id, start, sources, picks, refund, date, slipNo, note, photo, extraPages, by, nowISO }) {
@@ -479,10 +479,12 @@ export const slipCandidates = (entries, jobId) =>
    once write the same id and sync keeps one, and a delete can tombstone the
    next few ids too, so a change made on another device before it heard of
    the delete can't bring the return back. A change that moves the return
-   onto other receipts gets a fresh id instead (receiptlibrary.js), so every
-   derived id is booked on exactly the receipts of the return it came from:
-   deleting a receipt from an older copy (deletePlan) can take the derived
-   ids of the returns it sees there and never a return that has moved off. */
+   onto other receipts gets a MOVED id instead — "c7k2" → "c7k2~m1" →
+   "c7k2~m2" — also derived, so two devices making a move write one id, but
+   outside returnLineage: every "~n" id is booked on exactly the receipts of
+   the return it came from, so deleting a receipt from an older copy
+   (deletePlan) takes the "~n" ids of the returns it sees there and never a
+   return that has moved off. The office's delete closes both (returnFamily). */
 const GEN = /^(.*)~(\d+)$/;
 export function successorId(id) {
   const m = GEN.exec(String(id));
@@ -493,6 +495,17 @@ export function returnLineage(id, n = 3) {
   const out = [String(id)];
   while (out.length <= n) out.push(successorId(out[out.length - 1]));
   return out;
+}
+const MOVED = /^(.*)~m(\d+)$/;
+/** The id a change that moves the return onto other receipts takes. */
+export function movedId(id) {
+  const m = MOVED.exec(String(id));
+  return m ? `${m[1]}~m${Number(m[2]) + 1}` : `${id}~m1`;
+}
+/** What the office's delete closes: the lineage and the moved id of each. */
+export function returnFamily(id) {
+  const line = returnLineage(id);
+  return [...line, ...line.map(movedId)];
 }
 
 /** What deleting a purchase receipt takes with it (the phone's 🗑):
