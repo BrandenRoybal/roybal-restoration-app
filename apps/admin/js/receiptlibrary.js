@@ -23,8 +23,8 @@
    always land. A sync that rewrites the row mid-save is caught by
    the CAS, or after it by the graft below.
 
-   Logging a return waits until every crew phone runs Field Forms
-   v202 or later (returnsGate): an older phone shows a credit as an
+   Logging a return waits until the server requires Field Forms v202
+   or later (returnsGate): an older phone shows a credit as an
    ordinary receipt it could retype, re-read or delete.
 
    RETURN WINDOWS and "Nothing left over" live in Supabase (migration
@@ -174,16 +174,17 @@ export { graft };                      // for admin-receipts.test.mjs; the hook 
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") changed(); });
 
 /* ---------- return windows + "Nothing left over" (Supabase, 0018) ---------- */
-const WKEY = "roybal-receipt-windows", RKEY = "roybal-receipt-reviews", FKEY = "roybal-receipt-fleet";
+const WKEY = "roybal-receipt-windows", RKEY = "roybal-receipt-reviews", FKEY = "roybal-receipt-floor";
 const loadLocal = (k) => { try { const v = JSON.parse(localStorage.getItem(k)); return Array.isArray(v) ? v : []; } catch { return []; } };
 const saveLocal = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
 let windows = loadLocal(WKEY), reviews = loadLocal(RKEY);
 let windowsState = "cached";           // ok | missing (0018 not applied yet) | offline | cached
 let loadedAt = 0;
-// crew phones on a Field Forms build older than RETURNS_BUILD (0018's
-// field_builds_behind): a number, null when never checked, -1 = not the office
+// the oldest Field Forms build the server takes saves from (0018's
+// field_build_floor, app_settings min_field_build): a number, null when
+// never read, -1 = not the office
 const RETURNS_BUILD = 202;
-let behind = (() => { try { const v = JSON.parse(localStorage.getItem(FKEY)); return Number.isInteger(v) ? v : null; } catch { return null; } })();
+let floor = (() => { try { const v = JSON.parse(localStorage.getItem(FKEY)); return Number.isInteger(v) ? v : null; } catch { return null; } })();
 
 /* Every row of a PostgREST read, 1000 at a time (the hosted row cap). */
 async function readAll(path) {
@@ -207,31 +208,33 @@ async function loadWindows(force = false) {
     const [w, r, f] = await Promise.all([
       readAll("receipt_vendors?select=vendor_key,display_name,return_days,notes&order=vendor_key"),
       readAll(`receipt_return_reviews?select=job_id,receipt_id,status&updated_at=gte.${since}&order=job_id,receipt_id`),
-      rest("rpc/field_builds_behind", { method: "POST", body: JSON.stringify({ p_min_build: RETURNS_BUILD }) }).catch(() => null),
+      rest("rpc/field_build_floor", { method: "POST", body: "{}" }).catch(() => null),
     ]);
     if (w.status === 404 || r.status === 404) { windowsState = "missing"; return windows; }
     if (w.rows) { windows = w.rows; saveLocal(WKEY, windows); }
     if (r.rows) { reviews = r.rows; saveLocal(RKEY, reviews); }
-    if (f && f.ok) { const n = Number(await f.json()); behind = Number.isInteger(n) && n >= 0 ? n : null; }
-    else if (f && f.status === 403) behind = -1;
-    if (f && (f.ok || f.status === 403)) saveLocal(FKEY, behind);
+    if (f && f.ok) { const n = Number(await f.json()); floor = Number.isInteger(n) && n >= 0 ? n : null; }
+    else if (f && f.status === 403) floor = -1;
+    if (f && (f.ok || f.status === 403)) saveLocal(FKEY, floor);
     windowsState = w.rows && r.rows ? "ok" : "offline";
     if (windowsState === "ok") loadedAt = Date.now();
   } catch { windowsState = "offline"; }
   return windows;
 }
 
-/* Logging or changing a return waits until every crew phone that synced in
-   the last two weeks runs Field Forms v202 or later: v201 shows a credit as
-   an ordinary receipt, where retyping its total or an AI re-read turns the
-   refund into a cost and 🗑 deletes it for good. null = go ahead, else why
-   not, for the form to say. */
+/* Logging or changing a return waits until the server REQUIRES Field Forms
+   v202 or later (app_settings min_field_build, which _sync_guard enforces):
+   v201 shows a credit as an ordinary receipt, where retyping its total or an
+   AI re-read changes the refund and 🗑 deletes it for good. Under the floor
+   an old phone can't save anything until it reloads onto the new build.
+   Counting phones can't stand in for it: the server keeps one row per login,
+   rewritten only by a save. null = go ahead, else why not, for the form. */
 function returnsGate() {
   if (!SYNC_ENABLED) return null;
   if (windowsState === "missing") return "Logging returns switches on after this feature's database update is applied.";
-  if (behind === -1) return "Returns are logged by the office.";
-  if (behind == null) return "This device needs to check once, online, that every crew phone has the latest Field Forms. Connect and open this again.";
-  if (behind > 0) return `Logging returns switches on once every crew phone has the latest Field Forms (an older phone would show a return as a receipt it can change). ${behind === 1 ? "1 person's phone hasn't" : behind + " people's phones haven't"} updated yet: opening Field Forms with signal updates it.`;
+  if (floor === -1) return "Returns are logged by the office.";
+  if (floor == null) return "This device needs to check once, online, that every phone is required to run the latest Field Forms. Connect and open this again.";
+  if (floor < RETURNS_BUILD) return `Logging returns switches on once every phone is required to run Field Forms v${RETURNS_BUILD} or later (an older phone would show a return as a receipt it can change). That is a one-time server setting: when it is on, an older phone stops saving until it updates, which opening Field Forms with signal does.`;
   return null;
 }
 
@@ -722,16 +725,28 @@ async function renderReturnForm(view, jobId, id, mode, live) {
   const start = sources[0];
   if (!(start.amount > 0)) return stop("This receipt has no total yet. Add its total in Field Forms first, then log the return.");
 
-  // a new return's id is minted now, so a double click or a retry saves this
-  // one return, never two; a change's is derived (successorId), so two
-  // devices changing the same return at once end up with one
-  const formId = credit ? L.successorId(credit.id) : uid();
+  // ids are settled now, so a double click or a retry saves this one return,
+  // never two. A change that stays on the same receipts takes the derived id
+  // (successorId: two devices changing it at once end up with one, and a
+  // phone deleting its receipt from an older copy takes it along, as it
+  // would the original). A change that moves onto other receipts takes the
+  // fresh one: such a phone must not reach it.
+  const freshId = uid(), sameId = credit ? L.successorId(credit.id) : null;
+  const booked = credit ? (include.length ? include : [credit.returnOf]) : [];
+  const idFor = (picked) => {
+    if (!credit) return freshId;
+    const now = new Set(L.returnTargets(startId, picked));
+    return now.size === booked.length && booked.every((rid) => now.has(rid)) ? sameId : freshId;
+  };
   const picks = new Map();             // "receiptId|itemId" -> qty
   if (credit) {
     for (const ln of (credit.items || []).filter(Boolean)) {
       const e = sources.find((s) => s.id === (ln.ofReceipt || credit.returnOf));
       const it = e && itemFor(e, { of: ln.of, sku: ln.sku, desc: ln.desc });
-      if (it) picks.set(e.id + "|" + it.id, (picks.get(e.id + "|" + it.id) || 0) + amountNum(ln.qty));
+      // a line the form can't show (its receipt was read again, or deleted)
+      // would silently drop off the changed return and move its money
+      if (!it) return stop("Something on this return no longer matches its receipt: an item was read again, or a receipt was deleted, on another device. Delete this return and log it again.");
+      picks.set(e.id + "|" + it.id, (picks.get(e.id + "|" + it.id) || 0) + amountNum(ln.qty));
     }
   }
   const byId = new Map(sources.map((s) => [s.id, s]));
@@ -778,11 +793,12 @@ async function renderReturnForm(view, jobId, id, mode, live) {
   const note = h("input", { type: "text", maxlength: "200", value: userNote, placeholder: "e.g. 3 sheets left over after the subfloor" });
   const over = h("input", { type: "checkbox" });
   // a return logged as store credit stays one: re-saving it must not trip the cap
-  if (credit && Math.abs(amountNum(credit.amount)) > L.refundCap(entries, jobId, L.returnTargets(startId, pickList())) + 0.05) over.checked = true;
+  if (credit && Math.abs(amountNum(credit.amount)) > L.refundCap(entries, jobId, booked) + 0.05) over.checked = true;
 
   // the slip photo: snapped, uploaded, or one the crew already snapped as a $0 receipt
   let slip = credit ? { photo: credit.photo || "", extraPages: Array.isArray(credit.extraPages) ? credit.extraPages : [], fromId: null }
     : { photo: "", extraPages: [], fromId: null };
+  let ownSlip = slip;                  // the form's own slip, back when a crew slip is un-picked
   const slipView = h("div", { class: "rl-slipview" });
   const paintSlip = () => {
     if (!slip.photo) { slipView.replaceChildren(h("span", { class: "muted rl-small" }, "No slip photo yet (optional).")); return; }
@@ -792,7 +808,10 @@ async function renderReturnForm(view, jobId, id, mode, live) {
       h("div", { class: "rl-small" },
         slip.fromId ? "This snapped slip moves onto the return and comes off the receipt list. " : "",
         slip.extraPages.length ? `${1 + slip.extraPages.length} pages. ` : "",
-        h("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { slip = { photo: "", extraPages: [], fromId: null }; candSel && (candSel.value = ""); paintSlip(); } }, "Remove")));
+        h("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => {
+          slip = slip.fromId ? ownSlip : (ownSlip = { photo: "", extraPages: [], fromId: null });
+          candSel && (candSel.value = ""); paintSlip();
+        } }, "Remove")));
   };
   const onFile = (input) => async () => {
     const f = input.files && input.files[0]; input.value = "";
@@ -800,7 +819,7 @@ async function renderReturnForm(view, jobId, id, mode, live) {
     try {
       const pages = await toPages(f);
       if (!pages.length) throw new Error("empty");
-      slip = { photo: pages[0], extraPages: pages.slice(1), fromId: null };
+      slip = ownSlip = { photo: pages[0], extraPages: pages.slice(1), fromId: null };
       if (candSel) candSel.value = "";
       paintSlip();
     } catch { toast("Couldn't read that file. Try a photo or a PDF.", 3500); }
@@ -816,7 +835,7 @@ async function renderReturnForm(view, jobId, id, mode, live) {
   if (candSel) candSel.addEventListener("change", () => {
     const r = candSel.value && (p.receipts || []).find((x) => x && x.id === candSel.value);
     if (!r) {                          // back to the placeholder: that slip stays a receipt
-      if (slip.fromId) { slip = { photo: "", extraPages: [], fromId: null }; paintSlip(); }
+      if (slip.fromId) { slip = ownSlip; paintSlip(); }
       return;
     }
     slip = { photo: r.photo || "", extraPages: Array.isArray(r.extraPages) ? r.extraPages.slice(0, MAX_PAGES - 1) : [], fromId: r.id };
@@ -861,6 +880,7 @@ async function renderReturnForm(view, jobId, id, mode, live) {
       const amt = Math.abs(amountNum(refund.value));
       if (!L.validISO(date.value)) throw new Error("Pick the date on the return slip.");
       const picked = pickList();
+      const formId = idFor(picked);
       let c = null, kill = [], label = "", mine = false;
       // checked and built against the job as it is NOW, not as the form
       // opened; writeJob re-runs this if a sync lands mid-save
@@ -885,10 +905,16 @@ async function renderReturnForm(view, jobId, id, mode, live) {
           if (!se || !slipFrom || !L.needsTotal(se)) throw new Error("The snapped slip you picked changed on another device. Pick it again, or snap the slip.");
         }
         const now = L.returnSources(fe, jobId, startId, include);
+        // a crew slip moves over as it is NOW: a retake synced in since it was picked comes along
+        const photo = slipFrom ? slipFrom.photo || "" : slip.photo;
+        const extraPages = slipFrom ? (Array.isArray(slipFrom.extraPages) ? slipFrom.extraPages.slice(0, MAX_PAGES - 1) : []) : slip.extraPages;
         c = L.buildReturnCredit({ id: formId, start: now[0], sources: now, picks: picked, refund: amt, date: date.value,
-          slipNo: slipNo.value, note: note.value, photo: slip.photo, extraPages: slip.extraPages,
+          slipNo: slipNo.value, note: note.value, photo, extraPages,
           by: currentEmail() || "office", nowISO: new Date().toISOString() });
-        kill = [credit && credit.id, slipFrom && slipFrom.id].filter(Boolean);
+        // a change that moved receipts also closes the old one's derived ids,
+        // so another device changing it in place at the same time can't add a second copy
+        const old = !credit ? [] : formId === sameId ? [credit.id] : L.returnLineage(credit.id);
+        kill = [...old, slipFrom && slipFrom.id].filter(Boolean);
         fresh.receipts = fresh.receipts.filter((r) => !(r && kill.includes(r.id)));
         fresh.receipts.push(c);
         if (kill.length) tombstoneItems(fresh, kill);

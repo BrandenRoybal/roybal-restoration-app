@@ -34,12 +34,17 @@
 --
 -- THE PHONE CHECK. A field app older than v202 (the build that shipped with
 -- this migration) shows a credit as an ordinary receipt: retyping its total
--- or an AI re-read turns the refund into a cost, and its 🗑 deletes it for
--- good. So the office page logs no return until every crew phone that synced
--- in the last two weeks is on v202 or later. field_builds_behind() counts
--- the ones that aren't, from public.sync_clients (the build each person last
--- synced from, written by _sync_guard), for owner/office only — that table
--- and the sync_fleet view stay service-role only (0008). A count, no names.
+-- or an AI re-read changes the refund, and its 🗑 deletes it for good. So the
+-- office page logs no return until the server REQUIRES v202: app_settings
+-- min_field_build at 202 or more, the floor _sync_guard already enforces
+-- (0006). A phone below the floor has every save refused with "update the
+-- app" until it reloads onto the new build (and v202 counts a return as
+-- money back whatever sign an old build left on it). Counting phones from
+-- sync_clients cannot answer this: it keeps one row per login, rewritten
+-- only by a save, so a second device on the same login hides an old one and
+-- a phone that updated but saved nothing still looks old.
+-- field_build_floor() reads the floor for owner/office only; app_settings
+-- stays service-role only (0008).
 --
 -- Census: +2 tables, +2 policies, +2 primary keys, +3 functions, no triggers.
 -- Roles: owner/office read and write; crew_lead, crew, agent, customer and
@@ -186,13 +191,11 @@ grant execute on function public.receipt_return_review_set(uuid, text[], text) t
 
 
 -- ---------------------------------------------------------------------------
--- field_builds_behind(min build): how many people who could sync a job
--- (owner, office, crew lead, crew) last synced, within the past 14 days, from
--- a field app build older than p_min_build ("v201" < 202). Builds with no
--- digits are not counted; nor is anyone not seen for 14 days (a phone back
--- from a long break updates itself on its first open with signal).
+-- field_build_floor(): the oldest field app build the server accepts saves
+-- from (app_settings min_field_build, 0 = no floor), read exactly the way
+-- _sync_guard reads it, for the office page's return gate.
 -- ---------------------------------------------------------------------------
-create or replace function public.field_builds_behind(p_min_build integer)
+create or replace function public.field_build_floor()
 returns integer
   language plpgsql
   stable
@@ -202,21 +205,20 @@ as $$
 declare n int;
 begin
   if not public.role_is('owner', 'office') then
-    raise exception 'only the office can check field app versions' using errcode = 'insufficient_privilege';
+    raise exception 'only the office can read the field app build floor' using errcode = 'insufficient_privilege';
   end if;
-  select count(*) into n
-    from public.sync_clients c
-    join public.profiles p on p.id = c.user_id
-   where p.role in ('owner', 'office', 'crew_lead', 'crew')
-     and c.last_seen > now() - interval '14 days'
-     and c.build ~ '[0-9]'
-     and regexp_replace(c.build, '[^0-9]', '', 'g')::numeric < p_min_build;
-  return n;
+  begin
+    select coalesce((value)::text::int, 0) into n
+      from public.app_settings where key = 'min_field_build';
+  exception when others then
+    n := 0;                                -- a value _sync_guard can't read either: no floor
+  end;
+  return coalesce(n, 0);
 end;
 $$;
 
-alter function public.field_builds_behind(integer) owner to postgres;
-comment on function public.field_builds_behind(integer) is
-  'How many owner/office/crew_lead/crew logins synced in the last 14 days from a field app build older than p_min_build (sync_clients). The office Receipts page logs returns only at 0. Raises 42501 for anyone but owner/office.';
-revoke all on function public.field_builds_behind(integer) from public, anon, authenticated;
-grant execute on function public.field_builds_behind(integer) to authenticated, service_role;
+alter function public.field_build_floor() owner to postgres;
+comment on function public.field_build_floor() is
+  'The field app build floor _sync_guard enforces (app_settings min_field_build; 0 = none). The office Receipts page logs returns only once it is 202 or more. Raises 42501 for anyone but owner/office.';
+revoke all on function public.field_build_floor() from public, anon, authenticated;
+grant execute on function public.field_build_floor() to authenticated, service_role;

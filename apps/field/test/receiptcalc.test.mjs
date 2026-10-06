@@ -5,7 +5,7 @@
    Run: node test/receiptcalc.test.mjs */
 import assert from "node:assert/strict";
 import {
-  RECEIPT_CATEGORIES, RECEIPT_CATEGORY_KEYS, receiptCategory, receiptCategoryLabel, amountNum, itemsTotal,
+  RECEIPT_CATEGORIES, RECEIPT_CATEGORY_KEYS, receiptCategory, receiptCategoryLabel, amountNum, itemsTotal, receiptAmount,
   receiptTotals, receiptTileLine, vendorKey, applyReceiptRead, fmtMoney, PAID_WITH,
 } from "../js/receiptcalc.js";
 import { loggedCosts } from "../js/fincalc.js";
@@ -111,6 +111,18 @@ test("returns (kind: return, negative amount) net the totals and count apart", (
   assert.equal(receiptTileLine(p), "$254.03 · 2 receipts · 1 return");
   assert.equal(receiptTileLine({ receipts: [p.receipts[2]] }), "−$45.97 · 1 return", "a job holding only a credit still shows it");
   assert.equal(formCount(p, "receipts"), 2, "the tile badge counts receipts, not returns");
+});
+
+test("a return retyped as a positive total on an older phone still counts as money back", () => {
+  const p = { receipts: [
+    { id: "R1", vendor: "Home Depot", amount: "200.00", category: "materials" },
+    { id: "C1", kind: "return", returnOf: "R1", vendor: "Home Depot", amount: "45.97", category: "materials" },
+  ] };
+  assert.equal(receiptAmount(p.receipts[1]), -45.97);
+  assert.equal(receiptTotals(p).total, 154.03);
+  assert.equal(receiptTotals(p).credits, -45.97);
+  assert.equal(loggedCosts(p), 154.03, "the budget flag reads it the same way");
+  assert.equal(receiptAmount({ amount: "-12.00" }), -12, "an ordinary negative entry is left as typed");
 });
 
 test("tile line: money and count, empty when nothing is logged", () => {

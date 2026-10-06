@@ -435,9 +435,10 @@ export function checkReturn({ entries, jobId, returnOf, picks, refund, over }) {
 }
 export const fmtQty = (n) => String(r2(n));
 
-/** The credit element. `id` is minted when the form opens (a new return) or
-    is the return's successorId (a change), so a double tap or a retry saves
-    the same return, never two. returnOf is the receipt the items came from
+/** The credit element. `id` is minted when the form opens (a new return or
+    a change that moves receipts) or is the return's successorId (a change on
+    the same receipts), so a double tap or a retry saves the same return,
+    never two. returnOf is the receipt the items came from
     (the starting one when it has picks, or nothing is picked). */
 export function buildReturnCredit({ id, start, sources, picks, refund, date, slipNo, note, photo, extraPages, by, nowISO }) {
   const byId = new Map((sources || [start]).map((e) => [e.id, e]));
@@ -473,10 +474,15 @@ export const slipCandidates = (entries, jobId) =>
 
 /* ---------- a return's identity across changes ----------
    Changing a return replaces it with a new element (the old id is
-   tombstoned). The new id is DERIVED — "c7k2" → "c7k2~1" → "c7k2~2" — so two
-   devices changing the same return at once write the same id and sync keeps
-   one, and a delete can tombstone the next few ids too, so a change made on
-   another device before it heard of the delete can't bring the return back. */
+   tombstoned). A change that stays on the same receipts gets a DERIVED id —
+   "c7k2" → "c7k2~1" → "c7k2~2" — so two devices changing the same return at
+   once write the same id and sync keeps one, and a delete can tombstone the
+   next few ids too, so a change made on another device before it heard of
+   the delete can't bring the return back. A change that moves the return
+   onto other receipts gets a fresh id instead (receiptlibrary.js), so every
+   derived id is booked on exactly the receipts of the return it came from:
+   deleting a receipt from an older copy (deletePlan) can take the derived
+   ids of the returns it sees there and never a return that has moved off. */
 const GEN = /^(.*)~(\d+)$/;
 export function successorId(id) {
   const m = GEN.exec(String(id));

@@ -37,7 +37,7 @@ localStorage.setItem("roybal-session", JSON.stringify({ access_token: "t", refre
 const calls = [];
 let role = "error";                  // "error" → officeRole() null (fail open, not cached); true; false
 let missing = false;                 // 0018 not applied yet
-let behindN = 0;                     // crew phones on a build older than v202
+let floorN = 202;                    // app_settings min_field_build, as field_build_floor reads it
 let W = [{ vendor_key: "home depot", display_name: "Home Depot", return_days: 90, notes: "" }];
 const R = [];
 // PostgREST pages: limit/offset honoured, so a read past 1000 rows must page
@@ -52,9 +52,9 @@ globalThis.fetch = async (url, opts = {}) => {
   calls.push({ u, body });
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
   if (u.includes("/rest/v1/rpc/role_is")) return role === "error" ? json(503, {}) : json(200, role);
-  if (missing && /receipt_vendor|receipt_return_review|field_builds_behind/.test(u)) return json(404, { code: "PGRST205", message: "Could not find the table" });
-  if (u.includes("/rest/v1/rpc/field_builds_behind")) {
-    return role === false ? json(403, { code: "42501", message: "only the office can check field app versions" }) : json(200, behindN);
+  if (missing && /receipt_vendor|receipt_return_review|field_build_floor/.test(u)) return json(404, { code: "PGRST205", message: "Could not find the table" });
+  if (u.includes("/rest/v1/rpc/field_build_floor")) {
+    return role === false ? json(403, { code: "42501", message: "only the office can read the field app build floor" }) : json(200, floorN);
   }
   // a save nudges the sync; this test has no server for it
   if (/\/rest\/v1\/(rpc\/sync_|field_projects|rpc\/field_)/.test(u)) return json(503, { message: "no sync server in this test" });
@@ -411,17 +411,22 @@ await test("before the database update lands, the library still works and window
   missing = false;
 });
 
-await test("logging a return waits until every crew phone has the latest Field Forms", async () => {
-  behindN = 2;
+await test("logging a return waits until the server requires Field Forms v202 or later", async () => {
+  floorN = 0;                                           // no floor: an old phone could still save
   await go("#/receipts/vendors");                       // a fresh check
   await go(`#/receipts/${JOB}/R1/return`);
-  assert.match(view.textContent, /once every crew phone has the latest Field Forms.*2 people's phones haven't updated yet/s);
+  assert.match(view.textContent, /once every phone is required to run Field Forms v202 or later/);
   assert.equal(view.querySelector(".rl-form"), null);
-  assert.equal(localStorage.getItem("roybal-receipt-fleet"), "2", "remembered for an offline open");
-  behindN = 0;
+  assert.equal(localStorage.getItem("roybal-receipt-floor"), "0", "remembered for an offline open");
+  floorN = 201;
   await go("#/receipts/vendors");
   await go(`#/receipts/${JOB}/R1/return`);
-  assert.ok(view.querySelector(".rl-form"), "every phone updated: the form opens");
+  assert.equal(view.querySelector(".rl-form"), null, "a floor under v202 still lets v201 save");
+  floorN = 203;
+  await go("#/receipts/vendors");
+  await go(`#/receipts/${JOB}/R1/return`);
+  assert.ok(view.querySelector(".rl-form"), "v202 or later required: the form opens");
+  floorN = 202;
 });
 
 await test("a late render after the office moved to another tab leaves that tab alone", async () => {
@@ -441,7 +446,7 @@ await test("a crew login on the windows page is told the office sets them", asyn
 });
 
 await test("changing a return logged as store credit keeps its override, so it saves", async () => {
-  role = "error"; behindN = 0;
+  role = "error"; floorN = 202;
   await go("#/receipts/vendors");
   const p = await Store.get(JOB2);
   p.receipts.push({ id: "SC", kind: "return", returnOf: "S1", vendor: "Spenard Builders Supply", date: today, amount: "-150.00",
@@ -456,7 +461,102 @@ await test("changing a return logged as store credit keeps its override, so it s
   assert.deepEqual(after.map((r) => [r.id, r.amount]), [["SC~1", "-150.00"]]);
 });
 
-const stray = calls.filter((c) => !/\/rest\/v1\/(rpc\/role_is|rpc\/receipt_|rpc\/field_builds_behind|receipt_vendors|receipt_return_reviews)/.test(c.u));
+/* ---------- a third job: changes that move, crew retakes, slips, re-reads ---------- */
+const JOB3 = "33333333-3333-4333-8333-333333333333";
+const SLIP_RETAKE = IMG.replace("iVBOR", "iVBOz"), SLIP_OTHER = IMG.replace("iVBOR", "iVBOy");
+const { mergeProjects, tombstoneItems } = await import("../js/merge.js");
+const { receiptTotals } = await import("../js/receiptcalc.js");
+const qtyFor = (desc) => view.querySelector(`input[aria-label="Quantity returned: ${desc}"]`);
+await Store.put({ id: JOB3, customer: "Keepers", address: "3981 Fahrenkamp", updatedAt: "2026-10-01T00:00:00.000Z", receipts: [
+  { id: "A", vendor: "Home Depot", date: ago(10), amount: "20.00", category: "materials", items: [{ id: "a1", desc: "duct tape", qty: "2", unit: "ea", price: "10.00" }] },
+  { id: "B", vendor: "Home Depot", date: ago(9), amount: "120.00", category: "materials", items: [{ id: "b1", desc: "2x4x8 stud", qty: "20", unit: "ea", price: "6.00" }] },
+  { id: "c0", kind: "return", returnOf: "A", vendor: "Home Depot", date: ago(8), amount: "-10.00", category: "materials",
+    notes: "↩ Return of Home Depot receipt", items: [{ id: "c0-1", of: "a1", ofReceipt: "A", desc: "duct tape", qty: "1", price: "-10.00" }] },
+] }, { bump: false, quiet: true });
+let movedId = null;
+
+await test("a change that moves a return onto another receipt gets a fresh id, so a phone deleting the first receipt leaves it", async () => {
+  const stale = structuredClone(await Store.get(JOB3));     // a crew phone that synced before the change
+  await go(`#/receipts/${JOB3}/c0/change`);
+  type(qtyFor("duct tape"), "0");
+  type(qtyFor("2x4x8 stud"), "5");
+  type(view.querySelector(".rl-money"), "30.00");
+  btn(view, "Save changes").click();
+  await settle(80);
+  const office = await Store.get(JOB3);
+  const c = office.receipts.find((r) => r && r.kind === "return");
+  assert.equal(c.returnOf, "B");
+  assert.ok(!c.id.startsWith("c0~"), "not a derived id: " + c.id);
+  for (const id of L.returnLineage("c0")) assert.ok(office.deletedIds[id], id + " closed, so an in-place change elsewhere can't add a copy");
+  movedId = c.id;
+  // the phone deletes A from its older copy, where c0 still sits on A alone
+  const plan = L.deletePlan(stale, "A");
+  assert.deepEqual(plan.kill, ["A", ...L.returnLineage("c0")]);
+  stale.receipts = stale.receipts.filter((r) => !plan.kill.includes(r.id));
+  tombstoneItems(stale, plan.kill);
+  stale.updatedAt = "2026-10-06T09:00:00.000Z";
+  for (const { merged } of [mergeProjects(office, stale), mergeProjects(stale, office)]) {
+    assert.deepEqual(merged.receipts.map((r) => r.id).sort(), ["B", movedId].sort(), "the moved return survives the phone's delete");
+    assert.equal(receiptTotals(merged).total, 90);
+  }
+});
+
+await test("a crew retake that syncs in while the form is open is the slip that moves over", async () => {
+  const p = await Store.get(JOB3);
+  p.receipts.push({ id: "SLIP3", vendor: "Home Depot", date: today, amount: "", category: "materials", by: "CJ", photo: SLIP_IMG, items: [] });
+  await Store.put(p, { bump: false, quiet: true });
+  await go(`#/receipts/${JOB3}/B/return`);
+  type(qtyFor("2x4x8 stud"), "1");
+  const sel = [...view.querySelectorAll("select")].find((s) => [...s.options].some((o) => o.value === "SLIP3"));
+  sel.value = "SLIP3"; sel.dispatchEvent(new window.Event("change"));
+  const crew = await Store.get(JOB3);                         // the crew's Retake lands by sync
+  crew.receipts.find((r) => r.id === "SLIP3").photo = SLIP_RETAKE;
+  crew.updatedAt = "2026-10-06T10:00:00.000Z";
+  await Store.put(crew, { bump: false, quiet: true });
+  btn(view, "Save return").click();
+  await settle(80);
+  const after = await Store.get(JOB3);
+  const c = after.receipts.find((r) => r && r.kind === "return" && r.id !== movedId);
+  assert.equal(c.photo, SLIP_RETAKE, "the retake, not the photo the form saw when it was picked");
+  assert.ok(after.deletedIds.SLIP3);
+});
+
+await test("on a change, un-picking a crew slip brings back the return's own slip photo", async () => {
+  const p = await Store.get(JOB3);
+  p.receipts.push({ id: "SLIP4", vendor: "Home Depot", date: today, amount: "", category: "materials", by: "CJ", photo: SLIP_OTHER, items: [] });
+  await Store.put(p, { bump: false, quiet: true });
+  const c = p.receipts.find((r) => r && r.kind === "return" && r.id !== movedId);
+  await go(`#/receipts/${JOB3}/${enc(c.id)}/change`);
+  const shown = () => { const img = view.querySelector(".rl-slipview img"); return img ? img.getAttribute("src") : view.querySelector(".rl-slipview").textContent; };
+  assert.equal(shown(), SLIP_RETAKE);
+  const sel = [...view.querySelectorAll("select")].find((s) => [...s.options].some((o) => o.value === "SLIP4"));
+  sel.value = "SLIP4"; sel.dispatchEvent(new window.Event("change"));
+  assert.equal(shown(), SLIP_OTHER);
+  sel.value = ""; sel.dispatchEvent(new window.Event("change"));
+  assert.equal(shown(), SLIP_RETAKE, "the placeholder puts the return's own slip back");
+  sel.value = "SLIP4"; sel.dispatchEvent(new window.Event("change"));
+  btn(view.querySelector(".rl-slipview"), "Remove").click();
+  assert.equal(shown(), SLIP_RETAKE, "so does Remove on a crew slip");
+  btn(view, "Save changes").click();
+  await settle(80);
+  const after = await Store.get(JOB3);
+  const changed = after.receipts.find((r) => r && r.id === L.successorId(c.id));
+  assert.equal(changed.photo, SLIP_RETAKE);
+  assert.ok(after.receipts.some((r) => r.id === "SLIP4") && !after.deletedIds.SLIP4, "the crew's other slip stays a receipt");
+});
+
+await test("a return whose item was read again since won't open in Change: it says to delete and log it again", async () => {
+  const p = await Store.get(JOB3);
+  const b = p.receipts.find((r) => r.id === "B");
+  b.items = [{ id: "b9", desc: "STUD 2X4 8FT KD", qty: "20", unit: "ea", price: "6.00" }];   // ✨ Read again on a phone
+  p.updatedAt = "2026-10-06T11:00:00.000Z";
+  await Store.put(p, { bump: false, quiet: true });
+  await go(`#/receipts/${JOB3}/${enc(movedId)}/change`);
+  assert.match(view.textContent, /no longer matches its receipt.*Delete this return and log it again/s);
+  assert.equal(view.querySelector(".rl-form"), null);
+});
+
+const stray = calls.filter((c) => !/\/rest\/v1\/(rpc\/role_is|rpc\/receipt_|rpc\/field_build_floor|receipt_vendors|receipt_return_reviews)/.test(c.u));
 console.log("  (sync nudges: " + [...new Set(stray.map((c) => c.u.replace(/\?.*$/, "")))].join(", ") + ")");
 console.log(`\n${pass} passed`);
 process.exit(0);

@@ -52,8 +52,11 @@ export function receiptCategory(v) {
   return "other";
 }
 
-/** The receipt's total: `amount` (what the budget flag sums). */
-export const receiptAmount = (r) => amountNum(r && r.amount);
+/** The receipt's total: `amount` (what the budget flag sums). A return
+    (kind "return") is always money back, whatever sign its amount carries:
+    a phone older than v202 shows it as an ordinary receipt and could save
+    its total retyped as a positive number. */
+export const receiptAmount = (r) => (r && r.kind === "return" ? -Math.abs(amountNum(r.amount)) : amountNum(r && r.amount));
 
 /** Σ qty × price over the receipt's line items (a drift check against the
     printed total, never the total itself — a receipt's total is what was paid). */

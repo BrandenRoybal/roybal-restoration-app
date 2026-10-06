@@ -70,7 +70,7 @@ env:
                          #     worker_heartbeat under a new signature and replaces
                          #     worker_liveness_check: no change; +3: the office doors
                          #     receipt_vendor_set and receipt_return_review_set, and the
-                         #     phone check field_builds_behind (0018)
+                         #     build-floor read field_build_floor (0018)
   EXPECT_PKUNIQUE: 94   # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010);
                         # +2: the xact_ref_prices and xact_ref_lines pkeys (0011); +1: job_receipts pkey (0015);
                         # +1: worker_heartbeats pkey (0016); +2: receipt_vendors and receipt_return_reviews pkeys (0018)
