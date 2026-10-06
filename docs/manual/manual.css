@@ -1,0 +1,90 @@
+/* Roybal Construction app manual — print styles.
+   Palette and section style follow the field forms packet
+   (apps/field/css/print.css, formkit.js letterhead()). */
+:root {
+  --navy: #0f1b2d; --navy-2: #16263d; --line: #1f3354; --orange: #f26a21; --orange-tint: #fff1e8;
+  --ink: #1b2533; --ink-2: #44556b; --muted: #5b6b80; --rule: #6b7892; --band: #eef2f7;
+  --green: #1f9d55; --amber: #b7791f; --red: #c0392b;
+}
+@page { size: Letter; margin: 0.5in 0.5in 0.65in; }
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { margin: 0; font-family: "Helvetica Neue", Arial, sans-serif; font-size: 10.5pt; line-height: 1.42; color: var(--ink); background: #fff; }
+h1, h2, h3, h4 { color: var(--navy); margin: 0; }
+p { margin: 0 0 7pt; }
+ul, ol { margin: 0 0 8pt; padding-left: 17pt; }
+li { margin-bottom: 2.5pt; }
+a { color: var(--navy); }
+b, strong { color: var(--navy); }
+.ui { font-weight: 700; color: var(--navy); background: var(--band); border: 0.6px solid #c9d3e0; border-radius: 3px; padding: 0 3pt; white-space: nowrap; font-size: 9.5pt; }
+.muted { color: var(--muted); }
+.small { font-size: 9pt; }
+
+/* ---------- letterhead (cover + chapter openers) ---------- */
+.sheet-head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2.5px solid var(--navy); padding-bottom: 6pt; margin-bottom: 12pt; }
+.sheet-head__name { font-size: 17pt; font-weight: 800; letter-spacing: .3px; }
+.sheet-head__name .r { color: var(--orange); } .sheet-head__name .c { color: #000; }
+.sheet-head__tag { font-size: 8pt; color: var(--ink-2); margin-top: 2pt; }
+.sheet-head__addr { text-align: right; font-size: 7.5pt; color: var(--ink-2); line-height: 1.35; }
+
+/* ---------- cover ---------- */
+.cover { page-break-after: always; height: 9.6in; display: flex; flex-direction: column; }
+.cover__band { margin-top: .9in; background: var(--navy); color: #fff; border-left: 8pt solid var(--orange); padding: 26pt 26pt 24pt; border-radius: 2pt; }
+.cover__band h1 { color: #fff; font-size: 31pt; line-height: 1.08; letter-spacing: -.3px; }
+.cover__band .sub { color: #c9d6e8; font-size: 12.5pt; margin-top: 9pt; }
+.cover__logo { width: 82pt; height: 82pt; margin: 34pt 0 0; }
+.cover__meta { margin-top: 18pt; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10pt; }
+.cover__meta div { border-top: 2pt solid var(--orange); padding-top: 5pt; font-size: 9pt; color: var(--ink-2); }
+.cover__meta b { display: block; font-size: 11pt; }
+.cover__who { margin-top: auto; font-size: 9.5pt; color: var(--ink-2); border-top: 0.6px solid var(--rule); padding-top: 8pt; }
+
+/* ---------- chapters + sections ---------- */
+.chapter { page-break-before: always; }
+.chapter__head { background: var(--navy); color: #fff; padding: 13pt 16pt 12pt; border-left: 6pt solid var(--orange); margin-bottom: 11pt; border-radius: 2pt; }
+.chapter__head .num { color: var(--orange); font-size: 9pt; font-weight: 800; letter-spacing: 1.4px; text-transform: uppercase; }
+.chapter__head h1 { color: #fff; font-size: 21pt; margin-top: 2pt; }
+.chapter__head .who { color: #c9d6e8; font-size: 9.5pt; margin-top: 3pt; }
+h2.sec { font-size: 10.5pt; text-transform: uppercase; letter-spacing: .5px; background: var(--band); border-left: 3px solid var(--orange); padding: 4pt 7pt; margin: 13pt 0 7pt; break-after: avoid; }
+h3 { font-size: 11pt; margin: 10pt 0 4pt; break-after: avoid; }
+.keep { break-inside: avoid; }
+
+/* ---------- figures ---------- */
+.row { display: flow-root; margin: 4pt 0 9pt; }
+.row > figure.phone, .row > figure.side { float: right; margin: 2pt 0 8pt 16pt; }
+.row > .text { display: block; }
+figure { margin: 0; break-inside: avoid; }
+figure .frame { overflow: hidden; border: 0.8px solid #b7c2d3; border-radius: 7pt; background: #f3f5f8; box-shadow: 0 1.5pt 4pt rgba(15,27,45,.12); }
+figure img { display: block; width: 100%; }
+figure.phone { width: 2.3in; }
+figure.phone .frame { max-height: 4in; }
+figure.phone .frame { border-radius: 11pt; border: 3pt solid var(--navy-2); }
+figure.wide { width: 100%; margin: 4pt 0 10pt; }
+figcaption { font-size: 8pt; color: var(--muted); margin-top: 3.5pt; line-height: 1.3; }
+figcaption b { color: var(--ink-2); }
+.pair { display: flex; gap: 12pt; justify-content: center; margin: 4pt 0 10pt; break-inside: avoid; }
+.pair figure.phone { width: 2.3in; float: none; margin: 0; }
+
+/* ---------- callouts + tables ---------- */
+.note, .tip, .gate, .warn { border-radius: 3pt; padding: 6pt 9pt; margin: 6pt 0 9pt; font-size: 9.5pt; break-inside: avoid; }
+.note { background: var(--band); border-left: 3px solid var(--navy); }
+.tip { background: #eaf6ef; border-left: 3px solid var(--green); }
+.gate { background: var(--orange-tint); border-left: 3px solid var(--orange); }
+.warn { background: #fdecea; border-left: 3px solid var(--red); }
+.note b:first-child, .tip b:first-child, .gate b:first-child, .warn b:first-child { text-transform: uppercase; font-size: 8pt; letter-spacing: .5px; margin-right: 4pt; }
+table { width: 100%; border-collapse: collapse; margin: 4pt 0 10pt; font-size: 9pt; break-inside: avoid; }
+th { background: var(--navy); color: #fff; text-align: left; padding: 4pt 6pt; font-weight: 700; }
+td { border: 0.6px solid var(--rule); padding: 3.5pt 6pt; vertical-align: top; }
+tr:nth-child(even) td { background: #f7f9fc; }
+.steps { counter-reset: s; list-style: none; padding-left: 0; }
+.steps > li { counter-increment: s; position: relative; padding-left: 21pt; margin-bottom: 4pt; }
+.steps > li::before { content: counter(s); position: absolute; left: 0; top: 0; width: 14pt; height: 14pt; border-radius: 50%; background: var(--orange); color: #fff; font-size: 8pt; font-weight: 800; text-align: center; line-height: 14pt; }
+
+/* ---------- contents ---------- */
+.toc { columns: 2; column-gap: 22pt; font-size: 10pt; }
+.toc a { text-decoration: none; color: var(--ink); display: flex; justify-content: space-between; border-bottom: 0.6px dotted #b7c2d3; padding: 3pt 0; break-inside: avoid; }
+.toc a.ch { font-weight: 800; color: var(--navy); margin-top: 7pt; border-bottom: 1px solid var(--navy); }
+.toc a span { color: var(--muted); font-weight: 400; }
+
+/* ---------- diagrams ---------- */
+svg.diagram { width: 100%; height: auto; display: block; margin: 4pt 0 2pt; }
+.diagram-wrap { break-inside: avoid; margin: 4pt 0 10pt; }
