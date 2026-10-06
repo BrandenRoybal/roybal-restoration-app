@@ -18,12 +18,13 @@
 --                                 invoice" check sees spine rows too (0004
 --                                 gave agents no read on proposals at all)
 --   sms_codes_in_use()            every code a text-lane ask (pending_actions
---                                 .code) or a live proposal (sms_code) holds;
---                                 the three JS allocators of pending_actions
---                                 codes skip them all
+--                                 .code) or a live or just-answered proposal
+--                                 (sms_code) holds; the three JS allocators
+--                                 of pending_actions codes skip them all
 --   proposals_sms_code_skip_text  BEFORE INSERT on proposals: a new sms_code
 --                                 never lands on a code a pending text-lane
---                                 ask holds. With the allocators above, one
+--                                 ask, or one filed in the last 48 hours,
+--                                 holds. With the allocators above, one
 --                                 "YES 12" names one ask in one queue.
 --   outbox_channel_ready(ch)      is a worker heartbeating in the last 10
 --                                 minutes with this channel switched on? The
@@ -47,6 +48,14 @@
 -- already do, and a unique_violation the trigger causes is retried by
 -- op_propose's existing handler with a fresh code. Expired-but-still-pending
 -- text asks count as held, as the JS allocators already treat them.
+--
+-- A number stays held for 48 hours after its ask is answered, in both
+-- directions, because roybal-notify answers a late "YES n" for that long: a
+-- spine row answered in the last 48 hours (updated_at, the column its late
+-- lookup reads) keeps its code out of the JS allocators, and a text-lane ask
+-- filed in the last 48 hours, whatever became of it, keeps its code off new
+-- proposals. Otherwise a second "YES 29" meant for the answered ask would run
+-- whatever new ask took 29 in the other queue.
 --
 -- THE GRANT. 0004's rule is that a machine gets its grants from the owner,
 -- one at a time, with an event. The agent_authority.grant operation does not
@@ -128,10 +137,15 @@ create policy proposals_read_own_agent on public.proposals
 -- 3. sms_codes_in_use — every "YES n" number something can still answer.
 --
 -- Every pending_actions.code with status = 'pending' (expired ones included,
--- the rule the JS allocators already follow) plus every proposals.sms_code
--- with status = 'proposed' in the caller's org (stale ones included: the
--- unique index still holds them until op_propose's sweep). Distinct,
--- ascending, '{}' when none. pending_actions has no org column.
+-- the rule the JS allocators already follow) plus every proposals.sms_code in
+-- the caller's org that is status = 'proposed' (stale ones included: the
+-- unique index still holds them until op_propose's sweep) or was answered in
+-- the last 48 hours, so a late "YES n" roybal-notify still answers from the
+-- spine row never lands on a new text-lane ask. updated_at marks the answer:
+-- the update that approves (approved_at goes in the same update), declines or
+-- expires a row sets it, a run that finishes later sets it again, and it is
+-- the column notify's late lookup reads. Distinct, ascending, '{}' when none.
+-- pending_actions has no org column.
 -- ---------------------------------------------------------------------------
 create or replace function public.sms_codes_in_use() returns integer[]
   language sql
@@ -147,28 +161,34 @@ as $$
       union
       select p.sms_code
         from public.proposals p
-       where p.status = 'proposed' and p.sms_code is not null
+       where p.sms_code is not null
          and p.org_id = public.current_org()
+         and (p.status = 'proposed'
+              or p.updated_at >= now() - interval '48 hours')
     ) c;
 $$;
 
 alter function public.sms_codes_in_use() owner to postgres;
 comment on function public.sms_codes_in_use() is
-  'Every SMS approval code in use across both queues: pending_actions.code of status pending rows plus proposals.sms_code of live (status proposed) rows in the caller''s org; distinct, ascending, ''{}'' when none. The pending_actions code allocators skip all of them (0019).';
+  'Every SMS approval code in use across both queues: pending_actions.code of status pending rows plus proposals.sms_code of rows in the caller''s org that are live (status proposed) or were answered in the last 48 hours (updated_at), while roybal-notify still answers a late YES from them; distinct, ascending, ''{}'' when none. The pending_actions code allocators skip all of them (0019).';
 revoke all on function public.sms_codes_in_use() from public, anon, authenticated;
 grant execute on function public.sms_codes_in_use() to authenticated, service_role;
 
 
 -- ---------------------------------------------------------------------------
 -- 4. proposals_sms_code_skip_text — a new proposal never takes a code a
---    pending text-lane ask holds.
+--    pending text-lane ask holds, or one filed in the last 48 hours.
 --
 -- op_propose picks a code free among live proposals, then inserts; this moves
--- it on through the same sequence while a pending pending_actions row holds
--- it. op_propose reads the row back with RETURNING, so the code it reports
--- (and writes into proposal.created) is the one this settled on. Bounded:
--- 10000 tries is more than the whole 1..9999 cycle, so running out means
--- every code is held, and the insert is refused rather than given a clash.
+-- it on through the same sequence while a pending_actions row holds it: any
+-- row still pending, and any row created in the last 48 hours whatever its
+-- status, because roybal-notify keeps answering a late "YES n" for a text ask
+-- that long (its late lookup reads pending_actions created_at), and a live
+-- proposal on that number would take the YES instead. op_propose reads the
+-- row back with RETURNING, so the code it reports (and writes into
+-- proposal.created) is the one this settled on. Bounded: 10000 tries is more
+-- than the whole 1..9999 cycle, so running out means every code is held, and
+-- the insert is refused rather than given a clash.
 -- ---------------------------------------------------------------------------
 create or replace function public.proposals_sms_code_skip_text() returns trigger
   language plpgsql
@@ -182,10 +202,12 @@ begin
     return new;
   end if;
   while exists (select 1 from public.pending_actions pa
-                 where pa.status = 'pending' and pa.code = new.sms_code) loop
+                 where pa.code = new.sms_code
+                   and (pa.status = 'pending'
+                        or pa.created_at >= now() - interval '48 hours')) loop
     v_tries := v_tries + 1;
     if v_tries > 10000 then
-      raise exception 'proposals: every SMS code is held by a pending text-lane ask';
+      raise exception 'proposals: every SMS code is held by a pending or recent text-lane ask';
     end if;
     new.sms_code := nextval('public.proposals_sms_code_seq');
   end loop;
@@ -195,7 +217,7 @@ $$;
 
 alter function public.proposals_sms_code_skip_text() owner to postgres;
 comment on function public.proposals_sms_code_skip_text() is
-  'BEFORE INSERT on proposals: while a status pending pending_actions row holds new.sms_code, take the next proposals_sms_code_seq value, so one "YES n" never names an ask in each queue (0019). Live-proposal uniqueness stays with op_propose and proposals_live_sms_code_key.';
+  'BEFORE INSERT on proposals: while a pending_actions row that is status pending, or was created in the last 48 hours whatever its status, holds new.sms_code, take the next proposals_sms_code_seq value, so one "YES n" never names an ask in each queue, a late one included (0019). Live-proposal uniqueness stays with op_propose and proposals_live_sms_code_key.';
 -- Not callable over RPC as a trigger function anyway; nobody holds EXECUTE.
 revoke all on function public.proposals_sms_code_skip_text() from public, anon, authenticated, service_role;
 

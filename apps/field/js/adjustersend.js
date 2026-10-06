@@ -16,7 +16,8 @@
    fails or doesn't answer all get the panel exactly as it was: Copy
    and Open in Email, nothing else. These checks only decide what to
    offer; the server gates stay the real ones (op_propose's role
-   check, the proposals RLS, op_check_approver).
+   check, the proposals RLS, op_check_approver). A draft whose packet
+   link didn't publish offers no send at all, only why.
 
    The recipient comes from records, never from the draft: the newest
    inbound email filed to this job that isn't the customer's (one
@@ -55,20 +56,34 @@ const ms = (iso) => { const t = Date.parse(iso || ""); return Number.isFinite(t)
 const oneLine = (v) => str(v).replace(/[\u0000-\u001F\u007F-\u009F]/g, " ").replace(/\s+/g, " ").trim();
 
 /* ---------- addresses ---------- */
-const TOKEN = /[^\s<>()[\]{},;:"'`@]+@[^\s<>()[\]{},;:"'`@]+/g;
+/* The local part keeps every RFC 5322 atext character (' ` { } | / = ? and
+   the rest), so kelly.o'brien@… stays whole instead of turning into a
+   different, valid-looking brien@…; the domain stops at quotes and braces.
+   Both stop at whitespace, @ and the separators <>()[],;:". */
+const TOKEN = /[^\s<>()[\]@,;:"]+@[^\s<>()[\]{}@,;:"'`]+/g;
+const SEPARATOR = /[\s<>()[\],;:"]/;
+/* only quotes AROUND an address go (and a sentence's closing punctuation) */
+const unwrap = (a) => a.replace(/^['`‘’“”]+/, "").replace(/['`‘’“”.!?]+$/, "");
 /** The first address in free text ("Jane Doe (jane@carrier.com), 907…"),
-    trailing sentence punctuation dropped; "" when none passes SPINE_TO. */
+    surrounding quotes and trailing sentence punctuation dropped; "" when
+    none passes SPINE_TO. */
 export function addressIn(text) {
   for (const m of String(text ?? "").matchAll(TOKEN)) {
-    const a = m[0].replace(/[.!?]+$/, "");
+    const a = unwrap(m[0]);
     if (SPINE_TO.test(a) && a.length <= MAX.to) return a;
   }
   return "";
 }
-/** "Jane <JANE@x.com>" or "jane@x.com" → "jane@x.com"; "" when none. */
+/** "Jane <JANE@x.com>" or "jane@x.com" → "jane@x.com"; "" when none. A value
+    that already is one bare address (gmail-proxy stores from_addr that way,
+    apostrophes and all) comes back whole, never re-cut by the free-text scan. */
 export function bareAddress(v) {
-  const m = str(v).match(/<([^<>\s]+@[^<>\s]+)>/);
-  return lc(m && SPINE_TO.test(m[1]) ? m[1] : addressIn(v));
+  const s = str(v);
+  const m = s.match(/<([^<>\s]+@[^<>\s]+)>/);
+  if (m && SPINE_TO.test(m[1])) return lc(m[1]);
+  const whole = unwrap(s);
+  if (!SEPARATOR.test(s) && SPINE_TO.test(whole) && whole.length <= MAX.to) return lc(whole);
+  return lc(addressIn(s));
 }
 
 /** Who the email goes to, from records only. `emails` are this job's inbound
@@ -268,7 +283,9 @@ export function doorsLine(row) {
 /** After Approve. `lane` is outbox_channel_ready('email') read just after:
     true, false, or null when it couldn't say. A row someone answered first
     by text or in the inbox comes back as it was (approving twice is
-    approving once) and says so. */
+    approving once) and says so. The worker marks an email that waited
+    past EMAIL_MAX_AGE_HOURS (48) dead rather than send it late, so the
+    lane-off line never promises an open-ended wait (the YES reply's words). */
 export function approvedLine(row, lane) {
   const r = obj(row);
   if (r.status === "failed") return `⚠️ Approved, but it didn't run: ${str(r.error) || "no reason given"}`;
@@ -276,7 +293,7 @@ export function approvedLine(row, lane) {
   if (by) return `That one was already approved ${by} — it goes out once.`;
   const to = toOf(r);
   if (lane === true) return `✅ Approved — the email to ${to} is queued and goes out in a minute.`;
-  if (lane === false) return `✅ Approved — the email to ${to} is queued, but email sending is off on the worker, so it waits until that's back.`;
+  if (lane === false) return `✅ Approved — the email to ${to}. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.`;
   return `✅ Approved — the email to ${to} is queued to send.`;
 }
 /** op_propose handed back a row that isn't waiting: the same email (same
@@ -290,6 +307,8 @@ export function filedNote(row, now = Date.now()) {
   return "The server answered, but not with the ask. Check the Approvals tab before trying again.";
 }
 export const DECLINED = "👍 Declined — nothing was sent. Change it and send it for approval again if you want.";
+export const NO_PACKET = "The packet link didn't publish, so this email can't go for approval: it would reach the adjuster without the packet. " +
+  "Tap ✉️ Adjuster email to draft it again (that retries the link), or use Copy.";
 
 /* ---------- network ---------- */
 /* Is this the owner's login? true / false once role_is said so (kept per
@@ -368,7 +387,14 @@ export async function sendSetup(project) {
    draft on screen can't drift from the ask waiting on his yes; a decline
    (or an answer that leaves nothing waiting) unlocks them. */
 const FIELD = "width:100%;padding:8px 10px;border:1px solid #cdd5df;border-radius:10px;font-size:13px";
+const SECTION = "border-top:1px solid #dfe5ee;margin-top:10px;padding-top:10px";
 export function sendSection({ project, subj, bodyTa, setup, links }) {
+  /* The packet is the email's whole point and the draft says it's linked
+     below: with no packet link (its publish failed; app.js only toasts)
+     there's nothing to file, just why, and Copy above still works. */
+  if (!/^https:\/\//i.test(str(obj(links).packet))) {
+    return h("div", { class: "adjuster-send", style: SECTION }, h("div", { class: "warn", style: "margin:0" }, NO_PACKET));
+  }
   const s = obj(setup);
   const toInp = h("input", { type: "email", value: str(s.to), placeholder: "adjuster@carrier.com", autocomplete: "off", autocapitalize: "off", spellcheck: "false", style: FIELD });
   const note = h("div", { style: "font-size:13px;margin-top:8px", hidden: true });
@@ -458,7 +484,7 @@ export function sendSection({ project, subj, bodyTa, setup, links }) {
   });
 
   compose();
-  return h("div", { class: "adjuster-send", style: "border-top:1px solid #dfe5ee;margin-top:10px;padding-top:10px" },
+  return h("div", { class: "adjuster-send", style: SECTION },
     h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "Or send it from the office email once you approve it:"),
     h("label", { style: "display:block;font-size:12px;font-weight:600;margin-bottom:2px" }, "To", toInp),
     h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 0" }, sourceLine(s)),

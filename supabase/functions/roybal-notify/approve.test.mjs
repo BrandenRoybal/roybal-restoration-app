@@ -12,8 +12,8 @@ import {
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, replyFor,
   alaskaHour, windowOpensAt, expiresBeforeWindow, retryableStatus,
   parseDecideRequest, decideResponse, ownerGate,
-  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxWentOut,
-  spineLateText, spineVerdict, spineReply,
+  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState,
+  spineLateText, spineDecidedAt, spineOutranks, spineReceipt, spineVerdict, spineReply,
 } from "./approve.ts";
 
 let pass = 0;
@@ -505,26 +505,51 @@ test("the email lane is ready only on a 200 literal true, off only on a literal 
   assert.equal(emailLane(200, false), "off");
   for (const b of ["true", 1, null, [true], {}]) assert.equal(emailLane(200, b), "unknown", JSON.stringify(b));
   for (const s of [0, 404, 500, 503]) assert.equal(emailLane(s, true), "unknown", String(s));
-  assert.equal(outboxWentOut([{ status: "pending" }, { status: "sent" }]), true);
-  assert.equal(outboxWentOut([{ status: "delivered" }]), true);
-  for (const r of [[], [{ status: "pending" }], [{ status: "failed" }], [{ status: "dead" }], null, { status: "sent" }]) {
-    assert.equal(outboxWentOut(r), false, JSON.stringify(r));
+});
+
+test("an email's outbox row reads three ways: sent, dead (and why), or still waiting", () => {
+  assert.deepEqual(outboxState([{ status: "pending" }, { status: "sent" }]), { state: "sent" });
+  assert.deepEqual(outboxState([{ status: "delivered" }]), { state: "sent" });
+  assert.deepEqual(outboxState([{ status: "dead", error: "Gmail refused the address: 550 no such user" }]),
+    { state: "dead", error: "Gmail refused the address: 550 no such user" });
+  assert.deepEqual(outboxState([{ status: "dead", error: "  this email waited 50 hours in line, so it was not sent.  " }]),
+    { state: "dead", error: "this email waited 50 hours in line, so it was not sent" }, "trimmed, its closing period dropped");
+  assert.equal(outboxState([{ status: "dead", error: "x".repeat(400) }]).error.length, 160);
+  assert.equal(Array.from(outboxState([{ status: "dead", error: "🔥".repeat(200) }]).error).length, 160, "clipped by code point");
+  for (const error of [null, undefined, "", "   ", "."]) {
+    assert.deepEqual(outboxState([{ status: "dead", error }]), { state: "dead", error: "it gave up" }, JSON.stringify(error));
+  }
+  // a sent row outranks a dead twin (one key per proposal, but the read allows five)
+  assert.deepEqual(outboxState([{ status: "dead", error: "e" }, { status: "sent" }]), { state: "sent" });
+  for (const r of [[], [{ status: "pending" }], [{ status: "sending" }], [{ status: "failed", error: "Gmail API 503" }],
+    null, { status: "sent" }, { status: "dead" }, "dead"]) {
+    assert.deepEqual(outboxState(r), { state: "waiting" }, JSON.stringify(r));
   }
 });
 
 test("a spine row someone already answered gets the sentence its status earns", () => {
   const now = "2026-10-06T18:00:00.000Z";
   const row = (o) => sp(4, { rationale: "email the INV-4 reminder to Hebard", ...o });
+  const SENT = { state: "sent" }, WAITS = { state: "waiting" };
+  const DEAD = { state: "dead", error: "Gmail refused the address: 550 no such user" };
   for (const status of ["approved", "executing", "executed"]) {
     assert.equal(spineLateText(row({ status }), now), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
-    assert.equal(spineLateText(row({ status }), now, true), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
+    assert.equal(spineLateText(row({ status }), now, WAITS), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
+    assert.equal(spineLateText(row({ status }), now, SENT), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
+    assert.equal(spineLateText(row({ status }), now, DEAD),
+      "That one was approved, but the email couldn't be sent: Gmail refused the address: 550 no such user. Nothing went out.");
   }
-  // only an email has an outbox row to have gone out by
-  assert.match(spineLateText(row({ status: "executed", operation: "job.set_stage@1" }), now, true), /It goes out once\.$/);
-  assert.equal(spineLateText(row({ status: "declined" }), now), "That one was declined — nothing was sent.");
-  assert.equal(spineLateText(row({ status: "expired" }), now), "That one expired — nothing was sent.");
-  assert.equal(spineLateText(row({ status: "proposed", expires_at: "2026-10-06T17:59:59+00:00" }), now), "That one expired — nothing was sent.",
-    "a stale row stays 'proposed' until a sweep");
+  assert.equal(spineLateText(row({ status: "executed" }), now, { state: "dead", error: "it gave up" }),
+    "That one was approved, but the email couldn't be sent: it gave up. Nothing went out.");
+  // only an email has an outbox row to have gone out by, or to have died
+  assert.match(spineLateText(row({ status: "executed", operation: "job.set_stage@1" }), now, SENT), /It goes out once\.$/);
+  assert.match(spineLateText(row({ status: "executed", operation: "job.set_stage@1" }), now, DEAD), /^That one was already approved — .*It goes out once\.$/);
+  // the outbox says nothing about a row that was never approved
+  assert.equal(spineLateText(row({ status: "declined" }), now, DEAD), "That one was declined — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineLateText(row({ status: "declined" }), now), "That one was declined — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineLateText(row({ status: "expired" }), now), "That one expired — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineLateText(row({ status: "proposed", expires_at: "2026-10-06T17:59:59+00:00" }), now),
+    "That one expired — email the INV-4 reminder to Hebard. Nothing was sent.", "a stale row stays 'proposed' until a sweep");
   assert.equal(spineLateText(row({ status: "proposed", expires_at: "2026-10-06T18:00:01Z" }), now), null, "still live: not late");
   assert.equal(spineLateText(row({ status: "failed", error: "outbox insert refused" }), now),
     "That one was approved, but it didn't run: outbox insert refused");
@@ -559,7 +584,10 @@ test("every spine answer has its exact text", () => {
   const done = (o) => ({ status: "approved", row: sp(4, { status: "executed", approved_via: "sms", ...o }) });
   assert.equal(spineReply(done(), a, "YES", { lane: "ready" }), "✅ Approved — email the INV-4 reminder to Hebard. It's queued and goes out in a minute.");
   assert.equal(spineReply(done(), a, "YES", { lane: "off" }),
-    "✅ Approved — email the INV-4 reminder to Hebard. It's queued, but email sending is off on the worker, so it waits until that's back.");
+    "✅ Approved — email the INV-4 reminder to Hebard. It's queued, but email sending is off on the worker: " +
+    "it waits up to 48 hours for that to come back, then it isn't sent.");
+  // the worker kills an email older than EMAIL_MAX_AGE_HOURS: no reply promises an open-ended wait
+  for (const lane of ["ready", "off", "unknown", undefined]) assert.doesNotMatch(spineReply(done(), a, "YES", { lane }), /until that's back/);
   assert.equal(spineReply(done(), a, "YES", { lane: "unknown" }), "✅ Approved — email the INV-4 reminder to Hebard. It's queued to send.");
   assert.equal(spineReply(done(), a, "YES"), "✅ Approved — email the INV-4 reminder to Hebard. It's queued to send.");
   assert.equal(spineReply(done({ operation: "sms.send@1" }), a, "YES", { lane: "ready" }), "✅ Approved — email the INV-4 reminder to Hebard. It's queued to send.");
@@ -572,14 +600,51 @@ test("every spine answer has its exact text", () => {
   assert.doesNotMatch(spineReply(done(), a, "YES", { lane: "ready" }), /Done/);
   const tapped = { status: "answered", row: sp(4, { status: "executed", approved_via: "inbox", rationale: a.label }) };
   assert.equal(spineReply(tapped, a, "YES"), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
-  assert.equal(spineReply(tapped, a, "YES", { wentOut: true }), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
+  assert.equal(spineReply(tapped, a, "YES", { outbox: { state: "sent" } }), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
+  assert.equal(spineReply(tapped, a, "YES", { outbox: { state: "waiting" } }), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
+  assert.equal(spineReply(tapped, a, "YES", { outbox: { state: "dead", error: "Gmail refused the address: 550" } }),
+    "That one was approved, but the email couldn't be sent: Gmail refused the address: 550. Nothing went out.");
   assert.equal(spineReply({ status: "cancelled", row: sp(4) }, a, "NO"), "👍 Cancelled — email the INV-4 reminder to Hebard.");
   assert.equal(spineReply({ status: "already-answered" }, a, "NO"), "That one was already answered — nothing was cancelled.");
-  assert.equal(spineReply({ status: "expired" }, a, "YES"), "That one expired — nothing was sent.");
-  assert.equal(spineReply({ status: "declined" }, a, "YES"), "That one was declined — nothing was sent.");
+  assert.equal(spineReply({ status: "expired" }, a, "YES"), "That one expired — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineReply({ status: "declined" }, a, "YES"), "That one was declined — email the INV-4 reminder to Hebard. Nothing was sent.");
   assert.equal(spineReply({ status: "closed" }, a, "YES"), "That one was already answered — nothing was sent.");
   assert.equal(spineReply({ status: "not-recorded", why: "x" }, a, "YES"), "Couldn't record that just now — text YES 4 again in a minute.");
   assert.equal(spineReply({ status: "not-recorded", why: "x" }, a, "NO"), "Couldn't record that just now — text NO 4 again in a minute.");
+});
+
+test("a late spine answer speaks for its number only when the spine row was answered after any text-lane ask on it was created", () => {
+  const approved = sp(29, { status: "executed", approved_at: "2026-10-06T08:00:00Z", updated_at: "2026-10-06T08:00:01Z" });
+  const declined = sp(29, { status: "declined", approved_at: null, updated_at: "2026-10-06T08:00:00Z" });
+  const lapsed = sp(29, { status: "proposed", approved_at: null, updated_at: "2026-10-05T08:00:00Z", expires_at: "2026-10-06T08:00:00Z" });
+  // when each was answered: the approval, else the lapse of a stale 'proposed' row, else its last update
+  assert.equal(spineDecidedAt(approved), Date.parse("2026-10-06T08:00:00Z"));
+  assert.equal(spineDecidedAt(declined), Date.parse("2026-10-06T08:00:00Z"));
+  assert.equal(spineDecidedAt(lapsed), Date.parse("2026-10-06T08:00:00Z"));
+  assert.ok(Number.isNaN(spineDecidedAt({ status: "declined" })));
+  for (const row of [approved, declined, lapsed]) {
+    assert.equal(spineOutranks(row, null), true, `${row.status}: no text-lane row, the spine answers`);
+    assert.equal(spineOutranks(row, undefined), true);
+    assert.equal(spineOutranks(row, { created_at: "2026-10-06T07:59:59Z" }), true, `${row.status}: the text row came first`);
+    assert.equal(spineOutranks(row, { created_at: "2026-10-06T14:00:00Z" }), false, `${row.status}: minted on the freed number later`);
+    assert.equal(spineOutranks(row, { created_at: "2026-10-06T08:00:00Z" }), false, `${row.status}: a tie is not "after"`);
+    assert.equal(spineOutranks(row, { created_at: null }), false, "a text row with no readable time keeps the matcher's text");
+  }
+  assert.equal(spineOutranks({ status: "declined" }, { created_at: "2026-10-06T07:00:00Z" }), false, "nor a spine row with none");
+});
+
+test("a spine approval by text leaves the old lane's capture_events receipt, the one the Sunday report counts", () => {
+  const now = "2026-10-06T18:00:00.000Z";
+  const r = spineReceipt(sp(4, { status: "executed", approved_via: "sms" }), now);
+  assert.deepEqual(r, {
+    source_type: "assist_action", form_key: "email.send", captured_by: "approve-by-text",
+    status: "extracted", processed_at: now,
+    raw_payload: { proposal_id: "sp-4", via: "sms" },
+    result: { status: "executed" },
+  });
+  assert.equal(spineReceipt(sp(5, { operation: "job.set_stage@1" }), now).form_key, "job.set_stage", "the operation without @version");
+  // the report's own filter (weekly.ts): assist_action or email_send, captured_by approve-by-text
+  assert.ok(["assist_action", "email_send"].includes(r.source_type) && r.captured_by === "approve-by-text");
 });
 
 console.log(`\n${pass} approve-by-text checks passed.`);

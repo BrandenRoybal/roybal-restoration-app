@@ -22,7 +22,10 @@
    job names it, the page reads the newest worker heartbeat only when a
    spine email is shown and says when email sending is off (a heartbeat
    that won't read says nothing new), and the page calls no field export
-   that a stale cached copy of the field module could lack.
+   that a stale cached copy of the field module could lack. Then step 5
+   review round 1: the lane-off lines promise only the worker's 48 hours,
+   and a send the worker gave up on after its card aged off shows again,
+   named, for 48 hours from when it did.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -142,7 +145,7 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.includes("/rest/v1/coordination_jobs?select=id,title:data->>title,customer:data->>customer,address:data->>address&")) {
     return json(200, ids(u, "id").includes(BOARD1) ? [{ id: BOARD1, title: "Smith remodel", customer: "Smith", address: null }] : []);
   }
-  if (u.includes("/rest/v1/outbox?select=proposal_id,status,next_attempt_at,error,created_at&")) {
+  if (u.includes("/rest/v1/outbox?select=proposal_id,status,next_attempt_at,error,created_at,updated_at&")) {
     return json(200, OUTBOX.filter((o) => ids(u, "proposal_id").includes(o.proposal_id)));
   }
   throw new Error("unexpected fetch " + u);
@@ -784,8 +787,8 @@ await test("an owner check that can't answer says so with Retry (never \"not you
 });
 
 /* ---------- spine step 5 ---------- */
-const OFF_WAITING = "Email sending is off on the worker right now: approving queues this, and it waits until that's back.";
-const OFF_QUEUED = "Queued, but email sending is off on the worker, so it waits until that's back";
+const OFF_WAITING = "Email sending is off on the worker right now: approving queues this, and it waits up to 48 hours for sending to come back, then it isn't sent.";
+const OFF_QUEUED = "Queued, but email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent";
 const beats = (from) => calls.slice(from).filter((c) => c.u.includes("/worker_heartbeats?")).length;
 const reset5 = () => {
   fresh();
@@ -923,6 +926,57 @@ await test("the page calls only field exports that step 4 shipped, or checks a n
   // and every step-4 name it calls is still exported, so the newer module serves an older page too
   const field = await import("../js/approvals.js");
   for (const name of used.filter((n) => STEP4.has(n))) assert.notEqual(field[name], undefined, name);
+});
+
+await test("a send the worker gave up on after its card aged off shows again in Recently decided, named, for 48 hours from then", async () => {
+  reset5();
+  const STALE = "this email waited 58 hours in line, past the 48-hour limit (EMAIL_MAX_AGE_HOURS), so it was not sent. Send a fresh one if it should still go.";
+  // the brief's reminder, approved 60 h ago while sending was off; the worker came back an hour ago and gave up on it
+  const late = { ...email, id: id("spine", 6), sms_code: null, job_id: FIELD1, status: "executed", created_at: iso(-61), expires_at: iso(-37),
+    approved_at: iso(-60), updated_at: iso(-60), rationale: "email the INV-1001 reminder to Pollen (6 days past due, $1,240.00 open)" };
+  const dead = { proposal_id: late.id, status: "dead", next_attempt_at: iso(-60), error: STALE, created_at: iso(-60), updated_at: iso(-1) };
+  PA = [];
+  PR = [late];
+  OUTBOX = [dead];
+  let before = since0();
+  await go();
+  const c = card("spine:" + late.id);
+  assert.ok(c && c.classList.contains("ap-card--done"), "on Recently decided");
+  assert.equal(c.querySelector(".ap-out").textContent, "Couldn't send: " + STALE);
+  assert.ok(c.querySelector(".ap-out").classList.contains("ap-out--bad"));
+  // nothing else on the page names its job or proposer: they were read for it
+  assert.match(c.querySelector(".ap-meta").textContent, /^Pollen, 1192 Bemis Ct · from Brief agent · answered /);
+  const ob = calls.slice(before).find((x) => x.u.includes("/outbox?"));
+  assert.match(ob.u, /select=proposal_id,status,next_attempt_at,error,created_at,updated_at&/);
+  assert.deepEqual(ids(ob.u, "proposal_id"), [late.id]);
+  assert.equal(beats(before), 0, "an older send waits on nothing: no heartbeat read");
+  assert.equal(view.querySelector(".ap-lane"), null);
+  noJunk(view);
+  // beside the rest: newest news first, since it died after every other answer here
+  PR = [email, delivered, declined, late];
+  OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_at: iso(-5), error: null, created_at: iso(-5), updated_at: iso(-4.9) }, dead];
+  await go();
+  assert.deepEqual(recent().map((x) => x.dataset.key), ["spine:" + late.id, "spine:" + delivered.id, "spine:" + declined.id]);
+  assert.equal(card("spine:" + delivered.id).querySelector(".ap-out").textContent, "Delivered");
+  // died 49 h ago, or still in line with the worker down: not shown
+  for (const row of [{ ...dead, updated_at: iso(-49) }, { ...dead, status: "pending", error: null, updated_at: iso(-60) }]) {
+    PR = [late];
+    OUTBOX = [row];
+    await go();
+    assert.equal(card("spine:" + late.id), null, row.status + " " + row.updated_at);
+    assert.equal(view.querySelector(".ap-none").textContent, "Nothing is waiting on you.");
+  }
+  // an outbox read that answers with something other than a list says nothing and breaks nothing
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => (String(url).includes("/rest/v1/outbox?") ? json(200, { message: "not a list" }) : real(url, opts));
+  PR = [email, delivered, late];
+  OUTBOX = [dead];
+  try { await go(); } finally { globalThis.fetch = real; }
+  assert.ok(!/didn't load/.test(view.textContent));
+  assert.equal(waiting().length, 1);
+  assert.equal(card("spine:" + delivered.id).querySelector(".ap-out").textContent, "Queued to send");
+  assert.equal(card("spine:" + late.id), null);
+  reset5();
 });
 
 location.hash = "#/";

@@ -19,10 +19,14 @@
    refuse, or a job id that isn't a uuid files the old row exactly as
    before. A filing that failed on the network or with a 5xx may still
    have landed, so that reminder waits for tomorrow instead of risking
-   a second ask for one invoice. Every reminder sits in exactly one
-   queue: the 7-day "already asked about this invoice" check reads both
-   queues in every lane state, and offers nothing when either read
-   fails.
+   a second ask for one invoice. A permission refusal (42501) says the
+   brief's spine identity is broken, so nothing more is offered that
+   day on either lane. Every reminder sits in exactly one queue: the
+   7-day "already asked about this invoice" check reads both queues in
+   every lane state, and offers nothing when either read fails or the
+   brief's login doesn't resolve to its agent (rpc/current_agent_id),
+   because then RLS hides its own proposals and the read comes back
+   empty instead of failing.
    ============================================================ */
 
 import { invoiceTotals, money, type Blob } from "./digest.ts";
@@ -49,9 +53,23 @@ export function laneReady(status: number, body: unknown): boolean {
 
 /* The statuses that mean "this invoice already has its ask this week".
    A declined or failed reminder is offered again the next morning, as it
-   always was on the old lane. */
+   always was on the old lane. An expired spine reminder is held: it is
+   the old lane's unanswered row, which keeps status 'pending' (nothing
+   sweeps pending_actions) for the whole window, while op_propose sweeps
+   an ignored proposal to 'expired' a day later. */
 const PENDING_HOLDS = ["pending", "approved", "executed"];
-const SPINE_HOLDS = ["proposed", "approved", "executing", "executed"];
+const SPINE_HOLDS = ["proposed", "approved", "executing", "executed", "expired"];
+
+/** rpc/current_agent_id (0019) under the brief's login: may the 7-day
+    check trust the proposals read? Yes when it answers the brief's
+    agents id (a uuid), or 404 before 0019 (no spine rows can exist then).
+    A null (agent:brief disabled, or its login no longer linked) means RLS
+    hides the brief's own proposals and the read answers [] instead of
+    failing; that, an error or no answer offers no reminder that day. */
+export function agentKnown(status: number, body: unknown): boolean {
+  if (status === 404) return true;
+  return status === 200 && typeof body === "string" && UUID.test(body);
+}
 
 /** The dedupe key of one invoice — `<field project id>:<invoice no | id>`,
     the formula the old rows carry as params.invoiceKey and the spine rows
@@ -160,14 +178,19 @@ export function spineReminder(c: Candidate, mail: Mail): { ok: true; body: Blob 
 export type Filing =
   | { kind: "filed"; row: Blob }
   | { kind: "refused"; why: string }
+  | { kind: "blocked"; why: string }
   | { kind: "unsure"; why: string };
 
 /** How rpc/op_propose answered (status 0 = the request never got an
     answer). "filed": the proposals row came back (one object, or a
     one-element array). "refused": PostgREST said no with a 4xx — nothing
-    landed, so the old lane takes the reminder. "unsure": a 5xx, no answer,
-    or a 2xx without the row — the proposal may exist, so the reminder
-    waits for tomorrow rather than be asked twice. */
+    landed, so the old lane takes the reminder. "blocked": a 403 or a
+    42501 in the body — not allowed, which says the brief's spine identity
+    is broken (agent:brief disabled, unlinked or its grant gone), so its
+    7-day check can't be trusted either and nothing more is offered that
+    day, on either lane. "unsure": a 5xx, no answer, or a 2xx without the
+    row — the proposal may exist, so the reminder waits for tomorrow rather
+    than be asked twice. */
 export function filingOutcome(status: number, body: unknown): Filing {
   const one = Array.isArray(body) && body.length === 1 ? body[0] : body;
   const row = one && typeof one === "object" && !Array.isArray(one) ? one as Blob : null;
@@ -176,6 +199,7 @@ export function filingOutcome(status: number, body: unknown): Filing {
   }
   const detail = row ? [row.code, row.message].filter(Boolean).map(String).join(" ").slice(0, 200) : "";
   const why = `op_propose ${status ? `answered ${status}` : "got no answer"}${detail ? `: ${detail}` : ""}`;
+  if (status === 403 || (status >= 400 && String(row?.code ?? "") === "42501")) return { kind: "blocked", why };
   return status >= 400 && status < 500 ? { kind: "refused", why } : { kind: "unsure", why };
 }
 
@@ -190,8 +214,9 @@ export function yesLine(row: Blob, label: string, nowMs: number): { code: number
   return Number.isInteger(code) && code > 0 ? { code, label } : null;
 }
 
-/** rpc/sms_codes_in_use's answer (0019: every pending_actions code and every
-    live proposal's sms_code), or null when it didn't answer a list — before
+/** rpc/sms_codes_in_use's answer (0019: every pending_actions code, every
+    live proposal's sms_code, and every spine code answered in the last 48
+    hours, which a late YES may still mean), or null when it didn't answer a list — before
     0019 or in an outage — and the caller falls back to the pending codes. */
 export function codesInUseList(status: number, body: unknown): number[] | null {
   if (status < 200 || status >= 300 || !Array.isArray(body)) return null;

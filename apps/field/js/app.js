@@ -1825,7 +1825,8 @@ function narrativePage(project) {
       .then((m) => m.sendSetup(project).then((setup) => (setup ? { m, setup } : null)))
       .catch(() => null);
     try {
-      const draft = await draftAdjusterEmail(project);
+      // linked: the links go under the text right below, so the draft can say so
+      const draft = await draftAdjusterEmail(project, { linked: true });
       /* The claim links are appended DETERMINISTICALLY, never AI-written —
          a URL the model composed would be a guess. The packet link is the
          email's whole point, so a missing one publishes right here; the
@@ -1867,7 +1868,9 @@ function narrativePage(project) {
         location.href = `mailto:?subject=${encodeURIComponent(subj.value)}&body=${encodeURIComponent(bodyTa.value)}`;
       });
       const draftBox = h("div", { style: "border:1px dashed #b9c4d4;border-radius:12px;padding:12px;margin:10px 0;background:#f7f9fc" },
-        h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, "✉️ Adjuster email draft — the packet + photo links are included; review, then copy or open in your mail app:"),
+        h("div", { style: "font-weight:600;font-size:13px;margin-bottom:6px" }, shares.packet
+          ? "✉️ Adjuster email draft — the packet + photo links are included; review, then copy or open in your mail app:"
+          : "✉️ Adjuster email draft — the packet link didn't publish, so it isn't in here; draft again, or add the packet yourself before sending:"),
         subj, bodyTa,
         h("div", { style: "display:flex;gap:8px;margin-top:8px" }, copyBtn, mailBtn));
       emailPanel.replaceChildren(draftBox);

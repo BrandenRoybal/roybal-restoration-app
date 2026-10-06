@@ -45,7 +45,9 @@
  *   proposals (spine step 5), and answered by text instead of forwarded.
  *   A spine row is approved through rpc/op_proposal_approve as the owner's
  *   profile (p_via 'sms'), or declined through rpc/op_proposal_decline:
- *   the only two op_* doors this function opens.
+ *   the only two op_* doors this function opens. A spine approval by text
+ *   leaves the old lane's capture_events receipt (assist_action, captured_by
+ *   approve-by-text) for the Sunday report.
  *
  * Status (POST …/roybal-notify/status):   [F-034, High]
  *   Twilio's DELIVERY status callback — the answer to "did it arrive?".
@@ -127,9 +129,9 @@ import {
   parseApproval, replyText, validateBoardEdit, buildNextSubtasks, revGuard,
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, alaskaHour, expiresBeforeWindow, retryableStatus,
   decide, replyFor, parseDecideRequest, decideResponse, ownerGate, TryAgain,
-  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxWentOut, APPROVED_STATUSES,
-  spineLateText, spineVerdict, spineReply,
-  type DecideIO, type DecideAnswer, type Outcome, type Decision, type EmailLane,
+  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState, APPROVED_STATUSES,
+  spineLateText, spineOutranks, spineReceipt, spineVerdict, spineReply,
+  type DecideIO, type DecideAnswer, type Outcome, type Decision, type EmailLane, type OutboxState,
 } from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
 import { mapTwilioStatus, blockedStatuses } from "./status.mjs";
@@ -668,17 +670,32 @@ function decideIO(act: Record<string, unknown>, admin: Admin): DecideIO {
 
 /* ---------- the spine's side of a YES/NO (spine step 5) ----------
    One column list for the live read and the late lookup: what spineLabel
-   names a row by, and what an answer reads. */
-const SPINE_COLS = "id,sms_code,operation,input,edited_params,rationale,status,expires_at,approved_via,result,error,created_at,updated_at";
+   names a row by, what an answer reads, and when it was answered
+   (spineDecidedAt). */
+const SPINE_COLS = "id,sms_code,operation,input,edited_params,rationale,status,expires_at,approved_via,approved_at,result,error,created_at,updated_at";
 
-/* Has this proposal's email gone out? Read only to word an "already
-   approved" answer, so a read that fails says it goes out once, never that
-   it went. */
-async function spineWentOut(id: unknown, admin: Admin): Promise<boolean> {
+/* What became of this proposal's email: sent, dead (the worker gave up on
+   it, and why), or still waiting. Read only to word an "already approved"
+   answer, so a read that fails says it goes out once, never that it went
+   or that it won't. */
+async function spineOutbox(id: unknown, admin: Admin): Promise<OutboxState> {
   try {
-    const r = await admin(`outbox?proposal_id=eq.${encodeURIComponent(String(id))}&select=status&limit=5`, { method: "GET" });
-    return r.ok && outboxWentOut(await r.json().catch(() => null));
-  } catch (_) { return false; }
+    const r = await admin(`outbox?proposal_id=eq.${encodeURIComponent(String(id))}&select=status,error&limit=5`, { method: "GET" });
+    return outboxState(r.ok ? await r.json().catch(() => null) : null);
+  } catch (_) { return outboxState(null); }
+}
+
+/* The Sunday report's receipt for a spine ask approved by text (spineReceipt
+   in approve.ts): best-effort, so a write that fails is logged and the
+   reply goes out regardless. */
+async function writeSpineReceipt(row: Record<string, unknown>, admin: Admin): Promise<void> {
+  try {
+    const r = await admin("capture_events", {
+      method: "POST", headers: { Prefer: "return=minimal" },
+      body: JSON.stringify([spineReceipt(row, new Date().toISOString())]),
+    });
+    if (!r.ok) console.error("approve-by-text receipt not written", r.status, await r.text().catch(() => ""));
+  } catch (e) { console.error("approve-by-text receipt not written", e); }
 }
 
 /* Is the worker sending email right now? Read only after a text approved an
@@ -696,7 +713,10 @@ async function spineEmailLane(admin: Admin): Promise<EmailLane> {
    didn't run) instead of "that number doesn't match". This is the answer to
    a second YES, or a YES after the inbox approved it: it reads, and nothing
    runs. A lookup that fails leaves the matcher's own answer, which is still
-   true: no live row holds the number. */
+   true: no live row holds the number. So does a text-lane ask created on
+   the same number after the spine row was answered (spineOutranks): the
+   YES is about that one, whatever became of it, and the spine row's fate
+   would be the wrong ask's. */
 async function lateSpineAnswer(code: string, nowIso: string, admin: Admin): Promise<string | null> {
   try {
     const since = new Date(Date.parse(nowIso) - 48 * 3_600_000).toISOString();
@@ -707,9 +727,15 @@ async function lateSpineAnswer(code: string, nowIso: string, admin: Admin): Prom
     const rows = await r.json().catch(() => null);
     const row = Array.isArray(rows) ? (rows[0] as Record<string, unknown> | undefined) : undefined;
     if (!row) return null;
-    const went = opName(row.operation) === "email.send" && APPROVED_STATUSES.includes(String(row.status))
-      ? await spineWentOut(row.id, admin) : false;
-    return spineLateText(row, nowIso, went);
+    const t = await admin(
+      `pending_actions?code=eq.${Number(code)}&created_at=gte.${encodeURIComponent(since)}` +
+      `&select=id,code,status,created_at&order=created_at.desc&limit=1`, { method: "GET" });
+    if (!t.ok) return null;
+    const texts = await t.json().catch(() => null);
+    if (!Array.isArray(texts) || !spineOutranks(row, texts[0] as Record<string, unknown> | undefined)) return null;
+    const outbox = opName(row.operation) === "email.send" && APPROVED_STATUSES.includes(String(row.status))
+      ? await spineOutbox(row.id, admin) : undefined;
+    return spineLateText(row, nowIso, outbox);
   } catch (e) {
     console.error("late spine lookup failed", e);
     return null;
@@ -741,11 +767,15 @@ async function decideSpine(decision: Decision, row: Record<string, unknown>, wor
     const v = spineVerdict(decision, r.status, await r.json().catch(() => null));
     if (v.status === "not-recorded") return notRecorded(v.why);
     console.log(`approval by text: spine ${decision} #${row.sms_code} (${row.operation}) -> ${v.status}`);
-    const ctx: { lane?: EmailLane; wentOut?: boolean; nowIso: string } = { nowIso: new Date().toISOString() };
+    // this text's own approval leaves the Sunday report's receipt, written
+    // beside the lane read and never in the reply's way
+    const receipt = v.status === "approved" && v.row.status !== "failed" ? writeSpineReceipt(v.row, admin) : null;
+    const ctx: { lane?: EmailLane; outbox?: OutboxState; nowIso: string } = { nowIso: new Date().toISOString() };
     if ("row" in v && opName(v.row.operation) === "email.send") {
       if (v.status === "approved" && v.row.status !== "failed") ctx.lane = await spineEmailLane(admin);
-      if (v.status === "answered" && APPROVED_STATUSES.includes(String(v.row.status))) ctx.wentOut = await spineWentOut(v.row.id, admin);
+      if (v.status === "answered" && APPROVED_STATUSES.includes(String(v.row.status))) ctx.outbox = await spineOutbox(v.row.id, admin);
     }
+    await receipt;
     return spineReply(v, a, word, ctx);
   } catch (e) {
     return notRecorded(String((e as Error)?.message ?? e));

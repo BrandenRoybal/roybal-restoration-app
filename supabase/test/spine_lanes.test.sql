@@ -24,12 +24,17 @@
 --   4. An agent login reads the proposals it filed and no one else's; nobody
 --      else reads more than before; the brief's 7-day dedupe read finds its
 --      reminder by invoice key; it still reads no outbox or events.
---   5. sms_codes_in_use is every pending text-lane code plus every live
---      proposal code, distinct and ascending, '{}' when none.
---   6. A new proposal never lands on a code a pending text-lane ask holds,
---      including when moving it off lands on a live proposal's code (the
---      unique index and op_propose's retry finish the job), and its
---      proposal.created event names the code it ended up with.
+--   5. sms_codes_in_use is every pending text-lane code plus every code of
+--      a proposal that is live or was answered in the last 48 hours (by
+--      updated_at, exactly 48 hours included), in the caller's org only,
+--      distinct and ascending, '{}' when none. A proposal the owner just
+--      approved keeps its code there.
+--   6. A new proposal never lands on a code a pending text-lane ask holds, or
+--      one a text ask filed in the last 48 hours holds whatever became of it
+--      (exactly 48 hours included), including when moving it off lands on a
+--      live proposal's code (the unique index and op_propose's retry finish
+--      the job), and its proposal.created event names the code it ended up
+--      with.
 --   7. outbox_channel_ready is true only for a heartbeat under 10 minutes old
 --      that lists the channel in meta.channels as a string element.
 --   8. The owner's step-5 test at the SQL level: the brief files a reminder,
@@ -472,9 +477,15 @@ rollback to savepoint s;
 
 
 -- 5. sms_codes_in_use, from an empty code space (4 left only decided rows and
---    the two live ones above; clear those too)
+--    the two live ones above; clear those too). An answered proposal holds
+--    its code for 48 hours, and so does any text ask filed in that window
+--    against new proposals, so the real and earlier rows give theirs up and
+--    leave the window.
 update public.pending_actions set status = 'expired' where status = 'pending';
 update public.proposals set status = 'expired' where status = 'proposed';
+update public.proposals set sms_code = null where sms_code is not null;
+update public.pending_actions set created_at = now() - interval '49 hours'
+ where created_at >= now() - interval '48 hours';
 
 savepoint s;
 do $$
@@ -489,14 +500,40 @@ begin
   end if;
   reset role;
 
-  -- live proposals first (the trigger would move one that met a pending ask)
+  -- proposals first (the trigger would move one that met a pending ask): live,
+  -- stale, and answered ones either side of the 48-hour line. updated_at is
+  -- given here because an update would stamp it now().
   insert into public.proposals
-    (operation, action_type, proposed_by_kind, proposed_via, idempotency_key, status, sms_code, expires_at)
+    (operation, action_type, proposed_by_kind, proposed_via, idempotency_key, status, sms_code, expires_at,
+     approved_by_kind, approved_via, approved_at, created_at, updated_at, org_id)
   values
-    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:live',     'proposed', 15, now() + interval '1 hour'),
-    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:declined', 'declined', 16, now() + interval '1 hour'),
-    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:stale',    'proposed', 17, now() - interval '1 hour'),
-    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:nocode',   'proposed', null, now() + interval '1 hour');
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:live',     'proposed', 15, now() + interval '1 hour',
+     null, null, null, now(), now(), default),
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:declined', 'declined', 16, now() + interval '1 hour',
+     null, null, null, now() - interval '1 hour', now(), default),
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:stale',    'proposed', 17, now() - interval '1 hour',
+     null, null, null, now() - interval '25 hours', now() - interval '25 hours', default),
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:nocode',   'proposed', null, now() + interval '1 hour',
+     null, null, null, now(), now(), default),
+    -- approved and sent 47 hours ago: a late YES is still answered from it
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:sent47h',  'executed', 18, now() - interval '23 hours',
+     'human', 'inbox', now() - interval '47 hours', now() - interval '47 hours', now() - interval '47 hours', default),
+    -- declined exactly 48 hours ago: still inside notify's window (gte)
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:edge48h',  'declined', 19, now() - interval '24 hours',
+     null, null, null, now() - interval '49 hours', now() - interval '48 hours', default),
+    -- expired a second past 48 hours: free again
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:past48h',  'expired',  20, now() - interval '24 hours',
+     null, null, null, now() - interval '3 days', now() - interval '48 hours 1 second', default),
+    -- approved three days ago: free again
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:old',      'executed', 21, now() - interval '2 days',
+     'human', 'inbox', now() - interval '3 days', now() - interval '3 days', now() - interval '3 days', default),
+    -- approved 50 hours ago, its run finished 47 hours ago: notify reads
+    -- updated_at, so the code is still held
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:ranlate',  'executed', 22, now() - interval '26 hours',
+     'human', 'inbox', now() - interval '50 hours', now() - interval '50 hours', now() - interval '47 hours', default),
+    -- just declined in another org: not this caller's number space
+    ('sms.send@1', 'comms', 'human', 'ui', 'test:spine_lanes:codes:otherorg', 'declined', 23, now() + interval '1 hour',
+     null, null, null, now(), now(), '00000000-0000-0000-0000-00000000d1ff');
   if (select sms_code from public.proposals where idempotency_key = 'test:spine_lanes:codes:nocode') is not null then
     raise exception 'the trigger gave a code to a proposal that had none';
   end if;
@@ -513,19 +550,51 @@ begin
   set local role authenticated;
   set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d192", "role": "authenticated", "aud": "authenticated"}';
   got := public.sms_codes_in_use();
-  if got is distinct from '{11,12,15,17}'::integer[] then
-    raise exception 'sms_codes_in_use as the brief reads %, expected {11,12,15,17}', got;
+  if got is distinct from '{11,12,15,16,17,18,19,22}'::integer[] then
+    raise exception 'sms_codes_in_use as the brief reads %, expected {11,12,15,16,17,18,19,22}', got;
   end if;
 
   set local role service_role;
   set local request.jwt.claims = '{"role": "service_role"}';
-  if public.sms_codes_in_use() is distinct from '{11,12,15,17}'::integer[] then
+  if public.sms_codes_in_use() is distinct from '{11,12,15,16,17,18,19,22}'::integer[] then
     raise exception 'sms_codes_in_use as the service role reads %', public.sms_codes_in_use();
   end if;
   reset role;
 end
 $$;
 rollback to savepoint s;
+
+-- 5b. the review's case: the owner approves a reminder in the inbox, and its
+--     number stays out of the text-lane allocators while a late "YES n" for
+--     it is still answered from the spine
+savepoint s;
+set local role authenticated;
+set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d190", "role": "authenticated", "aud": "authenticated"}';
+do $$
+declare
+  p    public.proposals;
+  code integer;
+begin
+  p := public.op_propose('email.send',
+         '{"to": "billing@example.invalid", "subject": "SL reminder", "body": "A reminder."}'::jsonb,
+         '00000000-0000-0000-0000-00000000d1a1', null, 'email the SL-TEST-2 reminder to Spine Lanes Test',
+         '[]'::jsonb, 'ui', null, interval '24 hours');
+  code := p.sms_code;
+  if code is null or not (code = any (public.sms_codes_in_use())) then
+    raise exception 'a live proposal''s code % is not in use', code;
+  end if;
+
+  p := public.op_proposal_approve(p.id, 'inbox');
+  if p.status <> 'executed' or p.sms_code is distinct from code then
+    raise exception 'the inbox approval is % with code % (%)', p.status, p.sms_code, p.error;
+  end if;
+  if not (code = any (public.sms_codes_in_use())) then
+    raise exception 'a just-approved proposal''s code % was freed: %', code, public.sms_codes_in_use();
+  end if;
+end
+$$;
+rollback to savepoint s;
+reset role;
 
 
 -- 6. the trigger: a new proposal steps over pending text-lane codes
@@ -566,7 +635,7 @@ end
 $$;
 rollback to savepoint s;
 
--- 6b. a decided text ask does not hold its code
+-- 6b. a text ask decided and filed more than 48 hours ago does not hold its code
 savepoint s;
 do $$
 declare
@@ -576,7 +645,8 @@ declare
 begin
   n  := nextval('public.proposals_sms_code_seq');
   c1 := case when n >= 9999 then 1 else n + 1 end;
-  insert into public.pending_actions (code, kind, label, status) values (c1, 'sendText', 'sl decided', 'executed');
+  insert into public.pending_actions (code, kind, label, status, created_at, expires_at, executed_at)
+  values (c1, 'sendText', 'sl decided', 'executed', now() - interval '3 days', now() - interval '2 days', now() - interval '3 days');
 
   set local role authenticated;
   set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d190", "role": "authenticated", "aud": "authenticated"}';
@@ -590,7 +660,41 @@ end
 $$;
 rollback to savepoint s;
 
--- 6c. stepping over a text ask onto a live proposal's code: the unique index
+-- 6c. a text ask filed in the last 48 hours holds its code whatever became of
+--     it: roybal-notify still answers a late "YES n" for it, and a live
+--     proposal on that number would take the YES instead. Exactly 48 hours
+--     counts; a second more does not.
+savepoint s;
+do $$
+declare
+  n  integer;
+  c1 integer; c2 integer; c3 integer;
+  p  public.proposals;
+begin
+  n  := nextval('public.proposals_sms_code_seq');
+  c1 := case when n  >= 9999 then 1 else n  + 1 end;
+  c2 := case when c1 >= 9999 then 1 else c1 + 1 end;
+  c3 := case when c2 >= 9999 then 1 else c2 + 1 end;
+
+  insert into public.pending_actions (code, kind, label, status, created_at, expires_at, executed_at) values
+    (c1, 'boardEdit', 'sl ran 47h ago',     'executed', now() - interval '47 hours', now() - interval '23 hours', now() - interval '46 hours'),
+    (c2, 'sendText',  'sl declined at 48h', 'declined', now() - interval '48 hours', now() - interval '24 hours', null),
+    (c3, 'sendText',  'sl expired past 48h', 'expired', now() - interval '48 hours 1 second', now() - interval '24 hours', null);
+
+  set local role authenticated;
+  set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d190", "role": "authenticated", "aud": "authenticated"}';
+  p := public.op_propose('sms.send', '{"to": "+19075550114", "body": "sl recent"}'::jsonb);
+  reset role;
+
+  if p.sms_code is distinct from c3 then
+    raise exception 'text asks filed 47h and 48h ago on % and %, 48h+1s ago on %: the proposal took %, expected %',
+      c1, c2, c3, p.sms_code, c3;
+  end if;
+end
+$$;
+rollback to savepoint s;
+
+-- 6d. stepping over a text ask onto a live proposal's code: the unique index
 --     refuses it, op_propose retries with a fresh code, and the trigger checks
 --     that one too
 savepoint s;

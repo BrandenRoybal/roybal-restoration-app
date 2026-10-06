@@ -118,7 +118,9 @@ trying. A permanent refusal (bad number, bad address) is dead at once.
 - **Something gave up** (an outbox row or job went `dead`): the worker's
   heartbeat tick counts dead rows since the last watermark (a day before boot
   until the first text, so a restart hides nothing) and texts the owner once
-  per 24 h. Needs `OWNER_CELL` on the Fly app.
+  per 24 h, saying where to look: an approved email that gave up shows in
+  the admin app's Approvals tab, under Recently decided, as "Couldn't send"
+  with the reason. Needs `OWNER_CELL` on the Fly app.
 
 Both alarm states live in `app_settings` (`worker.liveness_alert`,
 `worker.alert_texted`, `worker.deadletter_alert`), so a restart never
@@ -151,7 +153,8 @@ Order matters: the database first, then the edge function, then the app.
    fly deploy --config services/worker/fly.toml --dockerfile services/worker/Dockerfile --ha=false .
    ```
    Email (optional, see the Gmail pair below) is one more command, from the
-   same repo root: `sh services/worker/set-gmail-secret.sh`.
+   same repo root on main: `sh services/worker/set-gmail-secret.sh`. It
+   deploys again as its last step.
    A value left as a placeholder (`< >`, quotes, spaces, `PASTE_`) stops the
    worker at boot with the variable's name in `fly logs`; fix it with
    `fly secrets set` (or `fly secrets unset` for an optional one) and it
@@ -164,15 +167,25 @@ Order matters: the database first, then the edge function, then the app.
      worker refuses both at boot.
    - **The Gmail pair** is the OAuth client the office Gmail connection was
      made with. Set it with `sh services/worker/set-gmail-secret.sh` from
-     the repo root: it reads the Client ID from `apps/field/js/config.js`
-     (`GMAIL_CLIENT_ID`, public, the same client), asks for the client
-     secret with echo off, refuses an empty value or one with spaces,
-     quotes, `< >`, `…` or `PASTE_` (anything the worker would refuse at
-     boot), asks again before using one that does not start with `GOCSPX-`,
-     and runs `fly secrets set -a roybal-worker GMAIL_CLIENT_ID=… GMAIL_CLIENT_SECRET=…`.
-     It never prints the secret. Fly then restarts the machine on its own
-     (no deploy; an app that was never deployed keeps the pair for its
-     first deploy). To see it took, `fly logs -a roybal-worker` shows a new
+     the repo root of an up-to-date main. It refuses to run anywhere else
+     (not the repo root, not on main, or a worker without the 48-hour email
+     limit, `staleEmailReason`) and says to run
+     `cd ~/roybal-restoration-app && git checkout main && git pull` first,
+     because its last step deploys this checkout. It reads the Client ID
+     from `apps/field/js/config.js` (`GMAIL_CLIENT_ID`, public, the same
+     client), asks for the client secret with echo off, refuses an empty
+     value or one with spaces, quotes, `< >`, `…` or `PASTE_` (anything the
+     worker would refuse at boot), and asks again before using one that
+     does not start with `GOCSPX-`. Then it stages the pair with
+     `fly secrets import --stage -a roybal-worker`, fed on stdin by a shell
+     builtin so the secret is never on a command line (nor printed), and
+     then runs the deploy above itself (with `-a roybal-worker`). Staged
+     means set without a restart: the image already on Fly may be older
+     than the 48-hour limit and the job filing of sent copies, and must not
+     come up with email on.
+     The deploy brings the new code and the pair live together; if it
+     fails, the pair stays staged and goes live with the next deploy (run
+     the line again). To see it took, `fly logs -a roybal-worker` shows a new
      `worker.start` line with `"email":true` and `"channels":["sms","email"]`
      and no `email.disabled` after it; `/healthz` and the heartbeat show the
      same channels, which is how the apps learn email sending is on. A
@@ -250,8 +263,10 @@ which re-applies `fly.toml`.
 `npm test` in this directory (no install; zero dependencies): the RFC 822
 builder, both adapters against a stubbed fetch (token refresh, adopt lookup,
 error verdicts, the email age limit and the job the sent copy files under),
-`set-gmail-secret.sh` against a stand-in `fly` (the exact pair it sets, the
-values it refuses, the secret never printed), the outbox lane's order of operations (adopt → send →
+`set-gmail-secret.sh` against a stand-in `fly` (the exact pair it stages on
+stdin and never on a command line, the deploy after it, the checkouts it
+refuses before fly is called and the values before anything is staged, the
+secret never printed), the outbox lane's order of operations (adopt → send →
 report with retries; a failed report leaves the row to expire; the active
 set is kept exact on every path), the queue lane, the heartbeat (which
 leases it names, and that the final one names none) and dead-letter text

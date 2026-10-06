@@ -223,5 +223,10 @@ export function buildBrief({ projects, boardJobs, boardBaseline = null, portalWa
     return { text: `${head}\nAll quiet: ${projects.length} jobs on file, nothing needs you this morning.`, flags: 0 };
   }
   const q = questions.slice(0, 3).map((s) => `❓ ${s}`);
-  return { text: [head, ...lines, ...q, ...offers].join("\n").slice(0, 1200), flags: lines.length + q.length + offers.length };
+  // the 1200-character cut never lands inside a YES line: one cut short
+  // can name a different live code ("YES 31" → "YES 3"), so an offer that
+  // doesn't fit whole is dropped; the rest is cut as it always was
+  let text = [head, ...lines, ...q].join("\n").slice(0, 1200);
+  for (const o of offers) if (text.length + 1 + o.length <= 1200) text += `\n${o}`;
+  return { text, flags: lines.length + q.length + offers.length };
 }

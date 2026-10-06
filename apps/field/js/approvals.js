@@ -25,7 +25,9 @@
             An email here goes out through the worker, which sends only
             while its heartbeat lists the "email" channel; the page
             reads the newest heartbeat so a card can say when sending
-            is off.
+            is off. A send the worker gave up on stays in Recently
+            decided for 48 hours from when it did (its outbox row's last
+            update), however old the approval, so "Couldn't send" is seen.
 
    The office page (apps/admin/js/approvals.js) reads both queues and
    the names around them; everything that decides what a card says
@@ -41,8 +43,8 @@
    load of an older cached copy after a deploy, paired with a newer
    apps/admin/js/approvals.js. So the page calls no export added after
    step 4; what step 5 added rides on calls it already made (fields on
-   the card, lookFrom's options, needs' answer), and an older copy just
-   leaves the new lines off.
+   the card, lookFrom's options, needs' and inbox's answers), and an
+   older copy just leaves the new lines off.
    ============================================================ */
 
 const TZ = "America/Anchorage";
@@ -207,11 +209,13 @@ function refsOf(v) {
 
 /* What a spine email says while the worker isn't sending email, in the
    words roybal-notify texts back when a YES lands in that state ("It's
-   queued, but email sending is off on the worker, so it waits until
-   that's back."). */
-export const LANE_OFF_WAITING = "Email sending is off on the worker right now: approving queues this, and it waits until that's back.";
-export const LANE_OFF_QUEUED = "Queued, but email sending is off on the worker, so it waits until that's back";
-export const LANE_OFF_FAILED = "Send failed, and email sending is off on the worker, so it waits until that's back";
+   queued, but email sending is off on the worker: it waits up to 48 hours
+   for that to come back, then it isn't sent."). The 48 is the worker's
+   EMAIL_MAX_AGE_HOURS default: an email row older than that when it would
+   first go out is marked dead, not sent, so no line here promises more. */
+export const LANE_OFF_WAITING = "Email sending is off on the worker right now: approving queues this, and it waits up to 48 hours for sending to come back, then it isn't sent.";
+export const LANE_OFF_QUEUED = "Queued, but email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent";
+export const LANE_OFF_FAILED = "Send failed, and email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent";
 
 /** One pending_actions row → a card. */
 export function fromPending(row, look = {}) {
@@ -313,9 +317,25 @@ export const isLive = (c, now = Date.now()) => c.status === openStatus(c) && ms(
 export const isExpired = (c, now = Date.now()) =>
   (c.status === "expired" || (c.status === openStatus(c) && ms(c.expiresAt) <= now)) &&
   ms(c.expiresAt) > now - EXPIRED_MS;
-/** Answered within the last 48 hours. */
+/* When the worker gave up on a spine send (its outbox row went 'dead': the
+   row's last update), else NaN. Only a string time counts: this runs over
+   every card, outside cardsOf's guard. */
+function diedAt(c) {
+  const o = c.lane === "spine" && c.status === "executed" ? obj(c.outbox) : {};
+  return o.status === "dead" && typeof o.updated_at === "string" ? ms(o.updated_at) : NaN;
+}
+/* The time a card counts as recent from: its answer, or when its send died
+   if that came later. The worker can give up on an email long after the
+   approval (it waited past its 48 hours with sending off, then the worker
+   came back), and "Couldn't send" must still be seen then. */
+function recentAt(c) {
+  const at = ms(c.decidedAt), died = diedAt(c);
+  return Number.isFinite(died) && !(died < at) ? died : at;
+}
+/** Answered within the last 48 hours, or a spine send whose outbox row
+    died within them, however long ago it was answered. */
 export const isRecent = (c, now = Date.now()) =>
-  DECIDED[c.lane].includes(c.status) && ms(c.decidedAt) >= now - RECENT_MS;
+  DECIDED[c.lane].includes(c.status) && recentAt(c) >= now - RECENT_MS;
 
 /* A row that won't make a card (a field of a shape no producer writes, in
    an ask filed by hand) is left off with a console warning: it never takes
@@ -338,8 +358,11 @@ function cardsOf(rows, make, lane, look, now, skip) {
 }
 
 /** Both queues' rows → { waiting (soonest expiry first), recent (newest
-    answer first), expired (a count), skipped ({text, spine}: rows that may
-    be waiting but wouldn't make a card) }. */
+    answer first; a send that died since counts from then), expired (a
+    count), skipped ({text, spine}: rows that may be waiting but wouldn't
+    make a card), older (the spine sends answered before the 48 hours, not
+    on recent: one whose outbox row died since comes back to it, so the page
+    reads their outbox rows, and the names they'd show with, too) }. */
 export function inbox(pendingRows, proposalRows, look = {}, now = Date.now()) {
   const skipped = { text: 0, spine: 0 };
   const cards = [...cardsOf(pendingRows, fromPending, "text", look, now, skipped),
@@ -347,8 +370,10 @@ export function inbox(pendingRows, proposalRows, look = {}, now = Date.now()) {
   const waiting = unclash(cards.filter((c) => isLive(c, now)))
     .sort((a, b) => ms(a.expiresAt) - ms(b.expiresAt) || ms(a.createdAt) - ms(b.createdAt));
   const recent = cards.filter((c) => isRecent(c, now))
-    .sort((a, b) => ms(b.decidedAt) - ms(a.decidedAt));
-  return { waiting, recent, expired: cards.filter((c) => isExpired(c, now)).length, skipped };
+    .sort((a, b) => recentAt(b) - recentAt(a));
+  const older = cards.filter((c) => c.lane === "spine" && c.status === "executed" &&
+    (c.kind === "email" || c.kind === "text") && !isRecent(c, now));
+  return { waiting, recent, expired: cards.filter((c) => isExpired(c, now)).length, skipped, older };
 }
 /* One number live on both queues at once can't be answered by text:
    roybal-notify reads the same live rows, answers "code-clash" and runs

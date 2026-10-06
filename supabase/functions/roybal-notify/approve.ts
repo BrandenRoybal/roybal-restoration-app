@@ -528,36 +528,94 @@ export function emailLane(status: number, body: unknown): EmailLane {
   return body === true ? "ready" : body === false ? "off" : "unknown";
 }
 
-/** outbox?proposal_id=eq.<id>&select=status: has this email gone out? A read
-    that failed or won't parse is "not known to have", so the text says it
-    goes out once rather than that it went. */
-export const outboxWentOut = (rows: unknown) =>
-  Array.isArray(rows) && rows.some((r) => ["sent", "delivered"].includes(String((r as Blob)?.status ?? "")));
+/** outbox?proposal_id=eq.<id>&select=status,error: what became of this
+    email. sent = the worker sent it (sent or delivered); dead = the worker
+    gave up on it for good (a permanent Gmail refusal, too many tries, or
+    past EMAIL_MAX_AGE_HOURS), `error` saying why; waiting = anything else
+    (pending, sending, failed and still retrying). A read that failed or
+    won't parse is waiting too, so the text says it goes out once rather
+    than that it went, or that it never will. */
+export type OutboxState = { state: "sent" } | { state: "dead"; error: string } | { state: "waiting" };
+const WAITING: OutboxState = { state: "waiting" };
+
+/** outbox.error as a reply quotes it: trimmed, 160 characters, its closing
+    period dropped (the sentence adds its own); nothing there = "it gave up". */
+const deadReason = (e: unknown) =>
+  clipTo(String(e ?? "").trim(), 160).trim().replace(/\.+$/, "").trim() || "it gave up";
+
+export function outboxState(rows: unknown): OutboxState {
+  if (!Array.isArray(rows)) return WAITING;
+  const st = (r: unknown) => String((r as Blob)?.status ?? "");
+  if (rows.some((r) => ["sent", "delivered"].includes(st(r)))) return { state: "sent" };
+  const dead = rows.find((r) => st(r) === "dead") as Blob | undefined;
+  return dead ? { state: "dead", error: deadReason(dead.error) } : WAITING;
+}
 
 /** Statuses a spine row reaches once someone approved it, before or after it ran. */
 export const APPROVED_STATUSES = ["approved", "executing", "executed"];
 
 const errText = (e: unknown) => clipTo(String(e || "unknown error"), 200);
-const EXPIRED_TEXT = "That one expired — nothing was sent.";
-const DECLINED_TEXT = "That one was declined — nothing was sent.";
-const alreadyApproved = (label: string, wentOut: boolean) =>
-  `That one was already approved — ${label}. ${wentOut ? "It went out once." : "It goes out once."}`;
+const expiredText = (label: string) => `That one expired — ${label}. Nothing was sent.`;
+const declinedText = (label: string) => `That one was declined — ${label}. Nothing was sent.`;
+const alreadyApproved = (label: string, outbox: OutboxState = WAITING) =>
+  outbox.state === "dead"
+    ? `That one was approved, but the email couldn't be sent: ${outbox.error}. Nothing went out.`
+    : `That one was already approved — ${label}. ${outbox.state === "sent" ? "It went out once." : "It goes out once."}`;
 
 /** A spine row someone already answered: the late YES (no live row holds the
     number, but a proposal with that sms_code was answered in the last 48h)
-    and the YES that lost the row lock to an inbox tap. `wentOut` = its email's
-    outbox row is sent or delivered. null = nothing to say about it (still
-    live, or superseded), and the caller's own answer stands. */
-export function spineLateText(row: Blob, nowIso: string, wentOut = false): string | null {
+    and the YES that lost the row lock to an inbox tap. `outbox` = its email's
+    outbox state (outboxState), read only for an approved email. null =
+    nothing to say about it (still live, or superseded), and the caller's own
+    answer stands. */
+export function spineLateText(row: Blob, nowIso: string, outbox: OutboxState = WAITING): string | null {
   const s = String(row?.status ?? "");
   const label = spineLabel(row);
-  if (APPROVED_STATUSES.includes(s)) return alreadyApproved(label, wentOut && opName(row.operation) === "email.send");
-  if (s === "declined") return DECLINED_TEXT;
+  if (APPROVED_STATUSES.includes(s)) return alreadyApproved(label, opName(row.operation) === "email.send" ? outbox : WAITING);
+  if (s === "declined") return declinedText(label);
   // a stale row stays 'proposed' until the next op_propose sweeps it
   const lapsed = s === "proposed" && Date.parse(String(row?.expires_at ?? "")) <= Date.parse(nowIso);
-  if (s === "expired" || lapsed) return EXPIRED_TEXT;
+  if (s === "expired" || lapsed) return expiredText(label);
   if (s === "failed") return `That one was approved, but it didn't run: ${errText(row.error)}`;
   return null;
+}
+
+/** When a spine row was answered, as an instant: its approval, else the
+    moment it lapsed (a stale row stays 'proposed' until a sweep), else its
+    last update (the decline, or the sweep). NaN when none of them parses. */
+export function spineDecidedAt(row: Blob): number {
+  const at = row?.approved_at ?? (row?.status === "proposed" ? row?.expires_at : row?.updated_at);
+  return Date.parse(String(at ?? ""));
+}
+
+/** Does a late spine answer still speak for this number? `text` = the
+    newest pending_actions row created on the same code in the same 48h
+    (pending_actions?code=eq.N&created_at=gte.…, newest first), or none.
+    The two number spaces can hand out one number in turn: a spine ask
+    answered at 8am frees its code, and a text-lane ask minted on it at 2pm
+    is what a YES on it means after that. So the spine answers only when it
+    was decided after that row was created, or there is no such row; a time
+    that won't parse on either side leaves the matcher's own text. */
+export function spineOutranks(row: Blob, text: Blob | null | undefined): boolean {
+  if (!text) return true;
+  const decided = spineDecidedAt(row);
+  const created = Date.parse(String(text.created_at ?? ""));
+  return Number.isFinite(decided) && Number.isFinite(created) && decided > created;
+}
+
+/** The receipt a spine approval by text leaves in capture_events, the same
+    one the old lane's YES left (gmail-proxy's email_send row, captured_by
+    approve-by-text): roybal-brief's Sunday report (weekly.ts) counts
+    assist_action and email_send rows captured_by approve-by-text as "actions
+    approved by text from the truck". `nowIso` stamps processed_at, the
+    column that report's read filters on. */
+export function spineReceipt(row: Blob, nowIso: string): Blob {
+  return {
+    source_type: "assist_action", form_key: opName(row?.operation), captured_by: "approve-by-text",
+    status: "extracted", processed_at: nowIso,
+    raw_payload: { proposal_id: row?.id ?? null, via: "sms" },
+    result: { status: row?.status ?? null },
+  };
 }
 
 /** What op_proposal_approve / op_proposal_decline answered, read as one
@@ -600,12 +658,14 @@ export function spineVerdict(decision: Decision, status: number, body: unknown):
 /** The text back for a spine decision. `a` = { code: sms_code, label:
     spineLabel(row) } of the row the YES matched; `word` = "YES" or "NO", for
     the not-recorded text. `lane` = the email lane, read only after this text
-    approved an email; `wentOut` = its outbox row, read only for an email
+    approved an email; `outbox` = its outbox state, read only for an email
     someone else approved; `nowIso` = the reply's clock. "Approved" never
-    says "Done" for a message: approving queues it, and the worker sends it. */
+    says "Done" for a message: approving queues it, and the worker sends it.
+    With the lane off it says how long it waits: the worker marks an email
+    that waited past EMAIL_MAX_AGE_HOURS (48) dead, never sent late. */
 export function spineReply(
   v: SpineVerdict, a: Blob, word: string,
-  ctx: { lane?: EmailLane; wentOut?: boolean; nowIso?: string } = {},
+  ctx: { lane?: EmailLane; outbox?: OutboxState; nowIso?: string } = {},
 ): string {
   const label = a?.label || "this ask";
   switch (v.status) {
@@ -615,7 +675,8 @@ export function spineReply(
       const op = opName(r.operation);
       if (op === "email.send") {
         if (ctx.lane === "ready") return `✅ Approved — ${label}. It's queued and goes out in a minute.`;
-        if (ctx.lane === "off") return `✅ Approved — ${label}. It's queued, but email sending is off on the worker, so it waits until that's back.`;
+        if (ctx.lane === "off") return `✅ Approved — ${label}. It's queued, but email sending is off on the worker: ` +
+          `it waits up to 48 hours for that to come back, then it isn't sent.`;
         return `✅ Approved — ${label}. It's queued to send.`;
       }
       if (op === "sms.send") return `✅ Approved — ${label}. It's queued to send.`;
@@ -623,11 +684,11 @@ export function spineReply(
       // a worker-runtime operation (none in the catalog yet) waits in jobs_queue
       return `✅ Approved — ${label}. It's queued to run.`;
     }
-    case "answered": return spineLateText(v.row, ctx.nowIso ?? new Date().toISOString(), ctx.wentOut) ?? alreadyApproved(label, false);
+    case "answered": return spineLateText(v.row, ctx.nowIso ?? new Date().toISOString(), ctx.outbox) ?? alreadyApproved(label);
     case "cancelled": return replyText("cancelled", { label })!;
     case "already-answered": return replyText("already-answered")!;
-    case "expired": return EXPIRED_TEXT;
-    case "declined": return DECLINED_TEXT;
+    case "expired": return expiredText(label);
+    case "declined": return declinedText(label);
     // superseded while it waited: replaced, never run
     case "closed": return "That one was already answered — nothing was sent.";
     case "not-recorded": return replyText("not-recorded", a, word)!;

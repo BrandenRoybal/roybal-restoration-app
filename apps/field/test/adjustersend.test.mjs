@@ -9,6 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
+import { readFileSync } from "node:fs";
 
 const dom = new JSDOM(`<!DOCTYPE html><html><body><div id="toast" hidden></div></body></html>`, { url: "http://localhost/" });
 const { window } = dom;
@@ -33,6 +34,7 @@ const resetNet = () => Object.assign(net, {
   emails: () => [200, []],
   open: () => [200, []],
   propose: null, approve: null, decline: null,
+  office: () => [200, { ok: true, draft: { subject: "Claim CLM-77", body: "Hello" } }],
 });
 resetNet();
 const resp = (status, body) => ({
@@ -53,6 +55,7 @@ globalThis.fetch = async (url, opts = {}) => {
     "/rest/v1/rpc/op_propose": net.propose,
     "/rest/v1/rpc/op_proposal_approve": net.approve,
     "/rest/v1/rpc/op_proposal_decline": net.decline,
+    "/functions/v1/roybal-ai-office": net.office,
   }[u.pathname];
   if (!route) throw new Error("unexpected request " + u.pathname + u.search);
   const out = await route(body, u);
@@ -113,6 +116,32 @@ test("addressIn finds the address inside free text; bareAddress reads a From hea
   assert.equal(S.bareAddress("Jane <Jane@Pollen.com>"), "jane@pollen.com");
   assert.equal(S.bareAddress(" JANE@pollen.com "), "jane@pollen.com");
   assert.equal(S.bareAddress(""), "");
+});
+
+test("an apostrophe (or any atext character) in the local part keeps the address whole", () => {
+  // gmail-proxy stores from_addr bare and keeps the apostrophe
+  assert.equal(S.bareAddress("kelly.o'brien@carrier.com"), "kelly.o'brien@carrier.com");
+  assert.equal(S.bareAddress(" Kelly.O'Brien@Carrier.com "), "kelly.o'brien@carrier.com");
+  assert.equal(S.bareAddress("Kelly O'Brien <kelly.o'brien@carrier.com>"), "kelly.o'brien@carrier.com");
+  assert.equal(S.addressIn("Kelly O'Brien (kelly.o'brien@carrier.com), 907-555-1212"), "kelly.o'brien@carrier.com");
+  assert.equal(S.addressIn("a{b}c|d/e=f?g^h_i`j~k!#$%&*+-@x.com"), "a{b}c|d/e=f?g^h_i`j~k!#$%&*+-@x.com");
+  // only quotes around it go
+  assert.equal(S.addressIn("send to 'kelly.o'brien@carrier.com'."), "kelly.o'brien@carrier.com");
+  assert.equal(S.addressIn("“jane@x.com”"), "jane@x.com");
+  assert.equal(S.bareAddress("'kelly.o'brien@carrier.com'"), "kelly.o'brien@carrier.com");
+  // separators still end it
+  assert.equal(S.addressIn("O'Brien:kelly@x.com"), "kelly@x.com");
+  assert.equal(S.bareAddress("jane@x.com, bob@y.com"), "jane@x.com");
+  assert.equal(S.bareAddress("(jane@x.com)"), "jane@x.com");
+
+  const mail = [{ from_addr: "kelly.o'brien@carrier.com", matched_by: "claim", received_at: "2026-10-01T20:00:00Z" }];
+  assert.deepEqual(S.prefillTo(project, mail), { to: "kelly.o'brien@carrier.com", source: "claim", at: "2026-10-01T20:00:00Z" }, "from an email row");
+  assert.deepEqual(S.prefillTo({ ...project, adjuster: "Kelly O'Brien, kelly.o'brien@carrier.com, 907-555-1212" }, []),
+    { to: "kelly.o'brien@carrier.com", source: "adjuster", at: "" }, "from the Adjuster field");
+  assert.deepEqual(S.prefillTo({ ...project, adjuster: "kelly.o'brien@carrier.com" }, []),
+    { to: "kelly.o'brien@carrier.com", source: "adjuster", at: "" }, "the Adjuster field holding just the address");
+  assert.deepEqual(S.prefillTo({ ...project, email: "Kelly.O'Brien@carrier.com" }, mail).source, "adjuster", "still the customer's when it's hers");
+  assert.ok(S.checkAddress("kelly.o'brien@carrier.com").ok);
 });
 
 test("the To prefill: claim-matched mail first, never the customer's, then the Adjuster field, else blank", () => {
@@ -243,7 +272,7 @@ test("rowState and the lines the section shows", () => {
 
   const done = row({ status: "executed", approved_via: "chip" });
   assert.equal(S.approvedLine(done, true), "✅ Approved — the email to adj@carrier.com is queued and goes out in a minute.");
-  assert.equal(S.approvedLine(done, false), "✅ Approved — the email to adj@carrier.com is queued, but email sending is off on the worker, so it waits until that's back.");
+  assert.equal(S.approvedLine(done, false), "✅ Approved — the email to adj@carrier.com. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.");
   assert.equal(S.approvedLine(done, null), "✅ Approved — the email to adj@carrier.com is queued to send.");
   assert.equal(S.approvedLine({ ...done, approved_via: "sms" }, true), "That one was already approved by text — it goes out once.");
   assert.equal(S.approvedLine({ ...done, approved_via: "inbox" }, true), "That one was already approved in the Approvals tab — it goes out once.");
@@ -350,6 +379,25 @@ test("the section: To prefilled with where it came from, and Send for approval",
   s.el.remove();
 });
 
+test("no packet link, no Send for approval: just why, and nothing asked", async () => {
+  resetNet(); await login("owner5b@x.com");
+  for (const links of [{ photos: LINKS.photos }, {}, null, { packet: "javascript:alert(1)", photos: LINKS.photos }]) {
+    const subj = document.createElement("input");
+    const bodyTa = document.createElement("textarea");
+    subj.value = "Claim CLM-77"; bodyTa.value = "Hello Bob,\n\nClaim documentation online:\n• All job photos, full resolution: " + LINKS.photos + "\n";
+    const el = S.sendSection({ project, subj, bodyTa, setup: { to: "adj@carrier.com", source: "claim" }, links });
+    document.body.append(el);
+    assert.equal(el.textContent, S.NO_PACKET, JSON.stringify(links));
+    assert.match(S.NO_PACKET, /^The packet link didn't publish, so this email can't go for approval/);
+    assert.match(S.NO_PACKET, /draft it again .*or use Copy\.$/);
+    assert.equal(el.querySelectorAll("button, input").length, 0, "no To field, no file button");
+    assert.deepEqual([subj.readOnly, bodyTa.readOnly], [false, false]);
+    el.remove();
+  }
+  await sleep(10);
+  assert.deepEqual(calls, []);
+});
+
 test("a bad address or an empty draft files nothing", async () => {
   resetNet(); await login("owner6@x.com");
   const s = mount({ to: "", source: "" });
@@ -431,7 +479,7 @@ test("Approve on one he already approved by text says so; the lane off says it w
   await until(() => s.btn("Approve and send"));
   s.btn("Approve and send").click();
   await answered(s);
-  assert.equal(s.note().textContent, "✅ Approved — the email to adj@carrier.com is queued, but email sending is off on the worker, so it waits until that's back.");
+  assert.equal(s.note().textContent, "✅ Approved — the email to adj@carrier.com. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.");
   s.el.remove();
 });
 
@@ -579,4 +627,19 @@ test("a double tap files once", async () => {
   await until(() => s.btn("Approve and send"));
   assert.equal(rpcCalls("op_propose").length, 1);
   s.el.remove();
+});
+
+/* ================== the draft says where the links are ================== */
+
+test("the narrative page asks for a draft with linked:true; without it the flag isn't sent", async () => {
+  resetNet(); await login("owner19@x.com");
+  const { draftAdjusterEmail } = await import("../js/officeai.js");
+  assert.deepEqual(await draftAdjusterEmail(project, { linked: true }), { subject: "Claim CLM-77", body: "Hello" });
+  assert.deepEqual(await draftAdjusterEmail(project), { subject: "Claim CLM-77", body: "Hello" });
+  const sent = calls.filter((c) => c.path === "/functions/v1/roybal-ai-office").map((c) => c.body);
+  assert.deepEqual(sent.map((b) => [b.action, b.linked]), [["adjusterEmail", true], ["adjusterEmail", undefined]]);
+  assert.ok(!("linked" in sent[1]), "an unlinked caller sends no flag at all");
+  // app.js appends the packet/photo links under the draft, so it's the linked caller
+  const app = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+  assert.deepEqual(app.match(/draftAdjusterEmail\([^)]*\)/g), ["draftAdjusterEmail(project, { linked: true })"]);
 });

@@ -1,9 +1,18 @@
 #!/bin/sh
-# Sets the worker's Gmail pair on Fly (GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET
-# on the roybal-worker app) in one command, so nothing from the README can be
-# pasted as a placeholder. Run it from the repo root on the Mac:
+# Puts the worker's Gmail pair (GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET on the
+# roybal-worker app) live on Fly in one command, so nothing from the README
+# can be pasted as a placeholder, and only together with worker code that
+# has the 48-hour email limit. Run it on the Mac from the repo root of an
+# up-to-date main:
 #
+#   cd ~/roybal-restoration-app && git checkout main && git pull
 #   sh services/worker/set-gmail-secret.sh
+#
+# It stages the pair (fly secrets import --stage: set, no restart) and then
+# deploys this checkout, so the image already on Fly never restarts with
+# email on. An image older than staleEmailReason (adapters/email.mjs) would
+# send an approved email days late and file its sent copy under no job, so
+# it refuses unless this is the root of a checkout on main that has it.
 #
 # The client id is public and already in the field app's config
 # (apps/field/js/config.js, GMAIL_CLIENT_ID), so it is read from there and
@@ -13,20 +22,39 @@
 # made with "Add secret" in Google Cloud. Never reset the existing one;
 # gmail-proxy refreshes the office connection with it.
 #
-# The secret is typed with echo off and never printed. Every value the
-# worker would refuse at boot (config.mjs: < >, quotes, spaces, … or PASTE_)
-# is refused here first: a refused value would stop the worker at boot and
-# take the text lane down with it.
+# The secret is typed with echo off, never printed, and never on a command
+# line (where ps would show it): printf, a shell builtin, hands the pair to
+# fly on stdin as NAME=VALUE lines. Every value the worker would refuse at
+# boot (config.mjs: < >, quotes, spaces, … or PASTE_) is refused here first:
+# a refused value would stop the worker at boot and take the text lane down
+# with it.
 
 set -eu
 
 APP=roybal-worker
 CONFIG=apps/field/js/config.js
+EMAIL_ADAPTER=services/worker/adapters/email.mjs
+FLY_TOML=services/worker/fly.toml
+DOCKERFILE=services/worker/Dockerfile
+UPDATE='cd ~/roybal-restoration-app && git checkout main && git pull'
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'set-gmail-secret: %s\n' "$*" >&2; exit 1; }
+not_this_checkout() { die "$1. Run $UPDATE first, then run this again. Nothing was changed."; }
 
-[ -f "$CONFIG" ] || die "run this from the repo root (cd ~/roybal-restoration-app first) so $CONFIG is found. Nothing was changed."
+# The deploy below builds from this directory, so check it before fly is
+# touched: the repo root, on main, with the worker's 48-hour email limit.
+[ -f "$CONFIG" ] || not_this_checkout "this is not the repo root ($CONFIG is not here)"
+command -v git >/dev/null 2>&1 \
+  || die "git is not installed, so the checkout the deploy builds from cannot be checked. Nothing was changed."
+TOP=$(git rev-parse --show-toplevel 2>/dev/null) || TOP=
+[ -n "$TOP" ] && [ "$(cd "$TOP" && pwd -P)" = "$(pwd -P)" ] \
+  || not_this_checkout "this is not the root of the git checkout"
+BRANCH=$(git symbolic-ref --short -q HEAD 2>/dev/null) || BRANCH=
+[ "$BRANCH" = main ] \
+  || not_this_checkout "this checkout is on ${BRANCH:-no branch}, not main, and the deploy builds from it"
+[ -f "$FLY_TOML" ] && [ -f "$DOCKERFILE" ] && grep -q staleEmailReason "$EMAIL_ADAPTER" 2>/dev/null \
+  || not_this_checkout "this checkout's worker predates the 48-hour email limit, so deploying it would send late emails"
 
 if command -v fly >/dev/null 2>&1; then FLY=fly
 elif command -v flyctl >/dev/null 2>&1; then FLY=flyctl
@@ -36,13 +64,16 @@ fi
 # Before the secret is typed, so it is never pasted only to be thrown away.
 "$FLY" auth whoami >/dev/null 2>&1 \
   || die "fly is not logged in (or cannot reach Fly). Run fly auth login, then run this again. Nothing was changed."
+# A fly that cannot stage would refuse the flag anyway; say so up front.
+"$FLY" secrets import --help 2>&1 | grep -q -- '--stage' \
+  || die "this fly is too old to stage secrets (fly secrets import has no --stage). Run brew upgrade flyctl, then run this again. Nothing was changed."
 
 CLIENT_ID=$(sed -n 's/^export const GMAIL_CLIENT_ID = "\([^"]*\)";.*$/\1/p' "$CONFIG" | head -n 1)
 [ -n "$CLIENT_ID" ] || die "could not find GMAIL_CLIENT_ID in $CONFIG. Nothing was changed."
 printf '%s' "$CLIENT_ID" | grep -Eq '^[0-9]+-[A-Za-z0-9_]+\.apps\.googleusercontent\.com$' \
   || die "GMAIL_CLIENT_ID in $CONFIG does not look like a Google OAuth client id. Nothing was changed."
 
-say "This sets the Gmail pair on the Fly app $APP."
+say "This sets the Gmail pair on the Fly app $APP and then deploys the worker from this checkout."
 say "Client id (public, from $CONFIG): $CLIENT_ID"
 say "The client secret: use the one in the client_secret_….json saved when the client was made,"
 say "or make a second one in Google Cloud (that OAuth client, Client secrets, Add secret)."
@@ -98,18 +129,27 @@ case "$SECRET" in
     ;;
 esac
 
-say "Setting GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET (hidden) on $APP..."
-"$FLY" secrets set -a "$APP" "GMAIL_CLIENT_ID=$CLIENT_ID" "GMAIL_CLIENT_SECRET=$SECRET" \
+say "Staging GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET (hidden) on $APP, without a restart..."
+printf 'GMAIL_CLIENT_ID=%s\nGMAIL_CLIENT_SECRET=%s\n' "$CLIENT_ID" "$SECRET" \
+  | "$FLY" secrets import --stage -a "$APP" \
   || die "fly did not take it (its message is above). Not logged in? Run fly auth login, then run this again."
 SECRET=
 
+DEPLOY="$FLY deploy -a $APP --config $FLY_TOML --dockerfile $DOCKERFILE --ha=false ."
 say ""
-say "Done. What happens next:"
-say "- Fly restarts the worker machine on its own within a minute or two; no deploy is needed."
-say "- To see it took: fly logs -a $APP shows a new worker.start line with \"email\":true and"
-say "  \"channels\":[\"sms\",\"email\"], and no email.disabled line after it. Or open"
-say "  https://$APP.fly.dev/healthz and look for \"channels\":[\"sms\",\"email\"]. The worker's"
-say "  heartbeat reports the same channels within 30 seconds, which is how the apps learn email is on."
+say "Deploying the worker from this checkout, so the pair goes live together with the"
+say "48-hour email limit. This takes a few minutes; fly prints its progress:"
+say "  $DEPLOY"
+"$FLY" deploy -a "$APP" --config "$FLY_TOML" --dockerfile "$DOCKERFILE" --ha=false . \
+  || die "the deploy did not finish (its message is above). The pair is staged on $APP, not live yet; it goes live with the next deploy. Run it again from here: $DEPLOY"
+
+say ""
+say "Done. What to expect:"
+say "- Fly now runs this checkout's worker with email on. To see it took: fly logs -a $APP"
+say "  shows a new worker.start line with \"email\":true and \"channels\":[\"sms\",\"email\"],"
+say "  and no email.disabled line after it. Or open https://$APP.fly.dev/healthz and look for"
+say "  \"channels\":[\"sms\",\"email\"]. The worker's heartbeat reports the same channels within"
+say "  30 seconds, which is how the apps learn email is on."
 say "- Approved emails waiting in line go out now. Any that waited more than EMAIL_MAX_AGE_HOURS"
 say "  (48 by default) are marked dead instead of going out late; the dead-letter text counts them."
 say "- A wrong secret still boots. It shows up later in fly logs as outbox.failed with"

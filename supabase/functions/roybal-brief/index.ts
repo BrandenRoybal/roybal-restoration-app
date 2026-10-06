@@ -38,8 +38,12 @@
  *     email lane is off, op_propose refuses (a 4xx), the address or the
  *     job id won't fit the spine, or REMINDERS_LANE=text.
  *   A spine filing that failed on the network or with a 5xx may have
- *   landed anyway, so that reminder waits for tomorrow. The 7-day
- *   per-invoice check reads both queues and offers nothing if it can't.
+ *   landed anyway, so that reminder waits for tomorrow; one refused as not
+ *   allowed (42501) stops the reminders for the day. The 7-day
+ *   per-invoice check reads both queues and offers nothing if it can't,
+ *   or if the brief's login doesn't resolve to agent:brief
+ *   (rpc/current_agent_id), which would leave it blind to its own
+ *   proposals.
  *   REMINDERS_LANE (optional secret): unset or "spine" = the above;
  *   "text" = always the old lane (the rollback); anything else = "text".
  *
@@ -57,7 +61,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { buildBrief, reminderEmail, type Blob } from "./digest.ts";
 import {
-  remindersLane, laneReady, remindedKeys, reminderCandidates, reminderLabel, pendingReminderRow,
+  remindersLane, laneReady, agentKnown, remindedKeys, reminderCandidates, reminderLabel, pendingReminderRow,
   spineReminder, filingOutcome, yesLine, codesInUseList, codeTaker,
 } from "./reminders.ts";
 import { buildWeekly } from "./weekly.ts";
@@ -123,8 +127,23 @@ async function emailLaneReady(jwt: string): Promise<boolean> {
   }
 }
 
-/* Every YES number a live ask holds, in either queue: rpc/sms_codes_in_use
-   (0019). When it doesn't answer a list (before 0019, an outage), the
+/* Does the brief's login still act as agent:brief? rpc/current_agent_id
+   (0019); see agentKnown. Without it the proposals read is blind: RLS
+   shows the brief only its own rows, and a null id matches none. */
+async function agentResolves(jwt: string): Promise<boolean> {
+  try {
+    const r = await post(jwt, "rpc/current_agent_id", {});
+    const body = await r.json().catch(() => null);
+    if (agentKnown(r.status, body)) return true;
+    console.error(`reminder check: current_agent_id answered ${r.status} ${JSON.stringify(body)?.slice(0, 120)}`);
+  } catch (e) {
+    console.error("reminder check: current_agent_id failed:", (e as Error).message);
+  }
+  return false;
+}
+
+/* Every YES number a live ask holds, in either queue, plus spine numbers
+   answered in the last 48 hours: rpc/sms_codes_in_use (0019). When it doesn't answer a list (before 0019, an outage), the
    pending codes — the rule the old lane always took codes by. */
 async function codesInUse(jwt: string): Promise<unknown[]> {
   try {
@@ -316,17 +335,21 @@ serve(async (req: Request) => {
       const lane = remindersLane(raw);
       if (lane.unknown) console.log(`REMINDERS_LANE="${String(raw).slice(0, 40)}" isn't spine or text; reminders take the old lane`);
       // Both queues, in every lane state: a flip either way must never ask
-      // about one invoice twice. Either read failing means no reminder today.
+      // about one invoice twice. Either read failing means no reminder today,
+      // and so does a login that no longer resolves to agent:brief (its
+      // proposals read would answer [] rather than fail).
       const unread = (what: string) => (e: Error) => {
         console.error(`reminder check: the ${what} read failed:`, e.message);
         return null;
       };
-      const [recentText, recentSpine] = await Promise.all([
+      const [recentText, recentSpine, asAgent] = await Promise.all([
         rest(jwt, `pending_actions?kind=eq.emailSend&created_at=gte.${weekAgo}&select=code,status,params,expires_at&limit=100`)
           .catch(unread("pending_actions")),
         rest(jwt, `proposals?operation=eq.email.send@1&created_at=gte.${weekAgo}&select=status,evidence_refs&limit=100`)
           .catch(unread("proposals")),
+        agentResolves(jwt),
       ]);
+      if (!asAgent) throw new Error("the brief's login doesn't resolve to agent:brief, so the 7-day check can't see its own proposals and no reminder is offered today");
       const reminded = remindedKeys(recentText, recentSpine);
       if (!reminded) throw new Error("the 7-day check couldn't read both queues, so no reminder is offered today");
 
@@ -363,6 +386,12 @@ serve(async (req: Request) => {
               // it may have landed: the old lane now could make it two asks
               console.error(`reminder ${c.key} waits for tomorrow: ${f.why}`);
               continue;
+            }
+            if (f.kind === "blocked") {
+              // not allowed: the spine identity is broken, so this morning's
+              // 7-day check can't be trusted on either lane
+              console.error(`reminders stop for today at ${c.key}: ${f.why}`);
+              break;
             }
             console.log(`reminder ${c.key} takes the old lane: ${f.why}`);
           } else {

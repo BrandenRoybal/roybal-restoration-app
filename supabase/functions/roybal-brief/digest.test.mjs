@@ -113,6 +113,46 @@ test("text stays under the 1200-char cap even with many flags", () => {
   assert.ok(b.text.length <= 1200);
 });
 
+test("the 1200-char cut never cuts inside a YES line: an offer that doesn't fit whole is dropped", () => {
+  const busy = Array.from({ length: 3 }, (_, i) => proj({
+    customer: "Job" + i, _rowUpdated: "2026-06-01T00:00:00Z",
+    dryingLogs: [{ date: "2026-07-01", equipment: [{ placed: "2026-07-01" }] }],
+  }));
+  const offers = [
+    { code: 2, label: "email the INV-4 reminder to Hebard" },
+    { code: 31, label: "add the framing phase to Swift — 6.5h logged with no phase" },
+  ];
+  const yes2 = "💬 Reply YES 2 — email the INV-4 reminder to Hebard";
+  const yes31 = "💬 Reply YES 31 — add the framing phase to Swift — 6.5h logged with no phase";
+  // pad one flag line so exactly `room` characters are left after the rest
+  const oneX = buildBrief({ ...base, projects: busy, emailsWaiting: { count: 1, oldest: "x" } }).text.length;
+  const padded = (room, proposals) => buildBrief({ ...base, projects: busy,
+    emailsWaiting: { count: 1, oldest: "x".repeat(1 + 1200 - room - oneX) }, proposals }).text;
+  const sized = (room) => padded(room, offers);
+  assert.equal(padded(100, []).length, 1100, "the padding leaves the room asked for");
+  // room for the first offer and only part of the second: before the fix the
+  // text ended "💬 Reply YES 3", one digit of 31
+  const one = sized(yes2.length + 1 + 15);
+  assert.ok(one.length <= 1200);
+  assert.ok(one.endsWith("\n" + yes2), one.slice(-80));
+  assert.doesNotMatch(one, /YES 3/);
+  // room for neither whole: no YES line at all, nothing cut short
+  const none = sized(yes2.length - 3);
+  assert.doesNotMatch(none, /💬/);
+  // room for both
+  const both = sized(yes2.length + yes31.length + 2);
+  assert.equal(both.length, 1200);
+  assert.ok(both.endsWith(`\n${yes2}\n${yes31}`));
+  // an offer too long to fit is dropped alone: a later one that fits whole shows
+  const long = padded(30, [{ code: 4, label: "y".repeat(40) }, { code: 5, label: "z" }]);
+  assert.ok(long.endsWith("\n💬 Reply YES 5 — z"), long.slice(-60));
+  assert.doesNotMatch(long, /YES 4/);
+  // the rest of the text is still cut at 1200, as it always was
+  const huge = buildBrief({ ...base, projects: busy, emailsWaiting: { count: 1, oldest: "x".repeat(2000) }, proposals: offers });
+  assert.equal(huge.text.length, 1200);
+  assert.doesNotMatch(huge.text, /💬/);
+});
+
 test("helpers: daysBefore + budgetStatus null without a base", () => {
   assert.equal(daysBefore(TODAY, "2026-07-20"), 3);
   assert.equal(daysBefore(TODAY, "garbage"), null);

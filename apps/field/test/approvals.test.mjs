@@ -6,7 +6,9 @@
    step 5: a waiting spine card's YES number (and none when one number is
    live on both queues), spine jobs named from either job table, and what
    the newest worker heartbeat says about email sending, on a waiting
-   email and an approved one.
+   email and an approved one, in words that promise no more than the
+   worker's 48 hours; and a send the worker gave up on after its card aged
+   off shows again for 48 hours from when it did.
    Run: node --test test/approvals.test.mjs */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -208,7 +210,7 @@ test("inbox: both lanes merged, soonest expiry first; recent answers newest firs
   assert.ok(!box.recent.some((c) => c.id === oldDecline.id), "a decline older than 48 h is off the list");
   assert.equal(box.expired, 3, "lapsed + swept + the stale spine row; not the one from three weeks ago");
   assert.deepEqual(box.skipped, { text: 0, spine: 0 });
-  assert.deepEqual(inbox(null, undefined, {}, NOW), { waiting: [], recent: [], expired: 0, skipped: { text: 0, spine: 0 } });
+  assert.deepEqual(inbox(null, undefined, {}, NOW), { waiting: [], recent: [], expired: 0, skipped: { text: 0, spine: 0 }, older: [] });
 });
 
 test("filters: live needs the open status AND a future expiry, whatever the row says", () => {
@@ -811,7 +813,7 @@ test("email sending off: a waiting email says approving queues it; an approved o
   const w = fromProposal(email, off);
   assert.equal(w.emailLane, false);
   assert.equal(w.laneHint, LANE_OFF_WAITING);
-  assert.equal(LANE_OFF_WAITING, "Email sending is off on the worker right now: approving queues this, and it waits until that's back.");
+  assert.equal(LANE_OFF_WAITING, "Email sending is off on the worker right now: approving queues this, and it waits up to 48 hours for sending to come back, then it isn't sent.");
   assert.equal(approveConfirm(w), "Send this email to adjuster@carrier.com?", "the confirm is as it was");
   assert.equal(w.yesHint, "or text YES 4", "a text still answers it");
   for (const look of [on, unknown]) {
@@ -825,10 +827,10 @@ test("email sending off: a waiting email says approving queues it; an approved o
   // approved (email.send runs inline, so 'executed' with an outbox row) and still in line
   const sent = (outbox, look = off) => outcome({ ...fromProposal({ ...delivered }, look), outbox }, NOW);
   assert.deepEqual(sent({ status: "pending" }), { text: LANE_OFF_QUEUED, tone: "wait" });
-  assert.equal(LANE_OFF_QUEUED, "Queued, but email sending is off on the worker, so it waits until that's back");
+  assert.equal(LANE_OFF_QUEUED, "Queued, but email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent");
   assert.deepEqual(sent({ status: "pending", next_attempt_at: iso(3) }), { text: LANE_OFF_QUEUED, tone: "wait" });
   assert.deepEqual(sent({ status: "failed", error: "Gmail API 503" }), { text: LANE_OFF_FAILED, tone: "wait" });
-  assert.equal(LANE_OFF_FAILED, "Send failed, and email sending is off on the worker, so it waits until that's back");
+  assert.equal(LANE_OFF_FAILED, "Send failed, and email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent");
   assert.deepEqual(sent(null), { text: LANE_OFF_QUEUED, tone: "wait" }, "just approved here: its outbox row isn't read yet");
   // what already happened still says so
   assert.deepEqual(sent({ status: "sent" }), { text: "Sent", tone: "ok" });
@@ -855,4 +857,54 @@ test("an approve answered by the server lands with the lane wording the page kne
   const after = settle(box, card, done);
   assert.equal(outcome(after.recent[0], NOW).text, LANE_OFF_QUEUED);
   assert.equal(outcome(fromProposal({ ...email, status: "executed" }, LOOK), NOW).text, "Queued to send", "lane unknown: as before");
+});
+
+test("a send the worker gave up on after its card aged off comes back to Recently decided for 48 hours from then", () => {
+  // the brief's reminder, approved 60 h ago while sending was off; the worker came back 2 h ago and marked it dead
+  const STALE = "this email waited 58 hours in line, past the 48-hour limit (EMAIL_MAX_AGE_HOURS), so it was not sent. Send a fresh one if it should still go.";
+  const late = { ...email, id: "bbbbbbbb-0000-4000-8000-000000000009", job_id: FIELD1, status: "executed",
+    created_at: iso(-61), expires_at: iso(-37), approved_at: iso(-60), updated_at: iso(-60) };
+  const lateSms = { ...queuedSms, id: "bbbbbbbb-0000-4000-8000-00000000000a", created_at: iso(-80), expires_at: iso(-56), approved_at: iso(-79), updated_at: iso(-79) };
+  const row = (p, status, at, extra = {}) => ({ proposal_id: p.id, status, created_at: iso(-60), updated_at: at, error: status === "dead" ? STALE : null, ...extra });
+  const box = (outbox) => inbox([], [...SPINE, late, lateSms], lookFrom({ catalog: CATALOG, jobs: [{ id: FIELD1, customer: "Pollen" }], outbox, now: NOW }), NOW);
+
+  // before the outbox is read (the page's first pass): off the list, but named in older, so its row is read
+  const bare = inbox([], [...SPINE, late, lateSms], {}, NOW);
+  assert.ok(!bare.recent.some((c) => c.id === late.id));
+  assert.deepEqual(bare.older.map((c) => c.id).sort(), [late.id, lateSms.id].sort(), "answered sends past the 48 hours, nothing else");
+  const n = needs(bare.older);
+  assert.deepEqual(n.outbox.sort(), [late.id, lateSms.id].sort());
+  assert.ok(n.field.includes(FIELD1), "and the names it would show with");
+
+  // dead 2 h ago: back on the list, ordered by when it died, saying why
+  const b = box([row(late, "dead", iso(-2)), row(lateSms, "dead", iso(-47.9), { error: "Twilio refused the number" })]);
+  const c = b.recent.find((x) => x.id === late.id);
+  assert.ok(c, "shown again");
+  assert.equal(b.recent[0].id, late.id, "newest news first: it died after every other answer here");
+  assert.equal(c.job, "Pollen");
+  assert.deepEqual(outcome(c, NOW), { text: "Couldn't send: " + STALE, tone: "bad" });
+  assert.equal(isRecent(c, NOW), true);
+  assert.equal(isRecent(c, Date.parse(iso(45.9))), true);
+  assert.equal(isRecent(c, Date.parse(iso(46.01))), false, "48 hours after it died it ages off like any other");
+  assert.ok(b.recent.some((x) => x.id === lateSms.id), "a spine text the worker gave up on, the same way");
+  assert.ok(!b.older.some((x) => x.id === late.id));
+  // the rest of the list is as it was
+  assert.deepEqual(b.recent.filter((x) => x.id !== late.id && x.id !== lateSms.id).map((x) => x.id),
+    inbox([], SPINE, LOOK, NOW).recent.map((x) => x.id));
+
+  // died more than 48 h ago, still in line (the worker is still down), or sent late: off the list
+  for (const outbox of [[row(late, "dead", iso(-48.1))], [row(late, "pending", iso(-60))], [row(late, "failed", iso(-1))], [row(late, "sent", iso(-1))], []]) {
+    assert.ok(!box(outbox).recent.some((x) => x.id === late.id), JSON.stringify(outbox));
+  }
+  // a row whose time won't read counts from the answer, and never takes the list down
+  for (const at of [null, undefined, "", "nope", 1759780800000, { toString: 1 }, ["2026-10-06T16:00:00Z"]]) {
+    assert.ok(!box([row(late, "dead", at)]).recent.some((x) => x.id === late.id), typeof at + " " + JSON.stringify(at));
+  }
+  // only an executed spine send: an outbox row beside anything else changes nothing
+  const odd = lookFrom({ outbox: [{ proposal_id: declinedSpine.id, status: "dead", updated_at: iso(-1) }], now: NOW });
+  assert.equal(isRecent(fromProposal({ ...declinedSpine, updated_at: iso(-60), expires_at: iso(-40) }, odd), NOW), false);
+  // an answer inside the 48 hours whose row died earlier (clocks apart) still counts from the answer
+  const d = fromProposal(delivered, lookFrom({ outbox: [row(delivered, "dead", iso(-50))], now: NOW }));
+  assert.equal(isRecent(d, NOW), true);
+  assert.equal(outcome(d, NOW).text, "Couldn't send: " + STALE);
 });

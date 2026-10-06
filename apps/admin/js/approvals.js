@@ -36,7 +36,9 @@
    additions (the spine's YES number, spine jobs looked up in both job
    tables, whether the worker is sending email) arrive through calls
    step 4 already made: fields on the card (yesHint, laneHint), needs'
-   answer (lanes) and lookFrom's options (heartbeats, now). An older
+   answer (lanes), inbox's answer (older: the sends answered before the
+   48 hours, whose outbox rows say whether one died since and so shows
+   again) and lookFrom's options (heartbeats, now). An older
    cached copy ignores what it doesn't know, and the cards read as
    they did. Anything added later that has to be a call is checked
    first (typeof A.x === "function").
@@ -67,8 +69,9 @@ async function rows(path) {
   return res.json();
 }
 const inList = (ids) => `in.(${ids.join(",")})`;          // uuids only (A.needs)
-/* a name the page couldn't read just stays off the card */
-const lookup = (ids, path) => (ids.length ? rows(path).catch(() => []) : Promise.resolve([]));
+/* a name the page couldn't read just stays off the card; so does one from a
+   read that answered with something other than a list */
+const lookup = (ids, path) => (ids.length ? rows(path).then((r) => (Array.isArray(r) ? r : []), () => []) : Promise.resolve([]));
 const laneWarn = (r, what) => (r.status === "fulfilled" ? null
   : `${what} didn't load${r.reason && r.reason.status ? ` (${r.reason.status})` : ": no connection"}.`);
 
@@ -89,17 +92,25 @@ async function load(now) {
   const warn = [laneWarn(text, "The text queue"), laneWarn(spine, "The new approvals queue")].filter(Boolean);
 
   const bare = A.inbox(pa, pr, {}, now);              // the cards to name: waiting and recent
-  const need = A.needs([...bare.waiting, ...bare.recent]);
+  const shown = A.needs([...bare.waiting, ...bare.recent]);
+  // and the sends answered before the 48 hours: one whose outbox row died
+  // since comes back to Recently decided (A.isRecent keys it on the row's
+  // updated_at), so their outbox rows and names are read as well. An older
+  // field module has no `older` and reads just what it shows.
+  const later = A.needs(Array.isArray(bare.older) ? bare.older : []);
+  const need = {};
+  for (const k of ["field", "board", "agents", "people", "outbox"]) need[k] = [...new Set([...(shown[k] || []), ...(later[k] || [])])];
   // only when a spine email is on the page (an older field module never
-  // asks); a read that fails is null, "can't tell", never "sending is off"
-  const mail = Array.isArray(need.lanes) && need.lanes.includes("email");
+  // asks); a read that fails is null, "can't tell", never "sending is off".
+  // An older send that comes back has died, and a dead row waits on nothing.
+  const mail = Array.isArray(shown.lanes) && shown.lanes.includes("email");
   const [ops, field, board, agents, profiles, outbox, heartbeats] = await Promise.all([
     pr.length && !catalog ? rows("operation_catalog?select=name,version,description&limit=100").catch(() => null) : catalog,
     lookup(need.field, `field_projects?select=${JOB_COLS}&id=${inList(need.field)}&limit=100`),
     lookup(need.board, `coordination_jobs?select=${JOB_COLS}&id=${inList(need.board)}&limit=100`),
     lookup(need.agents, `agents?select=id,name&id=${inList(need.agents)}&limit=100`),
     lookup(need.people, `profiles?select=id,full_name&id=${inList(need.people)}&limit=100`),
-    lookup(need.outbox, `outbox?select=proposal_id,status,next_attempt_at,error,created_at` +
+    lookup(need.outbox, `outbox?select=proposal_id,status,next_attempt_at,error,created_at,updated_at` +
       `&proposal_id=${inList(need.outbox)}&order=created_at.desc&limit=100`),
     mail ? rows(BEAT_PATH).then((r) => (Array.isArray(r) ? r : null), () => null) : null,
   ]);

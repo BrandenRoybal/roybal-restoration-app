@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { register } from "node:module";
 import {
-  remindersLane, laneReady, invoiceKey, remindedKeys, reminderCandidates, reminderLabel, pendingReminderRow,
+  remindersLane, laneReady, agentKnown, invoiceKey, remindedKeys, reminderCandidates, reminderLabel, pendingReminderRow,
   spineReminder, filingOutcome, yesLine, codesInUseList, codeTaker, SPINE_ADDRESS,
 } from "./reminders.ts";
 import { reminderEmail } from "./digest.ts";
@@ -52,7 +52,7 @@ test("the email lane is ready only on a 200 that answers literally true", () => 
 
 /* ---------- the 7-day check, both queues ---------- */
 
-test("an invoice already asked about in either queue is held; a failed read holds everything", () => {
+test("an invoice already asked about in either queue is held, an ignored (expired) spine ask too; a failed read holds everything", () => {
   const pending = [
     { status: "pending", params: { invoiceKey: "a:1" } },
     { status: "approved", params: { invoiceKey: "a:2" } },
@@ -75,11 +75,24 @@ test("an invoice already asked about in either queue is held; a failed read hold
     { status: "proposed", evidence_refs: { kind: "invoice", id: "b:10" } },
     { status: "proposed" },
   ];
-  assert.deepEqual([...remindedKeys(pending, spine)].sort(), ["a:1", "a:2", "a:3", "b:1", "b:2", "b:3", "b:4"]);
+  assert.deepEqual([...remindedKeys(pending, spine)].sort(), ["a:1", "a:2", "a:3", "b:1", "b:2", "b:3", "b:4", "b:7"],
+    "expired is the old lane's unanswered row, held for the window");
   assert.deepEqual([...remindedKeys([], [])], [], "both queues empty: nothing held");
   assert.equal(remindedKeys(null, []), null, "the pending_actions read failed");
   assert.equal(remindedKeys([], null), null, "the proposals read failed");
   assert.equal(remindedKeys({ message: "boom" }, []), null, "an error body isn't a list");
+});
+
+test("the proposals read is trusted only while the login resolves to the brief's agent, or before 0019", () => {
+  const AGENT_ID = "1af33481-7f1c-4485-87f5-7b0ec5e27554";
+  assert.equal(agentKnown(200, AGENT_ID), true);
+  assert.equal(agentKnown(200, AGENT_ID.toUpperCase()), true);
+  assert.equal(agentKnown(404, { code: "PGRST202" }), true, "before 0019: no spine rows can exist");
+  assert.equal(agentKnown(200, null), false, "agent:brief disabled or unlinked: RLS would hide its own rows");
+  for (const body of ["", "agent:brief", [AGENT_ID], { id: AGENT_ID }, 7]) {
+    assert.equal(agentKnown(200, body), false, JSON.stringify(body));
+  }
+  for (const s of [0, 401, 403, 500, 503]) assert.equal(agentKnown(s, AGENT_ID), false, String(s));
 });
 
 /* ---------- picking today's reminders ---------- */
@@ -182,10 +195,17 @@ test("op_propose: the row back is filed; a 4xx is a definite no; a 5xx or no ans
   assert.equal(filingOutcome(200, [row, row]).kind, "unsure");
   assert.equal(filingOutcome(200, {}).kind, "unsure", "a 2xx without the row may still have filed it");
   assert.equal(filingOutcome(200, null).kind, "unsure");
-  const no = filingOutcome(403, { code: "42501", message: "op spine: agent 1af… may not propose email.send@1" });
+  const no = filingOutcome(400, { code: "22023", message: "op spine: email.send@1 input is invalid" });
   assert.equal(no.kind, "refused");
-  assert.match(no.why, /403: 42501 op spine: agent/);
+  assert.match(no.why, /400: 22023 op spine: email\.send@1 input/);
   for (const s of [400, 401, 404, 409]) assert.equal(filingOutcome(s, { code: "x" }).kind, "refused", String(s));
+  // not allowed: the spine identity is broken, which no other lane fixes
+  const blocked = filingOutcome(403, { code: "42501", message: "op spine: agent 1af… may not propose email.send@1" });
+  assert.equal(blocked.kind, "blocked");
+  assert.match(blocked.why, /403: 42501 op spine: agent/);
+  assert.equal(filingOutcome(403, null).kind, "blocked", "a 403 whatever the body");
+  assert.equal(filingOutcome(401, { code: "42501", message: "permission denied" }).kind, "blocked", "42501 whatever the status");
+  assert.equal(filingOutcome(400, [{ code: "42501" }]).kind, "blocked");
   for (const s of [500, 502, 503, 504]) assert.equal(filingOutcome(s, { code: "P0002" }).kind, "unsure", String(s));
   assert.equal(filingOutcome(301, null).kind, "unsure");
   const lost = filingOutcome(0, null);
@@ -285,13 +305,14 @@ const pick = (list, path) => {
 
 /** The brief's whole world: the shop it reads, both queues, the RPCs it
     calls and roybal-notify. `w.lane` is outbox_channel_ready's answer,
+    `w.agent` current_agent_id's,
     `w.seq` the next proposals_sms_code_seq value, `w.propose` op_propose
     (a repeated key hands back the existing row whatever its status, and a
     new code skips live proposal codes and, as 0019's trigger does, pending
     ones). `over(method, path, init, w)` answers first (a Response, or an
     Error to throw); undefined falls through to the world. */
 function world({ projects = [job()], pending = [], spine = [], over = () => undefined } = {}) {
-  const w = { pending, spine, lane: true, seq: 4, calls: [], texts: [], logs: [] };
+  const w = { pending, spine, lane: true, agent: AGENT, seq: 4, calls: [], texts: [], logs: [] };
   const createdAt = new Date(NOW - 3600000).toISOString();
   w.propose = (b) => {
     const key = ["email.send", b.p_input.to.toLowerCase(), b.p_input.subject, b.p_input.body, b.p_job_id ?? "", TODAY].join(":");
@@ -339,6 +360,7 @@ function world({ projects = [job()], pending = [], spine = [], over = () => unde
       return J(pick(w.spine.filter((r) => r.proposed_by_id === AGENT), path).map(({ status, evidence_refs }) => ({ status, evidence_refs })));
     }
     if (path === "/rest/v1/rpc/outbox_channel_ready") return J(w.lane);
+    if (path === "/rest/v1/rpc/current_agent_id") return J(w.agent);
     if (path === "/rest/v1/rpc/sms_codes_in_use") {
       const codes = [...w.pending.filter((r) => r.status === "pending").map((r) => r.code),
         ...w.spine.filter((r) => r.status === "proposed" && r.sms_code != null).map((r) => r.sms_code)];
@@ -449,8 +471,8 @@ test("the email lane not live (false, or no RPC before 0019, or an error): the o
 
 test("op_propose refusing with a 4xx files the old row instead", async (t) => {
   for (const no of [
-    () => pg("42501", "op spine: agent 1af33481-7f1c-4485-87f5-7b0ec5e27554 may not propose email.send@1", 403),
     () => pg("22023", "op spine: email.send@1 input is invalid: to does not match", 400),
+    () => pg("PGRST116", "JSON object requested, multiple (or no) rows returned", 406),
     () => pg("PGRST202", "Could not find the function public.op_propose", 404),
   ]) {
     const w = world({ over: (m, p) => (p === "/rest/v1/rpc/op_propose" ? no() : undefined) });
@@ -459,6 +481,63 @@ test("op_propose refusing with a 4xx files the old row instead", async (t) => {
     assert.match(text, /💬 Reply YES 11 — email the INV-4 reminder to Jeff Hebard/);
     assert.ok(w.logs.some((l) => /takes the old lane: op_propose answered 4\d\d/.test(l)));
   }
+});
+
+test("op_propose answering not allowed (42501): no more reminders that day, on either lane", async (t) => {
+  const projects = [job(), job({ id: PID2, customer: "Swift", email: "swift@example.com",
+    invoices: [inv({ invoiceNo: "INV-9", dueDate: "2026-10-03" })] })];
+  for (const no of [
+    () => pg("42501", "op spine: agent login 1af33481-7f1c-4485-87f5-7b0ec5e27554 is not linked to an enabled agents row", 403),
+    () => pg("42501", "op spine: agent 1af33481-7f1c-4485-87f5-7b0ec5e27554 may not propose email.send@1", 403),
+    () => new Response("forbidden", { status: 403 }),
+  ]) {
+    const w = world({ projects, over: (m, p) => (p === "/rest/v1/rpc/op_propose" ? no() : undefined) });
+    const text = await morning(t, w, undefined);
+    assert.equal(called(w, "/rest/v1/rpc/op_propose").length, 1, "the second reminder isn't tried either");
+    assert.deepEqual(inserted(w), [], "no old-lane fallback for a broken identity");
+    assert.doesNotMatch(text, /Reply YES/);
+    assert.ok(w.logs.some((l) => /reminders stop for today at .*:INV-4: op_propose answered 403/.test(l)), w.logs.join(" | "));
+  }
+
+  // a reminder filed before the refusal keeps its line
+  const u = world({ projects, over: (m, p, init) =>
+    (p === "/rest/v1/rpc/op_propose" && JSON.parse(init.body).p_job_id === PID2 ? pg("42501", "not allowed", 403) : undefined) });
+  const text = await morning(t, u, undefined);
+  assert.equal(called(u, "/rest/v1/rpc/op_propose").length, 2);
+  assert.deepEqual(inserted(u), []);
+  assert.match(text, /💬 Reply YES 4 — email the INV-4 reminder to Jeff Hebard$/);
+});
+
+test("the login no longer resolving to agent:brief: no reminder at all that day, in every lane state", async (t) => {
+  // the brief asked about this invoice on the spine yesterday; disabled or
+  // unlinked, its proposals read answers [] instead of failing
+  const spine = [{ status: "proposed", proposed_by_id: "someone-else", evidence_refs: [{ kind: "invoice", id: KEY }] }];
+  const answers = [
+    (wo) => { wo.agent = null; },
+    () => pg("XX000", "boom", 500),
+    () => new Error("connection reset"),
+  ];
+  for (const answer of answers) {
+    for (const lane of [undefined, "text"]) {
+      const w = world({ spine: [...spine], over: (m, p, _i, wo) => (p === "/rest/v1/rpc/current_agent_id" ? answer(wo) : undefined) });
+      const text = await morning(t, w, lane);
+      assert.deepEqual(called(w, "/rest/v1/rpc/op_propose"), [], String(lane));
+      assert.deepEqual(inserted(w), [], String(lane));
+      assert.doesNotMatch(text, /Reply YES/);
+      assert.ok(w.logs.some((l) => /proposals skipped: the brief's login doesn't resolve to agent:brief/.test(l)), w.logs.join(" | "));
+    }
+  }
+
+  // before 0019 there is no current_agent_id and no spine rows: carry on
+  const v = world({ over: (m, p) => {
+    if (p === "/rest/v1/rpc/current_agent_id") return pg("PGRST202", "Could not find the function public.current_agent_id", 404);
+    if (p === "/rest/v1/rpc/outbox_channel_ready") return pg("PGRST202", "Could not find the function public.outbox_channel_ready", 404);
+    return undefined;
+  } });
+  const text = await morning(t, v, undefined);
+  assert.equal(called(v, "/rest/v1/rpc/current_agent_id")[0].auth, "Bearer brief-jwt");
+  assert.equal(called(v, "/rest/v1/pending_actions")[0].body, OLD_ROW(11));
+  assert.match(text, /💬 Reply YES 11 — email the INV-4 reminder to Jeff Hebard/);
 });
 
 test("op_propose failing with a 5xx or on the network: that reminder waits for tomorrow, in neither queue", async (t) => {
@@ -511,6 +590,15 @@ test("held in either queue this week: not asked again; declined or failed: asked
   const v = world({ spine: [{ status: "executed", proposed_by_id: AGENT, evidence_refs: [{ kind: "invoice", id: KEY }] }] });
   await morning(t, v, undefined);
   assert.deepEqual(called(v, "/rest/v1/rpc/op_propose"), [], "sent from the spine this week");
+
+  // ignored yesterday, swept to expired by today's first op_propose: held
+  // for the week, as the old lane's unanswered row is
+  const x = world({ spine: [{ status: "expired", proposed_by_id: AGENT, evidence_refs: [{ kind: "invoice", id: KEY }],
+    created_at: new Date(NOW - 2 * 86400000).toISOString() }] });
+  const textX = await morning(t, x, undefined);
+  assert.deepEqual(called(x, "/rest/v1/rpc/op_propose"), [], "an ignored spine ask isn't asked again after two days");
+  assert.deepEqual(inserted(x), []);
+  assert.doesNotMatch(textX, /Reply YES/);
 
   const u = world({
     pending: [{ code: 30, kind: "emailSend", status: "declined", params: { invoiceKey: KEY } }],
