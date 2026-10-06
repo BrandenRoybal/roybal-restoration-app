@@ -161,7 +161,102 @@ const birch = {
   certDrying: null, laborLog: null, portalShare: null,
 };
 
-export const JOBS = [whitaker, kessler, marsh, birch];
+/* ---------- the SOP's worked example (archived, so it stays off the job list) ----------
+   A finished Cat 2 / Class 2 kitchen loss: two moisture maps with numbered
+   reading points, a reference reading in each day's notes, a heater on a
+   Fairbanks fall job, and a signed Certificate of Drying. */
+const SOP_PTS = [[150, 120], [290, 120], [395, 200], [395, 300], [250, 360], [120, 360], [500, 360], [560, 470]];
+const sopMarkers = (pts) => svg(900, 600, pts.map(([x, y], i) =>
+  `<circle cx="${x}" cy="${y}" r="30" fill="#f26a21" stroke="#fff" stroke-width="4"/><text x="${x}" y="${y + 11}" font-family="Arial" font-weight="bold" font-size="30" fill="#fff" text-anchor="middle">${i + 1}</text>`).join("")
+  + (pts.length > 5 ? `<path d="M70 85 H440 V335 H545 V405 H70 Z" fill="none" stroke="#1c5fb0" stroke-width="5" stroke-dasharray="14 10"/>`
+  + `<text x="60" y="540" font-family="Arial" font-size="22" fill="#1c5fb0">dashed = wet boundary, day 0</text>` : ""));
+const sopRow = (dOff, vals, notes) => ({ ...reading(dOff, vals), notes });
+const sopJob = {
+  id: "demo-job-sop", createdAt: iso(-12), updatedAt: iso(-7), createdBy: "cj@example.com", archivedAt: iso(-7),
+  jobType: "restoration", workOrderNo: "RC-DEMO-1005", claimNo: "DEMO-CLM-51120",
+  customer: "Jordan Hollis", address: "300 Example Aspen Dr, Fairbanks, AK 99712",
+  phone: "907-555-0177", email: "j.hollis@example.com",
+  carrier: "Northstar Mutual (demo)", adjuster: "Sam Ortega", lossCause: "Dishwasher supply line failed overnight",
+  dateOfLoss: ymd(-12), waterCategory: "2", waterClass: "2", dryingSystem: "Closed", lossTypes: ["water"],
+  rooms: ["Kitchen", "Hall / Laundry"],
+  photos: [
+    { id: "sp1", by: "cj@example.com", src: roomPhoto("#d9cbb3", "#8a6a4a", true, "Before"), caption: "Kitchen at arrival, water at toe kick", room: "Kitchen", stage: "before", ts: iso(-12) },
+    { id: "sp2", by: "cj@example.com", src: cutPhoto(), caption: "Reading point 3 marked, 2 ft flood cut", room: "Kitchen", stage: "during", ts: iso(-11) },
+    { id: "sp3", by: "cj@example.com", src: roomPhoto("#e6e1d6", "#8a6a4a", false, "After"), caption: "All points at goal, equipment out", room: "Kitchen", stage: "after", ts: iso(-8) },
+  ],
+  moistureMaps: [{
+    id: "sop-mm1", by: "cj@example.com", createdAt: iso(-12), label: "Kitchen + hall walls", material: "Drywall / Gypsum", dryGoal: "13",
+    meter: "Protimeter MMS3 · Search (REL)", ambientTemp: "76°F / 34%", ambientRH: "", equipmentOnSite: "1 LGR dehu, 6 air movers, 1 heater", technician: "CJ",
+    floorPlan: floorPlan(), sketch: floorPlan(), strokes: sopMarkers(SOP_PTS), markerNext: 9, photos: [], page: "1", pageOf: "2",
+    equipmentPlan: [
+      { id: "e1", type: "lgr_dehumidifier", x: 0.36, y: 0.42, angle: 0 },
+      { id: "e2", type: "air_mover", x: 0.16, y: 0.48, angle: 0 }, { id: "e3", type: "air_mover", x: 0.31, y: 0.26, angle: 90 },
+      { id: "e4", type: "air_mover", x: 0.40, y: 0.68, angle: 180 }, { id: "e5", type: "air_mover", x: 0.20, y: 0.68, angle: 180 },
+      { id: "e6", type: "air_mover", x: 0.55, y: 0.66, angle: 0 }, { id: "e7", type: "air_mover", x: 0.60, y: 0.84, angle: 270 },
+      { id: "e8", type: "heater", x: 0.10, y: 0.84, angle: 0 },
+    ], equipmentPlanImg: "",
+    readings: [
+      sopRow(-12, ["99", "95", "88", "74", "62", "99", "81", "14"], "REF 12 (bedroom closet). Set day."),
+      sopRow(-11, ["72", "66", "58", "41", "33", "77", "49", "13"], "REF 12. Flood cut 2 ft, pts 1-6."),
+      sopRow(-10, ["38", "31", "27", "19", "16", "44", "22", "12"], "REF 12"),
+      sopRow(-9, ["14", "13", "12", "12", "12", "18", "13", "12"], "REF 12. Pt 6 behind dishwasher, AM re-aimed."),
+      sopRow(-8, ["12", "12", "12", "12", "11", "13", "12", "12"], "REF 12. All at goal. Verified by Branden."),
+    ],
+  }, {
+    id: "sop-mm2", by: "cj@example.com", createdAt: iso(-12), label: "Kitchen subfloor", material: "Framing / Wood / Subfloor", dryGoal: "12",
+    meter: "Protimeter MMS3 · Pin (WME)", ambientTemp: "76°F / 34%", ambientRH: "", equipmentOnSite: "1 LGR dehu, 6 air movers, 1 heater", technician: "CJ",
+    floorPlan: floorPlan(), sketch: floorPlan(), strokes: sopMarkers([[140, 230], [260, 230], [140, 300], [260, 300], [360, 270]]), markerNext: 6,
+    photos: [], page: "2", pageOf: "2", equipmentPlan: [], equipmentPlanImg: "",
+    readings: [
+      sopRow(-12, ["32", "28", "26", "21", "18"], "REF 11 (dining room subfloor)"),
+      sopRow(-11, ["26", "23", "21", "17", "15"], "REF 11"),
+      sopRow(-10, ["20", "18", "17", "14", "13"], "REF 11"),
+      sopRow(-9, ["15", "14", "13", "12", "12"], "REF 11"),
+      sopRow(-8, ["12", "12", "12", "11", "11"], "REF 11. All at goal."),
+    ],
+  }],
+  dryingLogs: [{
+    id: "sop-dl1", by: "cj@example.com", createdAt: iso(-12), dryoutStart: ymd(-12), dryoutFinish: ymd(-8), techSupervisor: "CJ", dryGoal: "13 REL drywall / 12 WME subfloor",
+    calcSF: "220", calcLF: "64", calcCeiling: "8", calcDehuType: "lgr", calcPints: "70",
+    calcDeviation: { scrub: "Clean supply line, extracted within 24 h, no odor. No scrubber, per Branden." },
+    equipment: [
+      { asset: "DH-04", type: "LGR Dehumidifier 70 pt", location: "Kitchen", placed: ymd(-12) + "T08:40", removed: ymd(-8) + "T09:30", hours: "", notes: "" },
+      { asset: "AM-21", type: "Air Mover", location: "Kitchen", placed: ymd(-12) + "T08:40", removed: ymd(-8) + "T09:30", hours: "", notes: "" },
+      { asset: "AM-22", type: "Air Mover", location: "Kitchen", placed: ymd(-12) + "T08:40", removed: ymd(-8) + "T09:30", hours: "", notes: "" },
+      { asset: "AM-23", type: "Air Mover", location: "Kitchen", placed: ymd(-12) + "T08:40", removed: ymd(-8) + "T09:30", hours: "", notes: "" },
+      { asset: "AM-24", type: "Air Mover", location: "Hall / Laundry", placed: ymd(-12) + "T08:40", removed: ymd(-10) + "T09:10", hours: "", notes: "Pulled day 2, area at goal" },
+      { asset: "AM-25", type: "Air Mover", location: "Hall / Laundry", placed: ymd(-12) + "T08:40", removed: ymd(-10) + "T09:10", hours: "", notes: "Pulled day 2, area at goal" },
+      { asset: "AM-26", type: "Air Mover", location: "Kitchen", placed: ymd(-12) + "T08:40", removed: ymd(-8) + "T09:30", hours: "", notes: "" },
+      { asset: "HT-02", type: "Heater (electric, 5 kW)", location: "Kitchen", placed: ymd(-12) + "T08:40", removed: ymd(-8) + "T09:30", hours: "", notes: "Affected air under 70°F at set" },
+    ],
+    readings: [
+      { date: ymd(-12), time: "08:40", outT: "24", outRH: "78", outGPP: "", refT: "68", refRH: "30", refGPP: "", affT: "64", affRH: "71", affGPP: "", gd: "", dehu: "1", am: "6", scrub: "0", tech: "CJ", notes: "Set. Heater added, affected under 70°F." },
+      { date: ymd(-11), time: "09:05", outT: "19", outRH: "80", outGPP: "", refT: "68", refRH: "29", refGPP: "", affT: "78", affRH: "41", affGPP: "", gd: "", dehu: "1", am: "6", scrub: "0", tech: "CJ", notes: "Dehu outlet 84°F / 17%" },
+      { date: ymd(-10), time: "08:50", outT: "15", outRH: "82", outGPP: "", refT: "69", refRH: "28", refGPP: "", affT: "80", affRH: "30", affGPP: "", gd: "", dehu: "1", am: "4", scrub: "0", tech: "Greg", notes: "2 AM pulled from hall (at goal)" },
+      { date: ymd(-9), time: "09:20", outT: "21", outRH: "79", outGPP: "", refT: "68", refRH: "28", refGPP: "", affT: "79", affRH: "26", affGPP: "", gd: "", dehu: "1", am: "4", scrub: "0", tech: "CJ", notes: "" },
+      { date: ymd(-8), time: "09:00", outT: "26", outRH: "76", outGPP: "", refT: "68", refRH: "28", refGPP: "", affT: "74", affRH: "27", affGPP: "", gd: "", dehu: "1", am: "4", scrub: "0", tech: "CJ", notes: "Dry verified. Equipment pulled." },
+    ],
+  }],
+  workAuth: { date: ymd(-12), scope: { 0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true }, mode: "sign", smsConsent: true,
+    ownerSig: signature("Jordan Hollis"), ownerName: "Jordan Hollis", ownerDate: ymd(-12), repSig: signature("CJ"), repName: "CJ (Roybal)", repDate: ymd(-12), uploadedDoc: "", uploadedPages: [] },
+  certDrying: {
+    certNo: "RC-DEMO-1005-CD", issueDate: ymd(-8), dryingDays: "5", dryStart: ymd(-12), dryComplete: ymd(-8),
+    affectedAreas: "Kitchen and hall / laundry: drywall to 24 in. (flood cut, removed), remaining drywall above the cut, subfloor under the dishwasher and sink base. Toe kicks removed for airflow.",
+    verification: [
+      { material: "Drywall, kitchen + hall walls (8 pts)", meter: "Protimeter MMS3 · Search (REL)", goal: "13", final: "13", reference: "12", dry: true },
+      { material: "Subfloor, kitchen (5 pts)", meter: "Protimeter MMS3 · Pin (WME)", goal: "12", final: "12", reference: "11", dry: true },
+    ],
+    dehuDays: "1 × 5", amDays: "6 × 3, 4 × 2", scrubDays: "0", heaterDays: "1 × 5 (heater)",
+    mode: "sign", uploadedDoc: "", uploadedPages: [],
+    sigTech: signature("B. Roybal"), sigTechName: "Branden Roybal, IICRC WRT", sigTechDate: ymd(-8),
+    sigOwner: signature("Jordan Hollis"), sigOwnerName: "Jordan Hollis", sigOwnerDate: ymd(-8),
+    sigAdjuster: "", sigAdjusterName: "", sigAdjusterDate: "",
+  },
+  constructionLogs: [], contents: [], boxes: [], changeOrders: [], invoices: [], reconEstimates: [], inspections: [], receipts: [],
+  laborLog: null, portalShare: null,
+};
+
+export const JOBS = [whitaker, kessler, marsh, birch, sopJob];
 export const fieldRows = () => JOBS.map((d) => ({ id: d.id, data: d, deleted: false, updated_at: d.updatedAt }));
 
 /* ---------- board / leads (coordination_jobs rows) ---------- */
