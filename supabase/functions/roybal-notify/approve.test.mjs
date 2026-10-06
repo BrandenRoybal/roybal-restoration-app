@@ -1,9 +1,13 @@
-/* Approve-by-text rules — unit tests (no Deno, no network).
+/* Approve-by-text rules — unit tests (no Deno, no network), plus the pure
+   half of the Approvals inbox's decidePending (request check, answers).
+   The order decide() runs in is tested in decide.test.mjs.
    Run: node --experimental-strip-types approve.test.mjs */
 import assert from "node:assert/strict";
 import {
   parseApproval, matchProposal, stillLive, proposalLine, replyText,
   validateBoardEdit, buildNextSubtasks, revGuard,
+  hourLabel, inSendWindow, sendWindowText, quietHoursHold, replyFor,
+  parseDecideRequest, decideResponse,
 } from "./approve.ts";
 
 let pass = 0;
@@ -131,6 +135,113 @@ test("a code shared by two live proposals is ambiguous, never a coin flip", () =
 test("rev guard: a job with no rev yet matches null-or-0, a revved one matches exactly", () => {
   assert.equal(revGuard(0), "or=(data->>rev.is.null,data->>rev.eq.0)");
   assert.equal(revGuard(7), "data->>rev=eq.7");
+});
+
+/* ---------- quiet hours: the preflight before a YES flips anything ---------- */
+
+test("the send window counts its start hour, not its end hour", () => {
+  assert.equal(inSendWindow(7, 7, 20), true);
+  assert.equal(inSendWindow(19, 7, 20), true);
+  assert.equal(inSendWindow(20, 7, 20), false);
+  assert.equal(inSendWindow(6, 7, 20), false);
+  assert.equal(inSendWindow(0, 7, 20), false);
+});
+
+test("hours read the way sendSms has always printed them", () => {
+  assert.equal(hourLabel(7), "7am");
+  assert.equal(hourLabel(20), "8pm");
+  assert.equal(hourLabel(13), "1pm");
+  assert.equal(hourLabel(12), "noon");
+  assert.equal(hourLabel(0), "midnight");
+  assert.equal(hourLabel(24), "midnight");
+  assert.equal(sendWindowText(7, 20), "7am and 8pm");
+});
+
+test("only a customer text outside the window is held", () => {
+  const cust = { to: "+19075551234", message: "We're on our way", audience: "customer" };
+  assert.equal(quietHoursHold("sendText", cust, 21, 7, 20), true, "a 9pm YES");
+  assert.equal(quietHoursHold("sendText", cust, 6, 7, 20), true);
+  assert.equal(quietHoursHold("sendText", cust, 20, 7, 20), true, "8pm is already outside");
+  assert.equal(quietHoursHold("sendText", cust, 7, 7, 20), false);
+  assert.equal(quietHoursHold("sendText", cust, 19, 7, 20), false);
+  assert.equal(quietHoursHold("sendText", { ...cust, audience: "crew" }, 21, 7, 20), false, "crew texts go at any hour");
+  // only an explicit customer audience is gated, exactly as the executor's own guard is
+  assert.equal(quietHoursHold("sendText", { to: "+19075551234", message: "x" }, 21, 7, 20), false);
+  assert.equal(quietHoursHold("sendText", null, 21, 7, 20), false);
+  assert.equal(quietHoursHold("emailSend", { audience: "customer" }, 23, 7, 20), false, "only texts have a window");
+  assert.equal(quietHoursHold("boardEdit", {}, 3, 7, 20), false);
+  assert.equal(quietHoursHold("sendText", cust, 21, 6, 22), false, "the window is SMS_QUIET_START/END, not a constant");
+});
+
+test("the quiet-hours reply names the window and the code to text again", () => {
+  const t = replyText("quiet-hours", { code: 14, label: "text Mike the start time" }, sendWindowText(7, 20));
+  assert.match(t, /between 7am and 8pm Alaska time/);
+  assert.match(t, /text YES 14 again then/);
+  assert.match(t, /Nothing was sent; it's still waiting/);
+});
+
+test("each decide() outcome gets the text reply the YES/NO path has always sent", () => {
+  const a = { code: 12, label: "email the INV-4 reminder to Hebard" };
+  const w = sendWindowText(7, 20);
+  assert.equal(replyFor("approve", { status: "executed" }, a, w), replyText("done", a));
+  assert.equal(replyFor("approve", { status: "not_open" }, a, w), replyText("none-open"));
+  assert.equal(replyFor("approve", { status: "failed", error: "that job is no longer on the board" }, a, w),
+    replyText("failed", a, "that job is no longer on the board"));
+  assert.equal(replyFor("approve", { status: "quiet_hours" }, a, w), replyText("quiet-hours", a, w));
+  // a NO answers "Cancelled" whether or not its flip landed, as it always has
+  assert.equal(replyFor("decline", { status: "declined" }, a, w), replyText("cancelled", a));
+  assert.equal(replyFor("decline", { status: "not_open" }, a, w), replyText("cancelled", a));
+});
+
+/* ---------- decidePending: the request, and every answer ---------- */
+
+const ID = "3f2c9a8e-5b1d-4c7e-9f0a-1b2c3d4e5f60";
+
+test("a decide request needs a real uuid and approve or decline", () => {
+  assert.deepEqual(parseDecideRequest({ id: ID, decision: "approve" }), { ok: true, id: ID, decision: "approve" });
+  assert.deepEqual(parseDecideRequest({ id: ` ${ID.toUpperCase()} `, decision: "decline" }),
+    { ok: true, id: ID.toUpperCase(), decision: "decline" });
+  // the id goes straight into a PostgREST filter, so nothing but a uuid gets through
+  for (const id of [undefined, null, "", "12", ID + "0", `${ID}&status=eq.executed`, "not-a-uuid", 12, { id: ID }]) {
+    const r = parseDecideRequest({ id, decision: "approve" });
+    assert.equal(r.ok, false, `id ${JSON.stringify(id)}`);
+    assert.match(r.message, /`id`/);
+  }
+  for (const decision of [undefined, "", "yes", "APPROVE", "approved", "no", true]) {
+    const r = parseDecideRequest({ id: ID, decision });
+    assert.equal(r.ok, false, `decision ${JSON.stringify(decision)}`);
+    assert.match(r.message, /"approve" or "decline"/);
+  }
+  assert.equal(parseDecideRequest(null).ok, false);
+  assert.equal(parseDecideRequest(undefined).ok, false);
+});
+
+test("decidePending: 200 when the decision was recorded, { ok:false, error, message } otherwise", () => {
+  const a = { id: ID, code: 12, kind: "emailSend", label: "email the INV-4 reminder to Hebard",
+    params: { to: "hebard@example.com", body: "…" }, status: "pending" };
+  const action = { id: ID, code: 12, kind: "emailSend", label: "email the INV-4 reminder to Hebard" };
+  const w = sendWindowText(7, 20);
+  assert.deepEqual(decideResponse({ status: "executed" }, a, w),
+    { code: 200, body: { ok: true, status: "executed", message: "Done — email the INV-4 reminder to Hebard.", action } });
+  assert.deepEqual(decideResponse({ status: "declined" }, a, w),
+    { code: 200, body: { ok: true, status: "declined", message: "Declined — email the INV-4 reminder to Hebard.", action } });
+  // failed is still a recorded decision; the error rides in message
+  assert.deepEqual(decideResponse({ status: "failed", error: "Invalid 'to' address" }, a, w),
+    { code: 200, body: { ok: true, status: "failed", message: "Invalid 'to' address", action } });
+  assert.deepEqual(decideResponse({ status: "not_open" }, a, w),
+    { code: 404, body: { ok: false, error: "not_open", message: "Already answered, or it expired." } });
+  const q = decideResponse({ status: "quiet_hours" }, a, w);
+  assert.equal(q.code, 409);
+  assert.equal(q.body.error, "quiet_hours");
+  assert.match(q.body.message, /between 7am and 8pm Alaska time\. It's still waiting/);
+  assert.deepEqual(decideResponse({ status: "not_owner" }, null, w),
+    { code: 403, body: { ok: false, error: "not_owner", message: "Approvals belong to the owner's login." } });
+  assert.deepEqual(decideResponse({ status: "bad_request", error: "Provide `id`, the pending action's uuid." }, null, w),
+    { code: 400, body: { ok: false, error: "bad_request", message: "Provide `id`, the pending action's uuid." } });
+  assert.deepEqual(decideResponse({ status: "server_error", error: "pending_actions read failed (503)" }, null, w),
+    { code: 500, body: { ok: false, error: "server_error", message: "pending_actions read failed (503)" } });
+  // the row's params (the email body, the customer's number) never ride back
+  assert.equal(JSON.stringify(decideResponse({ status: "executed" }, a, w)).includes("hebard@example.com"), false);
 });
 
 console.log(`\n${pass} approve-by-text checks passed.`);

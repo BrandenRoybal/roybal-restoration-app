@@ -11,6 +11,22 @@
  *             sends from TWILIO_FROM, records the row, returns { sid, status }.
  *             Customer-facing kinds only send 7am–8pm Alaska (quiet hours);
  *             crew/office kinds (fieldReport, forward) are exempt.
+ *   decidePending — { id, decision: "approve" | "decline" }
+ *             the admin app's Approvals tab answering a pending_actions row,
+ *             the inbox twin of a YES/NO text. Owner only: role_is('owner')
+ *             under the CALLER's JWT, and only a literal true passes. Then
+ *             the service role runs the row through decide() (approve.ts),
+ *             the same path a text takes: one quiet-hours preflight, guarded
+ *             flips, one executor, so a tap and a text can never both
+ *             execute. No text goes back to the owner; the response is the
+ *             answer, and it is always JSON:
+ *               200 { ok:true, status:"executed"|"declined"|"failed", message,
+ *                     action:{ id, code, kind, label } }   (failed = recorded;
+ *                     the error is the message)
+ *               400 bad_request · 403 not_owner · 404 not_open (already
+ *               answered, or expired) · 409 quiet_hours (a customer text
+ *               outside the window; it stays pending) · 500 server_error,
+ *               each { ok:false, error, message }
  *
  * Inbound (POST …/roybal-notify/inbound):
  *   Twilio's incoming-message webhook (form-encoded, no JWT). Auth is the
@@ -82,19 +98,25 @@
  * Deploy:   supabase functions deploy roybal-notify --no-verify-jwt
  *   (--no-verify-jwt required for browser CORS preflight + the Twilio
  *    webhook; the function self-protects — sendSms runs its DB ops under
- *    the caller's JWT and /inbound + /status demand a valid Twilio signature,
- *    so an unauthenticated caller can never reach a paid Twilio call.)
+ *    the caller's JWT, decidePending touches nothing until role_is('owner')
+ *    passes under the caller's JWT, and /inbound + /status demand a valid
+ *    Twilio signature, so an unauthenticated caller can never reach a paid
+ *    Twilio call.)
  *   After deploying, point the Twilio number's messaging STATUS CALLBACK at
  *   https://<project-ref>.supabase.co/functions/v1/roybal-notify/status
  *   (Console → Phone Numbers → the company number → Messaging). Without that
  *   URL set, this route is simply never called and rows stay at 'queued'.
  *
- * Success (200): { ok:true, sid, status, month_count }
- * Error   (400): { ok:false, error }
+ * sendSms success (200): { ok:true, sid, status, month_count }
+ * Error   (400): { ok:false, error }   (decidePending's answers are listed above)
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard } from "./approve.ts";
+import {
+  parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard,
+  hourLabel, inSendWindow, sendWindowText, quietHoursHold, decide, replyFor, parseDecideRequest, decideResponse,
+  type DecideIO, type DecideAnswer,
+} from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
 import { mapTwilioStatus, blockedStatuses } from "./status.mjs";
 import { smsAssistEnabled, assistSender, TEXT_EXECUTABLE_KINDS, mintCodes, pendingRowsFor, composeSmsReply, failureText } from "./smsassist.ts";
@@ -171,7 +193,10 @@ const clip = (t: string, n = 1600) => Array.from(t).slice(0, n).join("");
 /* ---------- quiet hours ----------
    Customer-facing texts only go out 7am–8pm America/Anchorage — the crew
    starts at 7, so the morning crew line and an "on our way" go out with
-   them; an evening assistant-proposed text still waits for morning.
+   them; an evening assistant-proposed text still waits for morning (a YES
+   on it outside the window is refused before anything flips and the
+   proposal stays pending: quietHoursHold in approve.ts, which shares the
+   window test and the hour labels below).
    Crew/office kinds are exempt (the office WANTS a 6am field report,
    and a chip-confirmed evening text to the crew about tomorrow's start
    is the dispatcher's call — assistCrew is user-confirmed by the tap).
@@ -278,8 +303,8 @@ export function anchorageHour(d = new Date()): number {
 function assertSendWindow(kind: string) {
   if (CREW_KINDS.has(kind)) return;
   const hr = anchorageHour();
-  if (hr >= QUIET_START && hr < QUIET_END) return;
-  const fmt = (h: number) => (h === 0 || h === 24 ? "midnight" : h === 12 ? "noon" : h < 12 ? `${h}am` : `${h - 12}pm`);
+  if (inSendWindow(hr, QUIET_START, QUIET_END)) return;
+  const fmt = hourLabel;
   throw new Error(
     `quiet_hours: customer texts send between ${fmt(QUIET_START)} and ${fmt(QUIET_END)} Alaska time — ` +
     `it's ${fmt(hr === 0 ? 24 : hr)}–${fmt(hr + 1)} there now. It was NOT sent; try again in the window.`);
@@ -452,16 +477,127 @@ async function twilioSignatureValid(req: Request, params: URLSearchParams, route
   return false;
 }
 
-/* ---------- approve-by-text ----------
+/* ---------- approve-by-text, and the inbox beside it ----------
    A YES/NO from the OWNER'S cell acts on pending_actions proposals (the
-   morning brief creates them — see roybal-brief + migration 210). Everything
-   here runs AFTER the Twilio signature check, with the service role:
-   approval state only ever changes on this verified path. Returns true when
-   the text was an approval keyword (handled + replied), false otherwise. */
-async function handleApproval(
-  from: string, text: string,
-  admin: (path: string, opts?: RequestInit) => Promise<Response>,
-): Promise<boolean> {
+   morning brief creates them — see roybal-brief + migration 210). So does a
+   tap in the admin app's Approvals tab (decidePending, below). Both channels
+   run the row through decide() in approve.ts with the pieces wired here:
+   the quiet-hours preflight, the guarded flips, ONE executor and the failed
+   stamp. Everything runs with the service role, and only after the channel
+   proved the owner: the Twilio signature + the owner's number for a text,
+   role_is('owner') under the caller's JWT for a tap. Approval state only
+   ever changes on those two verified paths. */
+
+type Admin = (path: string, opts?: RequestInit) => Promise<Response>;
+
+/* The executor: runs a row that one channel's guarded pending → approved
+   flip just landed, and throws a sentence the owner can read (decide()
+   stamps the row failed with it). The executor re-verifies the approved
+   row itself where it can: gmail-proxy re-reads it before sending. */
+async function executeApproved(act: Record<string, unknown>, admin: Admin): Promise<void> {
+  const params = (act.params ?? {}) as Record<string, unknown>;
+  if (act.kind === "emailSend") {
+    const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/gmail-proxy`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json", "x-cron-secret": cronSecret,
+        apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}`,
+      },
+      body: JSON.stringify({ action: "sendEmail", pendingActionId: act.id, ...params }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || body.ok === false) throw new Error(String(body.error || `email send failed (${r.status})`));
+  } else if (act.kind === "sendText") {
+    const to = toE164(params.to);
+    if (!to) throw new Error("no valid recipient number on the proposal");
+    // A customer text approved at 9pm never gets here: decide()'s preflight
+    // refuses it before the flip and it stays pending for the morning. This
+    // is the window sendSms enforces, kept as the backstop for an hour that
+    // turns between the preflight and the send. Only an explicit customer
+    // audience is gated (the SMS assistant's proposals always carry one);
+    // crew texts are exempt exactly as assistCrew is.
+    if (params.audience === "customer") assertSendWindow("assist");
+    const r = await twilioPost(to, String(params.message ?? ""));
+    if (!r.ok) throw new Error(String(r.body.message ?? `twilio ${r.status}`));
+    await admin(`pending_actions?id=eq.${act.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result: { sid: r.body.sid ?? "" } }),
+    });
+  } else if (act.kind === "boardEdit") {
+    // qb-time proposes a phase for hours it already saw logged; a YES writes
+    // it to the board. Rev-guarded like every other board write.
+    const { rowId, phase } = validateBoardEdit(params);
+    const got = await admin(
+      `coordination_jobs?id=eq.${encodeURIComponent(rowId)}&select=id,data,deleted`, { method: "GET" });
+    // A lookup that never landed is not a missing job — saying "no longer on
+    // the board" would send the owner hunting for a job that's sitting there.
+    if (!got.ok) throw new Error("couldn't reach the board just now — text YES again in a minute");
+    const row = ((await got.json().catch(() => [])) as Record<string, unknown>[])[0];
+    if (!row || row.deleted) throw new Error("that job is no longer on the board");
+    const data = (row.data ?? {}) as Record<string, unknown>;
+    // Refuse to give an unphased job its FIRST phase. schedule.js treats any
+    // job with subtasks as engine-managed, so one text would re-derive a
+    // hand-dated job's whole timeline from a single phase and cascade the new
+    // dates into everything downstream. That's a board decision, not an SMS.
+    if (!Array.isArray(data.subtasks) || !data.subtasks.length) {
+      throw new Error("that job has no phases yet — add the first one on the board");
+    }
+
+    const stamp = (result: Record<string, unknown>) =>
+      admin(`pending_actions?id=eq.${act.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result }),
+      });
+
+    const nextSubtasks = buildNextSubtasks(data.subtasks as Record<string, unknown>[], phase);
+    if (!nextSubtasks) {
+      // already there (added by hand while this sat) — the owner's intent is
+      // satisfied, so this is done, not failed
+      await stamp({ rowId, skipped: "phase already exists" });
+    } else {
+      const base = Number(data.rev) || 0;
+      const next = { ...data, subtasks: nextSubtasks, rev: base + 1, updatedAt: new Date().toISOString() };
+      const patch = await admin(`coordination_jobs?id=eq.${encodeURIComponent(rowId)}&${revGuard(base)}`, {
+        method: "PATCH", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ data: next }),
+      });
+      // 0 rows back = someone edited the job first; refusing beats clobbering
+      // them, and tomorrow's pull re-proposes the same phase
+      const wrote = patch.ok && ((await patch.json().catch(() => [])) as unknown[]).length > 0;
+      if (!wrote) throw new Error("the board job changed while this was pending — nothing was added");
+      await stamp({ rowId, rev: base + 1, phaseId: phase.id ?? null });
+    }
+  } else {
+    throw new Error(`unknown action kind "${act.kind}"`);
+  }
+}
+
+/* decide()'s I/O for one row, the same for both channels. Both flips are
+   guarded on status=pending, so a second answer (a double YES, or a YES
+   racing a tap) matches zero rows and never reaches the executor. */
+function decideIO(act: Record<string, unknown>, admin: Admin): DecideIO {
+  return {
+    held: quietHoursHold(act.kind, act.params as Record<string, unknown> | null, anchorageHour(), QUIET_START, QUIET_END),
+    flip: async (to) => {
+      const r = await admin(`pending_actions?id=eq.${act.id}&status=eq.pending`, {
+        method: "PATCH", headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ status: to }),
+      });
+      return r.ok && ((await r.json().catch(() => [])) as unknown[]).length > 0;
+    },
+    execute: () => executeApproved(act, admin),
+    fail: (error) =>
+      admin(`pending_actions?id=eq.${act.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "failed", result: { error } }),
+      }),
+  };
+}
+
+/* The text channel. Returns true when the text was an approval keyword
+   (handled + replied), false otherwise. */
+async function handleApproval(from: string, text: string, admin: Admin): Promise<boolean> {
   const owner = toE164(Deno.env.get("OWNER_CELL") ?? SMS_FORWARD_TO ?? "");
   if (!owner || toE164(from) !== owner) return false;
   const p = parseApproval(text);
@@ -491,107 +627,49 @@ async function handleApproval(
   if (!m.hit) { await say(replyText(m.reason as "none-open")!); return true; }
   const act = m.hit as Record<string, unknown>;
 
-  if (p.no) {
-    await admin(`pending_actions?id=eq.${act.id}&status=eq.pending`, {
-      method: "PATCH", body: JSON.stringify({ status: "declined" }),
-    });
-    await say(replyText("cancelled", act)!);
-    return true;
-  }
-
-  // approve first (guarded on still-pending — a double YES can't fire twice)…
-  const appr = await admin(`pending_actions?id=eq.${act.id}&status=eq.pending`, {
-    method: "PATCH", headers: { Prefer: "return=representation" },
-    body: JSON.stringify({ status: "approved" }),
-  });
-  const landed = appr.ok && ((await appr.json().catch(() => [])) as unknown[]).length > 0;
-  if (!landed) { await say(replyText("none-open")!); return true; }
-
-  // …then execute by kind. The executor re-verifies the approved row itself.
-  try {
-    const params = (act.params ?? {}) as Record<string, unknown>;
-    if (act.kind === "emailSend") {
-      const cronSecret = Deno.env.get("CRON_SECRET") ?? "";
-      const r = await fetch(`${SUPABASE_URL}/functions/v1/gmail-proxy`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json", "x-cron-secret": cronSecret,
-          apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}`,
-        },
-        body: JSON.stringify({ action: "sendEmail", pendingActionId: act.id, ...params }),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok || body.ok === false) throw new Error(String(body.error || `email send failed (${r.status})`));
-    } else if (act.kind === "sendText") {
-      const to = toE164(params.to);
-      if (!to) throw new Error("no valid recipient number on the proposal");
-      // A customer text approved at 9pm still waits for morning — the window
-      // sendSms enforces. Only an explicit customer audience is gated (the
-      // SMS assistant's proposals always carry one); crew texts are exempt
-      // exactly as assistCrew is.
-      if (params.audience === "customer") assertSendWindow("assist");
-      const r = await twilioPost(to, String(params.message ?? ""));
-      if (!r.ok) throw new Error(String(r.body.message ?? `twilio ${r.status}`));
-      await admin(`pending_actions?id=eq.${act.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result: { sid: r.body.sid ?? "" } }),
-      });
-    } else if (act.kind === "boardEdit") {
-      // qb-time proposes a phase for hours it already saw logged; a YES writes
-      // it to the board. Rev-guarded like every other board write.
-      const { rowId, phase } = validateBoardEdit(params);
-      const got = await admin(
-        `coordination_jobs?id=eq.${encodeURIComponent(rowId)}&select=id,data,deleted`, { method: "GET" });
-      // A lookup that never landed is not a missing job — saying "no longer on
-      // the board" would send the owner hunting for a job that's sitting there.
-      if (!got.ok) throw new Error("couldn't reach the board just now — text YES again in a minute");
-      const row = ((await got.json().catch(() => [])) as Record<string, unknown>[])[0];
-      if (!row || row.deleted) throw new Error("that job is no longer on the board");
-      const data = (row.data ?? {}) as Record<string, unknown>;
-      // Refuse to give an unphased job its FIRST phase. schedule.js treats any
-      // job with subtasks as engine-managed, so one text would re-derive a
-      // hand-dated job's whole timeline from a single phase and cascade the new
-      // dates into everything downstream. That's a board decision, not an SMS.
-      if (!Array.isArray(data.subtasks) || !data.subtasks.length) {
-        throw new Error("that job has no phases yet — add the first one on the board");
-      }
-
-      const stamp = (result: Record<string, unknown>) =>
-        admin(`pending_actions?id=eq.${act.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ status: "executed", executed_at: new Date().toISOString(), result }),
-        });
-
-      const nextSubtasks = buildNextSubtasks(data.subtasks as Record<string, unknown>[], phase);
-      if (!nextSubtasks) {
-        // already there (added by hand while this sat) — the owner's intent is
-        // satisfied, so this is done, not failed
-        await stamp({ rowId, skipped: "phase already exists" });
-      } else {
-        const base = Number(data.rev) || 0;
-        const next = { ...data, subtasks: nextSubtasks, rev: base + 1, updatedAt: new Date().toISOString() };
-        const patch = await admin(`coordination_jobs?id=eq.${encodeURIComponent(rowId)}&${revGuard(base)}`, {
-          method: "PATCH", headers: { Prefer: "return=representation" },
-          body: JSON.stringify({ data: next }),
-        });
-        // 0 rows back = someone edited the job first; refusing beats clobbering
-        // them, and tomorrow's pull re-proposes the same phase
-        const wrote = patch.ok && ((await patch.json().catch(() => [])) as unknown[]).length > 0;
-        if (!wrote) throw new Error("the board job changed while this was pending — nothing was added");
-        await stamp({ rowId, rev: base + 1, phaseId: phase.id ?? null });
-      }
-    } else {
-      throw new Error(`unknown action kind "${act.kind}"`);
-    }
-    await say(replyText("done", act)!);
-  } catch (e) {
-    await admin(`pending_actions?id=eq.${act.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: "failed", result: { error: String((e as Error).message).slice(0, 300) } }),
-    }).catch(() => {});
-    await say(replyText("failed", act, (e as Error).message)!);
-  }
+  // NO declines; YES clears the quiet-hours preflight, approves first (guarded
+  // on still-pending), then executes; a throw stamps the row failed. One reply
+  // either way: done, failed, cancelled, nothing open, or "text YES n again".
+  const decision = p.no ? "decline" : "approve";
+  const out = await decide(decision, decideIO(act, admin));
+  await say(replyFor(decision, out, act, sendWindowText(QUIET_START, QUIET_END)));
   return true;
+}
+
+/* The inbox channel: decidePending from the admin app's Approvals tab.
+   verify_jwt is off for this function, so the action guards itself: the
+   router's bearer check (401), then role_is('owner') under the CALLER's JWT.
+   PostgREST refuses a forged or expired token, and only a literal true
+   passes. Then the same lookup a text does (live = pending and unexpired),
+   by id this time, and the same decide(). No text goes back to the owner:
+   the JSON is the answer, including when something throws. */
+async function decidePending(body: Record<string, unknown>, jwt: string): Promise<Response> {
+  const answer = (out: DecideAnswer, act: Record<string, unknown> | null = null) => {
+    const r = decideResponse(out, act, sendWindowText(QUIET_START, QUIET_END));
+    return json(r.body, r.code);
+  };
+  try {
+    const who = await db("rpc/role_is", jwt, { method: "POST", body: JSON.stringify({ p_roles: ["owner"] }) });
+    if (!who.ok || (await who.json().catch(() => null)) !== true) return answer({ status: "not_owner" });
+    const ask = parseDecideRequest(body);
+    if (!ask.ok) return answer({ status: "bad_request", error: ask.message });
+
+    const admin: Admin = (path, opts = {}) => db(path, SERVICE_KEY, opts, SERVICE_KEY);
+    const nowIso = new Date().toISOString();
+    const got = await admin(
+      `pending_actions?id=eq.${ask.id}&status=eq.pending&expires_at=gt.${encodeURIComponent(nowIso)}&limit=1`,
+      { method: "GET" });
+    if (!got.ok) throw new Error(`pending_actions read failed (${got.status})`);
+    const act = ((await got.json()) as Record<string, unknown>[])[0];
+    if (!act) return answer({ status: "not_open" });
+
+    const out = await decide(ask.decision, decideIO(act, admin));
+    console.log(`decidePending: ${ask.decision} #${act.code} (${act.kind}) -> ${out.status}`);
+    return answer(out, act);
+  } catch (e) {
+    console.error("decidePending failed", e);
+    return answer({ status: "server_error", error: String((e as Error)?.message ?? e).slice(0, 200) });
+  }
 }
 
 /* ---------- the SMS channel (roadmap J0) ----------
@@ -874,7 +952,9 @@ serve(async (req: Request) => {
   try {
     const body = (await req.json()) ?? {};
     const action = String(body.action ?? "");
-    if (action !== "sendSms") return json({ ok: false, error: "Unknown action. Expected one of: sendSms" }, 400);
+    // decidePending answers its own JSON for every outcome, refusals included
+    if (action === "decidePending") return await decidePending(body as Record<string, unknown>, jwt);
+    if (action !== "sendSms") return json({ ok: false, error: "Unknown action. Expected one of: sendSms, decidePending" }, 400);
     const result = await sendSms(body as Record<string, unknown>, jwt);
     return json({ ok: true, ...result });
   } catch (err) {

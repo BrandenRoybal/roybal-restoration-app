@@ -276,3 +276,40 @@ table.minitable tr:last-child td { border-bottom: 0; }
 .rl-vrow .btn { width: auto; }
 input.rl-days { width: 90px; flex: 0 0 auto; }
 @media (max-width: 560px) { .rl-pill { top: 104px; } .rl-big { font-size: 24px; } }
+
+/* ============================================================
+   ✅ Approvals (operations spine, step 4) — approvals.js
+   ============================================================ */
+.ap-intro { font-size: 13px; color: var(--muted); margin: 0 0 4px; }
+.ap-none { font-size: 14px; margin: 4px 2px 0; }
+.ap-card { padding: 14px 16px; }
+.ap-card--done { box-shadow: var(--shadow-sm); padding: 12px 16px; }
+.ap-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ap-head .badge { flex: 0 0 auto; }
+.ap-title { flex: 1 1 260px; min-width: 0; font-size: 15px; overflow-wrap: anywhere; }
+.ap-meta { margin-top: 4px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+.ap-ev { margin-top: 10px; padding: 9px 12px; border-radius: 10px; background: #f6f8fb; font-size: 13.5px; }
+.ap-kv { display: flex; gap: 10px; padding: 2px 0; }
+.ap-k { flex: 0 0 72px; padding-top: 2px; font-size: 11px; font-weight: 700; letter-spacing: .4px;
+  text-transform: uppercase; color: var(--muted); }
+.ap-v { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* the whole email or text, scrollable inside the card, never the page */
+.ap-mail { margin-top: 6px; padding: 9px 11px; max-height: 220px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line); border-radius: 8px; background: #fff; font-size: 13px;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+.ap-refs { margin: 0; padding-left: 18px; }
+.ap-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.ap-yes { font-size: 12.5px; color: var(--muted); }
+.ap-err { margin: 10px 0 0; }
+.ap-out { margin-top: 5px; font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.ap-out--ok { color: var(--green); }
+.ap-out--no { color: var(--muted); }
+.ap-out--bad { color: var(--red); }
+.ap-out--wait { color: #1c5fb0; }
+.ap-expired { margin: 10px 2px 0; font-size: 13px; color: var(--muted); }
+@media (max-width: 560px) {
+  .ap-card { padding: 12px 13px; }
+  .ap-k { flex-basis: 58px; }
+  .ap-actions .btn { flex: 1 1 auto; white-space: nowrap; }   /* each its own width, one line, full row between them */
+  .ap-yes { flex-basis: 100%; text-align: center; }
+}
