@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Roybal Construction App Manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+<!--
+  SOURCE OF THE APP MANUAL. Edit this file, then rebuild:
+    node docs/manual/tools/shoot.mjs   (re-shoot screens; optional)
+    node docs/manual/tools/build.mjs   (writes docs/manual/dist/Roybal_App_Manual.pdf)
+  {{EDITION}}, {{BUILD}} and {{LICENSES}} are filled in by build.mjs. Screens come from
+  docs/manual/shots/ and show made-up demo data only (tools/demo-data.mjs).
+  When a feature ships: update its section here, add/adjust its shot in
+  tools/shoot.mjs, and update the "What's new" chapter.
+-->
+
+<!-- ============================ COVER ============================ -->
+<section class="cover">
+  <div class="sheet-head">
+    <div>
+      <div class="sheet-head__name"><span class="r">ROYBAL</span><span class="c"> CONSTRUCTION, LLC</span></div>
+      <div class="sheet-head__tag">General Contracting | Restoration &amp; Mitigation | IICRC WRT Certified</div>
+    </div>
+    <div class="sheet-head__addr">3850 Royal Rd, Fairbanks, AK 99701<br>907-371-9868 | branden@roybalconstruction.com<br>roybalconstruction.com</div>
+  </div>
+  <img class="cover__logo" src="../../apps/field/assets/emblem-mark.svg" alt="">
+  <div class="cover__band">
+    <h1>Roybal Construction<br>App Manual</h1>
+    <div class="sub">Field Forms, Office Admin, Job Board and the Customer Portal: how the crew, the office and our customers use them, task by task.</div>
+  </div>
+  <div class="cover__meta">
+    <div><b>Edition</b>{{EDITION}}</div>
+    <div><b>Field app build</b>{{BUILD}}</div>
+    <div><b>For</b>Owner, crew leads, crew</div>
+  </div>
+  <div class="cover__who">
+    Every screen in this manual was captured from the live app code with made-up demo jobs, names, phone numbers and amounts. Nothing shown is a real customer.
+    The manual is rebuilt from the repository whenever a feature ships, so check the edition date against the newest copy in the project files.
+    <div style="margin-top:6pt">{{LICENSES}}</div>
+  </div>
+</section>
+
+<!-- ============================ CONTENTS ============================ -->
+<section>
+  <h2 class="sec">Contents</h2>
+  <nav class="toc">
+    <a class="ch" href="#ch1">1. The app at a glance</a>
+    <a href="#s-apps">The four apps</a>
+    <a href="#s-roles">Logins and roles</a>
+    <a href="#s-flow">How a job moves through the app</a>
+    <a class="ch" href="#ch2">2. Field Forms (crew phones)</a>
+    <a href="#s-signin">Signing in, or working offline</a>
+    <a href="#s-list">The job list</a>
+    <a href="#s-newjob">Starting a job</a>
+    <a href="#s-jobpage">The job page</a>
+    <a href="#s-restforms">Restoration forms</a>
+    <a href="#s-photos">Job photos</a>
+    <a href="#s-workauth">Signatures and the work authorization</a>
+    <a href="#s-receipts">Receipts</a>
+    <a href="#s-conforms">Construction forms</a>
+    <a href="#s-bids">Lead bids, site visits and estimates</a>
+    <a href="#s-fieldreport">Field reports, labor and texting</a>
+    <a href="#s-packet">The job packet and narrative</a>
+    <a href="#s-assist">Ask the office (assistant)</a>
+    <a href="#s-sync">Offline and sync</a>
+    <a class="ch" href="#ch3">3. Office Admin</a>
+    <a href="#s-today">Today</a>
+    <a href="#s-approvals">Approvals</a>
+    <a href="#s-leads">Leads</a>
+    <a href="#s-ajobs">Jobs</a>
+    <a href="#s-areceipts">Receipts and returns</a>
+    <a href="#s-contacts">Contacts and campaigns</a>
+    <a href="#s-settings">Analytics and settings</a>
+    <a class="ch" href="#ch4">4. Job Board</a>
+    <a href="#s-views">Board views</a>
+    <a href="#s-editjob">Editing a job</a>
+    <a href="#s-crewview">Crew, hours and QuickBooks Time</a>
+    <a class="ch" href="#ch5">5. Customer Portal</a>
+    <a href="#s-portalsetup">Turning the portal on</a>
+    <a href="#s-portalsee">What the customer sees</a>
+    <a href="#s-signing">Sending a document for signature</a>
+    <a class="ch" href="#ch6">6. Where leads come from</a>
+    <a class="ch" href="#ch7">7. What's new and in progress</a>
+    <a class="ch" href="#ch8">8. Quick reference</a>
+    <a href="#s-daily">Crew daily checklist</a>
+    <a href="#s-trouble">When something looks wrong</a>
+    <a href="#s-glossary">Glossary</a>
+    <a href="#s-update">Keeping this manual current</a>
+  </nav>
+</section>
+
+<!-- ============================ 1. AT A GLANCE ============================ -->
+<section class="chapter" id="ch1">
+  <div class="chapter__head"><div class="num">Chapter 1</div><h1>The app at a glance</h1><div class="who">Everyone reads this chapter</div></div>
+
+  <h2 class="sec" id="s-apps">The four apps</h2>
+  <p>The Roybal app is four screens that share one set of job records. A photo a crew member takes on a phone shows up in the office, on the customer's page if the office shares it, and in the carrier packet. Nothing has to be typed twice.</p>
+
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 270" font-family="Helvetica Neue, Arial" font-size="12">
+    <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#44556b"/></marker></defs>
+    <rect x="270" y="105" width="180" height="62" rx="10" fill="#0f1b2d"/>
+    <text x="360" y="131" fill="#fff" font-weight="700" text-anchor="middle" font-size="13">Shared job records</text>
+    <text x="360" y="150" fill="#c9d6e8" text-anchor="middle" font-size="10.5">jobs · photos · forms · receipts · leads</text>
+    <!-- field -->
+    <rect x="10" y="10" width="220" height="92" rx="9" fill="#fff1e8" stroke="#f26a21" stroke-width="1.5"/>
+    <text x="24" y="34" font-weight="800" fill="#0f1b2d" font-size="13.5">📱 Field Forms</text>
+    <text x="24" y="54" fill="#44556b">Crew phones and tablets</text>
+    <text x="24" y="71" fill="#44556b">Forms, photos, readings, receipts,</text>
+    <text x="24" y="87" fill="#44556b">signatures. Works with no signal.</text>
+    <!-- admin -->
+    <rect x="490" y="10" width="220" height="92" rx="9" fill="#eef2f7" stroke="#1f3354" stroke-width="1.5"/>
+    <text x="504" y="34" font-weight="800" fill="#0f1b2d" font-size="13.5">🖥 Office Admin</text>
+    <text x="504" y="54" fill="#44556b">Owner's desk</text>
+    <text x="504" y="71" fill="#44556b">Today, Approvals, Leads, Receipts,</text>
+    <text x="504" y="87" fill="#44556b">Contacts, QuickBooks and Gmail.</text>
+    <!-- board -->
+    <rect x="10" y="170" width="220" height="92" rx="9" fill="#eef2f7" stroke="#1f3354" stroke-width="1.5"/>
+    <text x="24" y="194" font-weight="800" fill="#0f1b2d" font-size="13.5">📋 Job Board</text>
+    <text x="24" y="214" fill="#44556b">Office and crew leads</text>
+    <text x="24" y="231" fill="#44556b">Stages, schedule, crew assignments,</text>
+    <text x="24" y="247" fill="#44556b">hours from QuickBooks Time.</text>
+    <!-- portal -->
+    <rect x="490" y="170" width="220" height="92" rx="9" fill="#eaf6ef" stroke="#1f9d55" stroke-width="1.5"/>
+    <text x="504" y="194" font-weight="800" fill="#0f1b2d" font-size="13.5">🌐 Customer Portal</text>
+    <text x="504" y="214" fill="#44556b">Our customers, by text link</text>
+    <text x="504" y="231" fill="#44556b">Progress, photos, documents to sign,</text>
+    <text x="504" y="247" fill="#44556b">selections, balance, messages.</text>
+    <g stroke="#44556b" stroke-width="1.6" fill="none" marker-end="url(#ar)">
+      <path d="M232 70 L285 108"/><path d="M488 70 L436 108"/><path d="M232 210 L285 165"/><path d="M436 165 L488 210"/>
+    </g>
+  </svg>
+  </div>
+
+  <table>
+    <tr><th style="width:22%">App</th><th style="width:30%">Where to open it</th><th>Who uses it</th></tr>
+    <tr><td><b>Field Forms</b></td><td>app.roybalconstruction.com on the phone; add it to the home screen</td><td>Every crew member, every day on site</td></tr>
+    <tr><td><b>Office Admin</b></td><td>app.roybalconstruction.com/admin on a computer</td><td>Branden (owner and office)</td></tr>
+    <tr><td><b>Job Board</b></td><td>app.roybalconstruction.com/board</td><td>Branden and the crew leads for scheduling</td></tr>
+    <tr><td><b>Customer Portal</b></td><td>portal.roybalconstruction.com/j/… (a private link we text)</td><td>Customers; no account needed</td></tr>
+  </table>
+
+  <h2 class="sec" id="s-roles">Logins and roles</h2>
+  <p>Each person signs in with their own email. What they can change depends on the role on their login. The office sets roles; there is no role switch inside the apps.</p>
+  <table>
+    <tr><th style="width:16%">Role</th><th>What it can do</th></tr>
+    <tr><td><b>owner</b></td><td>Everything. Only the owner sees and answers <b>Approvals</b>, which covers every money decision and anything that sends to a customer or adjuster.</td></tr>
+    <tr><td><b>office</b></td><td>Office work: Magicplan create/link/pull, site-walk recordings, logging receipt returns, lead and contact edits. (Nobody holds this role yet.)</td></tr>
+    <tr><td><b>crew_lead</b></td><td>All field forms, photos, receipts, AI drafting and sync. Bid actions that write to the board (site visit done, estimate sent) save on the phone and are logged by the office.</td></tr>
+    <tr><td><b>crew</b></td><td>Same as crew lead in the field app.</td></tr>
+    <tr><td><b>agent</b></td><td>The automated helpers (phone receptionist, morning brief). They can propose work but can never approve it, and they cannot change job files.</td></tr>
+    <tr><td><b>new signup</b></td><td>Read-only. A brand-new login can sign in and see jobs, but nothing it changes is saved to the cloud until Branden gives it a role.</td></tr>
+  </table>
+  <div class="note"><b>Giving someone a role</b>When a new hire signs up, their login starts read-only. Branden sets their role (usually <b>crew</b>) the day they are handed a phone. Roles are changed in the database, not in the apps; ask Claude in the project to do it and name the person and the role. When someone leaves, their login is disabled, never deleted, so their past work keeps its name.</div>
+
+  <h2 class="sec" id="s-flow">How a job moves through the app</h2>
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 200" font-family="Helvetica Neue, Arial" font-size="11">
+    <defs><marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#f26a21"/></marker></defs>
+    <g font-weight="800" fill="#fff" font-size="11.5" text-anchor="middle">
+      <rect x="4" y="18" width="104" height="48" rx="8" fill="#7a8aa0"/><text x="56" y="47">1 · Lead</text>
+      <rect x="126" y="18" width="104" height="48" rx="8" fill="#1c5fb0"/><text x="178" y="47">2 · Bid</text>
+      <rect x="248" y="18" width="104" height="48" rx="8" fill="#1c5fb0"/><text x="300" y="40">3 · Won,</text><text x="300" y="55">scheduled</text>
+      <rect x="370" y="18" width="104" height="48" rx="8" fill="#f26a21"/><text x="422" y="47">4 · In progress</text>
+      <rect x="492" y="18" width="104" height="48" rx="8" fill="#8a6fb0"/><text x="544" y="40">5 · Final /</text><text x="544" y="55">punch</text>
+      <rect x="614" y="18" width="104" height="48" rx="8" fill="#1f9d55"/><text x="666" y="47">6 · Complete</text>
+    </g>
+    <g stroke="#f26a21" stroke-width="2" marker-end="url(#ar2)"><path d="M109 42h15"/><path d="M231 42h15"/><path d="M353 42h15"/><path d="M475 42h15"/><path d="M597 42h15"/></g>
+    <g fill="#44556b" font-size="10.2">
+      <text x="4" y="86">Web form, phone or</text><text x="4" y="100">referral lands in</text><text x="4" y="114">Leads (office) and the</text><text x="4" y="128">board's Leads / Bids.</text>
+      <text x="126" y="86">📐 Start bid on a</text><text x="126" y="100">phone. Site visit,</text><text x="126" y="114">Magicplan scan, walk</text><text x="126" y="128">clips, estimate draft.</text>
+      <text x="248" y="86">Marked Won on the</text><text x="248" y="100">board. Contract or</text><text x="248" y="114">work authorization</text><text x="248" y="128">signed, deposit sent.</text>
+      <text x="370" y="86">Daily forms, photos,</text><text x="370" y="100">readings, receipts,</text><text x="370" y="114">hours from QuickBooks</text><text x="370" y="128">Time. Portal updates.</text>
+      <text x="492" y="86">Punch list, certificate</text><text x="492" y="100">of drying or completion,</text><text x="492" y="114">customer sign-off.</text>
+      <text x="614" y="86">Packet to the carrier,</text><text x="614" y="100">final invoice, warranty</text><text x="614" y="114">and review request.</text>
+    </g>
+    <rect x="4" y="150" width="714" height="40" rx="7" fill="#eef2f7"/>
+    <text x="16" y="168" fill="#0f1b2d" font-weight="700" font-size="11">Every step leaves a record:</text>
+    <text x="16" y="183" fill="#44556b" font-size="10.5">who did it, when, with photos. The completeness panel on each job tells you what is still missing before it can be billed.</text>
+  </svg>
+  </div>
+  <p>Restoration jobs (water, fire, mold, storm) and construction jobs (remodel, new build, rebuild) share the same engine but get different form sets. A restoration job can spin off a linked reconstruction job when the drying is done (see <a href="#s-jobpage">The job page</a>).</p>
+</section>
+
+<!-- ============================ 2. FIELD FORMS ============================ -->
+<section class="chapter" id="ch2">
+  <div class="chapter__head"><div class="num">Chapter 2</div><h1>Field Forms</h1><div class="who">For the crew, on phones and tablets in the field</div></div>
+  <p>Field Forms is the crew's job binder: every form, photo, reading and signature for a job lives here, works with no signal, and turns into clean, branded PDFs for the carrier.</p>
+
+  <h2 class="sec" id="s-signin">Signing in, or working offline</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame"><img src="shots/field-signin.jpg" style="margin-top:0"></div><figcaption><b>Sign in</b> with your own crew email.</figcaption></figure>
+    <div class="text">
+      <ol class="steps">
+        <li>Open <b>app.roybalconstruction.com</b> on the phone. In Safari tap Share → <span class="ui">Add to Home Screen</span> so it opens like an app.</li>
+        <li>Enter your crew email and password and tap <span class="ui">Sign in</span>. Your jobs download and stay on the phone.</li>
+        <li>No signal at the first launch? Tap <span class="ui">Work offline on this device →</span>. Everything works and saves on the phone; sign in later to sync it up.</li>
+        <li>Tap the orange <span class="ui">👤 Set tech</span> chip in the top bar and pick your name. It tags your photos, logs and voice notes to you. It is set per device.</li>
+      </ol>
+      <div class="tip"><b>Tip</b>The dot at the top right shows sync: green <b>Synced</b>, amber <b>Syncing…</b>, red <b>Offline, saved on device</b> or <b>Sync error</b>.</div>
+      <div class="note"><b>New login?</b>Until Branden sets your role, you can see jobs but your changes stay on your phone only. If the account panel says "this account may not write", tell the office.</div>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-list">The job list</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame"><img src="shots/field-jobs.jpg"></div><figcaption><b>Jobs</b>, Restoration tab, with watch flags.</figcaption></figure>
+    <div class="text">
+      <p>Three tabs run across the top:</p>
+      <ul>
+        <li><span class="ui">📐 Lead bids</span>: bids in progress, plus open leads nobody has started yet.</li>
+        <li><span class="ui">💧 Restoration</span>: water, fire, mold and storm mitigation.</li>
+        <li><span class="ui">🔨 Construction</span>: remodels, new builds and rebuilds.</li>
+      </ul>
+      <p>When you are online, jobs group under the Job Board's stage headers (In Progress, Final / Punch, On Hold, Scheduled…), so the list reads like the whiteboard.</p>
+      <p><b>Watch flags</b> under a job tell you what needs attention, for example:</p>
+      <ul>
+        <li><b>💧 No reading in 2+ days</b>: the moisture readings are stale.</li>
+        <li><b>💧 1 unit on site 7+ days</b>: carriers question equipment past day 7.</li>
+        <li><b>🗓 No QB link</b>: the board job is not linked to QuickBooks Time.</li>
+      </ul>
+      <p>The <span class="ui">👤</span> button opens your account: who is signed in, the sync status line, <span class="ui">↻ Sync</span> and <span class="ui">Sign out</span>. A finished job can be archived with <span class="ui">🗂 Archive</span>; it moves to the 🗂 Archived list at the bottom and is never deleted.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-newjob">Starting a job</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4.4in"><img src="shots/field-job-edit.jpg"></div><figcaption><b>Job details</b>: entered once, used on every form.</figcaption></figure>
+    <div class="text">
+      <ol class="steps">
+        <li>Pick the <span class="ui">💧 Restoration</span> or <span class="ui">🔨 Construction</span> tab, then tap <span class="ui">+ New Job</span>.</li>
+        <li>Fill in the header: customer, phone, property address, email, work order #, claim #, date of loss, carrier, adjuster and loss cause. It saves as you type (<b>✓ Saved</b>).</li>
+        <li><b>Restoration:</b> tap every loss type that applies (💧 Water, 🔥 Fire &amp; Smoke, 🦠 Mold, 🌬️ Storm &amp; Wind). Each one opens its own fields: water category and class, drying system, smoke type, mold condition, storm cause.</li>
+        <li><b>Construction:</b> set the project type (Remodel, New Construction, Reconstruction), contract amount, lender if any, start and target dates, permit numbers.</li>
+        <li>Tap <span class="ui">Done — go to forms</span>.</li>
+      </ol>
+      <div class="tip"><b>Tip</b>Tapping + New Job twice on a slow phone will not make two jobs: an untouched blank job is reused. Bids that start from the Job Board already carry the customer header.</div>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-jobpage">The job page</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:5.1in"><img src="shots/field-job-home.jpg"></div><figcaption><b>Job page</b>: badges, actions, completeness, tiles.</figcaption></figure>
+    <div class="text">
+      <p>The top shows the customer, address, claim # and badges (water category and class, drying system). Under it:</p>
+      <ul>
+        <li><span class="ui">✎ Edit job details</span>, <span class="ui">📞 Call</span>, <span class="ui">🚗 Text: on our way</span> and <span class="ui">🗂 Archive</span>.</li>
+        <li><b>Completeness panel.</b> "Not yet billable" lists every item still missing before the job can be billed, then recommended items. Work it down to zero before the packet goes out.</li>
+        <li><b>💬 Messaging.</b> Texts sent from the app and the customer's replies. Tick <i>Send texts from the company number</i> to text from the toll-free line instead of your own phone.</li>
+        <li><b>⏪ Backups</b> and <b>☁ Cloud copy</b> (folded). Last-resort recovery; see <a href="#s-trouble">When something looks wrong</a>.</li>
+        <li><b>🔨 Reconstruction</b> (restoration jobs). <span class="ui">🔨 Start reconstruction</span> creates a linked construction job for the rebuild, carrying the header, photos and floor plans across.</li>
+        <li><b>Tiles</b>, one per form. Each shows <i>Not started</i>, <i>Started</i>, or a count such as <i>5 photos</i>.</li>
+      </ul>
+      <p>At the bottom: <span class="ui">📄 Full job packet (PDF)</span> and <span class="ui">📝 Construction Narrative</span> (restoration) or <span class="ui">📝 Progress Update</span> (construction).</p>
+    </div>
+  </div>
+
+  <table class="keep">
+    <tr><th style="width:31%">Tiles on every job</th><th>What it is for</th></tr>
+    <tr><td>📏 Floor Plan</td><td>Magicplan scan (link, ⟳ Pull, files) plus the dimensioned plan; prints full page.</td></tr>
+    <tr><td>📎 Supporting Docs</td><td>Engineer's reports, estimates, letters. Prints full page and the AI reads them.</td></tr>
+    <tr><td>📷 Job Photos</td><td>Before, during and after pictures.</td></tr>
+    <tr><td>📦 Contents</td><td>Personal property inventory and pack-out, boxes with QR labels, pack-back receipt.</td></tr>
+    <tr><td>✍️ Work Authorization</td><td>Sign on the device or upload a signed copy.</td></tr>
+    <tr><td>📋 Field Report</td><td>Crew to office: notes, issues, materials and photos. Internal, never in the packet.</td></tr>
+    <tr><td>⏱ Labor Log</td><td>Every hour from QuickBooks Time on one page for the packet.</td></tr>
+    <tr><td>🔁 Change Order</td><td>Scope or supplement changes; can be sent to the portal for e-signature.</td></tr>
+    <tr><td>🧾 Construction Invoice</td><td>T&amp;M or contract billing, drafted by the AI or built by hand.</td></tr>
+    <tr><td>🏗️ Estimate</td><td>Proposed scope and pricing, drafted from the site visit.</td></tr>
+    <tr><td>🌐 Client Portal</td><td>What the customer sees. Internal only, never in the packet.</td></tr>
+    <tr><td>🧾 Receipts</td><td>Every material, rental and dump receipt, read by the AI, with a running job cost. Internal.</td></tr>
+  </table>
+
+  <h2 class="sec" id="s-restforms">Restoration forms</h2>
+  <p>Restoration jobs add <b>🗺️ Moisture Map</b>, <b>💧 Drying Log</b> and <b>✅ Cert. of Drying</b>. Moisture maps and drying logs take a new page per area or per day; the tile counts how many are saved.</p>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4.9in"><img src="shots/field-moisture-map.jpg"></div><figcaption><b>Moisture Map</b> with an imported floor plan.</figcaption></figure>
+    <div class="text">
+      <h3>🗺️ Moisture Map</h3>
+      <ol class="steps">
+        <li>Tap <span class="ui">📄 Import floor plan (PDF / image)</span> or draw freehand. <span class="ui">✂️ Crop / zoom</span> fits it.</li>
+        <li>Tap <span class="ui">① Number</span> and drop a numbered marker at each reading location.</li>
+        <li>Pick the <b>material</b>; the IICRC dry goal fills itself in.</li>
+        <li>Each visit, tap <span class="ui">+ Add reading date</span> and enter MC% per location. Readings turn green when dry and red when wet, and the trend graph plots each location against the dry goal.</li>
+        <li>Place equipment icons on the plan (dehus, air movers, scrubbers) so the packet shows the equipment layout.</li>
+      </ol>
+      <h3>💧 Drying Log</h3>
+      <ul>
+        <li><span class="ui">🧮 Size the equipment</span> works out how many units the room needs.</li>
+        <li><span class="ui">+ Add equipment</span> for each unit (asset #, type, location, placed, removed).</li>
+        <li><span class="ui">+ Add reading</span> each visit: outside, reference and affected temperature and RH. GPP and grain depression calculate themselves, and any unit on site 7+ days is flagged for the carrier.</li>
+      </ul>
+      <h3>✅ Cert. of Drying</h3>
+      <p>The S500 dry-standard table (material, meter, goal, final reading, dry ✓) and a three-way sign-off: tech, owner and adjuster. Sign on the device or upload a signed copy.</p>
+      <div class="tip"><b>Voice</b>Moisture Map, Drying Log, Photos and several other forms have <span class="ui">🎙️ Transcribe</span>: say the readings, tap ⏹ Stop, then confirm the values it heard.</div>
+    </div>
+  </div>
+  <div class="pair">
+    <figure class="phone"><div class="frame" style="height:3.4in"><img src="shots/field-drying-log.jpg"></div><figcaption><b>Drying Log</b>: drying system, category and class.</figcaption></figure>
+    <figure class="phone"><div class="frame" style="height:3.4in"><img src="shots/field-drying-log.jpg" style="margin-top:-7.6in"></div><figcaption><b>Equipment</b> placed and removed, with runtime.</figcaption></figure>
+  </div>
+
+  <h2 class="sec" id="s-photos">Job photos</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4.8in"><img src="shots/field-photos.jpg"></div><figcaption><b>Job Photos</b>: stage, room and caption on each shot.</figcaption></figure>
+    <div class="text">
+      <ol class="steps">
+        <li>Tap <span class="ui">📷 Add photos</span>. Set the stage (Before, During, After) and the room.</li>
+        <li><span class="ui">✨ AI captions</span> writes a caption for each photo. Edit any caption you want.</li>
+        <li>Filter with the chips on top, or sort by stage, room or date.</li>
+      </ol>
+      <p><b>Sending photos to a carrier</b></p>
+      <ul>
+        <li><span class="ui">📄 Photo log PDF (email)</span> makes full-size photos, two per page, in files under 10 MB: the attachment a reviewer can open.</li>
+        <li><span class="ui">⬇ Download all (.zip)</span> packs every original with an index sheet.</li>
+        <li><span class="ui">🔗 Insurance photo link</span> publishes a private link to the full-resolution set (needs sign-in and signal); <span class="ui">Turn off</span> stops it.</li>
+        <li><span class="ui">☁ Move photos to cloud</span> frees phone space and keeps thumbnails.</li>
+      </ul>
+      <div class="warn"><b>Careful</b>Deleting a photo deletes it on every device.</div>
+      <h3>📦 Contents</h3>
+      <p><span class="ui">+ Add item</span> or <span class="ui">✨ Scan room photo</span> to list items, with quantity, room, box, condition and replacement value; age gives a live ACV. Non-salvageable items roll into the Loss List. <span class="ui">📦 Boxes</span> prints QR box labels, <span class="ui">↩︎ Pack-back</span> runs the return checklist with the owner's sign-off, and <span class="ui">📄 Inventory PDF</span> / <span class="ui">⬇ CSV</span> export it.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-workauth">Signatures and the work authorization</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4.6in"><img src="shots/field-work-auth.jpg" style="margin-top:-1.9in"></div><figcaption><b>Work Authorization</b>: scope, terms, signatures.</figcaption></figure>
+    <div class="text">
+      <p>Get the work authorization signed <b>before</b> any work starts.</p>
+      <ol class="steps">
+        <li>Open <b>✍️ Work Authorization</b>. The header comes from the job.</li>
+        <li>Review the authorized scope with the owner; the standard items are pre-checked.</li>
+        <li>Choose <span class="ui">✍️ Sign on device</span>: the owner signs with a finger, then the Roybal rep signs. Or choose <span class="ui">📎 Upload signed copy</span> to photograph a wet-signed paper copy.</li>
+        <li>If the owner agrees to job texts, tick the text-consent box.</li>
+      </ol>
+      <p>The same sign-or-upload choice is on the Cert. of Drying and the Cert. of Completion. To have a customer sign from home instead, send the form through the portal (<a href="#s-signing">Sending a document for signature</a>). A signature made in the portal is copied back into the form.</p>
+      <div class="note"><b>Every form</b>saves as you type. <span class="ui">⬇ Save as PDF</span> at the bottom makes a branded, letter-size copy under its own file name; <span class="ui">Done</span> goes back to the job.</div>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-receipts">Receipts</h2>
+  <div class="pair">
+    <figure class="phone"><div class="frame" style="height:4.1in"><img src="shots/field-receipts.jpg"></div><figcaption><b>🧾 Receipts</b>: job cost to date by category and vendor.</figcaption></figure>
+    <figure class="phone"><div class="frame" style="height:4.1in"><img src="shots/field-receipt-edit.jpg"></div><figcaption><b>One receipt</b> after the AI read it.</figcaption></figure>
+  </div>
+  <p>Snap every material, rental and dump receipt on the job it belongs to. QuickBooks bank feeds already bring in most charges but never know which job they were for; tagging the receipt to the job here fills that gap.</p>
+  <ol class="steps">
+    <li>On the job, open <b>🧾 Receipts</b> and tap <span class="ui">📷 Snap receipt</span> (or <span class="ui">📎 Upload photo / PDF</span>, or <span class="ui">✎ Type one in</span>).</li>
+    <li>With signal, the AI reads the store, date, total, tax and line items by itself (<b>✨ AI read</b>). With no signal it says so; tap <span class="ui">✨ Read receipt</span> later.</li>
+    <li>Check the total and set <b>Paid with</b>: Company card, Store account, Cash, or Personal card (reimburse). Tap <span class="ui">✓ Done</span>.</li>
+  </ol>
+  <p>The <b>Job costs to date</b> card totals everything by category (🪵 Materials, 🚜 Equipment rental, 🗑 Dump fees, 🧾 Other) and by vendor, and warns when spending passes the job budget. Search finds any item ("which job got the LVL?"). Receipts are internal and never go in the packet.</p>
+  <div class="gate"><b>Returns</b>Returns are logged in the office, not on the phone (see <a href="#s-areceipts">Receipts and returns</a>). On the phone a returned receipt shows a read-only <b>↩ Return</b> badge.</div>
+
+  <h2 class="sec" id="s-conforms">Construction forms</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4.4in"><img src="shots/field-construction-home.jpg"></div><figcaption><b>A construction job</b> with its board timeline.</figcaption></figure>
+    <div class="text">
+      <table>
+        <tr><th style="width:38%">Form</th><th>Use it to</th></tr>
+        <tr><td>📐 Scope of Work</td><td>List line items per room or area, tagged by trade, plus allowances.</td></tr>
+        <tr><td>🗒️ Pre-Construction</td><td>Check contract, deposit, permits, selections and utilities before building; log permits.</td></tr>
+        <tr><td>🎨 Selections</td><td>Track the owner's finish and fixture choices against allowances, with order-by dates.</td></tr>
+        <tr><td>👷 Sub Schedule</td><td>Sequence the trades with dates, status and COI tracking. <span class="ui">⤓ Prefill from board phases</span>.</td></tr>
+        <tr><td>🏛️ Inspection Log</td><td>Record each inspection, result, corrections and reinspection date.</td></tr>
+        <tr><td>🔧 Punch List</td><td>Walkthrough items with photos and an owner sign-off.</td></tr>
+        <tr><td>💰 Draw Schedule</td><td>Payment milestones; <span class="ui">→ Invoice</span> pre-fills an invoice for a draw.</td></tr>
+        <tr><td>🏁 Cert. of Completion</td><td>Final checklist, warranty, contractor and owner signatures.</td></tr>
+      </table>
+      <p><b>📅 Board timeline.</b> <span class="ui">📅 Estimate timeline</span> drafts the build phases (hours and wait days) from the scope; review them and tap <span class="ui">📅 Send to Job Board</span>. After that the board owns the dates, and the job page shows a read-only <b>🗓 On the Job Board</b> card.</p>
+      <p>Construction jobs get their own watch flags: failed inspections with no reinspection, sub no-shows, trades behind schedule, selections that need ordering.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-bids">Lead bids, site visits and estimates</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4in"><img src="shots/field-leadbids.jpg"></div><figcaption><b>📐 Lead bids</b>: open leads waiting for a bid.</figcaption></figure>
+    <div class="text">
+      <ol class="steps">
+        <li>Open the <span class="ui">📐 Lead bids</span> tab. Leads from the web form, the phone line and the office show as grey rows under <i>Leads on the board — not started</i>.</li>
+        <li>Tap <span class="ui">📐 Start bid</span> (needs signal). This creates the bid file. A greyed-out button means a job for that customer or claim # already exists; open that job instead.</li>
+        <li>The bid file opens with the <b>📐 Bid card</b>: 📅 Site visit · 📎 Packet · 🔎 Verify · 📄 Estimate · ✉️ Sent. Work down the card.</li>
+        <li>At the site visit, scan with Magicplan, record walk clips, take photos, then tap <span class="ui">✓ Site visit done</span>.</li>
+        <li>The row's bid chip shows progress: 📅 visit → 🔍 inspected → 📄 est. $ → 📄 sent.</li>
+      </ol>
+      <p>When the office marks the lead <b>Won</b> on the board, the same file becomes the job; the Bid card goes away and the page offers <span class="ui">📷 Copy N photos</span> to turn site-visit photos into "before" shots. A lost lead's bid file archives itself.</p>
+      <div class="gate"><b>Office only</b>Recording site walks, drafting scope notes, and Magicplan Create / Link / Pull are for the owner and office. Crew see the scan and its files.</div>
+    </div>
+  </div>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4.6in"><img src="shots/field-estimate.jpg"></div><figcaption><b>🏗️ Estimate</b>: AI bar, then line items by room.</figcaption></figure>
+    <div class="text">
+      <h3>The site visit and the estimate draft</h3>
+      <ul>
+        <li><b>📏 Floor Plan → 📐 Magicplan.</b> <span class="ui">📐 Create Magicplan project</span> (or <span class="ui">🔗 Link existing project</span>), scan in the Magicplan app, export, then tap <span class="ui">⟳ Pull</span>. Pull brings in everything exported, rooms and files.</li>
+        <li><b>📋 Site visit</b> (on the estimate). Slots for 🎥 walk clips, reports and drawings, extra photos, handwritten notes and Magicplan files, plus a typed scope box with 🎙️ dictation. Walk clips record offline and upload themselves (up to 15 minutes each).</li>
+        <li><span class="ui">✨ Draft scope notes</span> turns the walk clips into notes by room; mark each ✓ keep, ✎ reword or ✕ drop. Only kept notes reach the estimate.</li>
+        <li><span class="ui">✨ Draft estimate from site visit</span> runs in the background and fills the line items. The 🔎 Verify checklist on the Bid card makes sure a person checked it.</li>
+        <li><span class="ui">🔎 Find missed items</span> looks for gaps; <span class="ui">📥 Import Xactimate estimate</span> reads a carrier estimate.</li>
+        <li><span class="ui">✉️ Send</span>: save the PDF (or a Word copy), open the email, attach it. Opening the email marks the estimate sent on the board. Estimate numbers are suggested as RC-&lt;last name&gt;-&lt;month&gt;.</li>
+      </ul>
+      <p>The <b>🧾 Construction Invoice</b> uses the same editor, with <span class="ui">✨ Draft from documentation</span> and <span class="ui">⬆️ Push to QuickBooks</span>.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-fieldreport">Field reports, labor and texting</h2>
+  <ul>
+    <li><b>📋 Field Report</b> is the crew's note to the office: notes, issues, materials needed and photos, with a signature. <span class="ui">📱 Text to office</span> sends it. It never goes in the packet.</li>
+    <li><b>⏱ Labor Log</b> pulls every hour logged to the job in QuickBooks Time: link the QuickBooks job once with <span class="ui">Link QuickBooks job</span>, then <span class="ui">⤓ Sync labor from QuickBooks</span>. Hours sync is an office job; crew may see an error.</li>
+    <li><b>🚗 Text: on our way</b> on the job page texts the customer. With <i>Send texts from the company number</i> on, the text comes from the toll-free line and replies show in the job's Messaging log and on the office Today screen.</li>
+  </ul>
+
+  <h2 class="sec" id="s-packet">The job packet and narrative</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:3.7in"><img src="shots/field-packet.jpg"></div><figcaption><b>Full job packet</b>: choose what goes in.</figcaption></figure>
+    <div class="text">
+      <ol class="steps">
+        <li>On the job page tap <span class="ui">📄 Full job packet (PDF)</span>.</li>
+        <li>Untick anything to leave out of this job's packet (the choice is remembered).</li>
+        <li><span class="ui">⬇ Save packet as PDF</span> for one carrier-ready file, or <span class="ui">🔗 Insurance packet link</span> for a private link to the whole packet.</li>
+      </ol>
+      <p>Field Reports, the Client Portal and Receipts are never included. An uploaded signed copy of the work authorization or certificate of drying replaces the generated form.</p>
+      <p><b>📝 Construction Narrative</b> (restoration) writes the packet cover letter from the job's facts. It stays locked until the required documents are complete; <span class="ui">⚠️ Override — unlock anyway</span> skips the lock. <span class="ui">✉️ Adjuster email</span> drafts the email with the packet link. <b>📝 Progress Update</b> (construction) drafts a where-things-stand note for the owner, adjuster or lender.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-assist">Ask the office (assistant)</h2>
+  <p>The round 💬 button on every job page opens <b>Ask the office</b>. Type, talk (🎙️) or hand it a photo (📷). It reads this job's records and answers like a colleague, and it drafts paperwork: a change order, an invoice line, a receipt, a text to the customer. <b>Anything that writes or sends shows up as a confirm chip first; nothing happens until you tap it.</b> Drag the panel anywhere; — minimizes it.</p>
+  <div class="note"><b>AI needs signal</b>Every AI action (captions, receipt reading, drafts, the assistant) needs a connection and a signed-in login. With no signal you see "No connection — AI needs internet. Your typed entries are saved."</div>
+
+  <h2 class="sec" id="s-sync">Offline and sync</h2>
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 150" font-family="Helvetica Neue, Arial" font-size="11">
+    <defs><marker id="ar3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#44556b"/></marker></defs>
+    <rect x="6" y="20" width="150" height="70" rx="12" fill="#fff" stroke="#16263d" stroke-width="3"/>
+    <text x="81" y="48" text-anchor="middle" font-weight="800" fill="#0f1b2d" font-size="12">📱 Your phone</text>
+    <text x="81" y="66" text-anchor="middle" fill="#44556b">saves first, always</text>
+    <text x="81" y="80" text-anchor="middle" fill="#44556b">+ 10 backups per job</text>
+    <rect x="285" y="20" width="150" height="70" rx="10" fill="#0f1b2d"/>
+    <text x="360" y="48" text-anchor="middle" font-weight="800" fill="#fff" font-size="12">☁ Cloud</text>
+    <text x="360" y="66" text-anchor="middle" fill="#c9d6e8">merges both copies;</text>
+    <text x="360" y="80" text-anchor="middle" fill="#c9d6e8">never overwrites work</text>
+    <rect x="564" y="20" width="150" height="70" rx="12" fill="#fff" stroke="#16263d" stroke-width="3"/>
+    <text x="639" y="48" text-anchor="middle" font-weight="800" fill="#0f1b2d" font-size="12">📱 Another phone</text>
+    <text x="639" y="66" text-anchor="middle" fill="#44556b">or the office</text>
+    <text x="639" y="80" text-anchor="middle" fill="#44556b">sees the merged job</text>
+    <g stroke="#44556b" stroke-width="1.6" marker-end="url(#ar3)"><path d="M158 48 H283"/><path d="M283 64 H158"/><path d="M437 48 H562"/><path d="M562 64 H437"/></g>
+    <text x="220" y="40" text-anchor="middle" fill="#44556b" font-size="10">every 45 s when online</text>
+    <text x="500" y="40" text-anchor="middle" fill="#44556b" font-size="10">every 45 s when online</text>
+    <text x="6" y="118" fill="#0f1b2d" font-weight="700">No signal?</text>
+    <text x="72" y="118" fill="#44556b">Keep working. Everything is on the phone and syncs by itself when the signal comes back. Walk clips wait in a</text>
+    <text x="6" y="134" fill="#44556b">queue ("2 clips waiting to upload") and upload on their own. Two people can work the same job; photos, readings and forms merge.</text>
+  </svg>
+  </div>
+  <ul>
+    <li>If the app says <b>"This app is out of date — close and reopen it to update, then sync"</b>, swipe the app closed and open it again. Your work is still on the phone and syncs after the update.</li>
+    <li>The app updates itself in the background and reloads when you are not typing. The build number is at the bottom of the job list.</li>
+    <li>If a merge happened you'll see "🔀 merged changes from another device". Nothing was lost.</li>
+  </ul>
+</section>
+
+<!-- ============================ 3. OFFICE ADMIN ============================ -->
+<section class="chapter" id="ch3">
+  <div class="chapter__head"><div class="num">Chapter 3</div><h1>Office Admin</h1><div class="who">For Branden at the desk · app.roybalconstruction.com/admin</div></div>
+  <p>The Office Admin is the owner's desk. Tabs run across the top: <span class="ui">Today</span> <span class="ui">Approvals</span> <span class="ui">Leads</span> <span class="ui">Jobs</span> <span class="ui">Receipts</span> <span class="ui">Contacts</span> <span class="ui">Campaigns</span> <span class="ui">Analytics</span> <span class="ui">⚙ Settings</span> and <span class="ui">❓ Help</span>. Leads and Approvals carry a count badge when something is waiting. The 💬 button opens the same assistant as the field app, with every job in view.</p>
+
+  <h2 class="sec" id="s-today">Today</h2>
+  <figure class="wide"><div class="frame" style="height:3.9in"><img src="shots/admin-today.jpg"></div><figcaption><b>Today</b>: lead numbers, job numbers, company texting and job email.</figcaption></figure>
+  <ul>
+    <li><b>Lead row:</b> unworked leads, overdue follow-ups, pipeline value, average first touch, site visits this week, and estimates out with no answer after 5 days. Click a tile to jump to Leads.</li>
+    <li><b>Ops row:</b> total jobs, active in the last 7 days, drying in progress, and jobs that need attention (equipment out 7+ days).</li>
+    <li><b>↩ Return windows closing</b> appears only when a store's return window is about to close on leftover material. <span class="ui">Nothing left over</span> clears it.</li>
+    <li><b>💬 Company texting:</b> the latest conversations on the toll-free number, newest first, with new replies marked.</li>
+    <li><b>📧 Job email waiting:</b> unread job email matched to a job by claim # or customer. <span class="ui">✓ Read</span> or <span class="ui">Mark all read</span>; anything you handle in Gmail clears itself.</li>
+  </ul>
+
+  <h2 class="sec" id="s-approvals">Approvals</h2>
+  <figure class="wide"><div class="frame" style="height:4.2in"><img src="shots/admin-approvals.jpg"></div><figcaption><b>✅ Approvals</b>: everything waiting on the owner's yes.</figcaption></figure>
+  <p>Anything the automated helpers want to send or change waits here for the owner: overdue-invoice reminder emails from the morning brief, phases suggested from QuickBooks Time, customer texts, job stage moves. Only the owner's login sees this tab's contents.</p>
+  <ol class="steps">
+    <li>Read the card: who it goes to, the full message, why it was proposed, and links to the evidence.</li>
+    <li>Tap <span class="ui">Approve and send</span> (or <i>Approve and add phase</i>, <i>Approve and move job</i>) and confirm. Or tap <span class="ui">Decline</span>, optionally with a reason.</li>
+    <li>The card moves to <b>Recently decided</b> (last 48 hours) with the result: Sent, Phase added, Moved to…, Declined or Failed.</li>
+  </ol>
+  <div class="tip"><b>From your phone</b>Cards that show "or text YES 12" can also be answered by texting <b>YES 12</b> back to the alert. The first answer wins. The page refreshes itself every 45 seconds.</div>
+  <div class="gate"><b>In progress</b>One-tap overdue-invoice reminders and adjuster emails are being moved onto this list now (see <a href="#ch7">What's new</a>). Cards from the newer queue cannot be answered by text yet.</div>
+
+  <h2 class="sec" id="s-leads">Leads</h2>
+  <figure class="wide"><div class="frame" style="height:3.6in"><img src="shots/admin-leads.jpg"></div><figcaption><b>Leads</b>: open leads, newest first, with the next move on each.</figcaption></figure>
+  <p>Every open lead from the web form, the AI phone line, the website chat and the office shows here with its channel, age, message, phone, address and estimated value. ⚠ marks an emergency.</p>
+  <table>
+    <tr><th style="width:27%">Button</th><th>What it does</th></tr>
+    <tr><td>📞 Call</td><td>Calls the lead.</td></tr>
+    <tr><td>📅 Site visit</td><td>Books the visit: date, time and who's going. The visit shows on the board card and on the bid in Field Forms.</td></tr>
+    <tr><td>📱 Confirm by text</td><td>Opens an editable confirmation text. Texts only go out between 7 AM and 8 PM Alaska time.</td></tr>
+    <tr><td>⏰ Follow-up</td><td>Sets the next move and when.</td></tr>
+    <tr><td>✓ Done</td><td>Logs what happened (site visit done, estimate sent, waiting on customer, no answer) and the next step.</td></tr>
+    <tr><td>📝 Notes</td><td>Free notes on the lead.</td></tr>
+    <tr><td>✕ Lost / spam</td><td>Pick a reason (price, went with another contractor, no response, not a fit) and archive it.</td></tr>
+  </table>
+  <p>Marking a lead <b>Won</b> happens on the Job Board (<a href="#s-editjob">Editing a job</a>).</p>
+  <div class="warn"><b>Scam pattern</b>Out-of-state owner, no address, "remote estimate only", a broker RFQ or a video-call-only request: reply only with the standard intake (address, photos, site visit required, owner pays directly). Never accept third-party payments or overpayments.</div>
+
+  <h2 class="sec" id="s-ajobs">Jobs</h2>
+  <figure class="wide"><div class="frame" style="height:2.6in"><img src="shots/admin-jobs.jpg"></div><figcaption><b>Jobs</b>: every field job in one table.</figcaption></figure>
+  <p>A searchable table of every job (customer, address, claim #, category, moisture maps, drying logs, photos, contents, last update). ⚠ 7-day marks equipment out a week or more. Click a row to open that job in Field Forms.</p>
+
+  <h2 class="sec" id="s-areceipts">Receipts and returns</h2>
+  <figure class="wide"><div class="frame" style="height:3in"><img src="shots/admin-receipts.jpg"></div><figcaption><b>🧾 Receipts</b>: every receipt from every job, searchable.</figcaption></figure>
+  <ul>
+    <li>Search items, stores, jobs, receipt # or a dollar amount. Filter by store, job and date; chips for Purchases, Returns and <i>Needs a total</i>.</li>
+    <li>Click 🧾 on a row to open the receipt. <span class="ui">🧾 Show at the counter</span> puts the photo full screen for the store clerk.</li>
+    <li><span class="ui">↩ Log a return</span>: enter the quantity returned per item, the refund, the slip number and a note; attach the slip with <span class="ui">📷 Snap slip</span>, <span class="ui">📎 Upload</span>, or a slip the crew already snapped. Save. The job's cost total drops by the refund.</li>
+    <li><span class="ui">Return windows</span> sets how many days each store allows (for example 90 days at the hardware store, 30 at the lumber yard). The Today screen warns before a window closes.</li>
+  </ul>
+  <div class="gate"><b>Gated</b><span class="ui">↩ Log a return</span> stays greyed out until every crew phone is on field build v202 or newer. When Branden writes <b>"require v202"</b>, the app starts requiring that build; phones on an older build stop saving until Field Forms is closed and reopened. Returns and return windows are owner and office only.</div>
+
+  <h2 class="sec" id="s-contacts">Contacts and campaigns</h2>
+  <figure class="wide"><div class="frame" style="height:2.5in"><img src="shots/admin-contacts.jpg"></div><figcaption><b>Contacts</b>: customers, adjusters, agents, property managers and subs.</figcaption></figure>
+  <ul>
+    <li>Search by name, phone or email; filter with the role chips. <b>marketing ✓</b> means the person opted in to seasonal texts.</li>
+    <li>Open a contact for their jobs and leads, a timeline of every text, email, portal message and call, and <span class="ui">Edit</span>.</li>
+    <li><b>⚠ Merge review</b> lists possible duplicates: <span class="ui">Keep this one</span> merges, <span class="ui">Not a match</span> dismisses.</li>
+  </ul>
+  <p><b>Campaigns</b> sends a seasonal text (freeze-up prep, spring roof check) to opted-in customers only:</p>
+  <ol class="steps">
+    <li><span class="ui">＋ New campaign</span>, tick the recipients, name it ("Freeze-up prep 2026").</li>
+    <li>Write the message; <b>{name}</b> becomes each person's first name.</li>
+    <li><span class="ui">Review &amp; send</span> and confirm. Every send is re-checked for consent, quiet hours and duplicates.</li>
+  </ol>
+
+  <h2 class="sec" id="s-settings">Analytics and settings</h2>
+  <p><b>Analytics</b> shows win rate, hours actual vs estimate, contract vs bid, average first touch and site-visit-to-estimate time, with charts for conversion by channel, why we lose, speed to lead, and estimate vs actual on completed jobs. Pick the range (all time, 12 months, 90 days, 30 days).</p>
+  <figure class="wide"><div class="frame" style="height:3in"><img src="shots/admin-settings.jpg"></div><figcaption><b>⚙ Settings &amp; connections</b>.</figcaption></figure>
+  <p>One panel per connection, each with its status (● Connected, ▲ Needs reconnect, ○ Not connected): <b>QuickBooks Time</b> (<span class="ui">Sync job codes</span>), <b>QuickBooks Online</b> (invoicing), <b>Email (Gmail)</b> (<span class="ui">↻ Scan inbox now</span>), <b>Magicplan</b> (last 10 scans, <span class="ui">Link to job…</span>) and <b>🧾 Receipt return windows</b>. If a password change breaks one, reconnect it here.</p>
+</section>
+
+<!-- ============================ 4. JOB BOARD ============================ -->
+<section class="chapter" id="ch4">
+  <div class="chapter__head"><div class="num">Chapter 4</div><h1>Job Board</h1><div class="who">For the office and crew leads · app.roybalconstruction.com/board</div></div>
+  <p>The Job Board is the digital whiteboard: every lead and job, its stage, its crew and its dates. Field Forms and the Office Admin read their stages and schedule from here.</p>
+
+  <h2 class="sec" id="s-views">Board views</h2>
+  <figure class="wide"><div class="frame"><img src="shots/board-kanban.jpg"></div><figcaption><b>Kanban</b>: drag cards between stage columns.</figcaption></figure>
+  <p>The switcher at the top left changes the view. The search box and the type and crew filters apply to every view.</p>
+  <table>
+    <tr><th style="width:18%">View</th><th>Use it for</th></tr>
+    <tr><td>Kanban</td><td>The whiteboard. Columns: Leads / Bids, Scheduled, In Progress, On Hold, Final / Punch, Complete. Drag a card to change its stage.</td></tr>
+    <tr><td>Swimlanes</td><td>One lane per crew member.</td></tr>
+    <tr><td>Table</td><td>A sortable list: stage, type, crew, start, target, phases, hours, contract.</td></tr>
+    <tr><td>Triage</td><td>Only what needs a decision: overdue, due today, crew overloaded, no crew assigned, field updates to review, materials arriving.</td></tr>
+    <tr><td>Pipeline</td><td>Open leads, won, lost and win rate, with leads sorted by next action.</td></tr>
+    <tr><td>Crew</td><td>The daily magnet board (below).</td></tr>
+    <tr><td>Day</td><td>Hour by hour per crew member, from QuickBooks Time clock-ins.</td></tr>
+    <tr><td>Calendar · Gantt</td><td>Day, week and month calendars; the Gantt timeline with phases, ⚡ critical path and 📸 baseline. Drag a bar to reschedule.</td></tr>
+  </table>
+  <p><b>Card chips</b> tell the story at a glance: crew initials, the job type, 📅 the next date (amber today, red late), 📋 phase count, ⚠ crew overload, and warnings such as <b>⚠ No QB link</b>, <b>⚠ 0h since start</b> or <b>⚠ field</b> (a field update to review). Lead cards add the source, the estimated value and the site-visit date.</p>
+  <figure class="wide"><div class="frame" style="height:2.7in"><img src="shots/board-gantt.jpg"></div><figcaption><b>Gantt</b>: the timeline, with unscheduled leads underneath.</figcaption></figure>
+
+  <h2 class="sec" id="s-editjob">Editing a job</h2>
+  <div class="row">
+    <figure class="side" style="width:3.3in"><div class="frame" style="height:4.6in"><img src="shots/board-editor.jpg" style="width:180%;margin-left:-40%"></div><figcaption><b>Edit Job</b>: click any card.</figcaption></figure>
+    <div class="text">
+      <p>Click a card (or <span class="ui">+ New Job</span>) to open the editor: name, customer, phone, type, address, stage, priority, start and target dates, estimated hours, materials (not ordered, ordered, received), contract value, billed to date, assigned crew and notes.</p>
+      <p><b>🎯 Lead section</b> (leads only): source, estimated value, next action, 📅 site visit and who's going. Buttons:</p>
+      <ul>
+        <li><span class="ui">✓ Log what happened</span> records a call or visit and the next follow-up.</li>
+        <li><span class="ui">✓ Won</span> turns the lead into a job; the bid file in Field Forms becomes the job file.</li>
+        <li><span class="ui">✕ Lost</span> asks for the reason and archives it.</li>
+      </ul>
+      <p><b>🗓 Schedule section:</b> Auto (start after other jobs or milestones finish, plus lag days) or Manual (pin the start), a "start no earlier than" date for materials or permits, and <span class="ui">+ Add phase</span> with days, hours and lag. A phase plan sent from Field Forms waits under <i>📱 Phase plan from the field</i> until you <span class="ui">⤓ Import checked phases</span>.</p>
+      <p>The footer has <span class="ui">🗄 Archive</span>, <span class="ui">Delete</span>, <span class="ui">Cancel</span> and <span class="ui">Save</span>. <span class="ui">◆ Milestone</span> adds a zero-day marker such as an inspection or permit.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-crewview">Crew, hours and QuickBooks Time</h2>
+  <figure class="wide"><div class="frame" style="height:2.3in"><img src="shots/board-crew.jpg"></div><figcaption><b>Crew</b>: drag people between jobs for the day.</figcaption></figure>
+  <ul>
+    <li><b>Crew view:</b> pick the day with ‹ › or <span class="ui">Today</span>. Drag a person (or tap, then tap the job) from <i>Available</i> onto a job, or onto <i>Out today</i> for a no-show. <b>Move:</b> chooses <i>Just this day</i>, <i>This day on</i> or <i>Whole job</i>. ↺ resets a day to the plan.</li>
+    <li><b>⚠ overloads</b> lists anyone booked past their shift, with who is free that day.</li>
+    <li><b>Time logged</b> (in the job editor): link the job once with <span class="ui">Link QuickBooks job</span>, then <span class="ui">⤓ Sync hours</span> pulls every QuickBooks Time entry for it. Set <i>Count hours from</i> to separate rebuild hours from mitigation hours. Hours can also be logged by hand.</li>
+    <li><span class="ui">⏱ Hours</span> shows total hours and labor cost by crew and by job, estimated vs actual.</li>
+    <li><span class="ui">Roster</span> adds and edits crew: name, phone, app login email, role, rate, QuickBooks employee link, the daily schedule text, and an optional bio shown on the customer portal (get their OK first).</li>
+    <li><span class="ui">🗓 Calendar</span> sets working days, hours per day and holidays; <span class="ui">🖨 PDF</span> prints the board; <span class="ui">❓ Help</span> has the full built-in guide.</li>
+  </ul>
+</section>
+
+<!-- ============================ 5. PORTAL ============================ -->
+<section class="chapter" id="ch5">
+  <div class="chapter__head"><div class="num">Chapter 5</div><h1>Customer Portal</h1><div class="who">What our customers see, and how the office runs it from Field Forms</div></div>
+  <p>Each job can have a private web page for the customer: progress, photos, drying readings, documents to sign, material selections, the balance and a message thread. No account is needed; the customer opens the link we text them.</p>
+
+  <h2 class="sec" id="s-portalsetup">Turning the portal on</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:5in"><img src="shots/field-portal-form.jpg"></div><figcaption><b>🌐 Client Portal</b> form on the job.</figcaption></figure>
+    <div class="text">
+      <ol class="steps">
+        <li>On the job open <b>🌐 Client Portal</b> and tick <span class="ui">Enable the customer portal for this job</span>.</li>
+        <li>Set the <b>Current status</b> (the milestone the customer sees). Leave <i>Message the customer when I publish a new status</i> on to text them each time it moves.</li>
+        <li>Tap the photos to share (highlighted = shared). Choose whether to share drying progress, the insurance claim (carrier, claim #, stage, deductible) and supporting documents.</li>
+        <li>Tap <span class="ui">⬆ Publish to portal</span>.</li>
+        <li>Under <b>Customer link</b>, tap <span class="ui">💬 Text</span> to send the customer a ready-made message with the link, or <span class="ui">Copy</span>.</li>
+      </ol>
+      <p>Publish again whenever you want the customer's view refreshed. Costs, adjuster notes, field reports and receipts are never shared.</p>
+      <p>The same form handles <b>Balance on the portal</b>, <b>Customer selections</b> (<span class="ui">Publish selections</span> from the estimate), the customer <b>Messages</b> (<span class="ui">✨ Draft reply</span>, <span class="ui">Send reply</span>) and <span class="ui">⭐ Ask for a review by text</span> at the end of the job.</p>
+    </div>
+  </div>
+
+  <h2 class="sec" id="s-portalsee">What the customer sees</h2>
+  <div class="pair">
+    <figure class="phone"><div class="frame" style="height:4.9in"><img src="shots/portal-home.jpg"></div><figcaption><b>Top of the page</b>: status, what we need, progress.</figcaption></figure>
+    <figure class="phone"><div class="frame" style="height:4.9in"><img src="shots/portal-home.jpg" style="margin-top:-6.05in"></div><figcaption><b>Further down</b>: crew, photos, balance, messages.</figcaption></figure>
+  </div>
+  <ul>
+    <li><b>What we need from you</b> lists anything waiting on the customer (read and sign a document, make selections), or "✓ Nothing needed from you right now".</li>
+    <li><b>Progress</b> shows the milestones: for construction Contract, Permits, Scheduled, Framing &amp; rough-in, Insulation &amp; drywall, Finishes, Final walkthrough, Job complete; for restoration Scheduled, Water mitigation, Structural drying, Repairs approved, Reconstruction, Final walkthrough, Job complete.</li>
+    <li><b>Material selections:</b> for each item the customer taps <i>Keep it</i> or <i>I'd like something different</i>, then <i>Send my choices</i>. Keeping what was there adds nothing to the bill.</li>
+    <li><b>Meet your crew</b>, <b>Photos</b>, <b>Drying progress</b>, <b>Your insurance claim</b> and shared <b>Documents</b>, as the office chose.</li>
+    <li><b>Your balance:</b> invoiced, paid, balance due, and a <i>Pay online</i> button.</li>
+    <li><b>Messages:</b> a chat thread with the office.</li>
+    <li>When the job is complete: <b>Your warranty</b>, <b>Your home file</b> and <b>How did we do?</b></li>
+    <li><b>Keep this handy</b> lets the customer verify their phone by text code so the portal remembers all their projects.</li>
+  </ul>
+
+  <h2 class="sec" id="s-signing">Sending a document for signature</h2>
+  <div class="row">
+    <figure class="phone"><div class="frame" style="height:4.3in"><img src="shots/portal-sign.jpg"></div><figcaption><b>Signing</b> opens only after the customer reads the whole document.</figcaption></figure>
+    <div class="text">
+      <p>Estimates (construction jobs), work authorizations, change orders, certificates of drying, punch lists, certificates of completion and the contents pack-back receipt can all be signed in the portal.</p>
+      <ol class="steps">
+        <li>Fill out the form in Field Forms as usual.</li>
+        <li>In <b>🌐 Client Portal → Documents to sign</b>, tap <span class="ui">Send for signature</span> next to the document. The app makes a copy, puts it on the portal and texts the customer.</li>
+        <li>The customer opens <b>📄 Read the document</b>, reads it in full, then types their name, signs and taps <b>Sign</b> (or <b>Approve &amp; sign</b> on a change order), or <b>Decline</b>.</li>
+        <li>The status line on the form follows along: ⏳ sent, not opened yet → ⏳ opened, not signed yet → ✓ signed in the portal (name, date) or ✗ declined. The signature is copied back into the form.</li>
+      </ol>
+      <div class="note"><b>Before sending</b>The portal must be on for the job. Never test-sign a live document on a real customer's page.</div>
+    </div>
+  </div>
+  <div class="diagram-wrap" style="width:5.2in;margin:4pt auto 10pt">
+      <svg class="diagram" viewBox="0 0 420 56" font-family="Helvetica Neue, Arial" font-size="10.5">
+        <g text-anchor="middle" font-weight="700">
+          <rect x="2" y="10" width="92" height="40" rx="7" fill="#eef2f7" stroke="#1f3354"/><text x="48" y="34" fill="#0f1b2d">Send</text>
+          <rect x="110" y="10" width="92" height="40" rx="7" fill="#eef2f7" stroke="#1f3354"/><text x="156" y="34" fill="#0f1b2d">Opened</text>
+          <rect x="218" y="10" width="92" height="40" rx="7" fill="#fff1e8" stroke="#f26a21"/><text x="264" y="34" fill="#0f1b2d">Read in full</text>
+          <rect x="326" y="10" width="92" height="40" rx="7" fill="#1f9d55"/><text x="372" y="34" fill="#fff">✓ Signed</text>
+        </g>
+        <g stroke="#44556b" stroke-width="1.5"><path d="M95 30h13"/><path d="M203 30h13"/><path d="M311 30h13"/></g>
+      </svg>
+      <p class="small muted" style="margin-top:3pt">Changed the document after sending? Use <b>Send updated copy</b> so the customer signs the newest one. A declined estimate offers <b>Send revised estimate</b>.</p>
+      </div>
+</section>
+
+<!-- ============================ 6. LEADS IN ============================ -->
+<section class="chapter" id="ch6">
+  <div class="chapter__head"><div class="num">Chapter 6</div><h1>Where leads come from</h1><div class="who">How a new customer reaches the app</div></div>
+  <div class="diagram-wrap">
+  <svg class="diagram" viewBox="0 0 720 230" font-family="Helvetica Neue, Arial" font-size="11">
+    <defs><marker id="ar4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#44556b"/></marker></defs>
+    <g font-size="11.5">
+      <rect x="4" y="8" width="200" height="46" rx="8" fill="#fff1e8" stroke="#f26a21"/><text x="16" y="28" font-weight="800" fill="#0f1b2d">🌐 Website quote form</text><text x="16" y="44" fill="#44556b">roybalconstruction.com</text>
+      <rect x="4" y="64" width="200" height="46" rx="8" fill="#fff1e8" stroke="#f26a21"/><text x="16" y="84" font-weight="800" fill="#0f1b2d">📞 AI phone receptionist</text><text x="16" y="100" fill="#44556b">missed calls forward to it</text>
+      <rect x="4" y="120" width="200" height="46" rx="8" fill="#fff1e8" stroke="#f26a21"/><text x="16" y="140" font-weight="800" fill="#0f1b2d">💬 Website AI chat</text><text x="16" y="156" fill="#44556b">books a lead from the chat</text>
+      <rect x="4" y="176" width="200" height="46" rx="8" fill="#eef2f7" stroke="#1f3354"/><text x="16" y="196" font-weight="800" fill="#0f1b2d">✉️ Email, Yelp, referral</text><text x="16" y="212" fill="#44556b">entered by the office</text>
+    </g>
+    <rect x="268" y="80" width="170" height="70" rx="10" fill="#0f1b2d"/>
+    <text x="353" y="108" fill="#fff" font-weight="800" text-anchor="middle" font-size="12.5">New lead</text>
+    <text x="353" y="126" fill="#c9d6e8" text-anchor="middle">on the Job Board,</text>
+    <text x="353" y="140" fill="#c9d6e8" text-anchor="middle">stage Leads / Bids</text>
+    <g stroke="#44556b" stroke-width="1.5" fill="none" marker-end="url(#ar4)"><path d="M206 31 C240 31 240 95 266 100"/><path d="M206 87 C236 87 240 105 266 108"/><path d="M206 143 C236 143 240 125 266 122"/><path d="M206 199 C240 199 240 140 266 132"/></g>
+    <g font-size="11">
+      <rect x="500" y="14" width="216" height="52" rx="8" fill="#eaf6ef" stroke="#1f9d55"/><text x="512" y="35" font-weight="800" fill="#0f1b2d">📲 Text alert to the office</text><text x="512" y="52" fill="#44556b">web-form leads; ⚠ emergencies</text>
+      <rect x="500" y="88" width="216" height="52" rx="8" fill="#eef2f7" stroke="#1f3354"/><text x="512" y="109" font-weight="800" fill="#0f1b2d">🖥 Office Admin → Leads</text><text x="512" y="126" fill="#44556b">call, book visit, follow up</text>
+      <rect x="500" y="162" width="216" height="52" rx="8" fill="#eef2f7" stroke="#1f3354"/><text x="512" y="183" font-weight="800" fill="#0f1b2d">📱 Field Forms → Lead bids</text><text x="512" y="200" fill="#44556b">📐 Start bid at the site visit</text>
+    </g>
+    <g stroke="#44556b" stroke-width="1.5" fill="none" marker-end="url(#ar4)"><path d="M440 100 C470 80 470 45 498 42"/><path d="M440 115 H498"/><path d="M440 130 C470 150 470 185 498 188"/></g>
+  </svg>
+  </div>
+  <ul>
+    <li><b>Website form.</b> The customer fills in name, phone, email, the service, the address, a description and whether it is an emergency, then taps <i>Request my free estimate</i>. The lead lands on the board and the office gets a text.</li>
+    <li><b>Phone.</b> Calls we miss forward to the AI receptionist, which takes the details and books the lead with "AI-booked from a phone call" in the notes.</li>
+    <li><b>Website chat.</b> The AI chat on the site can book a lead the same way.</li>
+    <li><b>Everything else</b> (email to info@roybalconstruction.com, Yelp, referrals, walk-ins) is entered by the office with <span class="ui">+ New Job</span> on the board at stage Leads / Bids.</li>
+  </ul>
+  <p>From there the lead follows the flow in <a href="#s-flow">How a job moves through the app</a>: worked in Office Admin → Leads, bid in Field Forms, won or lost on the Job Board.</p>
+  <figure class="wide" style="width:85%;margin:6px auto"><div class="frame" style="height:2.7in"><img src="shots/board-pipeline.jpg"></div><figcaption><b>Pipeline</b> on the Job Board: open leads by next action.</figcaption></figure>
+</section>
+
+<!-- ============================ 7. WHAT'S NEW ============================ -->
+<section class="chapter" id="ch7">
+  <div class="chapter__head"><div class="num">Chapter 7</div><h1>What's new and in progress</h1><div class="who">As of the edition date on the cover</div></div>
+  <table>
+    <tr><th style="width:28%">Feature</th><th style="width:16%">Status</th><th>Notes</th></tr>
+    <tr><td>🧾 Receipts on every job</td><td>Live</td><td>Snap, AI read, running job cost by category and vendor, budget flag. Nothing goes to QuickBooks yet.</td></tr>
+    <tr><td>🧾 Office receipt library and store return windows</td><td>Live</td><td>Office Admin → Receipts.</td></tr>
+    <tr><td>↩ Log a return</td><td>Waiting</td><td>Turns on once Branden writes "require v202" and every phone runs build v202 or newer.</td></tr>
+    <tr><td>✅ Approvals inbox</td><td>Live</td><td>Owner only. Both the text-YES queue and the newer approval queue in one list.</td></tr>
+    <tr><td>One-tap overdue-invoice reminders and adjuster emails</td><td>Being built</td><td>Will arrive as cards in Approvals. Nothing sends without the owner's tap.</td></tr>
+    <tr><td>Receipts matched to QuickBooks</td><td>Planned</td><td>Nightly match to bank-feed charges, then "tag + attach" approvals; materials onto T&amp;M invoices; cost vs estimate.</td></tr>
+    <tr><td>Magicplan quantities into the estimate</td><td>Planned</td><td>Room measurements flowing straight into estimate line items.</td></tr>
+    <tr><td>📅 My Week</td><td>Parked</td><td>Hidden until the board schedule feeds it reliably, so crews never see wrong days.</td></tr>
+  </table>
+  <div class="note"><b>How this chapter stays current</b>Each time a feature ships, the thread that shipped it updates this table and the matching section, re-shoots the screen and rebuilds the PDF.</div>
+</section>
+
+<!-- ============================ 8. QUICK REFERENCE ============================ -->
+<section class="chapter" id="ch8">
+  <div class="chapter__head"><div class="num">Chapter 8</div><h1>Quick reference</h1><div class="who">Tear-out pages for the truck</div></div>
+
+  <h2 class="sec" id="s-daily">Crew daily checklist</h2>
+  <table>
+    <tr><th style="width:24%">When</th><th>Restoration job</th><th>Construction job</th></tr>
+    <tr><td><b>Day 1, before work</b></td><td>Job header complete (claim #, carrier, category and class). Work authorization signed. Before photos of every room.</td><td>Pre-construction checklist: contract, deposit, permits. Before photos.</td></tr>
+    <tr><td><b>Every visit</b></td><td>Moisture readings at every marker. Drying log reading and equipment count. During photos. Receipts snapped.</td><td>Progress photos by room. Receipts snapped. Field report for anything the office needs to know.</td></tr>
+    <tr><td><b>Leaving site</b></td><td>Check the job page's completeness panel. Sync dot green.</td><td>Punch items logged with photos. Sync dot green.</td></tr>
+    <tr><td><b>Closing out</b></td><td>Dry standard met on every material; Cert. of Drying signed; equipment removed dates entered; after photos.</td><td>Punch list cleared; inspections passed; Cert. of Completion signed; after photos.</td></tr>
+  </table>
+
+  <h2 class="sec" id="s-trouble">When something looks wrong</h2>
+  <table>
+    <tr><th style="width:36%">You see</th><th>Do this</th></tr>
+    <tr><td>Red dot, "Offline — saved on device"</td><td>Keep working. It syncs when the signal comes back.</td></tr>
+    <tr><td>"This app is out of date — close and reopen it to update"</td><td>Swipe Field Forms closed and open it again. Your work is safe on the phone.</td></tr>
+    <tr><td>"Sync issue: this account may not write…"</td><td>Your login has no role yet. Tell Branden.</td></tr>
+    <tr><td>A job looks old on this phone</td><td>👤 → ↻ Sync. Still old: sign out and back in to re-pull it.</td></tr>
+    <tr><td>Something you entered is missing</td><td>Open the job, unfold ⏪ Backups on this device and tap ⏪ Restore; it only adds back what is missing. Last resort: ☁ Cloud copy → Take the cloud's copy. Call the office first.</td></tr>
+    <tr><td>AI button does nothing, "AI needs internet"</td><td>Get signal; typed entries are already saved.</td></tr>
+    <tr><td>Start bid greyed out</td><td>A job for that customer or claim # already exists. Open that job.</td></tr>
+    <tr><td>Office connection shows ▲ Needs reconnect</td><td>Office Admin → ⚙ Settings → reconnect that panel.</td></tr>
+  </table>
+
+  <h2 class="sec" id="s-glossary">Glossary</h2>
+  <table>
+    <tr><td style="width:24%"><b>Bid file</b></td><td>The Field Forms job created by 📐 Start bid. It becomes the job when the lead is won.</td></tr>
+    <tr><td><b>Category / Class</b></td><td>IICRC water category (1 clean, 2 gray, 3 black) and class of water (evaporation load 1 to 4).</td></tr>
+    <tr><td><b>Completeness panel</b></td><td>The list on each job of what is still missing before it can be billed.</td></tr>
+    <tr><td><b>Confirm chip</b></td><td>An action the assistant proposes; nothing happens until someone taps it.</td></tr>
+    <tr><td><b>Dry goal</b></td><td>The moisture content a material must reach to count as dry, filled in from the material.</td></tr>
+    <tr><td><b>GPP / grain depression</b></td><td>Grains of moisture per pound of air, and the difference between the room air and the dehumidifier output. Both calculate themselves.</td></tr>
+    <tr><td><b>Packet</b></td><td>All of a job's completed forms in one PDF for the carrier.</td></tr>
+    <tr><td><b>Portal</b></td><td>The customer's private job page.</td></tr>
+    <tr><td><b>Return window</b></td><td>How many days a store allows a return; the office is warned before it closes.</td></tr>
+    <tr><td><b>Watch flag</b></td><td>A warning chip on a job row (stale readings, equipment 7+ days, no QB link).</td></tr>
+  </table>
+
+  <h2 class="sec" id="s-update">Keeping this manual current</h2>
+  <p>The manual lives in the app's repository at <b>docs/manual/</b>, next to the code it describes. When a feature ships, ask Claude in the project to "update the manual". It will:</p>
+  <ol class="steps">
+    <li>Update the section for that feature and the <a href="#ch7">What's new</a> table in <b>docs/manual/manual.html</b>.</li>
+    <li>Re-shoot the screens from the app code with made-up demo data (<b>docs/manual/tools/shoot.mjs</b>). No real customer data is ever used.</li>
+    <li>Rebuild this PDF (<b>docs/manual/tools/build.mjs</b>) with a new edition date, and post the new copy in the project files.</li>
+  </ol>
+</section>
+</body>
+</html>
