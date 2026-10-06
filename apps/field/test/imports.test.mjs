@@ -21,6 +21,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 
 const JS_DIR = new URL("../js/", import.meta.url);
+const ADMIN_DIR = new URL("../../admin/js/", import.meta.url);
 
 /* Keep code, blank everything else. Template literals keep their ${ }
    expressions (those are code); regex literals are recognised by what
@@ -126,6 +127,31 @@ const boundLocally = (code, name) =>
   new RegExp(`(?:function\\*?|const|let|var|class)\\s+${name}\\b`).test(code) ||
   new RegExp(`(?<![.\\w$])${name}\\b(?!\\s*\\()`).test(code);
 
+/* Every name a module imports by name from a sibling must be exported there.
+   A missing export is not a ReferenceError later — the browser refuses to
+   link the module at all, and a whole page goes blank (the office admin's
+   tabs load field modules by relative path: "../../js/x.js"). Keys are
+   field "x.js" and office "admin/x.js". */
+export function missingImports(sources) {           // -> [{ file, name, from }]
+  const out = [];
+  for (const [f, raw] of Object.entries(sources)) {
+    for (const m of raw.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g)) {
+      const spec = m[2];
+      const target = f.startsWith("admin/")
+        ? (spec.startsWith("../../js/") ? spec.slice(9) : spec.startsWith("./") ? "admin/" + spec.slice(2) : null)
+        : (spec.startsWith("./") ? spec.slice(2) : null);
+      if (!target) continue;
+      if (!sources[target]) { out.push({ file: f, name: "*", from: target }); continue; }
+      const have = exportsOf(codeOnly(sources[target]));
+      const imported = m[1].split(",").map((x) => x.trim().split(/\s+as\s+/)[0].trim()).filter(Boolean);
+      for (const nm of imported) {
+        if (!have.has(nm)) out.push({ file: f, name: nm, from: target });
+      }
+    }
+  }
+  return out;
+}
+
 export function unresolvedCalls(sources) {          // { file: raw source } -> [{ file, name, from }]
   const modules = Object.fromEntries(Object.entries(sources).map(([f, s]) => [f, codeOnly(s)]));
   const exportIndex = new Map();
@@ -162,12 +188,27 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()
   ok(found.length === 1 && found[0].file === "b.js" && found[0].name === "gate",
     "scanner: flags the one real unimported call and nothing string-, regex-, comment- or method-shaped");
 
-  // the app
+  const linkFixture = {
+    "a.js": "export function gate() {}\nexport { gate as door };\n",
+    "admin/p.js": 'import { gate, door as d } from "../../js/a.js";\nimport { gone } from "../../js/a.js";\nimport { x } from "./q.js";\n',
+  };
+  const miss = missingImports(linkFixture).map((b) => `${b.file}:${b.name}`).sort();
+  ok(JSON.stringify(miss) === JSON.stringify(["admin/p.js:*", "admin/p.js:gone"]),
+    "link check: flags a name the target doesn't export and a module that isn't there, nothing else");
+
+  // the app: the field modules, plus the office admin's (which import field modules by path)
   const files = readdirSync(JS_DIR).filter((f) => f.endsWith(".js")).sort();
-  const modules = Object.fromEntries(files.map((f) => [f, readFileSync(new URL(f, JS_DIR), "utf8")]));
+  const adminFiles = readdirSync(ADMIN_DIR).filter((f) => f.endsWith(".js")).sort();
+  const modules = Object.fromEntries([
+    ...files.map((f) => [f, readFileSync(new URL(f, JS_DIR), "utf8")]),
+    ...adminFiles.map((f) => ["admin/" + f, readFileSync(new URL(f, ADMIN_DIR), "utf8")]),
+  ]);
   const bad = unresolvedCalls(modules);
-  for (const b of bad) ok(false, `${b.file} calls ${b.name}() but never imports it — add it to the import from ./${b.from[0]}`);
-  ok(bad.length === 0, `${files.length} field modules: every cross-module call is imported`);
+  for (const b of bad) ok(false, `${b.file} calls ${b.name}() but never imports it — add it to the import from ${b.from[0]}`);
+  ok(bad.length === 0, `${files.length} field + ${adminFiles.length} office modules: every cross-module call is imported`);
+  const unlinked = missingImports(modules);
+  for (const b of unlinked) ok(false, b.name === "*" ? `${b.file} imports ${b.from}, which doesn't exist` : `${b.file} imports ${b.name} from ${b.from}, which doesn't export it`);
+  ok(unlinked.length === 0, "every named import is exported by the module it names");
 
   console.log(failures ? `\nFAILED: ${failures}` : "\nIMPORTS RESOLVE");
   process.exit(failures ? 1 : 0);

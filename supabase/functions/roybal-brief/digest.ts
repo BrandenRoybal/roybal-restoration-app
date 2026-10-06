@@ -26,7 +26,8 @@ export function invoiceTotals(inv: Blob) {
 
 export function loggedCosts(p: Blob) {
   let sum = 0;
-  for (const r of p.receipts || []) sum += num(r?.amount);
+  // a return is always money back (fincalc.js loggedCosts, receiptcalc.js receiptAmount)
+  for (const r of p.receipts || []) sum += r?.kind === "return" ? -Math.abs(num(r.amount)) : num(r?.amount);
   for (const key of ["invoices", "reconEstimates"]) {
     for (const inv of p[key] || []) {
       for (const att of inv?.attachments || []) {

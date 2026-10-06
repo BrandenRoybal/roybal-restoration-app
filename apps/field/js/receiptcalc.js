@@ -52,8 +52,11 @@ export function receiptCategory(v) {
   return "other";
 }
 
-/** The receipt's total: `amount` (what the budget flag sums). */
-export const receiptAmount = (r) => amountNum(r && r.amount);
+/** The receipt's total: `amount` (what the budget flag sums). A return
+    (kind "return") is always money back, whatever sign its amount carries:
+    a phone older than v202 shows it as an ordinary receipt and could save
+    its total retyped as a positive number. */
+export const receiptAmount = (r) => (r && r.kind === "return" ? -Math.abs(amountNum(r.amount)) : amountNum(r && r.amount));
 
 /** Σ qty × price over the receipt's line items (a drift check against the
     printed total, never the total itself — a receipt's total is what was paid). */
@@ -64,38 +67,51 @@ export function itemsTotal(items) {
 const r2 = (n) => Math.round(n * 100) / 100;
 
 /** Running totals over a job's receipts:
-    { total, count, byCategory: { materials: {total, count}, … }, vendors: [{vendor, total, count}] } */
+    { total, count, returns, credits, byCategory: { materials: {total, count}, … }, vendors: [{vendor, total, count}] }
+    A return logged in the office (kind "return", plan phase 2) is its own
+    element with a negative amount: every total nets it, `credits` sums
+    them, and the counts count purchases (`count`) and returns (`returns`)
+    apart — "3 receipts" for two buys and a return would misstate it. */
 export function receiptTotals(p) {
-  const out = { total: 0, count: 0, byCategory: {}, vendors: [] };
+  const out = { total: 0, count: 0, returns: 0, credits: 0, byCategory: {}, vendors: [] };
   for (const k of RECEIPT_CATEGORY_KEYS) out.byCategory[k] = { total: 0, count: 0 };
   const byVendor = new Map();
   for (const r of (p && p.receipts) || []) {
     if (!r) continue;
     const amt = receiptAmount(r);
     const cat = receiptCategory(r.category);
-    out.total += amt; out.count++;
-    out.byCategory[cat].total += amt; out.byCategory[cat].count++;
+    const ret = r.kind === "return";
+    out.total += amt;
+    if (ret) { out.returns++; out.credits += amt; } else out.count++;
+    out.byCategory[cat].total += amt; if (!ret) out.byCategory[cat].count++;
     const key = vendorKey(r.vendor);
     const v = byVendor.get(key) || { vendor: String(r.vendor || "").trim() || "Unknown vendor", total: 0, count: 0 };
-    v.total += amt; v.count++;
+    v.total += amt; if (!ret) v.count++;
     byVendor.set(key, v);
   }
   out.total = r2(out.total);
+  out.credits = r2(out.credits);
   for (const k of RECEIPT_CATEGORY_KEYS) out.byCategory[k].total = r2(out.byCategory[k].total);
   out.vendors = [...byVendor.values()].map((v) => ({ ...v, total: r2(v.total) })).sort((a, b) => b.total - a.total);
   return out;
 }
 
-/** "THE HOME DEPOT #1234" and "Home Depot" group together. */
+/** "THE HOME DEPOT #1234", "Home Depot 1234" and "Home Depot" group together,
+    and so do "Lowe's" and "Lowes". The office's vendor return windows
+    (public.receipt_vendors, migration 0018) are keyed by it. */
 export function vendorKey(v) {
-  return String(v || "").toLowerCase().replace(/^the\s+/, "").replace(/\s*#\s*\d+.*$/, "").replace(/[^a-z0-9]+/g, " ").trim() || "unknown";
+  return String(v || "").trim().toLowerCase().replace(/^the\s+/, "").replace(/\s*#\s*\d+.*$/, "")
+    .replace(/['’`]/g, "").replace(/[^a-z0-9]+/g, " ").trim().replace(/ \d{3,}$/, "") || "unknown";
 }
 
 /** The job tile's second line, or "" when nothing is logged yet. */
 export function receiptTileLine(p) {
   const t = receiptTotals(p);
-  if (!t.count) return "";
-  return `${fmtMoney(t.total)} · ${t.count} receipt${t.count === 1 ? "" : "s"}`;
+  if (!t.count && !t.returns) return "";
+  const parts = [fmtMoney(t.total)];
+  if (t.count) parts.push(`${t.count} receipt${t.count === 1 ? "" : "s"}`);
+  if (t.returns) parts.push(`${t.returns} return${t.returns === 1 ? "" : "s"}`);
+  return parts.join(" · ");
 }
 
 export const fmtMoney = (n) => {

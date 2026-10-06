@@ -70,7 +70,8 @@ export function hasSubcontractorDocs(p) {
    estimate's total, else the job's contract amount. */
 export function loggedCosts(p) {
   let sum = 0;
-  for (const r of p.receipts || []) sum += num(r && r.amount);
+  // a return is always money back (receiptcalc.js receiptAmount)
+  for (const r of p.receipts || []) sum += r && r.kind === "return" ? -Math.abs(num(r.amount)) : num(r && r.amount);
   for (const key of ["invoices", "reconEstimates"]) {
     for (const inv of p[key] || []) {
       for (const att of (inv && inv.attachments) || []) {

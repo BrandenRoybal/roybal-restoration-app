@@ -119,6 +119,16 @@ test("helpers: daysBefore + budgetStatus null without a base", () => {
   assert.equal(budgetStatus({ receipts: [{ amount: 500 }] }), null);
 });
 
+test("budget nets an office-logged return, whatever sign an old phone left on it (fincalc.js agrees)", () => {
+  const job = (amount) => ({ contractAmount: "2000", receipts: [
+    { id: "R1", vendor: "Home Depot", amount: "1700.00" },
+    { id: "C1", kind: "return", returnOf: "R1", vendor: "Home Depot", amount },
+  ] });
+  for (const amount of ["-105.96", "105.96"]) {
+    assert.deepEqual(budgetStatus(job(amount)), { pct: 80, over: false }, amount);
+  }
+});
+
 test("overdue lead follow-ups: count + names, ignoring future/resolved/non-leads", () => {
   const b = buildBrief({ ...base, boardJobs: [
     { stage: "lead", title: "Marcus Feld", nextActionAt: "2026-07-20" },              // overdue → shown
