@@ -11,6 +11,7 @@ import {
   akTime, expiresIn, expiredLine, firstSentence, jobName, agentName, stageLabel,
   approveConfirm, declineConfirm, declinePrompt, decisionRequest, pendingAnswer, spineAnswer,
   decidedText, settle, NO_CONNECTION, SIGNED_OUT, NEVER_REPORTED,
+  NEVER_REPORTED_PHASE, WAIT_MS, sawApproved, skippedLine, labelOf, READ_GAP_MS,
 } from "../js/approvals.js";
 
 // 10:00 AM Alaska (AKDT, UTC-8) on Tue Oct 6 2026
@@ -201,7 +202,8 @@ test("inbox: both lanes merged, soonest expiry first; recent answers newest firs
   ]);
   assert.ok(!box.recent.some((c) => c.id === oldDecline.id), "a decline older than 48 h is off the list");
   assert.equal(box.expired, 3, "lapsed + swept + the stale spine row; not the one from three weeks ago");
-  assert.deepEqual(inbox(null, undefined, {}, NOW), { waiting: [], recent: [], expired: 0 });
+  assert.deepEqual(box.skipped, { text: 0, spine: 0 });
+  assert.deepEqual(inbox(null, undefined, {}, NOW), { waiting: [], recent: [], expired: 0, skipped: { text: 0, spine: 0 } });
 });
 
 test("filters: live needs the open status AND a future expiry, whatever the row says", () => {
@@ -249,7 +251,7 @@ test("outcomes: sent, phase added, already there, queued with the quiet-hours ti
   const t = fromPending(phase);
   assert.equal(outcome({ ...t, status: "executed" }).text, "Phase added");
   assert.equal(outcome({ ...t, status: "declined" }).text, "Declined");
-  assert.equal(outcome({ ...t, status: "approved", answeredHere: true }).text, "Approved, still running");
+  assert.equal(outcome({ ...t, status: "approved", answeredHere: true }).text, "Approved — adding the phase");
   assert.equal(outcome({ ...t, status: "failed", error: "" }).text, "Failed: no reason given");
   const e = fromProposal({ ...email, status: "executed" });
   assert.equal(outcome(e).text, "Queued to send", "no outbox row readable");
@@ -405,6 +407,7 @@ test("a row naming Object.prototype's members is just unknown, and a row that wo
   try {
     const box = inbox([reminder, { ...phase, id: "bad-1", label: { toString: 1 } }], [email, { ...email, id: "bad-2", rationale: { toString: 1 } }], LOOK, NOW);
     assert.deepEqual(box.waiting.map((c) => c.key), ["spine:" + email.id, "text:" + reminder.id]);
+    assert.deepEqual(box.skipped, { text: 1, spine: 1 }, "both were open and unexpired");
   } finally { console.warn = warn; }
   assert.equal(warned.length, 2);
   assert.match(warned[0], /left off a text row .*bad-1/);
@@ -455,16 +458,16 @@ test("decidePending's newer answers: an expired login, a role check that couldn'
   assert.match(ok(409, { error: "try_again" }).error, /try again in a minute/i);
 });
 
-test("a row read back still 'approved' never reported back; one this tab just answered is still running; a 5xx with no JSON says to refresh", () => {
+test("a row read back still 'approved' long after this tab first saw it never reported back; a 5xx with no JSON says to refresh", () => {
   const stuck = fromPending({ ...reminder, status: "approved" });
-  assert.deepEqual(outcome(stuck), { text: NEVER_REPORTED, tone: "bad" });
+  assert.deepEqual(outcome(stuck, NOW, NOW - WAIT_MS - 1), { text: NEVER_REPORTED, tone: "bad" });
   assert.equal(NEVER_REPORTED, "Approved, but it never reported back. Check whether it went out before sending it again.");
   assert.deepEqual(outcome(fromPending({ ...reminder, status: "approved", result: { error: "gmail token expired" } })),
     { text: "Failed: gmail token expired", tone: "bad" });
   const box = inbox([{ ...reminder, status: "approved" }], [], LOOK, NOW);
-  assert.equal(outcome(box.recent[0], NOW).text, NEVER_REPORTED, "on Recently decided as read from the server");
-  const mine = decidedText(fromPending(reminder), { ok: true, status: "executed", message: "", action: { status: "approved", result: {} } }, NOW);
-  assert.deepEqual(outcome(mine), { text: "Approved, still running", tone: "wait" });
+  assert.equal(outcome(box.recent[0], NOW, NOW - 10 * 60e3).text, NEVER_REPORTED, "on Recently decided as read from the server");
+  const mine = decidedText(fromPending(reminder), { ok: true, status: "approved", message: "", action: { status: "approved", result: {} } }, NOW);
+  assert.deepEqual(outcome(mine, NOW + 60 * 60e3, NOW), { text: "Approved — waiting to hear how it went", tone: "wait" }, "this tab's own answer");
   const c = fromPending(reminder);
   for (const st of [500, 502, 503, 504, 546]) {
     assert.equal(pendingAnswer(st, null, c, "approve").error, "The server didn't answer. Refresh to see whether it went through.", String(st));
@@ -516,4 +519,179 @@ test("P0002 'no live operation': the ask was retired, only Decline can answer it
     { ok: false, error: "This kind of ask was retired before you answered it. Decline it; nothing was sent.", declineOnly: true });
   assert.deepEqual(spineAnswer(500, { code: "P0002", message: "op spine: no proposal bbbbbbbb-0000-4000-8000-000000000001" }),
     { ok: false, error: "This ask no longer exists.", gone: true });
+});
+
+/* ---------- review round 2 ---------- */
+
+test("Safari before 15.4 (no Object.hasOwn): every row still makes its card, with its chip and names", () => {
+  const real = Object.hasOwn;
+  delete Object.hasOwn;
+  try {
+    assert.equal(typeof Object.hasOwn, "undefined");
+    const box = inbox(PENDING, SPINE, LOOK, NOW);
+    assert.equal(box.waiting.length, 5);
+    assert.deepEqual(box.skipped, { text: 0, spine: 0 });
+    const r = box.waiting.find((c) => c.id === reminder.id);
+    assert.deepEqual([r.chip, r.by, r.job], ["Email", "Morning brief", "Pollen, 1192 Bemis Ct"]);
+    assert.equal(stageLabel("on_hold"), "On Hold");
+    assert.equal(outcome(box.recent.find((c) => c.id === delivered.id), NOW).text, "Delivered");
+    assert.equal(lookFrom({ jobs: [{ id: FIELD1, title: "Pollen" }] }).jobs[FIELD1], "Pollen");
+  } finally { Object.hasOwn = real; }
+});
+
+test("rows left off are counted when they may be waiting, and the line says how to answer them", () => {
+  const bad = (row, n) => ({ ...row, id: "bad-" + n, label: { toString: 1 }, rationale: { toString: 1 } });
+  const warn = console.warn;
+  console.warn = () => {};
+  let box;
+  try {
+    box = inbox(
+      [bad(reminder, 1), bad(phase, 2), bad(sent, 3), bad(lapsed, 4), bad({ ...phase, expires_at: { toString: 1 } }, 5), reminder],
+      [bad(email, 6), bad(delivered, 7)], LOOK, NOW);
+  } finally { console.warn = warn; }
+  // 1, 2: open and unexpired; 3 answered and 4 expired are not waiting; 5's expiry won't read: counted
+  assert.deepEqual(box.skipped, { text: 3, spine: 1 });
+  assert.deepEqual(box.waiting.map((c) => c.id), [reminder.id]);
+  assert.equal(skippedLine({ text: 1, spine: 0 }), "1 ask couldn't be shown here. Answer it by text, or tell Claude.");
+  assert.equal(skippedLine({ text: 3, spine: 0 }), "3 asks couldn't be shown here. Answer them by text, or tell Claude.");
+  assert.equal(skippedLine({ text: 0, spine: 1 }), "1 ask couldn't be shown here. Tell Claude.", "YES by text doesn't reach the spine");
+  assert.equal(skippedLine({ text: 0, spine: 2 }), "2 asks couldn't be shown here. Tell Claude.");
+  assert.equal(skippedLine(box.skipped), "4 asks couldn't be shown here. Any that came to you by text can be answered there; otherwise tell Claude.");
+  for (const none of [{ text: 0, spine: 0 }, {}, null, undefined]) assert.equal(skippedLine(none), "");
+});
+
+test("a row seen at 'approved' waits a few minutes from this tab's first sighting before it says it never reported back", () => {
+  const mail = fromPending({ ...reminder, status: "approved" });
+  const board = fromPending({ ...phase, status: "approved" });
+  const WAIT = { text: "Approved — waiting to hear how it went", tone: "wait" };
+  const ADDING = { text: "Approved — adding the phase", tone: "wait" };
+  assert.equal(WAIT_MS, 3 * 60 * 1000);
+  assert.deepEqual(outcome(mail, NOW, NOW), WAIT, "just seen");
+  assert.deepEqual(outcome(mail, NOW, NOW - WAIT_MS), WAIT, "three minutes on the dot: still waiting");
+  assert.deepEqual(outcome(mail, NOW, NOW - WAIT_MS - 1), { text: NEVER_REPORTED, tone: "bad" });
+  assert.deepEqual(outcome(board, NOW, NOW - 60e3), ADDING);
+  assert.deepEqual(outcome(board, NOW, NOW - WAIT_MS - 1), { text: NEVER_REPORTED_PHASE, tone: "bad" });
+  assert.equal(NEVER_REPORTED_PHASE, "Approved, but it never reported back. Check the board before approving it again.");
+  // no sighting kept yet (or a junk one) is a sighting now
+  for (const seen of [undefined, null, NaN, "x"]) assert.deepEqual(outcome(mail, NOW, seen), WAIT, String(seen));
+  assert.deepEqual(outcome(mail), WAIT);
+  // this tab's answer (landed, or still out: the page marks it) waits whatever the clock says
+  assert.deepEqual(outcome({ ...mail, answeredHere: true }, NOW, NOW - 60 * 60e3), WAIT);
+  assert.deepEqual(outcome({ ...board, answeredHere: true }, NOW, NOW - 60 * 60e3), ADDING);
+  // an error stamped on it is a failure at once
+  assert.equal(outcome({ ...mail, error: "gmail said no" }, NOW, NOW).text, "Failed: gmail said no");
+  // the spine's 'approved' is its own thing: the worker runs it
+  assert.equal(outcome(fromProposal({ ...stage, status: "approved" }), NOW, NOW - 60 * 60e3).text, "Approved, queued to run");
+});
+
+test("sawApproved keeps each text row's first sighting across refreshes, drops rows no longer approved, and ignores the spine", () => {
+  const seen = new Map();
+  const a = fromPending({ ...reminder, status: "approved" }), b = fromPending({ ...phase, status: "approved" });
+  const s = fromProposal({ ...stage, status: "approved" });
+  assert.equal(sawApproved(seen, [a, s, fromPending(sent)], NOW), seen);
+  assert.deepEqual([...seen], [[a.key, NOW]], "only the text row at 'approved'");
+  sawApproved(seen, [a, b], NOW + 60e3);
+  assert.deepEqual([...seen], [[a.key, NOW], [b.key, NOW + 60e3]], "a's first sighting is kept");
+  assert.equal(outcome(a, NOW + 4 * 60e3, seen.get(a.key)).text, NEVER_REPORTED);
+  assert.equal(outcome(b, NOW + 4 * 60e3, seen.get(b.key)).text, "Approved — adding the phase");
+  // b was put back to pending (the board couldn't be reached), then approved again later: it waits afresh
+  sawApproved(seen, [a, { ...b, status: "pending" }], NOW + 5 * 60e3);
+  assert.deepEqual([...seen.keys()], [a.key]);
+  sawApproved(seen, [a, b], NOW + 20 * 60e3);
+  assert.equal(seen.get(b.key), NOW + 20 * 60e3);
+  assert.equal(outcome(b, NOW + 21 * 60e3, seen.get(b.key)).text, "Approved — adding the phase");
+  sawApproved(seen, [], NOW);
+  assert.equal(seen.size, 0);
+  assert.equal(sawApproved(new Map(), null, NOW).size, 0);
+});
+
+test("after a gap in reading, a row still 'approved' starts its sighting over: a revert and a fresh approval may have gone unseen", () => {
+  const seen = new Map();
+  const b = fromPending({ ...phase, status: "approved" });
+  sawApproved(seen, [b], NOW);
+  // reads every 45 s keep the first sighting
+  sawApproved(seen, [b], NOW + 45e3, NOW);
+  sawApproved(seen, [b], NOW + 90e3, NOW + 45e3);
+  assert.equal(seen.get(b.key), NOW);
+  // the office was on the board for five minutes: whatever it saw before may not be this run
+  sawApproved(seen, [b], NOW + 90e3 + READ_GAP_MS + 1, NOW + 90e3);
+  assert.equal(seen.get(b.key), NOW + 90e3 + READ_GAP_MS + 1);
+  assert.equal(outcome(b, NOW + 90e3 + READ_GAP_MS + 60e3, seen.get(b.key)).text, "Approved — adding the phase");
+  // no earlier read to compare (the page's first): nothing to restart
+  const fresh = new Map([[b.key, NOW]]);
+  sawApproved(fresh, [b], NOW + 10 * 60e3);
+  assert.equal(fresh.get(b.key), NOW);
+});
+
+test("a skip the server knew of stays a skip when the re-read still says 'approved'", () => {
+  const card = fromPending(phase, LOOK);
+  const done = decidedText(card, { ok: true, status: "executed", message: "Phase was already on the board — nothing was added.",
+    action: { id: phase.id, code: phase.code, kind: "boardEdit", label: phase.label, status: "approved", result: { skipped: "phase already exists" } } }, NOW);
+  assert.equal(done.status, "executed");
+  assert.equal(outcome(done).text, "Phase was already on the board");
+});
+
+test("labelOf reads the label as the screen shows it, and never stalls on one built to", () => {
+  for (const fake of ["Invoice (quickbooks.intuit.com).", "Invoice (quickbooks.intuit.com)\u200b", "Invoice (quickbooks.intuit.com)\u2060",
+    "Invoice (quickbooks.intuit.com)\u200e", "Invoice \uFF08quickbooks\uFF0Eintuit\uFF0Ecom\uFF09", "Invoice (opens (quickbooks.intuit.com))",
+    "Invoice {quickbooks.intuit.com}", "opens quickbooks.intuit.com \u2014 Invoice", "Opens quickbooks.intuit.com: Invoice"]) {
+    assert.equal(labelOf(fake), "Invoice", JSON.stringify(fake));
+  }
+  // a filename isn't a host; "opens" with no host after it is just a word
+  for (const kept of ["Invoice (INV-4.pdf)", "Photos (IMG_2041.jpg)", "Estimate (Smith.xlsx)", "opens Monday"]) {
+    assert.equal(labelOf(kept), kept, kept);
+  }
+  // long runs of spaces, newlines or brackets: linear, so well under a second each
+  for (const big of ["a" + " ".repeat(200000) + "b", "Invoice" + "\n".repeat(200000) + "INV-4", "(".repeat(100000) + "x.com" + ")".repeat(100000)]) {
+    const t = performance.now();
+    labelOf(big);
+    assert.ok(performance.now() - t < 1000, `took ${Math.round(performance.now() - t)} ms`);
+  }
+});
+
+test("a final answer beats a re-read that still says 'approved'; otherwise the re-read row wins", () => {
+  const card = fromPending(reminder, LOOK);
+  const done = (status, action) => decidedText(card, { ok: true, status, message: "m", ...(action ? { action } : {}) }, NOW);
+  // the read raced the executed stamp: the send went out
+  assert.equal(done("executed", { status: "approved", result: {} }).status, "executed");
+  assert.equal(outcome(done("executed", { status: "approved", result: {} })).text, "Sent");
+  assert.equal(done("declined", { status: "approved", result: {} }).status, "declined");
+  assert.equal(done("failed", { status: "approved", result: { error: "gmail token expired" } }).status, "failed");
+  assert.equal(outcome(done("failed", { status: "approved", result: { error: "gmail token expired" } })).text, "Failed: gmail token expired");
+  // the re-read still wins when it is the final word
+  assert.equal(done("failed", { status: "executed", result: {} }).status, "executed");
+  assert.equal(done("executed", { status: "failed", result: { error: "x" } }).status, "failed");
+  // no final answer to keep: the re-read stands
+  assert.equal(done("approved", { status: "approved", result: {} }).status, "approved");
+  assert.equal(done("executed").status, "executed", "an older function's body, no action");
+  assert.equal(done("executed", { status: "weird", result: {} }).status, "executed");
+});
+
+test("a link's label loses its own trailing host-like brackets; the host the card prints is the real one", () => {
+  assert.equal(labelOf("Invoice (quickbooks.intuit.com)"), "Invoice");
+  assert.equal(labelOf("Invoice INV-4 (opens quickbooks.intuit.com/app/invoices)"), "Invoice INV-4");
+  assert.equal(labelOf("Invoice [quickbooks.intuit.com]"), "Invoice");
+  assert.equal(labelOf("Invoice (qb.intuit.com) (intuit.com)  "), "Invoice", "every trailing chunk");
+  assert.equal(labelOf("Thread (gооgle.com)"), "Thread", "a look-alike host is host-like too");
+  assert.equal(labelOf("Invoice (quickbooks\uFF0Eintuit\u3002com)"), "Invoice", "so is one with dots a browser reads as dots");
+  assert.equal(labelOf("Invoice (https://quickbooks.intuit.com/x)"), "Invoice");
+  for (const kept of ["Invoice (INV-4)", "Report (Oct 5)", "Hours (3.5 h)", "Call (e.g. Monday)", "Invoice (quickbooks.intuit.com) for Smith"]) {
+    assert.equal(labelOf(kept), kept, kept);
+  }
+  const long = "Invoice (" + "a".repeat(350) + ".com)";
+  assert.equal(labelOf(long), long, "a chunk longer than the 300 characters looked at is left alone");
+  const refs = fromProposal({ ...email, evidence_refs: [
+    { label: "Invoice (quickbooks.intuit.com)", url: "https://evil.example/pay" },
+    { label: "(mail.google.com)", url: "https://evil.example/mail" },          // nothing left: the link stands in
+    { label: "(mail.google.com)", type: "email", id: "77", url: "https://evil.example/m" },
+    { label: "Not a link (quickbooks.intuit.com)" },                         // no link, no host printed: kept as written
+    "https://evil.example/x (quickbooks.intuit.com)",
+  ] }).evidence.refs;
+  assert.deepEqual(refs.map((r) => [r.text, r.host]), [
+    ["Invoice", "evil.example"],
+    ["https://evil.example/mail", "evil.example"],
+    ["email 77", "evil.example"],
+    ["Not a link (quickbooks.intuit.com)", ""],
+    ["https://evil.example/x", "evil.example"],
+  ]);
 });

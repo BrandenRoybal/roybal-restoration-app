@@ -66,9 +66,11 @@ const opName = (operation) => str(operation).split("@")[0];
    can file a text-queue ask, so only an OWN key counts: a kind, proposer or
    stage of "constructor" or "__proto__" is simply unknown, never one of
    Object.prototype's members. put() writes the same way (a plain assignment
-   to "__proto__" would swap the map's prototype instead). */
+   to "__proto__" would swap the map's prototype instead). Not Object.hasOwn:
+   Safari before 15.4 lacks it, and a throw here would leave off every row. */
+const hasOwn = (map, k) => Object.prototype.hasOwnProperty.call(map, k);
 const own = (map, k) =>
-  map && typeof map === "object" && (typeof k === "string" || typeof k === "number") && Object.hasOwn(map, k) ? map[k] : undefined;
+  map && typeof map === "object" && (typeof k === "string" || typeof k === "number") && hasOwn(map, k) ? map[k] : undefined;
 const put = (map, k, v) => Object.defineProperty(map, k, { value: v, enumerable: true, writable: true, configurable: true });
 export const stageLabel = (id) => own(STAGES, id) || str(id);
 
@@ -95,8 +97,9 @@ export function agentName(name) {
    may carry a label and a link. Only an https link becomes a link, and it
    carries the host it really opens: the label is whatever the proposer
    wrote ("QuickBooks invoice INV-4" can point anywhere), so the card shows
-   the host beside it. URL() gives the host as the browser will dial it:
-   past any "mail.google.com@" userinfo, and punycode for a look-alike. */
+   the host first, then the label. URL() gives the host as the browser will
+   dial it: past any "mail.google.com@" userinfo, and punycode for a
+   look-alike. */
 function linkOf(u) {
   if (!/^https:\/\//i.test(u)) return null;
   try {
@@ -104,17 +107,64 @@ function linkOf(u) {
     return url.protocol === "https:" && url.hostname ? { url: u, host: url.hostname } : null;
   } catch { return null; }
 }
+/* A link's label that ends in its own "(quickbooks.intuit.com)" or
+   "[opens mail.google.com]", or opens with "opens mail.google.com —", reads
+   as the host it opens; the card prints the real one, so a host-like chunk
+   there goes. The label is read as the screen shows it: NFKC folds the
+   fullwidth brackets and dots, and format characters (zero-width spaces,
+   direction marks) go, as does punctuation trailing the chunk. A filename
+   ("(INV-4.pdf)") isn't a host and stays. Only the last 300 characters are
+   looked at, a few chunks at most, and nothing here backtracks: labels are
+   anyone's words, and one sized to stall a regex would stall the tab. */
+const OPEN = "([{", CLOSE = ")]}";
+const TRAILING = /[\s.,;:!?\u2026]/u;
+const FILE_EXT = /^(?:pdf|jpe?g|png|gif|heic|webp|tiff?|docx?|xlsx?|csv|txt|mp4|mov|m4a|mp3|wav|zip|esx)$/i;
+const HOST_RUN = /(?:[\p{L}\p{N}-]+[.\u3002])+(\p{L}{2,})/gu;   // NFKC leaves the ideographic full stop
+function hostish(t) {
+  if (/:\/\/|\bwww\./i.test(t)) return true;
+  for (const m of t.matchAll(HOST_RUN)) if (!FILE_EXT.test(m[1])) return true;
+  return false;
+}
+function rtrim(s) {
+  let i = s.length;
+  while (i > 0 && TRAILING.test(s[i - 1])) i--;
+  return s.slice(0, i);
+}
+/* The bracketed chunk that closes s (nesting counted), within its last 300 characters. */
+function closingChunk(s) {
+  if (!CLOSE.includes(s[s.length - 1])) return null;
+  let depth = 0;
+  for (let i = s.length - 1; i >= Math.max(0, s.length - 300); i--) {
+    if (CLOSE.includes(s[i])) depth++;
+    else if (OPEN.includes(s[i]) && --depth === 0) return { start: i, inner: s.slice(i + 1, -1) };
+  }
+  return null;
+}
+const LEAD = /^opens\s+(\S{1,253})\s*[\u2014\u2013:-]?\s*/iu;
+export function labelOf(label) {
+  let s = str(label).normalize("NFKC").replace(/\p{Cf}/gu, "");
+  const lead = LEAD.exec(s.slice(0, 300));
+  if (lead && hostish(lead[1])) s = s.slice(lead[0].length);
+  for (let n = 0; n < 5; n++) {
+    s = rtrim(s);
+    const c = closingChunk(s);
+    if (!c || !hostish(c.inner)) break;
+    s = s.slice(0, c.start);
+  }
+  return rtrim(s).trim();
+}
 function refsOf(v) {
   const list = Array.isArray(v) ? v : [];
   return list.slice(0, 10).map((x) => {
     if (typeof x === "string" || typeof x === "number") {
       const t = str(x);
       const link = linkOf(t);
-      return { text: t, url: link ? link.url : "", host: link ? link.host : "" };
+      return { text: link ? labelOf(t) || link.url : t, url: link ? link.url : "", host: link ? link.host : "" };
     }
     const o = obj(x);
     const link = [o.url, o.href].map(str).map(linkOf).find(Boolean) || null;
-    const named = [o.label, o.title, o.name, o.description, o.summary].map(str).find(Boolean);
+    const said = [o.label, o.title, o.name, o.description, o.summary].map(str).find(Boolean) || "";
+    const named = link ? labelOf(said) : said;
     const typed = [str(o.kind || o.type), str(o.id || o.ref)].filter(Boolean).join(" ");
     const text = named || typed || (link && link.url) || JSON.stringify(o).slice(0, 200);
     return { text, url: link ? link.url : "", host: link ? link.host : "" };
@@ -125,7 +175,8 @@ function refsOf(v) {
 /* card: { key, lane, id, code, kind, chip, title, approveLabel, yesHint,
            jobId, jobTable, job, by, byKind, byId, status, createdAt,
            expiresAt, decidedAt, answeredAt, evidence, result, error, outbox,
-           answeredHere (set by decidedText: this tab just answered it) }
+           answeredHere (set by decidedText: this tab just answered it; the
+           page sets it too while this tab's answer to it is still out) }
    look: { jobs: {id: name}, ops: {"email.send@1": description},
            people: {id: name}, outbox: {proposalId: outbox row} } */
 
@@ -224,28 +275,48 @@ export const isRecent = (c, now = Date.now()) =>
 
 /* A row that won't make a card (a field of a shape no producer writes, in
    an ask filed by hand) is left off with a console warning: it never takes
-   the rest of the list down with it. */
-function cardsOf(rows, make, lane, look) {
+   the rest of the list down with it. One that may still be waiting is
+   counted too (skip), so the page can say an ask is missing: a raw row that
+   is open and unexpired, or one so odd its status and expiry won't read. */
+function cardsOf(rows, make, lane, look, now, skip) {
   const out = [];
   for (const r of Array.isArray(rows) ? rows : []) {
     try { out.push(make(r, look)); }
     catch (e) {
       const id = r && typeof r.id === "string" ? r.id : "no id";
       console.warn(`Approvals: left off a ${lane} row that didn't read (${id}): ${e && e.message ? e.message : e}`);
+      let open = true;
+      try { open = r.status === (lane === "text" ? "pending" : "proposed") && Date.parse(r.expires_at) > now; } catch { /* can't tell: count it */ }
+      if (open) skip[lane]++;
     }
   }
   return out;
 }
 
 /** Both queues' rows → { waiting (soonest expiry first), recent (newest
-    answer first), expired (a count) }. */
+    answer first), expired (a count), skipped ({text, spine}: rows that may
+    be waiting but wouldn't make a card) }. */
 export function inbox(pendingRows, proposalRows, look = {}, now = Date.now()) {
-  const cards = [...cardsOf(pendingRows, fromPending, "text", look), ...cardsOf(proposalRows, fromProposal, "spine", look)];
+  const skipped = { text: 0, spine: 0 };
+  const cards = [...cardsOf(pendingRows, fromPending, "text", look, now, skipped),
+    ...cardsOf(proposalRows, fromProposal, "spine", look, now, skipped)];
   const waiting = cards.filter((c) => isLive(c, now))
     .sort((a, b) => ms(a.expiresAt) - ms(b.expiresAt) || ms(a.createdAt) - ms(b.createdAt));
   const recent = cards.filter((c) => isRecent(c, now))
     .sort((a, b) => ms(b.decidedAt) - ms(a.decidedAt));
-  return { waiting, recent, expired: cards.filter((c) => isExpired(c, now)).length };
+  return { waiting, recent, expired: cards.filter((c) => isExpired(c, now)).length, skipped };
+}
+/** The line for asks that may be waiting but couldn't be shown. A text-queue
+    ask can still be answered by text (the producer texted him its code); a
+    spine one can't yet. */
+export function skippedLine(skipped) {
+  const s = obj(skipped);
+  const text = Number(s.text) || 0, spine = Number(s.spine) || 0, n = text + spine;
+  if (n <= 0) return "";
+  const head = `${n} ${n === 1 ? "ask" : "asks"} couldn't be shown here.`;
+  if (!spine) return `${head} Answer ${n === 1 ? "it" : "them"} by text, or tell Claude.`;
+  if (!text) return `${head} Tell Claude.`;
+  return `${head} Any that came to you by text can be answered there; otherwise tell Claude.`;
 }
 
 /** The ids the page must name for the cards it shows: job ids per table
@@ -325,11 +396,19 @@ function delivery(o, now) {
     dead: "Couldn't send" + (str(o && o.error) ? ": " + str(o.error) : "") }, st) || "";
 }
 /* A text-queue row goes pending → approved → executed / failed inside the one
-   request that answered it, so a row still 'approved' when the tab reads it
-   back is one whose request died before it could say how it went. */
+   request that answered it. Seen at 'approved', it may be mid-run (a YES text
+   being handled right now, a tap on another phone, or this tab's own answer
+   still out), so it waits a few minutes from when this tab first saw it so;
+   still 'approved' after that, its request died before it could say how it
+   went. */
+export const WAIT_MS = 3 * 60 * 1000;
 export const NEVER_REPORTED = "Approved, but it never reported back. Check whether it went out before sending it again.";
-/** The outcome line on a Recently decided card: { text, tone: ok|no|bad|wait }. */
-export function outcome(c, now = Date.now()) {
+export const NEVER_REPORTED_PHASE = "Approved, but it never reported back. Check the board before approving it again.";
+/** The outcome line on a Recently decided card: { text, tone: ok|no|bad|wait }.
+    seenAt: when this tab first saw a text-queue row at 'approved' (the page
+    keeps it, sawApproved); a card answeredHere (this tab's answer, landed or
+    still out) waits whatever the time. */
+export function outcome(c, now = Date.now(), seenAt = now) {
   const failed = { text: "Failed: " + (c.error || "no reason given"), tone: "bad" };
   if (c.status === "declined") {
     const why = c.lane === "spine" ? c.evidence.reason : "";
@@ -339,8 +418,11 @@ export function outcome(c, now = Date.now()) {
   if (c.lane === "text") {
     if (c.status === "approved") {
       if (c.error) return failed;
-      // only the answer this tab is holding can still be running
-      return c.answeredHere ? { text: "Approved, still running", tone: "wait" } : { text: NEVER_REPORTED, tone: "bad" };
+      const phase = c.kind === "phase";
+      if (c.answeredHere || now - (Number.isFinite(seenAt) ? seenAt : now) <= WAIT_MS) {
+        return { text: phase ? "Approved — adding the phase" : "Approved — waiting to hear how it went", tone: "wait" };
+      }
+      return { text: phase ? NEVER_REPORTED_PHASE : NEVER_REPORTED, tone: "bad" };
     }
     if (c.status === "executed") {
       if (c.kind === "phase") return { text: c.result.skipped ? "Phase was already on the board" : "Phase added", tone: "ok" };
@@ -360,6 +442,29 @@ export function outcome(c, now = Date.now()) {
     }
   }
   return { text: cap(c.status), tone: "no" };
+}
+/** The page's record of when it first saw each text-queue row at 'approved'
+    (seen: a Map, card key → ms, kept across refreshes) brought up to date with
+    the cards just read: a new one starts now, and one no longer 'approved'
+    drops out, so a row approved again later (a board retry put it back to
+    pending) waits afresh. That only works while the reads are continuous:
+    prevRead is when the text queue was last read before this one, and after a
+    gap longer than READ_GAP_MS (the office was on another tab, the window was
+    hidden) a revert and a fresh approval may have come and gone unseen, so
+    every row still 'approved' starts over at now. Waiting a little longer
+    misleads nobody; "never reported back" on a run seconds old does.
+    Returns seen. */
+export const READ_GAP_MS = 150 * 1000;           // three 45 s refreshes missed in a row
+export function sawApproved(seen, cards, now = Date.now(), prevRead = NaN) {
+  const gap = Number.isFinite(prevRead) && now - prevRead > READ_GAP_MS;
+  const still = new Set();
+  for (const c of cards || []) {
+    if (c.lane !== "text" || c.status !== "approved") continue;
+    still.add(c.key);
+    if (gap || !seen.has(c.key)) seen.set(c.key, now);
+  }
+  for (const k of [...seen.keys()]) if (!still.has(k)) seen.delete(k);
+  return seen;
 }
 
 /* ---------- the buttons ---------- */
@@ -465,11 +570,15 @@ export function spineAnswer(status, body) {
 /** A text-queue card after decidePending recorded the decision. The row as
     the server re-read it after (answer.action) wins over the card's copy, so
     a phase that was already on the board says so now, not at the next
-    refresh. */
+    refresh. One exception: a re-read still at 'approved' (it raced the
+    executed stamp, or a stamp didn't land) never overrides a final answer:
+    the request that ran it knows how it went. */
+const FINAL = ["executed", "declined", "failed"];
 export function decidedText(c, answer, now = Date.now()) {
   const a = obj(answer.action);
   const at = new Date(now).toISOString();
-  const status = DECIDED.text.includes(a.status) ? a.status : answer.status;
+  const status = a.status === "approved" && FINAL.includes(answer.status) ? answer.status
+    : DECIDED.text.includes(a.status) ? a.status : answer.status;
   const result = { ...c.result, ...obj(a.result) };
   if (answer.status === "failed" && !str(result.error) && str(answer.message)) result.error = str(answer.message);
   return { ...c, status, decidedAt: at, answeredAt: at, answeredHere: true, error: str(result.error) || c.error, result };

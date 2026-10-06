@@ -26,7 +26,8 @@
  *                     the row re-read after the decision)
  *               400 bad_request · 401 auth (role_is refused the token) ·
  *               403 not_owner · 404 not_open (already answered, or expired) ·
- *               409 quiet_hours (a customer text outside the window) or
+ *               409 quiet_hours (a customer text outside the window; the
+ *               message says so when the row expires before it opens) or
  *               try_again (the board didn't answer; nothing was added) — both
  *               leave the row pending · 500 server_error (a PATCH errored:
  *               nothing moved) · 503 role_check_failed (role_is didn't
@@ -118,8 +119,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import {
   parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard,
-  hourLabel, inSendWindow, sendWindowText, quietHoursHold, decide, replyFor, parseDecideRequest, decideResponse,
-  ownerGate, TryAgain, type DecideIO, type DecideAnswer, type Outcome,
+  hourLabel, inSendWindow, sendWindowText, quietHoursHold, alaskaHour, expiresBeforeWindow, retryableStatus,
+  decide, replyFor, parseDecideRequest, decideResponse, ownerGate, TryAgain,
+  type DecideIO, type DecideAnswer, type Outcome,
 } from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
 import { mapTwilioStatus, blockedStatuses } from "./status.mjs";
@@ -300,9 +302,7 @@ const qh = (v: string | undefined, dflt: number) => {
 const QUIET_START = qh(Deno.env.get("SMS_QUIET_START"), 7);
 const QUIET_END = qh(Deno.env.get("SMS_QUIET_END"), 20);
 export function anchorageHour(d = new Date()): number {
-  return Number(new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Anchorage", hour: "numeric", hourCycle: "h23",
-  }).format(d));
+  return alaskaHour(d);
 }
 /* `hr` defaults to now; an approval passes the hour its decision was judged
    on, so the preflight and this backstop can never read two clocks. */
@@ -546,10 +546,17 @@ async function executeApproved(
       .catch(() => null);
     // A lookup that never landed is not a missing job — saying "no longer on
     // the board" would send the owner hunting for a job that's sitting there.
-    // Nothing has been written yet, so this one is retryable: decide() puts
-    // the row back at pending and the same YES (or tap) can try again.
-    if (!got || !got.ok) throw new TryAgain("couldn't reach the board just now. Nothing was added");
-    const row = ((await got.json().catch(() => [])) as Record<string, unknown>[])[0];
+    // Nothing has been written yet, so an outage is retryable: decide() puts
+    // the row back at pending and the same YES (or tap) can try again. Any
+    // other refusal (a 400, a 401) would answer the next try the same way, so
+    // it is a plain failure, not a row that bounces back to pending forever.
+    if (!got || retryableStatus(got.status)) throw new TryAgain("couldn't reach the board just now. Nothing was added");
+    if (!got.ok) throw new Error(`couldn't read that board job (status ${got.status})`);
+    // a 200 whose body never arrived whole (a gateway's page, a dropped
+    // connection) is a read that didn't land either, not an empty answer
+    const rows = await got.json().catch(() => null);
+    if (!Array.isArray(rows)) throw new TryAgain("couldn't reach the board just now. Nothing was added");
+    const row = (rows as Record<string, unknown>[])[0];
     if (!row || row.deleted) throw new Error("that job is no longer on the board");
     const data = (row.data ?? {}) as Record<string, unknown>;
     // Refuse to give an unphased job its FIRST phase. schedule.js treats any
@@ -597,10 +604,13 @@ async function executeApproved(
    never reaches the executor; the revert and the failed stamp on approved, so
    neither can overwrite an executed stamp gmail-proxy already wrote. A PATCH
    that errored is not a lost race: it throws, and the caller says nothing
-   moved. One Alaska clock read per decision: the preflight and the
-   executor's send-window backstop judge the same hour. */
+   moved. One Alaska clock read per decision: the preflight, the executor's
+   send-window backstop and the "expires before the window" check all judge
+   the same instant. */
 function decideIO(act: Record<string, unknown>, admin: Admin): DecideIO {
-  const hour = anchorageHour();
+  const at = new Date();
+  const hour = anchorageHour(at);
+  const held = quietHoursHold(act.kind, act.params as Record<string, unknown> | null, hour, QUIET_START, QUIET_END);
   const move = async (from: string, patch: Record<string, unknown>) => {
     const r = await admin(`pending_actions?id=eq.${act.id}&status=eq.${from}`, {
       method: "PATCH", headers: { Prefer: "return=representation" },
@@ -610,10 +620,29 @@ function decideIO(act: Record<string, unknown>, admin: Admin): DecideIO {
     return ((await r.json().catch(() => [])) as unknown[]).length > 0;
   };
   return {
-    held: quietHoursHold(act.kind, act.params as Record<string, unknown> | null, hour, QUIET_START, QUIET_END),
+    held,
+    expiresFirst: held && expiresBeforeWindow(act.expires_at, at, QUIET_START, QUIET_END),
     flip: (to) => move("pending", { status: to }),
     execute: () => executeApproved(act, admin, hour),
-    revert: () => move("approved", { status: "pending" }),
+    // Every code allocator (roybal-brief's takeCode, mintCodes below,
+    // qb-time's takeCodes) counts only pending rows as taken, so while this
+    // row sat at approved another proposal may have been minted on its code.
+    // Putting it back then would leave two live rows answering one YES. A
+    // twin ("taken"), or a check that can't say, means no revert: decide()
+    // stamps the row failed instead. The check and the revert are two
+    // requests, so a code minted between them still slips past; then a YES
+    // finds two rows and answers "ambiguous", and nothing runs.
+    revert: async () => {
+      const twin = await admin(
+        `pending_actions?code=eq.${encodeURIComponent(String(act.code))}&status=eq.pending` +
+        `&expires_at=gt.${encodeURIComponent(at.toISOString())}&id=neq.${act.id}&select=id&limit=1`,
+        { method: "GET" });
+      if (!twin.ok) return false;
+      const rows = await twin.json().catch(() => null);
+      if (!Array.isArray(rows)) return false;
+      if (rows.length) return "taken";
+      return move("approved", { status: "pending" });
+    },
     fail: (error) => move("approved", { status: "failed", result: { error } }),
     reread: async () => {
       const r = await admin(`pending_actions?id=eq.${act.id}&select=id,code,kind,label,status,result&limit=1`, { method: "GET" });

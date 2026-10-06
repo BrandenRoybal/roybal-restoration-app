@@ -7,6 +7,7 @@ import {
   parseApproval, matchProposal, stillLive, proposalLine, replyText,
   validateBoardEdit, buildNextSubtasks, revGuard,
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, replyFor,
+  alaskaHour, windowOpensAt, expiresBeforeWindow, retryableStatus,
   parseDecideRequest, decideResponse, ownerGate,
 } from "./approve.ts";
 
@@ -65,12 +66,14 @@ test("proposal + reply lines read like a human wrote them", () => {
 
 /* ---------- boardEdit ---------- */
 
+const JOB = "7d1e2f30-4a5b-4c6d-8e9f-a0b1c2d3e4f5";   // coordination_jobs.id is a uuid
 const phase = (name, id = "p-new") => ({ id, name, durationDays: null, lagDays: 0, estimatedHours: 5.2, crewIds: [] });
-const edit = (over = {}) => ({ op: "addPhase", rowId: "job-1", phase: phase("Punch list"), entryIds: ["e1"], ...over });
+const edit = (over = {}) => ({ op: "addPhase", rowId: JOB, phase: phase("Punch list"), entryIds: ["e1"], ...over });
 
 test("a well-formed addPhase proposal validates", () => {
   const v = validateBoardEdit(edit());
-  assert.equal(v.rowId, "job-1");
+  assert.equal(v.rowId, JOB);
+  assert.equal(validateBoardEdit(edit({ rowId: ` ${JOB.toUpperCase()} ` })).rowId, JOB.toUpperCase());
   assert.equal(v.phase.name, "Punch list");
   assert.equal(v.phase.estimatedHours, 5.2);
 });
@@ -82,6 +85,18 @@ test("anything but addPhase, or a proposal missing its job/phase, is refused", (
   assert.throws(() => validateBoardEdit(edit({ rowId: "  " })), /no board job/);
   assert.throws(() => validateBoardEdit(edit({ phase: phase("   ") })), /no phase/);
   assert.throws(() => validateBoardEdit(edit({ phase: undefined })), /no phase/);
+});
+
+test("a board job that isn't a uuid is refused before any read (PostgREST would 400 it every time)", () => {
+  for (const rowId of ["job-1", "12", JOB + "0", JOB.slice(1), `${JOB}&deleted=eq.false`, 12, { id: JOB }]) {
+    assert.throws(() => validateBoardEdit(edit({ rowId })), /^Error: the proposal names no valid board job$/, JSON.stringify(rowId));
+  }
+});
+
+test("only an outage or a rate limit makes a failed board read worth answering again", () => {
+  for (const s of [500, 502, 503, 504, 429]) assert.equal(retryableStatus(s), true, String(s));
+  // the same answer next time: retrying would bounce the row back to pending forever
+  for (const s of [400, 401, 403, 404, 406, 416, 200, 204]) assert.equal(retryableStatus(s), false, String(s));
 });
 
 test("append lands at the end and leaves the existing phases alone", () => {
@@ -180,6 +195,77 @@ test("the quiet-hours reply names the window and the code to text again", () => 
   assert.match(t, /Nothing was sent; it's still waiting/);
 });
 
+/* When the window next opens, and whether a held row lapses first. July
+   is AKDT (UTC-8), so 7am there is 15:00Z; January is AKST (UTC-9), 16:00Z. */
+const at = (iso) => new Date(iso);
+
+test("the Alaska clock reads both offsets", () => {
+  assert.equal(alaskaHour(at("2026-07-02T05:30:00Z")), 21);   // 9:30pm AKDT
+  assert.equal(alaskaHour(at("2026-01-15T06:30:00Z")), 21);   // 9:30pm AKST
+  assert.equal(alaskaHour(at("2026-07-01T08:00:00Z")), 0);    // midnight is 0, not 24
+});
+
+test("the window next opens at the top of the start hour, tomorrow's in the evening, today's before dawn", () => {
+  const iso = (d) => d.toISOString();
+  assert.equal(iso(windowOpensAt(at("2026-07-02T05:30:00Z"), 7, 20)), "2026-07-02T15:00:00.000Z", "9:30pm → 7am tomorrow");
+  assert.equal(iso(windowOpensAt(at("2026-07-02T13:15:00Z"), 7, 20)), "2026-07-02T15:00:00.000Z", "5:15am → 7am today");
+  assert.equal(iso(windowOpensAt(at("2026-07-02T08:00:00Z"), 7, 20)), "2026-07-02T15:00:00.000Z", "midnight → 7am today");
+  assert.equal(iso(windowOpensAt(at("2026-07-02T04:00:00Z"), 7, 20)), "2026-07-02T15:00:00.000Z", "8pm sharp → 7am tomorrow");
+  assert.equal(iso(windowOpensAt(at("2026-01-15T06:30:00Z"), 7, 20)), "2026-01-15T16:00:00.000Z", "winter: 7am AKST");
+  assert.equal(iso(windowOpensAt(at("2026-07-02T05:30:00Z"), 6, 20)), "2026-07-02T14:00:00.000Z", "SMS_QUIET_START, not a constant");
+});
+
+test("the window's opening lands on 7am across both DST changes", () => {
+  // spring forward (Mar 8, 2am AKST → 3am AKDT): 9:30pm Saturday to 7am is 9 real hours, not 10
+  const spring = windowOpensAt(at("2026-03-08T06:30:00Z"), 7, 20);
+  assert.equal(spring.toISOString(), "2026-03-08T15:00:00.000Z");
+  assert.equal(alaskaHour(spring), 7);
+  // fall back (Nov 1, 2am AKDT → 1am AKST): 11 real hours, not 10
+  const fall = windowOpensAt(at("2026-11-01T05:30:00Z"), 7, 20);
+  assert.equal(fall.toISOString(), "2026-11-01T16:00:00.000Z");
+  assert.equal(alaskaHour(fall), 7);
+});
+
+test("the window's opening is whatever the preflight would call open: a skipped start hour, a fractional start, no window", () => {
+  // start 2am on the spring-forward night: 2am never happens, the window opens at 3am AKDT
+  const skipped = windowOpensAt(at("2026-03-08T09:00:00Z"), 2, 20);
+  assert.equal(skipped.toISOString(), "2026-03-08T11:00:00.000Z");
+  assert.equal(inSendWindow(alaskaHour(skipped), 2, 20), true);
+  // a start of 7.25 is only open from the 8 o'clock hour on (inSendWindow compares whole hours)
+  assert.equal(windowOpensAt(at("2026-07-02T05:30:00Z"), 7.25, 20).toISOString(), "2026-07-02T16:00:00.000Z");
+  // a start at or after its end never opens, so nothing held can be approved "then"
+  assert.equal(windowOpensAt(at("2026-07-02T05:30:00Z"), 20, 20), null);
+  assert.equal(expiresBeforeWindow("2999-01-01T00:00:00Z", at("2026-07-02T05:30:00Z"), 20, 20), true);
+});
+
+test("a held row expires first only when its expiry falls at or before the window opens", () => {
+  const nine = at("2026-07-02T05:30:00Z");                    // 9:30pm AKDT; opens 15:00Z
+  assert.equal(expiresBeforeWindow("2026-07-02T10:00:00Z", nine, 7, 20), true, "2am: gone before 7am");
+  assert.equal(expiresBeforeWindow("2026-07-02T15:00:00Z", nine, 7, 20), true, "7:00:00 sharp is already not live");
+  assert.equal(expiresBeforeWindow("2026-07-02T15:00:01Z", nine, 7, 20), false);
+  assert.equal(expiresBeforeWindow("2026-07-02T17:00:00+00:00", nine, 7, 20), false, "9am: approve it then");
+  // no expiry (stillLive's never-expires) and junk are not "expires first"
+  for (const e of [null, undefined, "", "soon"]) assert.equal(expiresBeforeWindow(e, nine, 7, 20), false, String(e));
+  // the start hour decides: a 10am window makes a 9am expiry lapse
+  assert.equal(expiresBeforeWindow("2026-07-02T17:00:00Z", nine, 10, 20), true);
+});
+
+test("a held row that expires before the window says it won't go out, never 'approve it then'", () => {
+  const a = { code: 14, label: "text the Hebards the start time" };
+  const t = replyFor("approve", { status: "quiet_hours", expiresFirst: true }, a, sendWindowText(7, 20));
+  assert.equal(t, "🌙 Customer texts go out between 7am and 8pm Alaska time, and this one expires before then, so it won't go out. Nothing was sent.");
+  assert.doesNotMatch(t, /YES 14|still waiting/);
+  // the hours come from the window, never a constant
+  assert.match(replyFor("approve", { status: "quiet_hours", expiresFirst: true }, a, sendWindowText(6, 22)), /between 6am and 10pm Alaska time/);
+  assert.equal(replyFor("approve", { status: "quiet_hours", expiresFirst: false }, a, sendWindowText(7, 20)),
+    replyText("quiet-hours", a, sendWindowText(7, 20)));
+  const q = decideResponse({ status: "quiet_hours", expiresFirst: true }, a, sendWindowText(7, 20));
+  assert.deepEqual(q, { code: 409, body: { ok: false, error: "quiet_hours",
+    message: "Customer texts only go out between 7am and 8pm Alaska time, and this one expires before then. Nothing was sent." } });
+  assert.match(decideResponse({ status: "quiet_hours", expiresFirst: true }, a, sendWindowText(6, 22)).body.message, /between 6am and 10pm/);
+  assert.match(decideResponse({ status: "quiet_hours" }, a, sendWindowText(7, 20)).body.message, /It's still waiting; approve it then\./);
+});
+
 test("each decide() outcome gets the text reply the YES/NO path has always sent", () => {
   const a = { code: 12, label: "email the INV-4 reminder to Hebard" };
   const w = sendWindowText(7, 20);
@@ -270,6 +356,12 @@ test("decidePending: 200 when the decision was recorded, { ok:false, error, mess
     { code: 400, body: { ok: false, error: "bad_request", message: "Provide `id`, the pending action's uuid." } });
   assert.deepEqual(decideResponse({ status: "server_error", error: "pending_actions read failed (503)" }, null, w),
     { code: 500, body: { ok: false, error: "server_error", message: "pending_actions read failed (503)" } });
+  // a skip whose executed stamp didn't land: the re-read still says approved, but the answer knows it skipped
+  const phaseRow = { id: ID, code: 13, kind: "boardEdit", label: "add Punch list to Hebard", status: "pending" };
+  const stale = decideResponse({ status: "executed", skipped: "phase already exists" }, phaseRow, w,
+    { ...phaseRow, status: "approved", result: null });
+  assert.equal(stale.body.message, "Phase was already on the board — nothing was added.");
+  assert.deepEqual(stale.body.action.result, { skipped: "phase already exists" });
   // the row's params (the email body, the customer's number) never ride back
   assert.equal(JSON.stringify(decideResponse({ status: "executed" }, a, w)).includes("hebard@example.com"), false);
   assert.equal(JSON.stringify(decideResponse({ status: "executed" }, a, w, { ...sent, params: a.params })).includes("hebard@example.com"), false);
@@ -296,10 +388,10 @@ test("decidePending: a phase already on the board says nothing was added", () =>
   assert.equal(r.body.message, skip);
   assert.deepEqual(r.body.action.result, { skipped: "phase already exists" });
   // …or from the re-read row's stamp
-  const after = { ...a, status: "executed", result: { rowId: "job-1", skipped: "phase already exists" } };
+  const after = { ...a, status: "executed", result: { rowId: JOB, skipped: "phase already exists" } };
   assert.equal(decideResponse({ status: "executed" }, a, w, after).body.message, skip);
   // a phase that was added is Done
-  assert.equal(decideResponse({ status: "executed" }, a, w, { ...a, status: "executed", result: { rowId: "job-1", rev: 4 } }).body.message,
+  assert.equal(decideResponse({ status: "executed" }, a, w, { ...a, status: "executed", result: { rowId: JOB, rev: 4 } }).body.message,
     "Done — add phase Punch list to Pollen.");
 });
 

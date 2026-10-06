@@ -11,6 +11,12 @@
    retired kind of ask can still be declined; a row that never reported back
    says so; a skipped phase says so at once; evidence links show their host;
    the whole email shows; one hand-made row can't take the tab down.
+   Then review round 2: a row seen at 'approved' waits a few minutes (and
+   for as long as this tab's own answer is out) before it says it never
+   reported back; a re-read that raced the executed stamp still says Sent;
+   the real host comes before a link's label; and on a Safari without
+   Object.hasOwn every card still shows, with asks that won't read said out
+   loud.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -171,7 +177,7 @@ await test("the owner sees both queues merged, soonest expiry first, with the ev
   assert.match(e.textContent, /Why\s*The adjuster asked for it on Monday\./);
   assert.equal(e.querySelector(".ap-refs a").getAttribute("href"), "https://mail.google.com/mail/u/0/#inbox/1");
   assert.equal(e.querySelector(".ap-refs a").getAttribute("rel"), "noopener noreferrer");
-  assert.equal(e.querySelector(".ap-refs li").textContent, "Email from the adjuster (mail.google.com)", "the host it opens, beside its label");
+  assert.equal(e.querySelector(".ap-refs li").textContent, "opens mail.google.com — Email from the adjuster", "the host it opens, ahead of its label");
   assert.equal(e.querySelector(".ap-yes"), null, "no YES hint on the spine");
   assert.equal(btn(e, "Approve and send").disabled, false);
   const r = card("text:" + reminder.id);
@@ -505,26 +511,62 @@ await test("a retired kind of ask (P0002 no live operation): Approve goes off, D
   assert.equal(card(key).querySelector(".ap-out").textContent, "Declined");
 });
 
-await test("Recently decided: a row read back still 'approved' never reported back (unless it carries an error)", async () => {
+/* review round 2: a row seen at 'approved' waits a few minutes from this
+   tab's first sighting before it says it never reported back */
+const later = async (mins, fn) => {          // run fn with the page's clock mins ahead
+  const real = Date.now;
+  Date.now = () => real.call(Date) + mins * 60e3;
+  try { await fn(); } finally { Date.now = real; }
+};
+await test("Recently decided: a row read back at 'approved' waits a few minutes from first sight, then never reported back (unless it carries an error)", async () => {
   const stuck = { ...reminder, id: id("text", 7), code: 16, status: "approved", created_at: iso(-2), expires_at: iso(22) };
   const stuckErr = { ...phase, id: id("text", 8), code: 17, status: "approved", created_at: iso(-1), expires_at: iso(23), result: { error: "the board job changed" } };
-  PA = [reminder, phase, stuck, stuckErr];
+  const stuckPhase = { ...phase, id: id("text", 11), code: 18, status: "approved", created_at: iso(-1), expires_at: iso(23) };
+  PA = [reminder, phase, stuck, stuckErr, stuckPhase];
   PR = [];
   await go();
-  const out = (key) => card(key).querySelector(".ap-out");
-  assert.equal(out("text:" + stuck.id).textContent, "Approved, but it never reported back. Check whether it went out before sending it again.");
-  assert.ok(out("text:" + stuck.id).classList.contains("ap-out--bad"));
-  assert.equal(out("text:" + stuckErr.id).textContent, "Failed: the board job changed");
+  const out = (row) => card("text:" + row.id).querySelector(".ap-out");
+  const tones = (row) => [out(row).textContent, out(row).classList.contains("ap-out--wait") ? "wait" : out(row).classList.contains("ap-out--bad") ? "bad" : "?"];
+  assert.deepEqual(tones(stuck), ["Approved — waiting to hear how it went", "wait"], "a YES text may be running right now");
+  assert.deepEqual(tones(stuckPhase), ["Approved — adding the phase", "wait"]);
+  assert.equal(out(stuckErr).textContent, "Failed: the board job changed");
+  // two minutes on, the office comes back to the tab: still waiting (the first sighting is kept, not restarted)
+  await later(2, () => go());
+  assert.deepEqual(tones(stuck), ["Approved — waiting to hear how it went", "wait"]);
+  // past three minutes, the next refresh: it never reported back
+  await later(4, async () => { btn(view, "↻ Refresh").click(); await settle(); });
+  assert.deepEqual(tones(stuck), ["Approved, but it never reported back. Check whether it went out before sending it again.", "bad"]);
+  assert.deepEqual(tones(stuckPhase), ["Approved, but it never reported back. Check the board before approving it again.", "bad"]);
+  // the phase went back to pending (the board was out) and was approved again later: it waits afresh
+  PA = PA.map((r) => (r.id === stuckPhase.id ? { ...r, status: "pending" } : r));
+  await later(5, () => go());
+  assert.equal(card("text:" + stuckPhase.id).classList.contains("ap-card--done"), false, "waiting again");
+  PA = PA.map((r) => (r.id === stuckPhase.id ? { ...r, status: "approved" } : r));
+  await later(6, () => go());
+  assert.deepEqual(tones(stuckPhase), ["Approved — adding the phase", "wait"]);
+  assert.deepEqual(tones(stuck), ["Approved, but it never reported back. Check whether it went out before sending it again.", "bad"]);
 });
 
-await test("evidence links show the host they really open, beside the label", async () => {
+await test("evidence links show the host they really open first, then the label (whose own host-like tail is dropped)", async () => {
   PA = [];
   PR = [{ ...email, evidence_refs: [{ label: "QuickBooks invoice INV-4", url: "https://qb-login.example.net/signin" },
-    { label: "Gmail", url: "https://mail.google.com@evil.example/x" }, { label: "Not a link", url: "http://x.example/" }] }];
+    { label: "Gmail", url: "https://mail.google.com@evil.example/x" },
+    { label: "Invoice (quickbooks.intuit.com)", url: "https://evil.example/pay" },
+    { label: "Not a link", url: "http://x.example/" }] }];
   await go();
   const items = [...card("spine:" + email.id).querySelectorAll(".ap-refs li")];
-  assert.deepEqual(items.map((li) => li.textContent), ["QuickBooks invoice INV-4 (qb-login.example.net)", "Gmail (evil.example)", "Not a link"]);
-  assert.deepEqual(items.map((li) => li.querySelector("a") && li.querySelector("a").getAttribute("rel")), ["noopener noreferrer", "noopener noreferrer", null]);
+  assert.deepEqual(items.map((li) => li.textContent), ["opens qb-login.example.net — QuickBooks invoice INV-4", "opens evil.example — Gmail",
+    "opens evil.example — Invoice", "Not a link"]);
+  for (const li of items.slice(0, 3)) {
+    const host = li.querySelector(".ap-host"), link = li.querySelector("a");
+    assert.equal(li.firstChild, host, "the real host comes before anything the proposer wrote");
+    assert.ok(host.compareDocumentPosition(link) & window.Node.DOCUMENT_POSITION_FOLLOWING, "the link after it");
+    assert.ok(!host.contains(link) && !link.contains(host));
+  }
+  assert.deepEqual([items[2].querySelector("a").textContent, items[2].querySelector("a").getAttribute("href")], ["Invoice", "https://evil.example/pay"]);
+  assert.deepEqual(items.map((li) => li.querySelector("a") && li.querySelector("a").getAttribute("rel")),
+    ["noopener noreferrer", "noopener noreferrer", "noopener noreferrer", null]);
+  assert.equal(items[3].querySelector(".ap-host"), null, "no link, no host");
 });
 
 await test("the email or text body is shown whole: no height cap and no inner scroll on .ap-mail", async () => {
@@ -547,7 +589,118 @@ await test("one hand-made row (a prototype-named kind, a label that won't read) 
   assert.match(card("text:" + odd.id).querySelector(".ap-head").textContent, /^constructorDo a thing$/);
   assert.ok(btn(card("text:" + odd.id), "Approve"));
   assert.ok(warned.some((w) => w.includes(bad.id)), "the row left off is named in the console");
+  assert.equal(view.querySelector(".ap-skipped").textContent, "1 ask couldn't be shown here. Answer it by text, or tell Claude.", "and on the page");
   noJunk(view);
+  fresh();
+});
+
+await test("the office comes back to the tab while its own answer is out: that row reads as running, however long it takes", async () => {
+  fresh();
+  await go();
+  let release;
+  notify = () => new Promise((res) => { release = () => res(json(200, { ok: true, status: "executed", message: "Done — email the reminder.",
+    action: { id: reminder.id, code: 12, kind: "emailSend", label: reminder.label, status: "executed", result: {} } })); });
+  btn(card("text:" + reminder.id), "Approve and send").click();
+  await settle(10);
+  // the server flipped it to approved and is sending; the office opens the tab again meanwhile
+  PA = PA.map((r) => (r.id === reminder.id ? { ...r, status: "approved" } : r));
+  await go();
+  const out = () => card("text:" + reminder.id).querySelector(".ap-out");
+  assert.equal(card("text:" + reminder.id).classList.contains("ap-card--done"), true);
+  assert.equal(out().textContent, "Approved — waiting to hear how it went");
+  assert.ok(out().classList.contains("ap-out--wait"));
+  await later(10, () => go());
+  assert.equal(out().textContent, "Approved — waiting to hear how it went", "ten minutes on, but this tab's answer is still out");
+  // it lands: the page reads where things stand
+  PA = PA.map((r) => (r.id === reminder.id ? { ...r, status: "executed", executed_at: new Date().toISOString() } : r));
+  release();
+  await settle();
+  assert.equal(out().textContent, "Sent");
+  fresh();
+});
+
+await test("an Approve whose re-read raced the executed stamp (the row read back 'approved') says Sent, not still running", async () => {
+  fresh();
+  await go();
+  notify = () => json(200, { ok: true, status: "executed", message: "Done — email the reminder.",
+    action: { id: reminder.id, code: 12, kind: "emailSend", label: reminder.label, status: "approved", result: {} } });
+  btn(card("text:" + reminder.id), "Approve and send").click();
+  await settle();
+  assert.equal(card("text:" + reminder.id).querySelector(".ap-out").textContent, "Sent");
+  assert.equal(document.getElementById("toast").textContent, "Sent");
+  // the executed stamp never landed: the server row stays 'approved', but this tab heard it went out
+  PA = PA.map((r) => (r.id === reminder.id ? { ...r, status: "approved" } : r));
+  btn(view, "↻ Refresh").click();
+  await settle();
+  assert.equal(card("text:" + reminder.id).querySelector(".ap-out").textContent, "Sent", "not 'waiting'");
+  await later(4, async () => { btn(view, "↻ Refresh").click(); await settle(); });
+  assert.equal(card("text:" + reminder.id).querySelector(".ap-out").textContent, "Sent", "nor 'never reported back'");
+  // once the row moves on, the server's word is the card's again
+  PA = PA.map((r) => (r.id === reminder.id ? { ...r, status: "failed", result: { error: "bounced" } } : r));
+  await later(5, async () => { btn(view, "↻ Refresh").click(); await settle(); });
+  assert.equal(card("text:" + reminder.id).querySelector(".ap-out").textContent, "Failed: bounced");
+  fresh();
+});
+
+await test("away from the tab while a row went back to pending and was approved again: coming back, it waits afresh", async () => {
+  fresh();
+  const again = { ...phase, id: id("text", 12), code: 19, status: "approved", created_at: iso(-1), expires_at: iso(23) };
+  PA = [reminder, again];
+  PR = [];
+  await go();
+  const out = () => card("text:" + again.id).querySelector(".ap-out");
+  assert.equal(out().textContent, "Approved — adding the phase");
+  // the office goes to the board; the run fails over, is put back to pending, and YES comes again, none of it read here
+  location.hash = "#/board";
+  await settle(5);
+  // five minutes on, back on the tab mid-run
+  await later(5, () => go());
+  assert.equal(out().textContent, "Approved — adding the phase", "not 'never reported back' on a run seconds old");
+  // reads stay continuous from here, so a run that really is stuck still says so
+  await later(6, async () => { btn(view, "↻ Refresh").click(); await settle(); });
+  await later(7, async () => { btn(view, "↻ Refresh").click(); await settle(); });
+  await later(8.5, async () => { btn(view, "↻ Refresh").click(); await settle(); });
+  assert.equal(out().textContent, "Approved, but it never reported back. Check the board before approving it again.");
+  fresh();
+});
+
+await test("Safari before 15.4 (no Object.hasOwn): every card still shows; asks that won't read are said out loud, never \"nothing waiting\"", async () => {
+  fresh();
+  // Node's own Response uses Object.hasOwn, so it can't just go: it throws, as
+  // that Safari does, only when the tab's modules call it themselves
+  const real = Object.hasOwn;
+  Object.hasOwn = function hasOwn(o, k) {
+    if (/\/apps\/(field|admin)\/js\/approvals\.js/.test(new Error().stack.split("\n")[2] || "")) {
+      throw new TypeError("Object.hasOwn is not a function");
+    }
+    return real(o, k);
+  };
+  try { await go(); } finally { Object.hasOwn = real; }
+  assert.deepEqual(waiting().map((c) => c.dataset.key), ["spine:" + email.id, "text:" + phase.id, "text:" + reminder.id]);
+  assert.equal(card("spine:" + email.id).querySelector(".ap-head .badge").className, "badge disp-b", "the chip's tone");
+  assert.equal(card("text:" + phase.id).querySelector(".ap-head .badge").className, "badge cat2");
+  assert.equal(recent().length, 4);
+  assert.equal(view.querySelector(".ap-skipped"), null);
+  // every waiting row unreadable: the line says so, and the badge still counts them
+  const bad = (r) => ({ ...r, label: { toString: 1 }, rationale: { toString: 1 } });
+  PA = [bad(reminder), bad(phase), sent, bad(failed)];
+  PR = [bad(email)];
+  const warn = console.warn;
+  console.warn = () => {};
+  try { await go(); } finally { console.warn = warn; }
+  assert.equal(waiting().length, 0);
+  const line = view.querySelector(".ap-skipped");
+  assert.equal(line.textContent, "3 asks couldn't be shown here. Any that came to you by text can be answered there; otherwise tell Claude.",
+    "the failed one isn't waiting, so it isn't counted");
+  assert.ok(line.classList.contains("warn"));
+  assert.ok(!/Nothing is waiting on you/.test(view.textContent));
+  assert.deepEqual([badge().hidden, badge().textContent], [false, "3"]);
+  PA = [bad(reminder), phase];
+  PR = [];
+  console.warn = () => {};
+  try { await go(); } finally { console.warn = warn; }
+  assert.equal(view.querySelector(".ap-skipped").textContent, "1 ask couldn't be shown here. Answer it by text, or tell Claude.");
+  assert.deepEqual(waiting().map((c) => c.dataset.key), ["text:" + phase.id]);
   fresh();
 });
 

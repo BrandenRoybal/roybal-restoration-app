@@ -42,7 +42,7 @@ const REFRESH_MS = 45000;
 const enc = encodeURIComponent;
 /* the shared .badge tones: the chip by kind, the outcome line by how it went */
 const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", other: "disp-x" };
-const tone = (kind) => (Object.hasOwn(TONE, kind) ? TONE[kind] : TONE.other);
+const tone = (kind) => (Object.prototype.hasOwnProperty.call(TONE, kind) ? TONE[kind] : TONE.other);   // not Object.hasOwn: Safari < 15.4
 
 const TEXT_COLS = "id,code,kind,label,params,job_id,proposed_by,status,result,created_at,expires_at,executed_at";
 const SPINE_COLS = "id,operation,input,edited_params,proposed_by_kind,proposed_by_id,rationale,evidence_refs," +
@@ -90,7 +90,7 @@ async function load(now) {
   ]);
   if (ops) catalog = ops;
   const look = A.lookFrom({ catalog: catalog || [], agents, profiles, jobs: [...field, ...board], outbox });
-  return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2 };
+  return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2, textOk: text.status === "fulfilled", readAt: now };
 }
 
 /* ---------- is this the owner? ----------
@@ -161,6 +161,17 @@ let epoch = 0;                   // bumps on every answer; a refresh that starte
 let timer = null;
 let onShow = null;               // the open page's refresh, for coming back to the tab
 const notes = new Map();         // card key → { text, gone, declineOnly }: the error line under a card, kept across repaints
+/* card key → when this tab first saw that text-queue row at 'approved'. For a
+   few minutes it may be mid-run, not stuck (A.outcome); kept across
+   refreshes and re-renders, brought up to date by A.sawApproved */
+const seenApproved = new Map();
+let lastTextRead = NaN;          // when the text queue last loaded: a longer gap restarts those sightings
+/* card key → the card as this tab's own answer settled it (Sent, Declined,
+   Failed: …). A send whose executed stamp didn't land leaves the server row
+   at 'approved', and the refresh that rebuilds the card from it would turn a
+   "Sent" this tab heard into "waiting", then "never reported back". Kept
+   while the server row stays at 'approved', dropped once it moves on. */
+const heard = new Map();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && onShow && !inflight.size) onShow();
 });
@@ -200,8 +211,8 @@ export async function renderApprovals(view) {
   const uis = new Map();          // card key → its waiting card on screen now (paint rebuilds them)
   body.append(h("p", { class: "ap-intro" },
     "Everything waiting on your yes. A card that says “or text YES 12” can also be answered by text; the first answer counts."), page);
-  let state = await load(Date.now()).catch(() => ({ box: { waiting: [], recent: [], expired: 0 }, look: {},
-    warn: ["Approvals didn't load. Try again in a minute."], failed: true }));
+  let state = await load(Date.now()).catch(() => ({ box: { waiting: [], recent: [], expired: 0, skipped: { text: 0, spine: 0 } },
+    look: {}, warn: ["Approvals didn't load. Try again in a minute."], failed: true, textOk: false }));
   if (!live()) return;
   show();
 
@@ -227,7 +238,14 @@ export async function renderApprovals(view) {
     // the server still lists as open gives the buttons back
     const open = new Set(state.box.waiting.map((c) => c.key));
     for (const [k, n] of notes) if (!open.has(k) || n.gone) notes.delete(k);
-    if (!state.warn.length) setBadge(state.box.waiting.length);
+    // a text queue that didn't load says nothing about which rows are still 'approved'
+    if (state.textOk) {
+      A.sawApproved(seenApproved, state.box.recent, state.readAt, lastTextRead);
+      lastTextRead = state.readAt;
+      for (const k of [...heard.keys()]) if (!seenApproved.has(k)) heard.delete(k);
+    }
+    const { skipped } = state.box;
+    if (!state.warn.length) setBadge(state.box.waiting.length + skipped.text + skipped.spine);
     paint();
   }
 
@@ -242,8 +260,11 @@ export async function renderApprovals(view) {
       return;
     }
     kids.push(h("h2", {}, "Waiting on you", box.waiting.length ? h("span", { class: "navbadge" }, String(box.waiting.length)) : null));
+    // an ask that wouldn't make a card (console.warn names it) is still said out loud
+    const skipped = A.skippedLine(box.skipped);
+    if (skipped) kids.push(h("div", { class: "warn ap-skipped", role: "status" }, skipped));
     if (box.waiting.length) kids.push(...box.waiting.map((c) => waitingCard(c, now)));
-    else kids.push(h("p", { class: "muted ap-none" }, "Nothing is waiting on you."));
+    else if (!skipped) kids.push(h("p", { class: "muted ap-none" }, "Nothing is waiting on you."));
     const gone = A.expiredLine(box.expired);
     if (gone) kids.push(h("p", { class: "ap-expired" }, gone));
     kids.push(h("h2", {}, "Recently decided"));
@@ -315,6 +336,7 @@ export async function renderApprovals(view) {
       : c.lane === "text" ? A.pendingAnswer(res.status, b, c, decision) : A.spineAnswer(res.status, b);
     if (ans.ok) {
       const done = c.lane === "text" ? A.decidedText(c, ans) : A.fromProposal(ans.row, state.look);
+      if (c.lane === "text" && done.status !== "approved") heard.set(c.key, done);
       state = { ...state, box: A.settle(state.box, c, done) };
       toast(A.outcome(done).text);
     } else {
@@ -351,19 +373,27 @@ function evidence(c) {
     parts.push(kv("Job", c.job || "a board job"), kv("New stage", e.stage));
   }
   parts.push(kv("Why", e.rationale));
-  // a link's label is the proposer's words; the host beside it is where it really goes
+  // a link's label is the proposer's words, so where it really goes comes
+  // first, in its own bold element the label can't reach: "opens
+  // evil.example — Invoice" (A.labelOf drops a host the label claims)
   if (e.refs.length) {
     parts.push(h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Evidence"),
       h("ul", { class: "ap-v ap-refs" }, ...e.refs.map((r) => h("li", {},
-        r.url ? [h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.text), " ",
-          h("span", { class: "ap-host" }, `(${r.host})`)] : r.text)))));
+        r.url ? [h("span", { class: "ap-host" }, "opens " + r.host), " — ",
+          h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.text)] : r.text)))));
   }
   const shown = parts.filter(Boolean);
   return shown.length ? h("div", { class: "ap-ev" }, ...shown) : null;
 }
 
 function recentCard(c, now) {
-  const o = A.outcome(c, now);
+  // a row this tab's own answer is still out on (the office came back to the
+  // tab mid-answer) is running, not stuck
+  // and one whose answer this tab heard reads as that answer, not as the stale row
+  const mine = c.status === "approved" && heard.get(c.key);
+  const shown = mine ? { ...c, status: mine.status, result: mine.result, error: mine.error, answeredHere: true }
+    : inflight.has(c.key) ? { ...c, answeredHere: true } : c;
+  const o = A.outcome(shown, now, seenApproved.get(c.key));
   return h("div", { class: "card ap-card ap-card--done", dataset: { key: c.key } },
     head(c),
     h("div", { class: "ap-out ap-out--" + o.tone }, o.text),
