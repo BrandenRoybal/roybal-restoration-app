@@ -621,6 +621,16 @@ test("after a gap in reading, a row still 'approved' starts its sighting over: a
   const fresh = new Map([[b.key, NOW]]);
   sawApproved(fresh, [b], NOW + 10 * 60e3);
   assert.equal(fresh.get(b.key), NOW);
+  // an email or a text never goes back to pending, so a gap doesn't restart it: stuck is stuck
+  const a = fromPending({ ...reminder, status: "approved" });
+  const mail = new Map([[a.key, NOW]]);
+  sawApproved(mail, [a], NOW + 10 * 60e3, NOW);
+  assert.equal(mail.get(a.key), NOW);
+  assert.equal(outcome(a, NOW + 10 * 60e3, mail.get(a.key)).text, NEVER_REPORTED);
+  // a clock that went backwards is a gap, and a sighting in the future is never kept
+  const back = new Map([[a.key, NOW + 60 * 60e3], [b.key, NOW]]);
+  sawApproved(back, [a, b], NOW + 60e3, NOW + 30 * 60e3);
+  assert.deepEqual([back.get(a.key), back.get(b.key)], [NOW + 60e3, NOW + 60e3]);
 });
 
 test("a skip the server knew of stays a skip when the re-read still says 'approved'", () => {
@@ -637,9 +647,19 @@ test("labelOf reads the label as the screen shows it, and never stalls on one bu
     "Invoice {quickbooks.intuit.com}", "opens quickbooks.intuit.com \u2014 Invoice", "Opens quickbooks.intuit.com: Invoice"]) {
     assert.equal(labelOf(fake), "Invoice", JSON.stringify(fake));
   }
+  // invisible marks that aren't format characters, and brackets that only look like brackets
+  for (const fake of ["Invoice (quickbooks.intuit.com)\u034F", "Invoice (quickbooks.intuit.com)\uFE0F", "Invoice (quickbooks.intuit.com)\u3164",
+    "Invoice (quickbooks.intuit.com)\u2800", "Invoice (quickbooks.\uFE0Fintuit.\uFE0Fcom)", "Invoice \u3010quickbooks.intuit.com\u3011",
+    "Invoice \u2768quickbooks.intuit.com\u2769", "Invoice <quickbooks.intuit.com>", "\u034Fopens quickbooks.intuit.com \u2014 Invoice"]) {
+    assert.equal(labelOf(fake), "Invoice", JSON.stringify(fake));
+  }
   // a filename isn't a host; "opens" with no host after it is just a word
-  for (const kept of ["Invoice (INV-4.pdf)", "Photos (IMG_2041.jpg)", "Estimate (Smith.xlsx)", "opens Monday"]) {
+  for (const kept of ["Invoice (INV-4.pdf)", "Photos (IMG_2041.jpg)", "Estimate (Smith.xlsx)", "Plans (A1.dwg)", "opens Monday"]) {
     assert.equal(labelOf(kept), kept, kept);
+  }
+  // a label that claims no host shows exactly as written: its emoji, its final period, its fullwidth letters
+  for (const kept of ["Paid in full.", "Crew \u{1F468}\u200D\u{1F527} photos", "\uFF29nvoice 4", "Invoice\u2026"]) {
+    assert.equal(labelOf(kept), kept, JSON.stringify(kept));
   }
   // long runs of spaces, newlines or brackets: linear, so well under a second each
   for (const big of ["a" + " ".repeat(200000) + "b", "Invoice" + "\n".repeat(200000) + "INV-4", "(".repeat(100000) + "x.com" + ")".repeat(100000)]) {
@@ -686,6 +706,7 @@ test("a link's label loses its own trailing host-like brackets; the host the car
     { label: "(mail.google.com)", type: "email", id: "77", url: "https://evil.example/m" },
     { label: "Not a link (quickbooks.intuit.com)" },                         // no link, no host printed: kept as written
     "https://evil.example/x (quickbooks.intuit.com)",
+    { kind: "QuickBooks invoice", id: "(quickbooks.intuit.com)", url: "https://evil.example/k" },   // the kind/id fallback too
   ] }).evidence.refs;
   assert.deepEqual(refs.map((r) => [r.text, r.host]), [
     ["Invoice", "evil.example"],
@@ -693,5 +714,6 @@ test("a link's label loses its own trailing host-like brackets; the host the car
     ["email 77", "evil.example"],
     ["Not a link (quickbooks.intuit.com)", ""],
     ["https://evil.example/x", "evil.example"],
+    ["QuickBooks invoice", "evil.example"],
   ]);
 });

@@ -116,9 +116,10 @@ function linkOf(u) {
    ("(INV-4.pdf)") isn't a host and stays. Only the last 300 characters are
    looked at, a few chunks at most, and nothing here backtracks: labels are
    anyone's words, and one sized to stall a regex would stall the tab. */
-const OPEN = "([{", CLOSE = ")]}";
-const TRAILING = /[\s.,;:!?\u2026]/u;
-const FILE_EXT = /^(?:pdf|jpe?g|png|gif|heic|webp|tiff?|docx?|xlsx?|csv|txt|mp4|mov|m4a|mp3|wav|zip|esx)$/i;
+const OPEN = "([{<\u3010\u2768\u27EE", CLOSE = ")]}>\u3011\u2769\u27EF";      // and 【】 ❨❩ ⟮⟯, which read as brackets
+const TRAILING = /[\s.,;:!?\u2026\u2800]/u;                               // \u2800: the braille blank
+const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;             // zero-width, direction marks, variation selectors, fillers
+const FILE_EXT = /^(?:pdf|jpe?g|png|gif|heic|heif|webp|tiff?|docx?|xlsx?|pptx?|csv|txt|rtf|odt|json|xml|eml|msg|dwg|dxf|kmz|kml|mp4|mov|m4a|mp3|wav|zip|esx)$/i;
 const HOST_RUN = /(?:[\p{L}\p{N}-]+[.\u3002])+(\p{L}{2,})/gu;   // NFKC leaves the ideographic full stop
 function hostish(t) {
   if (/:\/\/|\bwww\./i.test(t)) return true;
@@ -142,16 +143,19 @@ function closingChunk(s) {
 }
 const LEAD = /^opens\s+(\S{1,253})\s*[\u2014\u2013:-]?\s*/iu;
 export function labelOf(label) {
-  let s = str(label).normalize("NFKC").replace(/\p{Cf}/gu, "");
+  const said = str(label);
+  let s = said.normalize("NFKC").replace(INVISIBLE, "");
+  let cut = false;
   const lead = LEAD.exec(s.slice(0, 300));
-  if (lead && hostish(lead[1])) s = s.slice(lead[0].length);
+  if (lead && hostish(lead[1])) { s = s.slice(lead[0].length); cut = true; }
   for (let n = 0; n < 5; n++) {
-    s = rtrim(s);
-    const c = closingChunk(s);
+    const c = closingChunk(rtrim(s));
     if (!c || !hostish(c.inner)) break;
     s = s.slice(0, c.start);
+    cut = true;
   }
-  return rtrim(s).trim();
+  // nothing claimed a host: the label shows exactly as written
+  return cut ? rtrim(s).trim() : said;
 }
 function refsOf(v) {
   const list = Array.isArray(v) ? v : [];
@@ -165,7 +169,8 @@ function refsOf(v) {
     const link = [o.url, o.href].map(str).map(linkOf).find(Boolean) || null;
     const said = [o.label, o.title, o.name, o.description, o.summary].map(str).find(Boolean) || "";
     const named = link ? labelOf(said) : said;
-    const typed = [str(o.kind || o.type), str(o.id || o.ref)].filter(Boolean).join(" ");
+    const kindId = [str(o.kind || o.type), str(o.id || o.ref)].filter(Boolean).join(" ");
+    const typed = link ? labelOf(kindId) : kindId;              // whatever text ends up beside the link
     const text = named || typed || (link && link.url) || JSON.stringify(o).slice(0, 200);
     return { text, url: link ? link.url : "", host: link ? link.host : "" };
   }).filter((r) => r.text && r.text !== "{}");
@@ -451,17 +456,20 @@ export function outcome(c, now = Date.now(), seenAt = now) {
     prevRead is when the text queue was last read before this one, and after a
     gap longer than READ_GAP_MS (the office was on another tab, the window was
     hidden) a revert and a fresh approval may have come and gone unseen, so
-    every row still 'approved' starts over at now. Waiting a little longer
-    misleads nobody; "never reported back" on a run seconds old does.
-    Returns seen. */
+    a board phase still 'approved' starts over at now. Only a board phase
+    can go back to pending (roybal-notify's retry when the board didn't
+    answer); an email or a text never does, so its first sighting stands.
+    Waiting a little longer misleads nobody; "never reported back" on a run
+    seconds old does. A clock that went backwards is a gap too, and a
+    sighting in the future is never kept. Returns seen. */
 export const READ_GAP_MS = 150 * 1000;           // three 45 s refreshes missed in a row
 export function sawApproved(seen, cards, now = Date.now(), prevRead = NaN) {
-  const gap = Number.isFinite(prevRead) && now - prevRead > READ_GAP_MS;
+  const gap = Number.isFinite(prevRead) && (now - prevRead > READ_GAP_MS || now < prevRead);
   const still = new Set();
   for (const c of cards || []) {
     if (c.lane !== "text" || c.status !== "approved") continue;
     still.add(c.key);
-    if (gap || !seen.has(c.key)) seen.set(c.key, now);
+    if (!seen.has(c.key) || seen.get(c.key) > now || (gap && c.kind === "phase")) seen.set(c.key, now);
   }
   for (const k of [...seen.keys()]) if (!still.has(k)) seen.delete(k);
   return seen;
