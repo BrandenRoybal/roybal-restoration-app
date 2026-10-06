@@ -40,6 +40,14 @@
  *   'inbound'). If SMS_FORWARD_TO is set, the reply is also forwarded as a
  *   text from the company number (never back to the sender, never past the
  *   monthly cap). Responds with empty TwiML so no auto-reply goes out.
+ *   A YES/NO from the owner's cell is an approval (handleApproval): it is
+ *   matched across BOTH approval queues, pending_actions and the spine's
+ *   proposals (spine step 5), and answered by text instead of forwarded.
+ *   A spine row is approved through rpc/op_proposal_approve as the owner's
+ *   profile (p_via 'sms'), or declined through rpc/op_proposal_decline:
+ *   the only two op_* doors this function opens. A spine approval by text
+ *   leaves the old lane's capture_events receipt (assist_action, captured_by
+ *   approve-by-text) for the Sunday report.
  *
  * Status (POST …/roybal-notify/status):   [F-034, High]
  *   Twilio's DELIVERY status callback — the answer to "did it arrive?".
@@ -118,10 +126,12 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import {
-  parseApproval, matchProposal, replyText, validateBoardEdit, buildNextSubtasks, revGuard,
+  parseApproval, replyText, validateBoardEdit, buildNextSubtasks, revGuard,
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, alaskaHour, expiresBeforeWindow, retryableStatus,
   decide, replyFor, parseDecideRequest, decideResponse, ownerGate, TryAgain,
-  type DecideIO, type DecideAnswer, type Outcome,
+  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState, APPROVED_STATUSES,
+  spineLateText, spineOutranks, spineReceipt, spineVerdict, spineReply,
+  type DecideIO, type DecideAnswer, type Outcome, type Decision, type EmailLane, type OutboxState,
 } from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
 import { mapTwilioStatus, blockedStatuses } from "./status.mjs";
@@ -491,7 +501,13 @@ async function twilioSignatureValid(req: Request, params: URLSearchParams, route
    stamp. Everything runs with the service role, and only after the channel
    proved the owner: the Twilio signature + the owner's number for a text,
    role_is('owner') under the caller's JWT for a tap. Approval state only
-   ever changes on those two verified paths. */
+   ever changes on those two verified paths.
+   Since spine step 5 the text channel also answers the spine's proposals
+   (the brief's reminder can be one). A spine row never goes through
+   decide(): op_proposal_approve / op_proposal_decline lock the row and
+   record the decision themselves, as the owner's profile, after the same
+   Twilio signature + owner's number proved the sender. The inbox answers
+   spine rows straight through PostgREST under the owner's own JWT. */
 
 type Admin = (path: string, opts?: RequestInit) => Promise<Response>;
 
@@ -652,6 +668,120 @@ function decideIO(act: Record<string, unknown>, admin: Admin): DecideIO {
   };
 }
 
+/* ---------- the spine's side of a YES/NO (spine step 5) ----------
+   One column list for the live read and the late lookup: what spineLabel
+   names a row by, what an answer reads, and when it was answered
+   (spineDecidedAt). */
+const SPINE_COLS = "id,sms_code,operation,input,edited_params,rationale,status,expires_at,approved_via,approved_at,result,error,created_at,updated_at";
+
+/* What became of this proposal's email: sent, dead (the worker gave up on
+   it, and why), or still waiting. Read only to word an "already approved"
+   answer, so a read that fails says it goes out once, never that it went
+   or that it won't. */
+async function spineOutbox(id: unknown, admin: Admin): Promise<OutboxState> {
+  try {
+    const r = await admin(`outbox?proposal_id=eq.${encodeURIComponent(String(id))}&select=status,error&limit=5`, { method: "GET" });
+    return outboxState(r.ok ? await r.json().catch(() => null) : null);
+  } catch (_) { return outboxState(null); }
+}
+
+/* The Sunday report's receipt for a spine ask approved by text (spineReceipt
+   in approve.ts): best-effort, so a write that fails is logged and the
+   reply goes out regardless. */
+async function writeSpineReceipt(row: Record<string, unknown>, admin: Admin): Promise<void> {
+  try {
+    const r = await admin("capture_events", {
+      method: "POST", headers: { Prefer: "return=minimal" },
+      body: JSON.stringify([spineReceipt(row, new Date().toISOString())]),
+    });
+    if (!r.ok) console.error("approve-by-text receipt not written", r.status, await r.text().catch(() => ""));
+  } catch (e) { console.error("approve-by-text receipt not written", e); }
+}
+
+/* Is the worker sending email right now? Read only after a text approved an
+   email, to say when it goes out. Anything but a literal answer is unknown,
+   and the text then promises no time. */
+async function spineEmailLane(admin: Admin): Promise<EmailLane> {
+  try {
+    const r = await admin("rpc/outbox_channel_ready", { method: "POST", body: JSON.stringify({ p_channel: "email" }) });
+    return emailLane(r.status, r.status === 200 ? await r.json().catch(() => null) : null);
+  } catch (_) { return "unknown"; }
+}
+
+/* A number no live row holds: was it a spine ask answered in the last 48h?
+   Then the text says what became of it (approved once, declined, expired,
+   didn't run) instead of "that number doesn't match". This is the answer to
+   a second YES, or a YES after the inbox approved it: it reads, and nothing
+   runs. A lookup that fails leaves the matcher's own answer, which is still
+   true: no live row holds the number. So does a text-lane ask created on
+   the same number after the spine row was answered (spineOutranks): the
+   YES is about that one, whatever became of it, and the spine row's fate
+   would be the wrong ask's. */
+async function lateSpineAnswer(code: string, nowIso: string, admin: Admin): Promise<string | null> {
+  try {
+    const since = new Date(Date.parse(nowIso) - 48 * 3_600_000).toISOString();
+    const r = await admin(
+      `proposals?sms_code=eq.${Number(code)}&updated_at=gte.${encodeURIComponent(since)}` +
+      `&select=${SPINE_COLS}&order=updated_at.desc&limit=1`, { method: "GET" });
+    if (!r.ok) return null;
+    const rows = await r.json().catch(() => null);
+    const row = Array.isArray(rows) ? (rows[0] as Record<string, unknown> | undefined) : undefined;
+    if (!row) return null;
+    const t = await admin(
+      `pending_actions?code=eq.${Number(code)}&created_at=gte.${encodeURIComponent(since)}` +
+      `&select=id,code,status,created_at&order=created_at.desc&limit=1`, { method: "GET" });
+    if (!t.ok) return null;
+    const texts = await t.json().catch(() => null);
+    if (!Array.isArray(texts) || !spineOutranks(row, texts[0] as Record<string, unknown> | undefined)) return null;
+    const outbox = opName(row.operation) === "email.send" && APPROVED_STATUSES.includes(String(row.status))
+      ? await spineOutbox(row.id, admin) : undefined;
+    return spineLateText(row, nowIso, outbox);
+  } catch (e) {
+    console.error("late spine lookup failed", e);
+    return null;
+  }
+}
+
+/* Approve or decline the spine row a YES/NO matched, and say what happened.
+   The service role has to name the principal it acts for (op_resolve_caller
+   refuses a nameless one), and a text proves only that the owner's cell sent
+   it, so the principal is the one owner profile, or nothing runs. Never
+   throws: a step that didn't answer is the not-recorded text, and the next
+   YES finds out what landed (the late lookup). */
+async function decideSpine(decision: Decision, row: Record<string, unknown>, word: string, admin: Admin): Promise<string> {
+  const a = { code: row.sms_code, label: spineLabel(row) };
+  const notRecorded = (why: string) => {
+    // a 42501 here is a principal or permission misconfiguration, not a blip
+    console.error(`approval by text: spine ${decision} #${row.sms_code} not recorded: ${why}`);
+    return spineReply({ status: "not-recorded", why }, a, word);
+  };
+  try {
+    const who = await admin("profiles?role=eq.owner&select=id&limit=2", { method: "GET" });
+    const owner = ownerPrincipal(who.status, who.ok ? await who.json().catch(() => null) : null);
+    if (!owner.ok) return notRecorded(owner.why);
+    const r = decision === "approve"
+      ? await admin("rpc/op_proposal_approve", {
+        method: "POST", body: JSON.stringify({ p_proposal_id: row.id, p_via: "sms", p_principal_id: owner.id }) })
+      : await admin("rpc/op_proposal_decline", {
+        method: "POST", body: JSON.stringify({ p_proposal_id: row.id, p_reason: null, p_principal_id: owner.id }) });
+    const v = spineVerdict(decision, r.status, await r.json().catch(() => null));
+    if (v.status === "not-recorded") return notRecorded(v.why);
+    console.log(`approval by text: spine ${decision} #${row.sms_code} (${row.operation}) -> ${v.status}`);
+    // this text's own approval leaves the Sunday report's receipt, written
+    // beside the lane read and never in the reply's way
+    const receipt = v.status === "approved" && v.row.status !== "failed" ? writeSpineReceipt(v.row, admin) : null;
+    const ctx: { lane?: EmailLane; outbox?: OutboxState; nowIso: string } = { nowIso: new Date().toISOString() };
+    if ("row" in v && opName(v.row.operation) === "email.send") {
+      if (v.status === "approved" && v.row.status !== "failed") ctx.lane = await spineEmailLane(admin);
+      if (v.status === "answered" && APPROVED_STATUSES.includes(String(v.row.status))) ctx.outbox = await spineOutbox(v.row.id, admin);
+    }
+    await receipt;
+    return spineReply(v, a, word, ctx);
+  } catch (e) {
+    return notRecorded(String((e as Error)?.message ?? e));
+  }
+}
+
 /* The text channel. Returns true when the text was an approval keyword
    (handled + replied), false otherwise. */
 async function handleApproval(from: string, text: string, admin: Admin): Promise<boolean> {
@@ -675,13 +805,39 @@ async function handleApproval(from: string, text: string, admin: Admin): Promise
     } catch (e) { console.error("approval reply failed", e); }
   };
 
+  // Both queues at once: a bare YES means the one thing waiting in either,
+  // and a number must never quietly pick one queue over the other. A read
+  // that failed (or answered no list) is not "nothing waiting": the owner is
+  // told to text it again, and nothing runs. Nor may it throw, or the "YES
+  // 12" would carry on to the SMS assistant as a question.
   const nowIso = new Date().toISOString();
-  const live = await admin(
-    `pending_actions?status=eq.pending&expires_at=gt.${encodeURIComponent(nowIso)}&order=created_at.desc&limit=20`,
-    { method: "GET" });
-  const rows = live.ok ? ((await live.json()) as Record<string, unknown>[]) : [];
-  const m = matchProposal(rows, p.code);
-  if (!m.hit) { await say(replyText(m.reason as "none-open")!); return true; }
+  const listOf = async (path: string) => {
+    const r = await admin(path, { method: "GET" });
+    if (!r.ok) throw new Error(`${path.split("?")[0]} read failed (${r.status})`);
+    const rows = await r.json();
+    if (!Array.isArray(rows)) throw new Error(`${path.split("?")[0]} read answered no list`);
+    return rows as Record<string, unknown>[];
+  };
+  const queues = await Promise.all([
+    listOf(`pending_actions?status=eq.pending&expires_at=gt.${encodeURIComponent(nowIso)}&order=created_at.desc&limit=20`),
+    listOf(`proposals?status=eq.proposed&expires_at=gt.${encodeURIComponent(nowIso)}&sms_code=not.is.null` +
+      `&select=${SPINE_COLS}&order=created_at.desc&limit=20`),
+  ]).catch((e) => { console.error("approval queues not read", e); return null; });
+  if (!queues) { await say(replyText("not-recorded", { code: p.code }, p.no ? "NO" : "YES")!); return true; }
+  const [rows, spine] = queues;
+  const m = matchAcross(rows, spine, p.code);
+  if (!m.hit) {
+    // no live row holds the number; a spine ask answered lately says what became of it
+    const late = p.code != null && (m.reason === "none-open" || m.reason === "no-such-code")
+      ? await lateSpineAnswer(p.code, nowIso, admin) : null;
+    await say(late ?? replyText(m.reason as "none-open", { code: p.code == null ? null : Number(p.code) })!);
+    return true;
+  }
+  // a spine row is the spine's to decide: op_proposal_approve / _decline, as the owner
+  if (m.lane === "spine") {
+    await say(await decideSpine(p.no ? "decline" : "approve", m.hit as Record<string, unknown>, p.no ? "NO" : "YES", admin));
+    return true;
+  }
   const act = m.hit as Record<string, unknown>;
 
   // NO declines; YES clears the quiet-hours preflight, approves first (guarded
@@ -758,6 +914,25 @@ async function decidePending(body: Record<string, unknown>, jwt: string): Promis
    answer back with the "Text YES n" lines. Every failure becomes a short text
    rather than silence: the owner sent a message and is looking at the phone. */
 type SmsProposal = { type: string; label: string; params: Record<string, unknown> };
+
+/* Every YES number a live ask holds, in either queue: rpc/sms_codes_in_use
+   (migration 0019) returns the pending_actions codes AND the live proposals'
+   sms_codes, so a minted code can't land on a spine proposal's number. When
+   that RPC doesn't answer a list (before 0019, or an outage), today's read
+   of the pending codes, the rule this lane always minted by. */
+async function codesInUse(admin: Admin): Promise<unknown[]> {
+  try {
+    const r = await admin("rpc/sms_codes_in_use", { method: "POST", body: "{}" });
+    if (r.ok) {
+      const codes = await r.json().catch(() => null);
+      if (Array.isArray(codes)) return codes;
+    }
+    console.log(`sms_codes_in_use didn't answer a list (${r.status}); minting clear of pending codes only`);
+  } catch (e) { console.error("sms_codes_in_use failed; minting clear of pending codes only", e); }
+  const live = await admin("pending_actions?status=eq.pending&select=code&limit=200", { method: "GET" });
+  return live.ok ? ((await live.json()) as Array<{ code: number }>).map((a) => a.code) : [];
+}
+
 async function runSmsAssist(
   from: string, text: string,
   admin: (path: string, opts?: RequestInit) => Promise<Response>,
@@ -811,14 +986,15 @@ async function runSmsAssist(
   }
 
   // proposals → pending_actions rows the owner approves with "YES n". Codes
-  // are unique across every live proposal (the brief and the QB Time sweep
-  // share the queue); only kinds handleApproval can execute are minted.
+  // are unique across every live ask in BOTH queues (the brief and the QB
+  // Time sweep share pending_actions, and a spine proposal's sms_code is
+  // answered by the same YES); only kinds handleApproval can execute are
+  // minted.
   let rows: Array<{ code: number; label: string }> = [];
   try {
     const executable = proposals.filter((p) => p && TEXT_EXECUTABLE_KINDS.has(String(p.type))).length;
     if (executable) {
-      const live = await admin("pending_actions?status=eq.pending&select=code&limit=200", { method: "GET" });
-      const used = live.ok ? ((await live.json()) as Array<{ code: number }>).map((a) => a.code) : [];
+      const used = await codesInUse(admin);
       const minted = pendingRowsFor(proposals, mintCodes(used, executable));
       const ins = await admin("pending_actions", {
         method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify(minted),

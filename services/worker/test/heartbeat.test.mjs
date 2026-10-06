@@ -122,6 +122,9 @@ test("deadLetterText reads as a sentence in Alaska time", () => {
   const t = deadLetterText({ count: 1, since: "2026-10-05T18:00:00Z" });
   assert.match(t, /^Roybal worker: 1 message or task gave up after retries since Oct 5, 10:00 AM Alaska time\./);
   assert.match(deadLetterText({ count: 3, since: "2026-10-05T18:00:00Z" }), /3 messages or tasks/);
+  // Points at the screen that exists: the Approvals tab's Recently decided card.
+  assert.match(t, /admin app's Approvals tab, under Recently decided, as "Couldn't send" with the reason\.$/);
+  assert.doesNotMatch(t, /outbox|status dead/);
   assert.ok(t.length < 320);
 });
 

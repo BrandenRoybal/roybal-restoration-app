@@ -18,7 +18,10 @@
  *   invoiceAudit  — compares the current invoice items against the digest
  *                   and returns documented-but-unbilled suggestions.
  *   adjusterEmail — claim-submission email (subject + body) from the digest
- *                   + the saved narrative.
+ *                   + the saved narrative. `linked: true` = the caller adds
+ *                   the packet/photo links under the text (the field
+ *                   narrative page); without it the draft says the packet
+ *                   will be shared.
  *   rebuildDraft  — reconstruction plan (scope per room, trade sequence,
  *                   owner selections, open questions) drafted from a
  *                   restoration job's fact pack when it converts to a
@@ -1172,6 +1175,19 @@ async function adjusterEmail(body: Record<string, unknown>) {
   const facts = body.facts;
   if (!facts || typeof facts !== "object") throw new Error("Missing `facts` digest.");
   const narrative = typeof body.narrative === "string" ? body.narrative : "";
+  // Only a caller that appends the packet + photo links under the draft
+  // (the field narrative page, which appends them whenever they publish) sends linked:true.
+  // The admin assistant's chip copies the text bare, so there the draft
+  // must not point at links that aren't there. Nothing is attached either way.
+  const packet = body.linked === true
+    ? `say what the documentation packet linked below holds (narrative, moisture maps, drying logs, photo report, ` +
+      `certificate of drying, invoice), and offer to answer questions or walk the scope on site. Nothing is attached: the ` +
+      `packet and photo links are added under your text, so never call the documents attached, and never write a link or ` +
+      `URL yourself.`
+    : `say the full documentation packet (narrative, moisture maps, drying logs, photo report, certificate of drying, ` +
+      `invoice) is available and will be shared, and offer to answer questions or walk the scope on site. Nothing is ` +
+      `attached and no link comes with your text, so never call the documents attached, never say they are linked or ` +
+      `below, and never write a link or URL yourself.`;
   const { input, usage } = await forcedTool({
     model: DOC_MODEL,
     system:
@@ -1180,9 +1196,7 @@ async function adjusterEmail(body: Record<string, unknown>) {
       "Roybal Construction, LLC, 907-371-9868. Call `email` with the draft.",
     content:
       `Draft the email submitting our documentation packet for this claim. Greet the adjuster by name if known, reference the ` +
-      `claim number and property address, summarize the loss and completed mitigation in 2-4 sentences, list the attached ` +
-      `documentation packet (narrative, moisture maps, drying logs, photo report, certificate of drying, invoice), and offer ` +
-      `to answer questions or walk the scope on site.\n\n` +
+      `claim number and property address, summarize the loss and completed mitigation in 2-4 sentences, ${packet}\n\n` +
       (narrative ? `SAVED NARRATIVE (source of truth for the summary):\n${narrative.slice(0, 6000)}\n\n` : "") +
       `DOCUMENTED FACTS:\n\`\`\`json\n${JSON.stringify(facts, null, 2)}\n\`\`\``,
     toolName: "email",

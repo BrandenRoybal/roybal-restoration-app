@@ -77,6 +77,18 @@ few milliseconds inside one request.
   the worker holds the OAuth client (`GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET`)
   and refreshes the stored token itself, writing it back so the proxy and the
   worker share one connection. Cc is supported; a reply carries In-Reply-To.
+  The sent copy lands in `email_messages` under the outbox row's job
+  (`job_id`), as gmail-proxy files its sends, so it shows in the job's
+  email history.
+- **A late email is not sent.** An email row older than
+  `EMAIL_MAX_AGE_HOURS` (default 48, from when it was queued, i.e. approved)
+  when it is about to go out is marked `dead` instead, with the reason on
+  the row ("this email waited 3 days in line, past the 48-hour limit …, so
+  it was not sent"), and the dead-letter text counts it. That is what keeps
+  an overdue-invoice reminder approved while the email lane was off from
+  reaching the customer days later, maybe after they paid. The adopt check
+  runs first, so an old row an earlier attempt did send is still recorded
+  as sent, never refused.
 - **`qbo` and `portal` outbox rows are not touched** (no adapter yet); they
   wait as `pending` until a later phase.
 - **Queue kinds**: `proposal.execute` only (runs `op_execute` as the approver;
@@ -106,7 +118,9 @@ trying. A permanent refusal (bad number, bad address) is dead at once.
 - **Something gave up** (an outbox row or job went `dead`): the worker's
   heartbeat tick counts dead rows since the last watermark (a day before boot
   until the first text, so a restart hides nothing) and texts the owner once
-  per 24 h. Needs `OWNER_CELL` on the Fly app.
+  per 24 h, saying where to look: an approved email that gave up shows in
+  the admin app's Approvals tab, under Recently decided, as "Couldn't send"
+  with the reason. Needs `OWNER_CELL` on the Fly app.
 
 Both alarm states live in `app_settings` (`worker.liveness_alert`,
 `worker.alert_texted`, `worker.deadletter_alert`), so a restart never
@@ -138,8 +152,9 @@ Order matters: the database first, then the edge function, then the app.
      OWNER_CELL="+1907XXXXXXX"
    fly deploy --config services/worker/fly.toml --dockerfile services/worker/Dockerfile --ha=false .
    ```
-   Email (optional, see below) is one more line, then deploy again:
-   `fly secrets set -a roybal-worker GMAIL_CLIENT_ID="PASTE_HERE" GMAIL_CLIENT_SECRET="PASTE_HERE"`.
+   Email (optional, see the Gmail pair below) is one more command, from the
+   same repo root on main: `sh services/worker/set-gmail-secret.sh`. It
+   deploys again as its last step.
    A value left as a placeholder (`< >`, quotes, spaces, `PASTE_`) stops the
    worker at boot with the variable's name in `fly logs`; fix it with
    `fly secrets set` (or `fly secrets unset` for an optional one) and it
@@ -151,20 +166,46 @@ Order matters: the database first, then the edge function, then the app.
      JWT (begins `eyJ`): either would boot and then fail every call, so the
      worker refuses both at boot.
    - **The Gmail pair** is the OAuth client the office Gmail connection was
-     made with: Google Cloud Console → Google Auth Platform (or APIs &
-     Services → Credentials) → that OAuth client. The Client ID is on the
-     page. The client secret is shown in full only when it is created (the
-     console masks it to its last four characters afterwards), and Supabase
-     shows its own copy as a digest only, so it cannot be read back from the
+     made with. Set it with `sh services/worker/set-gmail-secret.sh` from
+     the repo root of an up-to-date main. It refuses to run anywhere else
+     (not the repo root, not on main, or a worker without the 48-hour email
+     limit, `staleEmailReason`) and says to run
+     `cd ~/roybal-restoration-app && git checkout main && git pull` first,
+     because its last step deploys this checkout. It reads the Client ID
+     from `apps/field/js/config.js` (`GMAIL_CLIENT_ID`, public, the same
+     client), asks for the client secret with echo off, refuses an empty
+     value or one with spaces, quotes, `< >`, `…` or `PASTE_` (anything the
+     worker would refuse at boot), and asks again before using one that
+     does not start with `GOCSPX-`. Then it stages the pair with
+     `fly secrets import --stage -a roybal-worker`, fed on stdin by a shell
+     builtin so the secret is never on a command line (nor printed), and
+     then runs the deploy above itself (with `-a roybal-worker`). Staged
+     means set without a restart: the image already on Fly may be older
+     than the 48-hour limit and the job filing of sent copies, and must not
+     come up with email on.
+     The deploy brings the new code and the pair live together; if it
+     fails, the pair stays staged and goes live with the next deploy (run
+     the line again). To see it took, `fly logs -a roybal-worker` shows a new
+     `worker.start` line with `"email":true` and `"channels":["sms","email"]`
+     and no `email.disabled` after it; `/healthz` and the heartbeat show the
+     same channels, which is how the apps learn email sending is on. A
+     wrong secret still boots and shows up later as `outbox.failed` with
+     "Gmail token refresh failed"; run the script again with the right one.
+     Where the secret comes from: Google Cloud Console → Google Auth
+     Platform (or APIs & Services → Credentials) → that OAuth client. The
+     client secret is shown in full only when it is created (the console
+     masks it to its last four characters afterwards), and Supabase shows
+     its own copy as a digest only, so it cannot be read back from the
      gmail-proxy secrets either. If you kept the `client_secret_….json` you
-     downloaded when the client was made, use its `client_secret`. Otherwise,
-     under **Client secrets**, click **Add secret**: a client holds two, both
-     stay valid, and the new one is shown once — copy it into
-     `GMAIL_CLIENT_SECRET`. Do NOT reset, disable or delete the existing
-     secret: gmail-proxy refreshes the office connection with it, and losing
-     it breaks the inbox pull within the hour. Optional: without both, the
-     email lane stays off (logged at boot) and email rows wait as `pending`;
-     texts still flow.
+     downloaded when the client was made, use its `client_secret`.
+     Otherwise, under **Client secrets**, click **Add secret**: a client
+     holds two, both stay valid, and the new one is shown once — paste it
+     into the script. Do NOT reset, disable or delete the existing secret:
+     gmail-proxy refreshes the office connection with it, and losing it
+     breaks the inbox pull within the hour. Optional: without both, the
+     email lane stays off (logged at boot) and email rows wait as
+     `pending`; texts still flow. When the lane comes on, rows that waited
+     longer than `EMAIL_MAX_AGE_HOURS` go dead instead of out (above).
    - `OWNER_CELL` is optional too (no dead-letter text without it; the
      dead-worker text is the database's and needs nothing here).
    - `--ha=false` = ONE machine, on purpose.
@@ -203,20 +244,29 @@ which re-applies `fly.toml`.
   dead rows carry the provider's last word in `error`. To retry a dead row
   after fixing the cause: `update public.outbox set status = 'failed', attempts = 0, next_attempt_at = now() where id = …`
   (the adopt check runs on every attempt, so a text the dead row's last try
-  did deliver is adopted, not resent).
+  did deliver is adopted, not resent). An email row older than
+  `EMAIL_MAX_AGE_HOURS` goes straight back to dead, on purpose; if it
+  should still go, send a fresh one from the app instead.
 - **Rotate the alert secret** in place, so there is never a moment without one:
   `select vault.update_secret((select id from vault.secrets where name = 'worker_alert_secret'), replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''))`;
   the edge function reads it live.
 - **Env knobs** (fly.toml `[env]` or secrets, restart to apply):
   `WORKER_POLL_MS` 5000, `WORKER_HEARTBEAT_MS` 30000, `QUEUE_LEASE_S` 300,
   `OUTBOX_LEASE_S` 120, `OUTBOX_BATCH` 10, `OUTBOX_CHANNELS` `sms,email`,
-  `QUEUE_KINDS` `proposal.execute`, `SHUTDOWN_GRACE_MS` 25000.
+  `QUEUE_KINDS` `proposal.execute`, `SHUTDOWN_GRACE_MS` 25000,
+  `EMAIL_MAX_AGE_HOURS` 48 (1 to 720; a value that is not a number, or a
+  blank one, keeps 48, so a typo can neither switch the limit off nor stop
+  the worker booting).
 
 ## Tests
 
 `npm test` in this directory (no install; zero dependencies): the RFC 822
 builder, both adapters against a stubbed fetch (token refresh, adopt lookup,
-error verdicts), the outbox lane's order of operations (adopt → send →
+error verdicts, the email age limit and the job the sent copy files under),
+`set-gmail-secret.sh` against a stand-in `fly` (the exact pair it stages on
+stdin and never on a command line, the deploy after it, the checkouts it
+refuses before fly is called and the values before anything is staged, the
+secret never printed), the outbox lane's order of operations (adopt → send →
 report with retries; a failed report leaves the row to expire; the active
 set is kept exact on every path), the queue lane, the heartbeat (which
 leases it names, and that the final one names none) and dead-letter text

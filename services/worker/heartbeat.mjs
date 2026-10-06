@@ -69,8 +69,11 @@ export function deadLetterText({ count, since }) {
     timeZone: "America/Anchorage", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   });
   const what = count === 1 ? "1 message or task" : `${count} messages or tasks`;
+  // There is no outbox screen: an approved email that gave up shows on its
+  // card in the Approvals tab (apps/field/js/approvals.js, outbox status dead).
   return `Roybal worker: ${what} gave up after retries since ${fmt(since)} Alaska time. ` +
-    `Open the admin app's outbox and look for status dead.`;
+    `An approved email that gave up shows in the admin app's Approvals tab, under Recently decided, ` +
+    `as "Couldn't send" with the reason.`;
 }
 
 export async function deadLetterCheck(ctx, state) {

@@ -3,11 +3,12 @@
    Optional: GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET (without both, the email
    lane stays off and email rows wait as pending), OWNER_CELL (without it, the
    dead-letter text is off; the dead-WORKER text is the database's job, not
-   this process's). Numbers are clamped so a typo cannot make the worker spin
-   or go silent. */
+   this process's), EMAIL_MAX_AGE_HOURS (default 48). Numbers are clamped so
+   a typo cannot make the worker spin or go silent. */
 import os from "node:os";
 
 export const OUTBOX_AGENT_ID = "0a7ac824-5042-4bb5-ab0d-8569cea209b1"; // agents seed, migration 0004
+export const EMAIL_MAX_AGE_HOURS_DEFAULT = 48;
 
 export function loadConfig(env = process.env) {
   const url = String(env.SUPABASE_URL ?? "").trim().replace(/\/+$/, "");
@@ -53,8 +54,12 @@ export function loadConfig(env = process.env) {
     throw new Error("worker: OWNER_CELL is not a US phone number. Use the 10-digit cell, e.g. OWNER_CELL=\"+1907XXXXXXX\".");
   }
 
+  // A blank value counts as unset: Number("") is 0, which would clamp a
+  // knob to its floor (a 250 ms poll, a one-hour email limit) instead of
+  // leaving the default in place.
   const num = (name, dflt, lo, hi) => {
-    const n = Number(env[name] ?? dflt);
+    const raw = String(env[name] ?? "").trim();
+    const n = raw === "" ? dflt : Number(raw);
     return Number.isFinite(n) ? Math.min(Math.max(Math.round(n), lo), hi) : dflt;
   };
   const list = (name, dflt) =>
@@ -88,6 +93,12 @@ export function loadConfig(env = process.env) {
     emailEnabled,
     gmailClientId,
     gmailClientSecret,
+    // An email row older than this when it would be sent is dead, not late:
+    // a reminder approved while the email lane was off must not reach the
+    // customer days later. Clamped like the other knobs; a non-number keeps
+    // the default, so a typo can neither switch the limit off nor stop the
+    // worker booting (which would take the text lane down with it).
+    emailMaxAgeHours: num("EMAIL_MAX_AGE_HOURS", EMAIL_MAX_AGE_HOURS_DEFAULT, 1, 720),
     ownerCell,
     notifyUrl: String(env.NOTIFY_URL ?? "").trim() || `${url}/functions/v1/roybal-notify`,
     outboxAgentId: String(env.OUTBOX_AGENT_ID ?? "").trim() || OUTBOX_AGENT_ID,

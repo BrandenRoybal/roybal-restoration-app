@@ -283,11 +283,15 @@ export function auditReconEstimate(project, inv, pricingMode) {
 }
 
 /* ---------- adjuster email ---------- */
-/** Draft { subject, body } for the claim-submission email. */
-export function draftAdjusterEmail(project) {
+/** Draft { subject, body } for the claim-submission email. `linked: true`
+    from a caller that appends the packet/photo links under the text (the
+    narrative page): the draft then points at the packet linked below;
+    without it, it says the packet will be shared. */
+export function draftAdjusterEmail(project, { linked = false } = {}) {
   return callOffice(project, "adjusterEmail", {
     facts: narrativeFacts(project),
     narrative: project.narrative || "",
+    ...(linked === true ? { linked: true } : {}),
   }).then((b) => b.draft);
 }
 

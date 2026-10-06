@@ -1,6 +1,9 @@
 /* Approve-by-text rules — unit tests (no Deno, no network), plus the pure
-   half of the Approvals inbox's decidePending (request check, answers).
-   The order decide() runs in is tested in decide.test.mjs.
+   half of the Approvals inbox's decidePending (request check, answers),
+   and the spine lane's rules (step 5: one YES across both queues, the
+   spine row's label, and the text for every op_proposal_* answer).
+   The order decide() runs in, and a YES driven through index.ts against a
+   stubbed PostgREST, are tested in decide.test.mjs.
    Run: node --experimental-strip-types approve.test.mjs */
 import assert from "node:assert/strict";
 import {
@@ -9,6 +12,8 @@ import {
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, replyFor,
   alaskaHour, windowOpensAt, expiresBeforeWindow, retryableStatus,
   parseDecideRequest, decideResponse, ownerGate,
+  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState,
+  spineLateText, spineDecidedAt, spineOutranks, spineReceipt, spineVerdict, spineReply,
 } from "./approve.ts";
 
 let pass = 0;
@@ -417,6 +422,229 @@ test("role_is: only a 200 literal true is the owner; a refused token is 401, an 
     { code: 503, body: { ok: false, error: "role_check_failed", message: "Couldn't check your login just now. Try again." } });
   assert.deepEqual(decideResponse({ status: "not_owner" }, null, w),
     { code: 403, body: { ok: false, error: "not_owner", message: "Approvals belong to the owner's login." } });
+});
+
+/* ---------- the spine lane (step 5): one YES across both queues ---------- */
+
+const txt = (code, o = {}) => ({ code, status: "pending", label: `text-lane ${code}`, ...o });
+const sp = (sms_code, o = {}) => ({ id: `sp-${sms_code}`, sms_code, status: "proposed", operation: "email.send@1",
+  rationale: `spine ${sms_code}`, input: { to: "a@b.co", subject: "s", body: "b" }, ...o });
+
+test("a number names the one live ask that holds it, in whichever queue", () => {
+  const text = [txt(12), txt(13)];
+  const spine = [sp(4), sp(5)];
+  const t = matchAcross(text, spine, "12");
+  assert.deepEqual([t.lane, t.reason], ["text", "ok"]);
+  assert.equal(t.hit, text[0], "the text-lane row goes on to decide() exactly as read");
+  const s = matchAcross(text, spine, "04");
+  assert.deepEqual([s.lane, s.reason], ["spine", "ok"]);
+  assert.equal(s.hit, spine[0]);
+  assert.deepEqual(matchAcross(text, spine, "99"), { lane: null, hit: null, reason: "no-such-code" });
+  // only live rows count: a settled text row, an answered spine row, a spine row with no number
+  assert.equal(matchAcross([txt(12, { status: "executed" })], [sp(4, { status: "executed" })], "4").reason, "none-open");
+  assert.equal(matchAcross([txt(12)], [sp(4, { status: "executed" })], "4").reason, "no-such-code");
+  assert.equal(matchAcross([], [sp(null)], null).reason, "none-open");
+  assert.equal(matchAcross([], [], "12").reason, "none-open", "nothing live at all reads as today's 'nothing waiting'");
+});
+
+test("a number held in both queues is a code clash, and two text rows on one number stay ambiguous", () => {
+  const m = matchAcross([txt(12)], [sp(12)], "12");
+  assert.deepEqual(m, { lane: null, hit: null, reason: "code-clash" });
+  assert.equal(matchAcross([txt(12), txt(12, { label: "twin" })], [sp(12)], "12").reason, "code-clash");
+  assert.equal(matchAcross([txt(12), txt(12, { label: "twin" })], [], "12").reason, "ambiguous");
+  assert.equal(matchAcross([], [sp(7), sp(7, { id: "dup" })], "7").reason, "ambiguous");
+  assert.equal(replyText("code-clash", { code: 12 }),
+    "Two asks share number 12 — answer this one from the Approvals tab in the office app.");
+});
+
+test("a bare YES acts only when exactly one ask is live across both queues", () => {
+  assert.equal(matchAcross([txt(12)], [sp(4)], null).reason, "ambiguous");
+  const one = matchAcross([txt(12, { status: "declined" })], [sp(4)], null);
+  assert.deepEqual([one.lane, one.hit.sms_code, one.reason], ["spine", 4, "ok"]);
+  assert.equal(matchAcross([txt(12)], [], null).lane, "text");
+  // the text lane alone answers exactly as matchProposal always has
+  for (const [rows, code] of [[[txt(12), txt(13)], "13"], [[txt(12)], null], [[txt(12), txt(13)], null], [[], "5"], [[txt(12)], "99"]]) {
+    const a = matchAcross(rows, [], code), b = matchProposal(rows, code);
+    assert.deepEqual([a.hit, a.reason], [b.hit, b.reason], JSON.stringify([rows.map((r) => r.code), code]));
+  }
+});
+
+test("a spine row is called by its rationale's first line, else by what it would do", () => {
+  assert.equal(spineLabel({ rationale: "email the INV-4 reminder to Hebard (5 days past due, $1,200.00 open)" }),
+    "email the INV-4 reminder to Hebard (5 days past due, $1,200.00 open)");
+  assert.equal(spineLabel({ rationale: "  Claim documentation email to the adjuster.  \nThe packet is linked." }),
+    "Claim documentation email to the adjuster", "first line, trimmed, its period dropped (every reply adds one)");
+  assert.equal(spineLabel({ rationale: "x".repeat(300) }).length, 160);
+  assert.equal(Array.from(spineLabel({ rationale: "🔥".repeat(200) })).length, 160, "clipped by code point");
+  const op = (operation, input, o = {}) => spineLabel({ operation, input, rationale: "", ...o });
+  assert.equal(op("email.send@1", { to: "adj@carrier.com" }), "email adj@carrier.com");
+  assert.equal(op("email.send@1", { to: "old@x.co" }, { edited_params: { to: "new@x.co" } }), "email new@x.co", "an edit is what runs");
+  assert.equal(op("sms.send@1", { to: "+19075557777" }), "text +19075557777");
+  assert.equal(op("job.set_stage@1", { stage: "scheduled" }, { rationale: null }), "move the job to scheduled");
+  assert.equal(op("invoice.add_line@2", {}), "invoice.add_line");
+  assert.equal(op("email.send@1", {}), "email.send", "no address to name: the operation");
+  assert.equal(spineLabel({ rationale: " . " , operation: "sms.send@1", input: {} }), "sms.send");
+  assert.equal(opName("email.send@1"), "email.send");
+  assert.equal(opName(undefined), "");
+});
+
+test("the owner's principal is exactly one owner profile", () => {
+  const OWNER = "5b0c1d2e-3f4a-4b5c-8d6e-7f8a9b0c1d2e";
+  assert.deepEqual(ownerPrincipal(200, [{ id: OWNER }]), { ok: true, id: OWNER });
+  assert.deepEqual(ownerPrincipal(200, []), { ok: false, why: "no owner profile" });
+  assert.deepEqual(ownerPrincipal(200, [{ id: OWNER }, { id: OWNER }]), { ok: false, why: "2 owner profiles, not one" });
+  assert.equal(ownerPrincipal(200, [{ id: "owner" }]).ok, false, "only a uuid can name a principal");
+  assert.equal(ownerPrincipal(200, [{}]).ok, false);
+  assert.equal(ownerPrincipal(200, { id: OWNER }).ok, false, "a list, or nothing");
+  assert.equal(ownerPrincipal(200, null).ok, false);
+  for (const s of [0, 401, 404, 500, 503]) assert.equal(ownerPrincipal(s, [{ id: OWNER }]).ok, false, String(s));
+});
+
+test("the email lane is ready only on a 200 literal true, off only on a literal false", () => {
+  assert.equal(emailLane(200, true), "ready");
+  assert.equal(emailLane(200, false), "off");
+  for (const b of ["true", 1, null, [true], {}]) assert.equal(emailLane(200, b), "unknown", JSON.stringify(b));
+  for (const s of [0, 404, 500, 503]) assert.equal(emailLane(s, true), "unknown", String(s));
+});
+
+test("an email's outbox row reads three ways: sent, dead (and why), or still waiting", () => {
+  assert.deepEqual(outboxState([{ status: "pending" }, { status: "sent" }]), { state: "sent" });
+  assert.deepEqual(outboxState([{ status: "delivered" }]), { state: "sent" });
+  assert.deepEqual(outboxState([{ status: "dead", error: "Gmail refused the address: 550 no such user" }]),
+    { state: "dead", error: "Gmail refused the address: 550 no such user" });
+  assert.deepEqual(outboxState([{ status: "dead", error: "  this email waited 50 hours in line, so it was not sent.  " }]),
+    { state: "dead", error: "this email waited 50 hours in line, so it was not sent" }, "trimmed, its closing period dropped");
+  assert.equal(outboxState([{ status: "dead", error: "x".repeat(400) }]).error.length, 160);
+  assert.equal(Array.from(outboxState([{ status: "dead", error: "🔥".repeat(200) }]).error).length, 160, "clipped by code point");
+  for (const error of [null, undefined, "", "   ", "."]) {
+    assert.deepEqual(outboxState([{ status: "dead", error }]), { state: "dead", error: "it gave up" }, JSON.stringify(error));
+  }
+  // a sent row outranks a dead twin (one key per proposal, but the read allows five)
+  assert.deepEqual(outboxState([{ status: "dead", error: "e" }, { status: "sent" }]), { state: "sent" });
+  for (const r of [[], [{ status: "pending" }], [{ status: "sending" }], [{ status: "failed", error: "Gmail API 503" }],
+    null, { status: "sent" }, { status: "dead" }, "dead"]) {
+    assert.deepEqual(outboxState(r), { state: "waiting" }, JSON.stringify(r));
+  }
+});
+
+test("a spine row someone already answered gets the sentence its status earns", () => {
+  const now = "2026-10-06T18:00:00.000Z";
+  const row = (o) => sp(4, { rationale: "email the INV-4 reminder to Hebard", ...o });
+  const SENT = { state: "sent" }, WAITS = { state: "waiting" };
+  const DEAD = { state: "dead", error: "Gmail refused the address: 550 no such user" };
+  for (const status of ["approved", "executing", "executed"]) {
+    assert.equal(spineLateText(row({ status }), now), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
+    assert.equal(spineLateText(row({ status }), now, WAITS), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
+    assert.equal(spineLateText(row({ status }), now, SENT), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
+    assert.equal(spineLateText(row({ status }), now, DEAD),
+      "That one was approved, but the email couldn't be sent: Gmail refused the address: 550 no such user. Nothing went out.");
+  }
+  assert.equal(spineLateText(row({ status: "executed" }), now, { state: "dead", error: "it gave up" }),
+    "That one was approved, but the email couldn't be sent: it gave up. Nothing went out.");
+  // only an email has an outbox row to have gone out by, or to have died
+  assert.match(spineLateText(row({ status: "executed", operation: "job.set_stage@1" }), now, SENT), /It goes out once\.$/);
+  assert.match(spineLateText(row({ status: "executed", operation: "job.set_stage@1" }), now, DEAD), /^That one was already approved — .*It goes out once\.$/);
+  // the outbox says nothing about a row that was never approved
+  assert.equal(spineLateText(row({ status: "declined" }), now, DEAD), "That one was declined — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineLateText(row({ status: "declined" }), now), "That one was declined — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineLateText(row({ status: "expired" }), now), "That one expired — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineLateText(row({ status: "proposed", expires_at: "2026-10-06T17:59:59+00:00" }), now),
+    "That one expired — email the INV-4 reminder to Hebard. Nothing was sent.", "a stale row stays 'proposed' until a sweep");
+  assert.equal(spineLateText(row({ status: "proposed", expires_at: "2026-10-06T18:00:01Z" }), now), null, "still live: not late");
+  assert.equal(spineLateText(row({ status: "failed", error: "outbox insert refused" }), now),
+    "That one was approved, but it didn't run: outbox insert refused");
+  assert.equal(spineLateText(row({ status: "superseded" }), now), null);
+});
+
+test("op_proposal_approve / _decline answers read as one outcome; the SQLSTATE decides, not the HTTP status", () => {
+  const row = sp(4, { status: "executed", approved_via: "sms" });
+  assert.deepEqual(spineVerdict("approve", 200, row), { status: "approved", row });
+  assert.deepEqual(spineVerdict("approve", 200, [row]), { status: "approved", row }, "a one-element list is the row");
+  const tapped = { ...row, approved_via: "inbox" };
+  assert.deepEqual(spineVerdict("approve", 200, tapped), { status: "answered", row: tapped });
+  assert.deepEqual(spineVerdict("approve", 200, { ...row, approved_via: null }).status, "answered");
+  assert.deepEqual(spineVerdict("decline", 200, { ...row, status: "declined" }).status, "cancelled");
+  assert.deepEqual(spineVerdict("decline", 200, row), { status: "already-answered" });
+  const pg = (code, message) => ({ code, message, details: null, hint: null });
+  assert.deepEqual(spineVerdict("approve", 500, pg("55000", "op spine: proposal x expired at 2026-10-05 18:00:00+00")), { status: "expired" });
+  assert.deepEqual(spineVerdict("approve", 500, pg("55000", "op spine: proposal x is expired")), { status: "expired" });
+  assert.deepEqual(spineVerdict("approve", 500, pg("55000", "op spine: proposal x is declined")), { status: "declined" });
+  assert.deepEqual(spineVerdict("approve", 500, pg("55000", "op spine: proposal x is superseded")), { status: "closed" });
+  assert.deepEqual(spineVerdict("decline", 500, pg("55000", "op spine: proposal x is executed; only a proposed row can be declined")),
+    { status: "already-answered" });
+  for (const [s, b] of [[403, pg("42501", "op spine: no")], [500, pg("P0002", "op spine: no proposal x")], [502, null],
+    [200, null], [200, []], [200, [row, row]], [200, { status: "executed" }], [0, null]]) {
+    assert.equal(spineVerdict("approve", s, b).status, "not-recorded", JSON.stringify([s, b]));
+  }
+  assert.match(spineVerdict("approve", 403, pg("42501", "op spine: no")).why, /42501/);
+});
+
+test("every spine answer has its exact text", () => {
+  const a = { code: 4, label: "email the INV-4 reminder to Hebard" };
+  const done = (o) => ({ status: "approved", row: sp(4, { status: "executed", approved_via: "sms", ...o }) });
+  assert.equal(spineReply(done(), a, "YES", { lane: "ready" }), "✅ Approved — email the INV-4 reminder to Hebard. It's queued and goes out in a minute.");
+  assert.equal(spineReply(done(), a, "YES", { lane: "off" }),
+    "✅ Approved — email the INV-4 reminder to Hebard. It's queued, but email sending is off on the worker: " +
+    "it waits up to 48 hours for that to come back, then it isn't sent.");
+  // the worker kills an email older than EMAIL_MAX_AGE_HOURS: no reply promises an open-ended wait
+  for (const lane of ["ready", "off", "unknown", undefined]) assert.doesNotMatch(spineReply(done(), a, "YES", { lane }), /until that's back/);
+  assert.equal(spineReply(done(), a, "YES", { lane: "unknown" }), "✅ Approved — email the INV-4 reminder to Hebard. It's queued to send.");
+  assert.equal(spineReply(done(), a, "YES"), "✅ Approved — email the INV-4 reminder to Hebard. It's queued to send.");
+  assert.equal(spineReply(done({ operation: "sms.send@1" }), a, "YES", { lane: "ready" }), "✅ Approved — email the INV-4 reminder to Hebard. It's queued to send.");
+  assert.equal(spineReply(done({ operation: "job.set_stage@1" }), a, "YES"), "✅ Done — email the INV-4 reminder to Hebard.");
+  assert.equal(spineReply(done({ operation: "job.set_stage@1", status: "approved" }), a, "YES"), "✅ Approved — email the INV-4 reminder to Hebard. It's queued to run.");
+  assert.equal(spineReply(done({ status: "failed", error: "outbox insert refused" }), a, "YES", { lane: "ready" }),
+    "⚠️ Approved, but it didn't run — email the INV-4 reminder to Hebard: outbox insert refused");
+  assert.match(spineReply(done({ status: "failed", error: "e".repeat(500) }), a, "YES"), /: e{200}$/);
+  // approving never says "Done" for a message: it queued it
+  assert.doesNotMatch(spineReply(done(), a, "YES", { lane: "ready" }), /Done/);
+  const tapped = { status: "answered", row: sp(4, { status: "executed", approved_via: "inbox", rationale: a.label }) };
+  assert.equal(spineReply(tapped, a, "YES"), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
+  assert.equal(spineReply(tapped, a, "YES", { outbox: { state: "sent" } }), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
+  assert.equal(spineReply(tapped, a, "YES", { outbox: { state: "waiting" } }), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
+  assert.equal(spineReply(tapped, a, "YES", { outbox: { state: "dead", error: "Gmail refused the address: 550" } }),
+    "That one was approved, but the email couldn't be sent: Gmail refused the address: 550. Nothing went out.");
+  assert.equal(spineReply({ status: "cancelled", row: sp(4) }, a, "NO"), "👍 Cancelled — email the INV-4 reminder to Hebard.");
+  assert.equal(spineReply({ status: "already-answered" }, a, "NO"), "That one was already answered — nothing was cancelled.");
+  assert.equal(spineReply({ status: "expired" }, a, "YES"), "That one expired — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineReply({ status: "declined" }, a, "YES"), "That one was declined — email the INV-4 reminder to Hebard. Nothing was sent.");
+  assert.equal(spineReply({ status: "closed" }, a, "YES"), "That one was already answered — nothing was sent.");
+  assert.equal(spineReply({ status: "not-recorded", why: "x" }, a, "YES"), "Couldn't record that just now — text YES 4 again in a minute.");
+  assert.equal(spineReply({ status: "not-recorded", why: "x" }, a, "NO"), "Couldn't record that just now — text NO 4 again in a minute.");
+});
+
+test("a late spine answer speaks for its number only when the spine row was answered after any text-lane ask on it was created", () => {
+  const approved = sp(29, { status: "executed", approved_at: "2026-10-06T08:00:00Z", updated_at: "2026-10-06T08:00:01Z" });
+  const declined = sp(29, { status: "declined", approved_at: null, updated_at: "2026-10-06T08:00:00Z" });
+  const lapsed = sp(29, { status: "proposed", approved_at: null, updated_at: "2026-10-05T08:00:00Z", expires_at: "2026-10-06T08:00:00Z" });
+  // when each was answered: the approval, else the lapse of a stale 'proposed' row, else its last update
+  assert.equal(spineDecidedAt(approved), Date.parse("2026-10-06T08:00:00Z"));
+  assert.equal(spineDecidedAt(declined), Date.parse("2026-10-06T08:00:00Z"));
+  assert.equal(spineDecidedAt(lapsed), Date.parse("2026-10-06T08:00:00Z"));
+  assert.ok(Number.isNaN(spineDecidedAt({ status: "declined" })));
+  for (const row of [approved, declined, lapsed]) {
+    assert.equal(spineOutranks(row, null), true, `${row.status}: no text-lane row, the spine answers`);
+    assert.equal(spineOutranks(row, undefined), true);
+    assert.equal(spineOutranks(row, { created_at: "2026-10-06T07:59:59Z" }), true, `${row.status}: the text row came first`);
+    assert.equal(spineOutranks(row, { created_at: "2026-10-06T14:00:00Z" }), false, `${row.status}: minted on the freed number later`);
+    assert.equal(spineOutranks(row, { created_at: "2026-10-06T08:00:00Z" }), false, `${row.status}: a tie is not "after"`);
+    assert.equal(spineOutranks(row, { created_at: null }), false, "a text row with no readable time keeps the matcher's text");
+  }
+  assert.equal(spineOutranks({ status: "declined" }, { created_at: "2026-10-06T07:00:00Z" }), false, "nor a spine row with none");
+});
+
+test("a spine approval by text leaves the old lane's capture_events receipt, the one the Sunday report counts", () => {
+  const now = "2026-10-06T18:00:00.000Z";
+  const r = spineReceipt(sp(4, { status: "executed", approved_via: "sms" }), now);
+  assert.deepEqual(r, {
+    source_type: "assist_action", form_key: "email.send", captured_by: "approve-by-text",
+    status: "extracted", processed_at: now,
+    raw_payload: { proposal_id: "sp-4", via: "sms" },
+    result: { status: "executed" },
+  });
+  assert.equal(spineReceipt(sp(5, { operation: "job.set_stage@1" }), now).form_key, "job.set_stage", "the operation without @version");
+  // the report's own filter (weekly.ts): assist_action or email_send, captured_by approve-by-text
+  assert.ok(["assist_action", "email_send"].includes(r.source_type) && r.captured_by === "approve-by-text");
 });
 
 console.log(`\n${pass} approve-by-text checks passed.`);

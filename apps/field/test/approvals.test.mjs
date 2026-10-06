@@ -2,7 +2,13 @@
    step 4): both queues' rows as one card shape, waiting / recently decided /
    expired and their order, the names a page must look up, outcome lines,
    Alaska times, what each button sends, and the sentence for every answer
-   roybal-notify decidePending and the spine RPCs can give.
+   roybal-notify decidePending and the spine RPCs can give. Then spine
+   step 5: a waiting spine card's YES number (and none when one number is
+   live on both queues), spine jobs named from either job table, and what
+   the newest worker heartbeat says about email sending, on a waiting
+   email and an approved one, in words that promise no more than the
+   worker's 48 hours; and a send the worker gave up on after its card aged
+   off shows again for 48 hours from when it did.
    Run: node --test test/approvals.test.mjs */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -12,6 +18,7 @@ import {
   approveConfirm, declineConfirm, declinePrompt, decisionRequest, pendingAnswer, spineAnswer,
   decidedText, settle, NO_CONNECTION, SIGNED_OUT, NEVER_REPORTED,
   NEVER_REPORTED_PHASE, WAIT_MS, sawApproved, skippedLine, labelOf, READ_GAP_MS,
+  emailLaneOf, HEARTBEAT_FRESH_MS, LANE_OFF_WAITING, LANE_OFF_QUEUED, LANE_OFF_FAILED,
 } from "../js/approvals.js";
 
 // 10:00 AM Alaska (AKDT, UTC-8) on Tue Oct 6 2026
@@ -135,15 +142,15 @@ test("text queue: an unknown kind or proposer still makes a card, with a plain A
   assert.equal(fromPending(null).title, "An ask");
 });
 
-test("spine: email.send reads the catalog's first sentence and the key input, with the agent, rationale and evidence; never a YES hint", () => {
+test("spine: email.send reads the catalog's first sentence and the key input, with the agent, rationale, evidence and its YES number", () => {
   const c = fromProposal(email, LOOK);
   assert.equal(c.key, "spine:" + email.id);
   assert.deepEqual([c.lane, c.kind, c.chip], ["spine", "email", "Email"]);
   assert.equal(c.title, "Send one email: adjuster@carrier.com");
-  assert.equal(c.yesHint, "", "sms_code is set, but YES by text doesn't reach the spine");
-  assert.equal(c.code, null);
+  assert.equal(c.yesHint, "or text YES 4", "the text-queue card's words: roybal-notify answers a YES n on the spine too");
+  assert.equal(c.code, 4);
   assert.equal(c.by, "Brief agent");
-  assert.deepEqual([c.jobTable, c.jobId], ["board", BOARD2]);
+  assert.deepEqual([c.jobTable, c.jobId], ["either", BOARD2], "the page looks it up in both job tables");
   assert.equal(c.job, "", "a job the lookup missed is just left off");
   assert.equal(c.evidence.rationale, "The adjuster asked for it on Monday.");
   assert.deepEqual(c.evidence.refs, [
@@ -203,7 +210,7 @@ test("inbox: both lanes merged, soonest expiry first; recent answers newest firs
   assert.ok(!box.recent.some((c) => c.id === oldDecline.id), "a decline older than 48 h is off the list");
   assert.equal(box.expired, 3, "lapsed + swept + the stale spine row; not the one from three weeks ago");
   assert.deepEqual(box.skipped, { text: 0, spine: 0 });
-  assert.deepEqual(inbox(null, undefined, {}, NOW), { waiting: [], recent: [], expired: 0, skipped: { text: 0, spine: 0 } });
+  assert.deepEqual(inbox(null, undefined, {}, NOW), { waiting: [], recent: [], expired: 0, skipped: { text: 0, spine: 0 }, older: [] });
 });
 
 test("filters: live needs the open status AND a future expiry, whatever the row says", () => {
@@ -220,12 +227,14 @@ test("filters: live needs the open status AND a future expiry, whatever the row 
 test("needs: the ids to name, per table and kind; a non-uuid id never reaches an in.() read", () => {
   const box = inbox([...PENDING, { ...reminder, id: "zz", job_id: "local-123", params: {} }], SPINE, {}, NOW);
   const n = needs([...box.waiting, ...box.recent]);
-  assert.deepEqual(n.field, [FIELD1]);
+  // the spine email's job (BOARD2) could be either kind of job, so both tables are asked
+  assert.deepEqual(n.field.sort(), [FIELD1, BOARD2].sort());
   assert.deepEqual(n.board.sort(), [BOARD1, BOARD2].sort());
   assert.deepEqual(n.agents, [AGENT]);
   assert.deepEqual(n.people, [PERSON]);
   assert.deepEqual(n.outbox.sort(), [queuedSms.id, delivered.id].sort(), "executed spine sends only");
-  assert.deepEqual(needs([]), { field: [], board: [], agents: [], people: [], outbox: [] });
+  assert.deepEqual(n.lanes, ["email"], "a spine email waiting or sent: the page reads the worker's heartbeat");
+  assert.deepEqual(needs([]), { field: [], board: [], agents: [], people: [], outbox: [], lanes: [] });
 });
 
 test("lookFrom: catalog by name@version and name, agents and profiles by id, the newest outbox row per proposal", () => {
@@ -234,7 +243,7 @@ test("lookFrom: catalog by name@version and name, agents and profiles by id, the
   assert.equal(LOOK.people[AGENT], "Brief agent");
   assert.equal(LOOK.people[PERSON], "Gregory Roybal");
   assert.equal(LOOK.outbox[delivered.id].status, "delivered");
-  assert.deepEqual(lookFrom(), { jobs: {}, ops: {}, people: {}, outbox: {} });
+  assert.deepEqual(lookFrom(), { jobs: {}, ops: {}, people: {}, outbox: {}, emailLane: null }, "no heartbeat read: can't tell");
 });
 
 test("outcomes: sent, phase added, already there, queued with the quiet-hours time, delivered, declined with why, failed with why", () => {
@@ -554,8 +563,9 @@ test("rows left off are counted when they may be waiting, and the line says how 
   assert.deepEqual(box.waiting.map((c) => c.id), [reminder.id]);
   assert.equal(skippedLine({ text: 1, spine: 0 }), "1 ask couldn't be shown here. Answer it by text, or tell Claude.");
   assert.equal(skippedLine({ text: 3, spine: 0 }), "3 asks couldn't be shown here. Answer them by text, or tell Claude.");
-  assert.equal(skippedLine({ text: 0, spine: 1 }), "1 ask couldn't be shown here. Tell Claude.", "YES by text doesn't reach the spine");
-  assert.equal(skippedLine({ text: 0, spine: 2 }), "2 asks couldn't be shown here. Tell Claude.");
+  // a spine ask the brief texted him can be answered by text now; one that wasn't, can't
+  assert.equal(skippedLine({ text: 0, spine: 1 }), "1 ask couldn't be shown here. Any that came to you by text can be answered there; otherwise tell Claude.");
+  assert.equal(skippedLine({ text: 0, spine: 2 }), "2 asks couldn't be shown here. Any that came to you by text can be answered there; otherwise tell Claude.");
   assert.equal(skippedLine(box.skipped), "4 asks couldn't be shown here. Any that came to you by text can be answered there; otherwise tell Claude.");
   for (const none of [{ text: 0, spine: 0 }, {}, null, undefined]) assert.equal(skippedLine(none), "");
 });
@@ -716,4 +726,185 @@ test("a link's label loses its own trailing host-like brackets; the host the car
     ["https://evil.example/x", "evil.example"],
     ["QuickBooks invoice", "evil.example"],
   ]);
+});
+
+/* ---------- spine step 5 ---------- */
+
+test("a spine card offers its YES number only while it waits; one with no number, or a decided one, offers none", () => {
+  const box = inbox([], SPINE, LOOK, NOW);
+  assert.equal(box.waiting.find((c) => c.id === email.id).yesHint, "or text YES 4");
+  assert.equal(fromProposal({ ...email, sms_code: null }, LOOK).yesHint, "", "op_propose numbered nothing");
+  assert.equal(fromProposal({ ...email, sms_code: null }, LOOK).code, null);
+  for (const status of ["approved", "executing", "executed", "failed", "declined", "superseded", "expired"]) {
+    // the number is free for reuse once the row stops being proposed
+    assert.equal(fromProposal({ ...email, status }, LOOK).yesHint, "", status);
+  }
+  assert.equal(fromProposal({ ...stage, sms_code: 7 }, LOOK).yesHint, "or text YES 7", "every operation, not only email");
+  assert.ok(!box.recent.some((c) => c.yesHint), "Recently decided never offers a number");
+});
+
+test("one number live on both queues: neither card offers it (roybal-notify answers code-clash); everything else keeps its hint", () => {
+  const clashText = { ...reminder, code: 4 };                      // the spine email holds 4 too
+  const box = inbox([clashText, phase], [email, { ...stage, sms_code: 9 }], LOOK, NOW);
+  const hint = (id) => box.waiting.find((c) => c.id === id).yesHint;
+  assert.deepEqual([hint(reminder.id), hint(email.id)], ["", ""]);
+  assert.equal(hint(phase.id), "or text YES 13");
+  assert.equal(hint(stage.id), "or text YES 9");
+  assert.equal(box.waiting.find((c) => c.id === email.id).code, 4, "the card keeps its number; it just doesn't offer it");
+  // a clash only counts among live rows: an expired text row on 4 is no clash
+  const old = inbox([{ ...reminder, code: 4, expires_at: iso(-1) }], [email], LOOK, NOW);
+  assert.equal(old.waiting.find((c) => c.id === email.id).yesHint, "or text YES 4");
+  // two text rows on one number are left as they were (decidePending's own guard)
+  const twin = inbox([reminder, { ...phase, code: 12 }], [], LOOK, NOW);
+  assert.deepEqual(twin.waiting.map((c) => c.yesHint), ["or text YES 12", "or text YES 12"]);
+});
+
+test("a spine email's job is named from either table: the brief's and the adjuster's are field jobs; job.set_stage stays a board job", () => {
+  const fieldMail = { ...email, job_id: FIELD1 };
+  const c = fromProposal(fieldMail, LOOK);
+  assert.deepEqual([c.jobTable, c.jobId, c.job], ["either", FIELD1, "Pollen, 1192 Bemis Ct"]);
+  assert.deepEqual(needs([c]).field, [FIELD1]);
+  assert.deepEqual(needs([c]).board, [FIELD1], "uuids don't collide, so asking both tables is safe");
+  assert.equal(fromProposal({ ...email, job_id: BOARD1 }, LOOK).job, "Smith remodel", "a board job still names");
+  const s = fromProposal(stage, LOOK);
+  assert.equal(s.jobTable, "board");
+  assert.deepEqual([needs([s]).field, needs([s]).board], [[], [BOARD1]]);
+  assert.deepEqual(needs([fromProposal(queuedSms)]).field, [], "no job, nothing to read");
+  // the text queue is as it was
+  assert.deepEqual([fromPending(reminder).jobTable, fromPending(phase).jobTable], ["field", "board"]);
+});
+
+test("needs asks for the heartbeat only for a spine email that is waiting or was sent", () => {
+  const lanes = (rows) => needs(inbox([], rows, {}, NOW).waiting.concat(inbox([], rows, {}, NOW).recent)).lanes;
+  assert.deepEqual(lanes([email]), ["email"]);
+  assert.deepEqual(lanes([delivered]), ["email"]);
+  assert.deepEqual(lanes([declinedSpine]), [], "a declined email has nothing to wait for");
+  assert.deepEqual(lanes([queuedSms, stage]), [], "texts and stage moves don't go by email");
+  assert.deepEqual(needs([fromPending(reminder)]).lanes, [], "the text queue's email goes through gmail-proxy");
+});
+
+test("the newest heartbeat says whether the worker is sending email: fresh and listing email, or not; a read that won't read says nothing", () => {
+  const beat = (mins, channels, extra = {}) => [{ at: new Date(NOW - mins * 60e3).toISOString(), meta: { channels, email: true, ...extra } }];
+  assert.equal(HEARTBEAT_FRESH_MS, 10 * 60 * 1000);
+  assert.equal(emailLaneOf(beat(0.5, ["sms", "email"]), NOW), true);
+  assert.equal(emailLaneOf(beat(9.9, ["email"]), NOW), true);
+  assert.equal(emailLaneOf(beat(0.5, ["sms"]), NOW), false, "production today: no Gmail pair on the worker");
+  assert.equal(emailLaneOf(beat(10, ["sms", "email"]), NOW), false, "ten minutes of silence is a stopped worker");
+  assert.equal(emailLaneOf(beat(300, ["sms", "email"]), NOW), false);
+  assert.equal(emailLaneOf([], NOW), false, "no worker has ever beaten");
+  assert.equal(emailLaneOf(beat(-1, ["email"]), NOW), true, "a clock a little behind the server's");
+  // only the first row (the read is newest first) counts
+  assert.equal(emailLaneOf([...beat(1, ["sms"]), ...beat(2, ["sms", "email"])], NOW), false);
+  for (const junk of [null, undefined, {}, "x", [{ at: "nope", meta: { channels: ["email"] } }], [{ at: iso(0), meta: null }],
+    [{ at: iso(0), meta: { channels: "email" } }], [null]]) {
+    assert.equal(emailLaneOf(junk, NOW), null, JSON.stringify(junk));
+  }
+  assert.equal(lookFrom({ heartbeats: beat(1, ["sms"]), now: NOW }).emailLane, false);
+  assert.equal(lookFrom({ heartbeats: beat(1, ["sms", "email"]), now: NOW }).emailLane, true);
+  assert.equal(lookFrom({ heartbeats: null, now: NOW }).emailLane, null, "not read, or the read failed");
+  // a prototype-named channel or key changes nothing
+  assert.equal(emailLaneOf([{ at: iso(0), meta: { channels: ["__proto__", "constructor"] } }], NOW), false);
+});
+
+test("email sending off: a waiting email says approving queues it; an approved one in line or retrying says it waits; nothing else changes", () => {
+  const off = lookFrom({ catalog: CATALOG, agents: [{ id: AGENT, name: "agent:brief" }], jobs: [{ id: FIELD1, customer: "Pollen" }],
+    outbox: [{ proposal_id: delivered.id, status: "pending", created_at: iso(-4) }], heartbeats: [{ at: iso(-0.05), meta: { channels: ["sms"] } }], now: NOW });
+  const on = { ...off, emailLane: true }, unknown = { ...off, emailLane: null };
+  const w = fromProposal(email, off);
+  assert.equal(w.emailLane, false);
+  assert.equal(w.laneHint, LANE_OFF_WAITING);
+  assert.equal(LANE_OFF_WAITING, "Email sending is off on the worker right now: approving queues this, and it waits up to 48 hours for sending to come back, then it isn't sent.");
+  assert.equal(approveConfirm(w), "Send this email to adjuster@carrier.com?", "the confirm is as it was");
+  assert.equal(w.yesHint, "or text YES 4", "a text still answers it");
+  for (const look of [on, unknown]) {
+    assert.equal(fromProposal(email, look).laneHint, "", "sending, or can't tell: nothing new");
+  }
+  assert.equal(fromProposal(queuedSms, off).laneHint, "", "a text doesn't wait on email");
+  assert.equal(fromProposal(queuedSms, off).emailLane, null);
+  assert.equal(fromPending(reminder, off).laneHint, "", "the text queue sends through gmail-proxy");
+  assert.equal(fromPending(reminder, off).emailLane, null);
+  assert.equal(fromProposal({ ...email, status: "executed" }, off).laneHint, "", "only a waiting card carries the line");
+  // approved (email.send runs inline, so 'executed' with an outbox row) and still in line
+  const sent = (outbox, look = off) => outcome({ ...fromProposal({ ...delivered }, look), outbox }, NOW);
+  assert.deepEqual(sent({ status: "pending" }), { text: LANE_OFF_QUEUED, tone: "wait" });
+  assert.equal(LANE_OFF_QUEUED, "Queued, but email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent");
+  assert.deepEqual(sent({ status: "pending", next_attempt_at: iso(3) }), { text: LANE_OFF_QUEUED, tone: "wait" });
+  assert.deepEqual(sent({ status: "failed", error: "Gmail API 503" }), { text: LANE_OFF_FAILED, tone: "wait" });
+  assert.equal(LANE_OFF_FAILED, "Send failed, and email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent");
+  assert.deepEqual(sent(null), { text: LANE_OFF_QUEUED, tone: "wait" }, "just approved here: its outbox row isn't read yet");
+  // what already happened still says so
+  assert.deepEqual(sent({ status: "sent" }), { text: "Sent", tone: "ok" });
+  assert.deepEqual(sent({ status: "sending" }), { text: "Sending", tone: "wait" });
+  assert.deepEqual(sent({ status: "dead", error: "this email waited 50 hours in line, past the 48-hour limit (EMAIL_MAX_AGE_HOURS), so it was not sent. Send a fresh one if it should still go." }),
+    { text: "Couldn't send: this email waited 50 hours in line, past the 48-hour limit (EMAIL_MAX_AGE_HOURS), so it was not sent. Send a fresh one if it should still go.", tone: "bad" });
+  // sending, or can't tell: exactly as before
+  for (const look of [on, unknown, {}]) {
+    assert.equal(sent({ status: "pending" }, look).text, "Queued to send");
+    assert.equal(sent({ status: "failed" }, look).text, "Send failed, retrying");
+    assert.equal(sent(null, look).text, "Queued to send");
+  }
+  // a spine text with email off is untouched; a declined email too
+  assert.equal(outcome({ ...fromProposal(queuedSms, off), outbox: { status: "pending" } }, NOW).text, "Queued to send");
+  assert.equal(outcome(fromProposal(declinedSpine, off), NOW).text, "Declined: Already called them");
+  assert.equal(outcome(fromProposal({ ...email, status: "approved" }, off), NOW).text, "Approved, queued to run");
+});
+
+test("an approve answered by the server lands with the lane wording the page knew, as the toast will say it", () => {
+  const off = { ...LOOK, emailLane: false };
+  const box = inbox([], [email], off, NOW);
+  const card = box.waiting[0];
+  const done = fromProposal({ ...email, status: "executed", approved_at: iso(0), approved_via: "inbox", result: { outbox_id: "o1" } }, off);
+  const after = settle(box, card, done);
+  assert.equal(outcome(after.recent[0], NOW).text, LANE_OFF_QUEUED);
+  assert.equal(outcome(fromProposal({ ...email, status: "executed" }, LOOK), NOW).text, "Queued to send", "lane unknown: as before");
+});
+
+test("a send the worker gave up on after its card aged off comes back to Recently decided for 48 hours from then", () => {
+  // the brief's reminder, approved 60 h ago while sending was off; the worker came back 2 h ago and marked it dead
+  const STALE = "this email waited 58 hours in line, past the 48-hour limit (EMAIL_MAX_AGE_HOURS), so it was not sent. Send a fresh one if it should still go.";
+  const late = { ...email, id: "bbbbbbbb-0000-4000-8000-000000000009", job_id: FIELD1, status: "executed",
+    created_at: iso(-61), expires_at: iso(-37), approved_at: iso(-60), updated_at: iso(-60) };
+  const lateSms = { ...queuedSms, id: "bbbbbbbb-0000-4000-8000-00000000000a", created_at: iso(-80), expires_at: iso(-56), approved_at: iso(-79), updated_at: iso(-79) };
+  const row = (p, status, at, extra = {}) => ({ proposal_id: p.id, status, created_at: iso(-60), updated_at: at, error: status === "dead" ? STALE : null, ...extra });
+  const box = (outbox) => inbox([], [...SPINE, late, lateSms], lookFrom({ catalog: CATALOG, jobs: [{ id: FIELD1, customer: "Pollen" }], outbox, now: NOW }), NOW);
+
+  // before the outbox is read (the page's first pass): off the list, but named in older, so its row is read
+  const bare = inbox([], [...SPINE, late, lateSms], {}, NOW);
+  assert.ok(!bare.recent.some((c) => c.id === late.id));
+  assert.deepEqual(bare.older.map((c) => c.id).sort(), [late.id, lateSms.id].sort(), "answered sends past the 48 hours, nothing else");
+  const n = needs(bare.older);
+  assert.deepEqual(n.outbox.sort(), [late.id, lateSms.id].sort());
+  assert.ok(n.field.includes(FIELD1), "and the names it would show with");
+
+  // dead 2 h ago: back on the list, ordered by when it died, saying why
+  const b = box([row(late, "dead", iso(-2)), row(lateSms, "dead", iso(-47.9), { error: "Twilio refused the number" })]);
+  const c = b.recent.find((x) => x.id === late.id);
+  assert.ok(c, "shown again");
+  assert.equal(b.recent[0].id, late.id, "newest news first: it died after every other answer here");
+  assert.equal(c.job, "Pollen");
+  assert.deepEqual(outcome(c, NOW), { text: "Couldn't send: " + STALE, tone: "bad" });
+  assert.equal(isRecent(c, NOW), true);
+  assert.equal(isRecent(c, Date.parse(iso(45.9))), true);
+  assert.equal(isRecent(c, Date.parse(iso(46.01))), false, "48 hours after it died it ages off like any other");
+  assert.ok(b.recent.some((x) => x.id === lateSms.id), "a spine text the worker gave up on, the same way");
+  assert.ok(!b.older.some((x) => x.id === late.id));
+  // the rest of the list is as it was
+  assert.deepEqual(b.recent.filter((x) => x.id !== late.id && x.id !== lateSms.id).map((x) => x.id),
+    inbox([], SPINE, LOOK, NOW).recent.map((x) => x.id));
+
+  // died more than 48 h ago, still in line (the worker is still down), or sent late: off the list
+  for (const outbox of [[row(late, "dead", iso(-48.1))], [row(late, "pending", iso(-60))], [row(late, "failed", iso(-1))], [row(late, "sent", iso(-1))], []]) {
+    assert.ok(!box(outbox).recent.some((x) => x.id === late.id), JSON.stringify(outbox));
+  }
+  // a row whose time won't read counts from the answer, and never takes the list down
+  for (const at of [null, undefined, "", "nope", 1759780800000, { toString: 1 }, ["2026-10-06T16:00:00Z"]]) {
+    assert.ok(!box([row(late, "dead", at)]).recent.some((x) => x.id === late.id), typeof at + " " + JSON.stringify(at));
+  }
+  // only an executed spine send: an outbox row beside anything else changes nothing
+  const odd = lookFrom({ outbox: [{ proposal_id: declinedSpine.id, status: "dead", updated_at: iso(-1) }], now: NOW });
+  assert.equal(isRecent(fromProposal({ ...declinedSpine, updated_at: iso(-60), expires_at: iso(-40) }, odd), NOW), false);
+  // an answer inside the 48 hours whose row died earlier (clocks apart) still counts from the answer
+  const d = fromProposal(delivered, lookFrom({ outbox: [row(delivered, "dead", iso(-50))], now: NOW }));
+  assert.equal(isRecent(d, NOW), true);
+  assert.equal(outcome(d, NOW).text, "Couldn't send: " + STALE);
 });

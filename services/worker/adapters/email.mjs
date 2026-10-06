@@ -11,11 +11,21 @@
    `sent_by = outbox:<outbox id>`; a retry after a lost lease looks it up
    first and adopts the earlier send. The window between Gmail accepting and
    that row landing is the one place a crash could still double-send; the
-   row is written before outbox_sent so the window is as small as it can be. */
+   row is written before outbox_sent so the window is as small as it can be.
+
+   Late is worse than never for these: an overdue-invoice reminder approved
+   while the email lane was off would otherwise go out whenever the lane
+   came back, days later and maybe after the customer paid. A row older than
+   EMAIL_MAX_AGE_HOURS when it is about to be sent is refused as permanent,
+   so it goes dead with the reason on it and the dead-letter text counts it.
+   The check sits inside send(), which the lane calls only after its adopt
+   lookup found nothing, so an old row that an earlier attempt DID send is
+   still adopted, never refused. */
 
 import { buildRfc822, validAddresses, addressList } from "../rfc822.mjs";
 import { DeliveryError, tagFor } from "./sms.mjs";
 import { errText } from "../log.mjs";
+import { EMAIL_MAX_AGE_HOURS_DEFAULT } from "../config.mjs";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -27,6 +37,22 @@ export function classifyGmailError(status, text) {
   }
   // 401/403: token or scope — the next refresh may fix it; 429/5xx: later.
   return new DeliveryError(`Gmail API ${status}: ${t}`, { permanent: false, status });
+}
+
+/** Why this row is too old to send, or null when it may go. The text lands
+    in outbox.error, which the Approvals inbox shows after "Couldn't send: ".
+    A row with no readable created_at is refused too: the claim always
+    returns it, so its absence means a shape this code does not know, and
+    sending blind is the one thing the limit exists to stop. */
+export function staleEmailReason(row, maxHours, now = Date.now()) {
+  const queuedAt = Date.parse(String(row?.created_at ?? ""));
+  if (!Number.isFinite(queuedAt)) return "this email has no queued time, so its age can't be checked; it was not sent";
+  const ageH = Math.max(0, now - queuedAt) / 3_600_000;
+  if (ageH <= maxHours) return null;
+  const n = ageH < 72 ? Math.floor(ageH) : Math.floor(ageH / 24);
+  const age = ageH < 72 ? `${n} hour${n === 1 ? "" : "s"}` : `${n} days`;
+  return `this email waited ${age} in line, past the ${maxHours}-hour limit (EMAIL_MAX_AGE_HOURS), ` +
+    `so it was not sent. Send a fresh one if it should still go.`;
 }
 
 export function emailAdapter(ctx) {
@@ -95,6 +121,10 @@ export function emailAdapter(ctx) {
       if (p.cc && !validAddresses(p.cc)) throw new DeliveryError("email row has an invalid `cc` address", { permanent: true });
       if (!body) throw new DeliveryError("email row has an empty body", { permanent: true });
       if (!subject && !inReplyTo) throw new DeliveryError("email row has no subject", { permanent: true });
+      // Before the token refresh and the send: a stale row touches nothing at Google.
+      const maxHours = Number.isFinite(cfg.emailMaxAgeHours) ? cfg.emailMaxAgeHours : EMAIL_MAX_AGE_HOURS_DEFAULT;
+      const stale = staleEmailReason(row, maxHours);
+      if (stale) throw new DeliveryError(stale, { permanent: true });
 
       const { accessToken, account } = await getConnection();
       const { base64url } = buildRfc822({ to, cc: p.cc, from: account, subject: subject || "Re:", body, inReplyTo });
@@ -126,7 +156,11 @@ export function emailAdapter(ctx) {
           subject: (subject || "Re:").slice(0, 500),
           body_text: body,
           message_id_header: "",
-          job_id: null,
+          // Files the send under its job, as gmail-proxy does, so it shows in
+          // the job's email history. email_messages.job_id is text (a field
+          // project or a coordination job id); outbox.job_id is the uuid the
+          // proposal carried.
+          job_id: row.job_id == null || row.job_id === "" ? null : String(row.job_id),
           matched_by: "sent",
           contact_id: await contactIdFor(firstTo),
           received_at: new Date().toISOString(),

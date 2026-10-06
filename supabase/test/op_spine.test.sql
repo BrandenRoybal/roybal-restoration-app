@@ -1,5 +1,7 @@
 -- ============================================================================
--- Assertions for 0013_op_spine.sql and 0014_ops_first_five.sql.
+-- Assertions for 0013_op_spine.sql and 0014_ops_first_five.sql (3d also
+-- reads the one agent_authority grant 0019 seeds; 0019's own rules are in
+-- spine_lanes.test.sql).
 --
 -- Run by the DB replay workflow after the census, against the database
 -- `supabase db reset` rebuilt from supabase/migrations/. Every block raises on
@@ -125,19 +127,23 @@ values
   ('00000000-0000-0000-0000-00000000d001', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-op-owner@example.invalid',  '', now(), now(), now(), '{}', '{}'),
   ('00000000-0000-0000-0000-00000000d002', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-op-office@example.invalid', '', now(), now(), now(), '{}', '{}'),
   ('00000000-0000-0000-0000-00000000d003', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-op-crew@example.invalid',   '', now(), now(), now(), '{}', '{}'),
-  ('00000000-0000-0000-0000-00000000d004', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-op-agent@example.invalid',  '', now(), now(), now(), '{}', '{}')
+  ('00000000-0000-0000-0000-00000000d004', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-op-agent@example.invalid',  '', now(), now(), now(), '{}', '{}'),
+  ('00000000-0000-0000-0000-00000000d005', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-op-agent2@example.invalid', '', now(), now(), now(), '{}', '{}')
 on conflict (id) do nothing;
 
 insert into public.profiles (id, full_name, role) values
   ('00000000-0000-0000-0000-00000000d001', 'op test owner',  'owner'),
   ('00000000-0000-0000-0000-00000000d002', 'op test office', 'office'),
   ('00000000-0000-0000-0000-00000000d003', 'op test crew',   'crew'),
-  ('00000000-0000-0000-0000-00000000d004', 'op test agent',  'agent')
+  ('00000000-0000-0000-0000-00000000d004', 'op test agent',  'agent'),
+  ('00000000-0000-0000-0000-00000000d005', 'op test agent 2', 'agent')
 on conflict (id) do update set role = excluded.role, full_name = excluded.full_name;
 
--- the agent login is agent:brief
+-- the agent login is agent:brief; the second is agent:web, which holds no grant
 update public.agents set auth_user_id = '00000000-0000-0000-0000-00000000d004'
  where id = '1af33481-7f1c-4485-87f5-7b0ec5e27554';
+update public.agents set auth_user_id = '00000000-0000-0000-0000-00000000d005'
+ where id = '951f7f7d-eb77-4cda-9d98-1db89cf30541';
 
 -- a board job to move
 insert into public.coordination_jobs (id, data) values
@@ -273,17 +279,45 @@ $$;
 release savepoint s;
 reset role;
 
--- 3d. an agent login: nothing until the owner grants it, and never approval
+-- 3d. an agent login: nothing until the owner grants it, and never approval.
+--     agent:web holds no grant and is refused; agent:brief holds the one
+--     grant 0019 seeded (propose email.send) and nothing beyond it
 savepoint s;
 set local role authenticated;
-set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d004", "role": "authenticated", "aud": "authenticated"}';
+set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d005", "role": "authenticated", "aud": "authenticated"}';
 do $$
 begin
   begin
     perform public.op_propose('email.send', '{"to": "a@b.co", "subject": "x", "body": "y"}'::jsonb,
                               null, null, null, '[]'::jsonb, 'agent');
     raise exception 'an agent with no agent_authority row proposed';
-  exception when insufficient_privilege then null;
+  exception when insufficient_privilege then
+    if sqlerrm !~ 'may not propose' then raise; end if;
+  end;
+end
+$$;
+rollback to savepoint s;
+
+savepoint s;
+set local role authenticated;
+set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d004", "role": "authenticated", "aud": "authenticated"}';
+do $$
+declare
+  p public.proposals;
+begin
+  p := public.op_propose('email.send', '{"to": "a@b.co", "subject": "x", "body": "y"}'::jsonb,
+                         null, null, null, '[]'::jsonb, 'cron');
+  if p.status <> 'proposed' or p.proposed_by_kind <> 'agent'
+     or p.proposed_by_id <> '1af33481-7f1c-4485-87f5-7b0ec5e27554' then
+    raise exception 'agent:brief email.send under its 0019 grant is %, by %/%', p.status, p.proposed_by_kind, p.proposed_by_id;
+  end if;
+
+  begin
+    perform public.op_propose('sms.send', '{"to": "+19075550100", "body": "x"}'::jsonb,
+                              null, null, null, '[]'::jsonb, 'cron');
+    raise exception 'agent:brief proposed a text; 0019 grants it email.send only';
+  exception when insufficient_privilege then
+    if sqlerrm !~ 'may not propose' then raise; end if;
   end;
 end
 $$;
