@@ -25,7 +25,10 @@
    that a stale cached copy of the field module could lack. Then step 5
    review round 1: the lane-off lines promise only the worker's 48 hours,
    and a send the worker gave up on after its card aged off shows again,
-   named, for 48 hours from when it did.
+   named, for 48 hours from when it did. Then step 5 review round 2: so
+   does one whose proposal is older than the page's 7-day read (its dead
+   outbox row is read, then that proposal by id), and either of those
+   reads failing leaves the tab as it was.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -131,7 +134,15 @@ globalThis.fetch = async (url, opts = {}) => {
     if (headers.Range === "0-0") return counted(live(PR, "proposed"));
     assert.match(u, /select=id,operation,input,edited_params,/);
     assert.match(u, /select=[^&]*,sms_code&/, "the spine's YES number is read");
+    // the proposals of sends that died lately, by id, whatever their expiry
+    if (new URL(u).searchParams.has("id")) return json(200, PR.filter((r) => ids(u, "id").includes(r.id)));
     return json(200, PR.filter((r) => Date.parse(r.expires_at) >= since(u)));
+  }
+  if (u.includes("/rest/v1/outbox?status=eq.dead&")) {
+    const q = new URL(u).searchParams;
+    const from = Date.parse(q.get("updated_at").replace(/^gte\./, ""));
+    return json(200, OUTBOX.filter((o) => o.status === "dead" && o.proposal_id && Date.parse(o.updated_at) >= from)
+      .map((o) => ({ proposal_id: o.proposal_id })));
   }
   if (u.includes("/rest/v1/worker_heartbeats?")) {
     assert.match(u, /\/rest\/v1\/worker_heartbeats\?select=at,meta&order=at\.desc&limit=1$/);
@@ -946,7 +957,7 @@ await test("a send the worker gave up on after its card aged off shows again in 
   assert.ok(c.querySelector(".ap-out").classList.contains("ap-out--bad"));
   // nothing else on the page names its job or proposer: they were read for it
   assert.match(c.querySelector(".ap-meta").textContent, /^Pollen, 1192 Bemis Ct · from Brief agent · answered /);
-  const ob = calls.slice(before).find((x) => x.u.includes("/outbox?"));
+  const ob = calls.slice(before).find((x) => x.u.includes("/outbox?select="));
   assert.match(ob.u, /select=proposal_id,status,next_attempt_at,error,created_at,updated_at&/);
   assert.deepEqual(ids(ob.u, "proposal_id"), [late.id]);
   assert.equal(beats(before), 0, "an older send waits on nothing: no heartbeat read");
@@ -976,6 +987,107 @@ await test("a send the worker gave up on after its card aged off shows again in 
   assert.equal(waiting().length, 1);
   assert.equal(card("spine:" + delivered.id).querySelector(".ap-out").textContent, "Queued to send");
   assert.equal(card("spine:" + late.id), null);
+  reset5();
+});
+
+/* ---------- spine step 5, review round 2 ---------- */
+await test("a send that died in the last 48 hours shows even when its proposal is older than the 7-day read; a read that fails changes nothing", async () => {
+  reset5();
+  const GONE = "this email waited 9 days in line, past the 48-hour limit (EMAIL_MAX_AGE_HOURS), so it was not sent. Send a fresh one if it should still go.";
+  // the brief's reminder, filed 9 days ago with a day to answer it and approved at once; the worker
+  // was stopped, came back an hour ago and gave up on it. Its expiry is 8 days back: the 7-day read misses it.
+  const ancient = { ...email, id: id("spine", 7), sms_code: null, job_id: FIELD1, status: "executed", created_at: iso(-216), expires_at: iso(-192),
+    approved_at: iso(-215.9), updated_at: iso(-215.9), rationale: "email the INV-1001 reminder to Pollen (6 days past due, $1,240.00 open)" };
+  // and one inside the 7 days that died too: already on the page, so not read again by id
+  const inside = { ...email, id: id("spine", 8), sms_code: null, status: "executed", created_at: iso(-80), expires_at: iso(-56),
+    approved_at: iso(-79), updated_at: iso(-79) };
+  const deadOld = { proposal_id: ancient.id, status: "dead", next_attempt_at: iso(-215.9), error: GONE, created_at: iso(-215.9), updated_at: iso(-1) };
+  const deadIn = { proposal_id: inside.id, status: "dead", next_attempt_at: iso(-79), error: "Gmail refused the address", created_at: iso(-79), updated_at: iso(-2) };
+  const byId = (from) => calls.slice(from).filter((c) => c.u.includes("/rest/v1/proposals?") && new URL(c.u).searchParams.has("id"));
+  const deadReads = (from) => calls.slice(from).filter((c) => c.u.includes("/rest/v1/outbox?status=eq.dead&"));
+  PA = [];
+  PR = [email, ancient, inside];
+  OUTBOX = [deadOld, deadIn];
+  let before = since0();
+  await go();
+  const c = card("spine:" + ancient.id);
+  assert.ok(c && c.classList.contains("ap-card--done"), "on Recently decided");
+  assert.equal(c.querySelector(".ap-out").textContent, "Couldn't send: " + GONE);
+  assert.ok(c.querySelector(".ap-out").classList.contains("ap-out--bad"));
+  assert.match(c.querySelector(".ap-meta").textContent, /^Pollen, 1192 Bemis Ct · from Brief agent · answered /, "its job and proposer were read for it");
+  assert.equal(card("spine:" + inside.id).querySelector(".ap-out").textContent, "Couldn't send: Gmail refused the address");
+  assert.deepEqual(recent().map((x) => x.dataset.key), ["spine:" + ancient.id, "spine:" + inside.id], "newest news first, each once");
+  assert.equal(waiting().length, 1, "the waiting email is still there");
+  assert.equal(view.querySelector(".ap-expired"), null, "an executed row is never counted as expired");
+  // the reads: dead outbox rows of the last 48 hours, then only the proposals the 7-day read didn't have
+  const dr = deadReads(before);
+  assert.equal(dr.length, 1);
+  assert.match(dr[0].u, /\/rest\/v1\/outbox\?status=eq\.dead&updated_at=gte\.\d{4}-\d\d-\d\dT\d\d%3A\d\d%3A\d\d\.\d{3}Z&proposal_id=not\.is\.null&select=proposal_id&order=updated_at\.desc&limit=100$/);
+  const from = Date.parse(new URL(dr[0].u).searchParams.get("updated_at").replace(/^gte\./, ""));
+  assert.ok(Math.abs(from - (Date.now() - 48 * 3600e3)) < 60e3, "48 hours back");
+  const pr = byId(before);
+  assert.equal(pr.length, 1);
+  assert.deepEqual(ids(pr[0].u, "id"), [ancient.id]);
+  const main = calls.slice(before).find((x) => x.u.includes("/rest/v1/proposals?select=") && new URL(x.u).searchParams.has("expires_at"));
+  const cols = (u) => new URL(u).searchParams.get("select");
+  assert.equal(cols(pr[0].u), cols(main.u), "the same columns as the main read");
+  assert.match(pr[0].u, /&limit=100$/);
+  noJunk(view);
+
+  // died 49 h ago: the dead read leaves it out, nothing is read by id, nothing shows
+  OUTBOX = [{ ...deadOld, updated_at: iso(-49) }];
+  before = since0();
+  await go();
+  assert.equal(card("spine:" + ancient.id), null);
+  assert.equal(byId(before).length, 0);
+  // no dead rows at all: no read by id
+  OUTBOX = [];
+  before = since0();
+  await go();
+  assert.equal(byId(before).length, 0);
+  assert.equal(card("spine:" + ancient.id), null);
+
+  // a bad proposal_id in the answer can't sink the read by id
+  OUTBOX = [deadOld];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => (String(url).includes("/rest/v1/outbox?status=eq.dead&")
+    ? json(200, [{ proposal_id: "not-a-uuid" }, null, { proposal_id: ancient.id }, { proposal_id: ancient.id }]) : real(url, opts));
+  before = since0();
+  try { await go(); } finally { globalThis.fetch = real; }
+  assert.deepEqual(ids(byId(before)[0].u, "id"), [ancient.id]);
+  assert.ok(card("spine:" + ancient.id));
+
+  // either extra read failing (an error, no connection, an answer that isn't a list) leaves the tab as it was
+  const asToday = () => {
+    assert.ok(!/didn't load/.test(view.textContent), view.textContent);
+    assert.equal(view.querySelectorAll(".warn:not(.ap-err)").length, 0, "no warning line");
+    assert.equal(card("spine:" + ancient.id), null);
+    assert.equal(waiting().length, 1);
+    assert.equal(card("spine:" + inside.id).querySelector(".ap-out").textContent, "Couldn't send: Gmail refused the address");
+  };
+  OUTBOX = [deadOld, deadIn];
+  const fails = [
+    (u) => u.includes("/rest/v1/outbox?status=eq.dead&") && json(503, { message: "upstream" }),
+    (u) => { if (u.includes("/rest/v1/outbox?status=eq.dead&")) throw new TypeError("Failed to fetch"); },
+    (u) => u.includes("/rest/v1/outbox?status=eq.dead&") && json(200, { message: "not a list" }),
+    (u) => u.includes("/rest/v1/proposals?") && u.includes("&id=in.") && json(503, { message: "upstream" }),
+    (u) => { if (u.includes("/rest/v1/proposals?") && u.includes("&id=in.")) throw new TypeError("Failed to fetch"); },
+    (u) => u.includes("/rest/v1/proposals?") && u.includes("&id=in.") && json(200, { message: "not a list" }),
+  ];
+  for (const fail of fails) {
+    globalThis.fetch = async (url, opts) => fail(String(url)) || real(url, opts);
+    try { await go(); } finally { globalThis.fetch = real; }
+    asToday();
+  }
+
+  // the new approvals queue didn't load: its one warning, and nothing read by id beside it
+  globalThis.fetch = async (url, opts) => (String(url).includes("/rest/v1/proposals?") && !(opts.headers || {}).Range
+    ? json(503, { message: "upstream" }) : real(url, opts));
+  before = since0();
+  try { await go(); } finally { globalThis.fetch = real; }
+  assert.deepEqual([...view.querySelectorAll(".warn:not(.ap-err)")].map((w) => w.textContent), ["The new approvals queue didn't load (503)."]);
+  assert.equal(byId(before).length, 0);
+  assert.equal(card("spine:" + ancient.id), null);
   reset5();
 });
 

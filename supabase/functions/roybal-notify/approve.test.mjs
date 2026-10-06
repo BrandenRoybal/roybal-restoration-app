@@ -1,7 +1,8 @@
 /* Approve-by-text rules — unit tests (no Deno, no network), plus the pure
    half of the Approvals inbox's decidePending (request check, answers),
-   and the spine lane's rules (step 5: one YES across both queues, the
-   spine row's label, and the text for every op_proposal_* answer).
+   and the spine lane's rules (step 5: one YES across both queues, a bare
+   YES only for an ask a text offered, the spine row's label, the text for
+   every op_proposal_* answer, and the GET /version answer).
    The order decide() runs in, and a YES driven through index.ts against a
    stubbed PostgREST, are tested in decide.test.mjs.
    Run: node --experimental-strip-types approve.test.mjs */
@@ -12,7 +13,7 @@ import {
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, replyFor,
   alaskaHour, windowOpensAt, expiresBeforeWindow, retryableStatus,
   parseDecideRequest, decideResponse, ownerGate,
-  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState,
+  matchAcross, offeredByText, VERSION_ANSWER, spineLabel, opName, ownerPrincipal, emailLane, outboxState,
   spineLateText, spineDecidedAt, spineOutranks, spineReceipt, spineVerdict, spineReply,
 } from "./approve.ts";
 
@@ -427,8 +428,12 @@ test("role_is: only a 200 literal true is the owner; a refused token is 401, an 
 /* ---------- the spine lane (step 5): one YES across both queues ---------- */
 
 const txt = (code, o = {}) => ({ code, status: "pending", label: `text-lane ${code}`, ...o });
+/** A spine row as handleApproval reads it; by default the brief's reminder,
+    which the brief texted (proposed_via 'cron'). */
 const sp = (sms_code, o = {}) => ({ id: `sp-${sms_code}`, sms_code, status: "proposed", operation: "email.send@1",
-  rationale: `spine ${sms_code}`, input: { to: "a@b.co", subject: "s", body: "b" }, ...o });
+  rationale: `spine ${sms_code}`, input: { to: "a@b.co", subject: "s", body: "b" }, proposed_via: "cron", ...o });
+/** The job page's adjuster email: a spine ask no text ever offered. */
+const ui = (sms_code, o = {}) => sp(sms_code, { proposed_via: "ui", rationale: "Claim documentation email to the adjuster for claim CLM-77 — Hebard", ...o });
 
 test("a number names the one live ask that holds it, in whichever queue", () => {
   const text = [txt(12), txt(13)];
@@ -467,6 +472,48 @@ test("a bare YES acts only when exactly one ask is live across both queues", () 
     const a = matchAcross(rows, [], code), b = matchProposal(rows, code);
     assert.deepEqual([a.hit, a.reason], [b.hit, b.reason], JSON.stringify([rows.map((r) => r.code), code]));
   }
+});
+
+test("a bare YES or NO never acts on a spine ask no text offered; it names the ask and its number instead", () => {
+  // the adjuster email alone: nothing runs, and the answer says which number does
+  const only = ui(4);
+  assert.deepEqual(matchAcross([], [only], null), { lane: null, hit: null, reason: "needs-number", ask: only });
+  assert.equal(replyText("needs-number", { code: 4, label: spineLabel(only) }),
+    'Reply YES 4 to approve "Claim documentation email to the adjuster for claim CLM-77 — Hebard" (or NO 4).');
+  // a text-lane ask beside it: the bare YES is the text-lane ask's, as it was before step 5
+  const t = matchAcross([txt(12)], [ui(4)], null);
+  assert.deepEqual([t.lane, t.hit.code, t.reason], ["text", 12, "ok"]);
+  // the brief's texted reminder beside it: the reminder's
+  const c = matchAcross([], [ui(4), sp(5)], null);
+  assert.deepEqual([c.lane, c.hit.sms_code, c.reason], ["spine", 5, "ok"]);
+  // the brief's reminder alone: a bare YES is its answer
+  const b = matchAcross([], [sp(5)], null);
+  assert.deepEqual([b.lane, b.hit.sms_code, b.reason], ["spine", 5, "ok"]);
+  // YES n still reaches the adjuster email, and every coded rule holds for it
+  const n = matchAcross([txt(12)], [ui(4)], "4");
+  assert.deepEqual([n.lane, n.hit.sms_code, n.hit.proposed_via, n.reason], ["spine", 4, "ui", "ok"]);
+  assert.equal(matchAcross([txt(4)], [ui(4)], "4").reason, "code-clash");
+  assert.equal(matchAcross([], [ui(4)], "9").reason, "no-such-code");
+  // two offered asks, or two screen-only asks and nothing offered, demand the number
+  assert.equal(matchAcross([txt(12)], [sp(5), ui(4)], null).reason, "ambiguous");
+  assert.equal(matchAcross([], [ui(4), ui(6)], null).reason, "ambiguous");
+  // a row read without proposed_via is not one a text offered
+  assert.equal(matchAcross([], [sp(4, { proposed_via: undefined })], null).reason, "needs-number");
+  // a settled or unnumbered screen ask is not live at all
+  assert.equal(matchAcross([], [ui(4, { status: "executed" }), ui(null)], null).reason, "none-open");
+});
+
+test("only the brief's spine rows were offered by text", () => {
+  assert.equal(offeredByText({ proposed_via: "cron" }), true);
+  for (const via of ["ui", "chip", "agent", "sms", "mcp", "voice", "", null, undefined]) {
+    assert.equal(offeredByText({ proposed_via: via }), false, String(via));
+  }
+  assert.equal(offeredByText(null), false);
+});
+
+test("GET /version answers the exact shape the brief and set-gmail-secret.sh read", () => {
+  assert.equal(JSON.stringify(VERSION_ANSWER), '{"ok":true,"function":"roybal-notify","answers":["text","spine"]}');
+  assert.ok(VERSION_ANSWER.answers.includes("spine"));
 });
 
 test("a spine row is called by its rationale's first line, else by what it would do", () => {
@@ -536,6 +583,11 @@ test("a spine row someone already answered gets the sentence its status earns", 
     assert.equal(spineLateText(row({ status }), now), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
     assert.equal(spineLateText(row({ status }), now, WAITS), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
     assert.equal(spineLateText(row({ status }), now, SENT), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
+    // still waiting with email sending off on the worker: no "it goes out once"
+    assert.equal(spineLateText(row({ status }), now, WAITS, "off"),
+      "That one was already approved — email the INV-4 reminder to Hebard. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.");
+    assert.equal(spineLateText(row({ status }), now, WAITS, "ready"), "That one was already approved — email the INV-4 reminder to Hebard. It goes out once.");
+    assert.equal(spineLateText(row({ status }), now, SENT, "off"), "That one was already approved — email the INV-4 reminder to Hebard. It went out once.");
     assert.equal(spineLateText(row({ status }), now, DEAD),
       "That one was approved, but the email couldn't be sent: Gmail refused the address: 550 no such user. Nothing went out.");
   }

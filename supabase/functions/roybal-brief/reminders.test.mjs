@@ -16,10 +16,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { register } from "node:module";
 import {
-  remindersLane, laneReady, agentKnown, invoiceKey, remindedKeys, reminderCandidates, reminderLabel, pendingReminderRow,
-  spineReminder, filingOutcome, yesLine, codesInUseList, codeTaker, SPINE_ADDRESS,
+  remindersLane, laneReady, notifyAnswersSpine, agentKnown, invoiceKey, queuedIds, remindedKeys, reminderCandidates,
+  reminderLabel, pendingReminderRow, spineReminder, filingOutcome, yesLine, codesInUseList, codeTaker, SPINE_ADDRESS,
 } from "./reminders.ts";
 import { reminderEmail } from "./digest.ts";
+import { VERSION_ANSWER } from "../roybal-notify/approve.ts";
 
 const PID = "9e8d7c6b-5a49-4382-9716-a5b4c3d2e1f0";      // a field_projects.id (uuid)
 const PID2 = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
@@ -48,6 +49,26 @@ test("the email lane is ready only on a 200 that answers literally true", () => 
   assert.equal(laneReady(404, { code: "PGRST202" }), false, "before 0019 the RPC doesn't exist");
   assert.equal(laneReady(500, true), false);
   assert.equal(laneReady(0, null), false);
+});
+
+test("roybal-notify answers a spine YES only on a 200 whose answers list holds \"spine\"", () => {
+  const STEP5 = { ok: true, function: "roybal-notify", answers: ["text", "spine"] };
+  assert.equal(notifyAnswersSpine(200, STEP5), true);
+  assert.equal(notifyAnswersSpine(200, { answers: ["spine"] }), true, "the answers list is what counts");
+  assert.equal(notifyAnswersSpine(405, { ok: false, error: "Use POST" }), false, "the build before step 5 answers any GET 405");
+  assert.equal(notifyAnswersSpine(200, { ...STEP5, answers: ["text"] }), false);
+  assert.equal(notifyAnswersSpine(200, { ...STEP5, answers: "text,spine" }), false, "a string isn't the list");
+  assert.equal(notifyAnswersSpine(200, { ok: true, function: "roybal-notify" }), false);
+  for (const body of [null, "spine", ["spine"], true, 7]) assert.equal(notifyAnswersSpine(200, body), false, JSON.stringify(body));
+  for (const s of [0, 201, 204, 401, 404, 500, 503]) assert.equal(notifyAnswersSpine(s, STEP5), false, String(s));
+});
+
+test("the answer roybal-notify's /version sends is the one this check takes as yes", () => {
+  // the two ends of one contract, read from their own files: the body as
+  // the wire carries it (json() is JSON.stringify), parsed as the brief does
+  const wire = JSON.stringify(VERSION_ANSWER);
+  assert.equal(wire, '{"ok":true,"function":"roybal-notify","answers":["text","spine"]}');
+  assert.equal(notifyAnswersSpine(200, JSON.parse(wire)), true);
 });
 
 /* ---------- the 7-day check, both queues ---------- */
@@ -81,6 +102,46 @@ test("an invoice already asked about in either queue is held, an ignored (expire
   assert.equal(remindedKeys(null, []), null, "the pending_actions read failed");
   assert.equal(remindedKeys([], null), null, "the proposals read failed");
   assert.equal(remindedKeys({ message: "boom" }, []), null, "an error body isn't a list");
+});
+
+test("an executed spine reminder whose email died unsent is released; sent, queued, unknown or unread stays held", () => {
+  const ID = (n) => `00000000-0000-4000-8000-00000000000${n}`;
+  const ref = (id) => [{ kind: "invoice", id, label: "Invoice" }];
+  const spine = [1, 2, 3, 4, 5, 6].map((n) => ({ id: ID(n), status: "executed", evidence_refs: ref(`k:${n}`) }));
+  const outbox = [
+    { proposal_id: ID(1), status: "dead" },
+    { proposal_id: ID(2), status: "sent" },
+    { proposal_id: ID(3), status: "pending" },
+    { proposal_id: ID(4), status: "dead" }, { proposal_id: ID(4), status: "delivered" },
+    { proposal_id: ID(5), status: "failed" },
+    // ID(6): no outbox row at all
+    null, { status: "dead" },
+  ];
+  const held = (o) => [...remindedKeys([], spine, o)].sort();
+  assert.deepEqual(held(outbox), ["k:2", "k:3", "k:4", "k:5", "k:6"], "dead and never sent: offered again, as a failed old-lane send was");
+  assert.deepEqual(held(null), ["k:1", "k:2", "k:3", "k:4", "k:5", "k:6"], "the outbox read failed: everything held, as before");
+  assert.deepEqual(held(undefined), held(null), "no outbox answer passed: as before");
+  assert.deepEqual(held([]), held(null), "no outbox rows (or RLS before 0020): held");
+  assert.deepEqual(held({ message: "boom" }), held(null), "an error body isn't a list");
+  // dead is about delivery: it only releases an executed row
+  const proposed = [{ id: ID(1), status: "proposed", evidence_refs: ref("k:1") }];
+  assert.deepEqual([...remindedKeys([], proposed, [{ proposal_id: ID(1), status: "dead" }])], ["k:1"]);
+  // another of this week's asks for the invoice still holds it
+  const twice = [...spine.slice(0, 1), { id: ID(7), status: "executed", evidence_refs: ref("k:1") }];
+  assert.deepEqual([...remindedKeys([], twice, [{ proposal_id: ID(1), status: "dead" }, { proposal_id: ID(7), status: "sent" }])], ["k:1"]);
+  assert.deepEqual([...remindedKeys([], spine.slice(0, 1), [{ proposal_id: ID(1), status: "dead" }])], [], "both lists read: released");
+  assert.equal(remindedKeys(null, spine, outbox), null, "a failed queue read still holds the whole day");
+});
+
+test("the outbox read asks about the executed reminders only, by uuid, once each", () => {
+  const A = "00000000-0000-4000-8000-00000000000a", B = "00000000-0000-4000-8000-00000000000b";
+  assert.deepEqual(queuedIds([
+    { id: A, status: "executed" }, { id: A, status: "executed" }, { id: B, status: "executed" },
+    { id: "00000000-0000-4000-8000-00000000000c", status: "approved" },
+    { id: "sp-1),status.eq.(sent", status: "executed" }, { status: "executed" }, null,
+  ]), [A, B]);
+  assert.deepEqual(queuedIds([]), []);
+  assert.deepEqual(queuedIds(null), [], "the proposals read failed");
 });
 
 test("the proposals read is trusted only while the login resolves to the brief's agent, or before 0019", () => {
@@ -199,14 +260,30 @@ test("op_propose: the row back is filed; a 4xx is a definite no; a 5xx or no ans
   assert.equal(no.kind, "refused");
   assert.match(no.why, /400: 22023 op spine: email\.send@1 input/);
   for (const s of [400, 401, 404, 409]) assert.equal(filingOutcome(s, { code: "x" }).kind, "refused", String(s));
-  // not allowed: the spine identity is broken, which no other lane fixes
-  const blocked = filingOutcome(403, { code: "42501", message: "op spine: agent 1af… may not propose email.send@1" });
+  // not allowed because the login isn't an enabled agent (op_resolve_caller):
+  // the spine identity is broken, which no other lane fixes
+  const blocked = filingOutcome(403, { code: "42501",
+    message: "op spine: agent login 1af33481-7f1c-4485-87f5-7b0ec5e27554 is not linked to an enabled agents row" });
   assert.equal(blocked.kind, "blocked");
-  assert.match(blocked.why, /403: 42501 op spine: agent/);
-  assert.equal(filingOutcome(403, null).kind, "blocked", "a 403 whatever the body");
-  assert.equal(filingOutcome(401, { code: "42501", message: "permission denied" }).kind, "blocked", "42501 whatever the status");
-  assert.equal(filingOutcome(400, [{ code: "42501" }]).kind, "blocked");
+  assert.match(blocked.why, /403: 42501 op spine: agent login .* is not linked/);
+  assert.equal(filingOutcome(403, { code: "42501", message: "op spine: principal 1af… is neither an enabled agent nor a profile" }).kind, "blocked");
+  assert.equal(filingOutcome(401, { code: "42501", message: "op spine: agent login x is NOT LINKED TO AN ENABLED AGENTS ROW" }).kind, "blocked",
+    "42501 whatever the status, and whatever the case");
+  assert.equal(filingOutcome(400, [{ code: "42501", message: "op spine: agent login x is not linked to an enabled agents row" }]).kind, "blocked");
+  assert.equal(filingOutcome(500, { code: "42501", message: "op spine: agent login x is not linked to an enabled agents row" }).kind, "blocked");
+  // every other not-allowed is a definite no: a revoked or missing grant
+  // (0019's rollback) lands nothing, and the identity checked out this run
+  const revoked = filingOutcome(403, { code: "42501", message: "op spine: agent 1af… may not propose email.send@1" });
+  assert.equal(revoked.kind, "refused", "a grant revoked or never given falls back to the old lane");
+  assert.match(revoked.why, /403: 42501 op spine: agent 1af… may not propose email\.send@1/);
+  assert.equal(filingOutcome(403, null).kind, "refused", "a 403 that doesn't say the identity broke");
+  assert.equal(filingOutcome(403, { code: "42501", message: "permission denied for function op_propose" }).kind, "refused");
+  assert.equal(filingOutcome(401, { code: "42501", message: "op spine: role agent may not propose email.send@1" }).kind, "refused");
+  assert.equal(filingOutcome(400, [{ code: "42501" }]).kind, "refused");
+  assert.equal(filingOutcome(403, { code: "PGRST301", details: "not linked to an enabled agents row" }).kind, "refused",
+    "the message is what's read, not the details");
   for (const s of [500, 502, 503, 504]) assert.equal(filingOutcome(s, { code: "P0002" }).kind, "unsure", String(s));
+  assert.equal(filingOutcome(500, { code: "42501", message: "may not propose" }).kind, "unsure");
   assert.equal(filingOutcome(301, null).kind, "unsure");
   const lost = filingOutcome(0, null);
   assert.equal(lost.kind, "unsure");
@@ -271,6 +348,7 @@ export async function resolve(spec, ctx, next) {
 }`));
 
 const SB = "https://stub.supabase.test";
+const STEP5_NOTIFY = { ok: true, function: "roybal-notify", answers: ["text", "spine"] };
 const ENV = {
   SUPABASE_URL: SB, SUPABASE_ANON_KEY: "anon-key", CRON_SECRET: "cron", OWNER_CELL: "+19075551234",
   BRIEF_MACHINE_PASSWORD: "pw",
@@ -295,6 +373,7 @@ const holds = (v, f) => {
   if (v == null) return false;
   if (op === "gt") return instant(v) > instant(want);
   if (op === "gte") return instant(v) >= instant(want);
+  if (op === "in") return want.replace(/^\(|\)$/g, "").split(",").includes(String(v));
   throw new Error(`the stub can't filter ${f}`);
 };
 const pick = (list, path) => {
@@ -303,16 +382,17 @@ const pick = (list, path) => {
   return q.get("limit") ? out.slice(0, Number(q.get("limit"))) : out;
 };
 
-/** The brief's whole world: the shop it reads, both queues, the RPCs it
-    calls and roybal-notify. `w.lane` is outbox_channel_ready's answer,
-    `w.agent` current_agent_id's,
+/** The brief's whole world: the shop it reads, both queues, the outbox,
+    the RPCs it calls and roybal-notify. `w.lane` is outbox_channel_ready's
+    answer, `w.agent` current_agent_id's, `w.notify` roybal-notify's GET
+    /version (the step-5 build's answer unless a test says otherwise),
     `w.seq` the next proposals_sms_code_seq value, `w.propose` op_propose
     (a repeated key hands back the existing row whatever its status, and a
     new code skips live proposal codes and, as 0019's trigger does, pending
     ones). `over(method, path, init, w)` answers first (a Response, or an
     Error to throw); undefined falls through to the world. */
-function world({ projects = [job()], pending = [], spine = [], over = () => undefined } = {}) {
-  const w = { pending, spine, lane: true, agent: AGENT, seq: 4, calls: [], texts: [], logs: [] };
+function world({ projects = [job()], pending = [], spine = [], outbox = [], over = () => undefined } = {}) {
+  const w = { pending, spine, outbox, lane: true, agent: AGENT, notify: [200, STEP5_NOTIFY], seq: 4, calls: [], texts: [], logs: [] };
   const createdAt = new Date(NOW - 3600000).toISOString();
   w.propose = (b) => {
     const key = ["email.send", b.p_input.to.toLowerCase(), b.p_input.subject, b.p_input.body, b.p_job_id ?? "", TODAY].join(":");
@@ -357,7 +437,12 @@ function world({ projects = [job()], pending = [], spine = [], over = () => unde
     }
     // RLS (0019 proposals_read_own_agent): the brief reads only its own
     if (path.startsWith("/rest/v1/proposals?") && method === "GET") {
-      return J(pick(w.spine.filter((r) => r.proposed_by_id === AGENT), path).map(({ status, evidence_refs }) => ({ status, evidence_refs })));
+      return J(pick(w.spine.filter((r) => r.proposed_by_id === AGENT), path).map(({ id, status, evidence_refs }) => ({ id, status, evidence_refs })));
+    }
+    // RLS (0020 outbox_read_own_agent): the outbox rows of its own proposals
+    if (path.startsWith("/rest/v1/outbox?") && method === "GET") {
+      const own = new Set(w.spine.filter((r) => r.proposed_by_id === AGENT).map((r) => r.id));
+      return J(pick(w.outbox.filter((o) => own.has(o.proposal_id)), path).map(({ proposal_id, status }) => ({ proposal_id, status })));
     }
     if (path === "/rest/v1/rpc/outbox_channel_ready") return J(w.lane);
     if (path === "/rest/v1/rpc/current_agent_id") return J(w.agent);
@@ -367,6 +452,7 @@ function world({ projects = [job()], pending = [], spine = [], over = () => unde
       return J([...new Set(codes)].sort((a, b) => a - b));
     }
     if (path === "/rest/v1/rpc/op_propose") return w.propose(JSON.parse(init.body));
+    if (path === "/functions/v1/roybal-notify/version" && method === "GET") return J(w.notify[1], w.notify[0]);
     if (path === "/functions/v1/roybal-notify") {
       w.texts.push(JSON.parse(init.body));
       return J({ ok: true });
@@ -377,10 +463,11 @@ function world({ projects = [job()], pending = [], spine = [], over = () => unde
   return w;
 }
 
-/** One morning: the cron's POST, with the handler's log lines caught. */
-async function morning(t, w, lane) {
+/** One morning: the cron's POST, with the handler's log lines caught.
+    `apis` adds mocked timers (setTimeout, for the 5-second probe limit). */
+async function morning(t, w, lane, apis = ["Date"]) {
   if (lane === undefined) delete ENV.REMINDERS_LANE; else ENV.REMINDERS_LANE = lane;
-  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  t.mock.timers.enable({ apis, now: NOW });
   const keep = [console.log, console.error];
   console.log = console.error = (...a) => { w.logs.push(a.join(" ")); };
   try {
@@ -420,6 +507,12 @@ test("the default lane, email live: one email.send proposal, its own YES number 
   assert.deepEqual(inserted(w), [], "nothing on the old lane");
   assert.match(text, /💬 Reply YES 4 — email the INV-4 reminder to Jeff Hebard$/m, "the YES line format is unchanged");
   assert.equal(called(w, "/rest/v1/rpc/outbox_channel_ready")[0].body, JSON.stringify({ p_channel: "email" }));
+  const probe = called(w, "/functions/v1/roybal-notify/version");
+  assert.equal(probe.length, 1, "roybal-notify is asked once, before the filing");
+  assert.equal(probe[0].method, "GET");
+  assert.equal(probe[0].auth, undefined, "no login needed: it deploys with --no-verify-jwt");
+  assert.ok(w.calls.indexOf(probe[0]) < w.calls.indexOf(filed[0]));
+  assert.deepEqual(w.calls.filter((c) => c.path.startsWith("/rest/v1/outbox")), [], "no executed reminder: no outbox read");
   // the next morning (same Alaska day, a rerun) the 7-day check sees the spine row
   const again = world({ spine: w.spine });
   const text2 = await morning(t, again, undefined);
@@ -432,6 +525,7 @@ test("REMINDERS_LANE=text: the old row exactly as before — and the 7-day check
   const w = world({ pending: [{ code: 11, kind: "boardEdit", status: "pending", proposed_by: "qb-time", label: "add phase" }] });
   const text = await morning(t, w, "text");
   assert.deepEqual(called(w, "/rest/v1/rpc/outbox_channel_ready"), [], "the switch skips the spine entirely");
+  assert.deepEqual(called(w, "/functions/v1/roybal-notify/version"), []);
   assert.deepEqual(called(w, "/rest/v1/rpc/op_propose"), []);
   const post = called(w, "/rest/v1/pending_actions");
   assert.equal(post.length, 1);
@@ -464,8 +558,42 @@ test("the email lane not live (false, or no RPC before 0019, or an error): the o
     const w = world({ over: (m, p, _i, wo) => (p === "/rest/v1/rpc/outbox_channel_ready" ? answer(wo) : undefined) });
     const text = await morning(t, w, "spine");
     assert.deepEqual(called(w, "/rest/v1/rpc/op_propose"), []);
+    assert.deepEqual(called(w, "/functions/v1/roybal-notify/version"), [], "no lane, no need to ask roybal-notify");
     assert.equal(called(w, "/rest/v1/pending_actions")[0].body, OLD_ROW(11));
     assert.match(text, /💬 Reply YES 11 — email the INV-4 reminder to Jeff Hebard/);
+  }
+});
+
+test("roybal-notify not on the step-5 build (405, no spine, an error, no answer in 5 s): that run's reminders all take the old lane", async (t) => {
+  const projects = [job(), job({ id: PID2, customer: "Swift", email: "swift@example.com",
+    invoices: [inv({ invoiceNo: "INV-9", dueDate: "2026-10-03" })] })];
+  const VERSION = "/functions/v1/roybal-notify/version";
+  const answers = [
+    [(wo) => { wo.notify = [405, { ok: false, error: "Use POST" }]; }, /answered 405 \{"ok":false,"error":"Use POST"\}/],
+    [(wo) => { wo.notify = [200, { ...STEP5_NOTIFY, answers: ["text"] }]; }, /answered 200/],
+    [(wo) => { wo.notify = [404, { code: "NOT_FOUND", message: "Requested function was not found" }]; }, /answered 404/],
+    [() => new Error("network down"), /probe failed: network down/],
+    // hangs until the brief gives up: not at 4999 ms, at 5000
+    [(wo, init) => new Promise((_, reject) => {
+      init.signal.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError")));
+      t.mock.timers.tick(4999);
+      wo.abortedEarly = init.signal.aborted;
+      t.mock.timers.tick(1);
+    }), /no answer in 5 s/],
+  ];
+  for (const [answer, why] of answers) {
+    const w = world({ projects, over: (m, p, init, wo) => (p === VERSION ? answer(wo, init) : undefined) });
+    const text = await morning(t, w, undefined, ["Date", "setTimeout"]);
+    assert.equal(called(w, VERSION).length, 1, "once a run, not once a reminder");
+    if ("abortedEarly" in w) assert.equal(w.abortedEarly, false, "the limit is five seconds, not less");
+    assert.deepEqual(called(w, "/rest/v1/rpc/op_propose"), [], "no spine YES number while notify can't answer it");
+    assert.deepEqual(inserted(w).map((r) => r.code), [11, 12]);
+    assert.equal(JSON.stringify([inserted(w)[0]]), OLD_ROW(11));
+    assert.match(text, /💬 Reply YES 11 — email the INV-4 reminder to Jeff Hebard\n💬 Reply YES 12 — email the INV-9 reminder to Swift/);
+    const said = w.logs.filter((l) => /roybal-notify/.test(l));
+    assert.equal(said.length, 1, `one log line: ${said.join(" | ")}`);
+    assert.match(said[0], /^reminders: roybal-notify doesn't answer a YES on the spine yet \(its \/version .*\); they take the old lane$/);
+    assert.match(said[0], why);
   }
 });
 
@@ -483,13 +611,12 @@ test("op_propose refusing with a 4xx files the old row instead", async (t) => {
   }
 });
 
-test("op_propose answering not allowed (42501): no more reminders that day, on either lane", async (t) => {
+test("op_propose saying the login isn't an enabled agent (42501): no more reminders that day, on either lane", async (t) => {
   const projects = [job(), job({ id: PID2, customer: "Swift", email: "swift@example.com",
     invoices: [inv({ invoiceNo: "INV-9", dueDate: "2026-10-03" })] })];
   for (const no of [
     () => pg("42501", "op spine: agent login 1af33481-7f1c-4485-87f5-7b0ec5e27554 is not linked to an enabled agents row", 403),
-    () => pg("42501", "op spine: agent 1af33481-7f1c-4485-87f5-7b0ec5e27554 may not propose email.send@1", 403),
-    () => new Response("forbidden", { status: 403 }),
+    () => pg("42501", "op spine: principal 1af33481-7f1c-4485-87f5-7b0ec5e27554 is neither an enabled agent nor a profile", 403),
   ]) {
     const w = world({ projects, over: (m, p) => (p === "/rest/v1/rpc/op_propose" ? no() : undefined) });
     const text = await morning(t, w, undefined);
@@ -501,11 +628,32 @@ test("op_propose answering not allowed (42501): no more reminders that day, on e
 
   // a reminder filed before the refusal keeps its line
   const u = world({ projects, over: (m, p, init) =>
-    (p === "/rest/v1/rpc/op_propose" && JSON.parse(init.body).p_job_id === PID2 ? pg("42501", "not allowed", 403) : undefined) });
+    (p === "/rest/v1/rpc/op_propose" && JSON.parse(init.body).p_job_id === PID2
+      ? pg("42501", "op spine: agent login x is not linked to an enabled agents row", 403) : undefined) });
   const text = await morning(t, u, undefined);
   assert.equal(called(u, "/rest/v1/rpc/op_propose").length, 2);
   assert.deepEqual(inserted(u), []);
   assert.match(text, /💬 Reply YES 4 — email the INV-4 reminder to Jeff Hebard$/);
+});
+
+test("op_propose refusing the grant (revoked, 0019's rollback, or never given): the old lane takes every reminder", async (t) => {
+  const projects = [job(), job({ id: PID2, customer: "Swift", email: "swift@example.com",
+    invoices: [inv({ invoiceNo: "INV-9", dueDate: "2026-10-03" })] })];
+  for (const no of [
+    () => pg("42501", "op spine: agent 1af33481-7f1c-4485-87f5-7b0ec5e27554 may not propose email.send@1", 403),
+    () => new Response("forbidden", { status: 403 }),
+  ]) {
+    // current_agent_id still answers agent:brief after a revoke: the 7-day
+    // check is sound, and only the spine said no
+    const w = world({ projects, over: (m, p) => (p === "/rest/v1/rpc/op_propose" ? no() : undefined) });
+    const text = await morning(t, w, undefined);
+    assert.equal(called(w, "/rest/v1/rpc/op_propose").length, 2, "each reminder asks the spine, then falls back");
+    assert.deepEqual(inserted(w).map((r) => [r.code, r.params.invoiceKey]), [[11, KEY], [12, `${PID2}:INV-9`]]);
+    assert.equal(JSON.stringify([inserted(w)[0]]), OLD_ROW(11), "the old row exactly as before");
+    assert.match(text, /💬 Reply YES 11 — email the INV-4 reminder to Jeff Hebard\n💬 Reply YES 12 — email the INV-9 reminder to Swift/);
+    assert.ok(w.logs.some((l) => /reminder .*:INV-4 takes the old lane: op_propose answered 403/.test(l)), w.logs.join(" | "));
+    assert.ok(!w.logs.some((l) => /reminders stop for today/.test(l)));
+  }
 });
 
 test("the login no longer resolving to agent:brief: no reminder at all that day, in every lane state", async (t) => {
@@ -606,6 +754,57 @@ test("held in either queue this week: not asked again; declined or failed: asked
   });
   await morning(t, u, undefined);
   assert.equal(called(u, "/rest/v1/rpc/op_propose").length, 1);
+});
+
+test("a spine reminder whose email died unsent is offered again; sent, still queued, unread or before 0020: held", async (t) => {
+  // approved two days ago (executed = queued); the worker then gave it up
+  const SPID = "5d1e0a77-2c3b-4f4e-9a8b-7c6d5e4f3a2b";
+  const asked = () => [{ id: SPID, status: "executed", proposed_by_id: AGENT, sms_code: 3,
+    evidence_refs: [{ kind: "invoice", id: KEY }], created_at: new Date(NOW - 2 * 86400000).toISOString() }];
+  const OUTBOX_READ = `/rest/v1/outbox?proposal_id=in.(${SPID})&select=proposal_id,status&limit=200`;
+
+  const w = world({ spine: asked(), outbox: [{ proposal_id: SPID, status: "dead" }] });
+  const text = await morning(t, w, undefined);
+  assert.equal(called(w, OUTBOX_READ).length, 1, "the executed reminder's outbox rows, by id");
+  assert.equal(called(w, OUTBOX_READ)[0].auth, "Bearer brief-jwt", "as agent:brief (0020), never a service key");
+  assert.equal(called(w, "/rest/v1/rpc/op_propose").length, 1, "offered again, as a failed old-lane send was");
+  assert.match(text, /💬 Reply YES 4 — email the INV-4 reminder to Jeff Hebard$/m);
+
+  // the old lane offers it again too: the check is the same in every lane state
+  const v = world({ spine: asked(), outbox: [{ proposal_id: SPID, status: "dead" }] });
+  await morning(t, v, "text");
+  assert.equal(called(v, OUTBOX_READ).length, 1);
+  assert.equal(called(v, "/rest/v1/pending_actions")[0].body, OLD_ROW(11));
+
+  for (const [outbox, what] of [
+    [[{ proposal_id: SPID, status: "sent" }], "it went out"],
+    [[{ proposal_id: SPID, status: "delivered" }], "it went out"],
+    [[{ proposal_id: SPID, status: "pending" }], "still queued"],
+    [[{ proposal_id: SPID, status: "failed" }], "the worker is still trying"],
+    [[], "no outbox row (RLS before 0020)"],
+  ]) {
+    const u = world({ spine: asked(), outbox });
+    const textU = await morning(t, u, undefined);
+    assert.equal(called(u, OUTBOX_READ).length, 1, what);
+    assert.deepEqual(called(u, "/rest/v1/rpc/op_propose"), [], what);
+    assert.deepEqual(inserted(u), [], what);
+    assert.doesNotMatch(textU, /Reply YES/, what);
+  }
+
+  // the outbox read failing holds the queued one and stops nothing else
+  const projects = [job(), job({ id: PID2, customer: "Swift", email: "swift@example.com",
+    invoices: [inv({ invoiceNo: "INV-9", dueDate: "2026-10-03" })] })];
+  for (const fail of [() => pg("XX000", "boom", 500), () => new Error("connection reset")]) {
+    const x = world({ projects, spine: asked(), outbox: [{ proposal_id: SPID, status: "dead" }],
+      over: (m, p) => (p.startsWith("/rest/v1/outbox?") ? fail() : undefined) });
+    const textX = await morning(t, x, undefined);
+    const filed = called(x, "/rest/v1/rpc/op_propose").map((c) => JSON.parse(c.body).p_job_id);
+    assert.deepEqual(filed, [PID2], "INV-4 stays held; INV-9 is still offered");
+    assert.match(textX, /💬 Reply YES 4 — email the INV-9 reminder to Swift$/m);
+    assert.doesNotMatch(textX, /INV-4 reminder/);
+    assert.ok(x.logs.some((l) => /the outbox read failed, so every queued reminder stays held/.test(l)), x.logs.join(" | "));
+    assert.ok(!x.logs.some((l) => /proposals skipped/.test(l)), "the day's reminders go on");
+  }
 });
 
 test("op_propose handing back a decided row for a repeated key: no YES line, and no old row either", async (t) => {

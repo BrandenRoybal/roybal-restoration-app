@@ -249,7 +249,8 @@ test("the router names both actions", () => {
    `over(method, path, init, w)` answers first (a Response, or an Error to
    throw); undefined falls through to the world.
    The spine half (step 5): `w.spine` holds public.proposals rows, read
-   with their filters, order and limit honoured; `w.approve` / `w.decline`
+   with their filters, select, order and limit honoured (a column the
+   read doesn't ask for isn't there); `w.approve` / `w.decline`
    are op_proposal_approve / op_proposal_decline in the order the SQL runs
    them (approving twice returns the row; an email.send approval writes one
    outbox row, keyed, and ends executed); `w.outbox`, the owner profiles,
@@ -294,6 +295,7 @@ const spineRow = (o = {}) => ({
   id: SP, sms_code: 4, operation: "email.send@1", status: "proposed",
   input: { to: "hebard@example.com", subject: "Payment reminder — invoice INV-4 (Hebard)", body: "…" },
   edited_params: null, rationale: SP_LABEL, job_id: "9e8d7c6b-5a49-4382-9716-a5b4c3d2e1f0",
+  proposed_via: "cron",                                    // the brief's reminder, which it texted
   expires_at: "2999-01-01T00:00:00Z", created_at: "2026-10-06T16:00:00Z", updated_at: new Date().toISOString(),
   approved_by_kind: null, approved_by_ref: null, approved_via: null, approved_at: null,
   decline_reason: null, result: null, error: null, ...o,
@@ -325,6 +327,11 @@ const pick = (list, path) => {
     out = [...out].sort((x, y) => (instant(x[col]) < instant(y[col]) ? -1 : 1) * (dir === "desc" ? -1 : 1));
   }
   return q.get("limit") ? out.slice(0, Number(q.get("limit"))) : out;
+};
+/** PostgREST's select: only the columns asked for come back. */
+const only = (path, r) => {
+  const sel = new URLSearchParams(path.split("?")[1] || "").get("select");
+  return !sel || sel === "*" ? { ...r } : Object.fromEntries(sel.split(",").filter((c) => c in r).map((c) => [c, r[c]]));
 };
 
 function world(kind, over = () => undefined) {
@@ -384,7 +391,7 @@ function world(kind, over = () => undefined) {
     if (o instanceof Error) throw o;
     if (o) return o;
     if (path === "/rest/v1/rpc/role_is") return J(init.headers.Authorization === "Bearer owner-jwt");
-    if (path.startsWith("/rest/v1/proposals?") && method === "GET") return J(pick(w.spine, path).map((r) => ({ ...r })));
+    if (path.startsWith("/rest/v1/proposals?") && method === "GET") return J(pick(w.spine, path).map((r) => only(path, r)));
     if (path === "/rest/v1/rpc/op_proposal_approve") {
       const b = JSON.parse(init.body);
       return w.approve(b.p_proposal_id, b.p_via, b.p_principal_id);
@@ -910,12 +917,19 @@ test("a YES racing an inbox tap: the tap's approval stands, the text says so, on
   assert.deepEqual(replies(w), [ALREADY]);
   assert.equal(w.spine[0].approved_via, "inbox", "the row comes back approved_via inbox");
   assert.equal(w.outbox.length, 1);
-  assert.equal(reached(w, "outbox_channel_ready"), false, "the lane only words this text's own approval");
+  assert.equal(rpcCalls(w, "outbox_channel_ready").length, 1, "an email still waiting asks whether the worker is sending");
+
+  // ...and with email sending off on the worker, it never promises it goes out
+  const off = spineWorld(tapFirst((w) => { w.lane = false; }));
+  await text("YES 4");
+  assert.deepEqual(replies(off), [`That one was already approved — ${SP_LABEL}. It's queued, but email sending is off on the worker: ` +
+    "it waits up to 48 hours for that to come back, then it isn't sent."]);
 
   // the worker had already sent it
   const v = spineWorld(tapFirst((w) => { w.outbox[0].status = "delivered"; }));
   await text("YES 4");
   assert.deepEqual(replies(v), [WENT]);
+  assert.equal(reached(v, "outbox_channel_ready"), false, "one that went out needs no lane");
 
   // an outbox read that fails never claims it went
   const u = spineWorld((m, p, i, w) => {
@@ -1043,7 +1057,7 @@ test("a bare YES or NO acts only when exactly one ask is live across both queues
   assert.equal(reached(w, "/rpc/op_"), false);
   assert.equal(reached(w, "gmail-proxy"), false);
 
-  // one spine ask alone: a bare YES is its answer
+  // the brief's spine ask alone (it texted it: proposed_via cron): a bare YES is its answer
   const s = spineWorld();
   await text("ok");
   assert.deepEqual(replies(s), [APPROVED]);
@@ -1052,6 +1066,93 @@ test("a bare YES or NO acts only when exactly one ask is live across both queues
   await text("YES");
   assert.deepEqual(replies(t), ["✅ Done — email the INV-4 reminder to Hebard."]);
   assert.equal(reached(t, "/rpc/op_"), false);
+});
+
+/** The job page's adjuster email: filed from the narrative panel (proposed_via
+    'ui'), offered there with its number, never by text. */
+const ADJ_LABEL = "Claim documentation email to the adjuster for claim CLM-77 — Hebard";
+const adjusterRow = { proposed_via: "ui", rationale: ADJ_LABEL, input: { to: "kelly@carrier.example", subject: "Claim CLM-77", body: "…" } };
+const NEEDS_NUMBER = `Reply YES 4 to approve "${ADJ_LABEL}" (or NO 4).`;
+
+test("a bare YES or NO never approves or declines a spine ask no text offered: it names the ask and its number", async () => {
+  for (const said of ["YES", "ok", "y", "no", "STOP"]) {
+    const w = spineWorld(undefined, adjusterRow);
+    await text(said);
+    assert.deepEqual(replies(w), [NEEDS_NUMBER], said);
+    assert.equal(w.spine[0].status, "proposed", said);
+    assert.equal(reached(w, "/rpc/op_"), false, `${said}: no op_* door opens`);
+    assert.equal(w.outbox.length, 0, `${said}: nothing queued`);
+    assert.equal(reached(w, "roybal-ai-office"), false, `${said}: an answer, never a question`);
+  }
+  // the live read asks for proposed_via, the column the rule turns on
+  const w = spineWorld(undefined, adjusterRow);
+  await text("YES");
+  const live = w.calls.find((c) => c.path.startsWith("/rest/v1/proposals?status=eq.proposed"));
+  assert.ok(new URLSearchParams(live.path.split("?")[1]).get("select").split(",").includes("proposed_via"));
+  // its number approves it, as the panel says
+  await text("YES 4");
+  assert.deepEqual(replies(w), [NEEDS_NUMBER, `✅ Approved — ${ADJ_LABEL}. It's queued and goes out in a minute.`]);
+  assert.deepEqual([w.spine[0].status, w.spine[0].approved_via], ["executed", "sms"]);
+  assert.equal(w.outbox.length, 1);
+  // and NO n declines it
+  const d = spineWorld(undefined, adjusterRow);
+  await text("NO 4");
+  assert.deepEqual(replies(d), [`👍 Cancelled — ${ADJ_LABEL}.`]);
+  assert.equal(d.spine[0].status, "declined");
+});
+
+test("a bare YES beside a screen-only spine ask is the texted ask's: a text-lane row, or the brief's reminder", async () => {
+  // a live text-lane ask and the adjuster email: the bare YES runs the text-lane ask, as before step 5
+  const w = world("emailSend");
+  w.spine.push(spineRow(adjusterRow));
+  await text("YES");
+  assert.deepEqual(replies(w), ["✅ Done — email the INV-4 reminder to Hebard."]);
+  assert.equal(w.row.status, "executed");
+  assert.equal(w.spine[0].status, "proposed", "the adjuster email still waits for its number");
+  assert.equal(reached(w, "/rpc/op_"), false);
+  assert.equal(w.outbox.length, 0);
+
+  // the brief's reminder (cron) alone: a bare YES approves it
+  const c = spineWorld();
+  await text("YES");
+  assert.deepEqual(replies(c), [APPROVED]);
+  assert.equal(c.spine[0].approved_via, "sms");
+
+  // the brief's reminder beside the adjuster email: the reminder's
+  const b = spineWorld();
+  b.spine.push(spineRow({ ...adjusterRow, id: "c0ffee00-1111-4222-8333-444455557777", sms_code: 6 }));
+  await text("ok");
+  assert.deepEqual(replies(b), [APPROVED]);
+  assert.deepEqual(b.spine.map((r) => r.status), ["executed", "proposed"]);
+  assert.equal(b.outbox.length, 1);
+
+  // two screen-only asks and nothing texted: the number, whichever it is
+  const two = spineWorld(undefined, adjusterRow);
+  two.spine.push(spineRow({ ...adjusterRow, id: "c0ffee00-1111-4222-8333-444455557777", sms_code: 6 }));
+  await text("YES");
+  assert.deepEqual(replies(two), ["More than one action is waiting — reply YES with its number (e.g. YES 12)."]);
+  assert.equal(reached(two, "/rpc/op_"), false);
+});
+
+test("GET /version answers the step-5 contract with no key and reads nothing; every other GET is still 405", async () => {
+  for (const tail of ["/version", "/version/"]) {
+    const w = world("emailSend");
+    const r = await hushed(new Request(`${SB}/functions/v1/roybal-notify${tail}`, { method: "GET" }));
+    assert.equal(r.status, 200, tail);
+    assert.equal(await r.text(), '{"ok":true,"function":"roybal-notify","answers":["text","spine"]}', tail);
+    assert.equal(r.headers.get("Content-Type"), "application/json");
+    assert.equal(r.headers.get("Access-Control-Allow-Origin"), "*");
+    assert.deepEqual(w.calls, [], `${tail}: no read, no write, no text`);
+  }
+  for (const tail of ["", "/", "/inbound", "/status", "/versions", "/version/x"]) {
+    const w = world("emailSend");
+    const r = await hushed(new Request(`${SB}/functions/v1/roybal-notify${tail}`, { method: "GET" }));
+    assert.deepEqual([r.status, await r.json()], [405, { ok: false, error: "Use POST" }], tail || "(root)");
+    assert.deepEqual(w.calls, []);
+  }
+  // the preflight is today's
+  const o = await hushed(new Request(`${SB}/functions/v1/roybal-notify/version`, { method: "OPTIONS" }));
+  assert.deepEqual([o.status, await o.text(), o.headers.get("Access-Control-Allow-Methods")], [200, "ok", "POST, OPTIONS"]);
 });
 
 test("an expired spine row is never approved, and the text says it expired", async () => {

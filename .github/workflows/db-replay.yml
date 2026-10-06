@@ -44,13 +44,14 @@ env:
   EXPECT_TABLES: 70   # +9: the contract tables (migration 0004); +1: magicplan_exports (0010);
                       # +2: xact_ref_prices and xact_ref_lines (0011); +1: job_receipts (0015);
                       # +1: worker_heartbeats (0016); +2: receipt_vendors and receipt_return_reviews (0018)
-  EXPECT_POLICIES: 132   # +12: read-only policies on the contract tables (0004);
+  EXPECT_POLICIES: 133   # +12: read-only policies on the contract tables (0004);
                          # +1: magicplan_exports owner/office read (0010);
                          # +0: the xact_ref_* tables have none on purpose (0011);
                          # +1: job_receipts owner/office read (0015);
                          # +1: worker_heartbeats owner/office read (0016);
                          # +2: receipt_vendors and receipt_return_reviews owner/office read (0018);
-                         # +1: proposals_read_own_agent, an agent login reads the proposals it filed (0019)
+                         # +1: proposals_read_own_agent, an agent login reads the proposals it filed (0019);
+                         # +1: outbox_read_own_agent, an agent login reads the outbox rows of those proposals (0020)
   EXPECT_TRIGGERS: 45   # +10: 6 touch_updated_at, the proposals input guard, and the three
                         #      append-only guards on events (0004); +1: project_job_receipts
                         #      on field_projects (0015); +1: proposals_sms_code_skip_text, a new

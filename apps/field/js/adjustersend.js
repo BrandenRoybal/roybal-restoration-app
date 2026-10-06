@@ -10,7 +10,12 @@
    "Approve and send" / "Decline" right there. The same ask waits in
    the office Approvals tab and answers "YES n" by text; whichever
    door he uses first counts, and the spine sends it once (the
-   proposal's row lock, the outbox idempotency key).
+   proposal's row lock, the outbox idempotency key). Any answer that
+   comes back approved (this tap, another door first, or the same
+   email filed and approved earlier) reads that email's outbox row
+   before saying where it stands: it went out, it couldn't be sent
+   (the worker gave up on it), or it's on its way, with the email
+   lane saying whether that wait can run out.
 
    A crew login, the owner while the lane is off, and any check that
    fails or doesn't answer all get the panel exactly as it was: Copy
@@ -207,10 +212,48 @@ export function answerOf(status, body) {
 }
 /* "op spine: proposal <id> is declined; only a proposed row…" → "declined" */
 const answeredAs = (message) => (str(message).match(/\bis (approved|executing|executed|failed|declined|superseded)\b/) || [])[1] || "";
+const APPROVED = ["approved", "executing", "executed"];
 
-/** A refusal → its sentence. action: "file" | "approve" | "decline". */
-export function refusal(action, ans) {
+/* ---------- what became of an approved email ----------
+   The worker marks an email it gave up on dead (a permanent Gmail
+   refusal, too many tries, or past EMAIL_MAX_AGE_HOURS, 48), so a line
+   about an approved email says it went, or that it goes out, only
+   from its outbox row and the lane, in the YES reply's words
+   (roybal-notify's approve.ts says the same by text). */
+/** outbox.error as the line quotes it: trimmed, 160 characters, its
+    closing period dropped (the sentence adds its own); nothing there =
+    "it gave up". roybal-notify's replies quote it the same way. */
+const deadReason = (e) => Array.from(str(e)).slice(0, 160).join("").trim().replace(/\.+$/, "").trim() || "it gave up";
+/** outbox rows for one proposal ({status, error}) → { state: "sent" } (sent
+    or delivered), { state: "dead", error } (the worker gave up on it for
+    good), else { state: "waiting" }: pending, sending, failed and still
+    retrying, no row yet, or a read that failed, so a blip never says it
+    went. Read the way roybal-notify's outboxState reads them. */
+export function outboxState(rows) {
+  const list = arr(rows).map(obj);
+  if (list.some((r) => r.status === "sent" || r.status === "delivered")) return { state: "sent" };
+  const dead = list.find((r) => r.status === "dead");
+  return dead ? { state: "dead", error: deadReason(dead.error) } : { state: "waiting" };
+}
+const LANE_OFF = "It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.";
+export const deadLine = (outbox) => `That one was approved, but the email couldn't be sent: ${obj(outbox).error || "it gave up"}. Nothing went out.`;
+/* the sentence after "…already approved". `lane` is what
+   outbox_channel_ready('email') said: true, false, or null when it couldn't */
+const goesOut = (outbox, lane) => obj(outbox).state === "sent" ? "It went out once." : lane === false ? LANE_OFF : "It goes out once.";
+/** An email approved before this tap, as its outbox state and the lane say
+    it stands. `by`: "by text", "in the Approvals tab", or "" when the
+    answer doesn't say which door. */
+export function elsewhereLine(by, outbox, lane) {
+  if (obj(outbox).state === "dead") return deadLine(outbox);
+  return `That one was already approved${by ? " " + by : ""}. ${goesOut(outbox, lane)}`;
+}
+
+/** A refusal → its sentence. action: "file" | "approve" | "decline".
+    `after` ({outbox, lane}): for a decline that found the email approved
+    elsewhere first, what its outbox row and the lane say. */
+export function refusal(action, ans, after = {}) {
   const a = obj(ans);
+  const then = obj(after);
   const m = a.message ? ": " + a.message.replace(/\.$/, "") : "";
   const was = answeredAs(a.message);
   if (a.why === "signedout") return SIGNED_OUT;
@@ -234,7 +277,7 @@ export function refusal(action, ans) {
   if (a.why === "answered") {
     if (was === "declined" || was === "superseded") return "That one was declined — nothing was sent.";
     if (action === "decline" && was === "failed") return "That one was approved, but it didn't run. Nothing was cancelled.";
-    if (action === "decline" && was) return "That one was already approved — it goes out once.";
+    if (action === "decline" && APPROVED.includes(was)) return elsewhereLine("", then.outbox, then.lane);
     return action === "decline" ? "That one was already answered — nothing was cancelled." : "That one was already answered. Check the Approvals tab.";
   }
   if (a.why === "retired") return "This kind of ask was retired before you answered it. Decline it; nothing was sent.";
@@ -280,27 +323,47 @@ export function doorsLine(row) {
   const yes = r.status === "proposed" && Number.isInteger(code) && code > 0 ? `, or text YES ${code}` : "";
   return `or approve it from the Approvals tab${yes}`;
 }
+/** The door that approved a row before this tap, as a line names it: "by
+    text", "in the Approvals tab", or "" (this panel's own "chip", or a door
+    no line names). */
+export function approvedBy(row) {
+  const via = obj(row).approved_via;
+  return via === "sms" ? "by text" : via === "inbox" ? "in the Approvals tab" : "";
+}
 /** After Approve. `lane` is outbox_channel_ready('email') read just after:
-    true, false, or null when it couldn't say. A row someone answered first
-    by text or in the inbox comes back as it was (approving twice is
-    approving once) and says so. The worker marks an email that waited
-    past EMAIL_MAX_AGE_HOURS (48) dead rather than send it late, so the
-    lane-off line never promises an open-ended wait (the YES reply's words). */
-export function approvedLine(row, lane) {
+    true, false, or null when it couldn't say; `outbox` is the email's outbox
+    state (outboxState) read beside it. A row someone answered first by text
+    or in the inbox comes back as it was (approving twice is approving once)
+    and says so, and how its email stands. An outbox row that already went
+    out, or died, was approved before this tap too, whichever door (another
+    phone's panel), and says that. A read that failed is "waiting": the lane
+    decides the words, and it never says it went. The worker marks an email
+    that waited past EMAIL_MAX_AGE_HOURS (48) dead rather than send it late,
+    so no lane-off line promises an open-ended wait (the YES reply's words). */
+export function approvedLine(row, lane, outbox = null) {
   const r = obj(row);
   if (r.status === "failed") return `⚠️ Approved, but it didn't run: ${str(r.error) || "no reason given"}`;
-  const by = r.approved_via === "sms" ? "by text" : r.approved_via === "inbox" ? "in the Approvals tab" : "";
-  if (by) return `That one was already approved ${by} — it goes out once.`;
+  const by = approvedBy(r);
+  if (by) return elsewhereLine(by, outbox, lane);
+  const o = obj(outbox);
+  if (o.state === "dead") return deadLine(o);
   const to = toOf(r);
+  if (o.state === "sent") return `✅ Approved — the email to ${to}. It went out once.`;
   if (lane === true) return `✅ Approved — the email to ${to} is queued and goes out in a minute.`;
-  if (lane === false) return `✅ Approved — the email to ${to}. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.`;
+  if (lane === false) return `✅ Approved — the email to ${to}. ${LANE_OFF}`;
   return `✅ Approved — the email to ${to} is queued to send.`;
 }
 /** op_propose handed back a row that isn't waiting: the same email (same
-    address, subject and body, same Alaska day) was filed before and answered. */
-export function filedNote(row, now = Date.now()) {
+    address, subject and body, same Alaska day) was filed before and answered.
+    `after` ({outbox, lane}) for one approved then: what its outbox row and
+    the lane say, as approvedLine reads them. */
+export function filedNote(row, now = Date.now(), after = {}) {
   const st = rowState(row, now);
-  if (st === "approved") return "This exact email was already approved — it goes out once.";
+  const { outbox, lane } = obj(after);
+  if (st === "approved" && obj(outbox).state === "dead") {
+    return `This exact email was approved earlier, but it couldn't be sent: ${obj(outbox).error || "it gave up"}. Nothing went out. Change it to ask again.`;
+  }
+  if (st === "approved") return `This exact email was already approved. ${goesOut(outbox, lane)}`;
   if (st === "declined") return "This exact email was declined earlier today, so it wasn't filed again. Change it to ask again.";
   if (st === "expired") return "This exact email expired unanswered, so it wasn't filed again. Change it to ask again.";
   if (st === "failed") return `This exact email was approved earlier, but it didn't run: ${str(obj(row).error) || "no reason given"}. Change it to ask again.`;
@@ -339,6 +402,15 @@ export async function emailLane() {
     const v = await res.json().catch(() => null);
     return v === true ? true : v === false ? false : null;
   } catch { return null; }
+}
+/** What became of an approved email: its newest outbox row (the owner reads
+    every one, outbox_read_office), as outboxState reads it. Never throws; a
+    read that failed is "waiting", which never says it went. */
+export async function outboxOf(id) {
+  try {
+    const res = await rest(`outbox?proposal_id=eq.${encodeURIComponent(str(id))}&select=status,error&order=created_at.desc&limit=1`, { method: "GET" });
+    return outboxState(res.ok ? await res.json().catch(() => null) : null);
+  } catch { return outboxState(null); }
 }
 async function jobInbound(jobId) {
   const res = await rest(`email_messages?job_id=eq.${encodeURIComponent(jobId)}&direction=eq.in&order=received_at.desc&limit=20` +
@@ -414,8 +486,14 @@ export function sendSection({ project, subj, bodyTa, setup, links }) {
     actions.replaceChildren(approveBtn, declineBtn, h("span", { class: "subtle", style: "font-size:12px;margin:0" }, doorsLine(r)));
   };
   const done = (text) => { lock(true); say(note, text); actions.replaceChildren(); };
-  /* a row that came back answered: approved stays locked, anything else unlocks */
-  const settled = (r, text) => (rowState(r) === "approved" ? done(text) : compose(text));
+  /* a row that came back answered: approved stays locked, anything else
+     unlocks, and so does an approved email that couldn't be sent (`after`:
+     its {outbox, lane}), so he can change it and ask again */
+  const settled = (r, text, after = {}) =>
+    (rowState(r) === "approved" && obj(obj(after).outbox).state !== "dead" ? done(text) : compose(text));
+  /* an approved email: its outbox row and the lane, read side by side for
+     the line that says where it stands (neither read throws) */
+  const delivery = async (id) => { const [outbox, lane] = await Promise.all([outboxOf(id), emailLane()]); return { outbox, lane }; };
   const working = (btn, on) => {
     for (const b of [sendBtn, approveBtn, declineBtn]) b.disabled = on;
     if (on) { btn.dataset.label = btn.textContent; btn.textContent = "Working…"; }
@@ -441,7 +519,8 @@ export function sendSection({ project, subj, bodyTa, setup, links }) {
       const ans = await fileAsk(proposeBody({ project, to: chk.to, subject, body, links }));
       if (!ans.ok) { compose(); return say(err, refusal("file", ans)); }
       if (rowState(ans.row) === "waiting") return waiting(ans.row);
-      settled(ans.row, filedNote(ans.row));
+      const after = rowState(ans.row) === "approved" ? await delivery(ans.row.id) : {};
+      settled(ans.row, filedNote(ans.row, Date.now(), after), after);
     } finally { busy = false; working(sendBtn, false); }
   });
 
@@ -451,11 +530,13 @@ export function sendSection({ project, subj, bodyTa, setup, links }) {
     if (!confirm(approveConfirm(toOf(row)))) return;
     busy = true; working(approveBtn, true);
     const ans = await approveAsk(row.id);                                   // never throws
-    const lane = ans.ok && rowState(ans.row) === "approved" ? await emailLane() : null;
+    const st = ans.ok ? rowState(ans.row) : "";
+    /* the lane says when this approval goes out; one approved at another
+       door first may have gone out, or died, since: its outbox row says */
+    const after = st === "approved" ? await delivery(ans.row.id) : {};
     busy = false; working(approveBtn, false);
     if (ans.ok) {
-      const st = rowState(ans.row);
-      if (st === "approved") return done(approvedLine(ans.row, lane));
+      if (st === "approved") return settled(ans.row, approvedLine(ans.row, after.lane, after.outbox), after);
       if (st === "failed") return compose(approvedLine(ans.row, null));
       if (st === "waiting") return say(err, refusal("approve", { why: "odd" }));
       return compose(filedNote(ans.row));
@@ -473,13 +554,15 @@ export function sendSection({ project, subj, bodyTa, setup, links }) {
     if (reason === null) return;
     busy = true; working(declineBtn, true);
     const ans = await declineAsk(row.id, reason);                           // never throws
+    const was = ans.ok ? "" : answeredAs(ans.message);
+    /* approved at another door first: where that email stands now */
+    const after = ans.why === "answered" && APPROVED.includes(was) ? await delivery(row.id) : {};
     busy = false; working(declineBtn, false);
     if (ans.ok) return ans.row.status === "declined" ? compose(DECLINED) : settled(ans.row, filedNote(ans.row));
-    const was = answeredAs(ans.message);
     if (ans.why === "expired" || ans.why === "gone" || was === "declined" || was === "superseded" || was === "failed") {
       return compose(refusal("decline", ans));
     }
-    if (ans.why === "answered" && was) return done(refusal("decline", ans));   // approved elsewhere first
+    if (ans.why === "answered" && was) return done(refusal("decline", ans, after));   // approved elsewhere first
     say(err, refusal("decline", ans));
   });
 

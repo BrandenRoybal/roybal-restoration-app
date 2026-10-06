@@ -41,7 +41,10 @@
    again) and lookFrom's options (heartbeats, now). An older
    cached copy ignores what it doesn't know, and the cards read as
    they did. Anything added later that has to be a call is checked
-   first (typeof A.x === "function").
+   first (typeof A.x === "function"). The sends that died in the last
+   48 hours with a proposal older than the 7-day read (diedLate) are
+   plain reads here, no new call: their proposal rows join the rest
+   before inbox runs.
    ============================================================ */
 import { h, clear, toast, likelyOffline } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
@@ -77,18 +80,42 @@ const laneWarn = (r, what) => (r.status === "fulfilled" ? null
 
 let catalog = null;                    // operation_catalog (five rows today), read once per page load
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/* The sends the worker gave up on in the last 48 hours (outbox rows gone
+   'dead' since then: the row's last update) whose proposals the 7-day read
+   didn't reach: an email approved a week or more ago that waited out a
+   stopped worker, then died when it came back. Their proposal rows, read by
+   id with the same columns, so each comes back to Recently decided as
+   "Couldn't send" like the rest. Only beside a spine read that answered (a
+   queue that didn't load stays one warning); a read that fails, or answers
+   with something other than a list, adds nothing, and the tab reads as it
+   would without it. */
+async function diedLate(spine, dead) {
+  const pr = spine.status === "fulfilled" ? spine.value : null;
+  if (!Array.isArray(pr) || dead.status !== "fulfilled" || !Array.isArray(dead.value)) return [];
+  const have = new Set(pr.map((r) => r && r.id));
+  const ids = [...new Set(dead.value.map((o) => o && o.proposal_id))]
+    .filter((x) => typeof x === "string" && UUID.test(x) && !have.has(x));
+  return lookup(ids, `proposals?select=${SPINE_COLS}&id=${inList(ids)}&limit=100`);
+}
+
 /** Both queues and the names around them. Every row whose expiry is within
     the last 7 days or still ahead: that is every live ask, every expired one
     the count needs, and every recent answer (an ask is answered while it is
-    open, so it expires after the answer). */
+    open, so it expires after the answer). Plus, past that, the proposals of
+    sends that died in the last 48 hours (diedLate). */
 async function load(now) {
   const since = enc(new Date(now - A.EXPIRED_MS).toISOString());
-  const [text, spine] = await Promise.allSettled([
+  const [text, spine, dead] = await Promise.allSettled([
     rows(`pending_actions?select=${TEXT_COLS}&expires_at=gte.${since}&order=expires_at.desc&limit=200`),
     rows(`proposals?select=${SPINE_COLS}&expires_at=gte.${since}&order=expires_at.desc&limit=200`),
+    rows(`outbox?status=eq.dead&updated_at=gte.${enc(new Date(now - A.RECENT_MS).toISOString())}` +
+      `&proposal_id=not.is.null&select=proposal_id&order=updated_at.desc&limit=100`),
   ]);
   const pa = text.status === "fulfilled" ? text.value : [];
-  const pr = spine.status === "fulfilled" ? spine.value : [];
+  const late = await diedLate(spine, dead);
+  const pr = spine.status !== "fulfilled" ? [] : late.length ? [...spine.value, ...late] : spine.value;
   const warn = [laneWarn(text, "The text queue"), laneWarn(spine, "The new approvals queue")].filter(Boolean);
 
   const bare = A.inbox(pa, pr, {}, now);              // the cards to name: waiting and recent

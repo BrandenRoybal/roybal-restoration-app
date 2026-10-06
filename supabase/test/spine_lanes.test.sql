@@ -23,7 +23,9 @@
 --      agents row, and a caller with no identity.
 --   4. An agent login reads the proposals it filed and no one else's; nobody
 --      else reads more than before; the brief's 7-day dedupe read finds its
---      reminder by invoice key; it still reads no outbox or events.
+--      reminder by invoice key; it still reads no events, and no outbox row
+--      but those of its own proposals (none before 0020; 0020 and
+--      agent_outbox_read.test.sql give it those).
 --   5. sms_codes_in_use is every pending text-lane code plus every code of
 --      a proposal that is live or was answered in the last 48 hours (by
 --      updated_at, exactly 48 hours included), in the caller's org only,
@@ -362,9 +364,17 @@ begin
      and status in ('proposed', 'approved', 'executing', 'executed')
      and evidence_refs @> '[{"kind": "invoice", "id": "00000000-0000-0000-0000-00000000d1a1:SL-TEST-1"}]'::jsonb;
   if n <> 1 then raise exception 'the brief''s dedupe read finds % reminder(s) for its invoice, not 1', n; end if;
-  if (select count(*) from public.outbox) <> 0 or (select count(*) from public.events) <> 0 then
-    raise exception 'an agent login reads the outbox or the events ledger';
+  if (select count(*) from public.events) <> 0 then
+    raise exception 'an agent login reads the events ledger';
   end if;
+  -- the proposals read here is the brief's own RLS view, so this counts every
+  -- outbox row it reads that is not of a proposal it filed (a live brief's
+  -- approved reminders are, once 0020 is in)
+  select count(*) into n from public.outbox o
+   where not exists (select 1 from public.proposals p
+                      where p.id = o.proposal_id and p.proposed_by_kind = 'agent'
+                        and p.proposed_by_id = '1af33481-7f1c-4485-87f5-7b0ec5e27554');
+  if n <> 0 then raise exception 'an agent login reads % outbox row(s) of proposals it did not file', n; end if;
 
   set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d193", "role": "authenticated", "aud": "authenticated"}';
   select count(*) into n from public.proposals
