@@ -63,3 +63,35 @@ test("loadConfig requires the url and key, clamps numbers, and turns email off w
   const half = loadConfig({ ...base, GMAIL_CLIENT_ID: "id" });
   assert.equal(half.emailEnabled, false);
 });
+
+test("loadConfig refuses the wrong Supabase key and pasted placeholders at boot, naming the variable but never the value", () => {
+  const base = { SUPABASE_URL: "https://ref.supabase.co" };
+  const refuses = (env, re) => {
+    let err;
+    try { loadConfig({ ...base, SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k", ...env }); } catch (e) { err = e; }
+    assert.ok(err, `expected a refusal for ${JSON.stringify(Object.keys(env))}`);
+    assert.match(err.message, re);
+    for (const v of Object.values(env)) if (v.length > 6) assert.ok(!err.message.includes(v), "the value must not be echoed");
+    return err;
+  };
+  refuses({ SUPABASE_SERVICE_ROLE_KEY: "eyJhbGciOiJIUzI1NiJ9.x.y" }, /legacy JWT/);
+  refuses({ SUPABASE_SERVICE_ROLE_KEY: "sb_publishable_abc123def456" }, /publishable key/);
+  refuses({ SUPABASE_SERVICE_ROLE_KEY: "<sb_secret_… key>" }, /SUPABASE_SERVICE_ROLE_KEY looks like a placeholder/);
+  refuses({ SUPABASE_SERVICE_ROLE_KEY: "sb_secret_PASTE_HERE" }, /SUPABASE_SERVICE_ROLE_KEY looks like a placeholder/);
+  refuses({ GMAIL_CLIENT_ID: "<same as the gmail-proxy secret>" }, /GMAIL_CLIENT_ID looks like a placeholder/);
+  refuses({ GMAIL_CLIENT_SECRET: "<its client secret>" }, /GMAIL_CLIENT_SECRET looks like a placeholder/);
+  refuses({ OWNER_CELL: "<+19075550199>" }, /OWNER_CELL looks like a placeholder/);
+  refuses({ OWNER_CELL: "907-555-019" }, /OWNER_CELL is not a US phone number/);
+  refuses({ OWNER_CELL: "+44 20 7946 0958" }, /OWNER_CELL is not a US phone number/);
+
+  // Real shapes pass; the cell is normalized the way roybal-notify's toE164 does it.
+  const ok = (cell) => loadConfig({ ...base, SUPABASE_SERVICE_ROLE_KEY: " sb_secret_k\n", OWNER_CELL: cell });
+  assert.equal(ok("9075550199").ownerCell, "+19075550199");
+  assert.equal(ok("(907) 555-0199").ownerCell, "+19075550199");
+  assert.equal(ok("+1 907 555 0199").ownerCell, "+19075550199");
+  assert.equal(ok("").ownerCell, "");
+  assert.equal(ok("9075550199").serviceKey, "sb_secret_k");
+  const g = loadConfig({ ...base, SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k",
+    GMAIL_CLIENT_ID: "123-abc.apps.googleusercontent.com", GMAIL_CLIENT_SECRET: "GOCSPX-abc_DEF-123" });
+  assert.equal(g.emailEnabled, true);
+});
