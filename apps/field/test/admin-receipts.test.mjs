@@ -1,7 +1,8 @@
 /* The office Receipts tab (apps/admin/js/receiptlibrary.js) — DOM render
    (jsdom), local Store (fake-indexeddb), Supabase answered by a fake fetch.
    The library, the returns-counter viewer, logging / changing / deleting a
-   return, the pull-race graft, the return windows page and the
+   return, the pull races (compare-and-swap, graft), two devices changing
+   one return, the phone check, the return windows page and the
    window-closing reminder.
    Run: node apps/field/test/admin-receipts.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
@@ -36,15 +37,27 @@ localStorage.setItem("roybal-session", JSON.stringify({ access_token: "t", refre
 const calls = [];
 let role = "error";                  // "error" → officeRole() null (fail open, not cached); true; false
 let missing = false;                 // 0018 not applied yet
+let behindN = 0;                     // crew phones on a build older than v202
 let W = [{ vendor_key: "home depot", display_name: "Home Depot", return_days: 90, notes: "" }];
 const R = [];
+// PostgREST pages: limit/offset honoured, so a read past 1000 rows must page
+const page = (rows, u) => {
+  const q = new URL(u).searchParams;
+  const off = Number(q.get("offset") || 0), lim = Number(q.get("limit") || rows.length);
+  return rows.slice(off, off + lim);
+};
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
   const body = opts.body ? JSON.parse(opts.body) : null;
   calls.push({ u, body });
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
   if (u.includes("/rest/v1/rpc/role_is")) return role === "error" ? json(503, {}) : json(200, role);
-  if (missing && /receipt_vendor|receipt_return_review/.test(u)) return json(404, { code: "PGRST205", message: "Could not find the table" });
+  if (missing && /receipt_vendor|receipt_return_review|field_builds_behind/.test(u)) return json(404, { code: "PGRST205", message: "Could not find the table" });
+  if (u.includes("/rest/v1/rpc/field_builds_behind")) {
+    return role === false ? json(403, { code: "42501", message: "only the office can check field app versions" }) : json(200, behindN);
+  }
+  // a save nudges the sync; this test has no server for it
+  if (/\/rest\/v1\/(rpc\/sync_|field_projects|rpc\/field_)/.test(u)) return json(503, { message: "no sync server in this test" });
   if (u.includes("/rest/v1/rpc/receipt_vendor_set")) {
     W = W.filter((w) => w.vendor_key !== body.p_key);
     if (body.p_days != null) W.push({ vendor_key: body.p_key, display_name: body.p_display, return_days: body.p_days, notes: body.p_notes });
@@ -54,8 +67,8 @@ globalThis.fetch = async (url, opts = {}) => {
     for (const id of body.p_receipts) R.push({ job_id: body.p_job, receipt_id: id, status: body.p_status });
     return json(200, body.p_receipts.length);
   }
-  if (u.includes("/rest/v1/receipt_vendors")) return json(200, W);
-  if (u.includes("/rest/v1/receipt_return_reviews")) return json(200, R);
+  if (u.includes("/rest/v1/receipt_vendors")) return json(200, page(W, u));
+  if (u.includes("/rest/v1/receipt_return_reviews")) return json(200, page(R, u));
   throw new Error("unexpected fetch " + u);
 };
 
@@ -66,6 +79,7 @@ const M = await import("../../admin/js/receiptlibrary.js");
 const view = document.getElementById("view");
 const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 const go = async (hash) => { location.hash = hash; await settle(5); await M.renderReceipts(view); await settle(); };
+const enc = encodeURIComponent;
 const btn = (root, text) => [...root.querySelectorAll("button, a")].find((b) => b.textContent.trim() === text);
 const type = (el, v) => { el.value = v; el.dispatchEvent(new window.Event("input", { bubbles: true })); };
 const noJunk = (el) => assert.ok(!/\bnull\b|\bundefined\b|NaN/.test(el.textContent), el.textContent.match(/.{0,40}(null|undefined|NaN).{0,40}/));
@@ -127,7 +141,9 @@ await test("search: every word, inch marks ignored, the matching item line shown
 await test("🧾 puts the photo full screen with vendor · date · total · # · card; Esc closes it", async () => {
   const r1 = [...view.querySelectorAll(".rl-row")].find((r) => /0612-00412/.test(r.textContent));
   r1.querySelector(".rl-show").click();
+  r1.querySelector(".rl-show").click();          // a double click
   await settle();
+  assert.equal(document.querySelectorAll(".rl-view").length, 1, "one viewer, not two stacked");
   const ov = document.querySelector(".rl-view");
   assert.ok(ov);
   assert.match(ov.querySelector(".rl-view__facts").textContent, /THE HOME DEPOT #1234.*\$569\.76 · #0612-00412 · ••4558/s);
@@ -195,6 +211,17 @@ await test("a refund over what's left is refused until 'store credit or exchange
   assert.equal((await credits()).length, 1);
 });
 
+await test("the cap is the room on the receipt the items came from, not the one the form started from", async () => {
+  await go(`#/receipts/${JOB}/R1/return`);
+  const qtys = view.querySelectorAll(".rl-item input[type=number]");
+  type(qtys[2], "1");                                  // one of R2's studs only
+  type(view.querySelector(".rl-money"), "130");        // R1 has $410 left; R2 has $120
+  btn(view, "Save return").click();
+  await settle(80);
+  assert.match(view.querySelector(".warn").textContent, /more than what's left on the receipt \(\$120\.00\)/);
+  assert.equal((await credits()).length, 1);
+});
+
 await test("a sync that writes the server's older copy over the save gets the credit put back", async () => {
   await Store.put(JSON.parse(JSON.stringify(before)), { bump: false, quiet: true });   // the pull race
   assert.equal((await credits()).length, 0);
@@ -208,7 +235,16 @@ await test("a sync that writes the server's older copy over the save gets the cr
   assert.equal((await Store.get(JOB)).updatedAt, stamp, "nothing lost: no second write");
 });
 
-await test("a slip the crew snapped as a $0 receipt moves onto the return and leaves the list", async () => {
+await test("choosing the slip picker's placeholder again leaves the crew's slip where it was", async () => {
+  await go(`#/receipts/${JOB}/R2/return`);
+  const sel = [...view.querySelectorAll("select")].find((s) => [...s.options].some((o) => o.value === "SLIP"));
+  sel.value = "SLIP"; sel.dispatchEvent(new window.Event("change"));
+  assert.match(view.querySelector(".rl-slipview").textContent, /moves onto the return/);
+  sel.value = ""; sel.dispatchEvent(new window.Event("change"));
+  assert.match(view.querySelector(".rl-slipview").textContent, /No slip photo yet/);
+});
+
+await test("a slip the crew snapped moves onto the return; a sync landing mid-save keeps the crew's work", async () => {
   await go(`#/receipts/${JOB}/R2/return`);
   type(view.querySelector(".rl-item input[type=number]"), "5");
   assert.equal(view.querySelector(".rl-money").value, "30.00");
@@ -216,9 +252,26 @@ await test("a slip the crew snapped as a $0 receipt moves onto the return and le
   sel.value = "SLIP";
   sel.dispatchEvent(new window.Event("change"));
   assert.match(view.querySelector(".rl-slipview").textContent, /moves onto the return/);
-  btn(view, "Save return").click();
-  await settle(80);
+  // a pull lands between the save's read and its write: a crew note on R1
+  const putIf = Store.putIf;
+  let raced = 0;
+  Store.putIf = async function (proj, seen) {
+    if (!raced++) {
+      const crew = await Store.get(JOB);
+      crew.receipts.find((r) => r.id === "R1").notes = "crew: 2 sheets left in the garage";
+      crew.updatedAt = "2026-10-05T12:00:00.000Z";
+      await Store.put(crew, { bump: false, quiet: true });
+    }
+    return putIf.call(this, proj, seen);
+  };
+  try {
+    btn(view, "Save return").click();
+    await settle(120);
+  } finally { Store.putIf = putIf; }
+  assert.equal(raced, 2, "the first write saw the row move and tried again");
   const p = await Store.get(JOB);
+  assert.equal(p.receipts.find((r) => r.id === "R1").notes, "crew: 2 sheets left in the garage", "the crew's newer work survived");
+  assert.equal(p.updatedAt, L.nextStamp("2026-10-05T12:00:00.000Z"), "stamped past the copy it landed on");
   assert.equal(p.receipts.some((r) => r.id === "SLIP"), false);
   assert.ok(p.deletedIds && p.deletedIds.SLIP, "tombstoned, so a phone's copy can't bring it back");
   const c = p.receipts.find((r) => r.kind === "return" && r.returnOf === "R2");
@@ -240,10 +293,31 @@ await test("change a return: the old credit is replaced (tombstoned) by a new on
   assert.equal(p.receipts.some((r) => r.id === creditId), false);
   assert.ok(p.deletedIds[creditId]);
   const c = p.receipts.find((r) => r.kind === "return" && r.returnOf === "R1");
+  assert.equal(c.id, creditId + "~1", "the changed return's id is derived, not random");
   assert.equal(c.amount, "-105.96");
   assert.equal(c.items[0].qty, "2");
-  assert.equal(location.hash, `#/receipts/${JOB}/${c.id}`);
+  assert.equal(location.hash, `#/receipts/${JOB}/${enc(c.id)}`);
   creditId = c.id;
+});
+
+await test("another device changed the same return first: this form says so instead of doubling the refund", async () => {
+  await go(`#/receipts/${JOB}/${enc(creditId)}/change`);
+  type(view.querySelector(".rl-money"), "52.98");
+  // the other device's change arrives by sync while this form is open
+  const p = await Store.get(JOB);
+  const old = p.receipts.find((r) => r.id === creditId);
+  p.receipts = p.receipts.filter((r) => r.id !== creditId);
+  p.receipts.push({ ...old, id: L.successorId(creditId), amount: "-100.00" });
+  p.deletedIds[creditId] = new Date().toISOString();
+  p.updatedAt = "2026-10-05T13:00:00.000Z";
+  await Store.put(p, { bump: false, quiet: true });
+  btn(view, "Save changes").click();
+  await settle(80);
+  assert.match(view.querySelector(".warn").textContent, /changed on another device/);
+  const cs = (await credits()).filter((c) => c.returnOf === "R1");
+  assert.deepEqual(cs.map((c) => [c.id, c.amount]), [[L.successorId(creditId), "-100.00"]], "still one return: theirs");
+  creditId = L.successorId(creditId);
+  await go(`#/receipts/${JOB}/${enc(creditId)}`);
 });
 
 await test("a return's own page reads read-only facts and deletes cleanly", async () => {
@@ -256,6 +330,7 @@ await test("a return's own page reads read-only facts and deletes cleanly", asyn
   const p = await Store.get(JOB);
   assert.equal(p.receipts.some((r) => r.id === creditId), false);
   assert.ok(p.deletedIds[creditId]);
+  assert.ok(p.deletedIds[L.successorId(creditId)], "and the id a change in flight on another device would write");
   assert.equal(location.hash, `#/receipts/${JOB}/R1`);
 });
 
@@ -268,10 +343,23 @@ await test("Today shows the reminder; 'Nothing left over' clears the group in on
   await settle(80);
   const call = calls.filter((c) => c.u.includes("rpc/receipt_return_review_set")).pop();
   assert.deepEqual(call.body, { p_job: JOB, p_receipts: ["R1"], p_status: "nothing_to_return" });
-  assert.equal(slot.querySelector(".rl-flag"), null);
+  assert.equal(slot.textContent, "", "the last group cleared: no empty card left behind");
   const again = document.createElement("div"); view.replaceChildren(again);
   await M.fillReturnsToday(again, await Store.all());
   assert.equal(again.textContent, "", "cleared for good");
+});
+
+await test("past PostgREST's 1000-row cap the cleared list pages, so a cleared flag stays cleared", async () => {
+  const junk = Array.from({ length: 1200 }, (_, i) => ({ job_id: JOB2, receipt_id: "old-" + i, status: "nothing_to_return" }));
+  R.unshift(...junk);                                   // R1's answer is now row 1200, on the second page
+  await go("#/receipts/vendors");                       // a fresh read
+  const reads = calls.filter((c) => c.u.includes("/rest/v1/receipt_return_reviews")).slice(-2).map((c) => new URL(c.u).searchParams);
+  assert.deepEqual(reads.map((q) => [q.get("offset"), q.get("limit")]), [["0", "1000"], ["1000", "1000"]]);
+  assert.equal(reads[0].get("order"), "job_id,receipt_id", "a stable order to page by");
+  const slot = document.createElement("div"); view.replaceChildren(slot);
+  await M.fillReturnsToday(slot, await Store.all());
+  assert.equal(slot.textContent, "", "R1 stays cleared");
+  R.splice(0, junk.length);
 });
 
 await test("return windows: every store from the receipts, set one, see it saved through the door", async () => {
@@ -317,7 +405,30 @@ await test("before the database update lands, the library still works and window
   assert.match(view.textContent, /switch on after this feature's database update is applied/);
   await go("#/receipts");
   assert.equal(view.querySelectorAll(".rl-row").length, 5);
+  await go(`#/receipts/${JOB}/R1/return`);
+  assert.match(view.textContent, /Logging returns switches on after this feature's database update/);
+  assert.equal(view.querySelector(".rl-form"), null);
   missing = false;
+});
+
+await test("logging a return waits until every crew phone has the latest Field Forms", async () => {
+  behindN = 2;
+  await go("#/receipts/vendors");                       // a fresh check
+  await go(`#/receipts/${JOB}/R1/return`);
+  assert.match(view.textContent, /once every crew phone has the latest Field Forms.*2 people's phones haven't updated yet/s);
+  assert.equal(view.querySelector(".rl-form"), null);
+  assert.equal(localStorage.getItem("roybal-receipt-fleet"), "2", "remembered for an offline open");
+  behindN = 0;
+  await go("#/receipts/vendors");
+  await go(`#/receipts/${JOB}/R1/return`);
+  assert.ok(view.querySelector(".rl-form"), "every phone updated: the form opens");
+});
+
+await test("a late render after the office moved to another tab leaves that tab alone", async () => {
+  location.hash = "#/jobs"; await settle(5);
+  view.replaceChildren(document.createTextNode("the Jobs table"));
+  await M.renderReceipts(view); await settle();
+  assert.equal(view.textContent, "the Jobs table");
 });
 
 await test("a crew login on the windows page is told the office sets them", async () => {
@@ -325,7 +436,27 @@ await test("a crew login on the windows page is told the office sets them", asyn
   await go("#/receipts/vendors");
   assert.match(view.textContent, /Return windows are set by the office\./);
   assert.equal(view.querySelectorAll("input.rl-days").length, 0);
+  await go(`#/receipts/${JOB}/R1/return`);
+  assert.match(view.textContent, /Returns are logged by the office\./);
 });
 
+await test("changing a return logged as store credit keeps its override, so it saves", async () => {
+  role = "error"; behindN = 0;
+  await go("#/receipts/vendors");
+  const p = await Store.get(JOB2);
+  p.receipts.push({ id: "SC", kind: "return", returnOf: "S1", vendor: "Spenard Builders Supply", date: today, amount: "-150.00",
+    category: "materials", notes: "↩ Return of Spenard Builders Supply receipt — store credit", items: [] });
+  await Store.put(p);
+  await go(`#/receipts/${JOB2}/SC/change`);
+  const over = view.querySelector(".rl-check input[type=checkbox]");
+  assert.equal(over.checked, true, "$150 back on an $88.10 receipt: ticked already");
+  btn(view, "Save changes").click();
+  await settle(80);
+  const after = (await Store.get(JOB2)).receipts.filter((r) => r && r.kind === "return");
+  assert.deepEqual(after.map((r) => [r.id, r.amount]), [["SC~1", "-150.00"]]);
+});
+
+const stray = calls.filter((c) => !/\/rest\/v1\/(rpc\/role_is|rpc\/receipt_|rpc\/field_builds_behind|receipt_vendors|receipt_return_reviews)/.test(c.u));
+console.log("  (sync nudges: " + [...new Set(stray.map((c) => c.u.replace(/\?.*$/, "")))].join(", ") + ")");
 console.log(`\n${pass} passed`);
 process.exit(0);

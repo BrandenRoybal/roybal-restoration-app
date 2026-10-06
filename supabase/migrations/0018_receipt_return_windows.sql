@@ -32,11 +32,20 @@
 -- architecture/03-TARGET-ARCHITECTURE-AND-ROADMAP.md: writes through
 -- operations, direct INSERT/UPDATE/DELETE revoked). No org_id, like 0015.
 --
--- Census: +2 tables, +2 policies, +2 primary keys, +2 functions, no triggers.
+-- THE PHONE CHECK. A field app older than v202 (the build that shipped with
+-- this migration) shows a credit as an ordinary receipt: retyping its total
+-- or an AI re-read turns the refund into a cost, and its 🗑 deletes it for
+-- good. So the office page logs no return until every crew phone that synced
+-- in the last two weeks is on v202 or later. field_builds_behind() counts
+-- the ones that aren't, from public.sync_clients (the build each person last
+-- synced from, written by _sync_guard), for owner/office only — that table
+-- and the sync_fleet view stay service-role only (0008). A count, no names.
+--
+-- Census: +2 tables, +2 policies, +2 primary keys, +3 functions, no triggers.
 -- Roles: owner/office read and write; crew_lead, crew, agent, customer and
 -- anon see nothing and write nothing.
 --
--- Additive: dropping the two functions and the two tables restores the app
+-- Additive: dropping the three functions and the two tables restores the app
 -- exactly as it was.
 -- ============================================================================
 
@@ -174,3 +183,40 @@ comment on function public.receipt_return_review_set(uuid, text[], text) is
   'Office door for receipt_return_reviews: mark receipts of one job reviewed (status nothing_to_return), or clear the marks when status is null. Raises 42501 for anyone but owner/office.';
 revoke all on function public.receipt_return_review_set(uuid, text[], text) from public, anon, authenticated;
 grant execute on function public.receipt_return_review_set(uuid, text[], text) to authenticated, service_role;
+
+
+-- ---------------------------------------------------------------------------
+-- field_builds_behind(min build): how many people who could sync a job
+-- (owner, office, crew lead, crew) last synced, within the past 14 days, from
+-- a field app build older than p_min_build ("v201" < 202). Builds with no
+-- digits are not counted; nor is anyone not seen for 14 days (a phone back
+-- from a long break updates itself on its first open with signal).
+-- ---------------------------------------------------------------------------
+create or replace function public.field_builds_behind(p_min_build integer)
+returns integer
+  language plpgsql
+  stable
+  security definer
+  set search_path to 'public', 'pg_temp'
+as $$
+declare n int;
+begin
+  if not public.role_is('owner', 'office') then
+    raise exception 'only the office can check field app versions' using errcode = 'insufficient_privilege';
+  end if;
+  select count(*) into n
+    from public.sync_clients c
+    join public.profiles p on p.id = c.user_id
+   where p.role in ('owner', 'office', 'crew_lead', 'crew')
+     and c.last_seen > now() - interval '14 days'
+     and c.build ~ '[0-9]'
+     and regexp_replace(c.build, '[^0-9]', '', 'g')::numeric < p_min_build;
+  return n;
+end;
+$$;
+
+alter function public.field_builds_behind(integer) owner to postgres;
+comment on function public.field_builds_behind(integer) is
+  'How many owner/office/crew_lead/crew logins synced in the last 14 days from a field app build older than p_min_build (sync_clients). The office Receipts page logs returns only at 0. Raises 42501 for anyone but owner/office.';
+revoke all on function public.field_builds_behind(integer) from public, anon, authenticated;
+grant execute on function public.field_builds_behind(integer) to authenticated, service_role;

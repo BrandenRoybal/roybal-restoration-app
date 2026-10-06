@@ -22,6 +22,7 @@ import { accessToken } from "./supa.js";
 import { lossTypesOf } from "./model.js";
 import { getUnifiedJobId } from "./spine.js";
 import { capturedBy } from "./tech.js";
+import { amountNum } from "./receiptcalc.js";
 
 const FN_URL = SUPABASE_URL ? `${SUPABASE_URL}/functions/v1/roybal-ai-narrative` : "";
 
@@ -162,30 +163,72 @@ function equipmentSizingSummary(p) {
   return null;
 }
 
+/* A return the office logged (kind "return", plan phase 2) can cover
+   several receipts: each of its lines says which (ofReceipt, else the
+   return's returnOf). Its refund splits across them by what each line cost
+   on that receipt (the receipt's total over its lines: discounts, tax),
+   exactly as receiptlib.js creditShares does for the office Receipts page.
+   A copy, not an import: the field app loads receiptlib.js only on demand,
+   and this module sits in its startup graph.
+   Map receipt id → refund share; empty when none of its receipts is left. */
+function creditSplit(c, purchases) {
+  const ratio = (p) => {
+    const items = arr(p.items).filter(Boolean);
+    const list = items.reduce((a, it) => {
+      const pr = amountNum(it.price), q = amountNum(it.qty);
+      return a + (pr > 0 ? (q > 0 ? q : 1) * pr : 0);
+    }, 0);
+    const k = amountNum(p.amount) > 0 && list > 0 ? amountNum(p.amount) / list : 1;
+    return k <= 1.25 ? k : 1;
+  };
+  const val = new Map();
+  for (const it of arr(c.items)) {
+    if (!it || typeof it !== "object") continue;
+    const rid = it.ofReceipt || c.returnOf;
+    const p = purchases.get(rid);
+    if (!p) continue;
+    const q = amountNum(it.qty);
+    val.set(rid, (val.get(rid) || 0) + Math.abs((q > 0 ? q : 1) * amountNum(it.price)) * ratio(p));
+  }
+  const total = Math.abs(amountNum(c.amount));
+  if (!val.size) return purchases.has(c.returnOf) ? new Map([[c.returnOf, total]]) : new Map();
+  const sum = [...val.values()].reduce((a, b) => a + b, 0);
+  const out = new Map();
+  for (const [rid, v] of val) out.set(rid, sum > 0 ? total * (v / sum) : total / val.size);
+  return out;
+}
+
 /* Receipts / subcontractor invoices attached to invoices & estimates —
    AI-recognized (vendor, date, total) so drafts can bill documented
    pass-throughs and the assistant can cite them. */
 function receiptsSummary(p) {
   const out = [];
-  // Returns the office logged (kind "return", plan phase 2) fold into the
-  // receipt they return — one net entry, so a draft never bills the full
-  // purchase with the credit cut off by the cap below, nor a negative
-  // pass-through on its own. A return whose receipt is gone leads the list.
-  const jobReceipts = arr(p.receipts).filter(Boolean);
-  const purchaseIds = new Set(jobReceipts.filter((r) => r.kind !== "return").map((r) => r.id));
-  const creditsOf = new Map();
-  for (const r of jobReceipts) {
+  // Returns fold into the receipts they return (creditSplit above) — one net
+  // entry per receipt, so a draft never bills the full purchase with the
+  // credit cut off by the cap below, nor a negative pass-through on its own.
+  // A return whose receipts are all gone leads the list.
+  const jobReceipts = arr(p.receipts).filter((r) => r && typeof r === "object");
+  const dead = p.deletedIds && typeof p.deletedIds === "object" ? p.deletedIds : {};
+  const live = jobReceipts.filter((r) => !dead[r.id]);
+  const purchases = new Map(live.filter((r) => r.kind !== "return").map((r) => [r.id, r]));
+  const back = new Map();   // receipt id → { amount, dates }
+  for (const r of live) {
     if (r.kind !== "return") continue;
-    if (purchaseIds.has(r.returnOf)) {
-      if (!creditsOf.has(r.returnOf)) creditsOf.set(r.returnOf, []);
-      creditsOf.get(r.returnOf).push(r);
-    } else {
+    const shares = creditSplit(r, purchases);
+    if (!shares.size) {
       out.push({
         attachedTo: "job receipts", label: "return credit", docType: "return",
         vendor: r.vendor || "", date: r.date || "",
-        ...(r.amount != null && r.amount !== "" ? { total: Number(r.amount) } : {}),
+        ...(r.amount != null && r.amount !== "" ? { total: -Math.abs(amountNum(r.amount)) } : {}),
         summary: String(r.notes || "").slice(0, 400),
       });
+      continue;
+    }
+    for (const [rid, amt] of shares) {
+      const b = back.get(rid) || { amount: 0, dates: [] };
+      b.amount += amt;
+      if (r.date && !b.dates.includes(r.date)) b.dates.push(r.date);
+      back.set(rid, b);
     }
   }
   for (const [key, docLabel] of [["invoices", "invoice"], ["reconEstimates", "estimate"]]) {
@@ -208,10 +251,10 @@ function receiptsSummary(p) {
     }
   }
   // job receipts: the 🧾 Receipts tile and the office assistant's receiptLog chip
-  for (const r of jobReceipts) {
+  for (const r of live) {
     if (r.kind === "return") continue;
-    const credits = creditsOf.get(r.id) || [];
-    const returned = credits.reduce((a, c) => a + Math.abs(Number(c.amount) || 0), 0);
+    const b = back.get(r.id);
+    const returned = b ? Math.round(b.amount * 100) / 100 : 0;
     const hasTotal = r.amount != null && r.amount !== "";
     const notes = String(r.notes || "");
     out.push({
@@ -220,10 +263,10 @@ function receiptsSummary(p) {
       docType: "receipt",
       vendor: r.vendor || "",
       date: r.date || "",
-      ...(hasTotal ? { total: returned ? Math.round((Number(r.amount) - returned) * 100) / 100 : Number(r.amount) } : {}),
-      ...(returned ? { returned: Math.round(returned * 100) / 100 } : {}),
+      ...(hasTotal ? { total: returned ? Math.round((amountNum(r.amount) - returned) * 100) / 100 : amountNum(r.amount) } : {}),
+      ...(returned ? { returned } : {}),
       summary: (returned
-        ? `${notes ? notes + " — " : ""}total is after $${returned.toFixed(2)} returned (${credits.map((c) => c.date).filter(Boolean).join(", ") || "date not recorded"})`
+        ? `${notes ? notes + " — " : ""}total is after $${returned.toFixed(2)} returned (${b.dates.join(", ") || "date not recorded"})`
         : notes).slice(0, 400),
     });
   }

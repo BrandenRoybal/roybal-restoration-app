@@ -92,7 +92,9 @@ function paintNav() {
       title: "How the Office Admin fits together" }, "❓ Help"));
   refreshLeadsBadge();
 }
+let routeSeq = 0;       // a render that awaited past a newer route() drops its paint
 function route() {
+  routeSeq++;
   if (!isSignedIn() && SYNC_ENABLED) return renderLogin();
   leadsResetBusy();      // a route change tears down any open triage form
   paintNav();
@@ -148,7 +150,7 @@ function renderHelp() {
         h("strong", {}, "Show at the counter"), " on a receipt, to put the photo full screen; click the photo to zoom."),
       p(h("strong", {}, "Returns: "), "open the receipt and click ", h("strong", {}, "↩ Log a return"),
         ". Enter how many of each item went back (items from another receipt from the same store on the same job can go on the same return), the refund from the slip, and snap or upload the slip, or pick a slip a crew member already snapped as a receipt. The refund comes off the job's receipts total everywhere: the job tile, its costs, the morning brief. The original receipt is never changed. ",
-        h("strong", {}, "Change"), " or ", h("strong", {}, "Delete"), " a return from the receipt's page; crews see returns in Field Forms but can't change them."),
+        h("strong", {}, "Change"), " or ", h("strong", {}, "Delete"), " a return from the receipt's page; crews see returns in Field Forms but can't change them. Logging a return switches on once every crew phone that synced in the last two weeks has Field Forms v202 or later (an older phone would treat a return as an ordinary receipt); the form says how many phones still need to open Field Forms with signal."),
       p(h("strong", {}, "Return windows: "), "set each store's window once under ", h("strong", {}, "Return windows"),
         " (Home Depot 90 days, and so on; a store's name covers its branches). When materials from a store ($50 or more on the receipt) reach the last two weeks of the window (the last half of a window under four weeks) with nothing returned, Receipts and Today show ",
         h("strong", {}, "↩ Return windows closing"), " for that job and store. The app can't know what got used, so it asks: take anything left over back and log the return, or click ",
@@ -255,7 +257,9 @@ function jobSummary(p) {
 
 /* ---------- Today ('') — KPIs + company texting; CRM stats join in step 15 ---------- */
 async function renderToday() {
+  const my = routeSeq;
   const projects = await Store.all();
+  if (my !== routeSeq) return;
   const rows = projects.map(jobSummary);
   const body = clear(view);
 
@@ -304,7 +308,9 @@ function kpi(n, label, attn, onclick) {
 /* ---------- Jobs (#/jobs) — the all-jobs table ---------- */
 let filterText = "";
 async function renderJobs() {
+  const my = routeSeq;
   const projects = await Store.all();
+  if (my !== routeSeq) return;
   const rows = projects.map(jobSummary);
   const body = clear(view);
 

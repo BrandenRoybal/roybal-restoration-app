@@ -144,16 +144,27 @@ export function buildIndex(projects) {
   return out;
 }
 
+/* What a receipt charged per dollar of its listed lines: its total over the
+   lines (a contractor discount pulls it under 1, tax pushes it over). Lines
+   adding to far less than the total were misread or left out, so the lines
+   count at face value then. */
+function paidRatio(p) {
+  const list = p.items.reduce((a, it) => a + (it.price > 0 ? it.qty * it.price : 0), 0);
+  const k = p.amount > 0 && list > 0 ? p.amount / list : 1;
+  return k <= 1.25 ? k : 1;
+}
+
 /* Which purchase receipts a credit touches, and how much of it each one
    takes: each line's ofReceipt (else the credit's returnOf) gets its lines'
-   value; the credit's amount is split in those proportions (tax and
-   discounts ride along); a credit with no lines goes wholly to returnOf. */
+   value at what that receipt actually charged (paidRatio), and the credit's
+   amount is split in those proportions; a credit with no lines goes wholly
+   to returnOf. narrative.js repeats this for the billing AI. */
 function creditShares(c, byId) {
   const val = new Map();
   for (const it of c.items) {
     const rid = it.ofReceipt || c.returnOf;
     if (!rid || !byId.has(rid)) continue;
-    val.set(rid, (val.get(rid) || 0) + Math.abs(it.qty * it.price));
+    val.set(rid, (val.get(rid) || 0) + Math.abs(it.qty * it.price) * paidRatio(byId.get(rid)));
   }
   const total = Math.abs(c.amount);
   if (!val.size) return byId.has(c.returnOf) ? new Map([[c.returnOf, total]]) : new Map();
@@ -360,13 +371,15 @@ export const daysLeftText = (n) => (n === 0 ? "closes today" : n === 1 ? "closes
 /* ---------- the return form ---------- */
 /** Purchase receipts a return can draw from: the starting one, then the same
     job's other purchases from the same store (either key a prefix of the
-    other), newest first. */
-export function returnSources(entries, jobId, startId) {
+    other), newest first. `include`: receipts a return being changed already
+    draws from, kept even if their store name was retyped since. */
+export function returnSources(entries, jobId, startId, include = []) {
   const start = entries.find((e) => e.jobId === jobId && e.id === startId && e.kind === "purchase");
   if (!start) return [];
+  const keep = new Set(include);
   const related = (k) => k === start.vkey || k.startsWith(start.vkey + " ") || start.vkey.startsWith(k + " ");
   const others = entries.filter((e) => e.jobId === jobId && e.kind === "purchase" && e.id !== start.id &&
-    e.amount > 0 && e.vkey !== "unknown" && related(e.vkey)).sort(byNewest);
+    e.amount > 0 && ((e.vkey !== "unknown" && related(e.vkey)) || keep.has(e.id))).sort(byNewest);
   return [start, ...others];
 }
 export const remainingQty = (e, it) => Math.max(0, it.qty - ((e.returnedQty && e.returnedQty[it.id]) || 0));
@@ -385,6 +398,20 @@ export function prefillRefund(picks, sourcesById) {
   return r2(sum);
 }
 
+/** The receipts a return books against: those its picked items came from,
+    or the starting receipt for a refund with no items picked
+    (buildReturnCredit and creditShares book it the same way). */
+export function returnTargets(returnOf, picks) {
+  const ids = new Set((picks || []).filter((pk) => pk.qty > 0).map((pk) => pk.receiptId));
+  return ids.size ? [...ids] : [returnOf];
+}
+/** The most a return booked against `targets` can refund without "store
+    credit or exchange" ticked. */
+export const refundCap = (entries, jobId, targets) => r2(targets.reduce((a, id) => {
+  const e = entries.find((x) => x.jobId === jobId && x.id === id && x.kind === "purchase");
+  return a + (e ? refundLeft(e) : 0);
+}, 0));
+
 /** null when the return may be saved, else the reason, checked against the
     FRESH copy of the job (entries rebuilt from it just before saving). */
 export function checkReturn({ entries, jobId, returnOf, picks, refund, over }) {
@@ -393,23 +420,25 @@ export function checkReturn({ entries, jobId, returnOf, picks, refund, over }) {
   if (!start) return "That receipt is no longer on the job (deleted on another device?).";
   if (!(start.amount > 0)) return "This receipt has no total yet. Add its total first.";
   if (!(refund > 0)) return "Enter the refund from the slip.";
-  const involved = new Set([returnOf]);
   for (const pk of picks || []) {
     if (!(pk.qty > 0)) continue;
     const e = byId.get(pk.receiptId);
     const it = e && e.items.find((x) => x.id === pk.itemId);
     if (!it) return "An item you picked is no longer on its receipt. Reopen the form.";
     if (pk.qty > remainingQty(e, it) + 1e-9) return `Only ${fmtQty(remainingQty(e, it))} of “${it.desc}” is left to return.`;
-    involved.add(pk.receiptId);
   }
-  const cap = r2([...involved].reduce((a, id) => a + refundLeft(byId.get(id)), 0));
-  if (!over && refund > cap + 0.05) return `The refund is more than what's left on ${involved.size > 1 ? "those receipts" : "the receipt"} (${fmtMoney(cap)}). Tick "store credit or exchange" if that's right.`;
+  // the room is on the receipts the refund is booked against, not the one the form started from
+  const involved = returnTargets(returnOf, picks);
+  const cap = refundCap(entries, jobId, involved);
+  if (!over && refund > cap + 0.05) return `The refund is more than what's left on ${involved.length > 1 ? "those receipts" : "the receipt"} (${fmtMoney(cap)}). Tick "store credit or exchange" if that's right.`;
   return null;
 }
 export const fmtQty = (n) => String(r2(n));
 
-/** The credit element. `id` is minted when the form opens, so a double tap
-    or a retry saves the same return, never two. */
+/** The credit element. `id` is minted when the form opens (a new return) or
+    is the return's successorId (a change), so a double tap or a retry saves
+    the same return, never two. returnOf is the receipt the items came from
+    (the starting one when it has picks, or nothing is picked). */
 export function buildReturnCredit({ id, start, sources, picks, refund, date, slipNo, note, photo, extraPages, by, nowISO }) {
   const byId = new Map((sources || [start]).map((e) => [e.id, e]));
   const lines = [];
@@ -420,15 +449,16 @@ export function buildReturnCredit({ id, start, sources, picks, refund, date, sli
     lines.push({ id: `${id}-${lines.length + 1}`, of: it.id, ofReceipt: e.id, desc: it.desc, qty: fmtQty(pk.qty),
       unit: it.unit, price: negMoney(it.price), sku: it.sku });
   }
-  const others = new Set(lines.map((l) => l.ofReceipt).filter((rid) => rid !== start.id)).size;
-  const what = `↩ Return of ${start.vendor || "the"} ${start.date || ""} receipt${start.receiptNo ? " #" + start.receiptNo : ""}`
+  const from = lines.some((l) => l.ofReceipt === start.id) || !lines.length ? start : byId.get(lines[0].ofReceipt);
+  const others = new Set(lines.map((l) => l.ofReceipt).filter((rid) => rid !== from.id)).size;
+  const what = `↩ Return of ${from.vendor || "the"} ${from.date || ""} receipt${from.receiptNo ? " #" + from.receiptNo : ""}`
     .replace(/\s+/g, " ") + (others ? ` (+${others} more receipt${others === 1 ? "" : "s"})` : "");
   const n = String(note || "").trim();
   return {
-    id, kind: "return", returnOf: start.id, by: by || "", createdAt: nowISO,
-    vendor: start.vendor, date: validISO(date) ? date : "",
+    id, kind: "return", returnOf: from.id, by: by || "", createdAt: nowISO,
+    vendor: from.vendor, date: validISO(date) ? date : "",
     amount: negMoney(refund), subtotal: "", tax: "",
-    category: start.category, paidWith: start.paidWith || "", cardLast4: start.cardLast4 || "",
+    category: from.category, paidWith: from.paidWith || "", cardLast4: from.cardLast4 || "",
     receiptNo: String(slipNo || "").trim().slice(0, 40),
     notes: (what + (n ? " — " + n : "")).slice(0, 400),
     photo: photo || "", extraPages: Array.isArray(extraPages) ? extraPages.filter(Boolean).slice(0, 3) : [],
@@ -440,6 +470,38 @@ export function buildReturnCredit({ id, start, sources, picks, refund, date, sli
     a receipt (no usable total) — the form can take one's photo and drop it. */
 export const slipCandidates = (entries, jobId) =>
   entries.filter((e) => e.jobId === jobId && needsTotal(e) && e.hasPhoto).sort(byNewest);
+
+/* ---------- a return's identity across changes ----------
+   Changing a return replaces it with a new element (the old id is
+   tombstoned). The new id is DERIVED — "c7k2" → "c7k2~1" → "c7k2~2" — so two
+   devices changing the same return at once write the same id and sync keeps
+   one, and a delete can tombstone the next few ids too, so a change made on
+   another device before it heard of the delete can't bring the return back. */
+const GEN = /^(.*)~(\d+)$/;
+export function successorId(id) {
+  const m = GEN.exec(String(id));
+  return m ? `${m[1]}~${Number(m[2]) + 1}` : `${id}~1`;
+}
+/** The ids a delete tombstones: the return's own, then its next `n`. */
+export function returnLineage(id, n = 3) {
+  const out = [String(id)];
+  while (out.length <= n) out.push(successorId(out[out.length - 1]));
+  return out;
+}
+
+/** What deleting a purchase receipt takes with it (the phone's 🗑):
+    { kill: ids to remove and tombstone, returns: how many returns go too }
+    or { refuse: why }. A return booked only against this receipt goes with
+    it (a credit with no receipt would sit on the job total unexplained); one
+    that also covers another receipt is the office's to change first. */
+export function deletePlan(project, receiptId) {
+  const entries = buildIndex([project]);
+  const credits = entries.filter((c) => c.kind === "return" && c.targets.includes(receiptId));
+  if (credits.some((c) => c.targets.some((t) => t !== receiptId))) {
+    return { refuse: "This receipt is part of a return the office logged that also covers another receipt. Ask the office to change that return first." };
+  }
+  return { kill: [String(receiptId), ...credits.flatMap((c) => returnLineage(c.id))], returns: credits.length };
+}
 
 /** updatedAt for an append-only office write (a new credit, a tombstone):
     one millisecond past the copy it was made from, so on any merge the

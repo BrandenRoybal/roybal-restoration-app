@@ -34,7 +34,17 @@ import {
   RECEIPT_CATEGORIES, PAID_WITH, receiptCategory, receiptTotals, receiptAmount,
   itemsTotal, amountNum, applyReceiptRead,
 } from "./receiptcalc.js";
-import { isReturn, buildIndex, returnStatus, norm } from "./receiptlib.js";
+
+/* receiptlib.js (the return badges, the delete cascade) loads on demand, not
+   in the app's startup graph: a phone whose cache missed it still opens
+   offline, just without the badges. These two are its isReturn and norm. */
+const isReturn = (r) => !!r && r.kind === "return";
+const norm = (s) => String(s ?? "").toLowerCase().replace(/["“”″'’`]/g, "").replace(/\s+/g, " ").trim();
+let libLoad = null;
+function receiptLib() {
+  if (!libLoad) libLoad = import("./receiptlib.js").catch(() => { libLoad = null; return null; });
+  return libLoad;
+}
 
 /* Receipts snapped a moment ago whose first AI read should fire as soon as
    the editor opens (the snap navigates there through the router, which
@@ -144,7 +154,13 @@ function receiptsList(project, { view, setChrome }) {
   const hay = (r) => norm([r.vendor, r.notes, r.receiptNo, r.cardLast4, ...(r.items || []).map((it) => it && (it.desc + " " + (it.sku || "")))]
     .filter(Boolean).join(" "));
   const matches = (r) => norm(q).split(" ").filter(Boolean).every((w) => hay(r).includes(w));
-  const state = new Map(buildIndex([project]).map((e) => [e.id, e]));
+  let state = new Map(), returnStatus = () => "";
+  receiptLib().then((lib) => {
+    if (!lib || !list.isConnected) return;
+    state = new Map(lib.buildIndex([project]).map((e) => [e.id, e]));
+    returnStatus = lib.returnStatus;
+    paint();
+  });
   function paint() {
     const rows = project.receipts.filter((r) => r && (!fCat || receiptCategory(r.category) === fCat) && (!q || matches(r)))
       .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
@@ -187,9 +203,11 @@ function thumbEl(src, icon) {
     it, the budget line when the job has a budget, the top vendors. */
 function totalsCard(project) {
   const t = receiptTotals(project);
-  const rows = RECEIPT_CATEGORIES.filter((c) => t.byCategory[c.value].count)
+  // a category holding only a return (its receipt deleted) still gets its row,
+  // so "included above" is always true
+  const rows = RECEIPT_CATEGORIES.filter((c) => t.byCategory[c.value].count || t.byCategory[c.value].total)
     .map((c) => h("div", { class: "trow" },
-      h("span", {}, `${c.icon} ${c.label} `, h("span", { class: "subtle", style: "font-size:12px" }, `(${t.byCategory[c.value].count})`)),
+      h("span", {}, `${c.icon} ${c.label} `, t.byCategory[c.value].count ? h("span", { class: "subtle", style: "font-size:12px" }, `(${t.byCategory[c.value].count})`) : null),
       h("span", {}, money(t.byCategory[c.value].total))));
   if (t.returns) rows.push(h("div", { class: "trow" },
     h("span", {}, "↩ Returns (included above) ", h("span", { class: "subtle", style: "font-size:12px" }, `(${t.returns})`)),
@@ -318,15 +336,26 @@ function receiptEditor(project, r, ctx) {
     h("div", { class: "sticky-actions" },
       h("button", { type: "button", class: "btn btn--primary", onclick: async () => { commit(); location.hash = listHash(project); } }, "✓ Done"),
       h("button", { type: "button", class: "btn btn--danger", style: "flex:0 0 auto;width:auto", onclick: async () => {
-        // returns logged against it go with it — a credit with no receipt
-        // would sit on the job total with nothing to explain it
-        const credits = (buildIndex([project]).find((e) => e.id === r.id) || { returnIds: [] }).returnIds;
-        if (!confirm(credits.length
-          ? `Delete this receipt and the ${credits.length === 1 ? "return" : credits.length + " returns"} logged against it from the job?`
+        // returns logged against only this receipt go with it — a credit with
+        // no receipt would sit on the job total with nothing to explain it
+        // (receiptlib.js deletePlan); one that also covers another receipt
+        // is the office's to change first
+        const lib = await receiptLib();
+        let kill = [r.id], n = 0;
+        if (lib) {
+          const plan = lib.deletePlan(project, r.id);
+          if (plan.refuse) return toast(plan.refuse, 5000);
+          kill = plan.kill; n = plan.returns;
+        } else if (project.receipts.some((x) => isReturn(x) && (x.returnOf === r.id ||
+            (Array.isArray(x.items) && x.items.some((it) => it && it.ofReceipt === r.id))))) {
+          return toast("This receipt has a return logged against it. Open Field Forms with signal, then try again.", 5000);
+        }
+        if (!confirm(n
+          ? `Delete this receipt and the ${n === 1 ? "return" : n + " returns"} logged against it from the job?`
           : "Delete this receipt from the job?")) return;
-        const gone = new Set([r.id, ...credits]);
+        const gone = new Set(kill);
         project.receipts = project.receipts.filter((x) => x && !gone.has(x.id));
-        tombstoneItems(project, [...gone]);   // so the delete sticks across devices (merge.js)
+        tombstoneItems(project, kill);   // so the delete sticks across devices (merge.js)
         await Store.put(project);
         toast("Receipt deleted.");
         location.hash = listHash(project);

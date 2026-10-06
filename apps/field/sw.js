@@ -38,7 +38,8 @@ const CORE = [
   "js/myweek.js", "js/myweekcalc.js", "board/js/schedule.js", "board/js/schedulewatch.js",
   // ❓ Help: app.js statically imports help.js (which reads model.js's FORMS)
   "js/help.js",
-  // 🧾 Receipts: app.js statically imports receipts.js (→ receiptcalc.js, receiptlib.js)
+  // 🧾 Receipts: app.js statically imports receipts.js (→ receiptcalc.js); receipts.js
+  // loads receiptlib.js on demand, precached here so the return badges work offline
   "js/receipts.js", "js/receiptcalc.js", "js/receiptlib.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",

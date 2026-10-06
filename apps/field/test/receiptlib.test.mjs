@@ -10,10 +10,11 @@ import {
   returnFlags, leadDays, returnSources, remainingQty, refundLeft, prefillRefund, checkReturn,
   buildReturnCredit, slipCandidates, nextStamp, negMoney, money2, receiptDay, daysBetween,
   addDaysISO, validISO, returnStatus, overReturned, needsTotal, isReturn, vendorMatches,
+  returnTargets, refundCap, successorId, returnLineage, deletePlan,
 } from "../js/receiptlib.js";
 import { amountNum, receiptTotals } from "../js/receiptcalc.js";
 import { loggedCosts } from "../js/fincalc.js";
-import { mergeProjects } from "../js/merge.js";
+import { mergeProjects, tombstoneItems } from "../js/merge.js";
 
 const PLY = { id: "i1", desc: '3/4" CDX plywood 4x8', qty: "10", unit: "ea", price: "52.98", sku: "166073" };
 const KILZ = { id: "i2", desc: "KILZ 2 all-purpose primer 1 gal", qty: "2", unit: "ea", price: "24.98", sku: "" };
@@ -224,4 +225,91 @@ test("summary line: net spend and returns apart", () => {
   const p = bemis(); p.receipts.push({ id: "C1", kind: "return", returnOf: "R1", amount: "-69.76", items: [] });
   const s = summarize(buildIndex([p]));
   assert.deepEqual(s, { spent: 920, returned: 69.76, purchases: 4, returns: 1 });
+});
+
+test("the cap is the room on the receipts the items came from, and the credit is booked there", () => {
+  const p = bemis();
+  const idx = buildIndex([p]);
+  // started from R1 (hundreds of dollars of room), only R2's studs picked: R2's $120 is the cap
+  const picks = [{ receiptId: "R2", itemId: "j1", qty: 1 }];
+  assert.deepEqual(returnTargets("R1", picks), ["R2"]);
+  assert.deepEqual(returnTargets("R1", []), ["R1"], "a refund with nothing picked books against the starting receipt");
+  assert.equal(refundCap(idx, p.id, ["R2"]), 120);
+  assert.match(checkReturn({ entries: idx, jobId: p.id, returnOf: "R1", picks, refund: 130 }), /left on the receipt \(\$120\.00\)/);
+  assert.equal(checkReturn({ entries: idx, jobId: p.id, returnOf: "R1", picks, refund: 6 }), null);
+  const sources = returnSources(idx, p.id, "R1");
+  const c = buildReturnCredit({ id: "C2", start: sources[0], sources, picks, refund: 6, date: "2026-08-01", nowISO: "2026-08-01T20:00:00.000Z" });
+  assert.equal(c.returnOf, "R2", "booked against the receipt its items came from");
+  assert.equal(c.notes, "↩ Return of Home Depot 2026-07-20 receipt");
+  p.receipts.push(c);
+  const after = buildIndex([p]);
+  assert.equal(after.find((e) => e.id === "R2").returned, 6);
+  assert.equal(after.find((e) => e.id === "R1").returned, 0);
+  // a change keeps every receipt it already draws from, even one whose store was retyped
+  p.receipts[1].vendor = "HD Supply";
+  assert.deepEqual(returnSources(buildIndex([p]), p.id, "R1").map((e) => e.id), ["R1"]);
+  assert.deepEqual(returnSources(buildIndex([p]), p.id, "R1", ["R2"]).map((e) => e.id), ["R1", "R2"]);
+});
+
+test("a return across receipts splits by what each one charged: a discount, tax; misread lines at face value", () => {
+  const door = (id, price) => ({ id, desc: "slab door", qty: "1", price });
+  const p = { id: "j", receipts: [
+    { id: "R5", vendor: "Home Depot", amount: "50", category: "materials", items: [door("a", "100")] },     // half off
+    { id: "R6", vendor: "Home Depot", amount: "100", category: "materials", items: [door("b", "100")] },
+    { id: "C", kind: "return", returnOf: "R5", amount: "-150", items: [
+      { id: "C-1", of: "a", ofReceipt: "R5", desc: "slab door", qty: "1", price: "-100" },
+      { id: "C-2", of: "b", ofReceipt: "R6", desc: "slab door", qty: "1", price: "-100" }] },
+  ] };
+  let idx = buildIndex([p]);
+  const r5 = idx.find((e) => e.id === "R5"), r6 = idx.find((e) => e.id === "R6");
+  assert.equal(r5.returned, 50);
+  assert.equal(r6.returned, 100);
+  assert.equal(returnStatus(r5), "all");
+  assert.ok(!overReturned(r5), "no false 'more than the receipt'");
+  assert.equal(refundLeft(r6), 0, "no phantom room left on R6");
+  // lines adding to far less than the total were misread: they count at face value
+  p.receipts[0] = { ...p.receipts[0], amount: "400" };
+  idx = buildIndex([p]);
+  assert.equal(idx.find((e) => e.id === "R5").returned, 75);
+});
+
+test("a return's id across changes: two devices changing it keep one; a delete beats a change in flight", () => {
+  assert.equal(successorId("c7k2"), "c7k2~1");
+  assert.equal(successorId("c7k2~1"), "c7k2~2");
+  assert.equal(successorId("a~b~9"), "a~b~10");
+  assert.deepEqual(returnLineage("c7k2~1"), ["c7k2~1", "c7k2~2", "c7k2~3", "c7k2~4"]);
+  const base = bemis();
+  base.updatedAt = "2026-08-01T00:00:00.000Z";
+  base.receipts.push({ id: "C", kind: "return", returnOf: "R2", amount: "-12.00", items: [] });
+  const change = (amount, at) => {
+    const d = JSON.parse(JSON.stringify(base));
+    const old = d.receipts.find((r) => r.id === "C");
+    d.receipts = d.receipts.filter((r) => r.id !== "C");
+    d.receipts.push({ ...old, id: successorId("C"), amount });
+    tombstoneItems(d, ["C"]);
+    d.updatedAt = at;
+    return d;
+  };
+  const a = change("-18.00", "2026-08-02T00:00:00.000Z"), b = change("-24.00", "2026-08-03T00:00:00.000Z");
+  const credits = (p) => p.receipts.filter((r) => r && r.kind === "return");
+  const both = mergeProjects(a, b).merged;
+  assert.deepEqual(credits(both).map((r) => [r.id, r.amount]), [["C~1", "-24.00"]], "one return, the later change");
+  const del = JSON.parse(JSON.stringify(base));
+  del.receipts = del.receipts.filter((r) => r.id !== "C");
+  tombstoneItems(del, returnLineage("C"));
+  del.updatedAt = "2026-08-01T12:00:00.000Z";
+  assert.equal(credits(mergeProjects(a, del).merged).length, 0, "the delete wins over a change made before it was heard of");
+  assert.equal(credits(mergeProjects(del, a).merged).length, 0);
+});
+
+test("the phone's 🗑 on a receipt: its own returns go with it; a return also covering another receipt stops it", () => {
+  const p = bemis();
+  p.receipts.push({ id: "C1", kind: "return", returnOf: "R2", amount: "-12", items: [{ id: "C1-1", of: "j1", ofReceipt: "R2", desc: "2x4x8 stud", qty: "2", price: "-6" }] });
+  assert.deepEqual(deletePlan(p, "R2"), { kill: ["R2", "C1", "C1~1", "C1~2", "C1~3"], returns: 1 });
+  assert.deepEqual(deletePlan(p, "R3"), { kill: ["R3"], returns: 0 });
+  p.receipts.push({ id: "C2", kind: "return", returnOf: "R1", amount: "-58.98", items: [
+    { id: "C2-1", of: "i1", ofReceipt: "R1", desc: PLY.desc, qty: "1", price: "-52.98" },
+    { id: "C2-2", of: "j1", ofReceipt: "R2", desc: "2x4x8 stud", qty: "1", price: "-6" }] });
+  assert.match(deletePlan(p, "R2").refuse, /also covers another receipt/);
+  assert.match(deletePlan(p, "R1").refuse, /also covers another receipt/);
 });

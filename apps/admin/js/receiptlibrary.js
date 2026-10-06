@@ -16,11 +16,16 @@
 
    RETURNS are never an edit to the receipt they return. Each is a
    NEW credit element in the job's receipts[] (receiptlib.js
-   buildReturnCredit), saved by appendOnlyPut: the job's updatedAt
-   moves one millisecond past the copy it was made from, so on any
-   merge a crew phone's edits to the OTHER receipts still win while
-   the credit (a new id) and any tombstone always land. A sync that
-   rewrites the row mid-save is caught by the graft below.
+   buildReturnCredit), written by writeJob: a compare-and-swap that
+   moves the job's updatedAt one millisecond past the copy it was
+   made from, so on any merge a crew phone's edits to the OTHER
+   receipts still win while the credit (a new id) and any tombstone
+   always land. A sync that rewrites the row mid-save is caught by
+   the CAS, or after it by the graft below.
+
+   Logging a return waits until every crew phone runs Field Forms
+   v202 or later (returnsGate): an older phone shows a credit as an
+   ordinary receipt it could retype, re-read or delete.
 
    RETURN WINDOWS and "Nothing left over" live in Supabase (migration
    0018), owner/office only, written through their two doors.
@@ -60,11 +65,18 @@ const pretty = (key) => key.split(" ").map((w) => (/\d/.test(w) ? w : w[0].toUpp
 const badge = (text, tone) => h("span", { class: "badge " + tone }, text);
 
 /* ---------- the index: text only, rebuilt when a job changed ---------- */
-let cache = null, dirty = true;
+let cache = null, dirty = true, building = null;
 async function getIndex() {
-  if (cache && !dirty) return cache;
-  dirty = false;                       // a change landing during the build re-dirties it
-  cache = L.buildIndex(await Store.all());
+  // one build at a time, shared: a caller arriving mid-build waits for it
+  // rather than taking the old cache; a change landing during a build
+  // re-dirties it and the loop builds once more
+  for (let i = 0; i < 3 && (dirty || !cache); i++) {
+    if (!building) {
+      dirty = false;
+      building = Store.all().then((all) => { cache = L.buildIndex(all); }).finally(() => { building = null; });
+    }
+    await building;
+  }
   return cache;
 }
 const sigOf = (entries) => entries.map((e) =>
@@ -88,10 +100,28 @@ function changed() {
 }
 function watch(el, entries, scope = (x) => x) { watcher = { el, sig: sigOf(scope(entries)), scope }; }
 
-/* ---------- writes: append-only, and re-applied if a sync drops them ---------- */
-async function appendOnlyPut(p) {
-  p.updatedAt = L.nextStamp(p.updatedAt);
-  await Store.put(p, { bump: false });
+/* ---------- writes: compare-and-swap, append-only, re-applied if a sync drops them ---------- */
+/* Every office write to a job: `edit` changes a fresh copy (or throws a
+   sentence for the form), and the write lands only if nothing rewrote the
+   row since it was read (a sync pull, another tab). If something did, it
+   reads again and runs `edit` on the newer copy, so crew work that just
+   arrived is never written over. `edit` returning false: nothing to write.
+   Store.putIf is quiet, so this tells the page and the sync itself. */
+async function writeJob(jobId, edit) {
+  for (let i = 0; i < 6; i++) {
+    const p = await Store.get(jobId);
+    if (!p) throw new Error("This job is no longer on this device.");
+    const seen = p.updatedAt;
+    if (edit(p) === false) return null;
+    p.updatedAt = L.nextStamp(seen);
+    if (await Store.putIf(p, seen)) {
+      changed();
+      syncNow();                                // a sync already running skips this; the next try doesn't
+      setTimeout(() => syncNow(), 4000);
+      return p;
+    }
+  }
+  throw new Error("This job kept changing while saving. Try again in a moment.");
 }
 
 /* A pull that started before an office save can finish after it and write
@@ -100,8 +130,9 @@ async function appendOnlyPut(p) {
    back if a row write dropped it. */
 const pending = new Map();             // jobId -> [{ add, kill, tries }]
 const grafting = new Set();
+const savedIds = new Set();            // returns this session wrote (a retry finds its own, not another device's)
 function remember(jobId, w) {
-  const list = pending.get(jobId) || [];
+  const list = (pending.get(jobId) || []).filter((x) => !(w.add && x.add && x.add.id === w.add.id));
   list.push({ add: w.add || null, kill: w.kill || [], tries: 0 });
   pending.set(jobId, list);
 }
@@ -110,26 +141,30 @@ async function graft(jobId) {
   if (!list || !list.length || grafting.has(jobId)) return;
   grafting.add(jobId);
   try {
-    const p = await Store.get(jobId);
-    if (!p) { pending.delete(jobId); return; }
-    const dead = (p.deletedIds && typeof p.deletedIds === "object") ? p.deletedIds : {};
-    const have = new Set((p.receipts || []).filter(Boolean).map((r) => r.id));
-    const missingAdd = (w) => w.add && !have.has(w.add.id) && !dead[w.add.id];
-    const lost = list.filter((w) => missingAdd(w) || w.kill.some((k) => !dead[k]));
-    if (!lost.length) { pending.delete(jobId); return; }
-    if (!Array.isArray(p.receipts)) p.receipts = [];
-    for (const w of lost) {
-      w.tries++;
-      if (missingAdd(w)) p.receipts.push(JSON.parse(JSON.stringify(w.add)));
-      if (w.kill.length) {
-        p.receipts = p.receipts.filter((r) => !(r && w.kill.includes(r.id)));
-        tombstoneItems(p, w.kill);
+    let lost = [];
+    await writeJob(jobId, (p) => {
+      const dead = (p.deletedIds && typeof p.deletedIds === "object") ? p.deletedIds : {};
+      const have = new Set((p.receipts || []).filter(Boolean).map((r) => r.id));
+      const missingAdd = (w) => w.add && !have.has(w.add.id) && !dead[w.add.id];
+      lost = list.filter((w) => missingAdd(w) || w.kill.some((k) => !dead[k]));
+      if (!lost.length) return false;
+      if (!Array.isArray(p.receipts)) p.receipts = [];
+      for (const w of lost) {
+        if (missingAdd(w)) p.receipts.push(JSON.parse(JSON.stringify(w.add)));
+        if (w.kill.length) {
+          p.receipts = p.receipts.filter((r) => !(r && w.kill.includes(r.id)));
+          tombstoneItems(p, w.kill);
+        }
       }
-    }
-    pending.set(jobId, list.filter((w) => w.tries < 5));
-    await appendOnlyPut(p);
-  } catch { /* the next row change tries again */ }
-  finally { grafting.delete(jobId); }
+    });
+    // a save that landed while this ran added to the list; keep what it added
+    for (const w of lost) w.tries++;
+    const now = (pending.get(jobId) || []).filter((w) => (list.includes(w) ? lost.includes(w) : true) && w.tries < 5);
+    if (now.length) pending.set(jobId, now); else pending.delete(jobId);
+  } catch (e) {
+    if (/no longer on this device/.test(String(e && e.message))) pending.delete(jobId);
+    /* otherwise the next row change tries again */
+  } finally { grafting.delete(jobId); }
 }
 
 onProjectSaved(() => changed());
@@ -139,12 +174,29 @@ export { graft };                      // for admin-receipts.test.mjs; the hook 
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") changed(); });
 
 /* ---------- return windows + "Nothing left over" (Supabase, 0018) ---------- */
-const WKEY = "roybal-receipt-windows", RKEY = "roybal-receipt-reviews";
+const WKEY = "roybal-receipt-windows", RKEY = "roybal-receipt-reviews", FKEY = "roybal-receipt-fleet";
 const loadLocal = (k) => { try { const v = JSON.parse(localStorage.getItem(k)); return Array.isArray(v) ? v : []; } catch { return []; } };
 const saveLocal = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
 let windows = loadLocal(WKEY), reviews = loadLocal(RKEY);
 let windowsState = "cached";           // ok | missing (0018 not applied yet) | offline | cached
 let loadedAt = 0;
+// crew phones on a Field Forms build older than RETURNS_BUILD (0018's
+// field_builds_behind): a number, null when never checked, -1 = not the office
+const RETURNS_BUILD = 202;
+let behind = (() => { try { const v = JSON.parse(localStorage.getItem(FKEY)); return Number.isInteger(v) ? v : null; } catch { return null; } })();
+
+/* Every row of a PostgREST read, 1000 at a time (the hosted row cap). */
+async function readAll(path) {
+  const rows = [];
+  for (let from = 0; from <= 50000; from += 1000) {
+    const res = await rest(`${path}&limit=1000&offset=${from}`, { method: "GET" });
+    if (!res.ok) return { status: res.status, rows: null };
+    const page = await res.json();
+    rows.push(...page);
+    if (page.length < 1000) break;
+  }
+  return { status: 200, rows };
+}
 
 /* Today repaints on every sync, so a fresh read within a minute is reused. */
 async function loadWindows(force = false) {
@@ -152,17 +204,35 @@ async function loadWindows(force = false) {
   if (!force && windowsState === "ok" && Date.now() - loadedAt < 60000) return windows;
   try {
     const since = L.addDaysISO(todayISO(), -380);
-    const [w, r] = await Promise.all([
-      rest("receipt_vendors?select=vendor_key,display_name,return_days,notes&order=vendor_key", { method: "GET" }),
-      rest(`receipt_return_reviews?select=job_id,receipt_id,status&updated_at=gte.${since}`, { method: "GET" }),
+    const [w, r, f] = await Promise.all([
+      readAll("receipt_vendors?select=vendor_key,display_name,return_days,notes&order=vendor_key"),
+      readAll(`receipt_return_reviews?select=job_id,receipt_id,status&updated_at=gte.${since}&order=job_id,receipt_id`),
+      rest("rpc/field_builds_behind", { method: "POST", body: JSON.stringify({ p_min_build: RETURNS_BUILD }) }).catch(() => null),
     ]);
     if (w.status === 404 || r.status === 404) { windowsState = "missing"; return windows; }
-    if (w.ok) { windows = await w.json(); saveLocal(WKEY, windows); }
-    if (r.ok) { reviews = await r.json(); saveLocal(RKEY, reviews); }
-    windowsState = w.ok && r.ok ? "ok" : "offline";
+    if (w.rows) { windows = w.rows; saveLocal(WKEY, windows); }
+    if (r.rows) { reviews = r.rows; saveLocal(RKEY, reviews); }
+    if (f && f.ok) { const n = Number(await f.json()); behind = Number.isInteger(n) && n >= 0 ? n : null; }
+    else if (f && f.status === 403) behind = -1;
+    if (f && (f.ok || f.status === 403)) saveLocal(FKEY, behind);
+    windowsState = w.rows && r.rows ? "ok" : "offline";
     if (windowsState === "ok") loadedAt = Date.now();
   } catch { windowsState = "offline"; }
   return windows;
+}
+
+/* Logging or changing a return waits until every crew phone that synced in
+   the last two weeks runs Field Forms v202 or later: v201 shows a credit as
+   an ordinary receipt, where retyping its total or an AI re-read turns the
+   refund into a cost and 🗑 deletes it for good. null = go ahead, else why
+   not, for the form to say. */
+function returnsGate() {
+  if (!SYNC_ENABLED) return null;
+  if (windowsState === "missing") return "Logging returns switches on after this feature's database update is applied.";
+  if (behind === -1) return "Returns are logged by the office.";
+  if (behind == null) return "This device needs to check once, online, that every crew phone has the latest Field Forms. Connect and open this again.";
+  if (behind > 0) return `Logging returns switches on once every crew phone has the latest Field Forms (an older phone would show a return as a receipt it can change). ${behind === 1 ? "1 person's phone hasn't" : behind + " people's phones haven't"} updated yet: opening Field Forms with signal updates it.`;
+  return null;
 }
 
 /** A write through one of 0018's doors; throws with a sentence for a toast. */
@@ -224,8 +294,12 @@ const currentFlags = (entries) => L.returnFlags(entries, windows, reviews, today
 export async function fillReturnsToday(slot, projects) {
   await loadWindows();
   if (!slot.isConnected) return;
-  const flags = currentFlags(L.buildIndex(projects));
-  slot.replaceChildren(...(flags.length ? [flagsCard(flags, { compact: true })] : []));
+  const entries = L.buildIndex(projects);
+  const fill = () => {
+    const flags = currentFlags(entries);
+    slot.replaceChildren(...(flags.length ? [flagsCard(flags, { compact: true, onCleared: fill })] : []));
+  };
+  fill();
 }
 
 /** ⚙ Settings (admin.js): the set-once card. */
@@ -244,13 +318,19 @@ export function fillSettingsCard(slot) {
 }
 
 /* ---------- the full-screen viewer (the returns-counter view) ---------- */
+let opening = false;                   // a double click opens one viewer, not two
 async function showReceipt(jobId, id) {
-  const p = await Store.get(jobId);
-  const r = p && (p.receipts || []).find((x) => x && x.id === id);
-  if (!r) return toast("That receipt is no longer on the job.");
-  viewer(r);
+  if (opening || document.querySelector(".rl-view")) return;
+  opening = true;
+  try {
+    const p = await Store.get(jobId);
+    const r = p && (p.receipts || []).find((x) => x && x.id === id);
+    if (!r) return toast("That receipt is no longer on the job.");
+    viewer(r);
+  } finally { opening = false; }
 }
 function viewer(r) {
+  if (document.querySelector(".rl-view")) return;
   const pages = [r.photo, ...(Array.isArray(r.extraPages) ? r.extraPages : [])].filter(Boolean);
   let lock = null, closed = false;
   const close = () => {
@@ -291,6 +371,7 @@ const filters = { q: "", vendor: "", job: "", preset: "", show: "all" };
 
 /** admin.js route(): every #/receipts… hash lands here. */
 export async function renderReceipts(view) {
+  if (!location.hash.startsWith(LIST)) return;   // a late call (a save, the pill) after the office moved on
   const my = ++seq;
   const live = () => my === seq && location.hash.startsWith(LIST);
   watcher = null;
@@ -585,12 +666,14 @@ function jobCard(e, jobEntries) {
 async function deleteCredit(jobId, c, after) {
   if (!confirm(`Delete this ${L.fmtMoney(c.amount)} return? The job's receipts total goes back up by ${L.fmtMoney(Math.abs(c.amount))}.`)) return;
   try {
-    const fresh = await Store.get(jobId);
-    if (!fresh) throw new Error("This job is no longer on this device.");
-    fresh.receipts = (fresh.receipts || []).filter((r) => !(r && r.id === c.id));
-    tombstoneItems(fresh, [c.id]);
-    await appendOnlyPut(fresh);
-    remember(jobId, { kill: [c.id] });
+    // its next ids too: a change another device made before hearing of the
+    // delete can't bring it back (receiptlib.js successorId)
+    const kill = L.returnLineage(c.id);
+    await writeJob(jobId, (fresh) => {
+      fresh.receipts = (fresh.receipts || []).filter((r) => !(r && kill.includes(r.id)));
+      tombstoneItems(fresh, kill);
+    });
+    remember(jobId, { kill });
     toast("Return deleted.");
     after();
   } catch (err) { toast(String(err && err.message || err), 4000); }
@@ -616,7 +699,7 @@ async function toPages(f) {
 }
 
 async function renderReturnForm(view, jobId, id, mode, live) {
-  const p = await Store.get(jobId);
+  const [p] = await Promise.all([Store.get(jobId), loadWindows()]);
   if (!live()) return;
   const body = clear(view);
   const credit = mode === "change" && p ? (p.receipts || []).find((r) => r && r.id === id && L.isReturn(r)) : null;
@@ -625,17 +708,24 @@ async function renderReturnForm(view, jobId, id, mode, live) {
   const stop = (msg) => body.append(
     h("div", { class: "atoolbar" }, h("h1", {}, "↩ Return"), h("a", { class: "btn btn--ghost btn--sm", href: cancelHash }, "‹ Back")),
     h("div", { class: "empty" }, h("p", {}, msg)));
+  const gate = returnsGate();
+  if (gate) return stop(gate);
   if (!p) return stop("This job is no longer on this device.");
   if (mode === "change" && !credit) return stop("That return is no longer on the job. It was changed or deleted on another device.");
-  // a change re-checks the caps without the return it replaces
+  // a change re-checks the caps without the return it replaces, and keeps
+  // every receipt it already draws from on the form
   const base = { ...p, receipts: (Array.isArray(p.receipts) ? p.receipts : []).filter((r) => !(credit && r && r.id === credit.id)) };
+  const include = credit ? [...new Set((credit.items || []).filter(Boolean).map((ln) => ln.ofReceipt || credit.returnOf))] : [];
   const entries = L.buildIndex([base]);
-  const sources = L.returnSources(entries, jobId, startId);
+  const sources = L.returnSources(entries, jobId, startId, include);
   if (!sources.length) return stop(credit ? "The receipt this return was logged against is no longer on the job. Delete the return instead, or log a new one." : "That receipt is no longer on the job.");
   const start = sources[0];
   if (!(start.amount > 0)) return stop("This receipt has no total yet. Add its total in Field Forms first, then log the return.");
 
-  const formId = uid();                // minted now: a double click or a retry saves this one return, never two
+  // a new return's id is minted now, so a double click or a retry saves this
+  // one return, never two; a change's is derived (successorId), so two
+  // devices changing the same return at once end up with one
+  const formId = credit ? L.successorId(credit.id) : uid();
   const picks = new Map();             // "receiptId|itemId" -> qty
   if (credit) {
     for (const ln of (credit.items || []).filter(Boolean)) {
@@ -687,6 +777,8 @@ async function renderReturnForm(view, jobId, id, mode, live) {
   const userNote = credit ? String(credit.notes || "").split(" — ").slice(1).join(" — ") : "";
   const note = h("input", { type: "text", maxlength: "200", value: userNote, placeholder: "e.g. 3 sheets left over after the subfloor" });
   const over = h("input", { type: "checkbox" });
+  // a return logged as store credit stays one: re-saving it must not trip the cap
+  if (credit && Math.abs(amountNum(credit.amount)) > L.refundCap(entries, jobId, L.returnTargets(startId, pickList())) + 0.05) over.checked = true;
 
   // the slip photo: snapped, uploaded, or one the crew already snapped as a $0 receipt
   let slip = credit ? { photo: credit.photo || "", extraPages: Array.isArray(credit.extraPages) ? credit.extraPages : [], fromId: null }
@@ -723,7 +815,10 @@ async function renderReturnForm(view, jobId, id, mode, live) {
     ...cands.map((c) => h("option", { value: c.id }, `${c.vendor || "Unknown store"} · ${L.fmtDay(c.date)}${c.by ? " · " + c.by : ""}`))) : null;
   if (candSel) candSel.addEventListener("change", () => {
     const r = candSel.value && (p.receipts || []).find((x) => x && x.id === candSel.value);
-    if (!r) return;
+    if (!r) {                          // back to the placeholder: that slip stays a receipt
+      if (slip.fromId) { slip = { photo: "", extraPages: [], fromId: null }; paintSlip(); }
+      return;
+    }
     slip = { photo: r.photo || "", extraPages: Array.isArray(r.extraPages) ? r.extraPages.slice(0, MAX_PAGES - 1) : [], fromId: r.id };
     paintSlip();
   });
@@ -763,39 +858,47 @@ async function renderReturnForm(view, jobId, id, mode, live) {
     if (saving) return;
     saving = true; save.disabled = true; save.textContent = "Saving…"; err.hidden = true;
     try {
-      const fresh = await Store.get(jobId);
-      if (!fresh) throw new Error("This job is no longer on this device.");
-      if (!Array.isArray(fresh.receipts)) fresh.receipts = [];
-      if (fresh.receipts.some((r) => r && r.id === formId)) { location.hash = detailHash(jobId, credit ? formId : startId); return; }
-      if (credit && !fresh.receipts.some((r) => r && r.id === credit.id)) {
-        throw new Error("This return was changed or deleted on another device. Go back and open it again.");
-      }
       const amt = Math.abs(amountNum(refund.value));
       if (!L.validISO(date.value)) throw new Error("Pick the date on the return slip.");
-      // the caps are checked against the job as it is NOW, not as the form opened
-      const freshBase = credit ? { ...fresh, receipts: fresh.receipts.filter((r) => !(r && r.id === credit.id)) } : fresh;
-      const fe = L.buildIndex([freshBase]);
       const picked = pickList();
-      const problem = L.checkReturn({ entries: fe, jobId, returnOf: startId, picks: picked, refund: amt, over: over.checked });
-      if (problem) throw new Error(problem);
-      let slipFrom = null;
-      if (slip.fromId) {
-        const se = fe.find((x) => x.id === slip.fromId);
-        slipFrom = fresh.receipts.find((r) => r && r.id === slip.fromId);
-        if (!se || !slipFrom || !L.needsTotal(se)) throw new Error("The snapped slip you picked changed on another device. Pick it again, or snap the slip.");
-      }
-      const now = L.returnSources(fe, jobId, startId);
-      const c = L.buildReturnCredit({ id: formId, start: now[0], sources: now, picks: picked, refund: amt, date: date.value,
-        slipNo: slipNo.value, note: note.value, photo: slip.photo, extraPages: slip.extraPages,
-        by: currentEmail() || "office", nowISO: new Date().toISOString() });
-      const kill = [credit && credit.id, slipFrom && slipFrom.id].filter(Boolean);
-      fresh.receipts = fresh.receipts.filter((r) => !(r && kill.includes(r.id)));
-      fresh.receipts.push(c);
-      if (kill.length) tombstoneItems(fresh, kill);
-      await appendOnlyPut(fresh);
+      let c = null, kill = [], label = "", mine = false;
+      // checked and built against the job as it is NOW, not as the form
+      // opened; writeJob re-runs this if a sync lands mid-save
+      await writeJob(jobId, (fresh) => {
+        if (!Array.isArray(fresh.receipts)) fresh.receipts = [];
+        const dead = (fresh.deletedIds && typeof fresh.deletedIds === "object") ? fresh.deletedIds : {};
+        if (fresh.receipts.some((r) => r && r.id === formId)) {
+          if (savedIds.has(formId)) { mine = true; return false; }     // this form's own save already landed
+          throw new Error("This return was just changed on another device. Go back and open it again.");
+        }
+        if (dead[formId] || (credit && !fresh.receipts.some((r) => r && r.id === credit.id))) {
+          throw new Error("This return was changed or deleted on another device. Go back and open it again.");
+        }
+        const freshBase = credit ? { ...fresh, receipts: fresh.receipts.filter((r) => !(r && r.id === credit.id)) } : fresh;
+        const fe = L.buildIndex([freshBase]);
+        const problem = L.checkReturn({ entries: fe, jobId, returnOf: startId, picks: picked, refund: amt, over: over.checked });
+        if (problem) throw new Error(problem);
+        let slipFrom = null;
+        if (slip.fromId) {
+          const se = fe.find((x) => x.id === slip.fromId);
+          slipFrom = fresh.receipts.find((r) => r && r.id === slip.fromId);
+          if (!se || !slipFrom || !L.needsTotal(se)) throw new Error("The snapped slip you picked changed on another device. Pick it again, or snap the slip.");
+        }
+        const now = L.returnSources(fe, jobId, startId, include);
+        c = L.buildReturnCredit({ id: formId, start: now[0], sources: now, picks: picked, refund: amt, date: date.value,
+          slipNo: slipNo.value, note: note.value, photo: slip.photo, extraPages: slip.extraPages,
+          by: currentEmail() || "office", nowISO: new Date().toISOString() });
+        kill = [credit && credit.id, slipFrom && slipFrom.id].filter(Boolean);
+        fresh.receipts = fresh.receipts.filter((r) => !(r && kill.includes(r.id)));
+        fresh.receipts.push(c);
+        if (kill.length) tombstoneItems(fresh, kill);
+        label = L.jobLabel(fe[0] ? fe[0].job : { customer: fresh.customer, address: fresh.address });
+      });
+      if (mine) { location.hash = detailHash(jobId, formId); return; }
+      savedIds.add(formId);
       remember(jobId, { add: c, kill });
-      toast(`${credit ? "Return changed" : "Return logged"}: ${L.fmtMoney(c.amount)} off ${L.jobLabel(fe[0] ? fe[0].job : { customer: fresh.customer, address: fresh.address })}.`, 3500);
-      location.hash = detailHash(jobId, credit ? c.id : startId);
+      toast(`${credit ? "Return changed" : "Return logged"}: ${L.fmtMoney(c.amount)} off ${label}.`, 3500);
+      location.hash = detailHash(jobId, credit ? c.id : c.returnOf);
     } catch (e) {
       err.textContent = String(e && e.message || e); err.hidden = false;
     } finally {
@@ -846,7 +949,7 @@ async function renderVendors(view, live) {
     try {
       await door("receipt_vendor_set", { p_key: key, p_days: n, p_display: name.value.trim().slice(0, 120) || pretty(key), p_notes: "" });
       await loadWindows(true);
-      renderReceipts(view);
+      if (location.hash.startsWith(VENDORS)) renderReceipts(view);
       toast("Saved.");
     } catch (e) { add.disabled = false; toast(e.message, 4000); }
   });

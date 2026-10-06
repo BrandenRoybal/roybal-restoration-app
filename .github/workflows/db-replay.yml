@@ -55,7 +55,7 @@ env:
                         #      on field_projects (0015)
   EXPECT_VIEWS: 5
   EXPECT_ENUMS: 6   # -1: user_role dropped, profiles.role is text + check (0012)
-  EXPECT_FUNCTIONS: 88   # +1: contact_same_value (0001); +5: current_org, current_principal,
+  EXPECT_FUNCTIONS: 89   # +1: contact_same_value (0001); +5: current_org, current_principal,
                          #     current_role_name, and the two trigger functions (0004);
                          #     +1: role_is (0006); +2: xact_ref_prices_for and
                          #     xact_ref_reload (0011); +15: the op spine — emit_event,
@@ -68,8 +68,9 @@ env:
                          #     outbox_claim, outbox_sent, outbox_failed, worker_liveness_check
                          #     and worker_alert_secret (0016); 0017 drops and re-creates
                          #     worker_heartbeat under a new signature and replaces
-                         #     worker_liveness_check: no change; +2: the office doors
-                         #     receipt_vendor_set and receipt_return_review_set (0018)
+                         #     worker_liveness_check: no change; +3: the office doors
+                         #     receipt_vendor_set and receipt_return_review_set, and the
+                         #     phone check field_builds_behind (0018)
   EXPECT_PKUNIQUE: 94   # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010);
                         # +2: the xact_ref_prices and xact_ref_lines pkeys (0011); +1: job_receipts pkey (0015);
                         # +1: worker_heartbeats pkey (0016); +2: receipt_vendors and receipt_return_reviews pkeys (0018)

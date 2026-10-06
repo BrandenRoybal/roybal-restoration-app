@@ -1503,7 +1503,8 @@ function projectHome(project) {
     const isList = f.multi || Array.isArray(project[f.key]); // moisture/drying/photos/contents…
     const noun = f.key === "contents" ? "items" : (f.key === "photos" ? "photos" : (f.key === "receipts" ? "receipts" : "saved"));
     const badge = isList
-      ? h("span", { class: "tile__count" }, count ? `${count} ${noun}` : "None yet")
+      ? h("span", { class: "tile__count" }, count ? `${count} ${noun}`
+        : (f.key === "receipts" && rcLine ? "Returns only" : "None yet"))
       : h("span", { class: "tile__badge " + (count ? "done" : "todo") }, count ? "Started" : "Not started");
     const line = (f.key === "floorPlan" && mpLine) ? mpLine : ((f.key === "receipts" && rcLine) ? rcLine : f.blurb);
     tiles.append(h("a", { class: "tile" + (f.hero ? " tile--hero" : ""), href: `#/p/${project.id}/f/${f.key}` },

@@ -20,6 +20,10 @@
 --   4. The checks hold: a key vendorKey() could never produce, 'unknown',
 --      a window outside 0..365 days and an unknown status are rejected.
 --   5. anon reads nothing and cannot call the doors.
+--   6. field_builds_behind counts the owner/office/crew logins seen in the
+--      last 14 days on an older build, for owner/office only.
+-- Counts are of this file's own rows, so it passes on a database that
+-- already holds real windows, reviews and phones (staging).
 -- ============================================================================
 
 \set ON_ERROR_STOP on
@@ -50,7 +54,7 @@ begin
       problems := problems || format('%s should carry exactly one policy', t);
     end if;
   end loop;
-  foreach p in array array['public.receipt_vendor_set(text, integer, text, text)', 'public.receipt_return_review_set(uuid, text[], text)'] loop
+  foreach p in array array['public.receipt_vendor_set(text, integer, text, text)', 'public.receipt_return_review_set(uuid, text[], text)', 'public.field_builds_behind(integer)'] loop
     if has_function_privilege('anon', p, 'EXECUTE') then
       problems := problems || format('anon can execute %s', p);
     end if;
@@ -107,7 +111,7 @@ begin
   n := public.receipt_return_review_set('00000000-0000-0000-0000-0000000e0018', array['R1', 'R2', 'R2'], 'nothing_to_return');
   if n <> 2 then raise exception 'receipt_return_review_set wrote % rows, expected 2 (duplicates folded)', n; end if;
   n := public.receipt_return_review_set('00000000-0000-0000-0000-0000000e0018', array['R1'], 'nothing_to_return');
-  if n <> 1 or (select count(*) from public.receipt_return_reviews) <> 2 then
+  if n <> 1 or (select count(*) from public.receipt_return_reviews where job_id = '00000000-0000-0000-0000-0000000e0018') <> 2 then
     raise exception 'clearing a receipt twice must update, not add a row';
   end if;
   if (select count(*) from public.receipt_return_reviews where updated_by = '00000000-0000-0000-0000-00000000d018') <> 2 then
@@ -137,8 +141,8 @@ set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000d019", 
 do $$
 declare n int; v record;
 begin
-  if (select count(*) from public.receipt_vendors) <> 2 then
-    raise exception 'the office reads % windows, expected 2', (select count(*) from public.receipt_vendors);
+  if (select count(*) from public.receipt_vendors where vendor_key in ('home depot', 'spenard builders supply')) <> 2 then
+    raise exception 'the office reads % of the two windows the owner set', (select count(*) from public.receipt_vendors where vendor_key in ('home depot', 'spenard builders supply'));
   end if;
   n := public.receipt_vendor_set('home depot', 60, 'Home Depot', '');
   select * into v from public.receipt_vendors where vendor_key = 'home depot';
@@ -146,7 +150,7 @@ begin
     raise exception 'the office''s change landed wrong: %', row_to_json(v);
   end if;
   n := public.receipt_return_review_set('00000000-0000-0000-0000-0000000e0018', array['R2'], null);
-  if n <> 1 or (select count(*) from public.receipt_return_reviews) <> 1 then
+  if n <> 1 or (select count(*) from public.receipt_return_reviews where job_id = '00000000-0000-0000-0000-0000000e0018') <> 1 then
     raise exception 'un-clearing a receipt removed % rows', n;
   end if;
   n := public.receipt_vendor_set('spenard builders supply', null);
@@ -183,6 +187,11 @@ begin
     begin
       insert into public.receipt_vendors (vendor_key, return_days) values ('forged', 10);
       raise exception '% inserted into receipt_vendors', uid;
+    exception when insufficient_privilege then null;
+    end;
+    begin
+      perform public.field_builds_behind(202);
+      raise exception '% counted the phones behind', uid;
     exception when insufficient_privilege then null;
     end;
     perform set_config('role', 'postgres', true);
@@ -252,8 +261,50 @@ begin
     raise exception 'anon can call receipt_vendor_set';
   exception when insufficient_privilege then null;
   end;
+  begin
+    perform public.field_builds_behind(202);
+    raise exception 'anon can call field_builds_behind';
+  exception when insufficient_privilege then null;
+  end;
 end
 $$;
 rollback to savepoint s;
+
+-- 6. the phone check. What the five test logins add on top of whatever the
+--    database already holds: the owner on v201 today and the crew member on
+--    v202 (behind 202 and 203 respectively); the crew lead on v150 three
+--    weeks ago (not seen lately); the agent on v100 (cannot sync jobs); the
+--    office on a build with no digits (not counted).
+do $$
+declare b202 int; b203 int; a202 int; a203 int;
+begin
+  perform set_config('role', 'authenticated', true);
+  perform set_config('request.jwt.claims', '{"sub": "00000000-0000-0000-0000-00000000d019", "role": "authenticated", "aud": "authenticated"}', true);
+  b202 := public.field_builds_behind(202);
+  b203 := public.field_builds_behind(203);
+  perform set_config('role', 'postgres', true);
+
+  insert into public.sync_clients (user_id, build, last_seen, calls) values
+    ('00000000-0000-0000-0000-00000000d018', 'v201', now(),                      1),
+    ('00000000-0000-0000-0000-00000000d01b', 'v202', now() - interval '2 days',  1),
+    ('00000000-0000-0000-0000-00000000d01a', 'v150', now() - interval '21 days', 1),
+    ('00000000-0000-0000-0000-00000000d01c', 'v100', now(),                      1),
+    ('00000000-0000-0000-0000-00000000d019', 'dev',  now(),                      1)
+  on conflict (user_id) do update set build = excluded.build, last_seen = excluded.last_seen;
+
+  perform set_config('role', 'authenticated', true);
+  perform set_config('request.jwt.claims', '{"sub": "00000000-0000-0000-0000-00000000d018", "role": "authenticated", "aud": "authenticated"}', true);
+  a202 := public.field_builds_behind(202);
+  a203 := public.field_builds_behind(203);
+  perform set_config('role', 'postgres', true);
+
+  if a202 <> b202 + 1 then
+    raise exception 'field_builds_behind(202) went from % to %, expected +1 (the owner''s v201 only)', b202, a202;
+  end if;
+  if a203 <> b203 + 2 then
+    raise exception 'field_builds_behind(203) went from % to %, expected +2 (v201 and v202)', b203, a203;
+  end if;
+end
+$$;
 
 rollback;

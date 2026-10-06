@@ -179,6 +179,17 @@ ok("empty construction job -> safe facts",
   const capped = narrativeFacts(job).receipts;
   ok("the 25-entry cap never cuts an orphan credit", capped.length === 25 && capped[0].docType === "return");
   ok("a receipt with no return keeps its exact total", narrativeFacts({ receipts: [{ id: "x", amount: "12.345" }] }).receipts[0].total === 12.345);
+
+  // one return across two receipts splits by what each line cost there
+  const split = narrativeFacts({ receipts: [
+    { id: "R1", vendor: "Home Depot", date: "2026-10-01", amount: "200.00", category: "materials", items: [{ id: "a", desc: "door", qty: "2", price: "100" }] },
+    { id: "R2", vendor: "Home Depot", date: "2026-10-02", amount: "60.00", category: "materials", items: [{ id: "b", desc: "stud", qty: "6", price: "10" }] },
+    { id: "C", kind: "return", returnOf: "R1", date: "2026-10-09", amount: "-130.00", items: [
+      { id: "C-1", of: "a", ofReceipt: "R1", desc: "door", qty: "1", price: "-100" },
+      { id: "C-2", of: "b", ofReceipt: "R2", desc: "stud", qty: "3", price: "-10" }] },
+  ] }).receipts;
+  const s1 = split.find((r) => r.date === "2026-10-01"), s2 = split.find((r) => r.date === "2026-10-02");
+  ok("a return across receipts nets each by its own share, never one negative", split.length === 2 && s1.total === 100 && s1.returned === 100 && s2.total === 30 && s2.returned === 30);
 }
 
 console.log(`\n${pass} checks passed.`);
