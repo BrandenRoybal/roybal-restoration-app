@@ -23,6 +23,35 @@ export function loadConfig(env = process.env) {
     throw new Error("worker: SUPABASE_SERVICE_ROLE_KEY looks like a legacy JWT key, which this project has disabled. " +
       "Use a secret key (sb_secret_…): Supabase Dashboard → Project Settings → API Keys → Publishable and secret keys.");
   }
+  // Same silent failure with the publishable key (the first one on that
+  // Dashboard page, and the one that got pasted on 10/5): it boots, every
+  // service-role call is refused, and no heartbeat ever arms the alarm.
+  if (/^sb_publishable_/.test(key)) {
+    throw new Error("worker: SUPABASE_SERVICE_ROLE_KEY is the publishable key. " +
+      "Use a secret key (sb_secret_…) from the \"Secret keys\" section of Supabase Dashboard → Project Settings → API Keys.");
+  }
+  // A README placeholder typed as-is ("<sb_secret_… key>", "<same as the
+  // gmail-proxy secret>", "sb_secret_PASTE_HERE") would boot and fail later,
+  // far from the cause. Name the variable, never the value.
+  const looksLikePlaceholder = (v) => /[<>…"']|\s|PASTE_/.test(v);
+  for (const name of ["SUPABASE_SERVICE_ROLE_KEY", "GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "OWNER_CELL"]) {
+    const v = String(env[name] ?? "").trim();
+    if (v && looksLikePlaceholder(v) && !(name === "OWNER_CELL" && /^[\d\s()+.-]+$/.test(v))) {
+      throw new Error(`worker: ${name} looks like a placeholder (< >, quotes, spaces or PASTE_). ` +
+        `Set the real value: fly secrets set -a roybal-worker ${name}="…"`);
+    }
+  }
+  // Same normalizing as roybal-notify's toE164: a US number or nothing. A
+  // number it would reject must fail here, not at the first dead-letter text.
+  const cellRaw = String(env.OWNER_CELL ?? "").trim();
+  const cellDigits = cellRaw.replace(/\D/g, "");
+  const ownerCell = !cellRaw ? ""
+    : cellDigits.length === 10 ? `+1${cellDigits}`
+    : cellDigits.length === 11 && cellDigits.startsWith("1") ? `+${cellDigits}`
+    : null;
+  if (ownerCell === null) {
+    throw new Error("worker: OWNER_CELL is not a US phone number. Use the 10-digit cell, e.g. OWNER_CELL=\"+1907XXXXXXX\".");
+  }
 
   const num = (name, dflt, lo, hi) => {
     const n = Number(env[name] ?? dflt);
@@ -59,7 +88,7 @@ export function loadConfig(env = process.env) {
     emailEnabled,
     gmailClientId,
     gmailClientSecret,
-    ownerCell: String(env.OWNER_CELL ?? "").trim(),
+    ownerCell,
     notifyUrl: String(env.NOTIFY_URL ?? "").trim() || `${url}/functions/v1/roybal-notify`,
     outboxAgentId: String(env.OUTBOX_AGENT_ID ?? "").trim() || OUTBOX_AGENT_ID,
     shutdownGraceMs: num("SHUTDOWN_GRACE_MS", 25_000, 1_000, 60_000),

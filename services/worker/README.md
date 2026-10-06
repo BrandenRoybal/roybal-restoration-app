@@ -124,22 +124,32 @@ Order matters: the database first, then the edge function, then the app.
    production). It uses secrets that already exist (`OWNER_CELL`, the
    service role key). Check: `https://djpgvcvhvgrzgaziruze.supabase.co/functions/v1/roybal-webhooks/healthz`
    answers `{"ok":true}`.
-3. **Fly app** — from the REPO ROOT on the Mac:
+3. **Fly app** — inside the repo checkout on the Mac (`fly deploy` finds
+   `services/worker/fly.toml` nowhere else), on an up-to-date main (the deploy
+   builds from this copy; one older than 0017 fails every heartbeat). Swap in
+   the real values for `PASTE_HERE` and the X's; type no `< >`:
    ```sh
-   fly apps create roybal-worker
+   cd ~/roybal-restoration-app
+   git checkout main && git pull
+   fly apps create roybal-worker   # once; "Name has already been taken" means it is done
    fly secrets set -a roybal-worker \
      SUPABASE_URL="https://djpgvcvhvgrzgaziruze.supabase.co" \
-     SUPABASE_SERVICE_ROLE_KEY="<a SECRET key, sb_secret_…, see below>" \
-     GMAIL_CLIENT_ID="<Google Cloud Console OAuth client id, see below>" \
-     GMAIL_CLIENT_SECRET="<its client secret>" \
-     OWNER_CELL="<your cell, e.g. 907xxxxxxx>"
+     SUPABASE_SERVICE_ROLE_KEY="sb_secret_PASTE_HERE" \
+     OWNER_CELL="+1907XXXXXXX"
    fly deploy --config services/worker/fly.toml --dockerfile services/worker/Dockerfile --ha=false .
    ```
+   Email (optional, see below) is one more line, then deploy again:
+   `fly secrets set -a roybal-worker GMAIL_CLIENT_ID="PASTE_HERE" GMAIL_CLIENT_SECRET="PASTE_HERE"`.
+   A value left as a placeholder (`< >`, quotes, spaces, `PASTE_`) stops the
+   worker at boot with the variable's name in `fly logs`; fix it with
+   `fly secrets set` (or `fly secrets unset` for an optional one) and it
+   restarts on its own.
    - **The service key**: Supabase Dashboard → Project Settings → API Keys →
-     the **Publishable and secret keys** tab → copy (or create) a *Secret key*;
-     it begins `sb_secret_`. NOT the *Legacy* tab's `service_role` JWT (begins
-     `eyJ`): this project's legacy keys are disabled, and the worker refuses
-     one at boot rather than run with every call failing.
+     the **Publishable and secret keys** tab → the **Secret keys** section →
+     copy (or create) one; it begins `sb_secret_`. NOT the *publishable* key
+     above it (`sb_publishable_`) and NOT the *Legacy* tab's `service_role`
+     JWT (begins `eyJ`): either would boot and then fail every call, so the
+     worker refuses both at boot.
    - **The Gmail pair** is the OAuth client the office Gmail connection was
      made with: Google Cloud Console → Google Auth Platform (or APIs &
      Services → Credentials) → that OAuth client. The Client ID is on the
