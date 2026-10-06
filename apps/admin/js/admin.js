@@ -2,8 +2,8 @@
    Roybal Restoration — Office Admin
    Same-origin as the field app, so it shares the same local data
    and Supabase session. The CRM home (docs/CRM_Design.md §13):
-   tabbed sections over one hash router — Today, Jobs, Contacts,
-   Campaigns, ⚙ Settings — plus per-contact pages and help.
+   tabbed sections over one hash router — Today, Approvals, Jobs,
+   Contacts, Campaigns, ⚙ Settings — plus per-contact pages and help.
    ============================================================ */
 import { h, $, clear, Store, fmtDate, daysSince } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
@@ -44,14 +44,17 @@ function onStatus(s) {
   // contact page (its edit form would lose keystrokes to a background sync),
   // the campaigns composer (curation gone, and a rebuilt panel would hide a
   // send loop still running in a detached node — duplicate-SMS bait), an
-  // open lead-triage form; or the Receipts tab (a return form mid-typing,
-  // or a receipt up full screen at a returns counter)
+  // open lead-triage form; the Receipts tab (a return form mid-typing,
+  // or a receipt up full screen at a returns counter); or Approvals (an
+  // answer in flight — it refreshes itself, approvals.js)
   if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy() && !leadsBusy() &&
-      !location.hash.startsWith("#/receipts")) route();
+      !location.hash.startsWith("#/receipts") && !location.hash.startsWith("#/approvals")) route();
 }
 
 /* ---------- routes (the CRM home's hash router — doc §13.1) ----------
    ''            → Today: KPIs + company texting
+   #/approvals   → everything waiting on the owner's yes, both queues
+                   (approvals.js, loaded on first visit)
    #/jobs        → the all-jobs table
    #/receipts    → every job's receipts: search, returns, return windows
                    (receiptlibrary.js, loaded on first visit)
@@ -62,8 +65,8 @@ function onStatus(s) {
    #/help        → how the office admin fits together */
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
 const TABS = [
-  ["", "Today"], ["#/leads", "Leads"], ["#/jobs", "Jobs"], ["#/receipts", "Receipts"], ["#/contacts", "Contacts"],
-  ["#/campaigns", "Campaigns"], ["#/analytics", "Analytics"], ["#/settings", "⚙ Settings"],
+  ["", "Today"], ["#/approvals", "Approvals"], ["#/leads", "Leads"], ["#/jobs", "Jobs"], ["#/receipts", "Receipts"],
+  ["#/contacts", "Contacts"], ["#/campaigns", "Campaigns"], ["#/analytics", "Analytics"], ["#/settings", "⚙ Settings"],
 ];
 function sectionOf() {
   const hs = location.hash;
@@ -84,13 +87,16 @@ function paintNav() {
   nav.append(
     ...TABS.map(([href, label]) => {
       const a = h("a", { href: href || "#", class: cur === href ? "is-active" : "" }, label);
-      // the unworked-lead count rides the Leads tab (filled by refreshLeadsBadge)
+      // the unworked-lead count rides the Leads tab (filled by refreshLeadsBadge),
+      // what's waiting on the owner rides Approvals (refreshApprovalsBadge)
       if (href === "#/leads") a.append(h("span", { id: "leadsBadge", class: "navbadge", hidden: true }));
+      if (href === "#/approvals") a.append(h("span", { id: "approvalsBadge", class: "navbadge", hidden: true }));
       return a;
     }),
     h("a", { href: "#/help", class: "anav__help" + (cur === "#/help" ? " is-active" : ""),
       title: "How the Office Admin fits together" }, "❓ Help"));
   refreshLeadsBadge();
+  if (SYNC_ENABLED) approvalsModule().then((m) => m.refreshApprovalsBadge()).catch(() => {});
 }
 let routeSeq = 0;       // a render that awaited past a newer route() drops its paint
 function route() {
@@ -102,6 +108,7 @@ function route() {
   if (hs.startsWith("#/help")) return renderHelp();
   const cid = contactRoute();
   if (cid) return renderContactPage(view, cid);
+  if (hs.startsWith("#/approvals")) return renderApprovalsTab();
   if (hs.startsWith("#/leads")) return renderLeadsTab();
   if (hs.startsWith("#/jobs")) return renderJobs();
   if (hs.startsWith("#/receipts")) return renderReceiptsTab();
@@ -125,7 +132,8 @@ function renderHelp() {
     sec("The tabs",
       p("The office admin is organized into sections: ", h("strong", {}, "Today"), " — the shop at a glance plus ",
         h("strong", {}, "💬 Company texting"), " (both sides of the toll-free number) and ",
-        h("strong", {}, "📧 Job email waiting"), " (the brief's number, now visible — mail handled in Gmail clears itself within 15 minutes); ", h("strong", {}, "🆕 Leads"),
+        h("strong", {}, "📧 Job email waiting"), " (the brief's number, now visible — mail handled in Gmail clears itself within 15 minutes); ",
+        h("strong", {}, "✅ Approvals"), " — everything waiting on the owner's yes; ", h("strong", {}, "🆕 Leads"),
         " — the inbox for new business; ", h("strong", {}, "Jobs"),
         " — every field job; ", h("strong", {}, "🧾 Receipts"), " — every job's receipts, searchable down to the item, with returns and store return windows; ",
         h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; ",
@@ -134,6 +142,16 @@ function renderHelp() {
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
         " (job-matched email) connections, set once and out of the way."),
       p("Today opens with two stat rows. The lead row: ", h("strong", {}, "unworked leads"), " and ", h("strong", {}, "overdue follow-ups"), " (click either to jump to the inbox), the open ", h("strong", {}, "pipeline value"), " (estimated dollars across open leads), the ", h("strong", {}, "average first touch"), " — how fast someone reaches a new lead, measured from the moment it lands to the first action taken on it — then ", h("strong", {}, "site visits this week"), " and ", h("strong", {}, "estimates out with no answer for 5+ days"), ", the two places bids get stuck. Below it, the ops row: total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
+    sec("✅ Approvals — everything waiting on your yes",
+      p("Every ask the system is holding for the owner, soonest to expire first: the overdue-invoice reminder emails the morning brief drafts, the phases QuickBooks Time wants added to a board job, the texts the text assistant writes, and, as they start arriving, the new operations queue's emails, texts and job-stage moves. Each card shows exactly what would happen (the whole email, every line of it, the text, the phase and its hours), the job, who asked, and when it expires, in Alaska time. An evidence link starts with the site it really opens (“opens mail.google.com — …”), ahead of the name whoever filed it gave it; check that before you click. If an ask is waiting but couldn't be shown, a line under Waiting on you says so: answer it by text, or tell Claude."),
+      p(h("strong", {}, "Approve"), " does it after one confirm (the button says what: ", h("strong", {}, "Approve and send"), ", ", h("strong", {}, "Approve and add phase"), "…); ",
+        h("strong", {}, "Decline"), " drops it, and on the new queue you can say why. While one answer is on its way its card reads ", h("strong", {}, "Working…"),
+        "; the other cards can be answered meanwhile. This sits beside ", h("strong", {}, "text YES 12"),
+        ", not instead of it: a card that says “or text YES 12” can be answered either way, and only the first answer counts. Asks from the new queue can't be answered by text yet, so their cards don't offer it."),
+      p("Answered asks move to ", h("strong", {}, "Recently decided"), " (the last 48 hours) with what came of them: Sent, Phase added, Phase was already on the board, Queued to send, Declined, or Failed and why. ",
+        h("strong", {}, "Approved — waiting to hear how it went"), " (", h("strong", {}, "adding the phase"), " for a board phase) is one still running: a YES text being handled, a tap on another phone, or yours still on its way. Still that way a few minutes later, it reads ",
+        h("strong", {}, "Approved, but it never reported back"), ": the answer went in but the send didn't say how it went, so check whether it went out (for a phase, check the board) before approving it again. A line under the list counts asks that expired with no answer in the last week. The number on the tab is what's waiting now. Only the owner's login sees the tab's contents and its count; if the app couldn't check your login just then, the tab says so and offers ", h("strong", {}, "Retry"), "."),
+      p("Customer texts go out only during texting hours, Alaska time. Approving one from the text queue outside them leaves it waiting, and the card says when it can go (or that it expires before then, so it won't); a text from the new queue is queued and goes out when they open. If the board can't be reached, nothing is added and the card says to try again in a minute; an ask whose kind was retired before you answered it can only be declined.")),
     sec("🆕 Leads — the inbox for new business",
       p("Every open lead from every lane — website form, AI chat, phone line — newest first, with what the customer actually wrote or said shown in full (no more digging it out of a board chip's notes). The count on the tab is leads ", h("strong", {}, "nobody has touched yet"), "; the morning brief nags about them too."),
       p("Work a lead right from the row: ", h("strong", {}, "📞 Call"), ", ", h("strong", {}, "📅 Site visit"),
@@ -350,21 +368,32 @@ async function renderJobs() {
   paintTable();
 }
 
-/* ---------- 🧾 Receipts (#/receipts) — receiptlibrary.js, loaded on first
-   visit (a failed load is a fresh deploy meeting a stale cached page) ---------- */
-function receiptsModule() { return import("./receiptlibrary.js"); }
-function renderReceiptsTab() {
-  receiptsModule().then((m) => {
-    if (!location.hash.startsWith("#/receipts")) return;
-    m.renderReceipts(view).catch((e) => {
-      clear(view).append(h("div", { class: "empty" }, h("p", {}, "Couldn't open Receipts: " + String(e && e.message || e))));
+/* ---------- tabs loaded on first visit (a failed load is a fresh deploy
+   meeting a stale cached page) ---------- */
+function lazyTab(prefix, name, load, open) {
+  load().then((m) => {
+    if (!location.hash.startsWith(prefix)) return;
+    open(m).catch((e) => {
+      clear(view).append(h("div", { class: "empty" }, h("p", {}, `Couldn't open ${name}: ` + String(e && e.message || e))));
     });
   }).catch(() => {
-    if (!location.hash.startsWith("#/receipts")) return;
+    if (!location.hash.startsWith(prefix)) return;
     clear(view).append(h("div", { class: "empty" },
-      h("p", {}, "The office app just updated. Reload to open Receipts."),
+      h("p", {}, `The office app just updated. Reload to open ${name}.`),
       h("button", { class: "btn btn--primary btn--sm", style: "margin:8px auto 0", onclick: () => location.reload() }, "Reload")));
   });
+}
+
+/* ---------- ✅ Approvals (#/approvals) — approvals.js ---------- */
+function approvalsModule() { return import("./approvals.js"); }
+function renderApprovalsTab() {
+  lazyTab("#/approvals", "Approvals", approvalsModule, (m) => m.renderApprovals(view));
+}
+
+/* ---------- 🧾 Receipts (#/receipts) — receiptlibrary.js ---------- */
+function receiptsModule() { return import("./receiptlibrary.js"); }
+function renderReceiptsTab() {
+  lazyTab("#/receipts", "Receipts", receiptsModule, (m) => m.renderReceipts(view));
 }
 
 /* ---------- Leads (#/leads) — the inbox lives in leads.js ---------- */

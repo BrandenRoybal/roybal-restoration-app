@@ -4,19 +4,31 @@
    The morning brief (and later, other organs) PROPOSES actions as
    pending_actions rows, each with a short code. The owner texts
    back "YES 12" (or just "YES" when exactly one is open) and the
-   inbound webhook executes it server-side. These are the rules for
-   parsing that reply and matching it to a proposal — pure, so
-   they're Node-testable (node --experimental-strip-types
-   approve.test.mjs).
+   inbound webhook executes it server-side. Or the owner taps
+   Approve on the admin app's Approvals tab, which posts
+   decidePending to the same function. Either way the row goes
+   through decide() below: one quiet-hours preflight, one guarded
+   pending → approved flip, one executor, so whichever answer
+   lands first is the one that counts. These are the rules for
+   parsing that reply, matching it to a proposal and shaping each
+   channel's answer — pure, so they're Node-testable
+   (node --experimental-strip-types approve.test.mjs;
+   decide.test.mjs covers the order).
 
    Safety posture:
-   • Only the owner's cell may approve — checked by the caller.
+   • Only the owner may approve — the owner's cell for a text, an
+     owner login (role_is under the caller's JWT) for a tap. Both
+     are checked by the caller.
    • Codes expire (24h default) — yesterday's YES can't fire
      today's action.
    • "YES" alone only works when exactly ONE live proposal exists;
      two or more demand the code, and the mismatch reply says so.
    • Anything that isn't clearly a YES is ignored (normal replies
      keep flowing to the message log unharmed). STOP/NO cancels.
+   • A customer text approved outside the send window is refused
+     and stays pending. It is never burned as failed.
+   • A board edit that couldn't reach the board wrote nothing, so
+     it goes back to pending to be answered again.
    ============================================================ */
 
 // deno-lint-ignore no-explicit-any
@@ -65,6 +77,8 @@ export const proposalLine = (a: Blob) => `💬 Reply YES ${a.code} — ${a.label
 
 export type BoardEdit = { rowId: string; phase: Blob };
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Read a boardEdit proposal's params, or throw a sentence the owner can
     understand. A malformed proposal must die here, not half-way through a write. */
 export function validateBoardEdit(params: Blob): BoardEdit {
@@ -72,6 +86,9 @@ export function validateBoardEdit(params: Blob): BoardEdit {
   if (op !== "addPhase") throw new Error(`unsupported board edit "${op || "(none)"}" — only addPhase can be approved by text`);
   const rowId = String(params?.rowId ?? "").trim();
   if (!rowId) throw new Error("the proposal names no board job");
+  // coordination_jobs.id is a uuid (qb-time files job.id). Anything else can
+  // never match a job, and PostgREST answers it 400, every time it's asked.
+  if (!UUID.test(rowId)) throw new Error("the proposal names no valid board job");
   const phase = (params?.phase ?? {}) as Blob;
   if (typeof phase.name !== "string" || !phase.name.trim()) throw new Error("the proposal names no phase");
   // An id-less phase is a trap, not a phase: schedule.js keys hours by st.id,
@@ -107,14 +124,300 @@ export function buildNextSubtasks(subtasks: Blob[] | undefined | null, phase: Bl
 export const revGuard = (base: number) =>
   base > 0 ? `data->>rev=eq.${base}` : `or=(data->>rev.is.null,data->>rev.eq.0)`;
 
+/** Is a failed board read worth answering again? Only an outage (a 5xx) or a
+    rate limit (429) passes. Any other refusal is the same answer next time, so
+    a TryAgain would bounce the row back to pending forever. (A read that never
+    answered at all is retryable too; index.ts sees that as a throw.) */
+export const retryableStatus = (status: number) => status >= 500 || status === 429;
+
+/** "couldn't reach the board" → "Couldn't reach the board": an executor's
+    sentence opening a reply of its own. */
+const capFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 /** Confirmation / error texts the webhook sends back. */
-export function replyText(kind: "done" | "failed" | "none-open" | "ambiguous" | "no-such-code" | "cancelled", a?: Blob, detail?: string) {
+export function replyText(
+  kind: "done" | "skipped" | "failed" | "none-open" | "ambiguous" | "no-such-code" | "cancelled" | "already-answered" |
+    "quiet-hours" | "quiet-hours-expires" | "try-again" | "not-recorded",
+  a?: Blob, detail?: string,
+) {
+  const code = a?.code != null ? " " + a.code : "";
   switch (kind) {
     case "done": return `✅ Done — ${a?.label || "action executed"}.`;
+    // only a board edit skips: the phase it would add was already there
+    case "skipped": return `✅ Phase was already on the board — nothing was added (${a?.label || "board edit"}).`;
     case "failed": return `⚠️ Couldn't do it: ${String(detail || "unknown error").slice(0, 200)}. Nothing was sent.`;
     case "none-open": return "Nothing is waiting for approval right now.";
     case "ambiguous": return "More than one action is waiting — reply YES with its number (e.g. YES 12).";
     case "no-such-code": return "That number doesn't match a live proposal — check today's brief and reply YES with the number shown.";
     case "cancelled": return `👍 Cancelled — ${a?.label || "proposal dismissed"}.`;
+    // a NO whose flip matched nothing: a YES or a tap got there first
+    case "already-answered": return "That one was already answered — nothing was cancelled.";
+    // detail = sendWindowText(…), e.g. "7am and 8pm"
+    case "quiet-hours": return `🌙 Customer texts go out between ${detail || "7am and 8pm"} Alaska time — ` +
+      `text YES${code} again then. Nothing was sent; it's still waiting.`;
+    // the same hold, for a row that expires before the window opens: "then" never comes
+    case "quiet-hours-expires": return `🌙 Customer texts go out between ${detail || "7am and 8pm"} Alaska time, ` +
+      `and this one expires before then, so it won't go out. Nothing was sent.`;
+    // detail = the executor's sentence; the row is back at pending
+    case "try-again": return `⏳ ${capFirst(String(detail || "that didn't go through"))} — text YES${code} again in a minute.`;
+    // detail = the word he texted, "YES" or "NO"; the flip errored, so nothing moved
+    case "not-recorded": return `Couldn't record that just now — text ${detail || "YES"}${code} again in a minute.`;
+  }
+}
+
+/* ============================================================
+   Quiet hours — the preflight before a YES flips anything.
+   Customer texts go out 7am–8pm Alaska (SMS_QUIET_START / _END in
+   index.ts, whose assertSendWindow uses these same helpers). A
+   sendText for a customer audience, approved outside that window,
+   is refused BEFORE the pending → approved flip and stays pending,
+   to be answered again once the window opens (when the row expires
+   before then, the answer says it won't go out). Until this check,
+   a 9pm YES flipped the row to approved, the send guard then threw,
+   and the proposal was burned as failed. Crew texts and every other
+   kind go through at any hour, as the executor always treated them.
+   ============================================================ */
+
+/** 7 → "7am", 20 → "8pm", 12 → "noon", 0 and 24 → "midnight". */
+export const hourLabel = (h: number) =>
+  h === 0 || h === 24 ? "midnight" : h === 12 ? "noon" : h < 12 ? `${h}am` : `${h - 12}pm`;
+
+/** Is this Alaska hour inside the send window? Start counts, end doesn't. */
+export const inSendWindow = (hour: number, start: number, end: number) => hour >= start && hour < end;
+
+/** "7am and 8pm", the window as the owner reads it. */
+export const sendWindowText = (start: number, end: number) => `${hourLabel(start)} and ${hourLabel(end)}`;
+
+/** Does the preflight hold this row? Only a customer sendText, only outside the window. */
+export function quietHoursHold(kind: unknown, params: Blob | null | undefined, hour: number, start: number, end: number): boolean {
+  return kind === "sendText" && params?.audience === "customer" && !inSendWindow(hour, start, end);
+}
+
+/** The Alaska hour (0–23) at an instant; index.ts's anchorageHour is this at now. */
+const AK_HOUR = new Intl.DateTimeFormat("en-US", { timeZone: "America/Anchorage", hour: "numeric", hourCycle: "h23" });
+export const alaskaHour = (d: Date) => Number(AK_HOUR.format(d));
+
+const HOUR_MS = 3_600_000;
+
+/** When the send window next opens, seen from `at` outside it: the first
+    top of an hour after `at` that inSendWindow calls open, today's or
+    tomorrow's. Alaska sits a whole number of hours off UTC, so the top of
+    an hour is the same instant there and here. Stepping an hour at a time
+    and asking the same question the preflight asks is exact whatever the
+    hours are set to: across a DST change, for a start hour the clock skips
+    that night, or a start like 7.5. null when the window never opens (a
+    start at or after its end). */
+export function windowOpensAt(at: Date, start: number, end: number): Date | null {
+  let t = Math.floor(at.getTime() / HOUR_MS) * HOUR_MS;
+  for (let i = 0; i < 49; i++) {
+    t += HOUR_MS;
+    if (inSendWindow(alaskaHour(new Date(t)), start, end)) return new Date(t);
+  }
+  return null;
+}
+
+/** Will a held row expire before the window opens? Then "approve it then"
+    is a promise nobody can keep. A row with no expiry never lapses
+    (stillLive's rule), and neither does one whose expiry won't parse. */
+export function expiresBeforeWindow(expiresAt: unknown, at: Date, start: number, end: number): boolean {
+  if (expiresAt == null || expiresAt === "") return false;
+  const exp = Date.parse(String(expiresAt));
+  if (!Number.isFinite(exp)) return false;
+  const opens = windowOpensAt(at, start, end);
+  return !opens || exp <= opens.getTime();
+}
+
+/* ============================================================
+   decide — one answer, either channel.
+   The YES/NO text (handleApproval) and the inbox tap
+   (decidePending) both run a pending_actions row through here, so
+   the two can't drift apart:
+   • NO / Decline is a guarded flip, pending → declined.
+   • YES / Approve clears the quiet-hours preflight first, then
+     flips pending → approved, guarded on still-pending. Only a flip
+     that landed runs the executor. A tap and a text racing for the
+     same row can't both execute: the loser's flip matches zero rows
+     and it reports not_open.
+   • An executor throw stamps the row failed with result.error,
+     guarded on still-approved: when the stamp matches nothing,
+     someone settled the row first (gmail-proxy stamps its own
+     executed before it answers), so the row is re-read and its
+     real outcome reported.
+   • An executor that throws TryAgain wrote nothing and hit
+     something passing (the board didn't answer). The row goes back
+     approved → pending, guarded, to be answered again; if that
+     revert doesn't land it takes the failed stamp after all. Nor
+     is it sent when another live row has taken the same code
+     meanwhile (a row at approved doesn't hold its code), since
+     two live rows on one code would leave a YES ambiguous.
+   index.ts supplies the I/O (the PATCHes, gmail-proxy, Twilio, the
+   board write); the order lives here, where a test can see it.
+   ============================================================ */
+
+export type Decision = "approve" | "decline";
+export type Outcome =
+  | { status: "executed"; skipped?: string }
+  | { status: "declined" | "not_open" }
+  | { status: "quiet_hours"; expiresFirst?: boolean }
+  | { status: "failed" | "try_again"; error: string };
+
+/** Thrown by an executor that wrote nothing, over something that passes. */
+export class TryAgain extends Error {}
+
+export type DecideIO = {
+  /** The preflight's answer for this row (quietHoursHold). */
+  held: boolean;
+  /** Held, and the row expires before the window opens (expiresBeforeWindow). */
+  expiresFirst?: boolean;
+  /** Guarded PATCH pending → `to`. Resolves true when a row landed, false when
+      it matched none (a lost race); rejects when the PATCH errored. */
+  flip: (to: "approved" | "declined") => Promise<boolean>;
+  /** Run the approved row's action. Throws a sentence the owner can read.
+      Resolves with { skipped } when there was nothing to do. */
+  execute: () => Promise<unknown>;
+  /** Guarded PATCH approved → pending. Resolves true when a row landed, false
+      when it matched none or was not sent, "taken" when it was not sent
+      because another live row now holds the code. */
+  revert: () => Promise<boolean | "taken">;
+  /** Guarded PATCH approved → failed with result.error. Resolves true when a row landed. */
+  fail: (error: string) => Promise<boolean>;
+  /** The row as it stands now, or null. */
+  reread: () => Promise<Blob | null>;
+};
+
+/** Settle a best-effort step: whatever it throws is a step that didn't land. */
+const quietly = async <T>(step: () => Promise<T>, otherwise: T): Promise<T> => {
+  try { return await step(); } catch (_) { return otherwise; }
+};
+
+/** A flip that rejects (its PATCH errored or never answered) is not caught
+    here: nobody knows whether it landed, so the caller reports it and nothing
+    executes. Every later step is caught; decide() itself never throws past
+    the flip. */
+export async function decide(decision: Decision, io: DecideIO): Promise<Outcome> {
+  if (decision === "decline") return { status: (await io.flip("declined")) ? "declined" : "not_open" };
+  // a held row is never flipped: it stays pending for an answer in the window
+  // (and when it expires before the window opens, the answer has to say so)
+  if (io.held) return io.expiresFirst ? { status: "quiet_hours", expiresFirst: true } : { status: "quiet_hours" };
+  // approve first (guarded on still-pending — a double YES can't fire twice)…
+  if (!(await io.flip("approved"))) return { status: "not_open" };
+  // …then execute. From here on every throw ends back at pending or in the
+  // failed stamp, so a row can't be left sitting at "approved".
+  let error: string;
+  let retry = false;
+  try {
+    const done = (await io.execute()) as Blob | undefined;
+    return done?.skipped ? { status: "executed", skipped: String(done.skipped) } : { status: "executed" };
+  } catch (e) {
+    error = String((e as Error)?.message ?? e).slice(0, 300);
+    retry = e instanceof TryAgain;
+  }
+  if (retry) {
+    const back = await quietly<boolean | "taken">(() => io.revert(), false);
+    if (back === true) return { status: "try_again", error };
+    // the same YES would now run the newer ask, so the answer can't read as "try again"
+    if (back === "taken") error = `${error}; its YES number now belongs to a newer ask, so this one is closed`;
+  }
+  if (!(await quietly(() => io.fail(error), false))) {
+    // the row moved on without us (or the stamp errored): say what it shows
+    const now = await quietly(() => io.reread(), null);
+    if (now?.status === "executed") return { status: "executed" };
+  }
+  return { status: "failed", error };
+}
+
+/** The text back to the owner on the YES/NO path. `window` = sendWindowText(…). */
+export function replyFor(decision: Decision, out: Outcome, a: Blob, window: string): string {
+  if (decision === "decline") return replyText(out.status === "declined" ? "cancelled" : "already-answered", a)!;
+  switch (out.status) {
+    case "quiet_hours": return replyText(out.expiresFirst ? "quiet-hours-expires" : "quiet-hours", a, window)!;
+    case "not_open": return replyText("none-open")!;
+    case "failed": return replyText("failed", a, out.error)!;
+    case "try_again": return replyText("try-again", a, out.error)!;
+    case "executed": return replyText(out.skipped ? "skipped" : "done", a)!;
+    default: return replyText("done", a)!;
+  }
+}
+
+/* ============================================================
+   decidePending — the inbox's door (index.ts routes it).
+   The Approvals tab POSTs { action:"decidePending", id, decision }
+   with the owner's access token. index.ts checks the owner, then
+   runs the row through decide() with the service role. The request
+   check and the shape of every answer live here; the tab turns
+   them into sentences. No text goes back to the owner — this
+   response is the answer.
+   ============================================================ */
+
+/** The id must be a real uuid: it goes straight into a PostgREST filter. */
+export function parseDecideRequest(body: Blob | null | undefined):
+  { ok: true; id: string; decision: Decision } | { ok: false; message: string } {
+  const id = typeof body?.id === "string" ? body.id.trim() : "";
+  if (!UUID.test(id)) return { ok: false, message: "Provide `id`, the pending action's uuid." };
+  const decision = body?.decision;
+  if (decision !== "approve" && decision !== "decline")
+    return { ok: false, message: 'Provide `decision`, "approve" or "decline".' };
+  return { ok: true, id, decision };
+}
+
+/** Everything decidePending can answer: decide()'s outcomes plus the refusals before it. */
+export type DecideAnswer =
+  | Outcome
+  | { status: "not_owner" | "auth" | "role_check_failed" }
+  | { status: "bad_request" | "server_error"; error: string };
+
+/** rpc/role_is('owner') under the caller's JWT, read as decidePending's first
+    answer: null = the owner, carry on. Only a 200 that is literally true
+    passes. A 401 is PostgREST refusing the token (expired, or signed with a
+    key it no longer trusts), answered 401 so the app refreshes the token and
+    asks once more. Anything else (a 5xx, or `status` 0 for a call that never
+    answered) is an outage, not a verdict on who he is. Every refusal runs
+    nothing. */
+export function ownerGate(status: number, body: unknown): DecideAnswer | null {
+  if (status === 200) return body === true ? null : { status: "not_owner" };
+  if (status === 401) return { status: "auth" };
+  return { status: "role_check_failed" };
+}
+
+/** HTTP code + JSON body for each answer. 200 means the decision was recorded,
+    including "failed" (the error rides in `message`); everything else is
+    { ok:false, error, message }. `a` = the row, once there is one; `after` =
+    that row re-read once the decision settled (null when the read failed, and
+    then the outcome stands in for its status); `window` = sendWindowText(…). */
+export function decideResponse(out: DecideAnswer, a: Blob | null, window: string, after: Blob | null = null):
+  { code: number; body: Blob } {
+  const skipped = (out.status === "executed" && out.skipped) || after?.result?.skipped;
+  const settled = after ?? {
+    status: out.status,
+    result: out.status === "failed" ? { error: out.error } : skipped ? { skipped } : null,
+  };
+  // a skip is known even when its executed stamp didn't land and the re-read
+  // still shows the row at approved with no result
+  const result = skipped ? { ...(settled.result ?? {}), skipped } : settled.result ?? null;
+  const action = a ? {
+    id: a.id, code: a.code, kind: a.kind, label: a.label,
+    status: settled.status ?? null, result,
+  } : null;
+  const label = a?.label || "the action";
+  const refuse = (code: number, error: string, message: string) => ({ code, body: { ok: false, error, message } });
+  switch (out.status) {
+    case "executed": return { code: 200, body: { ok: true, status: "executed",
+      // only a board edit skips: the phase it would add was already there
+      message: skipped ? "Phase was already on the board — nothing was added." : `Done — ${label}.`, action } };
+    case "declined": return { code: 200, body: { ok: true, status: "declined", message: `Declined — ${label}.`, action } };
+    case "failed": return { code: 200, body: { ok: true, status: "failed", message: out.error || "unknown error", action } };
+    case "not_open": return refuse(404, "not_open", "Already answered, or it expired.");
+    // the row stays pending either way; only one of them can still be approved in the window
+    case "quiet_hours": return refuse(409, "quiet_hours", out.expiresFirst
+      ? `Customer texts only go out between ${window} Alaska time, and this one expires before then. Nothing was sent.`
+      : `Customer texts go out between ${window} Alaska time. It's still waiting; approve it then.`);
+    // the row is back at pending; the executor's sentence says what didn't happen
+    case "try_again": return refuse(409, "try_again", `${capFirst(out.error || "that didn't go through")}; try again in a minute.`);
+    case "not_owner": return refuse(403, "not_owner", "Approvals belong to the owner's login.");
+    case "auth": return refuse(401, "auth", "Your login expired. Sign in again.");
+    case "role_check_failed": return refuse(503, "role_check_failed", "Couldn't check your login just now. Try again.");
+    case "bad_request": return refuse(400, "bad_request", out.error);
+    // the bare cause: the tab already frames a 5xx as "something went wrong on the server (…)"
+    case "server_error": return refuse(500, "server_error", out.error || "unknown error");
   }
 }
