@@ -354,8 +354,11 @@ export function digestSupportDoc(project, pages, hint) {
 /* ---------- receipt read (🧾 Receipts tile) ---------- */
 /** Read a snapped receipt (page images, page 1 first) into
     { vendor, date, total, subtotal, tax, cardLast4, receiptNo, paidWith,
-      category, items:[{desc, qty, unit, price, sku}], confidence, notes, model }.
-    receiptcalc.js applyReceiptRead lands it on the receipt. */
+      category, items:[{desc, qty, unit, price, sku}], confidence, notes, model,
+      isReturn, refund }.
+    receiptcalc.js applyReceiptRead lands it on the receipt. A return slip
+    comes back isReturn with total null and the refund in `refund` (a reader
+    deployed before that sends neither, and drops a negative total). */
 export function readReceipt(project, pages) {
   return callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }).then((b) => b.receipt || {});
 }

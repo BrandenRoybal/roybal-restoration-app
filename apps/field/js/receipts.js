@@ -16,15 +16,17 @@
    public.job_receipts for the office. Nothing here touches
    QuickBooks — that is the plan's phase 3.
 
-   Returns (plan phase 2) are logged in the office app: each is its
-   own element with kind "return" and a negative amount (a credit,
-   receiptlib.js). Here a credit is read-only — a retake or a re-read
-   would flip its sign or drop its links — and the receipt it returns
-   carries a "↩ Returned" badge.
+   Returns (plan phase 2): each is its own element with kind "return"
+   and a negative amount (a credit, receiptlib.js). The office logs one
+   from the receipt it returns; here a return slip snapped at the counter
+   (the AI reads it as one, or its lines are credits) offers "↩ Log as a
+   return" and becomes the same credit, the slip folding into it. A credit
+   is read-only here — a retake or a re-read would flip its sign or drop
+   its links — and the receipt it returns carries a "↩ Returned" badge.
    ============================================================ */
-import { h, Store, toast, fmtDate, money, fileToDataURL } from "./core.js";
+import { h, Store, toast, fmtDate, money, fileToDataURL, uid, todayISO } from "./core.js";
 import { setCtx, commit, field, inp, ta, sel, seg, lineItems } from "./formkit.js";
-import { newReceipt, blankLineItem } from "./model.js";
+import { newReceipt, blankLineItem, author } from "./model.js";
 import { tombstoneItems } from "./merge.js";
 import { aiAvailable, aiReady, readReceipt } from "./officeai.js";
 import { isMediaMarker } from "./media.js";
@@ -154,11 +156,12 @@ function receiptsList(project, { view, setChrome }) {
   const hay = (r) => norm([r.vendor, r.notes, r.receiptNo, r.cardLast4, ...(r.items || []).map((it) => it && (it.desc + " " + (it.sku || "")))]
     .filter(Boolean).join(" "));
   const matches = (r) => norm(q).split(" ").filter(Boolean).every((w) => hay(r).includes(w));
-  let state = new Map(), returnStatus = () => "";
+  let state = new Map(), returnStatus = () => "", slip = () => false;
   receiptLib().then((lib) => {
     if (!lib || !list.isConnected) return;
     state = new Map(lib.buildIndex([project]).map((e) => [e.id, e]));
     returnStatus = lib.returnStatus;
+    if (typeof lib.isSlip === "function") slip = lib.isSlip;
     paint();
   });
   function paint() {
@@ -174,11 +177,13 @@ function receiptsList(project, { view, setChrome }) {
       const sub = [fmtDate(r.date), cat.label, n ? `${n} item${n === 1 ? "" : "s"}` : "", r.cardLast4 ? "••" + r.cardLast4 : "", r.receiptNo ? "#" + r.receiptNo : ""]
         .filter(Boolean).join(" · ");
       const ret = isReturn(r);
-      const needs = !ret && (!receiptAmount(r) || !String(r.vendor || "").trim());
+      const isSlip = !ret && slip(r);
+      const needs = !ret && !isSlip && (!receiptAmount(r) || !String(r.vendor || "").trim());
       const e = state.get(r.id);
       const st = returnStatus(e);
       const badges = [
         ret ? h("span", { class: "badge disp-b" }, "↩ Return") : null,
+        isSlip ? h("span", { class: "badge", style: "background:var(--brand-tint);color:var(--brand-dark)" }, "↩ Return slip: tap to log it") : null,
         st ? h("span", { class: "badge disp-b" }, (st === "all" ? "↩ All returned " : "↩ Partly returned ") + money(-e.returned)) : null,
         needs ? h("span", { class: "badge", style: "background:var(--brand-tint);color:var(--brand-dark)" }, "Needs vendor / total") : null,
         r.ai && !ret ? h("span", { class: "badge" }, "✨ AI read") : null].filter(Boolean);
@@ -284,8 +289,14 @@ function receiptEditor(project, r, ctx) {
       const read = await readReceipt(project, [r.photo, ...r.extraPages]);
       const changed = applyReceiptRead(r, read, { overwrite });
       r.ai = { at: new Date().toISOString(), model: read.model || "", confidence: typeof read.confidence === "number" ? read.confidence : null };
+      // a return slip (receiptlib.js isSlip): the refund never lands on the
+      // total, it waits here for "Log as a return"
+      if (read.isReturn === true) { r.ai.isReturn = true; r.ai.refund = amountNum(read.refund) > 0 ? amountNum(read.refund) : null; }
       await Store.put(project);
-      toast(changed.length ? `Read ${read.vendor || "the receipt"} — ${money(amountNum(read.total))}. Check it, then Done.` : "Read it — nothing new to fill in.");
+      const slipRead = read.isReturn === true || (!(amountNum(read.total) > 0) &&
+        (Array.isArray(read.items) ? read.items : []).some((it) => it && amountNum(it.price) < 0));
+      toast(slipRead && !(amountNum(r.amount) > 0) ? `Read a return slip from ${read.vendor || "the store"}. Tap ↩ Log as a return to take it off the job total.`
+        : changed.length ? `Read ${read.vendor || "the receipt"} — ${money(amountNum(read.total))}. Check it, then Done.` : "Read it — nothing new to fill in.", 4000);
       receiptEditor(project, r, ctx);   // repaint every field with what landed
       return;
     } catch (e) {
@@ -312,9 +323,26 @@ function receiptEditor(project, r, ctx) {
   }
   const items = lineItems(r.items, blankLineItem, { onTotals: () => paintTotals() });
 
+  // a return slip, or a receipt with no total that might be one: log it as a
+  // return of the purchase it came from (receiptlib.js loads on demand)
+  const slipBox = h("div");
+  if (!(amountNum(r.amount) > 0)) receiptLib().then((lib) => {
+    if (!lib || typeof lib.isSlip !== "function" || !slipBox.isConnected || amountNum(r.amount) > 0) return;
+    const go = () => { commit(); returnForm(project, r, ctx); };
+    slipBox.replaceChildren(lib.isSlip(r)
+      ? h("div", { class: "card", style: "border-left:4px solid var(--brand);margin-bottom:10px" },
+          h("strong", {}, "↩ This is a return slip"),
+          h("p", { class: "subtle", style: "margin:4px 0 8px" }, "Log it as a return of the receipt it came from, and the refund comes off this job's total."),
+          h("button", { type: "button", class: "btn btn--primary btn--sm", onclick: go }, "↩ Log as a return"))
+      : h("div", { style: "display:flex;align-items:center;gap:8px;margin:0 0 8px" },
+          h("span", { class: "subtle", style: "font-size:13px" }, "A return slip?"),
+          h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", onclick: go }, "↩ Log it as a return")));
+  });
+
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "🧾 Receipt"), pill),
+    slipBox,
     photoBox,
     h("div", { class: "grid2", style: "margin-top:12px" },
       field("Vendor", inp(r, "vendor", { placeholder: "Home Depot, Spenard, FNSB landfill…" })),
@@ -371,7 +399,7 @@ function receiptEditor(project, r, ctx) {
 }
 
 /* ---------- a return (credit) — read-only here ----------
-   Logged and changed in the office app (Receipts). A retake or AI read on
+   Changed or removed in the office app (Receipts). A retake or AI read on
    a credit would rewrite its amount as a cost and drop its item links, and
    the phone's decimal keypad has no minus key — so nothing here edits it. */
 function returnView(project, r, ctx) {
@@ -402,7 +430,155 @@ function returnView(project, r, ctx) {
       h("div", { class: "totals", style: "margin-top:6px" }, ...lines.map((it) => h("div", { class: "trow" },
         h("span", {}, `${it.desc || "Item"}${amountNum(it.qty) ? " × " + amountNum(it.qty) : ""}`),
         h("span", {}, money(amountNum(it.qty) * amountNum(it.price))))))) : null,
-    h("p", { class: "subtle", style: "font-size:13px" }, `Logged in the office${r.by ? " by " + r.by : ""}. Returns are changed or removed in the office app (Receipts), so the job total stays right.`));
+    h("p", { class: "subtle", style: "font-size:13px" }, `Logged${r.by ? " by " + r.by : ""}. Returns are changed or removed in the office app (Receipts), so the job total stays right.`));
+}
+
+/* ---------- a return slip → a return (the phone's half of the office form) ----------
+   The slip was snapped as a receipt. This books it against the purchase it
+   came from on this job: receiptlib.js slipMatches suggests the receipt and
+   the items (same store, a SKU or unit price that matches, the original
+   invoice # the slip prints), the crew checks the quantities and the refund,
+   and Save writes the same credit the office form builds (buildReturnCredit)
+   with the slip's photo on it. The slip comes off the list and is
+   tombstoned, so a stale copy on another phone can't bring it back as a $0
+   receipt. One receipt per return here; a return across two receipts, a
+   change or a delete is the office's. */
+async function returnForm(project, slip, ctx) {
+  const { view, setChrome } = ctx;
+  setChrome("Log a return", listHash(project), "Log a return");
+  view.replaceChildren();
+  setCtx(project, null);
+  const back = () => {
+    const cur = project.receipts.find((x) => x && x.id === slip.id);
+    if (cur && !isReturn(cur)) receiptEditor(project, cur, ctx); else location.hash = listHash(project);
+  };
+  const stop = (msg) => view.replaceChildren(h("h1", {}, "↩ Log a return"),
+    h("div", { class: "card" }, h("p", { style: "margin:0" }, msg)),
+    h("div", { class: "btn-row" }, h("button", { type: "button", class: "btn btn--ghost", onclick: back }, "‹ Back to the slip")));
+  const lib = await receiptLib();
+  if (!lib || typeof lib.slipMatches !== "function") return stop("Open Field Forms once with signal, then try again.");
+  const entries = lib.buildIndex([project]);
+  const byId = new Map(entries.filter((e) => e.kind === "purchase").map((e) => [e.id, e]));
+  const matches = lib.slipMatches(entries, project.id, slip);
+  if (!matches.length) {
+    return stop("There's no receipt on this job to log it against. Snap the original receipt on this job first, or log the return in the office app (Receipts).");
+  }
+
+  const formId = uid();                // minted once: a double tap saves this one return, never two
+  const onSlip = lib.slipRefund(slip);
+  let chosen = matches[0].score > 0 ? matches[0].id : "";
+  let picks = new Map();               // itemId -> qty, on the chosen receipt
+  const seed = () => {
+    picks = new Map();
+    const m = matches.find((x) => x.id === chosen);
+    for (const pk of (m ? m.picks : [])) picks.set(pk.itemId, pk.qty);
+  };
+  seed();
+  const pickList = () => [...picks].filter(([, q]) => q > 0).map(([itemId, qty]) => ({ receiptId: chosen, itemId, qty }));
+
+  // the refund: what the slip prints when the AI read it, else the items picked (plus tax)
+  let refundTouched = onSlip > 0;
+  const refund = h("input", { type: "text", inputmode: "decimal", placeholder: "0.00", value: onSlip > 0 ? onSlip.toFixed(2) : "", "aria-label": "Refund on the slip" });
+  refund.addEventListener("input", () => { refundTouched = refund.value.trim() !== ""; });
+  const prefill = () => {
+    if (refundTouched) return;
+    const v = lib.prefillRefund(pickList(), byId);
+    refund.value = v > 0 ? v.toFixed(2) : "";
+  };
+
+  const label = (e) => `${e.vendor || "Unknown store"} · ${lib.fmtDay(e.date)} · ${money(e.amount)}${e.receiptNo ? " · #" + e.receiptNo : ""}`;
+  const which = h("select", { "aria-label": "The receipt it returns" },
+    h("option", { value: "" }, "Pick the receipt it returns…"),
+    ...matches.map((m) => h("option", { value: m.id }, label(byId.get(m.id)))));
+  which.value = chosen;
+  const itemsBox = h("div", { class: "totals", style: "margin-top:6px" });
+  function paintItems() {
+    const e = byId.get(chosen);
+    if (!e) { itemsBox.replaceChildren(); return; }
+    const items = e.items.filter((it) => it.price > 0);
+    if (!items.length) { itemsBox.replaceChildren(h("p", { class: "subtle", style: "margin:4px 0" }, "No item lines on that receipt. Enter the refund below.")); return; }
+    itemsBox.replaceChildren(...items.map((it) => {
+      const left = lib.remainingQty(e, it);
+      const q = h("input", { type: "number", inputmode: "decimal", min: "0", step: "any", max: String(left), placeholder: "0",
+        value: picks.get(it.id) ? String(picks.get(it.id)) : "", disabled: left <= 0, style: "width:76px;flex:0 0 auto",
+        "aria-label": "Quantity returned: " + (it.desc || "item") });
+      q.addEventListener("input", () => {
+        const n = amountNum(q.value);
+        if (n > 0) picks.set(it.id, n); else picks.delete(it.id);
+        prefill();
+      });
+      return h("div", { class: "trow", style: "align-items:center;gap:10px" }, q,
+        h("span", { style: "flex:1;text-align:left" }, it.desc || "Item",
+          h("div", { class: "subtle", style: "font-size:12px" },
+            `${money(it.price)} each${it.sku ? " · SKU " + it.sku : ""} · ${left <= 0 ? "all returned" : lib.fmtQty(left) + " of " + lib.fmtQty(it.qty) + " left"}`)));
+    }));
+  }
+  which.addEventListener("change", () => { chosen = which.value; seed(); paintItems(); prefill(); });
+  paintItems();
+
+  const date = h("input", { type: "date", value: lib.validISO(slip.date) ? slip.date : todayISO(), "aria-label": "Return date" });
+  const slipNo = h("input", { type: "text", maxlength: "40", value: String(slip.receiptNo || ""), placeholder: "From the return slip" });
+  const over = h("input", { type: "checkbox", id: "ret-over" });
+  const err = h("div", { class: "warn", role: "alert", hidden: true });
+  const save = h("button", { type: "button", class: "btn btn--primary" }, "↩ Save return");
+  const lines = lib.slipLines(slip);
+
+  view.append(
+    h("h1", {}, "↩ Log a return"),
+    h("p", { class: "subtle" }, "The refund comes off this job's total, the receipt it returns shows what went back, and this slip's photo moves onto the return."),
+    h("div", { class: "card" },
+      field("Returns which receipt", which),
+      lines.length ? h("p", { class: "subtle", style: "font-size:12px;margin:-4px 0 6px" },
+        "On the slip: " + lines.map((ln) => `${ln.desc} × ${lib.fmtQty(ln.qty)}`).join(" · ")) : null,
+      h("strong", { style: "font-size:14px" }, "What went back"),
+      itemsBox),
+    h("div", { class: "card" },
+      h("div", { class: "grid2" },
+        field("Refund $", refund, onSlip > 0 ? "from the slip" : "filled from the items"),
+        field("Return date", date)),
+      field("Slip #", slipNo),
+      h("div", { class: "check" }, over, h("label", { for: "ret-over" }, "More than what's left on the receipt (store credit or an exchange)"))),
+    err,
+    h("div", { class: "sticky-actions" }, save,
+      h("button", { type: "button", class: "btn btn--ghost", style: "flex:0 0 auto;width:auto", onclick: back }, "Cancel")));
+  prefill();
+
+  let saving = false;
+  save.addEventListener("click", async () => {
+    if (saving) return;
+    err.hidden = true;
+    if (project.receipts.some((x) => x && x.id === formId)) { location.hash = listHash(project); return; }
+    try {
+      if (!chosen) throw new Error("Pick the receipt this slip returns.");
+      if (!lib.validISO(date.value)) throw new Error("Pick the date on the return slip.");
+      const amt = Math.abs(amountNum(refund.value));
+      // checked and built against the job as it is NOW (sync grafts into this object)
+      const cur = project.receipts.find((x) => x && x.id === slip.id);
+      const dead = project.deletedIds && typeof project.deletedIds === "object" ? project.deletedIds : {};
+      if (!cur || dead[slip.id]) throw new Error("This slip was deleted on another device.");
+      if (amountNum(cur.amount) > 0 || isReturn(cur)) throw new Error("This slip has a total now, so it counts as a purchase. Clear its total first if it's really a return.");
+      const fe = lib.buildIndex([project]);
+      const picked = pickList();
+      const problem = lib.checkReturn({ entries: fe, jobId: project.id, returnOf: chosen, picks: picked, refund: amt, over: over.checked });
+      if (problem) throw new Error(problem);
+      const sources = lib.returnSources(fe, project.id, chosen);
+      const c = lib.buildReturnCredit({ id: formId, start: sources[0], sources, picks: picked, refund: amt,
+        date: date.value, slipNo: slipNo.value, note: "",
+        photo: cur.photo || "", extraPages: Array.isArray(cur.extraPages) ? cur.extraPages.slice(0, MAX_PAGES - 1) : [],
+        by: author() || "", nowISO: new Date().toISOString() });
+      saving = true; save.disabled = true;
+      project.receipts = project.receipts.filter((x) => !(x && x.id === slip.id));
+      project.receipts.push(c);
+      tombstoneItems(project, [slip.id]);   // so the slip stays gone on every device (merge.js)
+      await Store.put(project);
+      toast(`Return logged: ${money(receiptAmount(c))} off this job.`, 3500);
+      location.hash = listHash(project);
+    } catch (e) {
+      saving = false; save.disabled = false;
+      err.textContent = String((e && e.message) || e);
+      err.hidden = false;
+    }
+  });
 }
 
 /* ---------- full-screen photo (the returns-counter view) ----------

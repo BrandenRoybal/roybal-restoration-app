@@ -219,8 +219,9 @@ export function newPhoto() {
    plus what the camera + AI read add. The photo is a data URL like any job
    photo: sync offloads it to the field-media bucket (media.js) and migration
    0015 projects the row into public.job_receipts for the office.
-   A return logged in the office is the same shape plus kind: "return",
-   returnOf and a negative amount (receiptlib.js buildReturnCredit). */
+   A return (logged in the office, or from a return slip on a phone) is the
+   same shape plus kind: "return", returnOf and a negative amount
+   (receiptlib.js buildReturnCredit). */
 export function newReceipt() {
   return {
     id: uid(), by: AUTHOR, createdAt: new Date().toISOString(),

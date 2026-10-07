@@ -11,11 +11,12 @@ export const PAID_WITH = ["card", "account", "cash", "personal"] as const;
 
 export const RECEIPT_READ_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["vendor", "date", "total", "subtotal", "tax", "cardLast4", "receiptNo", "paidWith", "category", "items", "confidence", "notes"],
+  required: ["vendor", "date", "isReturn", "total", "subtotal", "tax", "cardLast4", "receiptNo", "paidWith", "category", "items", "confidence", "notes"],
   properties: {
     vendor: { type: "string", description: "The store or vendor as printed, e.g. 'The Home Depot #1234', 'Spenard Builders Supply', 'FNSB Landfill'; empty if unreadable" },
     date: { type: "string", description: "The purchase date printed on the receipt, ISO YYYY-MM-DD; empty if not printed" },
-    total: { type: ["number", "null"], description: "The TOTAL actually paid, in dollars (after tax, after any discount); null if unreadable" },
+    isReturn: { type: "boolean", description: "true when this is a RETURN / refund / credit slip or credit memo (money back to the buyer), false for a purchase" },
+    total: { type: ["number", "null"], description: "The TOTAL actually paid, in dollars (after tax, after any discount); on a return slip the refund total, negative; null if unreadable" },
     subtotal: { type: ["number", "null"], description: "The pre-tax subtotal in dollars; null if not printed" },
     tax: { type: ["number", "null"], description: "Sales tax in dollars; null if none printed (Fairbanks has no sales tax — most receipts show none)" },
     cardLast4: { type: "string", description: "Last four digits of the card used, if printed (e.g. from '************4558'); empty otherwise" },
@@ -54,6 +55,8 @@ export function receiptReadText(pageCount: number): string {
     "RULES:\n" +
     "- vendor: the store name as printed (keep the store number, e.g. 'The Home Depot #1234').\n" +
     "- total: the amount actually PAID (the final TOTAL, after tax and discounts). subtotal and tax only when printed.\n" +
+    "- isReturn: true for a return / refund / credit slip or credit memo; then total is the refund as a NEGATIVE number " +
+    "and the returned lines are negative prices.\n" +
     "- items: every purchased line in printed order, with the UNIT price. A quantity of 3 @ 4.98 is qty 3, price 4.98. " +
     "A line printed only as an extended amount is price = amount ÷ qty. Returns and credits are negative prices. " +
     "Skip subtotal, tax, total, change, payment and loyalty lines.\n" +
@@ -67,6 +70,10 @@ export function receiptReadText(pageCount: number): string {
 type Item = { desc: string; qty: number; unit: string; price: number | null; sku: string };
 export type ReceiptRead = {
   vendor: string; date: string; total: number | null; subtotal: number | null; tax: number | null;
+  /** A return slip: total, subtotal and tax are null (a phone lands total as a
+      cost, so a refund must never reach it) and refund carries the slip's
+      total as a positive number, null when unreadable. */
+  isReturn: boolean; refund: number | null;
   cardLast4: string; receiptNo: string; paidWith: string; category: string; items: Item[];
   confidence: number; notes: string;
 };
@@ -101,12 +108,17 @@ export function normalizeReceiptRead(input: unknown): ReceiptRead {
   const paid = str(o.paidWith, 20).toLowerCase();
   const conf = typeof o.confidence === "number" && Number.isFinite(o.confidence) ? Math.max(0, Math.min(1, o.confidence)) : 0;
   const total = money(o.total);
+  // a negative total is a credit whatever the flag says; a phone before v206
+  // ignores isReturn and drops a null total, as it always dropped a negative one
+  const isReturn = o.isReturn === true || (total != null && total < 0);
   return {
     vendor: str(o.vendor, 120),
     date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "",
-    total: total != null && total >= 0 ? total : null,
-    subtotal: money(o.subtotal),
-    tax: money(o.tax),
+    total: isReturn ? null : total,
+    subtotal: isReturn ? null : money(o.subtotal),
+    tax: isReturn ? null : money(o.tax),
+    isReturn,
+    refund: isReturn && total != null && total !== 0 ? Math.abs(total) : null,
     cardLast4: str(o.cardLast4, 40).replace(/\D/g, "").slice(-4),
     receiptNo: str(o.receiptNo, 40),
     paidWith: (PAID_WITH as readonly string[]).includes(paid) ? paid : "",

@@ -11,6 +11,7 @@ import {
   buildReturnCredit, slipCandidates, nextStamp, negMoney, money2, receiptDay, daysBetween,
   addDaysISO, validISO, returnStatus, overReturned, needsTotal, isReturn, vendorMatches,
   returnTargets, refundCap, successorId, returnLineage, movedId, returnFamily, deletePlan,
+  isSlip, slipLines, slipRefund, slipMatches,
 } from "../js/receiptlib.js";
 import { amountNum, receiptTotals } from "../js/receiptcalc.js";
 import { loggedCosts } from "../js/fincalc.js";
@@ -317,4 +318,103 @@ test("the phone's 🗑 on a receipt: its own returns go with it; a return also c
     { id: "C2-2", of: "j1", ofReceipt: "R2", desc: "2x4x8 stud", qty: "1", price: "-6" }] });
   assert.match(deletePlan(p, "R2").refuse, /also covers another receipt/);
   assert.match(deletePlan(p, "R1").refuse, /also covers another receipt/);
+});
+
+/* ---------- a return slip snapped on a phone ---------- */
+// The 10/7 Spenard return as it landed: the AI read the slip as a return,
+// misread the SKU (JSD24SM for ISD24SM) and the original invoice # it prints
+// (7066665392 for 700665392), and the negative total was dropped.
+const chenaJob = () => ({
+  id: "job-1885", address: "1885 Chena Landings Lp", receipts: [
+    { id: "BUY", vendor: "Spenard Builders Supply", date: "2026-10-07", amount: "1146.75", subtotal: "1146.75", category: "materials",
+      paidWith: "account", receiptNo: "700665392", createdAt: "2026-10-07T22:38:04.228Z",
+      items: [{ id: "ri-7pkaos3t", qty: "15", sku: "ISD24SM", desc: '2" 4x8 Styrofoam SE 25PSI', unit: "ea", price: "76.45" }] },
+    { id: "OTHER", vendor: "Spenard Builders Supply", date: "2026-10-05", amount: "585.55", category: "materials", receiptNo: "700655947",
+      createdAt: "2026-10-07T22:37:24.964Z",
+      items: [{ id: "o1", qty: "4", sku: "OSB1932", desc: '19/32" 4x8 OSB RTD Alaska', unit: "ea", price: "31.68" }] },
+    { id: "BLOCK", vendor: "Fairbanks Block & Building Materials", date: "2026-10-07", amount: "956.23", category: "materials", receiptNo: "101083",
+      items: [{ id: "b1", qty: "15", sku: "IN330168", desc: "R-TECH IV 2x48x96 25PSI", unit: "ea", price: "51.25" }] },
+    { id: "SLIP", vendor: "Spenard Builders Supply", date: "2026-10-07", amount: "", category: "materials", paidWith: "account",
+      receiptNo: "7066665392", photo: "media:22eb:975427", createdAt: "2026-10-07T22:38:33.574Z",
+      notes: "This is a MERCHANDISE RETURN FORM. Handwritten form: original invoice # 7066665392 — verify both.",
+      ai: { at: "2026-10-07T22:38:42.538Z", confidence: 0.6 },
+      items: [{ id: "ri-jn0tuphb", qty: "15", sku: "JSD24SM", desc: '2" x 4 x 8 Styrofoam 25 PSI', unit: "ea", price: "-76.45" }] },
+  ] });
+
+test("a slip: a $0 receipt whose priced lines are all credits, or one the AI marked a return", () => {
+  const p = chenaJob();
+  const slip = p.receipts.find((r) => r.id === "SLIP");
+  assert.equal(isSlip(slip), true);
+  assert.equal(isSlip(p.receipts[0]), false, "a purchase");
+  assert.equal(isSlip({ ...slip, amount: "1146.75" }), false, "a total typed in makes it a purchase");
+  assert.equal(isSlip({ id: "C", kind: "return", amount: "-5", items: [{ desc: "x", price: "-5" }] }), false, "a logged return");
+  assert.equal(isSlip({ id: "X", amount: "", items: [] }), false, "an unread receipt");
+  assert.equal(isSlip({ id: "X", amount: "", items: [{ desc: "stud", price: "6" }, { desc: "stud", price: "-6" }] }), false, "an exchange with no flag");
+  assert.equal(isSlip({ id: "X", amount: "", items: [], ai: { isReturn: true, refund: 45.97 } }), true, "flagged by the reader");
+  assert.equal(isSlip({ id: "X", amount: "", items: [{ desc: "Pro Xtra discount", price: "-10" }, { desc: "", price: "-3" }] }), true);
+  assert.equal(isSlip(null), false);
+});
+
+test("a slip's lines and refund: credit lines as positive numbers, the printed refund first", () => {
+  const slip = chenaJob().receipts.find((r) => r.id === "SLIP");
+  assert.deepEqual(slipLines(slip), [{ desc: '2" x 4 x 8 Styrofoam 25 PSI', sku: "JSD24SM", qty: 15, price: 76.45 }]);
+  assert.equal(slipRefund(slip), 1146.75);
+  assert.equal(slipRefund({ ...slip, ai: { isReturn: true, refund: 1100 } }), 1100, "the slip's printed total wins over its lines");
+  // flagged, but the lines came out positive
+  const pos = { id: "X", amount: "", ai: { isReturn: true }, items: [{ desc: "slab door", qty: "2", price: "100" }] };
+  assert.deepEqual(slipLines(pos), [{ desc: "slab door", sku: "", qty: 2, price: 100 }]);
+  assert.equal(slipRefund(pos), 200);
+  // not flagged, positive lines: nothing to take back
+  assert.deepEqual(slipLines({ id: "X", items: [{ desc: "stud", qty: "1", price: "6" }] }), []);
+  assert.equal(slipRefund({ id: "X", items: [] }), 0, "the crew types it");
+});
+
+test("slipMatches: the Spenard slip finds its invoice through a misread SKU and invoice #, picks the 15 sheets", () => {
+  const p = chenaJob();
+  const slip = p.receipts.find((r) => r.id === "SLIP");
+  const m = slipMatches(buildIndex([p]), p.id, slip);
+  assert.deepEqual(m.map((x) => x.id), ["BUY", "OTHER", "BLOCK"], "the invoice first, the same store next");
+  assert.deepEqual(m[0].picks, [{ receiptId: "BUY", itemId: "ri-7pkaos3t", qty: 15 }]);
+  assert.ok(m[0].score > m[1].score && m[1].score > m[2].score);
+  assert.equal(m[2].score, 0, "another store, nothing on the slip names it");
+  assert.ok(!m.some((x) => x.id === "SLIP"), "never itself");
+});
+
+test("slipMatches: only this job, only receipts with money left, never past what is left of an item", () => {
+  const p = chenaJob();
+  const slip = p.receipts.find((r) => r.id === "SLIP");
+  // 10 of the 15 sheets already went back
+  p.receipts.push({ id: "C1", kind: "return", returnOf: "BUY", vendor: "Spenard Builders Supply", amount: "-764.50",
+    items: [{ id: "C1-1", of: "ri-7pkaos3t", ofReceipt: "BUY", desc: "Styrofoam", qty: "10", price: "-76.45" }] });
+  let m = slipMatches(buildIndex([p]), p.id, slip);
+  assert.deepEqual(m[0].picks, [{ receiptId: "BUY", itemId: "ri-7pkaos3t", qty: 5 }], "capped at the 5 left");
+  // all of it went back: the invoice drops out
+  p.receipts.find((r) => r.id === "C1").amount = "-1146.75";
+  p.receipts.find((r) => r.id === "C1").items[0].qty = "15";
+  m = slipMatches(buildIndex([p]), p.id, slip);
+  assert.ok(!m.some((x) => x.id === "BUY"));
+  // another job's receipts never show
+  const other = slipMatches(buildIndex([p, bemis()]), "job-bemis", slip);
+  assert.ok(other.length && other.every((x) => ["R1", "R2", "R3"].includes(x.id)), other.map((x) => x.id).join());
+  assert.ok(other.every((x) => x.score === 0), "nothing on a Spenard slip names a Home Depot receipt");
+});
+
+test("a return logged from a slip is the office's credit: nets the job total, marks the invoice returned", () => {
+  const p = chenaJob();
+  const slip = p.receipts.find((r) => r.id === "SLIP");
+  const idx = buildIndex([p]);
+  const m = slipMatches(idx, p.id, slip)[0];
+  assert.equal(checkReturn({ entries: idx, jobId: p.id, returnOf: m.id, picks: m.picks, refund: slipRefund(slip), over: false }), null);
+  const sources = returnSources(idx, p.id, m.id);
+  const c = buildReturnCredit({ id: "NEW", start: sources[0], sources, picks: m.picks, refund: slipRefund(slip), date: slip.date,
+    slipNo: slip.receiptNo, note: "", photo: slip.photo, extraPages: [], by: "branden@roybalconstruction.com", nowISO: "2026-10-08T00:00:00.000Z" });
+  assert.equal(c.amount, "-1146.75");
+  assert.equal(c.returnOf, "BUY");
+  assert.equal(c.photo, "media:22eb:975427", "the slip's photo moves onto the return");
+  const before = receiptTotals(p).total;
+  p.receipts = p.receipts.filter((r) => r.id !== "SLIP");
+  p.receipts.push(c);
+  assert.equal(receiptTotals(p).total, Math.round((before - 1146.75) * 100) / 100);
+  const buy = buildIndex([p]).find((e) => e.id === "BUY");
+  assert.equal(returnStatus(buy), "all");
 });

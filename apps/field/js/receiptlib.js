@@ -472,6 +472,113 @@ export function buildReturnCredit({ id, start, sources, picks, refund, date, sli
 export const slipCandidates = (entries, jobId) =>
   entries.filter((e) => e.jobId === jobId && needsTotal(e) && e.hasPhoto).sort(byNewest);
 
+/* ---------- a return slip snapped on a phone ----------
+   At the counter the crew snaps the return slip like any receipt. A slip
+   never lands as a cost: the reader keeps a credit's total off `amount`
+   (applyReceiptRead takes money > 0 only), so it sits on the job as a $0
+   receipt. The phone then offers to log it as a return of the purchase it
+   came from: the same credit the office form builds (buildReturnCredit),
+   and the slip folds into it, as when the office picks a crew slip.
+   These read the RAW receipt element (the phone has it), not an index entry. */
+const slipItems = (r) => (r && Array.isArray(r.items) ? r.items : []).filter((it) => it && typeof it === "object" && String(it.desc || "").trim());
+const markedReturn = (r) => !!(r && r.ai && r.ai.isReturn === true);
+
+/** A receipt that is really a return slip waiting to be logged: no total
+    yet, and either the AI read it as a return or every priced line on it is
+    a credit (a negative price). */
+export function isSlip(r) {
+  if (!r || isReturn(r) || amountNum(r.amount) > 0) return false;
+  if (markedReturn(r)) return true;
+  const priced = slipItems(r).filter((it) => amountNum(it.price) !== 0);
+  return priced.length > 0 && priced.every((it) => amountNum(it.price) < 0);
+}
+
+/** What the slip takes back, as positive numbers: its credit lines, or every
+    priced line when the AI marked the whole slip a return and the lines
+    came out positive. [{ desc, sku, qty, price }] */
+export function slipLines(r) {
+  const all = slipItems(r).map((it) => ({ desc: String(it.desc).trim(), sku: String(it.sku || "").trim(),
+    qty: Math.abs(amountNum(it.qty)) || 1, price: amountNum(it.price) }));
+  const credits = all.filter((it) => it.price < 0);
+  const use = credits.length ? credits : markedReturn(r) ? all.filter((it) => it.price > 0) : [];
+  return use.map((it) => ({ ...it, price: r2(Math.abs(it.price)) }));
+}
+
+/** The refund the slip prints: the AI's read of its total when it gave one
+    (ai.refund), else its lines; 0 when neither (the crew types it). */
+export function slipRefund(r) {
+  const printed = r && r.ai ? Math.abs(amountNum(r.ai.refund)) : 0;
+  if (printed > 0) return r2(printed);
+  return r2(slipLines(r).reduce((a, it) => a + it.qty * it.price, 0));
+}
+
+/* Levenshtein distance, for a misread digit or letter on a short code
+   ("7066665392" for invoice 700665392, "JSD24SM" for SKU ISD24SM). Codes
+   longer than 40 characters are never compared. */
+function editDistance(a, b) {
+  if (a === b) return 0;
+  if (a.length > 40 || b.length > 40) return Infinity;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+const codeKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const near = (a, b) => { const x = codeKey(a), y = codeKey(b); return x.length >= 5 && y.length >= 5 && editDistance(x, y) <= 1; };
+const words = (s) => new Set(norm(s).split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !/^\d+$/.test(w)));
+
+/* How well a slip line names a purchase item: 0 is no match. A SKU equal
+   or one character off, the same unit price, the same words. */
+function lineScore(ln, it) {
+  let s = 0;
+  if (ln.sku && it.sku) s += codeKey(ln.sku) === codeKey(it.sku) ? 3 : near(ln.sku, it.sku) ? 2 : 0;
+  if (ln.price > 0 && Math.abs(ln.price - it.price) <= 0.01) s += 2;
+  const a = words(ln.desc), b = words(it.desc);
+  if (a.size && b.size && [...a].filter((w) => b.has(w)).length * 2 >= Math.min(a.size, b.size)) s += 1;
+  return s >= 2 ? s : 0;
+}
+
+/** The job's purchases this slip could return, best match first, each with
+    the item quantities its lines point at:
+      [{ id, score, picks: [{ receiptId, itemId, qty }] }]
+    Only purchases on the same job with money left to return. A purchase
+    scores for the same store, for each slip line that names one of its
+    items (each item taken once, never past what is left of it), and for a
+    number on the slip (its # or the AI's notes) that is the purchase's
+    receipt # or one digit off it: a return slip often prints the original
+    invoice #. Score 0 means nothing on the slip pointed at it. */
+export function slipMatches(entries, jobId, r) {
+  const lines = slipLines(r);
+  const vkey = vendorKey(r && r.vendor);
+  const nums = [...new Set((String((r && r.receiptNo) || "") + " " + String((r && r.notes) || "")).match(/[0-9][0-9-]{4,}[0-9]/g) || [])];
+  const out = [];
+  for (const e of entries) {
+    if (e.jobId !== jobId || e.kind !== "purchase" || e.id === String(r && r.id) || !(e.amount > 0) || !(refundLeft(e) > 0)) continue;
+    let score = 0;
+    if (vkey !== "unknown" && e.vkey !== "unknown" && (vkey === e.vkey || vkey.startsWith(e.vkey + " ") || e.vkey.startsWith(vkey + " "))) score += 2;
+    if (e.receiptNo && nums.some((n) => codeKey(n) === codeKey(e.receiptNo) || near(n, e.receiptNo))) score += 3;
+    const used = new Set(), picks = [];
+    for (const ln of lines) {
+      let best = null, bestS = 0;
+      for (const it of e.items) {
+        if (!(it.price > 0) || used.has(it.id) || !(remainingQty(e, it) > 0)) continue;
+        const s = lineScore(ln, it);
+        if (s > bestS) { best = it; bestS = s; }
+      }
+      if (!best) continue;
+      used.add(best.id);
+      score += bestS;
+      picks.push({ receiptId: e.id, itemId: best.id, qty: Math.min(ln.qty, remainingQty(e, best)) });
+    }
+    out.push({ id: e.id, score, picks });
+  }
+  const at = new Map(entries.filter((e) => e.jobId === jobId).map((e) => [e.id, e]));
+  return out.sort((a, b) => b.score - a.score || byNewest(at.get(a.id), at.get(b.id)));
+}
+
 /* ---------- a return's identity across changes ----------
    Changing a return replaces it with a new element (the old id is
    tombstoned). A change that stays on the same receipts gets a DERIVED id —
