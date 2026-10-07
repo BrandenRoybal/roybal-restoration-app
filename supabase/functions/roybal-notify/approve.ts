@@ -50,10 +50,12 @@
 // deno-lint-ignore no-explicit-any
 export type Blob = Record<string, any>;
 
-/** "YES", "yes 12", "y 12", "approve 12" → { yes, code } ; "no 12"/"stop" → { no, code } */
+/** "YES", "yes 12", "yes12", "y 12", "approve 12" → { yes, code } ; "no 12"/"stop" → { no, code }.
+    The number may sit right against the word ("YES1" is how a thumb types
+    it); a letter may not ("yesterday", "nope" stay chatter). */
 export function parseApproval(text: string): { yes: boolean; no: boolean; code: string | null } {
   const t = String(text || "").trim().toLowerCase().replace(/[.!]+$/, "");
-  const m = t.match(/^(yes|y|approve|ok|no|n|cancel|stop)\b[\s#-]*(\d{1,4})?$/);
+  const m = t.match(/^(yes|y|approve|ok|no|n|cancel|stop)(?![a-z_])[\s#-]*(\d{1,4})?$/);
   if (!m) return { yes: false, no: false, code: null };
   const yes = ["yes", "y", "approve", "ok"].includes(m[1]);
   return { yes, no: !yes, code: m[2] ?? null };
