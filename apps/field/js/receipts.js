@@ -24,7 +24,7 @@
    is read-only here — a retake or a re-read would flip its sign or drop
    its links — and the receipt it returns carries a "↩ Returned" badge.
    ============================================================ */
-import { h, Store, toast, fmtDate, money, fileToDataURL, uid, todayISO } from "./core.js";
+import { h, Store, toast, fmtDate, money, fileToDataURL, todayISO } from "./core.js";
 import { setCtx, commit, field, inp, ta, sel, seg, lineItems } from "./formkit.js";
 import { newReceipt, blankLineItem, author } from "./model.js";
 import { tombstoneItems } from "./merge.js";
@@ -287,17 +287,21 @@ function receiptEditor(project, r, ctx) {
     reading = true; readBtn.disabled = true; readBtn.textContent = "✨ Reading…";
     try {
       const read = await readReceipt(project, [r.photo, ...r.extraPages]);
+      // the slip was logged as a return meanwhile: it is gone, nothing to land
+      if (!project.receipts.includes(r)) { reading = false; return; }
       const changed = applyReceiptRead(r, read, { overwrite });
       r.ai = { at: new Date().toISOString(), model: read.model || "", confidence: typeof read.confidence === "number" ? read.confidence : null };
       // a return slip (receiptlib.js isSlip): the refund never lands on the
       // total, it waits here for "Log as a return"
       if (read.isReturn === true) { r.ai.isReturn = true; r.ai.refund = amountNum(read.refund) > 0 ? amountNum(read.refund) : null; }
       await Store.put(project);
-      const slipRead = read.isReturn === true || (!(amountNum(read.total) > 0) &&
-        (Array.isArray(read.items) ? read.items : []).some((it) => it && amountNum(it.price) < 0));
+      const priced = (Array.isArray(read.items) ? read.items : []).filter((it) => it && amountNum(it.price) !== 0);
+      const slipRead = read.isReturn === true || (!(amountNum(read.total) > 0) && priced.length > 0 && priced.every((it) => amountNum(it.price) < 0));
       toast(slipRead && !(amountNum(r.amount) > 0) ? `Read a return slip from ${read.vendor || "the store"}. Tap ↩ Log as a return to take it off the job total.`
         : changed.length ? `Read ${read.vendor || "the receipt"} — ${money(amountNum(read.total))}. Check it, then Done.` : "Read it — nothing new to fill in.", 4000);
-      receiptEditor(project, r, ctx);   // repaint every field with what landed
+      // repaint every field with what landed — unless the editor is no longer
+      // on screen (the return form opened over it): that form stays
+      if (readBtn.isConnected) receiptEditor(project, r, ctx);
       return;
     } catch (e) {
       toast("Couldn't read the receipt — " + (e && e.message ? e.message : "try again"));
@@ -328,7 +332,10 @@ function receiptEditor(project, r, ctx) {
   const slipBox = h("div");
   if (!(amountNum(r.amount) > 0)) receiptLib().then((lib) => {
     if (!lib || typeof lib.isSlip !== "function" || !slipBox.isConnected || amountNum(r.amount) > 0) return;
-    const go = () => { commit(); returnForm(project, r, ctx); };
+    const go = () => {
+      if (reading) return toast("The AI is still reading it. One moment.");
+      commit(); returnForm(project, r, ctx);
+    };
     slipBox.replaceChildren(lib.isSlip(r)
       ? h("div", { class: "card", style: "border-left:4px solid var(--brand);margin-bottom:10px" },
           h("strong", {}, "↩ This is a return slip"),
@@ -464,7 +471,9 @@ async function returnForm(project, slip, ctx) {
     return stop("There's no receipt on this job to log it against. Snap the original receipt on this job first, or log the return in the office app (Receipts).");
   }
 
-  const formId = uid();                // minted once: a double tap saves this one return, never two
+  // derived from the slip: a double tap, another phone or the office turning
+  // this same slip into a return all write ONE element (receiptlib.js)
+  const formId = lib.slipReturnId(slip.id);
   const onSlip = lib.slipRefund(slip);
   let chosen = matches[0].score > 0 ? matches[0].id : "";
   let picks = new Map();               // itemId -> qty, on the chosen receipt
@@ -547,7 +556,10 @@ async function returnForm(project, slip, ctx) {
   save.addEventListener("click", async () => {
     if (saving) return;
     err.hidden = true;
-    if (project.receipts.some((x) => x && x.id === formId)) { location.hash = listHash(project); return; }
+    if (project.receipts.some((x) => x && x.id === formId)) {
+      if (!saving) toast("This slip is already logged as a return.", 3500);
+      location.hash = listHash(project); return;
+    }
     try {
       if (!chosen) throw new Error("Pick the receipt this slip returns.");
       if (!lib.validISO(date.value)) throw new Error("Pick the date on the return slip.");
@@ -555,6 +567,7 @@ async function returnForm(project, slip, ctx) {
       // checked and built against the job as it is NOW (sync grafts into this object)
       const cur = project.receipts.find((x) => x && x.id === slip.id);
       const dead = project.deletedIds && typeof project.deletedIds === "object" ? project.deletedIds : {};
+      if (dead[formId]) throw new Error("This slip was logged as a return and then deleted in the office.");
       if (!cur || dead[slip.id]) throw new Error("This slip was deleted on another device.");
       if (amountNum(cur.amount) > 0 || isReturn(cur)) throw new Error("This slip has a total now, so it counts as a purchase. Clear its total first if it's really a return.");
       const fe = lib.buildIndex([project]);
