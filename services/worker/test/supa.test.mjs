@@ -141,8 +141,11 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const FIELD_CONFIG = fs.readFileSync(path.join(REPO, "apps/field/js/config.js"), "utf8");
 const FIELD_CLIENT_ID = /export const GMAIL_CLIENT_ID = "([^"]+)"/.exec(FIELD_CONFIG)?.[1];
 const FIELD_SUPABASE_URL = /export const SUPABASE_URL = "([^"]+)"/.exec(FIELD_CONFIG)?.[1];
+// The field modules the worker image copies (services/worker/Dockerfile).
+const COPIED_FIELD = ["reconcile.js", "dryingcalc.js", "model.js", "core.js"].map((f) => `apps/field/js/${f}`);
 const CHECKOUT_FILES = ["apps/field/js/config.js", "services/worker/set-gmail-secret.sh",
-  "services/worker/adapters/email.mjs", "services/worker/fly.toml", "services/worker/Dockerfile", ".dockerignore"];
+  "services/worker/adapters/email.mjs", "services/worker/fly.toml", "services/worker/Dockerfile", ".dockerignore",
+  ...COPIED_FIELD];
 // A GIT_DIR from a hook running these tests must not point git elsewhere.
 const ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
 const which = (cmd) => spawnSync("sh", ["-c", `command -v ${cmd}`], { env: ENV, encoding: "utf8" }).stdout?.trim() ?? "";
@@ -381,6 +384,8 @@ test("set-gmail-secret.sh refuses, with fly never called, a checkout that is not
     ["an edited worker file", { edit: (r) => fs.appendFileSync(worker("fly.toml")(r), "\n# local edit\n") }],
     ["a new file in the worker", { edit: (r) => fs.writeFileSync(worker("scratch.mjs")(r), "export {};\n") }],
     ["an edited .dockerignore", { edit: (r) => fs.appendFileSync(path.join(r, ".dockerignore"), "services/worker/adapters\n") }],
+    ["an edited field module the image copies", { edit: (r) => fs.appendFileSync(path.join(r, "apps/field/js/dryingcalc.js"), "\n// local edit\n") }],
+    ["a copied field module deleted", { edit: (r) => fs.rmSync(path.join(r, "apps/field/js/reconcile.js")) }],
   ]) {
     const r = runSetGmailSecret(`${secret}\n`, opts);
     assert.equal(r.status, 1, `refused: ${why}\n${r.output}`);
@@ -395,6 +400,21 @@ test("set-gmail-secret.sh refuses, with fly never called, a checkout that is not
   assert.match(runSetGmailSecret(`${secret}\n`, { env: { FAKE_GIT_FETCH_FAIL: "1" } }).output, /could not fetch main/);
   assert.match(runSetGmailSecret(`${secret}\n`, { edit: (r) => fs.writeFileSync(worker("x.mjs")(r), "") }).output,
     /local changes in services\/worker/);
+  assert.match(runSetGmailSecret(`${secret}\n`, { edit: (r) => fs.appendFileSync(path.join(r, COPIED_FIELD[1]), "\n") }).output,
+    /field modules its image copies .*git status services\/worker apps\/field\/js\/reconcile\.js/);
+});
+
+test("set-gmail-secret.sh checks every path the worker's Dockerfile copies, so no local edit rides into the deploy", () => {
+  const script = fs.readFileSync(path.join(REPO, "services/worker/set-gmail-secret.sh"), "utf8");
+  const listed = /^IMAGE_PATHS='([^']*)'$/m.exec(script)?.[1].split(/\s+/) ?? [];
+  assert.ok(listed.includes(".dockerignore"), "the build context's filter is checked too");
+  const dockerfile = fs.readFileSync(path.join(REPO, "services/worker/Dockerfile"), "utf8");
+  const sources = [...dockerfile.matchAll(/^COPY\s+(?:--\S+\s+)*(.+?)\s+\S+\s*$/gm)].flatMap((m) => m[1].split(/\s+/));
+  assert.deepEqual(sources, ["apps/field/js/reconcile.js", "apps/field/js/dryingcalc.js", "apps/field/js/model.js",
+    "apps/field/js/core.js", "services/worker"]);
+  for (const src of sources) {
+    assert.ok(listed.some((p) => src === p || src.startsWith(`${p}/`)), `IMAGE_PATHS covers ${src}`);
+  }
 });
 
 test("set-gmail-secret.sh refuses, with fly never called, until roybal-notify answers a spine YES", { skip: SKIP }, () => {

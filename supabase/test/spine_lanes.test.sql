@@ -18,6 +18,9 @@
 --      authenticated on proposals.
 --   2. agent:brief may PROPOSE email.send, spelled the way op_agent_permits
 --      matches it, and nothing else: not sms.send, not execute, never approve.
+--      The lane's second grant, 0021's (agent:billing may PROPOSE
+--      invoice.review_gaps), is held to the same shape beside it (2b); the
+--      rest of 0021 is billing_review_gaps.test.sql.
 --   3. current_agent_id is the agents row a machine login acts as, and null
 --      for a human, a disabled agent, a human login wrongly linked to an
 --      agents row, and a caller with no identity.
@@ -156,6 +159,55 @@ begin
   end if;
   if public.op_agent_permits(web, 'email.send', 'comms', 'propose') then
     raise exception 'agent:web may propose email.send with no grant of its own';
+  end if;
+end
+$$;
+
+-- 2b. agent:billing's grant (0021), the same way
+do $$
+declare
+  billing constant uuid := '193d7dd0-74f9-407d-9891-8cb7aab22f82';
+  brief   constant uuid := '1af33481-7f1c-4485-87f5-7b0ec5e27554';
+begin
+  if (select count(*) from public.agent_authority
+       where agent_id = billing and operation = 'invoice.review_gaps' and capability = 'propose'
+         and revoked_at is null) <> 1 then
+    raise exception 'agent:billing does not hold exactly one live invoice.review_gaps propose grant';
+  end if;
+  if (select count(*) from public.agent_authority where agent_id = billing and revoked_at is null) <> 1 then
+    raise exception 'agent:billing holds a live grant beside invoice.review_gaps propose';
+  end if;
+  if not exists (select 1 from public.agent_authority g
+                   join public.events e on e.aggregate_type = 'agent_authority' and e.aggregate_id = g.id
+                  where g.agent_id = billing and g.operation = 'invoice.review_gaps'
+                    and e.kind = 'agent_authority.granted' and e.principal_kind = 'system'
+                    and e.idempotency_key = 'agent_authority.granted:' || g.id
+                    and e.data ->> 'operation' = 'invoice.review_gaps' and e.data ->> 'capability' = 'propose'
+                    and e.data ->> 'agent' = 'agent:billing') then
+    raise exception 'the agent:billing grant has no agent_authority.granted event naming it';
+  end if;
+  if (select reason from public.agent_authority
+       where agent_id = billing and operation = 'invoice.review_gaps' and revoked_at is null) !~ '0021.*2026-10-07' then
+    raise exception 'the agent:billing grant does not say it is 0021 on the owner''s go of 2026-10-07';
+  end if;
+
+  if not public.op_agent_permits(billing, 'invoice.review_gaps', 'money', 'propose') then
+    raise exception 'agent:billing may not propose invoice.review_gaps';
+  end if;
+  if public.op_agent_permits(billing, 'invoice.review_gaps', 'money', 'execute') then
+    raise exception 'agent:billing may execute invoice.review_gaps; 0021 grants propose only';
+  end if;
+  if public.op_agent_permits(billing, 'invoice.review_gaps', 'money', 'approve') then
+    raise exception 'agent:billing may approve';
+  end if;
+  if public.op_agent_permits(billing, 'invoice.add_line', 'money', 'propose') then
+    raise exception 'agent:billing may propose another money operation';
+  end if;
+  if public.op_agent_permits(billing, 'email.send', 'comms', 'propose') then
+    raise exception 'agent:billing may propose email.send';
+  end if;
+  if public.op_agent_permits(brief, 'invoice.review_gaps', 'money', 'propose') then
+    raise exception 'agent:brief may propose invoice.review_gaps with no grant of its own';
   end if;
 end
 $$;

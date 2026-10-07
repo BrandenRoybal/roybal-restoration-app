@@ -13,7 +13,7 @@ import {
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, replyFor,
   alaskaHour, windowOpensAt, expiresBeforeWindow, retryableStatus,
   parseDecideRequest, decideResponse, ownerGate,
-  matchAcross, offeredByText, VERSION_ANSWER, spineLabel, opName, ownerPrincipal, emailLane, outboxState,
+  matchAcross, offeredByText, VERSION_ANSWER, INBOX_ONLY_FILTER, spineLabel, opName, ownerPrincipal, emailLane, outboxState,
   spineLateText, spineDecidedAt, spineOutranks, spineReceipt, spineVerdict, spineReply,
 } from "./approve.ts";
 
@@ -544,6 +544,37 @@ test("a spine row is called by its rationale's first line, else by what it would
   assert.equal(spineLabel({ rationale: " . " , operation: "sms.send@1", input: {} }), "sms.send");
   assert.equal(opName("email.send@1"), "email.send");
   assert.equal(opName(undefined), "");
+});
+
+/** The nightly billing check's ask (0021): money, filed proposed_via 'agent',
+    its rationale's first line the dollar summary, then its limits. */
+const GAPS_WHY = "Add 2 lines ($325.08, 1 unpriced) to Doe: dehu-days, labor hours";
+const gaps = (sms_code, o = {}) => sp(sms_code, { operation: "invoice.review_gaps@1", proposed_via: "agent",
+  rationale: `${GAPS_WHY}\nLimits: an internal leak check, not carrier-grade justification.`,
+  input: { job_id: "j1", lines: [], total_usd: 325.08, unpriced_count: 1 }, ...o });
+
+test("an invoice-gaps ask is the inbox's: both spine reads carry one filter that leaves it out", () => {
+  assert.equal(INBOX_ONLY_FILTER, "&operation=not.like.invoice.review_gaps*");
+  // it rides the query string as written: one more filter, nothing to encode
+  const q = new URLSearchParams(`status=eq.proposed&sms_code=not.is.null${INBOX_ONLY_FILTER}&select=id`);
+  assert.deepEqual([...q.keys()], ["status", "sms_code", "operation", "select"]);
+  assert.equal(q.get("operation"), "not.like.invoice.review_gaps*", "PostgREST reads * as LIKE's %");
+  assert.equal(encodeURIComponent(q.get("operation")), q.get("operation"));
+});
+
+test("an invoice-gaps row that ever reached the matcher is named by its dollar line, and a bare YES never runs it", () => {
+  const g = gaps(7);
+  assert.equal(offeredByText(g), false, "proposed_via 'agent': no text offered it");
+  assert.equal(spineLabel(g), GAPS_WHY, "the first line; the limits stay in the inbox");
+  assert.equal(spineLabel(gaps(7, { rationale: `${GAPS_WHY}.` })), GAPS_WHY);
+  assert.equal(spineLabel(gaps(7, { rationale: "" })), "invoice.review_gaps", "no rationale: the operation");
+  assert.ok(Array.from(spineLabel(gaps(7, { rationale: "x".repeat(400) }))).length <= 160);
+  // a bare YES never runs it, alone or beside the asks a text did offer
+  assert.equal(matchAcross([], [g], null).reason, "needs-number");
+  const r = matchAcross([], [g, sp(4)], null);
+  assert.deepEqual([r.lane, r.hit.sms_code, r.reason], ["spine", 4, "ok"], "the brief's reminder is the bare YES's");
+  const t = matchAcross([txt(12)], [g], null);
+  assert.deepEqual([t.lane, t.hit.code, t.reason], ["text", 12, "ok"]);
 });
 
 test("the owner's principal is exactly one owner profile", () => {

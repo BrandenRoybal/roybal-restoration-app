@@ -3,7 +3,9 @@
    Optional: GMAIL_CLIENT_ID + GMAIL_CLIENT_SECRET (without both, the email
    lane stays off and email rows wait as pending), OWNER_CELL (without it, the
    dead-letter text is off; the dead-WORKER text is the database's job, not
-   this process's), EMAIL_MAX_AGE_HOURS (default 48). Numbers are clamped so
+   this process's), EMAIL_MAX_AGE_HOURS (default 48), BILLING_RECONCILE
+   (`off` = the nightly billing check answers {skipped:"off"} and reads
+   nothing; anything else, or unset, leaves it on). Numbers are clamped so
    a typo cannot make the worker spin or go silent. */
 import os from "node:os";
 
@@ -89,7 +91,12 @@ export function loadConfig(env = process.env) {
     outboxLeaseS: num("OUTBOX_LEASE_S", 120, 30, 3600),
     outboxBatch: num("OUTBOX_BATCH", 10, 1, 100),
     channels,
-    queueKinds: list("QUEUE_KINDS", "proposal.execute"),
+    // An unlisted kind waits `queued` forever, so a QUEUE_KINDS set on the
+    // app (fly.toml [env] or a secret) must name billing.reconcile too.
+    queueKinds: list("QUEUE_KINDS", "proposal.execute,billing.reconcile"),
+    // The billing check's kill switch (README, Day-2 ops): the queue row is
+    // still claimed and finished, done with {skipped:"off"}.
+    billingReconcile: String(env.BILLING_RECONCILE ?? "").trim().toLowerCase() !== "off",
     emailEnabled,
     gmailClientId,
     gmailClientSecret,

@@ -1569,7 +1569,11 @@ function packetGroups(project) {
     }
     const sheets = [];
     if (f.multi) {
-      (v || []).forEach((inst) => sheets.push(render(project, inst)));
+      // a billing-check draft (invoice.review_gaps) stays out until the office
+      // numbers it or pushes it to QuickBooks: it is unreviewed and may hold unpriced lines
+      const heldDraft = (inst) => f.key === "invoices" && inst && inst.reviewGaps
+        && !String(inst.invoiceNo || "").trim() && !inst.qboInvoiceId;
+      (v || []).forEach((inst) => { if (!heldDraft(inst)) sheets.push(render(project, inst)); });
     } else if (f.key === "floorPlan") {
       // Floor plan: every plan page FULL PAGE. The room-dimensions takeoff
       // table is INTERNAL ONLY — the adjuster reads SF/LF off the full-size
@@ -1586,7 +1590,7 @@ function packetGroups(project) {
       }
     }
     if (!sheets.length) continue;
-    const count = formCount(project, f.key);
+    const count = f.multi ? sheets.length : formCount(project, f.key);
     const note = f.key === "photos" ? `${count} photos` : f.key === "contents" ? `${count} items`
       : f.multi && count > 1 ? `${count}` : "";
     groups.push({ key: f.key, icon: f.icon, label: f.name, note, sheets });

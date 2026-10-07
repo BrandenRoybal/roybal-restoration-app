@@ -292,7 +292,8 @@ input.rl-days { width: 90px; flex: 0 0 auto; }
 .ap-kv { display: flex; gap: 10px; padding: 2px 0; }
 .ap-k { flex: 0 0 72px; padding-top: 2px; font-size: 11px; font-weight: 700; letter-spacing: .4px;
   text-transform: uppercase; color: var(--muted); }
-.ap-v { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* pre-wrap: a two-line Why (the billing check's summary, then its limits) keeps its break */
+.ap-v { flex: 1; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 /* the whole email or text, every line of it: no height cap and no inner
    scroll, so the end of what he approves is never out of sight (a phone
    hides an inner scrollbar until it's touched); long words wrap */
@@ -302,6 +303,18 @@ input.rl-days { width: 90px; flex: 0 0 auto; }
 .ap-refs { margin: 0; padding-left: 18px; }
 /* where an evidence link really goes, ahead of the proposer's label for it */
 .ap-host { font-size: 12px; font-weight: 700; color: var(--ink-2); overflow-wrap: anywhere; }
+/* invoice gaps: a money ask's chip, then one row per line (what, the figures,
+   why, the records behind it), the total, and what to check */
+.badge.ap-money { background: #efe8fb; color: #5b3596; }
+.ap-lines { margin: 0; padding-left: 20px; }
+.ap-line { padding: 5px 0; border-top: 1px solid var(--line); }
+.ap-line:first-child { border-top: 0; padding-top: 0; }
+.ap-line__what { font-weight: 600; }
+.ap-line__fig { font-variant-numeric: tabular-nums; }
+.ap-line__fig--open { font-weight: 600; color: #7a5a1a; }   /* no rate: the office prices it */
+.ap-line__why { font-size: 12.5px; color: var(--muted); }
+.ap-line .ap-refs, .ap-hints .ap-refs { font-size: 12.5px; color: var(--muted); }
+.ap-hints { margin: 0; padding-left: 18px; }
 .ap-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
 .ap-yes { font-size: 12.5px; color: var(--muted); }
 /* a spine email while the worker isn't sending email: approving only queues it */

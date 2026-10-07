@@ -28,7 +28,11 @@
    named, for 48 hours from when it did. Then step 5 review round 2: so
    does one whose proposal is older than the page's 7-day read (its dead
    outbox row is read, then that proposal by id), and either of those
-   reads failing leaves the tab as it was.
+   reads failing leaves the tab as it was. Then the nightly billing check's
+   invoice gaps: every line with its figures and records ("no rate" when the
+   job has none, out of the total), the total, what to check, no YES number,
+   only the field job read, and Approve and add lines landing as what the
+   executor did; superseded with no gaps left reads as no longer needed.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -74,6 +78,7 @@ const iso = (hrs) => new Date(NOW + hrs * 3600e3).toISOString();
 const FIELD1 = "11111111-1111-4111-8111-111111111111";
 const BOARD1 = "22222222-2222-4222-8222-222222222222";
 const AGENT = "1af33481-7f1c-4485-87f5-7b0ec5e27554";
+const BILLING = "193d7dd0-74f9-407d-9891-8cb7aab22f82";          // agent:billing
 const id = (lane, n) => (lane === "text" ? "aaaaaaaa" : "bbbbbbbb") + `-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 const reminder = { id: id("text", 1), code: 12, kind: "emailSend", proposed_by: "morning-brief", status: "pending",
@@ -97,7 +102,8 @@ const swept = { ...phase, id: id("text", 6), status: "expired", created_at: iso(
 const stale = { ...email, id: id("spine", 4), expires_at: iso(-20) };
 let PA = [reminder, phase, sent, failed, lapsed, swept];
 let PR = [email, delivered, declined, stale];
-const CATALOG = [{ name: "email.send", version: 1, description: "Send one email. Execution writes one outbox row; the worker delivers it through Gmail." }];
+const CATALOG = [{ name: "email.send", version: 1, description: "Send one email. Execution writes one outbox row; the worker delivers it through Gmail." },
+  { name: "invoice.review_gaps", version: 1, description: "Add the lines the nightly billing check found documented but not billed. Execution appends one new draft invoice to the job." }];
 let OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
 /* the newest worker heartbeat, as of the page's clock: sending email unless a test says otherwise */
 const beatAt = (minsAgo, channels) => () => json(200, [{ at: new Date(Date.now() - minsAgo * 60e3).toISOString(),
@@ -149,7 +155,9 @@ globalThis.fetch = async (url, opts = {}) => {
     return heartbeat();
   }
   if (u.includes("/rest/v1/operation_catalog?select=name,version,description")) return json(200, CATALOG);
-  if (u.includes("/rest/v1/agents?select=id,name&")) return json(200, ids(u, "id").includes(AGENT) ? [{ id: AGENT, name: "agent:brief" }] : []);
+  if (u.includes("/rest/v1/agents?select=id,name&")) {
+    return json(200, [{ id: AGENT, name: "agent:brief" }, { id: BILLING, name: "agent:billing" }].filter((a) => ids(u, "id").includes(a.id)));
+  }
   if (u.includes("/rest/v1/field_projects?select=id,title:data->>title,customer:data->>customer,address:data->>address&")) {
     return json(200, ids(u, "id").includes(FIELD1) ? [{ id: FIELD1, title: null, customer: "Pollen", address: "1192 Bemis Ct" }] : []);
   }
@@ -1088,6 +1096,121 @@ await test("a send that died in the last 48 hours shows even when its proposal i
   assert.deepEqual([...view.querySelectorAll(".warn:not(.ap-err)")].map((w) => w.textContent), ["The new approvals queue didn't load (503)."]);
   assert.equal(byId(before).length, 0);
   assert.equal(card("spine:" + ancient.id), null);
+  reset5();
+});
+
+/* ---------- the nightly billing check: invoice gaps ---------- */
+const LIMITS = "Limits: an internal leak check, not carrier-grade justification. Prices come only from this job's own invoice lines; the rest are left unpriced.";
+/* the input billing.reconcile files (contract K3), plus the fingerprint the filing door stamps */
+const gapsRow = { id: id("spine", 9), operation: "invoice.review_gaps@1", sms_code: 21, status: "proposed", edited_params: null,
+  input: { job_id: FIELD1, findings_hash: "0123456789abcdef0123456789abcdef", base_rev: 41, rate_invoice_id: "inv-7f3a", rate_invoice_no: "1043",
+    sent: true, total_usd: 721.25, unpriced_count: 2, detector: "billing.reconcile@0.1", limits: LIMITS,
+    invoice_fingerprint: "fedcba9876543210fedcba9876543210",
+    lines: [
+      { finding_id: "equip:dehu", class: "dehu", desc: "Dehumidifier (per 24 hr period) - 70-109 ppd - No monitor.", qty: 6, unit: "EA",
+        price: 85, amount: 510, room: "", code: "DHM>", basis: "20 dehu-days documented from 6 unit rows; 14 billed on invoice 1043.",
+        refs: [{ kind: "drying_log", id: "log-1", label: "20 dehu-days from 6 unit rows, 07-28→08-04", date: "2026-07-28" },
+          { kind: "invoice_line", id: "inv-7f3a#2", label: "invoice 1043 line 3: 14 EA Dehumidifier @ $85.00" }] },
+      { finding_id: "labor:hours", class: "labor", desc: "Water Extraction & Remediation Technician - per hour", qty: 3.25, unit: "HR",
+        price: 65, amount: 211.25, room: "", code: "LAB", basis: "27.25 h in QuickBooks Time inside the mitigation window; 24 billed.",
+        refs: [{ kind: "time_entries", id: "jc-889", label: "QuickBooks Time: 27.25 h, 07-27→08-06" }] },
+      { finding_id: "cat3:containment", class: "cat3", desc: "Containment Barrier/Airlock/Decon. Chamber", qty: null, unit: "SF",
+        price: null, amount: null, room: "Basement", code: "BARR", basis: "Cat 3 job: no containment line on the invoice.",
+        refs: [{ kind: "water_category", id: "3", label: "Water category 3 (Cat 3 package applies)" }] },
+      { finding_id: "cat3:hepa_filter", class: "cat3", desc: "Add for HEPA filter (for negative air exhaust fan)", qty: 2, unit: "EA",
+        price: null, amount: null, room: "", code: "FHEPA", basis: "One per scrubber on a Cat 3 job.", refs: [] },
+    ],
+    hints: [{ kind: "open_equipment_row", label: "1 equipment row has no removal date: counted to its last reading",
+      refs: [{ kind: "equipment_row", id: "log-1#eq4", label: "Dehu D-4" }] }] },
+  proposed_by_kind: "agent", proposed_by_id: BILLING,
+  rationale: "Add 4 lines ($721.25, 2 unpriced) to Pollen: dehu-days, labor hours, Cat 3 package\n" + LIMITS,
+  evidence_refs: [{ kind: "invoice", id: "inv-7f3a", label: "Compared with 1 T&M invoice; newest is invoice 1043" }],
+  job_id: FIELD1, created_at: iso(-9), expires_at: iso(14 * 24 - 9), approved_at: null, updated_at: iso(-9), decline_reason: null, result: null, error: null };
+const row = (root, k) => {
+  const kv = [...root.querySelectorAll(".ap-kv")].find((x) => x.querySelector(".ap-k").textContent === k);
+  return kv ? kv.querySelector(".ap-v") : null;
+};
+
+await test("an invoice-gaps card shows every line with its figures and records, the priced total and what to check, with no YES number", async () => {
+  reset5();
+  const noGaps = { ...gapsRow, id: id("spine", 10), sms_code: null, status: "superseded", updated_at: iso(-3), result: { superseded_reason: "no_gaps" } };
+  const present = { ...gapsRow, id: id("spine", 11), sms_code: null, status: "executed", approved_at: iso(-4), updated_at: iso(-4),
+    result: { status: "already_present", invoice_id: "5d41402a-bc4b-2a76-b971-9d911017c592", lines_added: 0, total_usd: 0, unpriced: 0, rev: 41 } };
+  PA = [];
+  PR = [gapsRow, noGaps, present];
+  const before = since0();
+  await go();
+  const c = card("spine:" + gapsRow.id);
+  assert.equal(c.querySelector(".ap-head").textContent,
+    "Invoice gapsAdd the lines the nightly billing check found documented but not billed: 4 lines · $721.25 · 2 unpriced");
+  assert.ok(c.querySelector(".ap-head .badge").classList.contains("ap-money"), "a money ask's own chip");
+  assert.match(c.querySelector(".ap-meta").textContent, /^Pollen, 1192 Bemis Ct · from Billing agent · asked .+ · expires in 13 days$/);
+  assert.equal(c.querySelector(".ap-yes"), null, "answered here only: roybal-notify never reads these");
+  assert.equal(row(c, "Adds").textContent, "A new draft invoice, beside invoice 1043 (an invoice on this job has already gone out)");
+  const lines = [...c.querySelectorAll(".ap-lines > .ap-line")];
+  assert.deepEqual(lines.map((l) => [l.querySelector(".ap-line__what").textContent, l.querySelector(".ap-line__fig").textContent]), [
+    ["Dehumidifier (per 24 hr period) - 70-109 ppd - No monitor.", "6 EA × $85.00 = $510.00"],
+    ["Water Extraction & Remediation Technician - per hour", "3.25 HR × $65.00 = $211.25"],
+    ["Containment Barrier/Airlock/Decon. Chamber (Basement)", "no quantity · no rate"],
+    ["Add for HEPA filter (for negative air exhaust fan)", "2 EA · no rate"],
+  ]);
+  assert.deepEqual(lines.map((l) => l.querySelector(".ap-line__fig").classList.contains("ap-line__fig--open")), [false, false, true, true],
+    "a line with no rate stands out");
+  assert.equal(lines[0].querySelector(".ap-line__why").textContent, "20 dehu-days documented from 6 unit rows; 14 billed on invoice 1043.");
+  assert.deepEqual([...lines[0].querySelectorAll(".ap-refs li")].map((li) => li.textContent),
+    ["20 dehu-days from 6 unit rows, 07-28→08-04", "invoice 1043 line 3: 14 EA Dehumidifier @ $85.00"]);
+  assert.equal(lines[3].querySelector(".ap-refs"), null, "no records, no empty list");
+  assert.equal(row(c, "Total").textContent, "$721.25 + 2 lines with no rate (not in the total); the new invoice adds this job's O&P and tax");
+  assert.equal(row(c, "To check").textContent, "1 equipment row has no removal date: counted to its last readingDehu D-4");
+  assert.equal(row(c, "Why").textContent, gapsRow.rationale, "both lines, the break kept");
+  assert.deepEqual([...row(c, "Evidence").querySelectorAll("li")].map((li) => li.textContent), ["Compared with 1 T&M invoice; newest is invoice 1043"]);
+  // in order: what it adds, the lines, the total, what to check, then why and the evidence
+  assert.deepEqual([...c.querySelectorAll(".ap-ev > .ap-kv > .ap-k")].map((k) => k.textContent), ["Adds", "Lines", "Total", "To check", "Why", "Evidence"]);
+  assert.equal(btn(c, "Approve and add lines").disabled, false);
+  // Recently decided: what the executor did, and a card the next night's check no longer needed
+  assert.deepEqual(recent().map((x) => x.dataset.key), ["spine:" + noGaps.id, "spine:" + present.id]);
+  assert.equal(card("spine:" + noGaps.id).querySelector(".ap-out").textContent, "No longer needed: the invoice covers it");
+  assert.equal(card("spine:" + present.id).querySelector(".ap-out").textContent, "Already on the job");
+  // the reads: the field job only (never the board), the billing agent's name, no heartbeat
+  const reads = calls.slice(before);
+  assert.ok(reads.some((x) => x.u.includes("/field_projects?") && ids(x.u, "id").includes(FIELD1)));
+  assert.ok(!reads.some((x) => x.u.includes("/coordination_jobs?")), "an invoice gap is on a field job");
+  assert.ok(reads.some((x) => x.u.includes("/agents?") && ids(x.u, "id").includes(BILLING)));
+  assert.equal(beats(before), 0);
+  noJunk(view);
+  reset5();
+});
+
+await test("Approve and add lines: one confirm naming the lines, the priced total and the job; the executed row lands as what was added", async () => {
+  reset5();
+  PA = [];
+  PR = [gapsRow];
+  await go();
+  asked.length = 0;
+  const added = { status: "added", invoice_id: "5d41402a-bc4b-2a76-b971-9d911017c592", lines_added: 4, total_usd: 721.25, unpriced: 2, rev: 42 };
+  // runtime sql: op_proposal_approve runs the executor before it answers, so the row comes back executed
+  spine = () => json(200, { ...gapsRow, status: "executed", approved_at: new Date().toISOString(), approved_via: "inbox",
+    updated_at: new Date().toISOString(), result: added });
+  const before = since0();
+  btn(card("spine:" + gapsRow.id), "Approve and add lines").click();
+  await settle();
+  assert.deepEqual(asked, ["Add 4 lines ($721.25, 2 unpriced) as a new draft invoice on Pollen, 1192 Bemis Ct?"]);
+  const rpc = calls.slice(before).find((x) => x.u.includes("/rpc/op_proposal_"));
+  assert.match(rpc.u, /\/rest\/v1\/rpc\/op_proposal_approve$/);
+  assert.deepEqual(rpc.body, { p_proposal_id: gapsRow.id, p_via: "inbox" }, "no edit: every line");
+  const out = card("spine:" + gapsRow.id).querySelector(".ap-out");
+  assert.equal(out.textContent, "Added 4 lines on a new draft invoice");
+  assert.ok(out.classList.contains("ap-out--ok"));
+  assert.equal(document.getElementById("toast").textContent, "Added 4 lines on a new draft invoice");
+  // the invoices changed after it was filed: the executor refused, and the card says why
+  await go();
+  spine = () => json(200, { ...gapsRow, status: "failed", approved_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    error: "invoice.review_gaps: the job's invoices changed since this was proposed, so nothing was added; the nightly check files a fresh card if the work is still unbilled and the job is still one it checks (not archived, not every invoice paid)" });
+  btn(card("spine:" + gapsRow.id), "Approve and add lines").click();
+  await settle();
+  assert.equal(card("spine:" + gapsRow.id).querySelector(".ap-out").textContent,
+    "Failed: invoice.review_gaps: the job's invoices changed since this was proposed, so nothing was added; the nightly check files a fresh card if the work is still unbilled and the job is still one it checks (not archived, not every invoice paid)");
+  noJunk(view);
   reset5();
 });
 

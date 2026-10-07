@@ -302,10 +302,14 @@ const spineRow = (o = {}) => ({
 });
 
 /** PostgREST's filters, as far as these reads use them: eq/neq/gt/gte/lt,
-    is.null and not.is.null, then order and limit. Timestamps compare as
-    instants. A filter it doesn't know throws, like every unrouted call. */
+    like (`*` or `%` any run, `_` any one character), is.null, and not. on
+    any of them (a NULL column matches no not. but not.is.null, as in SQL),
+    then order and limit. Timestamps compare as instants. A filter it
+    doesn't know throws, like every unrouted call. */
 const KEYWORDS = new Set(["select", "order", "limit", "offset"]);
 const instant = (v) => (typeof v === "string" && /^\d{4}-\d\d-\d\dT/.test(v) ? Date.parse(v) : v);
+const likeRe = (p) => new RegExp("^" + Array.from(p, (c) =>
+  c === "*" || c === "%" ? ".*" : c === "_" ? "." : c.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("") + "$", "s");
 const holds = (v, f) => {
   if (f === "not.is.null") return v != null;
   if (f === "is.null") return v == null;
@@ -314,6 +318,8 @@ const holds = (v, f) => {
   if (op === "eq") return String(v) === want;
   if (op === "neq") return String(v) !== want;
   if (v == null) return false;
+  if (op === "not") return !holds(v, want);
+  if (op === "like") return likeRe(want).test(String(v));
   if (op === "gt") return instant(v) > instant(want);
   if (op === "gte") return instant(v) >= instant(want);
   if (op === "lt") return instant(v) < instant(want);
@@ -1132,6 +1138,90 @@ test("a bare YES beside a screen-only spine ask is the texted ask's: a text-lane
   await text("YES");
   assert.deepEqual(replies(two), ["More than one action is waiting — reply YES with its number (e.g. YES 12)."]);
   assert.equal(reached(two, "/rpc/op_"), false);
+});
+
+/* ---------- invoice gaps (0021): the inbox's alone ----------
+   The nightly billing check files its ask on the spine like any other, with
+   an sms_code, but both spine reads leave invoice.review_gaps out, so a text
+   can neither approve nor decline one, and never hears what became of it. */
+const GAPS_WHY = "Add 2 lines ($325.08, 1 unpriced) to Doe: dehu-days, labor hours";
+/** The billing check's proposal as op_propose files it: money, proposed_via 'agent'. */
+const gapsRow = (o = {}) => spineRow({
+  id: "d00dfeed-2222-4333-8444-555566667777", sms_code: 7, operation: "invoice.review_gaps@1", proposed_via: "agent",
+  input: { job_id: "9e8d7c6b-5a49-4382-9716-a5b4c3d2e1f0", lines: [], total_usd: 325.08, unpriced_count: 1 },
+  rationale: `${GAPS_WHY}\nLimits: an internal leak check, not carrier-grade justification.`, ...o });
+const NO_SUCH = "That number doesn't match a live proposal — check today's brief and reply YES with the number shown.";
+const NOTHING = "Nothing is waiting for approval right now.";
+const INBOX_ONLY = "not.like.invoice.review_gaps*";
+const spineReads = (w) => w.calls.filter((c) => c.method === "GET" && c.path.startsWith("/rest/v1/proposals?"));
+
+test("YES n or NO n on an invoice-gaps ask answers like a number no ask holds, and nothing runs", async () => {
+  // beside the brief's live reminder: the gaps number is no-such-code
+  for (const said of ["YES 7", "yes #7", "NO 7"]) {
+    const w = spineWorld();
+    w.spine.push(gapsRow());
+    await text(said);
+    assert.deepEqual(replies(w), [NO_SUCH], said);
+    assert.deepEqual(w.spine.map((r) => r.status), ["proposed", "proposed"], said);
+    assert.equal(reached(w, "/rpc/op_"), false, `${said}: no op_* door opens`);
+    assert.equal(reached(w, "roybal-ai-office"), false, `${said}: an answer, never a question`);
+    // both reads, the live one and the late lookup on its number, leave it out
+    const reads = spineReads(w);
+    assert.equal(reads.length, 2, said);
+    for (const c of reads) assert.equal(new URLSearchParams(c.path.split("?")[1]).get("operation"), INBOX_ONLY, c.path);
+  }
+  // the filter hides nothing else: the reminder's number still approves it
+  const v = spineWorld();
+  v.spine.push(gapsRow());
+  await text("YES 4");
+  assert.deepEqual(replies(v), [APPROVED]);
+  assert.deepEqual(v.spine.map((r) => r.status), ["executed", "proposed"]);
+
+  // alone: the same answer as a number nobody was ever given
+  const one = spineWorld(undefined, gapsRow());
+  await text("YES 7");
+  await text("YES 99");
+  assert.deepEqual(replies(one), [NOTHING, NOTHING]);
+  assert.equal(one.spine[0].status, "proposed");
+  assert.equal(reached(one, "/rpc/op_"), false);
+});
+
+test("a bare YES or NO never names or runs an invoice-gaps ask, alone or beside the brief's reminder", async () => {
+  for (const said of ["YES", "ok", "no"]) {
+    const w = spineWorld(undefined, gapsRow());
+    await text(said);
+    assert.deepEqual(replies(w), [NOTHING], `${said}: never "Reply YES 7 to approve …"`);
+    assert.equal(w.spine[0].status, "proposed", said);
+    assert.equal(reached(w, "/rpc/op_"), false, said);
+  }
+  const b = spineWorld();
+  b.spine.push(gapsRow());
+  await text("YES");
+  assert.deepEqual(replies(b), [APPROVED], "the reminder is the one live ask a text can answer");
+  assert.deepEqual(b.spine.map((r) => r.status), ["executed", "proposed"]);
+});
+
+test("a late YES on an invoice-gaps ask the inbox answered gets no word of its fate", async () => {
+  const at = new Date().toISOString();
+  for (const fate of [
+    { status: "executed", approved_via: "inbox", approved_at: at, result: { status: "added" } },
+    { status: "declined", decline_reason: "not this one" },
+    { status: "failed", approved_via: "inbox", approved_at: at, error: "op spine: invoices changed since filing" },
+  ]) {
+    const w = spineWorld();
+    w.spine.push(gapsRow(fate));
+    await text("YES 7");
+    assert.deepEqual(replies(w), [NO_SUCH], fate.status);
+    const late = spineReads(w).find((c) => c.path.includes("sms_code=eq.7"));
+    assert.equal(new URLSearchParams(late.path.split("?")[1]).get("operation"), INBOX_ONLY, fate.status);
+    assert.equal(reached(w, "/rpc/op_"), false, fate.status);
+    // nothing else live: today's "nothing waiting", never "already approved — Add 2 lines …"
+    const alone = world("emailSend");
+    alone.row.status = "executed";
+    alone.spine.push(gapsRow(fate));
+    await text("YES 7");
+    assert.deepEqual(replies(alone), [NOTHING], fate.status);
+  }
 });
 
 test("GET /version answers the step-5 contract with no key and reads nothing; every other GET is still 405", async () => {

@@ -39,6 +39,8 @@
      mismatch reply says so. A spine ask offered only on a screen
      always demands its number: a bare "ok" meant for the assistant
      must never send the adjuster an email.
+   • An invoice-gaps ask (invoice.review_gaps) is the inbox's alone:
+     the text channel never reads one (INBOX_ONLY_FILTER).
    • Anything that isn't clearly a YES is ignored (normal replies
      keep flowing to the message log unharmed). STOP/NO cancels.
    • A customer text approved outside the send window is refused
@@ -485,6 +487,16 @@ export const VERSION_ANSWER = { ok: true, function: "roybal-notify", answers: ["
     qb-time and the SMS assistant all send their "YES n" lines), so the
     text lane needs no such test. */
 export const offeredByText = (r: Blob) => r?.proposed_via === "cron";
+
+/** The spine asks a text never answers, as a PostgREST filter both spine
+    reads append (the live read and the late lookup, index.ts; `*` is
+    LIKE's `%`). An invoice.review_gaps proposal (0021) is money whose
+    lines and evidence show only in the inbox, and a 160-character label
+    can't carry them, so neither "YES n" nor a bare YES ever reaches one:
+    its number answers like a number no ask holds, and its fate is never
+    quoted back. It is filed proposed_via 'agent' besides, so one that got
+    past this filter still couldn't be a bare YES's (offeredByText). */
+export const INBOX_ONLY_FILTER = "&operation=not.like.invoice.review_gaps*";
 
 /** Pick the ask a reply refers to across both queues. `text` = live
     pending_actions rows (status 'pending'), `spine` = live proposals
