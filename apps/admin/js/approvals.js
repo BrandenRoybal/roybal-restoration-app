@@ -40,7 +40,11 @@
    48 hours, whose outbox rows say whether one died since and so shows
    again) and lookFrom's options (heartbeats, now). An older
    cached copy ignores what it doesn't know, and the cards read as
-   they did. Anything added later that has to be a call is checked
+   they did. The nightly billing check's invoice gaps ride the same
+   way (kind "gaps", its lines and total as text on the card); an
+   older copy makes them a plain card for that one load: Why and
+   Evidence, a plain Approve, and a YES number roybal-notify won't
+   take. Anything added later that has to be a call is checked
    first (typeof A.x === "function"). The sends that died in the last
    48 hours with a proposal older than the 7-day read (diedLate) are
    plain reads here, no new call: their proposal rows join the rest
@@ -54,8 +58,9 @@ import * as A from "../../js/approvals.js";
 const HASH = "#/approvals";
 const REFRESH_MS = 45000;
 const enc = encodeURIComponent;
-/* the shared .badge tones: the chip by kind, the outcome line by how it went */
-const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", other: "disp-x" };
+/* the shared .badge tones: the chip by kind, the outcome line by how it went
+   (invoice gaps, a money ask, get admin.css's own) */
+const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", gaps: "ap-money", other: "disp-x" };
 const tone = (kind) => (Object.prototype.hasOwnProperty.call(TONE, kind) ? TONE[kind] : TONE.other);   // not Object.hasOwn: Safari < 15.4
 
 const TEXT_COLS = "id,code,kind,label,params,job_id,proposed_by,status,result,created_at,expires_at,executed_at";
@@ -412,8 +417,17 @@ const head = (c) => h("div", { class: "ap-head" },
   h("strong", { class: "ap-title" }, c.title));
 const kv = (k, v) => (v ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, k), h("span", { class: "ap-v" }, v)) : null);
 
-/* what would happen, in full: the whole email, the whole text, the phase
-   (the body is never clamped, so nothing he approves is out of sight) */
+/* a link's label is the proposer's words, so where it really goes comes
+   first, in its own bold element the label can't reach: "opens
+   evil.example — Invoice" (A.labelOf drops a host the label claims) */
+const refItem = (r) => h("li", {},
+  r.url ? [h("span", { class: "ap-host" }, "opens " + r.host), " — ",
+    h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.text)] : r.text);
+const refList = (refs, cls = "ap-refs") => (Array.isArray(refs) && refs.length ? h("ul", { class: cls }, ...refs.map(refItem)) : null);
+
+/* what would happen, in full: the whole email, the whole text, the phase,
+   every invoice line (the body is never clamped, so nothing he approves is
+   out of sight) */
 function evidence(c) {
   const e = c.evidence;
   const parts = [];
@@ -426,16 +440,27 @@ function evidence(c) {
     parts.push(kv("Phase", e.phase), kv("Hours", e.hours != null ? `${e.hours} h logged` : ""));
   } else if (c.kind === "stage") {
     parts.push(kv("Job", c.job || "a board job"), kv("New stage", e.stage));
+  } else if (c.kind === "gaps") {
+    // the nightly billing check: each line the new draft invoice would get,
+    // with its figures ("no rate" when the job has none) and the records
+    // behind it, the total of the priced lines, then what it noticed but
+    // never adds. Every figure arrives as text from the field module.
+    const lines = Array.isArray(e.lines) ? e.lines : [];
+    const hints = Array.isArray(e.hints) ? e.hints : [];
+    parts.push(kv("Adds", e.invoice),
+      lines.length ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Lines"),
+        h("ol", { class: "ap-v ap-lines" }, ...lines.map((l) => h("li", { class: "ap-line" },
+          h("div", { class: "ap-line__what" }, l.text),
+          h("div", { class: "ap-line__fig" + (l.priced ? "" : " ap-line__fig--open") }, l.figures),
+          l.basis ? h("div", { class: "ap-line__why" }, l.basis) : null,
+          refList(l.refs))))) : null,
+      kv("Total", e.total),
+      hints.length ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "To check"),
+        h("ul", { class: "ap-v ap-hints" }, ...hints.map((x) => h("li", {}, x.text, refList(x.refs))))) : null);
   }
   parts.push(kv("Why", e.rationale));
-  // a link's label is the proposer's words, so where it really goes comes
-  // first, in its own bold element the label can't reach: "opens
-  // evil.example — Invoice" (A.labelOf drops a host the label claims)
   if (e.refs.length) {
-    parts.push(h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Evidence"),
-      h("ul", { class: "ap-v ap-refs" }, ...e.refs.map((r) => h("li", {},
-        r.url ? [h("span", { class: "ap-host" }, "opens " + r.host), " — ",
-          h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer" }, r.text)] : r.text)))));
+    parts.push(h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Evidence"), refList(e.refs, "ap-v ap-refs")));
   }
   const shown = parts.filter(Boolean);
   return shown.length ? h("div", { class: "ap-ev" }, ...shown) : null;

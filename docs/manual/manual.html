@@ -478,14 +478,28 @@
 
   <h2 class="sec" id="s-approvals">Approvals</h2>
   <figure class="wide"><div class="frame" style="height:4.2in"><img src="shots/admin-approvals.jpg"></div><figcaption><b>✅ Approvals</b>: everything waiting on the owner's yes.</figcaption></figure>
-  <p>Anything the automated helpers want to send or change waits here for the owner: overdue-invoice reminder emails from the morning brief, phases suggested from QuickBooks Time, customer texts, job stage moves. Only the owner's login sees this tab's contents.</p>
+  <p>Anything the automated helpers want to send or change waits here for the owner: overdue-invoice reminder emails from the morning brief, adjuster emails sent for approval from a job's narrative page, phases suggested from QuickBooks Time, customer texts, job stage moves, and invoice gaps from the nightly billing check. Only the owner's login sees this tab's contents.</p>
   <ol class="steps">
     <li>Read the card: who it goes to, the full message, why it was proposed, and links to the evidence.</li>
-    <li>Tap <span class="ui">Approve and send</span> (or <i>Approve and add phase</i>, <i>Approve and move job</i>) and confirm. Or tap <span class="ui">Decline</span>, optionally with a reason.</li>
+    <li>Tap <span class="ui">Approve and send</span> (or <i>Approve and add phase</i>, <i>Approve and move job</i>, <i>Approve and add lines</i>) and confirm. Or tap <span class="ui">Decline</span>, optionally with a reason.</li>
     <li>The card moves to <b>Recently decided</b> (last 48 hours) with the result: Sent, Phase added, Moved to…, Declined or Failed.</li>
   </ol>
   <div class="tip"><b>From your phone</b>Cards that show "or text YES 12" can also be answered by texting <b>YES 12</b> back to the alert. The first answer wins. The page refreshes itself every 45 seconds.</div>
-  <div class="gate"><b>In progress</b>One-tap overdue-invoice reminders and adjuster emails are being moved onto this list now (see <a href="#ch7">What's new</a>). Cards from the newer queue cannot be answered by text yet.</div>
+
+  <h3>Invoice gaps</h3>
+  <p>Early each morning the nightly billing check reads every water job that isn't archived and still has an invoice not paid in full, and compares what the job's records show with what its invoices bill:</p>
+  <ul>
+    <li><b>Equipment days</b> from the drying log: each dehumidifier, air mover, air scrubber and heater from placed to removed, counted in 24-hour periods (a part day counts as a day). When the invoices price drying as one item (a structural-drying bid, or a contract with no itemised scope), the check notes that the days can't be compared and adds no equipment line.</li>
+    <li><b>Crew hours</b> from QuickBooks Time during the mitigation (before the Labor Log's start date, when one is set), compared only when the job's invoices bill labor by the hour. When labor is priced inside unit-priced lines or a contract, the check notes that the hours can't be compared and adds no labor line.</li>
+    <li><b>Cat 3 steps</b> (containment, floor protection, HEPA vacuuming, antimicrobial, PPE, negative air and HEPA filters) that the job has a record of, in a photo, a change order, the Cat 3 justification or the drying log's air scrubbers, but no invoice line bills.</li>
+  </ul>
+  <p>When documented work isn't billed, an <span class="ui">Invoice gaps</span> card lists each line it would add: what, how many, the rate already on this job's invoices, and the log, hours or photos behind it. A line with no rate on this job reads <b>no rate</b> and stays out of the card's total. The total is the lines alone: the new draft invoice adds this job's overhead and profit, and its tax, on top. Under the lines are notes the check never bills, such as days with equipment on and no reading, hours outside the mitigation dates, and Cat 3 items with no record of the work. A job with only notes gets no card.</p>
+  <ol class="steps">
+    <li>Check each line against its evidence, then tap <span class="ui">Approve and add lines</span> and confirm, or <span class="ui">Decline</span>.</li>
+    <li>Approving adds the lines once, as a new draft invoice on the job (🧾 Construction Invoice in Field Forms), never inside an invoice already there. Recently decided reads <b>Added 3 lines on a new draft invoice</b>.</li>
+    <li>The office opens the draft and fills in the quantity and price on every line the card showed as <b>no rate</b>. Those lines carry a red <b>Billing check · no rate on this job: price it</b> note in the invoice editor until a price is typed, and <span class="ui">⬆️ Push to QuickBooks</span> refuses the invoice until they are priced. The draft has no number or status and isn't in QuickBooks, and the <span class="ui">📄 Full job packet (PDF)</span> leaves it out until the office gives it an invoice number or pushes it to QuickBooks.</li>
+  </ol>
+  <div class="note"><b>Approvals tab only</b>Invoice-gap cards have no "or text YES" line, and a YES text never approves one. If the job's invoice lines change before you approve (an edited, added or voided invoice; a payment or sending one doesn't count), approving fails and says so, and nothing is added; the next night's check files a fresh card if anything is still unbilled and the job is still one it checks (not archived, and not every invoice paid). A card waits 14 days; a gap still there after its card expires is offered again, while one you declined stays quiet until the job's records or invoice lines change.</div>
 
   <h2 class="sec" id="s-leads">Leads</h2>
   <figure class="wide"><div class="frame" style="height:3.6in"><img src="shots/admin-leads.jpg"></div><figcaption><b>Leads</b>: open leads, newest first, with the next move on each.</figcaption></figure>
@@ -696,7 +710,8 @@
     <tr><td>🧾 Office receipt library and store return windows</td><td>Live</td><td>Office Admin → Receipts.</td></tr>
     <tr><td>↩ Log a return</td><td>Waiting</td><td>Turns on once Branden writes "require v202" and every phone runs build v202 or newer.</td></tr>
     <tr><td>✅ Approvals inbox</td><td>Live</td><td>Owner only. Both the text-YES queue and the newer approval queue in one list.</td></tr>
-    <tr><td>One-tap overdue-invoice reminders and adjuster emails</td><td>Being built</td><td>Will arrive as cards in Approvals. Nothing sends without the owner's tap.</td></tr>
+    <tr><td>One-tap overdue-invoice reminders and adjuster emails</td><td>Live</td><td>Cards in Approvals, answered by tap or by texting YES and the card's number. Nothing sends without the owner's yes.</td></tr>
+    <tr><td>🧾 Invoice gaps (nightly billing check)</td><td>Live</td><td>Each night, water jobs are checked for drying-log equipment days, QuickBooks Time hours (hourly invoices only) and recorded Cat 3 work that no invoice bills. Gaps arrive as cards in Approvals; approving adds them once as a new draft invoice for the office to price. Approvals tab only, never by text.</td></tr>
     <tr><td>Receipts matched to QuickBooks</td><td>Planned</td><td>Nightly match to bank-feed charges, then "tag + attach" approvals; materials onto T&amp;M invoices; cost vs estimate.</td></tr>
     <tr><td>Magicplan quantities into the estimate</td><td>Planned</td><td>Room measurements flowing straight into estimate line items.</td></tr>
     <tr><td>📅 My Week</td><td>Parked</td><td>Hidden until the board schedule feeds it reliably, so crews never see wrong days.</td></tr>

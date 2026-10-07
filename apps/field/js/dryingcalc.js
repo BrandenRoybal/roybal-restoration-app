@@ -154,17 +154,28 @@ export function equipmentCalc({
   };
 }
 
+/* The equipment class of a free-text type (a drying-log row, a photo's AI
+   equipment tag): first match wins, in this order. "LGR 7000XLi" and
+   desiccant units are dehus even without the word. Shared with the billing
+   reconcile (reconcile.js), which counts unit-days per class. */
+export function equipClassOf(type) {
+  const t = String(type || "").toLowerCase();
+  if (!t) return null;
+  if (/dehu|\blgr\b|desiccant/.test(t)) return "dehu";
+  if (/scrub|hepa|negative\s*air|neg\.?\s+air|air\s*filtration|afd/.test(t)) return "scrubber";
+  if (/heat/.test(t)) return "heater";
+  if (/air\s*mover|mover|axial|centrifugal|velo|fan/.test(t)) return "airMover";
+  return null;
+}
+
 /* Count what's actually deployed from the drying log's equipment rows,
    matching on the free-text type — for the recommended-vs-deployed line. */
+const DEPLOYED_KEY = { dehu: "dehus", scrubber: "scrubbers", heater: "heaters", airMover: "airMovers" };
 export function deployedCounts(equipment) {
   const out = { airMovers: 0, dehus: 0, scrubbers: 0, heaters: 0 };
   for (const row of Array.isArray(equipment) ? equipment : []) {
-    const t = String((row && row.type) || "").toLowerCase();
-    if (!t) continue;
-    if (/dehu/.test(t)) out.dehus++;
-    else if (/scrub|hepa|negative\s*air|neg\.?\s+air|air\s*filtration|afd/.test(t)) out.scrubbers++;
-    else if (/heat/.test(t)) out.heaters++;
-    else if (/air\s*mover|mover|axial|centrifugal|velo|fan/.test(t)) out.airMovers++;
+    const cls = equipClassOf(row && row.type);
+    if (cls) out[DEPLOYED_KEY[cls]]++;
   }
   return out;
 }

@@ -1323,8 +1323,13 @@ function invoiceCharges(inv, onTotals, opts = {}) {
     const tr = h("tr");
     // a price the draft took from the owner's past Xactimate estimates stays
     // marked for review on screen (app-only: never prints, never in the .docx)
+    // the nightly billing check's lines (invoice.review_gaps) say why they are
+    // here; one with no rate on this job stays flagged until a price is typed
     const refBadge = it.priced === "reference"
       ? h("div", { class: "app-only", style: "font-size:11px;color:var(--navy-3);padding:0 8px 2px", title: it.refNote || null }, "Xactimate ref price \u00b7 review")
+      : it.priced === "flag" || it.priced === "invoice_rate"
+      ? h("div", { class: "app-only", style: "font-size:11px;padding:0 8px 2px;color:" + (it.priced === "flag" ? "var(--red, #b42318)" : "var(--navy-3)"), title: it.basis || null },
+          it.priced === "flag" ? "Billing check \u00b7 no rate on this job: price it" : "Billing check \u00b7 rate from this job \u00b7 review")
       : null;
     const cell = (key, cls, type = "text") => {
       const input = h("input", { type, value: it[key] ?? "" });
@@ -1332,9 +1337,11 @@ function invoiceCharges(inv, onTotals, opts = {}) {
         it[key] = input.value;
         // the office typed its own price: it is no longer the reference price,
         // so the review badge and the refNote go (in place — no repaint mid-typing)
-        if (key === "price" && it.priced === "reference") {
+        if (key === "price" && (it.priced === "reference" || it.priced === "flag" || it.priced === "invoice_rate")
+            && (it.priced !== "flag" || Number.isFinite(parseFloat(input.value)))) {
           it.priced = "manual";
           delete it.refNote;
+          delete it.flag;
           if (refBadge) refBadge.remove();
         }
         extEl.textContent = money((Number(it.qty) || 0) * (Number(it.price) || 0)); recalc(); commit();
@@ -1793,6 +1800,9 @@ export function invoice(project, inv) {
     inv.qboInvoiceId ? "\u2b06\ufe0f Update in QuickBooks" : "\u2b06\ufe0f Push to QuickBooks");
   qboBtn.addEventListener("click", async () => {
     if (!(inv.items || []).some((it) => String(it.desc || "").trim())) return toast("Add line items first.");
+    // a billing-check line with no rate would reach QuickBooks as a $0.00 line
+    const unpriced = (inv.items || []).filter((it) => it.priced === "flag").length;
+    if (unpriced) return toast(`Price the ${unpriced} flagged line${unpriced === 1 ? "" : "s"} first.`);
     busyBtn(qboBtn, true, "\u2b06\ufe0f Pushing\u2026");
     try {
       const r = await pushInvoiceToQbo(project, inv);

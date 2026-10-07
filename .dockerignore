@@ -1,11 +1,18 @@
-# Build context for the phone agent's Docker image (fly deploy from the repo
-# root). The image only needs services/phone-agent + two shared files, so keep
-# the heavyweight directories out of the upload (~1.5 GB → a few MB).
+# Build context for the phone agent's and the worker's Docker images (fly
+# deploy from the repo root). Each image needs its own service directory + a
+# few shared files, so keep the heavyweight directories out of the upload
+# (~1.5 GB → a few MB).
 .claude
 .git
 **/node_modules
-# NOTE: do not ignore apps/board — the Dockerfile copies apps/board/js/schedule.js
+# NOTE: do not ignore apps/board — the phone agent's Dockerfile copies apps/board/js/schedule.js
 apps/field
+# ...except the four modules the worker's billing check imports
+# (services/worker/Dockerfile copies them; the exceptions must follow apps/field)
+!apps/field/js/reconcile.js
+!apps/field/js/dryingcalc.js
+!apps/field/js/model.js
+!apps/field/js/core.js
 apps/admin
 apps/site
 apps/portal

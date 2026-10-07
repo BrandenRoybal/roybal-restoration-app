@@ -26,8 +26,9 @@
 # GitHub's main exactly (git fetch, then HEAD = origin/main: a main older
 # than the last worker deploy from GitHub would roll that deploy back), with
 # no local changes, untracked files included, in what the image is built
-# from (services/worker, the Dockerfile's one COPY, and .dockerignore, which
-# picks the build context), and with staleEmailReason (adapters/email.mjs):
+# from (IMAGE_PATHS: services/worker and the four apps/field/js modules the
+# Dockerfile copies, and .dockerignore, which picks the build context), and
+# with staleEmailReason (adapters/email.mjs):
 # an image without it would send an approved email days late and file its
 # sent copy under no job.
 #
@@ -72,6 +73,10 @@ CONFIG=apps/field/js/config.js
 EMAIL_ADAPTER=services/worker/adapters/email.mjs
 FLY_TOML=services/worker/fly.toml
 DOCKERFILE=services/worker/Dockerfile
+# What the image is built from: every COPY source in the Dockerfile, and the
+# .dockerignore that picks the build context (test/supa.test.mjs holds this
+# list to the Dockerfile's COPY lines).
+IMAGE_PATHS='services/worker apps/field/js/reconcile.js apps/field/js/dryingcalc.js apps/field/js/model.js apps/field/js/core.js .dockerignore'
 UPDATE='cd ~/roybal-restoration-app && git checkout main && git pull'
 RERUN='cd ~/roybal-restoration-app && sh services/worker/set-gmail-secret.sh'
 
@@ -133,10 +138,11 @@ TOP=$(git rev-parse --show-toplevel 2>/dev/null) || TOP=
 BRANCH=$(git symbolic-ref --short -q HEAD 2>/dev/null) || BRANCH=
 [ "$BRANCH" = main ] \
   || not_this_checkout "this checkout is on ${BRANCH:-no branch}, not main, and the deploy builds from it"
-CHANGED=$(git status --porcelain --untracked-files=normal -- services/worker .dockerignore 2>/dev/null) \
+# $IMAGE_PATHS unquoted on purpose: one argument per path
+CHANGED=$(git status --porcelain --untracked-files=normal -- $IMAGE_PATHS 2>/dev/null) \
   || not_this_checkout "git could not read this checkout's status"
 [ -z "$CHANGED" ] \
-  || not_this_checkout "this checkout has local changes in services/worker or .dockerignore (git status services/worker .dockerignore lists them), and the deploy would build them into the image; undo them or get them merged"
+  || not_this_checkout "this checkout has local changes in services/worker, the field modules its image copies or .dockerignore (git status $IMAGE_PATHS lists them), and the deploy would build them into the image; undo them or get them merged"
 git fetch -q origin main \
   || not_this_checkout "git could not fetch main from GitHub (its message is above), so this cannot tell whether this checkout is the latest main"
 HEAD_AT=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || HEAD_AT=

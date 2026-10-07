@@ -2,7 +2,7 @@
   "name": "roybal-worker",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.6" },
+  "engines": { "node": ">=22.7" },
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.mjs"

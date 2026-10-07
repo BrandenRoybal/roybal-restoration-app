@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runQueueOnce, runJob, handlers, JobError } from "../lanes/queue.mjs";
+import { loadConfig } from "../config.mjs";
 import { fakeSupa, testConfig, recordingLog, jobRow } from "./helpers.mjs";
 
 const ctxWith = (supa = fakeSupa(), extra = {}) =>
@@ -120,4 +121,35 @@ test("an outage on finish_job is retried per configured delay, then logged as fi
   const row = await runJob(ctx2, jobRow());
   assert.equal(row.status, "done");
   assert.ok(ctx2.log.events().includes("job.done"));
+});
+
+test("billing.reconcile is claimed by default and dispatched to the billing check, which finishes done with its summary", async () => {
+  const env = { SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k" };
+  const kinds = loadConfig(env).queueKinds;
+  assert.deepEqual(kinds, ["proposal.execute", "billing.reconcile"]);
+  assert.deepEqual(loadConfig({ ...env, QUEUE_KINDS: "proposal.execute" }).queueKinds, ["proposal.execute"],
+    "a QUEUE_KINDS set on the app still wins, so it must name the new kind");
+  assert.equal(handlers["billing.reconcile"].name, "billingReconcile");
+  const job = jobRow({ kind: "billing.reconcile", payload: { run_date: "2026-10-07" }, principal_kind: "agent",
+    principal_id: "193d7dd0-74f9-407d-9891-8cb7aab22f82" });
+  const supa = fakeSupa({ rpc: { claim_job: [job], finish_job: (a) => ({ status: a.p_ok ? "done" : "failed" }) } });
+  const ctx = ctxWith(supa, { cfg: testConfig({ queueKinds: kinds }), now: () => new Date("2026-10-07T20:00:00Z") });
+  assert.equal(await runQueueOnce(ctx), 1);
+  assert.deepEqual(supa.rpcs("claim_job")[0].p_kinds, ["proposal.execute", "billing.reconcile"]);
+  assert.equal(supa.rpcs("op_execute").length, 0);
+  assert.deepEqual(supa.calls.select.map((c) => c.table), ["coordination_jobs", "field_projects"]);
+  const fin = supa.rpcs("finish_job")[0];
+  assert.equal(fin.p_ok, true);
+  assert.deepEqual(fin.p_result, {
+    run_date: "2026-10-07", jobs_seen: 0, in_scope: 0, filed: 0, unchanged: 0, superseded: 0,
+    skipped: {}, hints_only: [], errors: [],
+  });
+  assert.equal(ctx.active.jobs.size, 0);
+
+  // the kill switch still settles the row: done, nothing read
+  const off = fakeSupa({ rpc: { claim_job: [job], finish_job: { status: "done" } } });
+  const ctxOff = ctxWith(off, { cfg: testConfig({ queueKinds: kinds, billingReconcile: false }) });
+  assert.equal(await runQueueOnce(ctxOff), 1);
+  assert.deepEqual(off.rpcs("finish_job")[0].p_result, { skipped: "off" });
+  assert.equal(off.calls.select.length, 0);
 });

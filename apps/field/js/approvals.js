@@ -21,7 +21,9 @@
             page looks a spine job up in both tables (uuids don't
             collide). Since step 5, "YES n" by text reaches these rows
             too (roybal-notify's handleApproval matches sms_code), and a
-            waiting spine card offers it the way a text-queue card does.
+            waiting spine card offers it the way a text-queue card does,
+            all but the nightly billing check's invoice gaps: roybal-notify
+            never reads those, so they are answered here only.
             An email here goes out through the worker, which sends only
             while its heartbeat lists the "email" channel; the page
             reads the newest heartbeat so a card can say when sending
@@ -63,10 +65,11 @@ const KINDS = {
   text: { chip: "Text", approve: "Approve and send" },
   phase: { chip: "Board phase", approve: "Approve and add phase" },
   stage: { chip: "Job stage", approve: "Approve and move job" },
+  gaps: { chip: "Invoice gaps", approve: "Approve and add lines" },
   other: { chip: "", approve: "Approve" },
 };
 const TEXT_KIND = { emailSend: "email", sendText: "text", boardEdit: "phase" };
-const SPINE_KIND = { "email.send": "email", "sms.send": "text", "job.set_stage": "stage" };
+const SPINE_KIND = { "email.send": "email", "sms.send": "text", "job.set_stage": "stage", "invoice.review_gaps": "gaps" };
 /* what each queue calls an answered row */
 const DECIDED = {
   text: ["approved", "executed", "failed", "declined"],
@@ -75,6 +78,7 @@ const DECIDED = {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+const arr = (v) => (Array.isArray(v) ? v : []);
 const str = (v) => (v == null ? "" : String(v)).trim();
 const ms = (iso) => { const t = Date.parse(iso || ""); return Number.isFinite(t) ? t : NaN; };
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : "");
@@ -203,6 +207,9 @@ function refsOf(v) {
            (the line a waiting card shows about that, or ""),
            answeredHere (set by decidedText: this tab just answered it; the
            page sets it too while this tab's answer to it is still out) }
+   evidence carries every kind's fields, empty where they don't apply; an
+   invoice-gaps card fills lines, hints, total, totalUsd, unpriced, sent and
+   invoice (gapsOf)
    look: { jobs: {id: name}, ops: {"email.send@1": description},
            people: {id: name}, outbox: {proposalId: outbox row},
            emailLane: true | false | null } */
@@ -243,11 +250,88 @@ export function fromPending(row, look = {}) {
       to: str(p.to), cc: "", subject: str(p.subject), body: str(p.body),
       message: str(p.message), audience: str(p.audience),
       phase: str(phase.name), hours: Number.isFinite(hours) && hours > 0 ? hours : null,
-      stage: "", rationale: "", refs: [], reason: "",
+      stage: "", rationale: "", refs: [], reason: "", ...noGaps(),
     },
     result: res, error: str(res.error), outbox: null,
     // the text queue's email goes out through gmail-proxy, not the worker
     emailLane: null, laneHint: "",
+  };
+}
+
+/* ---------- invoice gaps (the nightly billing check) ---------- */
+const USD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+const RATE = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 4 });
+const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+/* Figures the way Postgres counts them. A JSON number is the decimal its
+   text spells (String(n) is what JSON.stringify writes and numeric reads), so
+   each is taken as that exact decimal, [digits, places]; products and sums
+   stay exact, and rounding is half away from zero, once, as round(numeric, n)
+   does. Binary floats drift: 1.005 * 100 is 100.49999999999999, so
+   Math.round gives 1.00 where Postgres gives 1.01. A quantity and a rate
+   show as written (to 4 places), so "3 EA × $1.115 = $3.35" adds up. */
+const decimal = (n) => {        // a finite number
+  const [, sign, whole, frac = "", exp = "0"] = /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]\d+))?$/.exec(String(n));
+  const places = frac.length - Number(exp);
+  const digits = BigInt(whole + frac) * 10n ** BigInt(Math.max(0, -places));
+  return [sign ? -digits : digits, Math.max(0, places)];
+};
+const times = ([a, p], [b, q]) => [a * b, p + q];
+const plus = ([a, p], [b, q]) => (p >= q ? [a + b * 10n ** BigInt(p - q), p] : [a * 10n ** BigInt(q - p) + b, q]);
+const roundTo = ([d, places], to) => {
+  if (places <= to) return Number(d) / 10 ** places;
+  const unit = 10n ** BigInt(places - to), mag = d < 0n ? -d : d;
+  const q = mag / unit + (2n * (mag % unit) >= unit ? 1n : 0n);
+  return Number(d < 0n ? -q : q) / 10 ** to;
+};
+const cents = (x) => roundTo(x, 2);
+const shown = (n) => roundTo(decimal(n), 4);
+const plural = (n, one) => `${n} ${n === 1 ? one : one + "s"}`;
+const noGaps = () => ({ lines: [], hints: [], total: "", totalUsd: 0, unpriced: 0, sent: false, invoice: "" });
+// after an invoice-gaps total: the draft the executor writes carries this job's O&P and tax on top
+const GAPS_OP_TAX = "; the new invoice adds this job's O&P and tax";
+
+/* An invoice.review_gaps row (billing.reconcile files it; input shape:
+   reconcile.js reconcileJob) → what approving adds, as text. The lines are
+   the ones op_exec_invoice_review_gaps would write: the proposal's own, less
+   any an edit dropped (an edit may only drop lines, and their content always
+   comes from the input). Each reads "4 DA × $85.00 = $340.00"; one with no
+   rate on this job reads "no rate" and stays out of the total, which is the
+   priced lines' qty × price summed exactly and rounded to the cent once, as
+   the executor's round(sum(qty * price), 2) counts it. That is the lines
+   alone: the executor gives the draft the rate invoice's percentage O&P and
+   tax rate (never its fixed-dollar O&P), so the total says the new invoice
+   adds them (the confirm keeps K11's words: $X is what the lines add). Hints
+   (what the check noticed but never adds) follow. Every figure is formatted
+   here, so the page prints no null, NaN or undefined. */
+function gapsOf(r) {
+  const input = obj(r.input);
+  const pick = obj(r.edited_params).lines;
+  const keep = Array.isArray(pick) ? new Set(pick.map((l) => str(obj(l).finding_id))) : null;
+  let sum = [0n, 0], unpriced = 0;
+  const lines = arr(input.lines).map(obj).filter((l) => !keep || keep.has(str(l.finding_id))).slice(0, 40).map((l) => {
+    const qty = num(l.qty), price = num(l.price), unit = str(l.unit), room = str(l.room);
+    const many = qty == null ? "no quantity" : `${shown(qty)}${unit ? " " + unit : ""}`;
+    let figures;
+    if (price == null) { unpriced++; figures = `${many} · no rate`; }
+    else if (qty == null) figures = `no quantity · ${RATE.format(shown(price))}${unit ? " per " + unit : ""}`;
+    else {
+      const amount = times(decimal(qty), decimal(price));
+      sum = plus(sum, amount);
+      figures = `${many} × ${RATE.format(shown(price))} = ${USD.format(cents(amount))}`;
+    }
+    return { id: str(l.finding_id), text: (str(l.desc) || "A line") + (room ? ` (${room})` : ""), figures,
+      basis: str(l.basis), priced: price != null, refs: refsOf(l.refs) };
+  });
+  const totalUsd = cents(sum);
+  const hints = arr(input.hints).slice(0, 20).map(obj)
+    .map((h) => ({ text: str(h.label) || cap(str(h.kind).replace(/_/g, " ")), refs: refsOf(h.refs) }))
+    .filter((h) => h.text);
+  const sent = input.sent === true;
+  const no = str(input.rate_invoice_no);
+  return {
+    lines, hints, totalUsd, unpriced, sent,
+    total: USD.format(totalUsd) + (unpriced ? ` + ${plural(unpriced, "line")} with no rate (not in the total)` : "") + GAPS_OP_TAX,
+    invoice: "A new draft invoice" + (no ? `, beside invoice ${no}` : "") + (sent ? " (an invoice on this job has already gone out)" : ""),
   };
 }
 
@@ -266,7 +350,9 @@ export function fromProposal(row, look = {}) {
   const jobId = kind === "stage" ? str(edited.job_id ?? obj(r.input).job_id) || str(r.job_id) : str(r.job_id);
   const job = own(look.jobs, jobId) || "";
   const what = firstSentence(own(look.ops, str(r.operation)) || own(look.ops, name)) || name || "An ask";
-  const key = kind === "email" || kind === "text" ? str(input.to) : kind === "stage" ? stageLabel(input.stage) : "";
+  const gaps = kind === "gaps" ? gapsOf(r) : noGaps();
+  const key = kind === "email" || kind === "text" ? str(input.to) : kind === "stage" ? stageLabel(input.stage)
+    : kind === "gaps" ? `${plural(gaps.lines.length, "line")} · ${USD.format(gaps.totalUsd)}${gaps.unpriced ? ` · ${gaps.unpriced} unpriced` : ""}` : "";
   const byId = str(r.proposed_by_id);
   const status = str(r.status);
   // proposals_sms_code_seq numbers a row while it is proposed (unique only
@@ -279,9 +365,12 @@ export function fromProposal(row, look = {}) {
     chip: KINDS[kind].chip || name || "Ask",
     title: key ? `${what}: ${key}` : what,
     approveLabel: KINDS[kind].approve,
-    yesHint: code && status === "proposed" ? `or text YES ${code}` : "",
-    // job.set_stage moves a board job; anything else may name either table
-    jobId, jobTable: kind === "stage" ? "board" : "either", job,
+    // invoice gaps are answered here only: roybal-notify reads none of them,
+    // so a YES with their number would answer like no such number
+    yesHint: code && status === "proposed" && kind !== "gaps" ? `or text YES ${code}` : "",
+    // job.set_stage moves a board job and invoice gaps go on a field job;
+    // anything else may name either table
+    jobId, jobTable: kind === "stage" ? "board" : kind === "gaps" ? "field" : "either", job,
     by: proposerName(r.proposed_by_kind, own(look.people, byId)),
     byKind: str(r.proposed_by_kind), byId,
     status, createdAt: str(r.created_at), expiresAt: str(r.expires_at),
@@ -293,7 +382,7 @@ export function fromProposal(row, look = {}) {
       message: kind === "text" ? str(input.body) : "", audience: "",
       phase: "", hours: null, stage: kind === "stage" ? stageLabel(input.stage) : "",
       rationale: str(r.rationale), refs: refsOf(r.evidence_refs),
-      reason: str(r.decline_reason),
+      reason: str(r.decline_reason), ...gaps,
     },
     result: obj(r.result), error: str(r.error),
     outbox: own(look.outbox, str(r.id)) || null,
@@ -532,7 +621,13 @@ export function outcome(c, now = Date.now(), seenAt = now) {
     }
   } else {
     if (c.status === "approved" || c.status === "executing") return { text: "Approved, queued to run", tone: "wait" };
-    if (c.status === "superseded") return { text: "Replaced by a newer ask", tone: "no" };
+    if (c.status === "superseded") {
+      // billing_review_gaps_file's reasons: nothing left to add (no_gaps), or
+      // the night's findings no longer match this card's (findings_changed)
+      const why = c.result.superseded_reason;
+      return { text: why === "no_gaps" ? "No longer needed: the invoice covers it"
+        : why === "findings_changed" ? "Closed: the nightly check's findings changed" : "Replaced by a newer ask", tone: "no" };
+    }
     if (c.status === "executed") {
       if (c.kind === "email" || c.kind === "text") {
         const d = delivery(c.outbox, now);
@@ -546,6 +641,13 @@ export function outcome(c, now = Date.now(), seenAt = now) {
         return { text: d || "Queued to send", tone: st === "dead" ? "bad" : st === "sent" || st === "delivered" ? "ok" : "wait" };
       }
       if (c.kind === "stage") return { text: "Moved to " + (stageLabel(c.result.to) || c.evidence.stage), tone: "ok" };
+      if (c.kind === "gaps") {
+        // op_exec_invoice_review_gaps's result.status; only added wrote the job
+        const st = str(c.result.status), n = Number(c.result.lines_added);
+        if (st === "added") return { text: `Added ${plural(Number.isInteger(n) && n > 0 ? n : arr(c.evidence.lines).length, "line")} on a new draft invoice`, tone: "ok" };
+        if (st === "already_present") return { text: "Already on the job", tone: "ok" };
+        if (st === "deleted_by_office") return { text: "The office deleted that invoice; nothing re-added", tone: "no" };
+      }
       return { text: "Done", tone: "ok" };
     }
   }
@@ -586,6 +688,10 @@ export function approveConfirm(c) {
   if (c.kind === "text") return `Send this text to ${e.to || "them"}?`;
   if (c.kind === "phase") return `Add the phase "${e.phase || "this phase"}" to ${c.job || "this job"} on the board?`;
   if (c.kind === "stage") return `Move ${c.job || "this job"} to ${e.stage || "the new stage"} on the board?`;
+  if (c.kind === "gaps") {
+    const n = arr(e.lines).length, open = Number(e.unpriced) || 0;
+    return `Add ${plural(n, "line")} (${USD.format(Number(e.totalUsd) || 0)}${open ? `, ${open} unpriced` : ""}) as a new draft invoice on ${c.job || "this job"}?`;
+  }
   return `Approve: ${c.title}?`;
 }
 /** Decline on the text queue asks once; on the spine it asks for a reason. */

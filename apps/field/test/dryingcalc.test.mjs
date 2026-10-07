@@ -1,7 +1,7 @@
 /* Drying equipment sizing — the IICRC WRT worksheets (US Imperial), pure math.
    Run: node apps/field/test/dryingcalc.test.mjs   (from repo root) */
 import assert from "node:assert";
-import { airmoverCalc, dehuCalc, scrubberCalc, equipmentCalc, deployedCounts, DEHU_FACTORS } from "../js/dryingcalc.js";
+import { airmoverCalc, dehuCalc, scrubberCalc, equipmentCalc, deployedCounts, equipClassOf, DEHU_FACTORS } from "../js/dryingcalc.js";
 
 let pass = 0;
 const ok = (name, cond) => { assert.ok(cond, name); console.log("  ✓ " + name); pass++; };
@@ -72,6 +72,25 @@ const dep = deployedCounts([
   { type: "Aux heater" }, { type: "" },
 ]);
 ok("deployed counts match free-text types", dep.airMovers === 3 && dep.dehus === 2 && dep.scrubbers === 2 && dep.heaters === 1);
+// deliberate change: an LGR or desiccant unit is a dehu even without the word (it used to count as nothing)
+const lgr2 = deployedCounts([{ type: "LGR 7000XLi" }, { type: "Phoenix desiccant" }, { type: "lgr" }, { type: "Dehu #2" }, null, { type: "Generator" }]);
+ok("LGR / desiccant without 'dehu' now count as dehus; unmatched and empty rows still count nothing",
+  lgr2.dehus === 4 && lgr2.airMovers === 0 && lgr2.scrubbers === 0 && lgr2.heaters === 0);
+ok("deployedCounts tolerates a non-array", deployedCounts(null).dehus === 0 && deployedCounts(undefined).airMovers === 0);
+
+/* ---------- equipClassOf: the one classifier both counters use ---------- */
+const CLASS_CASES = [
+  ["LGR 7000XLi dehumidifier", "dehu"], ["Dehu #2", "dehu"], ["LGR 7000XLi", "dehu"], ["Desiccant 1200", "dehu"],
+  ["lgr_dehumidifier", "dehu"], ["HEPA air scrubber", "scrubber"], ["Negative air machine", "scrubber"],
+  ["neg. air", "scrubber"], ["AFD 500", "scrubber"], ["air_scrubber", "scrubber"], ["Air filtration device", "scrubber"],
+  ["Aux heater", "heater"], ["heater", "heater"], ["Dri-Eaz Velo Pro low-profile air mover", "airMover"],
+  ["axial fan", "airMover"], ["Centrifugal mover", "airMover"], ["air_mover", "airMover"], ["air movers", "airMover"],
+  ["Generator", null], ["", null], [null, null], [undefined, null],
+];
+for (const [type, want] of CLASS_CASES) ok(`equipClassOf(${JSON.stringify(type)}) -> ${want}`, equipClassOf(type) === want);
+ok("first match wins: a 'dehu' scrubber combo stays a dehu, a heated mover is a heater",
+  equipClassOf("dehu + scrubber") === "dehu" && equipClassOf("heated air mover") === "heater");
+ok("LGR run into a model number (\"LGR7000\") is not matched: the word needs a boundary", equipClassOf("LGR7000") === null);
 
 /* ---------- M3: Magicplan room volume, offered ---------- */
 const MEASURED = [

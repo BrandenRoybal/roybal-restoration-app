@@ -383,9 +383,11 @@ $$;
 -- ---------------------------------------------------------------------------
 -- 12. The six seed agents exist and hold nothing but what the owner granted.
 --     Deny by default is the whole point of agent_authority: a machine gets
---     its grants from the owner, one at a time, with an event. The one grant
---     so far is 0019's, on the owner's go of 2026-10-06: agent:brief may
---     PROPOSE email.send (its overdue-invoice reminders), nothing more.
+--     its grants from the owner, one at a time, with an event. The grants so
+--     far: 0019's, on the owner's go of 2026-10-06, agent:brief may PROPOSE
+--     email.send (its overdue-invoice reminders); and 0021's, on the owner's
+--     go of 2026-10-07, agent:billing may PROPOSE invoice.review_gaps (the
+--     nightly billing check). Nothing more.
 -- ---------------------------------------------------------------------------
 do $$
 declare
@@ -400,12 +402,13 @@ begin
   end if;
 
   select count(*) into n from public.agent_authority where revoked_at is null;
-  if n <> 1 then
-    raise exception '% live agent_authority grant(s); the seed is exactly agent:brief proposing email.send (0019)', n;
+  if n <> 2 then
+    raise exception '% live agent_authority grant(s); the seed is exactly agent:brief proposing email.send (0019) and agent:billing proposing invoice.review_gaps (0021)', n;
   end if;
 
-  select * into g from public.agent_authority where revoked_at is null;
-  if g.agent_id <> '1af33481-7f1c-4485-87f5-7b0ec5e27554' or g.operation <> 'email.send'
+  select * into g from public.agent_authority
+   where revoked_at is null and agent_id = '1af33481-7f1c-4485-87f5-7b0ec5e27554';
+  if g.agent_id is null or g.operation <> 'email.send'
      or g.capability <> 'propose' or g.conditions <> '{}'::jsonb or g.expires_at is not null then
     raise exception 'the seeded grant is %/%/% (conditions %, expires %), not agent:brief propose email.send',
       g.agent_id, g.operation, g.capability, g.conditions, g.expires_at;
@@ -416,6 +419,19 @@ begin
                   where kind = 'agent_authority.granted' and aggregate_type = 'agent_authority'
                     and aggregate_id = g.id) then
     raise exception 'the agent:brief grant has no agent_authority.granted event';
+  end if;
+
+  select * into g from public.agent_authority
+   where revoked_at is null and agent_id = '193d7dd0-74f9-407d-9891-8cb7aab22f82';
+  if g.agent_id is null or g.operation <> 'invoice.review_gaps'
+     or g.capability <> 'propose' or g.conditions <> '{}'::jsonb or g.expires_at is not null then
+    raise exception 'the 0021 grant is %/%/% (conditions %, expires %), not agent:billing propose invoice.review_gaps',
+      g.agent_id, g.operation, g.capability, g.conditions, g.expires_at;
+  end if;
+  if not exists (select 1 from public.events
+                  where kind = 'agent_authority.granted' and aggregate_type = 'agent_authority'
+                    and aggregate_id = g.id) then
+    raise exception 'the agent:billing grant has no agent_authority.granted event';
   end if;
 end
 $$;

@@ -8,7 +8,13 @@
    the newest worker heartbeat says about email sending, on a waiting
    email and an approved one, in words that promise no more than the
    worker's 48 hours; and a send the worker gave up on after its card aged
-   off shows again for 48 hours from when it did.
+   off shows again for 48 hours from when it did. Then the nightly billing
+   check's invoice.review_gaps: its lines, total and hints as text (no rate
+   on an unpriced line, which stays out of the total), every amount and the
+   total counted as Postgres counts them (exact decimals, half away from
+   zero, rounded once), the lines an edit kept, the confirm, the executor's
+   three results, superseded as no longer needed or as closed when the
+   check's findings changed, and no YES number (inbox only).
    Run: node --test test/approvals.test.mjs */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -907,4 +913,215 @@ test("a send the worker gave up on after its card aged off comes back to Recentl
   const d = fromProposal(delivered, lookFrom({ outbox: [row(delivered, "dead", iso(-50))], now: NOW }));
   assert.equal(isRecent(d, NOW), true);
   assert.equal(outcome(d, NOW).text, "Couldn't send: " + STALE);
+});
+
+/* ---------- the nightly billing check: invoice gaps ---------- */
+const BILLING = "193d7dd0-74f9-407d-9891-8cb7aab22f82";          // agent:billing
+const LIMITS = "Limits: an internal leak check, not carrier-grade justification. Prices come only from this job's own invoice lines; the rest are left unpriced.";
+/* the input billing.reconcile files (contract K3), plus the fingerprint and the offer the filing door stamps */
+const gapsInput = {
+  job_id: FIELD1, findings_hash: "0123456789abcdef0123456789abcdef", base_rev: 41,
+  rate_invoice_id: "inv-7f3a", rate_invoice_no: "1043", sent: true,
+  lines: [
+    { finding_id: "equip:dehu", class: "dehu", desc: "Dehumidifier (per 24 hr period) - 70-109 ppd - No monitor.", qty: 6, unit: "EA",
+      price: 85, amount: 510, room: "", code: "DHM>", basis: "20 dehu-days documented from 6 unit rows; 14 billed on invoice 1043.",
+      refs: [{ kind: "drying_log", id: "log-1", label: "20 dehu-days from 6 unit rows, 07-28→08-04", date: "2026-07-28" },
+        { kind: "invoice_line", id: "inv-7f3a#2", label: "invoice 1043 line 3: 14 EA Dehumidifier @ $85.00" }] },
+    { finding_id: "labor:hours", class: "labor", desc: "Water Extraction & Remediation Technician - per hour", qty: 3.25, unit: "HR",
+      price: 65, amount: 211.25, room: "", code: "LAB", basis: "27.25 h in QuickBooks Time inside the mitigation window; 24 billed.",
+      refs: [{ kind: "time_entries", id: "jc-889", label: "QuickBooks Time: 27.25 h, 07-27→08-06" }] },
+    { finding_id: "cat3:containment", class: "cat3", desc: "Containment Barrier/Airlock/Decon. Chamber", qty: null, unit: "SF",
+      price: null, amount: null, room: "Basement", code: "BARR", basis: "Cat 3 job: no containment line on the invoice.",
+      refs: [{ kind: "water_category", id: "3", label: "Water category 3 (Cat 3 package applies)" }] },
+    { finding_id: "cat3:hepa_filter", class: "cat3", desc: "Add for HEPA filter (for negative air exhaust fan)", qty: 2, unit: "EA",
+      price: null, amount: null, room: "", code: "FHEPA", basis: "One per scrubber on a Cat 3 job.", refs: [] },
+  ],
+  hints: [
+    { kind: "open_equipment_row", label: "1 equipment row has no removal date: counted to its last reading",
+      refs: [{ kind: "equipment_row", id: "log-1#eq4", label: "Dehu D-4" }] },
+    { kind: "photographed_not_logged", label: "Antimicrobial is in the photos but not on the invoice",
+      refs: [{ kind: "photo", id: "ph-9", label: "antimicrobial (07-29)", date: "2026-07-29" }] },
+  ],
+  total_usd: 721.25, unpriced_count: 2, detector: "billing.reconcile@0.1", limits: LIMITS,
+  invoice_fingerprint: "fedcba9876543210fedcba9876543210", offer: 0,
+};
+const gaps = {
+  id: "bbbbbbbb-0000-4000-8000-00000000000b", operation: "invoice.review_gaps@1", action_type: "money", sms_code: 21,
+  input: gapsInput, edited_params: null, proposed_by_kind: "agent", proposed_by_id: BILLING, proposed_via: "agent",
+  rationale: "Add 4 lines ($721.25, 2 unpriced) to Pollen: dehu-days, labor hours, Cat 3 package\n" + LIMITS,
+  evidence_refs: [{ kind: "invoice", id: "inv-7f3a", label: "Compared with 1 T&M invoice; newest is invoice 1043" }],
+  job_id: FIELD1, status: "proposed", created_at: iso(-9), expires_at: iso(14 * 24 - 9), approved_at: null, updated_at: iso(-9),
+  decline_reason: null, result: null, error: null,
+};
+const GAPS_LOOK = lookFrom({
+  catalog: [...CATALOG, { name: "invoice.review_gaps", version: 1,
+    description: "Add the lines the nightly billing check found documented but not billed. Execution appends one new draft invoice to the job." }],
+  agents: [{ id: BILLING, name: "agent:billing" }],
+  jobs: [{ id: FIELD1, title: null, customer: "Pollen", address: "1192 Bemis Ct" }],
+});
+/* the draft the executor writes takes the rate invoice's O&P and tax, which the
+   card's figure (the lines alone) does not include: the total says so */
+const OP_TAX = "; the new invoice adds this job's O&P and tax";
+/* every string a card puts on screen: no null, undefined, NaN or [object …] */
+const JUNK = /\bnull\b|\bundefined\b|NaN|\[object/;
+function texts(c) {
+  const e = c.evidence;
+  return [c.title, c.chip, c.approveLabel, c.yesHint, c.job, c.by, approveConfirm(c), outcome(c, NOW).text, e.total, e.invoice,
+    ...e.lines.flatMap((l) => [l.text, l.figures, l.basis, ...l.refs.map((r) => r.text)]),
+    ...e.hints.flatMap((x) => [x.text, ...x.refs.map((r) => r.text)])];
+}
+
+test("invoice gaps: one card with every line's figures, the priced total, the hints, on its field job, from the billing agent, with no YES number", () => {
+  const c = fromProposal(gaps, GAPS_LOOK);
+  assert.deepEqual([c.lane, c.kind, c.chip, c.approveLabel], ["spine", "gaps", "Invoice gaps", "Approve and add lines"]);
+  assert.equal(c.title, "Add the lines the nightly billing check found documented but not billed: 4 lines · $721.25 · 2 unpriced");
+  assert.equal(c.code, 21, "op_propose numbered it");
+  assert.equal(c.yesHint, "", "inbox only: roybal-notify never reads these rows");
+  assert.deepEqual([c.jobTable, c.jobId, c.job, c.by], ["field", FIELD1, "Pollen, 1192 Bemis Ct", "Billing agent"]);
+  const e = c.evidence;
+  assert.deepEqual(e.lines.map((l) => [l.id, l.figures, l.priced]), [
+    ["equip:dehu", "6 EA × $85.00 = $510.00", true],
+    ["labor:hours", "3.25 HR × $65.00 = $211.25", true],
+    ["cat3:containment", "no quantity · no rate", false],
+    ["cat3:hepa_filter", "2 EA · no rate", false],
+  ]);
+  assert.equal(e.lines[2].text, "Containment Barrier/Airlock/Decon. Chamber (Basement)", "the room, when the line has one");
+  assert.equal(e.lines[0].basis, "20 dehu-days documented from 6 unit rows; 14 billed on invoice 1043.");
+  assert.deepEqual(e.lines[0].refs.map((r) => r.text), ["20 dehu-days from 6 unit rows, 07-28→08-04", "invoice 1043 line 3: 14 EA Dehumidifier @ $85.00"]);
+  assert.deepEqual(e.lines[3].refs, []);
+  // unpriced lines stay out of the total: qty × price of the priced ones, as the executor sums it
+  assert.deepEqual([e.totalUsd, e.unpriced, e.total], [721.25, 2, "$721.25 + 2 lines with no rate (not in the total)" + OP_TAX]);
+  assert.equal(e.invoice, "A new draft invoice, beside invoice 1043 (an invoice on this job has already gone out)");
+  assert.equal(e.sent, true);
+  assert.deepEqual(e.hints.map((x) => [x.text, x.refs.map((r) => r.text)]), [
+    ["1 equipment row has no removal date: counted to its last reading", ["Dehu D-4"]],
+    ["Antimicrobial is in the photos but not on the invoice", ["antimicrobial (07-29)"]],
+  ]);
+  assert.equal(e.rationale.split("\n")[0], "Add 4 lines ($721.25, 2 unpriced) to Pollen: dehu-days, labor hours, Cat 3 package");
+  assert.deepEqual(e.refs.map((r) => r.text), ["Compared with 1 T&M invoice; newest is invoice 1043"]);
+  // the page asks for the field job only, and the agent's name
+  assert.deepEqual(needs([c]), { field: [FIELD1], board: [], agents: [BILLING], people: [], outbox: [], lanes: [] });
+  // the catalog unreadable: the operation's name stands in; an unsent job, no invoice number
+  assert.equal(fromProposal(gaps).title, "invoice.review_gaps: 4 lines · $721.25 · 2 unpriced");
+  const quiet = fromProposal({ ...gaps, input: { ...gapsInput, sent: false, rate_invoice_no: "" } }, GAPS_LOOK).evidence;
+  assert.equal(quiet.invoice, "A new draft invoice");
+  // every other card carries the same fields, empty
+  for (const other of [fromProposal(email, LOOK), fromPending(reminder, LOOK)]) {
+    assert.deepEqual([other.evidence.lines, other.evidence.hints, other.evidence.total, other.evidence.unpriced], [[], [], "", 0]);
+  }
+  for (const t of texts(c)) assert.ok(!JUNK.test(t), t);
+});
+
+test("invoice gaps: the confirm names the lines, the priced total, the unpriced count and the job", () => {
+  assert.equal(approveConfirm(fromProposal(gaps, GAPS_LOOK)), "Add 4 lines ($721.25, 2 unpriced) as a new draft invoice on Pollen, 1192 Bemis Ct?");
+  assert.equal(approveConfirm(fromProposal(gaps)), "Add 4 lines ($721.25, 2 unpriced) as a new draft invoice on this job?", "a job the lookup missed");
+  const priced = { ...gapsInput, lines: gapsInput.lines.slice(0, 1), total_usd: 510, unpriced_count: 0 };
+  const one = fromProposal({ ...gaps, input: priced }, GAPS_LOOK);
+  assert.equal(approveConfirm(one), "Add 1 line ($510.00) as a new draft invoice on Pollen, 1192 Bemis Ct?", "nothing unpriced: no count");
+  assert.equal(one.title, "Add the lines the nightly billing check found documented but not billed: 1 line · $510.00");
+  assert.equal(one.evidence.total, "$510.00" + OP_TAX);
+  const big = fromProposal({ ...gaps, input: { ...priced, lines: [{ ...priced.lines[0], qty: 412, price: 12.5 }] } }, GAPS_LOOK);
+  assert.equal(big.evidence.lines[0].figures, "412 EA × $12.50 = $5,150.00");
+  assert.equal(approveConfirm(big), "Add 1 line ($5,150.00) as a new draft invoice on Pollen, 1192 Bemis Ct?");
+});
+
+test("invoice gaps: every amount and the total count as Postgres counts them: exact decimals, half away from zero, rounded once", () => {
+  const card = (...lines) => fromProposal({ ...gaps, input: { ...gapsInput, lines } }, GAPS_LOOK);
+  const line = (finding_id, qty, price, unit = "EA") => ({ finding_id, desc: "Line", qty, unit, price });
+  // every total names the O&P and tax the new invoice adds; the figure before it is the lines alone
+  const read = (c) => { assert.ok(c.evidence.total.endsWith(OP_TAX), c.evidence.total);
+    return [c.evidence.lines.map((l) => l.figures), c.evidence.totalUsd, c.evidence.total.slice(0, -OP_TAX.length)]; };
+  // round(0.25 * 12.34, 2) is 3.09 and round(1.005, 2) is 1.01; binary floats make the second 1.00
+  assert.deepEqual(read(card(line("a", 0.25, 12.34, "HR"))), [["0.25 HR × $12.34 = $3.09"], 3.09, "$3.09"]);
+  assert.deepEqual(read(card(line("a", 1, 1.005))), [["1 EA × $1.005 = $1.01"], 1.01, "$1.01"]);
+  // products exact: 0.5 × 2.01 is 1.005 (1.00499… as a float), 3 × 1.115 is 3.345 (3.3449999… as a float)
+  assert.deepEqual(read(card(line("a", 0.5, 2.01))), [["0.5 EA × $2.01 = $1.01"], 1.01, "$1.01"]);
+  assert.deepEqual(read(card(line("a", 3, 1.115))), [["3 EA × $1.115 = $3.35"], 3.35, "$3.35"]);
+  // the total is the exact sum rounded once, as the executor's round(sum(qty * price), 2) and the
+  // invoice editor's line total count it: 3.085 + 1.005 is $4.09, not $3.09 + $1.01
+  const two = card(line("a", 0.25, 12.34, "HR"), line("b", 1, 1.005));
+  assert.deepEqual(read(two), [["0.25 HR × $12.34 = $3.09", "1 EA × $1.005 = $1.01"], 4.09, "$4.09"]);
+  assert.equal(two.title, "Add the lines the nightly billing check found documented but not billed: 2 lines · $4.09");
+  assert.equal(approveConfirm(two), "Add 2 lines ($4.09) as a new draft invoice on Pollen, 1192 Bemis Ct?");
+  // half away from zero, not half up: a credit (the executor refuses one; the card still counts it right)
+  assert.deepEqual(read(card(line("a", 1, -0.125))), [["1 EA × -$0.125 = -$0.13"], -0.13, "-$0.13"]);
+  // a quantity and a rate show as written (to 4 places), so each line's arithmetic reads true
+  assert.deepEqual(read(card(line("a", 1.005, 2, "DA"))), [["1.005 DA × $2.00 = $2.01"], 2.01, "$2.01"]);
+  assert.deepEqual(read(card({ finding_id: "a", desc: "Line", qty: null, unit: "SF", price: 0.125 })),
+    [["no quantity · $0.125 per SF"], 0, "$0.00"]);
+});
+
+test("invoice gaps: an edit can only drop lines, and the card shows the kept lines as the proposal holds them (the executor's rule)", () => {
+  const c = fromProposal({ ...gaps, edited_params: { lines: [{ finding_id: "labor:hours", qty: 99, price: 1000 }, { finding_id: "cat3:nope" }] } }, GAPS_LOOK);
+  assert.deepEqual(c.evidence.lines.map((l) => [l.id, l.figures]), [["labor:hours", "3.25 HR × $65.00 = $211.25"]], "its own content, not the edit's");
+  assert.deepEqual([c.evidence.total, c.evidence.unpriced], ["$211.25" + OP_TAX, 0]);
+  assert.equal(c.title, "Add the lines the nightly billing check found documented but not billed: 1 line · $211.25");
+  assert.equal(approveConfirm(c), "Add 1 line ($211.25) as a new draft invoice on Pollen, 1192 Bemis Ct?");
+  assert.equal(c.evidence.hints.length, 2, "hints are the proposal's, whatever the edit");
+  // an edit that names no lines keeps them all
+  assert.equal(fromProposal({ ...gaps, edited_params: { total_usd: 1 } }, GAPS_LOOK).evidence.lines.length, 4);
+});
+
+test("invoice gaps: what came of it, from the executor's result; superseded with no gaps left is no longer needed, and with other findings closed", () => {
+  const c = fromProposal(gaps, GAPS_LOOK);
+  const at = (status, result, error = null) =>
+    outcome(fromProposal({ ...gaps, status, approved_at: iso(-1), updated_at: iso(-1), result, error }, GAPS_LOOK), NOW);
+  const added = { status: "added", invoice_id: "5d41402a-bc4b-2a76-b971-9d911017c592", lines_added: 4, total_usd: 721.25, unpriced: 2, rev: 42 };
+  assert.deepEqual(at("executed", added), { text: "Added 4 lines on a new draft invoice", tone: "ok" });
+  assert.deepEqual(at("executed", { ...added, lines_added: 1 }), { text: "Added 1 line on a new draft invoice", tone: "ok" });
+  assert.equal(at("executed", { ...added, lines_added: "x" }).text, "Added 4 lines on a new draft invoice", "a count that won't read: the card's lines");
+  assert.deepEqual(at("executed", { status: "already_present", lines_added: 0 }), { text: "Already on the job", tone: "ok" });
+  assert.deepEqual(at("executed", { status: "deleted_by_office", lines_added: 0 }), { text: "The office deleted that invoice; nothing re-added", tone: "no" });
+  assert.deepEqual(at("executed", null), { text: "Done", tone: "ok" }, "a result that says nothing");
+  assert.deepEqual(at("failed", null, "invoice.review_gaps: the job's invoices changed since this was proposed, so nothing was added; the nightly check files a fresh card if the work is still unbilled and the job is still one it checks (not archived, not every invoice paid)"),
+    { text: "Failed: invoice.review_gaps: the job's invoices changed since this was proposed, so nothing was added; the nightly check files a fresh card if the work is still unbilled and the job is still one it checks (not archived, not every invoice paid)", tone: "bad" });
+  assert.deepEqual(at("superseded", { superseded_reason: "no_gaps" }), { text: "No longer needed: the invoice covers it", tone: "no" });
+  // billing_review_gaps_file's quiet night: the owner already answered tonight's findings, and this card holds others
+  assert.deepEqual(at("superseded", { superseded_reason: "findings_changed" }), { text: "Closed: the nightly check's findings changed", tone: "no" });
+  assert.deepEqual(at("superseded", { superseded_by: "bbbbbbbb-0000-4000-8000-00000000000c" }), { text: "Replaced by a newer ask", tone: "no" });
+  assert.deepEqual(at("approved", null), { text: "Approved, queued to run", tone: "wait" });
+  assert.equal(outcome({ ...c, status: "declined", evidence: { ...c.evidence, reason: "Billed it by hand" } }).text, "Declined: Billed it by hand");
+  // the approve answer is the executed row (runtime sql runs inside op_proposal_approve): it lands as that outcome
+  const box = inbox([], [gaps], GAPS_LOOK, NOW);
+  const after = settle(box, box.waiting[0], fromProposal({ ...gaps, status: "executed", approved_at: iso(0), updated_at: iso(0), result: added }, GAPS_LOOK));
+  assert.equal(outcome(after.recent[0], NOW).text, "Added 4 lines on a new draft invoice");
+  assert.equal(after.recent[0].yesHint, "");
+});
+
+test("invoice gaps: a number it holds is never offered, so a text-queue ask on the same number keeps its hint", () => {
+  const box = inbox([{ ...reminder, code: 21 }], [gaps], GAPS_LOOK, NOW);
+  assert.deepEqual(box.waiting.map((c) => [c.kind, c.yesHint]), [["email", "or text YES 21"], ["gaps", ""]]);
+  assert.equal(box.waiting.find((c) => c.kind === "gaps").code, 21, "the card keeps its number; it just doesn't offer it");
+});
+
+test("invoice gaps: a line or hint of any odd shape still reads as words, never null, undefined or NaN", () => {
+  const odd = fromProposal({ ...gaps, input: { ...gapsInput, rate_invoice_no: null, sent: "yes",
+    lines: [
+      { finding_id: "equip:dehu", desc: "", qty: "6", unit: "", price: "85" },                // strings, no desc, no unit
+      { finding_id: "equip:air_mover", desc: "Air mover", qty: NaN, unit: "EA", price: Infinity },
+      { finding_id: "labor:hours", desc: "Tech", qty: null, unit: "HR", price: 65 },            // a rate but no quantity
+      null, "x", 7, [],
+      { finding_id: "equip:heater", desc: "Heater", qty: 0.1 + 0.2, unit: "DA", price: 100, refs: "nope" },
+    ],
+    hints: [{ kind: "labor_no_window", label: "" }, { kind: "", label: "" }, null, { label: "Mind the gap", refs: [{}, null, { label: "Log" }] }] } }, GAPS_LOOK);
+  const e = odd.evidence;
+  assert.deepEqual(e.lines.map((l) => [l.text, l.figures]), [
+    ["A line", "no quantity · no rate"],
+    ["Air mover", "no quantity · no rate"],
+    ["Tech", "no quantity · $65.00 per HR"],
+    ["A line", "no quantity · no rate"], ["A line", "no quantity · no rate"], ["A line", "no quantity · no rate"], ["A line", "no quantity · no rate"],
+    ["Heater", "0.3 DA × $100.00 = $30.00"],
+  ]);
+  assert.deepEqual([e.totalUsd, e.unpriced], [30, 6], "the rate-only line is priced but has no amount: like the executor, it adds nothing");
+  assert.deepEqual(e.hints.map((x) => x.text), ["Labor no window", "Mind the gap"]);
+  assert.deepEqual(e.hints[1].refs.map((r) => r.text), ["Log"]);
+  assert.equal(e.invoice, "A new draft invoice", "only sent: true says it went out");
+  for (const t of texts(odd)) assert.ok(!JUNK.test(t), t);
+  // no lines at all, or no input: still a card, and still words
+  for (const input of [{ ...gapsInput, lines: "none", hints: {} }, null]) {
+    const c = fromProposal({ ...gaps, input }, GAPS_LOOK);
+    assert.deepEqual([c.evidence.lines, c.evidence.total], [[], "$0.00" + OP_TAX]);
+    assert.equal(approveConfirm(c), "Add 0 lines ($0.00) as a new draft invoice on Pollen, 1192 Bemis Ct?");
+    for (const t of texts(c)) assert.ok(!JUNK.test(t), t);
+  }
 });

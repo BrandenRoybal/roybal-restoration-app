@@ -51,7 +51,10 @@
  *   answers an ask a text offered: any pending_actions row, or a spine row
  *   the brief filed (proposed_via 'cron'). A spine ask filed from a screen
  *   (the job page's adjuster email) needs "YES n"; a bare keyword with only
- *   that one live gets "Reply YES n to approve …" and nothing runs.
+ *   that one live gets "Reply YES n to approve …" and nothing runs. An
+ *   invoice-gaps ask (invoice.review_gaps, 0021) is answered in the inbox
+ *   only: both spine reads leave it out (INBOX_ONLY_FILTER), so its number
+ *   gets the same answer as a number no ask holds.
  *
  * Version (GET …/roybal-notify/version):
  *   200 {"ok":true,"function":"roybal-notify","answers":["text","spine"]}
@@ -144,7 +147,7 @@ import {
   parseApproval, replyText, validateBoardEdit, buildNextSubtasks, revGuard,
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, alaskaHour, expiresBeforeWindow, retryableStatus,
   decide, replyFor, parseDecideRequest, decideResponse, ownerGate, TryAgain,
-  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState, APPROVED_STATUSES,
+  matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState, APPROVED_STATUSES, INBOX_ONLY_FILTER,
   spineLateText, spineOutranks, spineReceipt, spineVerdict, spineReply, VERSION_ANSWER,
   type DecideIO, type DecideAnswer, type Outcome, type Decision, type EmailLane, type OutboxState,
 } from "./approve.ts";
@@ -734,12 +737,13 @@ async function spineEmailLane(admin: Admin): Promise<EmailLane> {
    true: no live row holds the number. So does a text-lane ask created on
    the same number after the spine row was answered (spineOutranks): the
    YES is about that one, whatever became of it, and the spine row's fate
-   would be the wrong ask's. */
+   would be the wrong ask's. An inbox-only ask (INBOX_ONLY_FILTER) is never
+   read here either, so its fate is never quoted to a text. */
 async function lateSpineAnswer(code: string, nowIso: string, admin: Admin): Promise<string | null> {
   try {
     const since = new Date(Date.parse(nowIso) - 48 * 3_600_000).toISOString();
     const r = await admin(
-      `proposals?sms_code=eq.${Number(code)}&updated_at=gte.${encodeURIComponent(since)}` +
+      `proposals?sms_code=eq.${Number(code)}&updated_at=gte.${encodeURIComponent(since)}${INBOX_ONLY_FILTER}` +
       `&select=${SPINE_COLS}&order=updated_at.desc&limit=1`, { method: "GET" });
     if (!r.ok) return null;
     const rows = await r.json().catch(() => null);
@@ -846,7 +850,7 @@ async function handleApproval(from: string, text: string, admin: Admin): Promise
   const queues = await Promise.all([
     listOf(`pending_actions?status=eq.pending&expires_at=gt.${encodeURIComponent(nowIso)}&order=created_at.desc&limit=20`),
     listOf(`proposals?status=eq.proposed&expires_at=gt.${encodeURIComponent(nowIso)}&sms_code=not.is.null` +
-      `&select=${SPINE_COLS}&order=created_at.desc&limit=20`),
+      `${INBOX_ONLY_FILTER}&select=${SPINE_COLS}&order=created_at.desc&limit=20`),
   ]).catch((e) => { console.error("approval queues not read", e); return null; });
   if (!queues) { await say(replyText("not-recorded", { code: p.code }, p.no ? "NO" : "YES")!); return true; }
   const [rows, spine] = queues;

@@ -1,20 +1,21 @@
 # Roybal worker — the operations spine's hands (Fly app `roybal-worker`)
 
 The always-on Node process that turns an approved proposal into a sent text
-or email. The spine (migrations 0013–0017) decides *what* may happen and
-records that it did; this process is the only thing that *does* it. It is its
-own Fly app, never co-hosted with the phone agent: a stalled send must never
-touch a live call, and the dead-worker alarm assumes this app is the only
-writer of `worker_heartbeats`.
+or email, and runs the nightly billing check. The spine (migrations
+0013–0017) decides *what* may happen and records that it did; this process is
+the only thing that *does* it. It is its own Fly app, never co-hosted with the
+phone agent: a stalled send must never touch a live call, and the dead-worker
+alarm assumes this app is the only writer of `worker_heartbeats`.
 
 ```
 owner approves (admin app / YES by text)
   → op_proposal_approve → executor writes an outbox row (email.send, sms.send)
                         → or enqueues a jobs_queue row (worker-runtime ops; none yet)
+pg_cron 14:45 UTC → enqueues a billing.reconcile row (the nightly billing check, below)
                                       ↓ polled every 5 s
 THIS WORKER (Fly, one machine)
   outbox lane   outbox_claim → Twilio via roybal-notify | Gmail API → outbox_sent / outbox_failed
-  queue lane    claim_job → op_execute → finish_job
+  queue lane    claim_job → op_execute | billing check → finish_job
   heartbeat     worker_heartbeat every 30 s; dead-letter text to the owner
                                       ↓
 pg_cron (in the database, every 5 min)   worker_liveness_check: 10 min of silence
@@ -91,15 +92,148 @@ few milliseconds inside one request.
   as sent, never refused.
 - **`qbo` and `portal` outbox rows are not touched** (no adapter yet); they
   wait as `pending` until a later phase.
-- **Queue kinds**: `proposal.execute` only (runs `op_execute` as the approver;
-  a proposal whose executor fails is recorded on the proposal, and the job is
-  done with that outcome). Only the kinds in `QUEUE_KINDS` are claimed; a row
-  of any other kind waits as `queued` until a worker that knows it is
-  deployed. A kind that is listed but has no handler is dead on arrival.
+- **Queue kinds**: `proposal.execute` (runs `op_execute` as the approver; a
+  proposal whose executor fails is recorded on the proposal, and the job is
+  done with that outcome) and `billing.reconcile` (the nightly billing check,
+  below). Only the kinds in `QUEUE_KINDS` are claimed; a row of any other
+  kind waits as `queued` until a worker that knows it is deployed. A kind
+  that is listed but has no handler is dead on arrival.
 
 Retry policy for a failed send: `now() + 2^attempts` minutes, capped at an
 hour, 6 attempts by default (`outbox.max_attempts`) — about an hour of
 trying. A permanent refusal (bad number, bad address) is dead at once.
+
+## The nightly billing check (`billing.reconcile`, migration 0021)
+
+Every morning it compares what each water job DOCUMENTS (drying-log
+equipment rows, QuickBooks Time hours inside the mitigation window, the
+Cat 3 package) with what its invoices BILL, and files what is missing as ONE
+`invoice.review_gaps` card per job in the Approvals inbox, for the owner
+only. Approving a card adds those lines to the job as a new draft
+supplement invoice; that write happens in the database
+(`op_exec_invoice_review_gaps`, runtime `sql`), never here. This lane only
+reads and files.
+
+```
+pg_cron 14:45 UTC (05:45 AKST / 06:45 AKDT), billing-reconcile-nightly
+  → enqueue('billing.reconcile', {run_date: <Alaska date>}, key billing.reconcile:<date>, priority -10, agent:billing)
+THIS WORKER  lanes/billing.mjs
+  coordination_jobs   board stage of each linked field job (data.fieldJobId)
+  field_projects      scope keys for every job, paged by id; then each candidate's detector keys
+  time_entries        the job's QuickBooks Time rows by jobcode: id, date, hours, qbTimesheetId, updated_at, source
+  detector            apps/field/js/reconcile.js (pure; copied into the image)
+  → billing_review_gaps_file(job, rev read, input | null, rationale, evidence)
+       stamps the invoice fingerprint, files as agent:billing, supersedes the job's older open card
+```
+
+- **Payloads.** Nightly: `{"run_date": "YYYY-MM-DD"}` (the Alaska date).
+  Manual: `{"job_ids": ["<field job id>", …]}`, 1 to 100 ids. Anything else
+  is dead on arrival with the reason.
+- **Which jobs.** Nightly: not deleted, a restoration job with water among its
+  loss types, not archived, at least one invoice that is neither void nor a
+  contract, not every non-void invoice paid, and, when a board tile links it, a board
+  stage of In Progress, On Hold, Final / Punch or Complete (a job no tile
+  links goes on its field evidence alone). A manual run takes the jobs it
+  names whether archived, paid or at any stage, but still only a restoration
+  water job with an invoice.
+- **Per job.** Lines → a new card (`filed`). When the same findings against
+  the same invoice lines were filed before (a status change, such as the
+  QuickBooks payment pull marking one paid, is not a change; voiding one
+  is), a card that expired or was superseded
+  with nobody answering it is offered again as a new card (`filed`, at most
+  50 offers); one still open, declined, failed or executed stands
+  (`unchanged`: a declined card stays declined until something changes), and
+  the job's other open cards are superseded with reason `findings_changed`
+  (counted in `superseded`). No lines → the job's open card, if any, is
+  superseded with reason `no_gaps`; a job with only hints (days with
+  equipment on and no reading,
+  photos showing equipment no row logs, …) files nothing and is listed in
+  `hints_only`. A job saved on a phone between the read and the filing
+  (`rev_moved`) is read again once. Hours rows reach the detector as the six
+  fields above: never an employee's name, a note or a QB user id.
+- **The summary** is the job's result, in the `job.done` event:
+  `{run_date, jobs_seen, in_scope, filed, unchanged, superseded,
+  skipped: {reason: count}, hints_only: [≤50 job ids], errors: [≤20 {job_id, message}]}`.
+  `skipped` counts every job that filed nothing, by reason: `not_restoration`,
+  `not_water`, `archived`, `no_invoice`, `contract`, `paid`, `stage`,
+  `deleted`, `missing`, `rev_moved` (moved twice), `no_gaps`, `hints_only`.
+  One job's error (a 42501 when agent:billing's propose grant is missing or
+  revoked, a failed read) is recorded in `errors` and the run goes on; a read
+  that fails before any job is reached fails the run, and the queue retries
+  it (a second filing of the same findings is a no-op). The last runs:
+  `select at, data -> 'result' as summary from public.events where kind = 'job.done' and operation = 'billing.reconcile' order by at desc limit 5`.
+  `fly logs` shows one `billing.run` line per run (counts only), a
+  `billing.filed` per card and a `billing.job_failed` per error.
+- **A missed night is not caught up.** A `run_date` older than yesterday in
+  Alaska (the worker was down two days) finishes done with
+  `{"skipped":"stale"}`; the next night covers it.
+- **Run it now** (Supabase SQL editor). One job, or a few: find the id with
+  `select id, data ->> 'customer' from public.field_projects where not deleted and data ->> 'customer' ilike '%<customer name>%'`, then
+  ```sql
+  select public.enqueue('billing.reconcile', '{"job_ids":["<field job id>"]}'::jsonb,
+    'billing.reconcile:manual:' || gen_random_uuid(), now(), -10, 'agent',
+    '193d7dd0-74f9-407d-9891-8cb7aab22f82'::uuid);
+  ```
+  The whole nightly pass, now (a fresh key, so it does not collide with
+  tonight's row):
+  ```sql
+  select public.enqueue('billing.reconcile',
+    jsonb_build_object('run_date', to_char(now() at time zone 'America/Anchorage', 'YYYY-MM-DD')),
+    'billing.reconcile:rerun:' || gen_random_uuid(), now(), -10, 'agent',
+    '193d7dd0-74f9-407d-9891-8cb7aab22f82'::uuid);
+  ```
+  The worker picks it up within one poll (5 s) and the summary lands as
+  above.
+- **Kill switch**: `fly secrets set -a roybal-worker BILLING_RECONCILE=off`
+  (Fly restarts the worker with it). The nightly row is still claimed and
+  finishes done with `{"skipped":"off"}`; nothing is read or filed. Undo:
+  `fly secrets unset -a roybal-worker BILLING_RECONCILE`.
+- **Rollback.** Steps 1 and 2 each stop new cards on their own; 3 and 4 deal
+  with the cards already filed:
+  1. the kill switch above;
+  2. stop the schedule: `select cron.unschedule('billing-reconcile-nightly')`
+     (to schedule it again, run the `cron.schedule` statement in migration
+     0021, section 7);
+  3. open cards: decline them in the inbox, or let them expire (14 days).
+     Nothing reaches a job until the owner approves a card;
+  4. optional: `update public.operation_catalog set deprecated_at = now() where name = 'invoice.review_gaps' and version = 1`
+     (open cards can then only be declined; do 1 or 2 first, or every run
+     records each job with gaps as an error, "no live operation").
+  Taking `billing.reconcile` out of `QUEUE_KINDS` is NOT a rollback: the
+  nightly rows would wait `queued` forever.
+- **Deploy order**: the database first, then roybal-notify, then the
+  worker.
+  1. Migration 0021 (the usual words in the thread: "staging", then
+     "production"). It adds the catalog row, the filing door, the executor,
+     agent:billing's propose grant and the nightly cron row.
+  2. roybal-notify ("deploy roybal-notify" in the project, or the **Function
+     deploy** workflow; staging, then production), BEFORE the worker. The
+     build before this one reads every live proposal that has a number, so
+     until this one is live a text "YES n" (and its own "Reply YES n"
+     answer to a bare YES) can approve an invoice-gaps card, which is meant
+     for the inbox only. No card exists before the new worker runs, so
+     deploying the function here is enough. Check: the **Function deploy**
+     run for roybal-notify to production, from main with this change in it,
+     finished green (its log lists the new version) before you deploy the
+     worker. `GET …/roybal-notify/version` answers the same with or without
+     this build, so it can't tell you.
+  3. The worker, on the Mac, from an up-to-date main (the image now carries
+     the four field modules the check imports, so build from the repo root as
+     always):
+     ```sh
+     cd ~/roybal-restoration-app
+     git checkout main && git pull
+     fly secrets list -a roybal-worker   # a QUEUE_KINDS here overrides the new default: fly secrets unset -a roybal-worker QUEUE_KINDS
+     fly deploy --config services/worker/fly.toml --dockerfile services/worker/Dockerfile --ha=false .
+     ```
+     (or the **Fly deploy** workflow from main, once `FLY_API_TOKEN` is set).
+     Check: `fly logs -a roybal-worker` shows `worker.start` with
+     `"kinds":["proposal.execute","billing.reconcile"]`, as does `/healthz`.
+  Until the worker is deployed, the nightly rows wait `queued` (the old
+  worker does not claim the kind), so no card is filed before roybal-notify
+  (step 2) is live; the new worker runs yesterday's and today's, and
+  finishes older ones `{"skipped":"stale"}`. To see a first
+  result without waiting for the morning, enqueue a manual run (above).
 
 ## Two alarms, both to the owner's cell
 
@@ -184,8 +318,9 @@ Order matters: the database first, then the edge function, then the app.
      run from anything the deploy must not build: not the repo root, not on
      main, not GitHub's latest main (it runs `git fetch origin main` and
      compares: an older checkout would roll back a worker fix deployed from
-     GitHub since), local changes in `services/worker` or `.dockerignore`
-     (untracked files too: the image would take them), or a worker without
+     GitHub since), local changes in `services/worker`, the four
+     `apps/field/js` modules the image copies or `.dockerignore` (untracked
+     files too: the image would take them), or a worker without
      the 48-hour email limit (`staleEmailReason`). Each time it says to run
      `cd ~/roybal-restoration-app && git checkout main && git pull` first,
      because its last step deploys this checkout. It reads the Client ID
@@ -288,10 +423,12 @@ which re-applies `fly.toml`.
 - **Env knobs** (fly.toml `[env]` or secrets, restart to apply):
   `WORKER_POLL_MS` 5000, `WORKER_HEARTBEAT_MS` 30000, `QUEUE_LEASE_S` 300,
   `OUTBOX_LEASE_S` 120, `OUTBOX_BATCH` 10, `OUTBOX_CHANNELS` `sms,email`,
-  `QUEUE_KINDS` `proposal.execute`, `SHUTDOWN_GRACE_MS` 25000,
+  `QUEUE_KINDS` `proposal.execute,billing.reconcile` (a value set on the app
+  replaces the whole list, so it must name both), `SHUTDOWN_GRACE_MS` 25000,
   `EMAIL_MAX_AGE_HOURS` 48 (1 to 720; a value that is not a number, or a
   blank one, keeps 48, so a typo can neither switch the limit off nor stop
-  the worker booting).
+  the worker booting), `BILLING_RECONCILE` (`off` stops the billing check;
+  unset, or anything else, leaves it on).
 
 ## Tests
 
@@ -308,10 +445,19 @@ anything is staged, the secret never printed; under `sh` and, where it is
 installed, `bash --posix`, which is what macOS runs as `/bin/sh`), the
 outbox lane's order of operations (adopt → send → report with retries; a
 failed report leaves the row to expire; the active set is kept exact on
-every path), the queue lane, the heartbeat (which
+every path), the queue lane, the billing check against a small in-memory
+PostgREST and the real detector (which jobs are in scope, paging past a
+server's row cap, the filing door's arguments, the rev_moved re-read, no
+lines and hints only, the stale and off skips, one job's error, the summary,
+hours rows with no employee in them, and that the scan and the per-job read
+project every key the detector reads), that `set-gmail-secret.sh` checks
+every path the Dockerfile copies, the heartbeat (which
 leases it names, and that the final one names none) and dead-letter text
 with its 24 h guard, and the real HTTP server booting, answering `/healthz`
 through an outage, and stopping clean. The database
-half is `supabase/test/worker_spine.test.sql`, run by the DB replay workflow
-against a database rebuilt from the migrations. The alert function's rules
+half is `supabase/test/worker_spine.test.sql` (and, for the billing check's
+door and executor, `supabase/test/billing_review_gaps.test.sql`), run by the
+DB replay workflow against a database rebuilt from the migrations. The
+detector's own rules are `apps/field/test/reconcile.test.mjs` (root
+`npm run field:test`). The alert function's rules
 are `supabase/functions/roybal-webhooks/alert.test.mjs` (root `npm run fn:test`).
