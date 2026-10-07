@@ -11,7 +11,7 @@ import {
   buildReturnCredit, slipCandidates, nextStamp, negMoney, money2, receiptDay, daysBetween,
   addDaysISO, validISO, returnStatus, overReturned, needsTotal, isReturn, vendorMatches,
   returnTargets, refundCap, successorId, returnLineage, movedId, returnFamily, deletePlan,
-  isSlip, slipLines, slipRefund, slipMatches,
+  isSlip, slipLines, slipRefund, slipMatches, slipReturnId,
 } from "../js/receiptlib.js";
 import { amountNum, receiptTotals } from "../js/receiptcalc.js";
 import { loggedCosts } from "../js/fincalc.js";
@@ -367,6 +367,40 @@ test("a slip's lines and refund: credit lines as positive numbers, the printed r
   // not flagged, positive lines: nothing to take back
   assert.deepEqual(slipLines({ id: "X", items: [{ desc: "stud", qty: "1", price: "6" }] }), []);
   assert.equal(slipRefund({ id: "X", items: [] }), 0, "the crew types it");
+  // a restocking fee on the slip comes off the credit lines
+  const fee = { id: "X", amount: "", ai: { isReturn: true }, items: [{ desc: "slab door", qty: "1", price: "-100" }, { desc: "restocking fee", qty: "1", price: "15" }] };
+  assert.equal(slipRefund(fee), 85);
+  assert.deepEqual(slipLines(fee).map((l) => l.desc), ["slab door"], "the fee is not an item taken back");
+  // an exchange that cost more than it gave back: no refund to suggest
+  assert.equal(slipRefund({ id: "X", ai: { isReturn: true }, items: [{ desc: "a", qty: "1", price: "-20" }, { desc: "b", qty: "1", price: "35" }] }), 0);
+});
+
+test("one slip, one return: two devices turning the same slip into a return keep ONE credit", () => {
+  const base = chenaJob();
+  base.updatedAt = "2026-10-07T23:00:00.000Z";
+  const convert = (refund, at) => {
+    const d = JSON.parse(JSON.stringify(base));
+    const slip = d.receipts.find((r) => r.id === "SLIP");
+    const idx = buildIndex([d]);
+    const m = slipMatches(idx, d.id, slip)[0];
+    const sources = returnSources(idx, d.id, m.id);
+    const c = buildReturnCredit({ id: slipReturnId("SLIP"), start: sources[0], sources, picks: m.picks, refund, date: slip.date,
+      slipNo: slip.receiptNo, note: "", photo: slip.photo, extraPages: [], by: "x", nowISO: at });
+    d.receipts = d.receipts.filter((r) => r.id !== "SLIP");
+    d.receipts.push(c);
+    tombstoneItems(d, ["SLIP"]);
+    d.updatedAt = at;
+    return d;
+  };
+  const phone = convert(1146.75, "2026-10-07T23:05:00.000Z"), office = convert(1146.75, "2026-10-07T23:06:00.000Z");
+  for (const merged of [mergeProjects(phone, office).merged, mergeProjects(office, phone).merged]) {
+    const credits = merged.receipts.filter((r) => r && r.kind === "return");
+    assert.deepEqual(credits.map((r) => r.id), ["SLIP~ret"]);
+    assert.equal(receiptTotals(merged).total, Math.round((receiptTotals(base).total - 1146.75) * 100) / 100, "the refund counts once");
+    assert.ok(!merged.receipts.some((r) => r && r.id === "SLIP"));
+  }
+  assert.equal(slipReturnId("SLIP"), "SLIP~ret");
+  assert.equal(successorId(slipReturnId("SLIP")), "SLIP~ret~1", "a change in the office still derives from it");
 });
 
 test("slipMatches: the Spenard slip finds its invoice through a misread SKU and invoice #, picks the 15 sheets", () => {

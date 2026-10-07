@@ -142,6 +142,7 @@ await test("a slip logs as a return of its invoice: picked, prefilled, the slip 
   const saved = await Store.get("p2");
   const credit = saved.receipts.find((r) => r.kind === "return");
   assert.ok(credit, "a return");
+  assert.equal(credit.id, "SLIP~ret", "the slip's derived id: every device writes the same one");
   assert.equal(credit.amount, "-1146.75");
   assert.equal(credit.returnOf, "BUY");
   assert.equal(credit.photo, "media:22eb:975427");
@@ -171,6 +172,24 @@ await test("a refund past what is left stops with the reason, unless it is store
   btn(/Save return/).click();
   await settle(80);
   assert.equal((await Store.get("p2")).receipts.find((r) => r.kind === "return").amount, "-1500.00");
+});
+
+await test("a slip another device already turned into a return: says so, adds nothing", async () => {
+  const p = chena();
+  await Store.put(p, { bump: false, quiet: true });
+  await receiptsPage(p, "SLIP", ctx);
+  await settle();
+  btn(/Log as a return/).click();
+  await settle();
+  // the other device's return arrives (sync grafts it into the open job)
+  p.receipts.push({ id: "SLIP~ret", kind: "return", returnOf: "BUY", vendor: "Spenard Builders Supply", amount: "-1146.75", category: "materials",
+    items: [{ id: "SLIP~ret-1", of: "ri-7", ofReceipt: "BUY", desc: "Styrofoam", qty: "15", price: "-76.45" }] });
+  p.receipts = p.receipts.filter((r) => r.id !== "SLIP");
+  p.deletedIds = { SLIP: "2026-10-07T23:10:00.000Z" };
+  btn(/Save return/).click();
+  await settle(80);
+  assert.match(toastText(), /already logged as a return/);
+  assert.equal(p.receipts.filter((r) => r.kind === "return").length, 1);
 });
 
 await test("no receipt on the job to return against: says so, saves nothing", async () => {

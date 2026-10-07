@@ -884,7 +884,10 @@ async function renderReturnForm(view, jobId, id, mode, live) {
       const amt = Math.abs(amountNum(refund.value));
       if (!L.validISO(date.value)) throw new Error("Pick the date on the return slip.");
       const picked = pickList();
-      const formId = idFor(picked);
+      // a new return that takes a crew slip gets the slip's derived id, the one a
+      // phone turning that slip into a return writes too, so sync keeps one
+      const fromSlip = !credit && slip.fromId && typeof L.slipReturnId === "function";
+      const formId = fromSlip ? L.slipReturnId(slip.fromId) : idFor(picked);
       let c = null, kill = [], label = "", mine = false;
       // checked and built against the job as it is NOW, not as the form
       // opened; writeJob re-runs this if a sync lands mid-save
@@ -893,8 +896,10 @@ async function renderReturnForm(view, jobId, id, mode, live) {
         const dead = (fresh.deletedIds && typeof fresh.deletedIds === "object") ? fresh.deletedIds : {};
         if (fresh.receipts.some((r) => r && r.id === formId)) {
           if (savedIds.has(formId)) { mine = true; return false; }     // this form's own save already landed
-          throw new Error("This return was just changed on another device. Go back and open it again.");
+          throw new Error(fromSlip ? "That slip is already logged as a return (from a phone, or another device). Open the receipt to see it."
+            : "This return was just changed on another device. Go back and open it again.");
         }
+        if (fromSlip && dead[formId]) throw new Error("That slip was logged as a return and the return was deleted. Snap the slip again to log it.");
         if (dead[formId] || (credit && !fresh.receipts.some((r) => r && r.id === credit.id))) {
           throw new Error("This return was changed or deleted on another device. Go back and open it again.");
         }

@@ -505,12 +505,24 @@ export function slipLines(r) {
 }
 
 /** The refund the slip prints: the AI's read of its total when it gave one
-    (ai.refund), else its lines; 0 when neither (the crew types it). */
+    (ai.refund), else what its lines net to — a restocking fee or an
+    exchanged item on the slip comes off the credit lines. 0 when the lines
+    don't net to money back (the crew types it). */
 export function slipRefund(r) {
   const printed = r && r.ai ? Math.abs(amountNum(r.ai.refund)) : 0;
   if (printed > 0) return r2(printed);
-  return r2(slipLines(r).reduce((a, it) => a + it.qty * it.price, 0));
+  const priced = slipItems(r).map((it) => ({ qty: Math.abs(amountNum(it.qty)) || 1, price: amountNum(it.price) })).filter((it) => it.price !== 0);
+  if (!priced.length) return 0;
+  const net = priced.reduce((a, it) => a + it.qty * it.price, 0);
+  // every line positive: a slip the AI marked a return whose lines came out unsigned
+  if (priced.every((it) => it.price > 0)) return markedReturn(r) ? r2(net) : 0;
+  return net < 0 ? r2(-net) : 0;
 }
+
+/** The id of the return a slip becomes, the same on every device: a phone
+    and the office (or two phones) turning the same slip into a return write
+    ONE element, and sync keeps one, never two credits for one refund. */
+export const slipReturnId = (slipId) => `${slipId}~ret`;
 
 /* Levenshtein distance, for a misread digit or letter on a short code
    ("7066665392" for invoice 700665392, "JSD24SM" for SKU ISD24SM). Codes
