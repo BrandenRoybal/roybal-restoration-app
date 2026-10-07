@@ -8,7 +8,7 @@ const test = (name, fn) => { fn(); console.log("  ✓ " + name); pass++; };
 
 test("schema: every field the field app lands is required, items carry sku and unit price", () => {
   const req = RECEIPT_READ_SCHEMA.required;
-  for (const k of ["vendor", "date", "total", "subtotal", "tax", "cardLast4", "receiptNo", "paidWith", "category", "items", "confidence", "notes"])
+  for (const k of ["vendor", "date", "isReturn", "total", "subtotal", "tax", "cardLast4", "receiptNo", "paidWith", "category", "items", "confidence", "notes"])
     assert.ok(req.includes(k), k + " is required");
   assert.deepEqual(RECEIPT_READ_SCHEMA.properties.category.enum, [...RECEIPT_CATEGORIES]);
   assert.deepEqual(RECEIPT_READ_SCHEMA.properties.paidWith.enum, [...PAID_WITH, ""]);
@@ -21,6 +21,7 @@ test("prompt: the rules that keep the cost log honest are in the text", () => {
   assert.match(t, /actually PAID/);
   assert.match(t, /every purchased line/);
   assert.match(t, /negative prices/);
+  assert.match(t, /isReturn: true for a return/);
   assert.match(t, /equipment only for RENTALS/);
   assert.match(t, /rather than guessing/);
   assert.match(receiptReadText(3), /3 pages, page 1 first/);
@@ -68,6 +69,32 @@ test("normalize: garbage never reaches a money field, an unknown category become
   assert.equal(normalizeReceiptRead(null).items.length, 0);
   assert.equal(normalizeReceiptRead(undefined).total, null);
   assert.equal(normalizeReceiptRead({ total: -3 }).total, null, "a negative total is not a total");
+  assert.equal(r.isReturn, false);
+  assert.equal(r.refund, null);
+});
+
+test("normalize: a return slip never puts money in total, subtotal or tax; refund carries it", () => {
+  const slip = normalizeReceiptRead({ vendor: "Spenard Builders Supply", isReturn: true, total: -1146.75, subtotal: 1146.75, tax: 0,
+    items: [{ desc: "2in 4x8 Styrofoam 25 PSI", qty: 15, unit: "ea", price: -76.45, sku: "ISD24SM" }] });
+  assert.equal(slip.isReturn, true);
+  assert.equal(slip.total, null, "a phone lands total as a cost");
+  assert.equal(slip.subtotal, null);
+  assert.equal(slip.tax, null);
+  assert.equal(slip.refund, 1146.75);
+  assert.equal(slip.items[0].price, -76.45, "the lines keep their sign");
+  // the model flags a return but prints the refund positive: still never a cost
+  const pos = normalizeReceiptRead({ isReturn: true, total: 45.97 });
+  assert.equal(pos.total, null);
+  assert.equal(pos.refund, 45.97);
+  // a negative total is a credit even when the flag is missing or false
+  const neg = normalizeReceiptRead({ isReturn: false, total: -12 });
+  assert.equal(neg.isReturn, true);
+  assert.equal(neg.refund, 12);
+  // a slip whose total is unreadable
+  assert.equal(normalizeReceiptRead({ isReturn: true, total: null }).refund, null);
+  // only a real boolean true flags a return
+  assert.equal(normalizeReceiptRead({ isReturn: "yes", total: 20 }).isReturn, false);
+  assert.equal(normalizeReceiptRead({ isReturn: "yes", total: 20 }).total, 20);
 });
 
 console.log(`\n${pass} receipt checks passed.`);
