@@ -28,6 +28,13 @@ test("YES in its many forms parses; chatter does not", () => {
   assert.deepEqual(parseApproval("ok"), { yes: true, no: false, code: null });
   assert.deepEqual(parseApproval("YES #12"), { yes: true, no: false, code: "12" });
   assert.deepEqual(parseApproval("Yes 12."), { yes: true, no: false, code: "12" });
+  assert.deepEqual(parseApproval("yes1"), { yes: true, no: false, code: "1" });   // no space, as thumbs type it
+  assert.deepEqual(parseApproval("YES12"), { yes: true, no: false, code: "12" });
+  assert.deepEqual(parseApproval("Y7"), { yes: true, no: false, code: "7" });
+  assert.equal(parseApproval("yesterday").yes, false);                  // a letter after the word is chatter
+  assert.equal(parseApproval("okay").yes, false);
+  assert.equal(parseApproval("yes1 and the other one").yes, false);
+  assert.equal(parseApproval("yes 12345").yes, false);                  // codes are 1–4 digits
   assert.equal(parseApproval("yes send the hansen one").yes, false);   // free text ≠ approval
   assert.equal(parseApproval("can you check on the Hebert job?").yes, false);
   assert.equal(parseApproval("").yes, false);
@@ -37,6 +44,10 @@ test("NO / STOP / CANCEL parse as declines", () => {
   assert.deepEqual(parseApproval("no 12"), { yes: false, no: true, code: "12" });
   assert.deepEqual(parseApproval("STOP"), { yes: false, no: true, code: null });
   assert.deepEqual(parseApproval("cancel 4"), { yes: false, no: true, code: "4" });
+  assert.deepEqual(parseApproval("no1"), { yes: false, no: true, code: "1" });
+  assert.deepEqual(parseApproval("N12"), { yes: false, no: true, code: "12" });
+  assert.equal(parseApproval("nope").no, false);
+  assert.equal(parseApproval("not yet").no, false);
 });
 
 const open = (rows) => rows.map((r) => ({ status: "pending", ...r }));
