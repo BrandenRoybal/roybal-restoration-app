@@ -3,8 +3,10 @@
    the email lane is live, and nobody on any failed check), the To prefill
    from records, the address check with the spine's own pattern, the exact
    op_propose / approve / decline bodies, every answer the spine can give
-   and its sentence, and the section's whole life in jsdom against a faked
-   PostgREST that throws on any request it doesn't expect.
+   and its sentence, what an approved email's outbox row says about it
+   (went out, couldn't be sent, on its way), and the section's whole life
+   in jsdom against a faked PostgREST that throws on any request it
+   doesn't expect.
    Run: node --test test/adjustersend.test.mjs */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -33,6 +35,7 @@ const resetNet = () => Object.assign(net, {
   lane: () => [200, true],
   emails: () => [200, []],
   open: () => [200, []],
+  outbox: () => [200, []],
   propose: null, approve: null, decline: null,
   office: () => [200, { ok: true, draft: { subject: "Claim CLM-77", body: "Hello" } }],
 });
@@ -52,6 +55,7 @@ globalThis.fetch = async (url, opts = {}) => {
     "/rest/v1/rpc/outbox_channel_ready": net.lane,
     "/rest/v1/email_messages": net.emails,
     "/rest/v1/proposals": net.open,
+    "/rest/v1/outbox": net.outbox,
     "/rest/v1/rpc/op_propose": net.propose,
     "/rest/v1/rpc/op_proposal_approve": net.approve,
     "/rest/v1/rpc/op_proposal_decline": net.decline,
@@ -236,7 +240,7 @@ test("every refusal has a sentence, per door", () => {
   assert.equal(S.refusal("approve", a("retired")), "This kind of ask was retired before you answered it. Decline it; nothing was sent.");
   assert.equal(S.refusal("approve", a("forbidden")), "Your login isn't allowed to answer this one.");
   assert.equal(S.refusal("approve", a("gone")), "This ask no longer exists. Nothing was sent.");
-  assert.equal(S.refusal("decline", a("answered", "proposal x is executed; only a proposed row can be declined")), "That one was already approved — it goes out once.");
+  assert.equal(S.refusal("decline", a("answered", "proposal x is executed; only a proposed row can be declined")), "That one was already approved. It goes out once.");
   assert.equal(S.refusal("decline", a("answered", "proposal x is failed; only a proposed row can be declined")), "That one was approved, but it didn't run. Nothing was cancelled.");
   assert.equal(S.refusal("decline", a("answered", "")), "That one was already answered — nothing was cancelled.");
   assert.equal(S.refusal("decline", a("network")), "Couldn't reach the server. Try again.");
@@ -274,11 +278,11 @@ test("rowState and the lines the section shows", () => {
   assert.equal(S.approvedLine(done, true), "✅ Approved — the email to adj@carrier.com is queued and goes out in a minute.");
   assert.equal(S.approvedLine(done, false), "✅ Approved — the email to adj@carrier.com. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.");
   assert.equal(S.approvedLine(done, null), "✅ Approved — the email to adj@carrier.com is queued to send.");
-  assert.equal(S.approvedLine({ ...done, approved_via: "sms" }, true), "That one was already approved by text — it goes out once.");
-  assert.equal(S.approvedLine({ ...done, approved_via: "inbox" }, true), "That one was already approved in the Approvals tab — it goes out once.");
+  assert.equal(S.approvedLine({ ...done, approved_via: "sms" }, true), "That one was already approved by text. It goes out once.");
+  assert.equal(S.approvedLine({ ...done, approved_via: "inbox" }, true), "That one was already approved in the Approvals tab. It goes out once.");
   assert.equal(S.approvedLine(row({ status: "failed", error: "Gmail refused" }), true), "⚠️ Approved, but it didn't run: Gmail refused");
 
-  assert.equal(S.filedNote(row({ status: "executed" })), "This exact email was already approved — it goes out once.");
+  assert.equal(S.filedNote(row({ status: "executed" })), "This exact email was already approved. It goes out once.");
   assert.equal(S.filedNote(row({ status: "declined" })), "This exact email was declined earlier today, so it wasn't filed again. Change it to ask again.");
   assert.equal(S.filedNote(row({ status: "expired" })), "This exact email expired unanswered, so it wasn't filed again. Change it to ask again.");
 
@@ -291,6 +295,62 @@ test("rowState and the lines the section shows", () => {
   assert.equal(S.dupConfirm({ created_at: "2026-10-05T23:12:00Z" }, "adj@carrier.com"),
     "Another email to adj@carrier.com is already waiting for approval on this job (asked Oct 5, 3:12 PM). Approving both would send both.\n\nSend this one for approval too?");
   assert.equal(S.dupConfirm({}, "adj@carrier.com").split("\n")[0], "Another email to adj@carrier.com is already waiting for approval on this job. Approving both would send both.");
+});
+
+test("outboxState reads an approved email's outbox rows the way the YES reply does", () => {
+  for (const st of ["sent", "delivered"]) assert.deepEqual(S.outboxState([{ status: st, error: null }]), { state: "sent" }, st);
+  assert.deepEqual(S.outboxState([{ status: "dead", error: "  Gmail refused kelly@carrier.com: 550 no such user. " }]),
+    { state: "dead", error: "Gmail refused kelly@carrier.com: 550 no such user" }, "trimmed, closing period dropped");
+  assert.deepEqual(S.outboxState([{ status: "dead", error: null }]), { state: "dead", error: "it gave up" });
+  assert.deepEqual(S.outboxState([{ status: "dead", error: "  ..  " }]), { state: "dead", error: "it gave up" });
+  const long = S.outboxState([{ status: "dead", error: "é".repeat(200) }]);
+  assert.equal(Array.from(long.error).length, 160, "160 characters, not 160 bytes");
+  assert.deepEqual(S.outboxState([{ status: "dead" }, { status: "sent" }]), { state: "sent" }, "one that went out wins");
+  for (const st of ["pending", "sending", "failed", "", undefined]) assert.deepEqual(S.outboxState([{ status: st }]), { state: "waiting" }, String(st));
+  for (const bad of [[], null, undefined, {}, "nope", [null]]) assert.deepEqual(S.outboxState(bad), { state: "waiting" }, "no row, or a read that failed: " + JSON.stringify(bad));
+});
+
+test("approvedLine for one approved at another door: from its outbox row, then the lane", () => {
+  const SENT = { state: "sent" }, WAITS = { state: "waiting" };
+  const DEAD = { state: "dead", error: "Gmail refused kelly@carrier.com: 550 no such user" };
+  const OFF = "It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.";
+  const DEAD_LINE = "That one was approved, but the email couldn't be sent: Gmail refused kelly@carrier.com: 550 no such user. Nothing went out.";
+  for (const [via, by] of [["sms", "by text"], ["inbox", "in the Approvals tab"]]) {
+    const r = row({ status: "executed", approved_via: via });
+    assert.equal(S.approvedLine(r, true, SENT), `That one was already approved ${by}. It went out once.`);
+    assert.equal(S.approvedLine(r, false, SENT), `That one was already approved ${by}. It went out once.`, "it went, whatever the lane says now");
+    assert.equal(S.approvedLine(r, true, DEAD), DEAD_LINE);
+    assert.equal(S.approvedLine(r, false, DEAD), DEAD_LINE);
+    assert.equal(S.approvedLine(r, false, WAITS), `That one was already approved ${by}. ${OFF}`);
+    assert.equal(S.approvedLine(r, true, WAITS), `That one was already approved ${by}. It goes out once.`);
+    assert.equal(S.approvedLine(r, null, WAITS), `That one was already approved ${by}. It goes out once.`);
+    // the outbox read failed (outboxOf hands back "waiting"), or wasn't passed: the lane decides, never "went out"
+    assert.equal(S.approvedLine(r, false, S.outboxState(null)), `That one was already approved ${by}. ${OFF}`);
+    assert.equal(S.approvedLine(r, true), `That one was already approved ${by}. It goes out once.`);
+    assert.equal(S.approvedLine(r, false), `That one was already approved ${by}. ${OFF}`);
+  }
+  assert.equal(S.approvedLine(row({ status: "executed", approved_via: "sms" }), true, { state: "dead", error: "" }),
+    "That one was approved, but the email couldn't be sent: it gave up. Nothing went out.");
+  // approved by this panel's chip, but its outbox row already went or died: approved before this tap (another phone)
+  const chip = row({ status: "executed", approved_via: "chip" });
+  assert.equal(S.approvedLine(chip, true, SENT), "✅ Approved — the email to adj@carrier.com. It went out once.");
+  assert.equal(S.approvedLine(chip, false, DEAD), DEAD_LINE);
+  assert.equal(S.approvedLine(chip, true, WAITS), "✅ Approved — the email to adj@carrier.com is queued and goes out in a minute.");
+  assert.equal(S.approvedLine(chip, false, WAITS), `✅ Approved — the email to adj@carrier.com. ${OFF}`);
+  assert.equal(S.approvedLine(row({ status: "failed", error: "boom" }), true, SENT), "⚠️ Approved, but it didn't run: boom");
+
+  // the same words where a decline or a refiling finds it approved first
+  const a = { ok: false, why: "answered", status: 500, code: "55000", message: "proposal x is executed; only a proposed row can be declined" };
+  assert.equal(S.refusal("decline", a, { outbox: SENT, lane: true }), "That one was already approved. It went out once.");
+  assert.equal(S.refusal("decline", a, { outbox: DEAD, lane: true }), DEAD_LINE);
+  assert.equal(S.refusal("decline", a, { outbox: WAITS, lane: false }), `That one was already approved. ${OFF}`);
+  assert.equal(S.refusal("decline", { ...a, message: "proposal x is approved" }, { outbox: WAITS, lane: true }), "That one was already approved. It goes out once.");
+  const filed = row({ status: "executed", approved_via: "inbox" });
+  assert.equal(S.filedNote(filed, Date.now(), { outbox: SENT, lane: true }), "This exact email was already approved. It went out once.");
+  assert.equal(S.filedNote(filed, Date.now(), { outbox: WAITS, lane: false }), `This exact email was already approved. ${OFF}`);
+  assert.equal(S.filedNote(filed, Date.now(), { outbox: WAITS, lane: true }), "This exact email was already approved. It goes out once.");
+  assert.equal(S.filedNote(filed, Date.now(), { outbox: DEAD, lane: true }),
+    "This exact email was approved earlier, but it couldn't be sent: Gmail refused kelly@carrier.com: 550 no such user. Nothing went out. Change it to ask again.");
 });
 
 /* ======================= who is offered it ======================= */
@@ -455,6 +515,8 @@ test("Approve sends op_proposal_approve with p_via chip once he confirms, and sa
   assert.deepEqual(rpcCalls("op_proposal_approve").map((c) => c.body), [{ p_proposal_id: row().id, p_via: "chip" }]);
   assert.equal(s.note().textContent, "✅ Approved — the email to adj@carrier.com is queued and goes out in a minute.");
   assert.equal(rpcCalls("outbox_channel_ready").length, 1, "the lane is read again for the wording");
+  assert.deepEqual(calls.filter((c) => c.path === "/rest/v1/outbox").map((c) => c.query),
+    [`?proposal_id=eq.${row().id}&select=status,error&order=created_at.desc&limit=1`], "and its outbox row, beside it");
   assert.ok(!s.btn("Decline") && !s.btn("Send for approval"));
   assert.equal(s.bodyTa.readOnly, true);
   s.el.remove();
@@ -469,7 +531,7 @@ test("Approve on one he already approved by text says so; the lane off says it w
   await until(() => s.btn("Approve and send"));
   s.btn("Approve and send").click();
   await answered(s);
-  assert.equal(s.note().textContent, "That one was already approved by text — it goes out once.");
+  assert.equal(s.note().textContent, "That one was already approved by text. It goes out once.");
   s.el.remove();
 
   net.approve = () => [200, row({ status: "executed", approved_via: "chip" })];
@@ -539,8 +601,102 @@ test("Decline on one approved elsewhere first: it says so and stays shut", async
   await until(() => s.btn("Decline"));
   s.btn("Decline").click();
   await answered(s);
-  assert.equal(s.note().textContent, "That one was already approved — it goes out once.");
+  assert.equal(s.note().textContent, "That one was already approved. It goes out once.");
   assert.equal(s.bodyTa.readOnly, true);
+  s.el.remove();
+});
+
+/* approved at another door before his tap: the panel reads that email's outbox row */
+async function approveAnswered(over, { outbox, lane = () => [200, true] } = {}) {
+  net.propose = (b) => [200, row({ input: b.p_input })];
+  net.approve = () => [200, row({ status: "executed", ...over })];
+  net.outbox = outbox; net.lane = lane;
+  const s = mount();
+  s.btn("Send for approval").click();
+  await until(() => s.btn("Approve and send"));
+  s.btn("Approve and send").click();
+  await answered(s);
+  return s;
+}
+const outboxReads = () => calls.filter((c) => c.path === "/rest/v1/outbox");
+
+test("Approve on one approved in the inbox whose email died: says nothing went out, and the draft opens up", async () => {
+  resetNet(); await login("owner12b@x.com");
+  const s = await approveAnswered({ approved_via: "inbox" }, {
+    outbox: () => [200, [{ status: "dead", error: "Gmail refused kelly@carrier.com: 550 5.1.1 no such user." }]],
+  });
+  assert.equal(s.note().textContent, "That one was approved, but the email couldn't be sent: Gmail refused kelly@carrier.com: 550 5.1.1 no such user. Nothing went out.");
+  assert.deepEqual(outboxReads().map((c) => c.query), [`?proposal_id=eq.${row().id}&select=status,error&order=created_at.desc&limit=1`]);
+  assert.ok(s.btn("Send for approval") && !s.btn("Approve and send"), "he can fix the address and ask again");
+  assert.deepEqual([s.to.readOnly, s.subj.readOnly, s.bodyTa.readOnly], [false, false, false]);
+  s.el.remove();
+});
+
+test("Approve on one approved by text that went out: it went out once, and stays shut", async () => {
+  resetNet(); await login("owner12c@x.com");
+  const s = await approveAnswered({ approved_via: "sms" }, { outbox: () => [200, [{ status: "delivered", error: null }]], lane: () => [200, false] });
+  assert.equal(s.note().textContent, "That one was already approved by text. It went out once.");
+  assert.ok(!s.btn("Send for approval") && !s.btn("Approve and send"));
+  assert.equal(s.bodyTa.readOnly, true);
+  s.el.remove();
+});
+
+test("Approve on one approved by text, still queued with the lane off: the 48-hour line", async () => {
+  resetNet(); await login("owner12d@x.com");
+  const s = await approveAnswered({ approved_via: "sms" }, { outbox: () => [200, [{ status: "pending", error: null }]], lane: () => [200, false] });
+  assert.equal(s.note().textContent, "That one was already approved by text. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.");
+  assert.equal(s.bodyTa.readOnly, true);
+  s.el.remove();
+});
+
+test("the outbox read failing never says it went out: the lane decides the words", async () => {
+  for (const [i, outbox] of [() => [500, { message: "boom" }], () => [200, "nope"], () => new TypeError("Failed to fetch")].entries()) {
+    resetNet(); await login(`owner12e${i}@x.com`);
+    let s = await approveAnswered({ approved_via: "inbox" }, { outbox, lane: () => [200, false] });
+    assert.equal(s.note().textContent, "That one was already approved in the Approvals tab. It's queued, but email sending is off on the worker: it waits up to 48 hours for that to come back, then it isn't sent.");
+    s.el.remove();
+    s = await approveAnswered({ approved_via: "inbox" }, { outbox, lane: () => [200, true] });
+    assert.equal(s.note().textContent, "That one was already approved in the Approvals tab. It goes out once.");
+    s.el.remove();
+  }
+});
+
+test("Decline on one approved elsewhere whose email died: says nothing went out", async () => {
+  resetNet(); await login("owner12f@x.com");
+  net.propose = (b) => [200, row({ input: b.p_input })];
+  net.decline = () => [500, { code: "55000", message: "op spine: proposal x is executed; only a proposed row can be declined" }];
+  net.outbox = () => [200, [{ status: "dead", error: "" }]];
+  answerPrompt = "";
+  const s = mount();
+  s.btn("Send for approval").click();
+  await until(() => s.btn("Decline"));
+  s.btn("Decline").click();
+  await answered(s);
+  assert.equal(s.note().textContent, "That one was approved, but the email couldn't be sent: it gave up. Nothing went out.");
+  assert.equal(outboxReads().length, 1);
+  assert.equal(s.bodyTa.readOnly, true);
+  s.el.remove();
+});
+
+test("op_propose handing back the same email already approved: its outbox row says how it stands", async () => {
+  resetNet(); await login("owner12g@x.com");
+  net.propose = (b) => [200, row({ input: b.p_input, status: "executed", approved_via: "inbox" })];
+  net.outbox = () => [200, [{ status: "sent", error: null }]];
+  let s = mount();
+  s.btn("Send for approval").click();
+  await until(() => !s.note().hidden);
+  assert.equal(s.note().textContent, "This exact email was already approved. It went out once.");
+  assert.ok(!s.btn("Send for approval"));
+  assert.equal(s.bodyTa.readOnly, true);
+  s.el.remove();
+
+  net.outbox = () => [200, [{ status: "dead", error: "Too many tries" }]];
+  s = mount();
+  s.btn("Send for approval").click();
+  await until(() => !s.note().hidden);
+  assert.equal(s.note().textContent, "This exact email was approved earlier, but it couldn't be sent: Too many tries. Nothing went out. Change it to ask again.");
+  assert.ok(s.btn("Send for approval"));
+  assert.equal(s.bodyTa.readOnly, false, "he can change it and ask again");
   s.el.remove();
 });
 

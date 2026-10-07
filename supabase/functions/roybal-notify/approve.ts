@@ -18,8 +18,10 @@
    Since spine step 5 a YES also reaches the spine's proposals
    (public.proposals, numbered by sms_code). The reply is matched
    across BOTH queues at once (matchAcross), so a bare YES still
-   means "the one thing waiting", and a number that two asks share
-   runs neither. A spine hit is approved through
+   means "the one thing a text offered", and a number that two asks
+   share runs neither. A spine ask no text offered (the job page's
+   adjuster email) is only ever answered by its number. A spine hit
+   is approved through
    op_proposal_approve, never decide(): the row lock there is what
    makes a second YES, or a YES racing an inbox tap, approve once.
    The spine half's rules (labels, the answer → text mapping) sit
@@ -31,8 +33,12 @@
      are checked by the caller.
    • Codes expire (24h default) — yesterday's YES can't fire
      today's action.
-   • "YES" alone only works when exactly ONE live proposal exists;
-     two or more demand the code, and the mismatch reply says so.
+   • "YES" alone only works when exactly ONE live ask that a text
+     offered exists (every pending_actions row, and the brief's spine
+     rows: offeredByText); two or more demand the code, and the
+     mismatch reply says so. A spine ask offered only on a screen
+     always demands its number: a bare "ok" meant for the assistant
+     must never send the adjuster an email.
    • Anything that isn't clearly a YES is ignored (normal replies
      keep flowing to the message log unharmed). STOP/NO cancels.
    • A customer text approved outside the send window is refused
@@ -147,7 +153,7 @@ const capFirst = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 /** Confirmation / error texts the webhook sends back. */
 export function replyText(
   kind: "done" | "skipped" | "failed" | "none-open" | "ambiguous" | "no-such-code" | "cancelled" | "already-answered" |
-    "quiet-hours" | "quiet-hours-expires" | "try-again" | "not-recorded" | "code-clash",
+    "quiet-hours" | "quiet-hours-expires" | "try-again" | "not-recorded" | "code-clash" | "needs-number",
   a?: Blob, detail?: string,
 ) {
   const code = a?.code != null ? " " + a.code : "";
@@ -162,6 +168,9 @@ export function replyText(
     // one number on a live row in each queue (matchAcross): neither runs, and
     // the inbox, which shows both cards side by side, is where to pick
     case "code-clash": return `Two asks share number ${a?.code ?? ""} — answer this one from the Approvals tab in the office app.`;
+    // a bare YES/NO whose one live ask no text offered (matchAcross): it
+    // names that ask and the number that answers it, and nothing runs
+    case "needs-number": return `Reply YES${code} to approve "${a?.label || "this ask"}" (or NO${code}).`;
     case "cancelled": return `👍 Cancelled — ${a?.label || "proposal dismissed"}.`;
     // a NO whose flip matched nothing: a YES or a tap got there first
     case "already-answered": return "That one was already answered — nothing was cancelled.";
@@ -445,24 +454,51 @@ export function decideResponse(out: DecideAnswer, a: Blob | null, window: string
    or declined through rpc/op_proposal_decline. Neither runs
    decide(): the spine's own row lock and its "approving twice is
    approving once" return are what keep an inbox tap and a text,
-   or two texts, to one outbox row. What lives here is how a reply
-   is matched, what a spine row is called in a text, and which
-   sentence each answer gets.
+   or two texts, to one outbox row. Only the brief texts its spine
+   asks; the adjuster email is offered on the job page, so a bare
+   YES never reaches it (offeredByText). What lives here is how a
+   reply is matched, what a spine row is called in a text, which
+   sentence each answer gets, and the GET /version answer that
+   tells the brief and set-gmail-secret.sh this build reads the
+   spine at all (VERSION_ANSWER).
    ============================================================ */
 
-export type MatchReason = "ok" | "none-open" | "ambiguous" | "no-such-code" | "code-clash";
+export type MatchReason = "ok" | "none-open" | "ambiguous" | "no-such-code" | "code-clash" | "needs-number";
 export type Lane = "text" | "spine";
+
+/** GET …/roybal-notify/version (index.ts routes it, no key needed:
+    verify_jwt is off). This build answers a YES across both queues, so
+    "answers" names them. roybal-brief probes it before it files a reminder
+    on the spine, and set-gmail-secret.sh before it turns the email lane
+    on: a 200 whose `answers` includes "spine" is the only yes. The build
+    before step 5 answers any GET 405 "Use POST". The shape is a contract
+    those two read, so it changes only with them. */
+export const VERSION_ANSWER = { ok: true, function: "roybal-notify", answers: ["text", "spine"] } as const;
+
+/** Was this spine ask offered by text, so a bare YES or NO can mean it?
+    Only the brief's are (proposed_via 'cron': its "💬 Reply YES n" lines).
+    The rest (the job page's adjuster email, 'ui'; chip, mcp, voice …) were
+    offered on a screen that shows the number, and nothing about them
+    reached his phone. Every pending_actions row was texted (the brief,
+    qb-time and the SMS assistant all send their "YES n" lines), so the
+    text lane needs no such test. */
+export const offeredByText = (r: Blob) => r?.proposed_via === "cron";
 
 /** Pick the ask a reply refers to across both queues. `text` = live
     pending_actions rows (status 'pending'), `spine` = live proposals
-    (status 'proposed', with an sms_code), both read unexpired. The hit is
-    the row exactly as read, tagged by `lane` beside it, so a text-lane hit
-    goes on to decide() untouched. A number held by a live row in each
-    queue is a code-clash and runs neither (sms_codes_in_use keeps new
-    codes apart; rows minted before it can still collide). A bare YES or
-    NO acts only when exactly one row is live across both. */
+    (status 'proposed', with an sms_code, read with proposed_via), both
+    read unexpired. The hit is the row exactly as read, tagged by `lane`
+    beside it, so a text-lane hit goes on to decide() untouched. A number
+    held by a live row in each queue is a code-clash and runs neither
+    (sms_codes_in_use keeps new codes apart; rows minted before it can
+    still collide). A bare YES or NO acts only when exactly one row a text
+    offered (offeredByText) is live across both; the spine rows no text
+    offered are left out of that count, since "ok" to the assistant must
+    not send the adjuster email. When one of those is all there is, the
+    answer is needs-number with that row as `ask` (named, never run); two
+    or more is ambiguous. */
 export function matchAcross(text: Blob[], spine: Blob[], code: string | null):
-  { lane: Lane | null; hit: Blob | null; reason: MatchReason } {
+  { lane: Lane | null; hit: Blob | null; reason: MatchReason; ask?: Blob } {
   const t = (text || []).filter((a) => a && a.status === "pending");
   const s = (spine || []).filter((r) => r && r.status === "proposed" && r.sms_code != null);
   if (!t.length && !s.length) return { lane: null, hit: null, reason: "none-open" };
@@ -478,8 +514,15 @@ export function matchAcross(text: Blob[], spine: Blob[], code: string | null):
     if (sh[0]) return { lane: "spine", hit: sh[0], reason: "ok" };
     return { lane: null, hit: null, reason: "no-such-code" };
   }
-  if (t.length + s.length !== 1) return { lane: null, hit: null, reason: "ambiguous" };
-  return t[0] ? { lane: "text", hit: t[0], reason: "ok" } : { lane: "spine", hit: s[0], reason: "ok" };
+  const texted = s.filter(offeredByText);
+  if (t.length + texted.length === 1) {
+    return t[0] ? { lane: "text", hit: t[0], reason: "ok" } : { lane: "spine", hit: texted[0], reason: "ok" };
+  }
+  if (t.length + texted.length > 1) return { lane: null, hit: null, reason: "ambiguous" };
+  // nothing a text offered is live: only a number answers what is
+  return s.length === 1
+    ? { lane: null, hit: null, reason: "needs-number", ask: s[0] }
+    : { lane: null, hit: null, reason: "ambiguous" };
 }
 
 /** "email.send@1" → "email.send": proposals store the operation versioned. */
@@ -557,21 +600,34 @@ export const APPROVED_STATUSES = ["approved", "executing", "executed"];
 const errText = (e: unknown) => clipTo(String(e || "unknown error"), 200);
 const expiredText = (label: string) => `That one expired — ${label}. Nothing was sent.`;
 const declinedText = (label: string) => `That one was declined — ${label}. Nothing was sent.`;
-const alreadyApproved = (label: string, outbox: OutboxState = WAITING) =>
+/* An email still waiting with the worker's email lane known off may never
+   go out (the worker drops one that waited past 48 hours), so it says that
+   instead of promising "it goes out once". */
+const alreadyApproved = (label: string, outbox: OutboxState = WAITING, lane: EmailLane = "unknown") =>
   outbox.state === "dead"
     ? `That one was approved, but the email couldn't be sent: ${outbox.error}. Nothing went out.`
-    : `That one was already approved — ${label}. ${outbox.state === "sent" ? "It went out once." : "It goes out once."}`;
+    : outbox.state === "sent"
+    ? `That one was already approved — ${label}. It went out once.`
+    : lane === "off"
+    ? `That one was already approved — ${label}. It's queued, but email sending is off on the worker: ` +
+      "it waits up to 48 hours for that to come back, then it isn't sent."
+    : `That one was already approved — ${label}. It goes out once.`;
 
 /** A spine row someone already answered: the late YES (no live row holds the
     number, but a proposal with that sms_code was answered in the last 48h)
     and the YES that lost the row lock to an inbox tap. `outbox` = its email's
-    outbox state (outboxState), read only for an approved email. null =
+    outbox state (outboxState), read only for an approved email, and `lane`
+    the worker's email lane (emailLane), read only when that email is still
+    waiting. null =
     nothing to say about it (still live, or superseded), and the caller's own
     answer stands. */
-export function spineLateText(row: Blob, nowIso: string, outbox: OutboxState = WAITING): string | null {
+export function spineLateText(row: Blob, nowIso: string, outbox: OutboxState = WAITING,
+  lane: EmailLane = "unknown"): string | null {
   const s = String(row?.status ?? "");
   const label = spineLabel(row);
-  if (APPROVED_STATUSES.includes(s)) return alreadyApproved(label, opName(row.operation) === "email.send" ? outbox : WAITING);
+  if (APPROVED_STATUSES.includes(s)) {
+    return opName(row.operation) === "email.send" ? alreadyApproved(label, outbox, lane) : alreadyApproved(label);
+  }
   if (s === "declined") return declinedText(label);
   // a stale row stays 'proposed' until the next op_propose sweeps it
   const lapsed = s === "proposed" && Date.parse(String(row?.expires_at ?? "")) <= Date.parse(nowIso);
@@ -684,7 +740,7 @@ export function spineReply(
       // a worker-runtime operation (none in the catalog yet) waits in jobs_queue
       return `✅ Approved — ${label}. It's queued to run.`;
     }
-    case "answered": return spineLateText(v.row, ctx.nowIso ?? new Date().toISOString(), ctx.outbox) ?? alreadyApproved(label);
+    case "answered": return spineLateText(v.row, ctx.nowIso ?? new Date().toISOString(), ctx.outbox, ctx.lane) ?? alreadyApproved(label);
     case "cancelled": return replyText("cancelled", { label })!;
     case "already-answered": return replyText("already-answered")!;
     case "expired": return expiredText(label);

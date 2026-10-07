@@ -14,19 +14,29 @@
 
    The rules, in one paragraph: a reminder goes on the spine only when
    REMINDERS_LANE allows it, the worker's email lane is live
-   (outbox_channel_ready('email') answers true) and op_propose takes it;
-   a definite refusal (a 4xx), an address the spine's schema would
-   refuse, or a job id that isn't a uuid files the old row exactly as
-   before. A filing that failed on the network or with a 5xx may still
-   have landed, so that reminder waits for tomorrow instead of risking
-   a second ask for one invoice. A permission refusal (42501) says the
-   brief's spine identity is broken, so nothing more is offered that
-   day on either lane. Every reminder sits in exactly one queue: the
-   7-day "already asked about this invoice" check reads both queues in
-   every lane state, and offers nothing when either read fails or the
-   brief's login doesn't resolve to its agent (rpc/current_agent_id),
-   because then RLS hides its own proposals and the read comes back
-   empty instead of failing.
+   (outbox_channel_ready('email') answers true), the deployed
+   roybal-notify answers a YES on the spine (its GET /version, probed
+   once a run: an older build reads only pending_actions and would answer
+   the spine's YES number "doesn't match") and op_propose takes it; a
+   definite refusal (a 4xx), an address the spine's schema would refuse,
+   or a job id that isn't a uuid files the old row exactly as before. A
+   refusal is definite whatever it says, a missing or revoked grant
+   included (0019's rollback), unless it says the brief's login isn't an
+   enabled agent: that identity broke after this run's identity check
+   (rpc/current_agent_id, below) passed, so nothing more is offered that
+   day on either lane. A filing that failed on the network or with a 5xx
+   may still have landed, so that reminder waits for tomorrow instead of
+   risking a second ask for one invoice. Every reminder sits in exactly
+   one queue: the 7-day "already asked about this invoice" check reads
+   both queues in every lane state, and offers nothing when either read
+   fails or the brief's login doesn't resolve to its agent
+   (rpc/current_agent_id), because then RLS hides its own proposals and
+   the read comes back empty instead of failing. On the spine "executed"
+   only means queued, so the check also reads the outbox rows of the
+   brief's executed reminders (0020) and offers again one whose email the
+   worker gave up on and never sent, as the old lane re-offered a failed
+   send; that read failing, or answering nothing before 0020, holds them
+   as before and stops nothing.
    ============================================================ */
 
 import { invoiceTotals, money, type Blob } from "./digest.ts";
@@ -51,12 +61,28 @@ export function laneReady(status: number, body: unknown): boolean {
   return status === 200 && body === true;
 }
 
+/** GET …/functions/v1/roybal-notify/version: does the deployed
+    roybal-notify answer a YES on the spine? Only a 200 whose answers list
+    holds "spine" says so ({"ok":true,"function":"roybal-notify",
+    "answers":["text","spine"]}). The build before step 5 answers every
+    GET 405 "Use POST"; it, any other body, an error or no answer means the
+    spine's "Reply YES n" would reach a door that can't act on it, so the
+    reminders take the old lane that run. */
+export function notifyAnswersSpine(status: number, body: unknown): boolean {
+  if (status !== 200 || !body || typeof body !== "object" || Array.isArray(body)) return false;
+  const answers = (body as Blob).answers;
+  return Array.isArray(answers) && answers.includes("spine");
+}
+
 /* The statuses that mean "this invoice already has its ask this week".
    A declined or failed reminder is offered again the next morning, as it
    always was on the old lane. An expired spine reminder is held: it is
    the old lane's unanswered row, which keeps status 'pending' (nothing
    sweeps pending_actions) for the whole window, while op_propose sweeps
-   an ignored proposal to 'expired' a day later. */
+   an ignored proposal to 'expired' a day later. An executed spine
+   reminder is held unless its email died unsent (see deadUnsent): the
+   worker never writes back to the proposal, and the old lane's send that
+   failed left 'failed', which is offered again. */
 const PENDING_HOLDS = ["pending", "approved", "executed"];
 const SPINE_HOLDS = ["proposed", "approved", "executing", "executed", "expired"];
 
@@ -76,14 +102,45 @@ export function agentKnown(status: number, body: unknown): boolean {
     as evidence_refs {kind: "invoice", id}. */
 export const invoiceKey = (p: Blob, inv: Blob) => `${p.id}:${inv.invoiceNo || inv.id || ""}`;
 
+/** The ids of the brief's executed (queued) spine reminders, the ones the
+    outbox read asks about: outbox?proposal_id=in.(<ids>). Only uuids, which
+    every proposals.id is, so nothing odd ever lands inside the in.(…). */
+export function queuedIds(spine: unknown): string[] {
+  if (!Array.isArray(spine)) return [];
+  const ids = spine.filter((r) => r && r.status === "executed" && UUID.test(String(r.id ?? "")))
+    .map((r) => String(r.id));
+  return [...new Set(ids)];
+}
+
+/* The proposals whose email the worker gave up on (an outbox row 'dead')
+   and never sent (no row 'sent' or 'delivered'). Anything but a list —
+   the read failed — is none, so every executed reminder stays held. */
+function deadUnsent(outbox: unknown): Set<string> {
+  const seen = new Map<string, { dead: boolean; sent: boolean }>();
+  for (const o of Array.isArray(outbox) ? outbox : []) {
+    if (!o || typeof o !== "object" || o.proposal_id == null) continue;
+    const id = String(o.proposal_id);
+    const s = seen.get(id) ?? { dead: false, sent: false };
+    if (o.status === "dead") s.dead = true;
+    if (o.status === "sent" || o.status === "delivered") s.sent = true;
+    seen.set(id, s);
+  }
+  return new Set([...seen].filter(([, s]) => s.dead && !s.sent).map(([id]) => id));
+}
+
 /** The invoices already asked about in the last 7 days, from both queues:
     pending_actions emailSend rows (params.invoiceKey) and the brief's own
     email.send proposals (evidence_refs {kind: "invoice", id}; RLS returns
     only its own after 0019, none before). Null when either read did not
     answer a list — the brief then offers no reminder that day, because a
-    blind check would ask about the same invoice in a second queue. */
-export function remindedKeys(pending: unknown, spine: unknown): Set<string> | null {
+    blind check would ask about the same invoice in a second queue.
+    `outbox` is the outbox read for queuedIds (proposal_id, status): an
+    executed reminder whose email died unsent is not held, so the next
+    morning offers it again. Left out, failed (null) or empty (before 0020
+    RLS answers []), every executed reminder is held, as before. */
+export function remindedKeys(pending: unknown, spine: unknown, outbox?: unknown): Set<string> | null {
   if (!Array.isArray(pending) || !Array.isArray(spine)) return null;
+  const dead = deadUnsent(outbox);
   const keys = new Set<string>();
   for (const a of pending) {
     const k = a && PENDING_HOLDS.includes(a.status) ? String(a.params?.invoiceKey || "") : "";
@@ -91,6 +148,7 @@ export function remindedKeys(pending: unknown, spine: unknown): Set<string> | nu
   }
   for (const r of spine) {
     if (!r || !SPINE_HOLDS.includes(r.status)) continue;
+    if (r.status === "executed" && r.id != null && dead.has(String(r.id))) continue;
     for (const ref of Array.isArray(r.evidence_refs) ? r.evidence_refs : []) {
       if (ref && typeof ref === "object" && ref.kind === "invoice" && ref.id != null && String(ref.id)) {
         keys.add(String(ref.id));
@@ -181,16 +239,23 @@ export type Filing =
   | { kind: "blocked"; why: string }
   | { kind: "unsure"; why: string };
 
+/* op_resolve_caller's 42501s (0013) that say the caller isn't an enabled
+   agent at all, as opposed to op_propose's "agent … may not propose …",
+   which says the agent is fine and lacks the grant. */
+const IDENTITY_BROKEN = /not linked to an enabled agents row|neither an enabled agent nor a profile/i;
+
 /** How rpc/op_propose answered (status 0 = the request never got an
     answer). "filed": the proposals row came back (one object, or a
-    one-element array). "refused": PostgREST said no with a 4xx — nothing
-    landed, so the old lane takes the reminder. "blocked": a 403 or a
-    42501 in the body — not allowed, which says the brief's spine identity
-    is broken (agent:brief disabled, unlinked or its grant gone), so its
-    7-day check can't be trusted either and nothing more is offered that
-    day, on either lane. "unsure": a 5xx, no answer, or a 2xx without the
-    row — the proposal may exist, so the reminder waits for tomorrow rather
-    than be asked twice. */
+    one-element array). "blocked": not allowed (a 403, or 42501 in the
+    body) with a message that says the login isn't an enabled agent
+    (disabled or unlinked since agentKnown passed), so the 7-day check that
+    ran under it can't be trusted either and nothing more is offered that
+    day, on either lane. "refused": PostgREST said no with any other 4xx,
+    a missing or revoked email.send grant included ("agent … may not
+    propose email.send@1", 0019's rollback) — nothing landed, the identity
+    was confirmed this run, so the old lane takes the reminder. "unsure": a
+    5xx, no answer, or a 2xx without the row — the proposal may exist, so
+    the reminder waits for tomorrow rather than be asked twice. */
 export function filingOutcome(status: number, body: unknown): Filing {
   const one = Array.isArray(body) && body.length === 1 ? body[0] : body;
   const row = one && typeof one === "object" && !Array.isArray(one) ? one as Blob : null;
@@ -199,7 +264,8 @@ export function filingOutcome(status: number, body: unknown): Filing {
   }
   const detail = row ? [row.code, row.message].filter(Boolean).map(String).join(" ").slice(0, 200) : "";
   const why = `op_propose ${status ? `answered ${status}` : "got no answer"}${detail ? `: ${detail}` : ""}`;
-  if (status === 403 || (status >= 400 && String(row?.code ?? "") === "42501")) return { kind: "blocked", why };
+  const notAllowed = status === 403 || (status >= 400 && String(row?.code ?? "") === "42501");
+  if (notAllowed && IDENTITY_BROKEN.test(String(row?.message ?? ""))) return { kind: "blocked", why };
   return status >= 400 && status < 500 ? { kind: "refused", why } : { kind: "unsure", why };
 }
 

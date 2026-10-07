@@ -47,7 +47,21 @@
  *   profile (p_via 'sms'), or declined through rpc/op_proposal_decline:
  *   the only two op_* doors this function opens. A spine approval by text
  *   leaves the old lane's capture_events receipt (assist_action, captured_by
- *   approve-by-text) for the Sunday report.
+ *   approve-by-text) for the Sunday report. A bare YES/NO (no number) only
+ *   answers an ask a text offered: any pending_actions row, or a spine row
+ *   the brief filed (proposed_via 'cron'). A spine ask filed from a screen
+ *   (the job page's adjuster email) needs "YES n"; a bare keyword with only
+ *   that one live gets "Reply YES n to approve …" and nothing runs.
+ *
+ * Version (GET …/roybal-notify/version):
+ *   200 {"ok":true,"function":"roybal-notify","answers":["text","spine"]}
+ *   (VERSION_ANSWER in approve.ts), no key, nothing read. It says this build
+ *   answers a YES on the spine. roybal-brief probes it before filing a
+ *   reminder on the spine, and services/worker/set-gmail-secret.sh before
+ *   it turns the email lane on, so no spine YES number goes out while the
+ *   deployed build reads only pending_actions and would answer it "doesn't
+ *   match". Every other GET answers 405 "Use POST", as every GET did before
+ *   step 5.
  *
  * Status (POST …/roybal-notify/status):   [F-034, High]
  *   Twilio's DELIVERY status callback — the answer to "did it arrive?".
@@ -110,11 +124,12 @@
  *           Alaska-time window customer-facing texts may send in)
  * Deploy:   supabase functions deploy roybal-notify --no-verify-jwt
  *   (--no-verify-jwt required for browser CORS preflight + the Twilio
- *    webhook; the function self-protects — sendSms runs its DB ops under
+ *    webhook, and it is what lets /version answer with no key; the
+ *    function self-protects — sendSms runs its DB ops under
  *    the caller's JWT, decidePending touches nothing until role_is('owner')
- *    passes under the caller's JWT, and /inbound + /status demand a valid
- *    Twilio signature, so an unauthenticated caller can never reach a paid
- *    Twilio call.)
+ *    passes under the caller's JWT, /inbound + /status demand a valid
+ *    Twilio signature, and /version answers a constant and reads nothing,
+ *    so an unauthenticated caller can never reach a paid Twilio call.)
  *   After deploying, point the Twilio number's messaging STATUS CALLBACK at
  *   https://<project-ref>.supabase.co/functions/v1/roybal-notify/status
  *   (Console → Phone Numbers → the company number → Messaging). Without that
@@ -130,7 +145,7 @@ import {
   hourLabel, inSendWindow, sendWindowText, quietHoursHold, alaskaHour, expiresBeforeWindow, retryableStatus,
   decide, replyFor, parseDecideRequest, decideResponse, ownerGate, TryAgain,
   matchAcross, spineLabel, opName, ownerPrincipal, emailLane, outboxState, APPROVED_STATUSES,
-  spineLateText, spineOutranks, spineReceipt, spineVerdict, spineReply,
+  spineLateText, spineOutranks, spineReceipt, spineVerdict, spineReply, VERSION_ANSWER,
   type DecideIO, type DecideAnswer, type Outcome, type Decision, type EmailLane, type OutboxState,
 } from "./approve.ts";
 import { campaignGate } from "./campaign.mjs";
@@ -670,9 +685,11 @@ function decideIO(act: Record<string, unknown>, admin: Admin): DecideIO {
 
 /* ---------- the spine's side of a YES/NO (spine step 5) ----------
    One column list for the live read and the late lookup: what spineLabel
-   names a row by, what an answer reads, and when it was answered
-   (spineDecidedAt). */
-const SPINE_COLS = "id,sms_code,operation,input,edited_params,rationale,status,expires_at,approved_via,approved_at,result,error,created_at,updated_at";
+   names a row by, what an answer reads, when it was answered
+   (spineDecidedAt), and whether a text offered it (proposed_via: only
+   then may a bare YES mean it, offeredByText). */
+const SPINE_COLS = "id,sms_code,operation,input,edited_params,rationale,status,expires_at,approved_via,approved_at," +
+  "result,error,proposed_via,created_at,updated_at";
 
 /* What became of this proposal's email: sent, dead (the worker gave up on
    it, and why), or still waiting. Read only to word an "already approved"
@@ -699,8 +716,9 @@ async function writeSpineReceipt(row: Record<string, unknown>, admin: Admin): Pr
 }
 
 /* Is the worker sending email right now? Read only after a text approved an
-   email, to say when it goes out. Anything but a literal answer is unknown,
-   and the text then promises no time. */
+   email, or answered one approved before that is still waiting, to say when
+   it goes out. Anything but a literal answer is unknown, and the text then
+   promises no time. */
 async function spineEmailLane(admin: Admin): Promise<EmailLane> {
   try {
     const r = await admin("rpc/outbox_channel_ready", { method: "POST", body: JSON.stringify({ p_channel: "email" }) });
@@ -735,7 +753,9 @@ async function lateSpineAnswer(code: string, nowIso: string, admin: Admin): Prom
     if (!Array.isArray(texts) || !spineOutranks(row, texts[0] as Record<string, unknown> | undefined)) return null;
     const outbox = opName(row.operation) === "email.send" && APPROVED_STATUSES.includes(String(row.status))
       ? await spineOutbox(row.id, admin) : undefined;
-    return spineLateText(row, nowIso, outbox);
+    // still waiting: whether the worker is sending email decides what to promise
+    const lane = outbox?.state === "waiting" ? await spineEmailLane(admin) : undefined;
+    return spineLateText(row, nowIso, outbox, lane);
   } catch (e) {
     console.error("late spine lookup failed", e);
     return null;
@@ -773,7 +793,10 @@ async function decideSpine(decision: Decision, row: Record<string, unknown>, wor
     const ctx: { lane?: EmailLane; outbox?: OutboxState; nowIso: string } = { nowIso: new Date().toISOString() };
     if ("row" in v && opName(v.row.operation) === "email.send") {
       if (v.status === "approved" && v.row.status !== "failed") ctx.lane = await spineEmailLane(admin);
-      if (v.status === "answered" && APPROVED_STATUSES.includes(String(v.row.status))) ctx.outbox = await spineOutbox(v.row.id, admin);
+      if (v.status === "answered" && APPROVED_STATUSES.includes(String(v.row.status))) {
+        ctx.outbox = await spineOutbox(v.row.id, admin);
+        if (ctx.outbox.state === "waiting") ctx.lane = await spineEmailLane(admin);
+      }
     }
     await receipt;
     return spineReply(v, a, word, ctx);
@@ -805,11 +828,13 @@ async function handleApproval(from: string, text: string, admin: Admin): Promise
     } catch (e) { console.error("approval reply failed", e); }
   };
 
-  // Both queues at once: a bare YES means the one thing waiting in either,
-  // and a number must never quietly pick one queue over the other. A read
-  // that failed (or answered no list) is not "nothing waiting": the owner is
-  // told to text it again, and nothing runs. Nor may it throw, or the "YES
-  // 12" would carry on to the SMS assistant as a question.
+  // Both queues at once: a bare YES means the one thing a text offered in
+  // either (a spine ask filed from a screen needs its number: the answer
+  // names it and runs nothing), and a number must never quietly pick one
+  // queue over the other. A read that failed (or answered no list) is not
+  // "nothing waiting": the owner is told to text it again, and nothing runs.
+  // Nor may it throw, or the "YES 12" would carry on to the SMS assistant as
+  // a question.
   const nowIso = new Date().toISOString();
   const listOf = async (path: string) => {
     const r = await admin(path, { method: "GET" });
@@ -830,7 +855,8 @@ async function handleApproval(from: string, text: string, admin: Admin): Promise
     // no live row holds the number; a spine ask answered lately says what became of it
     const late = p.code != null && (m.reason === "none-open" || m.reason === "no-such-code")
       ? await lateSpineAnswer(p.code, nowIso, admin) : null;
-    await say(late ?? replyText(m.reason as "none-open", { code: p.code == null ? null : Number(p.code) })!);
+    const named = m.ask ? { code: m.ask.sms_code, label: spineLabel(m.ask) } : { code: p.code == null ? null : Number(p.code) };
+    await say(late ?? replyText(m.reason as "none-open", named)!);
     return true;
   }
   // a spine row is the spine's to decide: op_proposal_approve / _decline, as the owner
@@ -1198,8 +1224,10 @@ async function handleStatus(req: Request): Promise<Response> {
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
   const path = new URL(req.url).pathname;
+  // the step-5 probe: the only GET answered, with no key and nothing read
+  if (req.method === "GET" && /\/version\/?$/.test(path)) return json(VERSION_ANSWER);
+  if (req.method !== "POST") return json({ ok: false, error: "Use POST" }, 405);
   if (/\/inbound\/?$/.test(path)) return handleInbound(req);
   if (/\/status\/?$/.test(path)) return handleStatus(req);
   const jwt = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();

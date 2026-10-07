@@ -152,9 +152,11 @@ Order matters: the database first, then the edge function, then the app.
      OWNER_CELL="+1907XXXXXXX"
    fly deploy --config services/worker/fly.toml --dockerfile services/worker/Dockerfile --ha=false .
    ```
-   Email (optional, see the Gmail pair below) is one more command, from the
-   same repo root on main: `sh services/worker/set-gmail-secret.sh`. It
-   deploys again as its last step.
+   Email (optional, see the Gmail pair below) comes last, after migration
+   0019 is applied and roybal-notify is deployed on the step-5 build, and
+   is one more command:
+   `cd ~/roybal-restoration-app && git checkout main && git pull && sh services/worker/set-gmail-secret.sh`.
+   It deploys again as its last step.
    A value left as a placeholder (`< >`, quotes, spaces, `PASTE_`) stops the
    worker at boot with the variable's name in `fly logs`; fix it with
    `fly secrets set` (or `fly secrets unset` for an optional one) and it
@@ -166,10 +168,25 @@ Order matters: the database first, then the edge function, then the app.
      JWT (begins `eyJ`): either would boot and then fail every call, so the
      worker refuses both at boot.
    - **The Gmail pair** is the OAuth client the office Gmail connection was
-     made with. Set it with `sh services/worker/set-gmail-secret.sh` from
-     the repo root of an up-to-date main. It refuses to run anywhere else
-     (not the repo root, not on main, or a worker without the 48-hour email
-     limit, `staleEmailReason`) and says to run
+     made with. Setting it is the last step of turning email on, in this
+     order: migration 0019 applied (production), roybal-notify deployed on
+     the step-5 build ("deploy roybal-notify" in the project), then
+     `sh services/worker/set-gmail-secret.sh` from the repo root of an
+     up-to-date main. Email on is what makes the morning brief file its
+     reminders on the spine and text "Reply YES n" for them; a roybal-notify
+     from before step 5 reads only the text lane's asks, so it would answer
+     that YES "doesn't match" and a bare YES would run whatever text-lane ask
+     is live instead. So the script first asks the deployed roybal-notify
+     (`GET …/functions/v1/roybal-notify/version`, no key, at the
+     `SUPABASE_URL` in `apps/field/js/config.js`) and refuses, saying to
+     deploy roybal-notify first, unless it answers HTTP 200 with `"spine"`
+     in its `answers` (the build before step 5 answers 405). It refuses to
+     run from anything the deploy must not build: not the repo root, not on
+     main, not GitHub's latest main (it runs `git fetch origin main` and
+     compares: an older checkout would roll back a worker fix deployed from
+     GitHub since), local changes in `services/worker` or `.dockerignore`
+     (untracked files too: the image would take them), or a worker without
+     the 48-hour email limit (`staleEmailReason`). Each time it says to run
      `cd ~/roybal-restoration-app && git checkout main && git pull` first,
      because its last step deploys this checkout. It reads the Client ID
      from `apps/field/js/config.js` (`GMAIL_CLIENT_ID`, public, the same
@@ -183,11 +200,26 @@ Order matters: the database first, then the edge function, then the app.
      means set without a restart: the image already on Fly may be older
      than the 48-hour limit and the job filing of sent copies, and must not
      come up with email on.
-     The deploy brings the new code and the pair live together; if it
-     fails, the pair stays staged and goes live with the next deploy (run
-     the line again). To see it took, `fly logs -a roybal-worker` shows a new
-     `worker.start` line with `"email":true` and `"channels":["sms","email"]`
-     and no `email.disabled` after it; `/healthz` and the heartbeat show the
+     The deploy brings the new code and the pair live together. A staged
+     pair goes live with ANY restart of the app, a plain `fly secrets set`
+     included, and a restart keeps the image already on Fly; so if the
+     deploy fails, or the run is stopped (Ctrl-C, the window closed) once
+     fly has the pair, the script takes it back out
+     (`fly secrets unset --stage`), so no restart can turn email on in an
+     older image, and gives the line to run it again. That never stops a
+     worker already running with email (a pair from an earlier run, or a
+     deploy that failed after Fly started the new image): it stays on until
+     the worker's next restart, then goes off, and the message says so. A
+     failed import is taken back out the same way. If that unset fails too,
+     it says the pair may still be staged: until a run of the script goes
+     through, any `fly secrets set` or restart of roybal-worker turns email
+     on in the old image. A fly
+     that cannot stage both ways (`secrets import` and `secrets unset`
+     without `--stage`) is refused before the secret is asked for
+     (`brew upgrade flyctl`). To see it took, `fly logs -a roybal-worker`
+     shows a new `worker.start` line with `"email":true` and
+     `"channels":["sms","email"]` and no `email.disabled` after it;
+     `/healthz` and the heartbeat show the
      same channels, which is how the apps learn email sending is on. A
      wrong secret still boots and shows up later as `outbox.failed` with
      "Gmail token refresh failed"; run the script again with the right one.
@@ -230,8 +262,11 @@ which re-applies `fly.toml`.
 
 - **Kill switch**: `fly scale count 0 -a roybal-worker`. Approvals still
   record, sends wait in line as `pending`, and the owner gets the down text
-  within ~15 minutes (that is the alarm working). `fly scale count 1 -a roybal-worker` resumes;
-  everything queued goes out, each row once.
+  within ~15 minutes (that is the alarm working). `fly scale count 1 -a roybal-worker` resumes:
+  queued texts go out, each row once, and so do queued emails less than
+  `EMAIL_MAX_AGE_HOURS` (48) old. Older emails are marked dead (shown in the
+  admin app's Approvals tab, under Recently decided, as "Couldn't send") and
+  must be sent fresh.
 - **Test the alarm**: scale to 0, wait 15 minutes, expect the text; scale back
   to 1 and `select public.worker_liveness_check(true)` reports `fresh` on the
   next cron tick (event `worker.recovered`). The edge function's 24 h guard
@@ -263,12 +298,17 @@ which re-applies `fly.toml`.
 `npm test` in this directory (no install; zero dependencies): the RFC 822
 builder, both adapters against a stubbed fetch (token refresh, adopt lookup,
 error verdicts, the email age limit and the job the sent copy files under),
-`set-gmail-secret.sh` against a stand-in `fly` (the exact pair it stages on
-stdin and never on a command line, the deploy after it, the checkouts it
-refuses before fly is called and the values before anything is staged, the
-secret never printed), the outbox lane's order of operations (adopt → send →
-report with retries; a failed report leaves the row to expire; the active
-set is kept exact on every path), the queue lane, the heartbeat (which
+`set-gmail-secret.sh` against a stand-in `fly`, `git fetch` and `curl`, so
+nothing leaves the machine (the exact pair it stages on stdin and never on
+a command line, the deploy after it, the pair taken back out when the
+deploy fails or the run is stopped, the checkouts it refuses before fly is
+called, behind GitHub's main or with local changes included, and a
+roybal-notify that cannot answer a spine YES, the values it refuses before
+anything is staged, the secret never printed; under `sh` and, where it is
+installed, `bash --posix`, which is what macOS runs as `/bin/sh`), the
+outbox lane's order of operations (adopt → send → report with retries; a
+failed report leaves the row to expire; the active set is kept exact on
+every path), the queue lane, the heartbeat (which
 leases it names, and that the final one names none) and dead-letter text
 with its 24 h guard, and the real HTTP server booting, answering `/healthz`
 through an outage, and stopping clean. The database

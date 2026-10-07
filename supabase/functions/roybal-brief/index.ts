@@ -31,19 +31,26 @@
  *     agent:brief (migration 0019 lets it PROPOSE email.send, nothing
  *     else). It shows in the Approvals inbox and answers to its YES number;
  *     approving queues one email the worker sends. Taken only while the
- *     worker's email lane is live (rpc/outbox_channel_ready) and
- *     op_propose accepts it.
+ *     worker's email lane is live (rpc/outbox_channel_ready), the deployed
+ *     roybal-notify answers a YES on the spine (GET
+ *     …/roybal-notify/version, probed once a run with a 5-second limit;
+ *     the build before step 5 answers 405 and reads only pending_actions)
+ *     and op_propose accepts it.
  *   - the old lane: a pending_actions emailSend row, sent through
  *     gmail-proxy on a YES — exactly as before step 5. Taken when the
- *     email lane is off, op_propose refuses (a 4xx), the address or the
- *     job id won't fit the spine, or REMINDERS_LANE=text.
+ *     email lane is off, roybal-notify isn't on the step-5 build,
+ *     op_propose refuses (a 4xx, a revoked or missing grant included), the
+ *     address or the job id won't fit the spine, or REMINDERS_LANE=text.
  *   A spine filing that failed on the network or with a 5xx may have
- *   landed anyway, so that reminder waits for tomorrow; one refused as not
- *   allowed (42501) stops the reminders for the day. The 7-day
- *   per-invoice check reads both queues and offers nothing if it can't,
- *   or if the brief's login doesn't resolve to agent:brief
- *   (rpc/current_agent_id), which would leave it blind to its own
- *   proposals.
+ *   landed anyway, so that reminder waits for tomorrow; one refused
+ *   because the login isn't an enabled agent (op_resolve_caller's 42501)
+ *   stops the reminders for the day. The 7-day per-invoice check reads
+ *   both queues and offers nothing if it can't, or if the brief's login
+ *   doesn't resolve to agent:brief (rpc/current_agent_id), which would
+ *   leave it blind to its own proposals. It also reads the outbox rows of
+ *   its executed reminders (migration 0020 lets it) and offers again one
+ *   whose email died unsent, as the old lane re-offered a failed send; if
+ *   that read fails, or answers nothing before 0020, they stay held.
  *   REMINDERS_LANE (optional secret): unset or "spine" = the above;
  *   "text" = always the old lane (the rollback); anything else = "text".
  *
@@ -61,8 +68,8 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { buildBrief, reminderEmail, type Blob } from "./digest.ts";
 import {
-  remindersLane, laneReady, agentKnown, remindedKeys, reminderCandidates, reminderLabel, pendingReminderRow,
-  spineReminder, filingOutcome, yesLine, codesInUseList, codeTaker,
+  remindersLane, laneReady, notifyAnswersSpine, agentKnown, queuedIds, remindedKeys, reminderCandidates,
+  reminderLabel, pendingReminderRow, spineReminder, filingOutcome, yesLine, codesInUseList, codeTaker,
 } from "./reminders.ts";
 import { buildWeekly } from "./weekly.ts";
 import { buildCrewDigest, entriesCutoff } from "./crewdigest.ts";
@@ -124,6 +131,30 @@ async function emailLaneReady(jwt: string): Promise<boolean> {
   } catch (e) {
     console.error("outbox_channel_ready failed:", (e as Error).message);
     return false;
+  }
+}
+
+/* Would the owner's "YES n" for a spine reminder reach a door that acts on
+   it? GET …/roybal-notify/version (see notifyAnswersSpine): roybal-notify
+   deploys with --no-verify-jwt, so no key is needed; the apikey rides
+   along as on every call. Five seconds at most, body included, so a hung
+   function never holds the brief. Answers why not ("" = it answers the
+   spine), for the one log line the caller writes. */
+async function notifySpineGap(): Promise<string> {
+  const stop = new AbortController();
+  const timer = setTimeout(() => stop.abort(), 5000);
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/roybal-notify/version`, {
+      headers: { apikey: ANON_KEY }, signal: stop.signal,
+    });
+    const body = await r.json().catch(() => null);
+    if (notifyAnswersSpine(r.status, body)) return "";
+    if (stop.signal.aborted) return "its /version gave no answer in 5 s";
+    return `its /version answered ${r.status} ${JSON.stringify(body)?.slice(0, 120)}`;
+  } catch (e) {
+    return stop.signal.aborted ? "its /version gave no answer in 5 s" : `its /version probe failed: ${(e as Error).message}`;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -345,12 +376,24 @@ serve(async (req: Request) => {
       const [recentText, recentSpine, asAgent] = await Promise.all([
         rest(jwt, `pending_actions?kind=eq.emailSend&created_at=gte.${weekAgo}&select=code,status,params,expires_at&limit=100`)
           .catch(unread("pending_actions")),
-        rest(jwt, `proposals?operation=eq.email.send@1&created_at=gte.${weekAgo}&select=status,evidence_refs&limit=100`)
+        rest(jwt, `proposals?operation=eq.email.send@1&created_at=gte.${weekAgo}&select=id,status,evidence_refs&limit=100`)
           .catch(unread("proposals")),
         agentResolves(jwt),
       ]);
       if (!asAgent) throw new Error("the brief's login doesn't resolve to agent:brief, so the 7-day check can't see its own proposals and no reminder is offered today");
-      const reminded = remindedKeys(recentText, recentSpine);
+      // An executed spine reminder was only queued: one whose email the
+      // worker gave up on, unsent, is offered again (0020 lets the brief
+      // read its own reminders' outbox rows; before it RLS answers []). This
+      // read failing holds them all, as before, and stops nothing else.
+      const queued = queuedIds(recentSpine);
+      const sends = queued.length
+        ? await rest(jwt, `outbox?proposal_id=in.(${queued.join(",")})&select=proposal_id,status&limit=200`)
+          .catch((e: Error) => {
+            console.error("reminder check: the outbox read failed, so every queued reminder stays held:", e.message);
+            return null;
+          })
+        : [];
+      const reminded = remindedKeys(recentText, recentSpine, sends);
       if (!reminded) throw new Error("the 7-day check couldn't read both queues, so no reminder is offered today");
 
       const picks = reminderCandidates(projects, today, reminded);
@@ -358,6 +401,15 @@ serve(async (req: Request) => {
       if (picks.length && lane.lane === "spine") {
         spine = await emailLaneReady(jwt);
         if (!spine) console.log("reminders: the worker's email lane isn't live; they take the old lane");
+        else {
+          // once a run, before anything is filed: a spine YES number must
+          // not go out while the deployed roybal-notify can't answer it
+          const gap = await notifySpineGap();
+          if (gap) {
+            spine = false;
+            console.log(`reminders: roybal-notify doesn't answer a YES on the spine yet (${gap}); they take the old lane`);
+          }
+        }
       }
       // Codes must be unique across every LIVE ask in both queues, not just
       // this kind — qb-time and the SMS assistant propose into the old queue,
@@ -388,8 +440,10 @@ serve(async (req: Request) => {
               continue;
             }
             if (f.kind === "blocked") {
-              // not allowed: the spine identity is broken, so this morning's
-              // 7-day check can't be trusted on either lane
+              // the login isn't an enabled agent any more: the spine
+              // identity broke after the check above, so this morning's
+              // 7-day check can't be trusted on either lane (a refused
+              // grant is "refused" and falls through to the old lane)
               console.error(`reminders stop for today at ${c.key}: ${f.why}`);
               break;
             }
