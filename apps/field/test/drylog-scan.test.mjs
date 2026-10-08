@@ -539,6 +539,103 @@ await test("the fill handle on a table a sync replaced mid-edit redraws instead 
   assert.equal(liveOf(q, "AM-014").notes, "dehu draining to sink");
 });
 
+await test("typed rows carry an id: one added here gets its own, one from an older build the same one on every phone that draws it", () => {
+  const p = job(), q = clone(p);
+  const typed = (x) => x.dryingLogs[0].equipment.filter((r) => !r.scanId);
+  const sheet = render(p);
+  const ids = typed(p).map((r) => r.rowId);
+  assert.ok(ids.every(Boolean) && new Set(ids).size === ids.length);
+  assert.ok(p.dryingLogs[0].equipment.filter((r) => r.scanId).every((r) => !r.rowId), "a scanned row is known by its scan");
+  btn(sheet, "+ Add equipment").click();
+  const added = typed(p).at(-1);
+  assert.ok(added.rowId && ids.indexOf(added.rowId) < 0);
+  render(q);
+  assert.deepEqual(typed(q).map((r) => r.rowId), ids, "the same ids on the other phone");
+});
+
+await test("a row this phone just added, gone in a sync that brought the other phone's new unit: typing in it or ✕ says so and leaves that unit alone", () => {
+  for (const act of ["type", "x"]) {
+    const p = job();
+    const sheet = render(p);
+    const other = clone(p);                                          // the other phone drew the same log
+    btn(sheet, "+ Add equipment").click();                           // this phone's new row
+    other.dryingLogs[0].equipment.push({ ...blankEquipRow(), rowId: "other-new", asset: "AM-040", type: "Air mover", location: "Bath" });
+    other.updatedAt = "2026-10-08T00:00:00.000Z";
+    const mine = rowsOf(sheet).at(-1);
+    const asset = inputsOf(mine)[0];
+    asset.focus();
+    syncIn(p, other);
+    document.getElementById("toast").textContent = "";
+    if (act === "type") enter(asset, "AM-041");
+    else btn(mine, "✕").click();
+    assert.match(toastText(), /changed on the other phone/, act);
+    const u = liveOf(p, "AM-040");
+    assert.ok(u && u.type === "Air mover" && u.location === "Bath" && !u.placed, act);
+    assert.ok(!liveOf(p, "AM-041"));
+  }
+});
+
+await test("two new units with no tag yet and the same Placed: the other phone tags one, or deletes a row above them, and each edit here still lands on its own unit", () => {
+  const p = job();
+  const eq = p.dryingLogs[0].equipment;
+  eq.splice(eq.length - 1, 1,
+    { ...blankEquipRow(), type: "Air mover", location: "Bath", placed: "2026-10-08T09:00" },
+    { ...blankEquipRow(), type: "Dehumidifier", location: "Hall", placed: "2026-10-08T09:00" });
+  const sheet = render(p);
+  const by = (loc) => p.dryingLogs[0].equipment.find((r) => r.location === loc && r.placed === "2026-10-08T09:00");
+  const [am, dh] = rowsOf(sheet).slice(-2);
+  const other = clone(p);
+  other.dryingLogs[0].equipment.find((r) => r.location === "Bath").asset = "AM-041";   // tagged on the other phone
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  inputsOf(am)[2].focus();
+  syncIn(p, other);
+  enter(inputsOf(am)[2], "2026-10-10T09:00");
+  enter(boxes(dh)[2], "dehu draining");
+  assert.deepEqual([by("Bath").asset, by("Bath").removed, by("Bath").notes, by("Hall").removed, by("Hall").notes],
+    ["AM-041", "2026-10-10T09:00", "", "", "dehu draining"]);
+  other.dryingLogs[0] = clone(p.dryingLogs[0]);
+  other.dryingLogs[0].equipment.splice(0, 1);                        // the other phone takes AM-020 off, above them
+  other.updatedAt = "2026-10-08T01:00:00.000Z";
+  inputsOf(dh)[2].focus();
+  syncIn(p, other);
+  enter(inputsOf(dh)[2], "2026-10-12T09:00");
+  assert.deepEqual([by("Bath").removed, by("Hall").removed, !!liveOf(p, "AM-020")], ["2026-10-10T09:00", "2026-10-12T09:00", false]);
+});
+
+await test("a field put back where it began after a sync brought the other phone's value: that value stands (Removed, room)", () => {
+  const p = job();
+  const sheet = render(p);
+  const tr = rowOf(sheet, "AM-020");
+  const removed = inputsOf(tr)[2], room = boxes(tr)[1];
+  const other = clone(p);
+  Object.assign(other.dryingLogs[0].equipment[0], { removed: "2026-10-08T13:20", location: "Laundry" });
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  removed.focus();
+  syncIn(p, other);
+  typeInto(removed, "2026-10-09T08:00");                             // a slip
+  assert.equal(liveOf(p, "AM-020").removed, "2026-10-09T08:00");
+  enter(removed, "");                                                // cleared again
+  assert.equal(liveOf(p, "AM-020").removed, "2026-10-08T13:20");
+  typeInto(room, "Hall x");
+  enter(room, "Hall");
+  assert.equal(liveOf(p, "AM-020").location, "Laundry");
+});
+
+await test("Notes typed in a box whose row a sync replaced keep a repeated line, blank lines and the order typed", () => {
+  const p = job();
+  p.dryingLogs[0].equipment[0].notes = "fan on high\nok";
+  const sheet = render(p);
+  const ta = boxes(rowOf(sheet, "AM-020"))[2];
+  const other = clone(p);
+  other.dryingLogs[0].equipment[0].notes = "fan on high\nok\ncarpet lifted";
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  ta.focus();
+  syncIn(p, other);
+  typeInto(ta, "fan on high\nok\nok");
+  enter(ta, "fan on high\nok\nok\n\nday 2 dry\n\nday 3 dry");
+  assert.equal(liveOf(p, "AM-020").notes, "fan on high\nok\nok\n\nday 2 dry\n\nday 3 dry\ncarpet lifted");
+});
+
 await test("✕ on a scanned row asks, then undoes the scan with void events (the row goes)", () => {
   const p = job();
   recordScan(p, { tag: "AM-014", mode: "place", room: "Bedroom", ...ctx("e3", T2) });   // a move
