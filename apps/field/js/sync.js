@@ -167,6 +167,8 @@ async function absorb(localRef, serverFull, why) {
    re-push. Bumping here would re-dirty a row that already matches the server,
    and two devices would feed each other rev bumps forever (the Jul 2026
    disk-IO incident). Returns true when the union landed locally. */
+const OWED_GAP_MS = 10 * 60 * 1000;
+const owedAt = new Map();   // job id → when a rebuilt union was last pushed back (adoptServerMerge)
 async function adoptServerMerge(localRef, res, fetchMedia, have) {
   const id = localRef.id;
   let full, missing;
@@ -203,8 +205,10 @@ async function adoptServerMerge(localRef, res, fetchMedia, have) {
   // and the next adopt or pull finds nothing to rewrite. Without this the
   // server's copy, which the morning brief and the portal read, lacks the
   // rows until someone edits the job again.
-  const owed = !!settled.rebuilt;
-  if (owed) full.updatedAt = laterThan(localRef.updatedAt, full.updatedAt);
+  // At most once per job per OWED_GAP_MS, whatever the cause: a rebuild that
+  // never settles (a rule two builds disagree on) costs one push, not a loop.
+  const owed = !!settled.rebuilt && !(Date.now() - (owedAt.get(id) || 0) < OWED_GAP_MS);
+  if (owed) { owedAt.set(id, Date.now()); full.updatedAt = laterThan(localRef.updatedAt, full.updatedAt); }
   // CAS on the SNAPSHOT this push was built from, not on the row we just read:
   // the union the server built cannot contain anything typed after that
   // snapshot (deflate + media upload + round-trip can take minutes on a

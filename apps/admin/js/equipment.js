@@ -38,7 +38,7 @@ import { rest, currentEmail } from "../../js/supa.js";
 import { syncNow } from "../../js/sync.js";
 import { qrSvg } from "../../js/qr.js";
 import { TAG_PAD, TAG_PREFIXES, TYPE_LABELS, parseTag, tagKey, typeFromTag, liveScans, placements, applyScans, wallTime } from "../../js/scans.js";
-import { loadFleet, unitFor, unitLabel, unitModelText, labelPayload } from "../../js/fleet.js";
+import { loadFleet, saveFleet, unitFor, unitLabel, unitModelText, labelPayload } from "../../js/fleet.js";
 
 const HASH = "#/equipment";
 const LABELS = "#/equipment/labels";
@@ -51,7 +51,7 @@ const TYPE_ORDER = ["air_mover", "dehumidifier", "dehu_lgr", "dehu_desiccant", "
 const STATUS = [["active", "Active"], ["repair", "Repair"], ["retired", "Retired"]];
 const OWNED = [["owned", "Owned"], ["rented", "Rented"]];
 const ACT_WORD = { place: "placed", move: "moved", remove: "removed" };
-const HOW_WORD = { camera: "📷 Scanned", photo: "📷 Label photo", typed: "⌨ Tag typed in" };
+const HOW_WORD = { camera: "📷 Scanned", photo: "📷 Label photo", typed: "⌨ Tag typed in", log: "✎ Typed, then scanned" };   // log: a typed row the scanner took over
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);   // not Object.hasOwn: Safari < 15.4
@@ -143,7 +143,9 @@ export function equipmentIndex(projects) {
     }
     let live = [];
     try { live = liveScans(copy); } catch { /* as above */ }
-    for (const e of live) scans.push({ key: tagKey(e.tag), tag: clean(e.tag), type: clean(e.type), act: e.act, at: e.at, jobId, job });
+    // a place that moved a unit already out reads as a move (scans.js scanRecord says the same)
+    const moved = new Set(ps.flatMap((P) => P.moves.map((m) => m.id)));
+    for (const e of live) scans.push({ key: tagKey(e.tag), tag: clean(e.tag), type: clean(e.type), act: moved.has(e.id) ? "move" : e.act, at: e.at, jobId, job });
   }
   return { out, scans };
 }
@@ -202,6 +204,7 @@ async function loadUnits() {
       const rows = await res.json();
       units = (Array.isArray(rows) ? rows : []).filter((u) => u && typeof u === "object" && clean(u.tag));
       unitsState = "ok";
+      saveFleet(units);                  // what "the list this device saw last" means when it is next offline
     } else if (await missingTable(res)) unitsState = "missing";
     else { unitsState = "error"; unitsStatus = res.status; }
   } catch { unitsState = "offline"; }
@@ -377,7 +380,7 @@ function outNow(idx) {
   const flagCard = conflicts.size ? h("div", { class: "card eq-flags" },
     h("strong", {}, `⚠ ${plural(conflicts.size, "unit")} out on two jobs at once`),
     h("p", { class: "muted eq-small", style: "margin:4px 0 2px" },
-      "A unit can only be in one place: it was pulled from one of these jobs without a scan or a removal date. Open the job it left and scan it out (Remove), or type its removal date on the drying log."),
+      "A unit can only be in one place: it was pulled from one of these jobs without a scan or a removal date. Open the job it left and type the date and time it really came off in that row's Removed cell. Don't scan it out there: a Remove scan records now, and bills the days it spent on the other job."),
     ...[...conflicts].sort((a, b) => tagOrder(a[1][0].tag, b[1][0].tag)).map(([, list]) => h("div", { class: "eq-flag" },
       h("strong", {}, list[0].tag), " — ",
       ...list.flatMap((e, i) => {
@@ -682,7 +685,7 @@ function editUnit(u, repaint) {
   const owned = select(OWNED, u.owned === "rented" ? "rented" : "owned", { "aria-label": "Owned or rented" });
   const status = select(STATUS, u.status || "active", { "aria-label": "Status" });
   const notes = h("textarea", { maxlength: "500", rows: "2" });
-  notes.value = clean(u.notes);
+  notes.value = u.notes == null ? "" : String(u.notes);   // line breaks kept: clean() is for one-line fields
   const err = h("div", { class: "warn", hidden: true });
   const save = h("button", { type: "button", class: "btn btn--primary" }, "Save");
   save.addEventListener("click", async () => {

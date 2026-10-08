@@ -351,6 +351,14 @@ test("asset dedupe: the same machine in two rows unions its times; different mac
   ] });
   assert.equal(twoLogs.dehu.days, 5, "08-01 10:00 → 08-06 10:00 once, not 3 + 3");
   assert.equal(twoLogs.dehu.rows.length, 2);
+  // a typed "dh 1" and a scanned DH-001 are one machine: the tag key, not the spelling
+  for (const typedTag of ["DH-1", "dh 1", "DH-001"]) {
+    const spelled = eqDays([
+      { asset: typedTag, type: "dehu", placed: "2026-08-01T10:00", removed: "2026-08-08T10:00" },
+      { asset: "DH-001", type: "dehu", placed: "2026-08-03T10:00", removed: "2026-08-08T10:00" },
+    ]);
+    assert.equal(spelled.dehu.days, 7, typedTag);
+  }
   const moved = eqDays([
     { asset: "D-1", type: "dehu", placed: "2026-08-01T10:00", removed: "2026-08-02T10:00" },
     { asset: "D-1", type: "dehu", placed: "2026-08-05T10:00", removed: "2026-08-06T10:00" },
@@ -1348,8 +1356,8 @@ test("the module is pure: imports only dryingcalc.js, model.js and scans.js, rea
   const src = readFileSync(new URL("../js/reconcile.js", import.meta.url), "utf8");
   const imports = [...src.matchAll(/^\s*import\s[^;]*?from\s+"([^"]+)"/gm)].map((m) => m[1]).sort();
   assert.deepEqual(imports, ["./dryingcalc.js", "./model.js", "./scans.js"]);
-  // scans.js is used for applyScans alone, which reads no clock (scans.test.mjs: no imports, no DOM, no network)
-  assert.deepEqual([...src.matchAll(/import\s*\{([^}]*)\}\s*from\s+"\.\/scans\.js"/g)].map((m) => m[1].trim()), ["applyScans"]);
+  // scans.js is used for applyScans and tagKey alone, which read no clock (scans.test.mjs: no imports, no DOM, no network)
+  assert.deepEqual([...src.matchAll(/import\s*\{([^}]*)\}\s*from\s+"\.\/scans\.js"/g)].map((m) => m[1].trim()), ["applyScans, tagKey"]);
   assert.ok(!/\bimport\s*\(/.test(src), "no dynamic import");
   assert.ok(!/Date\.now\s*\(/.test(src), "no Date.now()");
   assert.ok(!/new Date\(\s*\)/.test(src), "no argument-less new Date()");

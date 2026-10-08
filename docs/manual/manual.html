@@ -318,12 +318,13 @@
   <ul>
     <li><b>Pulling:</b> switch the toggle to <span class="ui">Remove</span> and scan each unit as it comes out. No room is needed. Its Removed time and Hrs fill in on its row.</li>
     <li><b>Moving to another room:</b> stay in <span class="ui">Place</span>, pick the new room and scan the unit. It keeps its one row, so it is never counted twice, and the app adds a Notes line such as <i>moved to Bedroom 2 10/09 14:30</i>.</li>
+    <li><b>Units already typed on the log</b> (a job started before scanning, or a row added by hand): scan them the same way. The scan takes over that unit's typed row, so a Remove fills in its Removed time and a Place in another room adds the moved-to line. It never adds a second row for the same unit.</li>
     <li>The Place / Remove toggle stays where you left it, even the next time the scanner opens. Look at it before the first scan.</li>
   </ul>
   <table class="keep">
     <tr><th style="width:40%">An amber card says</th><th>What it means</th></tr>
     <tr><td><i>AM-014 is already in Kitchen</i></td><td>Scanned twice. Nothing new was logged.</td></tr>
-    <tr><td><i>AM-014 isn't out on this job</i></td><td>Remove mode, but the unit was never placed on this job. Check the toggle and the job.</td></tr>
+    <tr><td><i>AM-014 isn't out on this job</i></td><td>Remove mode, but nothing on this job's drying log shows the unit out, scanned or typed. Check the toggle and the job.</td></tr>
     <tr><td><i>… (still out on another job)</i></td><td>It's logged here anyway. The other job never recorded it coming out; the office sees both and sorts it out.</td></tr>
     <tr><td><i>What is 101?</i></td><td>A tag with no letters that isn't on the fleet list yet. Tap Air mover, Dehumidifier, Air scrubber or Heater once.</td></tr>
     <tr><td><i>That QR code isn't an equipment label.</i></td><td>It read some other QR code, such as a contents box label.</td></tr>
@@ -333,14 +334,14 @@
     <li>Wipe the label, move a little closer or farther, and turn on <span class="ui">🔦</span> if the device shows it.</li>
     <li>Tap <span class="ui">⌨ Type tag</span> at the bottom of the scanner, type the tag (<i>AM-014</i>, or <i>am 14</i>) and tap <span class="ui">Use</span>. It's logged like a scan, with the time and room, and marked as typed.</li>
     <li>If the scanner says <b>Camera didn't start.</b>, it offers <span class="ui">📷 Photo of the label</span> (take a picture of the label and the app reads the QR code from it), <span class="ui">⌨ Type the tag</span> and <span class="ui">Try the camera again</span>. On an iPhone or iPad, check that Settings → Safari → Camera isn't set to Deny.</li>
-    <li>If the scanner won't open at all, add the row by hand with <span class="ui">+ Add equipment</span> as before. A typed row counts everywhere a scanned row does.</li>
+    <li>If the scanner won't open at all, add the row by hand with <span class="ui">+ Add equipment</span> as before. A typed row counts everywhere a scanned row does, and once the scanner works again, scanning that unit takes its typed row over.</li>
   </ul>
   <h3>Undo and fixing a row</h3>
   <ul>
     <li>Scanned the wrong unit or the wrong room? Tap <span class="ui">Undo</span> on the card right away, before the next scan, then scan again.</li>
-    <li>Later, on the drying log, ✕ on a scanned row asks <i>Undo this scan?</i> and undoes the whole row: its placing, any moves and its removal. Then scan the unit again the right way.</li>
+    <li>Later, on the drying log, ✕ on a scanned row asks <i>Undo this scan?</i> and undoes the whole row: its placing, any moves and its removal. Then scan the unit again the right way. On a typed row the scanner took over, ✕ undoes only the scans (the move or the removal) and the row goes back to how it was typed.</li>
     <li>On a scanned row the tag, the placed time and Hrs come from the scan and can't be typed over, and neither can the removed time once the unit was scanned out. The fill handle skips them. Type, Location and Notes stay editable, so you can still fix a room's spelling or write why a unit is still needed after 7 days.</li>
-    <li>A scanned unit that came out without being scanned: type its Removed date and time on its row.</li>
+    <li>A scanned unit that came out without being scanned: type its Removed date and time on its row. The next time that unit is scanned, the typed time goes on the scan record as its removal.</li>
   </ul>
   <h3>Good to know</h3>
   <ul>
@@ -585,8 +586,8 @@
   <h2 class="sec" id="s-aequip">Equipment</h2>
   <p>The <span class="ui">🏷️ Equipment</span> tab shows where every drying unit is, from the jobs' drying logs and the QR labels the crew scans on site (<a href="#s-scan">Scanning equipment in and out</a>). It also keeps the <b>fleet list</b> the labels print from.</p>
   <ul>
-    <li><b>Out now</b> lists every unit placed on a job's drying log and not yet removed, on every job, scanned or typed: tag, type, job (click it to open the job in Field Forms), room, since, days out, and how it was logged (📷 Scanned, 📷 Label photo, ⌨ Tag typed in, or ✎ Typed for a row added by hand). A unit out <b>7+ days</b> is flagged. Units still open on archived jobs are counted under the list, and <span class="ui">Show them</span> lists them.</li>
-    <li><b>⚠ Out on two jobs at once</b> is listed first. A unit can only be in one place, so it came off one of those jobs without a scan or a removal date. Open the job it left and scan it out (Remove), or type its removal date on that drying log.</li>
+    <li><b>Out now</b> lists every unit placed on a job's drying log and not yet removed, on every job, scanned or typed: tag, type, job (click it to open the job in Field Forms), room, since, days out, and how it was logged (📷 Scanned, 📷 Label photo, ⌨ Tag typed in, ✎ Typed for a row added by hand, or ✎ Typed, then scanned for a typed row the scanner took over). A unit out <b>7+ days</b> is flagged. Units still open on archived jobs are counted under the list, and <span class="ui">Show them</span> lists them.</li>
+    <li><b>⚠ Out on two jobs at once</b> is listed first. A unit can only be in one place, so it came off one of those jobs without a scan or a removal date. Open the job it left and type the date and time it really came off in that row's Removed cell. Don't scan it out there: a Remove scan records the time of the scan, which bills the days it spent on the other job.</li>
     <li><b>Fleet list:</b> one row per labelled unit, with its tag, type, make and model, rating, owned or rented, status, where it is now and its last scan. Search it, filter by type and status, and set a unit to Active, Repair or Retired from its row. <span class="ui">Edit</span> changes one unit.</li>
     <li><b>Tags seen, not in the fleet list:</b> tags scanned on a job that aren't on the list yet. <span class="ui">Add</span> puts one on in one tap (the type comes from the letters; pick it for a plain number), or <span class="ui">Add all</span> takes them all. Once a tag is on the list, its labels print and the scanner names it.</li>
   </ul>

@@ -50,6 +50,12 @@ const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const labelOf = (code) => (code && has(TYPE_LABELS, code) ? TYPE_LABELS[code] : "");
 // ids compare by code unit, never localeCompare: the order must not depend on the device's locale
 const byId = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+/* JSON with every object's keys sorted. A copy that came back from the server
+   is jsonb, which stores keys in its own order (length, then bytes); a check
+   that read key order would see a change on every server copy, and sync
+   would push it back forever (the Jul 2026 push loop). */
+const canonStr = (v) => JSON.stringify(v, (k, x) => (isObj(x)
+  ? Object.keys(x).sort(byId).reduce((o, key) => { o[key] = x[key]; return o; }, {}) : x));
 
 /* ---------- tags ---------- */
 // between prefix and digits: nothing, a hyphen, a space, "_" or "." — or the dash a phone keyboard swaps in
@@ -300,7 +306,7 @@ export function applyScans(project) {
   const ps = placements(project);
   const scannedRow = (r) => isObj(r) && !!r.scanId;
   if (!ps.length && !logs.some((l) => arr(l.equipment).some(scannedRow))) return { changed: false };
-  const before = logs.map((l) => JSON.stringify(l.equipment === undefined ? null : l.equipment));
+  const before = logs.map((l) => canonStr(l.equipment === undefined ? null : l.equipment));
 
   // where each placement's row lives; a second copy (another log, or the same
   // log twice after a merge) goes, keeping the one in the placement's own log
@@ -353,7 +359,7 @@ export function applyScans(project) {
     writeRow(row, P);
   }
 
-  const changed = logs.some((l, i) => JSON.stringify(l.equipment === undefined ? null : l.equipment) !== before[i]);
+  const changed = logs.some((l, i) => canonStr(l.equipment === undefined ? null : l.equipment) !== before[i]);
   return { changed };
 }
 
@@ -391,13 +397,72 @@ function unitModel(unit) {
 
 const findPlacement = (project, placeId) => placements(project).find((P) => P.placeId === placeId) || null;
 
+// a type label back to its code ("Air mover" → air_mover)
+function codeOfLabel(label) {
+  const want = clean(label).toLowerCase();
+  return want ? Object.keys(TYPE_LABELS).find((c) => TYPE_LABELS[c].toLowerCase() === want) || null : null;
+}
+
+// the row a placement wrote, in whichever log holds it
+function scannedRow(project, placeId) {
+  for (const log of arr(project.dryingLogs)) {
+    for (const row of arr(isObj(log) ? log.equipment : null)) if (isObj(row) && row.scanId === placeId) return row;
+  }
+  return null;
+}
+
+// a Removed time typed on a scanned row whose remove was never scanned, as epoch ms (NaN if none or unreadable)
+function typedRemovalMs(project, P) {
+  const row = P && !P.removeId ? scannedRow(project, P.placeId) : null;
+  return row && clean(row.removed) ? wallMs(row.removed) : NaN;
+}
+
+// a hand-typed row on this job for this unit that is still out: same tag, placed, not removed
+function openTypedRow(project, key) {
+  for (const log of arr(project.dryingLogs)) {
+    if (!isObj(log)) continue;
+    for (const row of arr(log.equipment)) {
+      if (isObj(row) && !row.scanId && tagKey(row.asset) === key && clean(row.placed) && !clean(row.removed)) return { log, row };
+    }
+  }
+  return null;
+}
+
+// the time a placement last changed (placed or moved), epoch ms
+function lastChange(P) {
+  let t = instant(P.placedAt);
+  for (const m of P.moves) t = Math.max(t, instant(m.at));
+  return t;
+}
+
+/* A stamp for an event that must land AFTER `floorMs` to count: the device's
+   own time, or 1 ms past the floor when that clock is behind the one that
+   placed the unit (events are walked in time order; a remove sorted before
+   its place would be dropped while the crew saw "removed"). */
+function stampAfter(at, floorMs) {
+  const t = Number.isFinite(instant(at)) ? instant(at) : Date.now();
+  return Number.isFinite(floorMs) && t <= floorMs ? new Date(floorMs + 1).toISOString()
+    : Number.isFinite(instant(at)) ? str(at).trim() : new Date(t).toISOString();
+}
+
 /** Decide one read and, when it changes something, record it.
     input: { tag, mode: "place"|"remove", room, how, at, id, by, tech, build,
       unit (fleet row or null), typeCode (a pick for a tag with no prefix),
       elsewhere ({jobId, label, since} or null), logId }.
     outcome: placed | moved | removed (an event was pushed and the rows
     rewritten) · already (out in that room) · not_here (remove of a unit not
-    out) · need_room · need_type · invalid (no tag in the text). */
+    out) · need_room · need_type · invalid (no tag in the text).
+
+    Two kinds of row the scan takes over before deciding:
+    · a scanned row whose Removed was TYPED (the unit came out without a
+      scan): on a Place, that removal goes on the record first as a remove
+      at the typed time (how "log"), so the unit reads as back in; a Remove
+      scan records its own time instead;
+    · a hand-typed row for this unit that is still out (a job started before
+      scanning, or a row added because the scanner wouldn't open): a place at
+      its typed time and room (how "log") makes it the unit's scanned row,
+      so a Remove closes it and a Place elsewhere moves it, never a second
+      row for one machine. A Place in the same room changes nothing. */
 export function recordScan(project, input) {
   const inp = isObj(input) ? input : {};
   const unit = isObj(inp.unit) ? inp.unit : null;
@@ -406,24 +471,62 @@ export function recordScan(project, input) {
   if (!isObj(project) || !parsed) return done("invalid", null, "That isn't a tag (example AM-014)", null);
   // shown as the fleet list has it when the label and the list agree
   const tag = unit && tagKey(unit.tag) === tagKey(parsed) ? clean(unit.tag).toUpperCase() : parsed;
-  const open = openPlacement(project, tag);
+  const key = tagKey(tag);
+  const remove = inp.mode === "remove";
+  const room = clean(inp.room);
+  if (!remove && !room) return done("need_room", null, "Pick the room first", openPlacement(project, tag));
+  let n = 0;
+  const logCtx = (at) => ({ ...inp, at, how: "log", id: typeof inp.id === "string" && inp.id ? `${inp.id}-${++n}` : "" });
 
-  if (inp.mode === "remove") {
+  let open = openPlacement(project, tag);
+  // (a Remove scan of it is the better record: its own time replaces the typed one)
+  const typedOut = remove ? NaN : typedRemovalMs(project, open);
+  if (open && Number.isFinite(typedOut)) {
+    pushEvent(project, newEvent(project, logCtx(stampAfter(new Date(typedOut).toISOString(), lastChange(open))), open.tag, "remove", open.room));
+    applyScans(project);
+    open = openPlacement(project, tag);
+  }
+  if (!open) {
+    const typed = openTypedRow(project, key);
+    const placedMs = typed ? wallMs(typed.row.placed) : NaN;
+    const where = typed ? clean(typed.row.location) : "";
+    if (typed && !remove && roomKey(where) === roomKey(room)) return done("already", null, `${tag} is already in ${where}`, null);
+    if (typed && Number.isFinite(placedMs)) {
+      const ev = newEvent(project, logCtx(new Date(placedMs).toISOString()), tag, "place", where);
+      ev.type = clean(typed.row.type) || labelOf(typeFromTag(tag)) || TYPE_LABELS.other;
+      ev.model = unitModel(unit);
+      ev.logId = str(typed.log.id);
+      typed.row.scanId = ev.id;                          // this row is the placement's: no second row
+      pushEvent(project, ev);
+      applyScans(project);
+      open = openPlacement(project, tag);
+    }
+  }
+
+  if (remove) {
     if (!open) return done("not_here", null, `${tag} isn't out on this job`, null);
-    const ev = pushEvent(project, newEvent(project, inp, tag, "remove", open.room));
+    const ev = pushEvent(project, newEvent(project, { ...inp, at: stampAfter(inp.at, lastChange(open)) }, tag, "remove", open.room));
     applyScans(project);
     return done("removed", ev, `${tag} removed from ${open.room}`, findPlacement(project, open.placeId));
   }
 
-  const room = clean(inp.room);
-  if (!room) return done("need_room", null, "Pick the room first", open);
   if (open) {
     if (roomKey(open.room) === roomKey(room)) return done("already", null, `${tag} is already in ${open.room}`, open);
-    const ev = pushEvent(project, newEvent(project, inp, tag, "move", room));
+    // recorded as a PLACE in the new room: it moves the unit while it is out,
+    // and if another device took it out meanwhile, the same event puts it
+    // back on the log in this room instead of being dropped
+    const ev = newEvent(project, { ...inp, at: stampAfter(inp.at, lastChange(open)) }, tag, "place", room);
+    ev.type = open.type;
+    ev.model = open.model;
+    ev.logId = open.logId;
+    pushEvent(project, ev);
     applyScans(project);
     return done("moved", ev, `${tag} moved ${open.room} → ${room}`, findPlacement(project, open.placeId));
   }
-  const code = [inp.typeCode, unit && unit.type, typeFromTag(tag)].find((c) => typeof c === "string" && has(TYPE_LABELS, c));
+  // a unit back on this job takes the type it had here
+  const before = placements(project).filter((P) => P.tagKey === key).pop();
+  const code = [inp.typeCode, unit && unit.type, typeFromTag(tag), before && codeOfLabel(before.type)]
+    .find((c) => typeof c === "string" && has(TYPE_LABELS, c));
   if (!code) return done("need_type", null, `What kind of unit is ${tag}?`, null);
   const ev = newEvent(project, inp, tag, "place", room);
   ev.type = TYPE_LABELS[code];
@@ -495,7 +598,8 @@ export function openElsewhere(projects, tag, exceptJobId) {
     if (exceptJobId && p.id === exceptJobId) continue;
     const label = jobLabel(p), jobId = str(p.id);
     for (const P of placements(p)) {
-      if (P.tagKey === key && !P.removeId) consider({ jobId, label, since: P.placedAt, room: P.room });
+      // a scanned row whose Removed was typed is in, whatever the events say
+      if (P.tagKey === key && !P.removeId && !Number.isFinite(typedRemovalMs(p, P))) consider({ jobId, label, since: P.placedAt, room: P.room });
     }
     for (const log of arr(p.dryingLogs)) {
       for (const row of arr(isObj(log) ? log.equipment : null)) {
@@ -511,16 +615,44 @@ export function openElsewhere(projects, tag, exceptJobId) {
 /* ---------- printing and picking ---------- */
 /** The printed scan record: one row per live event, in time order —
     { at (Alaska wall time), tag, type, act, room, how, tech, by }. A move or
-    remove shows the type its unit was placed with. */
-export function scanRecord(project) {
-  const typeOf = new Map();
-  return liveScans(project).map((e) => {
+    remove shows the type its unit was placed with; a place that moved a unit
+    already out reads "move". `placeIds` (optional) keeps only the events of
+    those placements: one drying log's own rows. */
+export function scanRecord(project, placeIds) {
+  const typeOf = new Map(), moved = new Set(), owner = new Map();
+  for (const P of placements(project)) {
+    owner.set(P.placeId, P.placeId);
+    for (const m of P.moves) { moved.add(m.id); owner.set(m.id, P.placeId); }
+    if (P.removeId) owner.set(P.removeId, P.placeId);
+  }
+  const only = placeIds ? new Set(placeIds) : null;
+  const out = [];
+  for (const e of liveScans(project)) {
     const key = tagKey(e.tag);
     let type = clean(e.type);
-    if (e.act === "place" && type) typeOf.set(key, type);
+    const act = moved.has(e.id) ? "move" : e.act;
+    if (act === "place" && type) typeOf.set(key, type);
     if (!type) type = typeOf.get(key) || labelOf(typeFromTag(e.tag));
-    return { at: wallTime(e.at), tag: clean(e.tag), type, act: e.act, room: clean(e.room), how: str(e.how), tech: str(e.tech), by: str(e.by) };
-  });
+    if (only && !only.has(owner.get(e.id))) continue;
+    out.push({ at: wallTime(e.at), tag: clean(e.tag), type, act, room: clean(e.room), how: str(e.how), tech: str(e.tech), by: str(e.by) });
+  }
+  return out;
+}
+
+/** What ✕ on a scanned row undoes: the whole placement, except on a typed
+    row the scanner took over (its place is how "log"), where only the scans
+    since (moves, the remove) are undone and the row stays as it was typed;
+    with none, the row goes like any typed row. Returns the void events. */
+export function undoRow(project, placeId, ctx) {
+  const c = isObj(ctx) ? ctx : {};
+  const P = isObj(project) ? findPlacement(project, placeId) : null;
+  if (!P) return [];
+  const later = [...P.moves.map((m) => m.id), P.removeId].filter(Boolean);
+  if (P.how !== "log" || !later.length) return voidPlacement(project, placeId, c);
+  const byEvent = new Map(sortedEvents(project).map((e) => [e.id, e]));
+  const out = later.map((id, i) => pushVoid(project, byEvent.get(id), { ...c, id: i && c.id ? `${c.id}-${i}` : c.id }));
+  applyScans(project);
+  return out;
 }
 
 /** Rooms to offer on the scanner's room sheet, each once (first spelling

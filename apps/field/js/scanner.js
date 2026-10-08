@@ -119,7 +119,7 @@ async function runScanner(project, opts) {
     let mode = lsGet(MODE_KEY) === "remove" ? "remove" : "place";
     let room = ssGet(roomKey(project.id));
     let decoder = null, decoderFailed = false;
-    let stream = null, track = null, live = false, camTry = 0, resumeCamera = false;
+    let stream = null, track = null, live = false, starting = false, camTry = 0, resumeCamera = false;
     let torchOn = false, tickTimer = 0, reading = false, flashTimer = 0;
     let canvas = null, ctx = null;
     let sheetEl = null;
@@ -180,10 +180,11 @@ async function runScanner(project, opts) {
     document.body.appendChild(overlay);
 
     const onHash = () => close();
-    const onPageHide = () => { if (live) resumeCamera = true; stopCamera(); };
+    // a camera still starting (permission, first frame) comes back too
+    const onPageHide = () => { if (live || starting) resumeCamera = true; stopCamera(); };
     const onVisible = () => {
       if (closed) return;
-      if (document.visibilityState === "hidden") { if (live) resumeCamera = true; stopCamera(); }
+      if (document.visibilityState === "hidden") { if (live || starting) resumeCamera = true; stopCamera(); }
       else if (resumeCamera) { resumeCamera = false; startCamera(); }
     };
     const onPageShow = () => { if (!closed && resumeCamera) { resumeCamera = false; startCamera(); } };
@@ -211,7 +212,9 @@ async function runScanner(project, opts) {
     function setMode(m) {
       mode = m === "remove" ? "remove" : "place";
       lsSet(MODE_KEY, mode);
-      lastKey = "";            // a deliberate re-scan after switching must count
+      // a label still in view stays quiet: switching to Remove must not pull
+      // the unit just placed. A deliberate re-scan: out of view and back.
+      lastAt = deps.now();
       paintMode(); readyStatus();
     }
     function paintMode() {
@@ -222,7 +225,7 @@ async function runScanner(project, opts) {
     function setRoom(name) {
       room = name;
       ssSet(roomKey(project.id), room);
-      lastKey = "";
+      lastAt = deps.now();     // as setMode: the unit in view isn't moved by picking a room
       paintRoom();
     }
     function paintRoom() { roomBtn.textContent = "Room: " + (room || "pick") + " ▾"; }
@@ -238,6 +241,11 @@ async function runScanner(project, opts) {
     async function startCamera() {
       if (closed || decoderFailed) return;
       const myTry = ++camTry;
+      starting = true;
+      try { await startCameraTry(myTry); }
+      finally { if (myTry === camTry) starting = false; }
+    }
+    async function startCameraTry(myTry) {
       fallback.hidden = true;
       status(decoder ? "Starting camera…" : "Loading scanner…");
       const md = navigator.mediaDevices;
@@ -278,6 +286,7 @@ async function runScanner(project, opts) {
     }
     function stopCamera() {
       camTry++;                // any start still waiting on a permission prompt is now stale
+      starting = false;
       live = false;
       clearTimeout(tickTimer);
       if (stream) stopStream(stream);
@@ -452,7 +461,8 @@ async function runScanner(project, opts) {
       overlay.appendChild(sheetEl);
       return sheetEl;
     }
-    function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; } }
+    // reads pause under a sheet: a label still in view after Cancel must not reopen it
+    function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; lastAt = deps.now(); } }
 
     function openRoomSheet(then) {
       const err = h("div", { class: "sc-err", hidden: true });

@@ -21,7 +21,14 @@ const serverRows = new Map();
 let onPatch = null;      // test hook: runs while a push PATCH is "in flight"
 let clock = 1;
 const nowIso = () => new Date(1700000000000 + clock++ * 1000).toISOString();
-const resp = (status, body) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
+/* Every body comes back the way Postgres hands out jsonb: object keys sorted
+   by length, then bytes — never in the order the client wrote them. A
+   client check that reads key order (rather than content) sees a change on
+   every server copy and re-pushes forever, the Jul 2026 loop; this keeps
+   every case below honest about that. */
+const jsonbOrder = (v) => Array.isArray(v) ? v.map(jsonbOrder) : v && typeof v === "object"
+  ? Object.keys(v).sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0)).reduce((o, k) => { o[k] = jsonbOrder(v[k]); return o; }, {}) : v;
+const resp = (status, body) => ({ ok: status < 400, status, json: async () => jsonbOrder(body), text: async () => JSON.stringify(jsonbOrder(body)) });
 
 const mediaStore = new Map();   // field-media bucket: hash -> text
 let mediaGets = 0;              // GETs that actually went to the "network"
@@ -417,6 +424,13 @@ const { tombstoneItems } = await import("../js/merge.js");
     const revUp = Number(up.rev);
     await syncNow(); await syncNow();
     ok(Number(serverRows.get("pS").data.rev) === revUp, "…once: no further pushes once the server holds it");
+    // another tab wrote the same content; this one re-pushes on a stale rev and gets 'current' back,
+    // in jsonb key order: adopted CLEAN, nothing owed (a key-order "change" here was an endless loop)
+    const srow = serverRows.get("pS");
+    srow.data = { ...srow.data, rev: revUp + 1 };
+    await Store.put(await Store.get("pS"), { quiet: true });
+    await syncNow(); await syncNow(); await syncNow();
+    ok(Number(serverRows.get("pS").data.rev) === revUp + 1, "a 'current' answer holding scanned rows is adopted clean: no push owed");
   }
 
   // ---------- pull merge: dirty local + newer remote = union, not replace ----------

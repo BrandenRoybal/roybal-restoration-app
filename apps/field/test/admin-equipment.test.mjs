@@ -170,6 +170,9 @@ await test("Out now: every unit placed and not removed, scanned or typed, on eve
   const flags = view.querySelector(".eq-flags");
   assert.match(flags.textContent, /1 unit out on two jobs at once/);
   assert.match(flags.textContent, /AM-014 — Pollen \(Bedroom, since .+\) · Smith \(Living room, since .+\)/);
+  // the fix is the real removal time, typed: a Remove scan now would bill the other job's days here
+  assert.match(flags.textContent, /type the date and time it really came off in that row's Removed cell/);
+  assert.doesNotMatch(flags.textContent, /scan it out \(Remove\)/);
   noJunk(view);
 });
 
@@ -193,6 +196,8 @@ await test("the scans are written into a copy: the jobs on this device are untou
 
 await test("the fleet list: active units by default, where each is now and its last scan; filters and search", async () => {
   assert.deepEqual(fleetTags(), ["AM-014", "DH-002"]);
+  assert.deepEqual(JSON.parse(localStorage.getItem("roybal-fleet")).map((u) => u.tag).sort(), ["AM-003", "AM-014", "DH-002", "HT-001"],
+    "what this device read is kept for the next time it is offline");
   const fleet = cardOf("Fleet list");
   assert.equal(fleet.querySelector(".eq-head span").textContent, "4 units · 2 active");
   const [am, dh] = bodyRows(fleet);
@@ -315,6 +320,15 @@ await test("Edit: a tag already on the list says so and keeps the form; a good s
   assert.deepEqual(sent, { id: "u1", tag: "AM-014", type: "air_mover", make: "Dri-Eaz", model: "Velo Pro",
     rating: "1/3 hp", owned: "owned", status: "active", notes: "", serial: "S-1" });
   assert.equal(bodyRows(cardOf("Fleet list")).find((r) => r.children[1].textContent === "AM-014").children[4].textContent, "1/3 hp");
+  // notes keep their line breaks: saved as typed, and shown that way on the next edit
+  btn(bodyRows(cardOf("Fleet list")).find((r) => r.children[1].textContent === "AM-014"), "Edit").click();
+  type(dialog().querySelector("textarea"), "Bearing noisy\nSent to shop 9/30");
+  btn(dialog(), "Save").click();
+  await settle(80);
+  assert.equal(rpc("equipment_unit_save").pop().body.p_unit.notes, "Bearing noisy\nSent to shop 9/30");
+  btn(bodyRows(cardOf("Fleet list")).find((r) => r.children[1].textContent === "AM-014"), "Edit").click();
+  assert.equal(dialog().querySelector("textarea").value, "Bearing noisy\nSent to shop 9/30");
+  btn(dialog(), "Cancel").click();
   void make; void model;
 });
 

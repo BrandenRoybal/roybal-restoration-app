@@ -193,7 +193,7 @@ function renderHelp() {
     sec("🏷️ Equipment — where every unit is",
       p(h("strong", {}, "Out now"), " lists every unit placed on a job's drying log and not yet removed, on every job, whether the crew scanned its QR label or typed the row: tag, type, job, room, since when and for how many days, and how it was logged. A unit out ",
         h("strong", {}, "7+ days"), " is flagged, and a unit out on ", h("strong", {}, "two jobs at once"),
-        " is listed first: it was pulled from one of them without a scan or a removal date, so open the job it left and scan it out (Remove), or type its removal date. Units still open on archived jobs are counted under the list and shown on request."),
+        " is listed first: it was pulled from one of them without a scan or a removal date, so open the job it left and type the date and time it really came off in its Removed cell (a Remove scan now would record today). Units still open on archived jobs are counted under the list and shown on request."),
       p("The ", h("strong", {}, "fleet list"), " is one row per labelled machine: tag, type, make and model, rating, owned or rented, status (Active, Repair, Retired), where it is now and its last scan. ",
         h("strong", {}, "+ Add units"), " adds a whole run at once: pick the type (the prefix follows: AM air mover, DH dehumidifier, AF air scrubber, HT heater; blank for plain numbers), the first and last number and the digits, and AM-001 to AM-040 go on in one go; tags already on the list are skipped. ",
         h("strong", {}, "Edit"), " changes one unit. The office or a crew lead keeps the list. ",

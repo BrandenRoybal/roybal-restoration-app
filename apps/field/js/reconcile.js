@@ -24,7 +24,7 @@
    ============================================================ */
 import { equipClassOf } from "./dryingcalc.js";
 import { jobType, lossTypesOf } from "./model.js";
-import { applyScans } from "./scans.js";
+import { applyScans, tagKey } from "./scans.js";
 
 export const DETECTOR = "billing.reconcile@0.1";
 
@@ -194,17 +194,17 @@ function equipmentFacts(job, today = "") {
         start = placed.ms; end = finish.ms; hours = wallHours(start, end); basis = "placed to dry-out finish";
       } else {
         // still running (no removed, no dry-out finish) or stamps that cannot be measured
-        open.push({ cls, id, asset: asset.toLowerCase(), name, startDate: placed && !filled(e.removed) ? placed.date : "" });
+        open.push({ cls, id, asset: tagKey(asset), name, startDate: placed && !filled(e.removed) ? placed.date : "" });
         return;
       }
       if (end != null && end > cutoff) {
         // an end stamp ahead of today (a planned pickup, a date slip): still running, not measured
-        open.push({ cls, id, asset: asset.toLowerCase(), name, startDate: placed ? placed.date : "" });
+        open.push({ cls, id, asset: tagKey(asset), name, startDate: placed ? placed.date : "" });
         return;
       }
       const startDate = start != null ? dateOfMs(start) : "", endDate = end != null ? dateOfMs(end) : "";
       rows.push({
-        cls, id, logId, asset: asset.toLowerCase(), start, end, hours, basis, startDate, endDate,
+        cls, id, logId, asset: tagKey(asset), start, end, hours, basis, startDate, endDate,
         ref: { kind: "equipment_row", id, label: clip(`${name}: ${span(startDate, endDate) || basis}, ${plural(unitDays(hours), "day")}`, 120), ...(startDate ? { date: startDate } : {}) },
       });
     });
@@ -217,7 +217,7 @@ function equipmentFacts(job, today = "") {
      row with hours but no placed time counts only where it is larger than the
      tag's other rows. */
   const days = { dehu: 0, airMover: 0, scrubber: 0, heater: 0 };
-  const byAsset = new Map();   // cls|asset -> its timed rows and its largest untimed (manual hours, no placed) figure
+  const byAsset = new Map();   // cls|tag key (AM-14 = AM-014 = am 14) -> its timed rows and its largest untimed (manual hours, no placed) figure
   for (const r of rows) {
     if (!r.asset) { days[r.cls] += unitDays(r.hours); continue; }
     const k = r.cls + "|" + r.asset;

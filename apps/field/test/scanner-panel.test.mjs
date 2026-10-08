@@ -241,7 +241,7 @@ await test("Remove mode pulls a unit (sticky), a unit scanned in another room mo
   assert.equal(sessionStorage.getItem("roybal-scan-room:job-a"), "Hall");
   await typeTag("AM-020");
   const mv = p.equipmentScans[p.equipmentScans.length - 1];
-  assert.equal(mv.act, "move"); assert.equal(mv.room, "Hall");
+  assert.equal(mv.act, "place", "a move is a place in the new room"); assert.equal(mv.room, "Hall");
   const am = p.dryingLogs[0].equipment.filter((r) => r.asset === "AM-020");
   assert.equal(am.length, 1, "a move keeps its one row");
   assert.match(am[0].notes, /moved to Hall/);
@@ -538,6 +538,77 @@ await test("a double tap opens one overlay; a hash change from elsewhere closes 
   assert.equal(ov(), null);
   assert.ok(streams[streams.length - 1].track.stopped);
   hashUntouched();
+});
+
+await test("a label still in view: switching to Remove or picking a room logs nothing, and Cancel on a sheet stays shut", async () => {
+  cameraPlays = true;
+  setCamera(async () => fakeStream());
+  roomPref("job-a", "Kitchen");
+  window.localStorage.removeItem("roybal-scan-mode");
+  const p = job();
+  const done = openScanner(p, { onChange: () => {} });
+  await until(() => ov() && /Point at a label/.test(ov().querySelector(".sc-status").textContent));
+  frames.push("RC:AM-014");
+  await until(() => live(p).length === 1);
+  nowMs += 500;
+  tap(btn("Remove"));                              // pulling the next units; AM-014 is still in frame
+  frames.push("RC:AM-014", "RC:AM-014");
+  await until(() => frames.length === 0); await settle(20);
+  assert.equal(live(p).length, 1, "the unit just placed is not pulled");
+  tap(btn("Place"));
+  tap(ov().querySelector(".sc-room")); tap(btn("Hall", sheet()));
+  frames.push("RC:AM-014");
+  await until(() => frames.length === 0); await settle(20);
+  assert.equal(live(p).length, 1, "picking a room does not move the unit in view");
+  nowMs += 3500;                                   // out of view and back: a deliberate scan counts
+  frames.push("RC:AM-014");
+  await until(() => live(p).length === 2);
+  assert.match(cardText(), /moved Kitchen → Hall/);
+
+  nowMs += 3500;
+  frames.push("RC:101");
+  await until(() => sheet() && /What is 101\?/.test(sheet().textContent));
+  nowMs += 4000;                                   // the crew thinks it over, then cancels
+  tap(btn("Cancel", sheet()));
+  frames.push("RC:101", "RC:101");
+  await until(() => frames.length === 0); await settle(20);
+  assert.equal(sheet(), null, "Cancel stays shut while the label is in view");
+  tap(btn("Done"));
+  await done;
+  hashUntouched();
+});
+
+await test("hidden while the camera is still starting: back in the app, it starts again", async () => {
+  cameraPlays = true;
+  let release = null;
+  setCamera(() => new Promise((r) => { release = r; }));
+  roomPref("job-a", "Kitchen");
+  const p = job();
+  const done = openScanner(p, { onChange: () => {} });
+  await until(() => typeof release === "function");
+  const vis = (v) => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => v });
+  vis("hidden");
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  const stale = fakeStream();
+  release(stale);                                  // the permission answer arrives after the app was left
+  await settle(10);
+  assert.ok(stale.track.stopped, "the stale start's camera is released");
+  const calls = gumCalls;
+  setCamera(async () => fakeStream());
+  vis("visible");
+  document.dispatchEvent(new window.Event("visibilitychange"));
+  await until(() => /Point at a label/.test(ov().querySelector(".sc-status").textContent));
+  assert.equal(gumCalls, calls + 1, "the camera was asked for again");
+  tap(btn("Done"));
+  await done;
+  hashUntouched();
+});
+
+await test("an app update never reloads the page under an open scanner, and saves the last scan before any reload", () => {
+  const src = readFileSync(new URL("../js/app.js", import.meta.url), "utf8");
+  const sw = src.slice(src.indexOf('if ("serviceWorker" in navigator)'));
+  assert.match(sw, /const typing = \(\) => \{[\s\S]*?document\.querySelector\("\.sc"\)[\s\S]*?\};/, "the scanner overlay counts as typing");
+  assert.match(sw, /const doReload = \(\) => \{[\s\S]*?flushPending[\s\S]*?location\.reload\(\)/, "the pending autosave goes first");
 });
 
 /* ---------- 12. the real vendored decoder ---------- */

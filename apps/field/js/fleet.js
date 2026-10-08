@@ -38,6 +38,11 @@ export function fleetReady() {
   try { return localStorage.getItem(READY_KEY) === "1"; } catch { return false; }
 }
 
+/** Keep a list this device just read, for the next time it is offline. */
+export function saveFleet(units) {
+  try { localStorage.setItem(FLEET_KEY, JSON.stringify(Array.isArray(units) ? units : [])); } catch {}
+}
+
 function setReady(on) {
   try { if (on) localStorage.setItem(READY_KEY, "1"); else localStorage.removeItem(READY_KEY); } catch {}
 }
@@ -64,7 +69,7 @@ export async function refreshFleet() {
     if (res.ok) {
       const rows = await res.json();
       const units = Array.isArray(rows) ? rows.filter((u) => u && typeof u === "object" && clean(u.tag)) : [];
-      try { localStorage.setItem(FLEET_KEY, JSON.stringify(units)); } catch {}
+      saveFleet(units);
       setReady(true);
       return { ok: true, units, missing: false };
     }

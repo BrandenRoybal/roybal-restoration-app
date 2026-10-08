@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   TAG_PAD, TAG_PREFIXES, TYPE_LABELS, parseTag, tagKey, typeFromTag, liveScans, placements, openPlacement,
-  wallTime, applyScans, recordScan, voidEvent, voidPlacement, openElsewhere, scanRecord, roomSuggestions,
+  wallTime, applyScans, recordScan, voidEvent, voidPlacement, openElsewhere, scanRecord, roomSuggestions, undoRow,
 } from "../js/scans.js";
 import { equipClassOf, deployedCounts } from "../js/dryingcalc.js";
 import { mergeProjects, ID_COLLECTIONS, tombstoneItems } from "../js/merge.js";
@@ -322,7 +322,7 @@ test("moves keep the row: a 'moved to' line per move, user notes untouched, an u
   row.notes = "behind the fridge";
   const m = recordScan(p, place("AM-014", "Bedroom", "s2", 270));    // 14:30
   assert.equal(m.outcome, "moved");
-  assert.equal(m.event.act, "move");
+  assert.equal(m.event.act, "place", "a move is a place in the new room (it survives another device's remove)");
   assert.equal(m.message, "AM-014 moved Kitchen → Bedroom");
   assert.equal(rows(p).length, 1, "still one row");
   assert.equal(row.location, "Kitchen");
@@ -686,6 +686,101 @@ test("roomSuggestions: scanned rooms, row locations, the room list, Magicplan ro
   assert.deepEqual(roomSuggestions(p), ["Kitchen", "Bath", "Laundry", "Hall closet", "Living Room", "Primary Bedroom", "Basement"]);
   assert.deepEqual(roomSuggestions(job({ dryingLogs: [] })), []);
   assert.deepEqual(roomSuggestions(null), []);
+});
+
+/* ---------- review fixes: key order, clock skew, offline moves, typed rows ---------- */
+// Postgres jsonb keeps object keys sorted by length, then bytes: what a copy looks like after the server
+const jsonbOrder = (v) => Array.isArray(v) ? v.map(jsonbOrder) : v && typeof v === "object"
+  ? Object.keys(v).sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0)).reduce((o, k) => { o[k] = jsonbOrder(v[k]); return o; }, {}) : v;
+
+test("a copy back from the server (jsonb key order) is not a change: no push owed, no loop", () => {
+  const p = job();
+  recordScan(p, place("AM-014", "Kitchen", "s1", 0));
+  recordScan(p, place("AM-014", "Bath", "s2", 30));
+  recordScan(p, remove("AM-014", "s3", 60));
+  const back = jsonbOrder(clone(p));
+  assert.notEqual(JSON.stringify(back.dryingLogs), JSON.stringify(p.dryingLogs), "the key order really differs");
+  assert.equal(applyScans(back).changed, false);
+  assert.equal(applyScans(back).changed, false);
+});
+
+test("a remove or move from a device whose clock is behind still lands after the place", () => {
+  const p = job();
+  recordScan(p, place("AM-014", "Kitchen", "s1", 60));
+  const r = recordScan(p, remove("AM-014", "s2", 59));             // the second phone runs a minute slow
+  assert.equal(r.outcome, "removed");
+  assert.equal(openPlacement(p, "AM-014"), null, "the unit really is out");
+  assert.ok(Date.parse(r.event.at) > Date.parse(at(60)), r.event.at);
+  assert.equal(rows(p)[0].removed, "2026-10-08T11:00");
+  const q = job();
+  recordScan(q, place("AM-014", "Kitchen", "s1", 60));
+  const m = recordScan(q, place("AM-014", "Bath", "s2", 30));
+  assert.equal(m.outcome, "moved");
+  assert.equal(openPlacement(q, "AM-014").room, "Bath");
+});
+
+test("a move made offline after another device's remove puts the unit back on the log in the new room", () => {
+  const base = job();
+  recordScan(base, place("AM-020", "Kitchen", "s1", 0));
+  const a = clone(base), b = clone(base);
+  recordScan(a, remove("AM-020", "s2", 60));                      // online phone pulls it
+  const mv = recordScan(b, place("AM-020", "Bath", "s3", 90));   // offline phone still shows it out: moves it
+  assert.equal(mv.outcome, "moved");
+  b.updatedAt = "2026-10-08T20:00:00.000Z";
+  const { merged } = mergeProjects(a, b);
+  applyScans(merged);
+  const out = scanned(merged).map((r) => [r.asset, r.location, r.placed, r.removed]);
+  assert.deepEqual(out, [["AM-020", "Kitchen", "2026-10-08T10:00", "2026-10-08T11:00"], ["AM-020", "Bath", "2026-10-08T11:30", ""]]);
+  assert.equal(openPlacement(merged, "AM-020").room, "Bath");
+});
+
+test("a Removed typed on a scanned row closes it: a later scan logs the typed removal, then decides", () => {
+  const p = job();
+  recordScan(p, place("AM-014", "Kitchen", "s1", 0));
+  rows(p)[0].removed = "2026-10-08T13:00";                       // pulled without a scan, time typed
+  applyScans(p);
+  assert.equal(openElsewhere([{ ...p, id: "job-1" }], "AM-014", "job-2"), null, "not 'still listed' anywhere");
+  const back = recordScan(p, place("AM-014", "Kitchen", "s2", 24 * 60));
+  assert.equal(back.outcome, "placed", "back on the job: a new placement, not 'already'");
+  const evs = p.equipmentScans.map((e) => [e.act, e.how, e.at]);
+  assert.deepEqual(evs.slice(1, 2), [["remove", "log", "2026-10-08T21:00:00.000Z"]]);
+  assert.deepEqual(scanned(p).map((r) => [r.placed, r.removed]), [["2026-10-08T10:00", "2026-10-08T13:00"], ["2026-10-09T10:00", ""]]);
+});
+
+test("a hand-typed open row is taken over by the scan: Remove closes it, Place elsewhere moves it, never a second row", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "am 14", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }])] });
+  const p = typed();
+  const same = recordScan(p, place("AM-014", "kitchen", "s1", 0));
+  assert.equal(same.outcome, "already");
+  assert.deepEqual(p.equipmentScans, [], "same room: nothing recorded");
+  const r = recordScan(p, remove("AM-014", "s2", 0));
+  assert.equal(r.outcome, "removed");
+  assert.equal(rows(p).length, 1);
+  assert.deepEqual([rows(p)[0].asset, rows(p)[0].placed, rows(p)[0].removed, rows(p)[0].hours], ["AM-014", "2026-10-05T09:00", "2026-10-08T10:00", 73]);
+  assert.deepEqual(p.equipmentScans.map((e) => [e.act, e.how, e.id]), [["place", "log", "s2-1"], ["remove", "camera", "s2"]]);
+  // ✕ on the row undoes the scanned remove only: the row goes back to how it was typed
+  undoRow(p, rows(p)[0].scanId, ctx("v1", 5));
+  assert.deepEqual([rows(p).length, rows(p)[0].removed, rows(p)[0].placed], [1, "", "2026-10-05T09:00"]);
+  undoRow(p, rows(p)[0].scanId, ctx("v2", 6));
+  assert.equal(rows(p).length, 0, "a second ✕ takes the row off, as on any typed row");
+
+  const q = typed();
+  const mv = recordScan(q, place("AM-014", "Bath", "s1", 0));
+  assert.equal(mv.outcome, "moved");
+  assert.equal(rows(q).length, 1, "one row for one machine");
+  assert.deepEqual(deployedCounts(rows(q)), deployedCounts([{ type: "Air mover" }]));
+  assert.match(rows(q)[0].notes, /moved to Bath 10\/08 10:00/);
+  assert.equal(recordScan(typed(), remove("AM-015", "s9", 0)).outcome, "not_here", "another unit is still not here");
+});
+
+test("scanRecord reads a place that moved a unit as a move, and keeps one log's units when asked", () => {
+  const p = job({ dryingLogs: [log("A", []), log("B", [])] });
+  recordScan(p, place("AM-001", "Kitchen", "s1", 0, { logId: "A" }));
+  recordScan(p, place("AM-002", "Bath", "s2", 1, { logId: "B" }));
+  recordScan(p, place("AM-001", "Hall", "s3", 2));
+  assert.deepEqual(scanRecord(p).map((r) => [r.tag, r.act]), [["AM-001", "place"], ["AM-002", "place"], ["AM-001", "move"]]);
+  const onA = p.dryingLogs[0].equipment.map((r) => r.scanId);
+  assert.deepEqual(scanRecord(p, onA).map((r) => [r.tag, r.act, r.room]), [["AM-001", "place", "Kitchen"], ["AM-001", "move", "Hall"]]);
 });
 
 /* ---------- the module's own rules ---------- */

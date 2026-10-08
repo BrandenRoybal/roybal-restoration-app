@@ -180,6 +180,8 @@ await test("the fill handle never writes into a scanned row's tag, times or hour
   eq[0].removed = "2026-10-08T09:00";
   dragFill(render(p), 0, 4);
   assert.equal(eq[1].removed, "2026-10-08T09:00", "a typed removal is allowed while no scan removed it");
+  assert.equal(eq[1].hours, 71, "and its hours are worked out on the spot (10/05 10:00 → 10/08 09:00)");
+  assert.equal(inputsOf(rowsOf(view)[1])[3].value, "71", "on screen too, so a print right now has them");
   // ...but not once a scan removed it
   recordScan(p, { tag: "AM-015", mode: "remove", ...ctx("e3", T2) });
   eq[0].removed = "2026-10-09T09:00";
@@ -281,6 +283,16 @@ await test("the printed sheet carries the S legend, the scan record and its foot
     "Times come from the scanning device's clock at the moment the label was read. Each scan is also logged on Roybal's server when the device syncs, and that log can't be edited.");
   // the move is noted on the kept row, the SOP way
   assert.match(p.dryingLogs[0].equipment[1].notes, /^moved to Bedroom 10\/06 09:30$/m);
+});
+
+await test("two drying logs: each prints the scan record of its own units only", () => {
+  const p = job();
+  const b = newDryingLog(); b.id = "log2"; b.equipment = [];
+  p.dryingLogs.push(b);
+  recordScan(p, { tag: "DH-003", mode: "place", room: "Basement", logId: "log2", ...ctx("e9", T1) });
+  const tags = (d) => [...render(p, d).querySelectorAll(".eqscan-rec tbody tr")].map((tr) => tr.children[1].textContent);
+  assert.deepEqual(tags(p.dryingLogs[0]), ["AM-014", "AM-015"]);
+  assert.deepEqual(tags(b), ["DH-003"]);
 });
 
 await test("a log with no scanned rows prints nothing extra", () => {
