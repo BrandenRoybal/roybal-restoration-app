@@ -51,7 +51,7 @@ const TYPE_ORDER = ["air_mover", "dehumidifier", "dehu_lgr", "dehu_desiccant", "
 const STATUS = [["active", "Active"], ["repair", "Repair"], ["retired", "Retired"]];
 const OWNED = [["owned", "Owned"], ["rented", "Rented"]];
 const ACT_WORD = { place: "placed", move: "moved", remove: "removed" };
-const HOW_WORD = { camera: "📷 Scanned", photo: "📷 Label photo", typed: "⌨ Tag typed in", log: "✎ Typed, then scanned" };   // log: a typed row the scanner took over
+const HOW_WORD = { camera: "📷 Scanned", photo: "📷 Label photo", typed: "⌨ Tag typed in" };
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);   // not Object.hasOwn: Safari < 15.4
@@ -136,7 +136,7 @@ export function equipmentIndex(projects) {
       }
     }
     for (const P of ps) {
-      if (P.removeId || onLog.has(P.placeId)) continue;
+      if (P.removeId || P.endedTyped || onLog.has(P.placeId)) continue;
       const placed = wallTime(P.placedAt);
       out.push({ ...base, key: P.tagKey, tag: P.tag, type: P.type, room: P.room, placed, days: daysSince(placed),
         scanned: true, how: P.how, tech: P.tech, by: P.by, noLog: true });
@@ -145,7 +145,9 @@ export function equipmentIndex(projects) {
     try { live = liveScans(copy); } catch { /* as above */ }
     // a place that moved a unit already out reads as a move (scans.js scanRecord says the same)
     const moved = new Set(ps.flatMap((P) => P.moves.map((m) => m.id)));
-    for (const e of live) scans.push({ key: tagKey(e.tag), tag: clean(e.tag), type: clean(e.type), act: moved.has(e.id) ? "move" : e.act, at: e.at, jobId, job });
+    const starts = new Set(ps.map((P) => P.placeId));
+    const actOf = (e) => (moved.has(e.id) || (e.act === "place" && e.from && !starts.has(e.id)) ? "move" : e.act);
+    for (const e of live) scans.push({ key: tagKey(e.tag), tag: clean(e.tag), type: clean(e.type), act: actOf(e), at: e.at, jobId, job });
   }
   return { out, scans };
 }

@@ -23,7 +23,7 @@ import { h, toast, uid, fileToDataURL, fmtDate, stripCtrl } from "./core.js";
 import { newDryingLog, newPhoto, author } from "./model.js";
 import { BUILD } from "./config.js";
 import { hasTech, pickTech, techName } from "./tech.js";
-import { parseTag, tagKey, wallTime, TYPE_LABELS, recordScan, voidEvent, openElsewhere, roomSuggestions } from "./scans.js";
+import { parseTag, tagKey, wallTime, TYPE_LABELS, recordScan, voidEvent, undoTyped, openElsewhere, roomSuggestions } from "./scans.js";
 import { loadFleet, refreshFleet, unitFor } from "./fleet.js";
 
 const MODE_KEY = "roybal-scan-mode";                  // localStorage: Place | Remove survives app restarts
@@ -123,7 +123,7 @@ async function runScanner(project, opts) {
     let torchOn = false, tickTimer = 0, reading = false, flashTimer = 0;
     let canvas = null, ctx = null;
     let sheetEl = null;
-    let lastKey = "", lastAt = 0;
+    let lastKey = "", lastAt = 0, sheetGuard = false;
     let audio = null;
     const counts = { placed: 0, moved: 0, removed: 0 };
     const roomTags = {};       // room → tags placed / moved in / removed this session (photo caption)
@@ -214,7 +214,7 @@ async function runScanner(project, opts) {
       lsSet(MODE_KEY, mode);
       // a label still in view stays quiet: switching to Remove must not pull
       // the unit just placed. A deliberate re-scan: out of view and back.
-      lastAt = deps.now();
+      holdGuard();
       paintMode(); readyStatus();
     }
     function paintMode() {
@@ -225,7 +225,7 @@ async function runScanner(project, opts) {
     function setRoom(name) {
       room = name;
       ssSet(roomKey(project.id), room);
-      lastAt = deps.now();     // as setMode: the unit in view isn't moved by picking a room
+      holdGuard();             // as setMode: the unit in view isn't moved by picking a room
       paintRoom();
     }
     function paintRoom() { roomBtn.textContent = "Room: " + (room || "pick") + " ▾"; }
@@ -347,6 +347,10 @@ async function runScanner(project, opts) {
     }
     // a tag just handled (any way) is ignored by the camera while it stays in view
     function quiet(tag) { lastKey = tagKey(tag); lastAt = deps.now(); }
+    // keep a label that is still in view quiet a while longer; one that left
+    // view long enough ago counts again (an expired guard is never re-armed)
+    function guardLive() { return deps.now() - lastAt < SAME_TAG_MS; }
+    function holdGuard() { if (guardLive()) lastAt = deps.now(); }
     function onCameraText(text) {
       const tag = parseTag(text);
       const key = tag ? tagKey(tag) : "raw:" + text;
@@ -395,7 +399,8 @@ async function runScanner(project, opts) {
         case "placed": case "moved": case "removed": {
           counts[r.outcome]++;
           const where = (r.event && r.event.room) || (r.outcome === "removed" ? "" : room);
-          if (where) (roomTags[where] = roomTags[where] || []).push(r.event ? r.event.tag : tag);
+          const shown = r.event ? r.event.tag : tag;
+          if (where) (roomTags[where] = roomTags[where] || []).push(shown);
           paintCount();
           // amber, not a block: the office sorts out a unit listed on two jobs
           const since = away && away.since ? sinceText(away.since) : "";
@@ -403,24 +408,25 @@ async function runScanner(project, opts) {
           const awayNote = !away || r.outcome !== "placed" ? ""
             : (named ? "Listed there" : `Still listed on ${away.label || "another job"}`) +
               (since ? " since " + since : "") + " — the office will see both.";
-          feedback(awayNote ? "warn" : "ok", r.message || tag, awayNote, r, where);
+          feedback(awayNote ? "warn" : "ok", r.message || tag, awayNote, r, where, shown);
           changed();
           return;
         }
         default: return feedback("warn", r.message || tag, "");
       }
     }
-    function undo(r, where) {
-      if (!r || !r.event) return;
-      const v = voidEvent(project, r.event.id, { id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD });
-      if (!v) return;
+    function undo(r, where, tag) {
+      if (!r) return;
+      if (r.event) {
+        if (!voidEvent(project, r.event.id, { id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD })) return;
+      } else if (!undoTyped(r)) return;     // a typed row the scan filled in goes back as it was
       counts[r.outcome] = Math.max(0, counts[r.outcome] - 1);
       const list = where && roomTags[where];
-      const i = list ? list.lastIndexOf(r.event.tag) : -1;
+      const i = list ? list.lastIndexOf(tag) : -1;
       if (i >= 0) list.splice(i, 1);
       paintCount();
-      quiet(r.event.tag);      // the label is likely still in view: don't log it straight back
-      showCard("undone", "Undone: " + (r.message || r.event.tag), "", null);
+      quiet(tag);              // the label is likely still in view: don't log it straight back
+      showCard("undone", "Undone: " + (r.message || tag), "", null);
       changed();
     }
     function changed() {
@@ -428,13 +434,13 @@ async function runScanner(project, opts) {
     }
 
     /* ---------- feedback ---------- */
-    function feedback(tone, msg, sub, r, where) {
+    function feedback(tone, msg, sub, r, where, tag) {
       clearTimeout(flashTimer);
       flash.className = "sc-flash sc-flash--" + (tone === "ok" ? "ok" : "warn");
       flashTimer = setTimeout(() => { flash.className = "sc-flash"; }, 260);
       beep(tone === "ok" ? 1320 : 440);
       try { navigator.vibrate && navigator.vibrate(60); } catch {}
-      showCard(tone, msg, sub, r ? () => undo(r, where) : null);
+      showCard(tone, msg, sub, r ? () => undo(r, where, tag) : null);
     }
     function beep(freq) {
       if (!audio) return;
@@ -457,12 +463,13 @@ async function runScanner(project, opts) {
     /* ---------- sheets (room, type, typed tag) ---------- */
     function openSheet(...children) {
       closeSheet();
+      sheetGuard = guardLive();     // the label that opened it (if any) is likely still in view
       sheetEl = h("div", { class: "sc-sheet", role: "dialog" }, ...children);
       overlay.appendChild(sheetEl);
       return sheetEl;
     }
     // reads pause under a sheet: a label still in view after Cancel must not reopen it
-    function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; lastAt = deps.now(); } }
+    function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; if (sheetGuard) lastAt = deps.now(); } }
 
     function openRoomSheet(then) {
       const err = h("div", { class: "sc-err", hidden: true });

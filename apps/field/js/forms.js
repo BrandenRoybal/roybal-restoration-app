@@ -38,7 +38,7 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
-import { applyScans, undoRow, scanRecord } from "./scans.js";
+import { applyScans, voidPlacement, scanRecord } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
@@ -673,7 +673,7 @@ function wallShort(w) {
   return m ? `${m[2]}/${m[3]}/${m[1]} ${m[4]}` : String(w || "");
 }
 const SCAN_ACT = { place: "Placed", move: "Moved", remove: "Removed" };
-const SCAN_HOW = { camera: "Camera", photo: "Label photo", typed: "Typed tag", log: "From the log" };
+const SCAN_HOW = { camera: "Camera", photo: "Label photo", typed: "Typed tag" };
 const scanUndoCtx = () => ({ id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD });
 
 export function dryingLog(project, d) {
@@ -823,12 +823,8 @@ export function dryingLog(project, d) {
         // a scan is never deleted: a void event cancels it (scans.js), on every device
         // (the printed scan record lists the scans that still count; the void
         // and the scan it cancels both stay in the server's audit copy)
-        const sc = row.scan || {};
-        const keepRow = sc.how === "log" && !!(sc.removeId || (sc.moves || []).length);   // a typed row the scanner took over
-        if (!confirm(keepRow
-          ? "Undo the scans on this row? It goes back to how it was typed; the scans stay in the server's scan log, marked undone."
-          : "Undo this scan? The row comes off the drying log; the scan stays in the server's scan log, marked undone.")) return;
-        if (!undoRow(project, row.scanId, scanUndoCtx()).length) {
+        if (!confirm("Undo this scan? The row comes off the drying log; the scan stays in the server's scan log, marked undone.")) return;
+        if (!voidPlacement(project, row.scanId, scanUndoCtx()).length) {
           applyScans(project);
           // a row whose scan this device doesn't hold (applyScans leaves those): ✕ takes it off like a typed row
           const at = d.equipment.indexOf(row);

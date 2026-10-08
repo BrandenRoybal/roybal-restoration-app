@@ -578,6 +578,63 @@ await test("a label still in view: switching to Remove or picking a room logs no
   hashUntouched();
 });
 
+await test("a label that left view a while ago counts at once after a room pick or a mode switch", async () => {
+  cameraPlays = true;
+  setCamera(async () => fakeStream());
+  roomPref("job-a", "Kitchen");
+  window.localStorage.removeItem("roybal-scan-mode");
+  const p = job();
+  const done = openScanner(p, { onChange: () => {} });
+  await until(() => ov() && /Point at a label/.test(ov().querySelector(".sc-status").textContent));
+  frames.push("RC:AM-014");
+  await until(() => live(p).length === 1);
+  nowMs += 20000;                                  // carried to the Hall, label out of view
+  tap(ov().querySelector(".sc-room")); tap(btn("Hall", sheet()));
+  frames.push("RC:AM-014");
+  await until(() => live(p).length === 2);
+  assert.match(cardText(), /moved Kitchen → Hall/);
+  nowMs += 20000;
+  tap(btn("Remove"));
+  frames.push("RC:AM-014");
+  await until(() => live(p).length === 3);
+  assert.match(cardText(), /AM-014 removed from Hall/);
+  tap(btn("Place"));
+  tap(btn("Done"));
+  await done;
+  hashUntouched();
+});
+
+await test("a unit typed on the log by hand: Remove fills in its row (no second row), and Undo puts the row back", async () => {
+  setCamera(null);
+  window.localStorage.setItem("roybal-scan-mode", "remove");
+  roomPref("job-a", "Kitchen");
+  const p = job("job-a", {});
+  p.dryingLogs[0].equipment = [{ ...blankRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }];
+  let saves = 0;
+  const done = openScanner(p, { onChange: () => { saves++; } });
+  await until(() => ov() && !ov().querySelector(".sc-fallback").hidden);
+  await typeTag("AM-030");
+  const row = p.dryingLogs[0].equipment[0];
+  assert.equal(p.dryingLogs[0].equipment.length, 1, "one row for one machine");
+  assert.ok(row.removed, "Removed filled in");
+  assert.ok(Number(row.hours) > 0, "and Hrs");
+  assert.equal(row.scanId, undefined, "still a typed row");
+  assert.equal(live(p).length, 0, "no scan event");
+  assert.equal(cardText().replace("Undo", ""), "AM-030 removed from Kitchen (typed row)");
+  assert.equal(countText(), "Placed 0 · Moved 0 · Removed 1");
+  assert.equal(saves, 1);
+  tap(btn("Undo", document.querySelector(".sc-card")));
+  assert.deepEqual([row.removed, row.hours], ["", ""], "back as it was typed");
+  assert.equal(countText(), "Placed 0 · Moved 0 · Removed 0");
+  assert.match(cardText(), /^Undone: AM-030 removed/);
+  assert.equal(saves, 2);
+  tap(btn("Place"));
+  tap(btn("Done"));
+  await done;
+  window.localStorage.removeItem("roybal-scan-mode");
+  hashUntouched();
+});
+
 await test("hidden while the camera is still starting: back in the app, it starts again", async () => {
   cameraPlays = true;
   let release = null;
