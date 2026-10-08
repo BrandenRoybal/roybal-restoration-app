@@ -52,12 +52,15 @@ const STAGE_ORDER = ["lead", "scheduled", "in_progress", "on_hold", "final", "do
 /* What scopeOf reads (jobType, lossTypesOf's inputs, archivedAt, invoices),
    and on top of it everything reconcileJob reads. A key missing here reads as
    absent to the detector: lossTypesOf, for one, calls a job with no loss
-   fields at all water. test/billing.test.mjs holds both lists to the
-   detector's source. */
+   fields at all water, and without equipmentScans a scanned unit whose row a
+   newer copy of the drying log dropped would go uncounted (the detector
+   rebuilds those rows from the scans, apps/field/js/scans.js, which also
+   reads deletedIds: a deleted scan's row goes, as it does on a phone).
+   test/billing.test.mjs holds both lists to the detector's source. */
 export const SCOPE_KEYS = ["jobType", "lossTypes", "waterCategory", "waterClass", "dryingSystem", "smokeType",
   "fireDamage", "moldCondition", "moldExtent", "stormCause", "envelopeBreached", "archivedAt", "invoices"];
 export const JOB_KEYS = [...SCOPE_KEYS, "rev", "customer", "dateOfLoss", "qbJobcodeId", "laborLog", "dryingLogs",
-  "moistureMaps", "photos", "changeOrders", "cat3Justification"];
+  "equipmentScans", "deletedIds", "moistureMaps", "photos", "changeOrders", "cat3Justification"];
 const TIME_SELECT = "id,updated_at,date:data->>date,hours:data->hours,qbTimesheetId:data->>qbTimesheetId,source:data->>source";
 
 const projection = (keys) => ["id", "deleted", ...keys.map((k) => `${k}:data->${k}`)].join(",");

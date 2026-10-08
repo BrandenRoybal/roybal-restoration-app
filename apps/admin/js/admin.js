@@ -3,7 +3,8 @@
    Same-origin as the field app, so it shares the same local data
    and Supabase session. The CRM home (docs/CRM_Design.md §13):
    tabbed sections over one hash router — Today, Approvals, Jobs,
-   Contacts, Campaigns, ⚙ Settings — plus per-contact pages and help.
+   Receipts, Equipment, Contacts, Campaigns, ⚙ Settings — plus
+   per-contact pages and help.
    ============================================================ */
 import { h, $, clear, Store, fmtDate, daysSince } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
@@ -19,6 +20,7 @@ import { contactsTab, renderContactPage } from "./contacts.js";
 import { campaignsPanel, campaignsBusy } from "./campaigns.js";
 import { leadsTab, leadsBusy, leadsResetBusy, refreshLeadsBadge, leadStats, fmtTouch } from "./leads.js";
 import { analyticsTab } from "./analytics.js";
+import { rowOutAt } from "../../js/scans.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
 
@@ -45,10 +47,15 @@ function onStatus(s) {
   // the campaigns composer (curation gone, and a rebuilt panel would hide a
   // send loop still running in a detached node — duplicate-SMS bait), an
   // open lead-triage form; the Receipts tab (a return form mid-typing,
-  // or a receipt up full screen at a returns counter); or Approvals (an
-  // answer in flight — it refreshes itself, approvals.js)
+  // or a receipt up full screen at a returns counter); Approvals (an
+  // answer in flight — it refreshes itself, approvals.js); or Equipment
+  // (an Add units form, a label sheet about to print — it shows a
+  // refresh pill instead, equipment.js)
+  if (s.state === "synced" && isSignedIn() && location.hash.startsWith("#/equipment"))
+    equipmentModule().then((m) => { if (typeof m.equipmentChanged === "function") m.equipmentChanged(); }).catch(() => {});
   if (s.state === "synced" && isSignedIn() && !contactRoute() && !campaignsBusy() && !leadsBusy() &&
-      !location.hash.startsWith("#/receipts") && !location.hash.startsWith("#/approvals")) route();
+      !location.hash.startsWith("#/receipts") && !location.hash.startsWith("#/approvals") &&
+      !location.hash.startsWith("#/equipment")) route();
 }
 
 /* ---------- routes (the CRM home's hash router — doc §13.1) ----------
@@ -58,6 +65,8 @@ function onStatus(s) {
    #/jobs        → the all-jobs table
    #/receipts    → every job's receipts: search, returns, return windows
                    (receiptlibrary.js, loaded on first visit)
+   #/equipment   → where every drying unit is, the fleet list, QR labels
+                   (equipment.js, loaded on first visit)
    #/contacts    → the contact directory
    #/campaigns   → CF-5 campaigns
    #/settings    → QB Time / QBO / Gmail / Magicplan connections
@@ -66,7 +75,7 @@ function onStatus(s) {
 const contactRoute = () => (location.hash.match(/^#\/c\/([0-9a-f-]{36})/i) || [])[1] || null;
 const TABS = [
   ["", "Today"], ["#/approvals", "Approvals"], ["#/leads", "Leads"], ["#/jobs", "Jobs"], ["#/receipts", "Receipts"],
-  ["#/contacts", "Contacts"], ["#/campaigns", "Campaigns"], ["#/analytics", "Analytics"], ["#/settings", "⚙ Settings"],
+  ["#/equipment", "Equipment"], ["#/contacts", "Contacts"], ["#/campaigns", "Campaigns"], ["#/analytics", "Analytics"], ["#/settings", "⚙ Settings"],
 ];
 function sectionOf() {
   const hs = location.hash;
@@ -112,6 +121,7 @@ function route() {
   if (hs.startsWith("#/leads")) return renderLeadsTab();
   if (hs.startsWith("#/jobs")) return renderJobs();
   if (hs.startsWith("#/receipts")) return renderReceiptsTab();
+  if (hs.startsWith("#/equipment")) return renderEquipmentTab();
   if (hs.startsWith("#/contacts")) return renderContactsTab();
   if (hs.startsWith("#/campaigns")) return renderCampaignsTab();
   if (hs.startsWith("#/analytics")) { clear(view).append(analyticsTab()); return; }
@@ -136,12 +146,13 @@ function renderHelp() {
         h("strong", {}, "✅ Approvals"), " — everything waiting on the owner's yes; ", h("strong", {}, "🆕 Leads"),
         " — the inbox for new business; ", h("strong", {}, "Jobs"),
         " — every field job; ", h("strong", {}, "🧾 Receipts"), " — every job's receipts, searchable down to the item, with returns and store return windows; ",
+        h("strong", {}, "🏷️ Equipment"), " — where every drying unit is, the fleet list, and its QR labels; ",
         h("strong", {}, "👤 Contacts"), "; ", h("strong", {}, "📣 Campaigns"), "; ",
         h("strong", {}, "📊 Analytics"), "; and ",
         h("strong", {}, "⚙ Settings"), " — the ", h("strong", {}, "QuickBooks Time"), " (crew hours), ",
         h("strong", {}, "QuickBooks Online"), " (invoices + nightly payment sync), and ", h("strong", {}, "Gmail"),
         " (job-matched email) connections, set once and out of the way."),
-      p("Today opens with two stat rows. The lead row: ", h("strong", {}, "unworked leads"), " and ", h("strong", {}, "overdue follow-ups"), " (click either to jump to the inbox), the open ", h("strong", {}, "pipeline value"), " (estimated dollars across open leads), the ", h("strong", {}, "average first touch"), " — how fast someone reaches a new lead, measured from the moment it lands to the first action taken on it — then ", h("strong", {}, "site visits this week"), " and ", h("strong", {}, "estimates out with no answer for 5+ days"), ", the two places bids get stuck. Below it, the ops row: total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
+      p("Today opens with two stat rows. The lead row: ", h("strong", {}, "unworked leads"), " and ", h("strong", {}, "overdue follow-ups"), " (click either to jump to the inbox), the open ", h("strong", {}, "pipeline value"), " (estimated dollars across open leads), the ", h("strong", {}, "average first touch"), " — how fast someone reaches a new lead, measured from the moment it lands to the first action taken on it — then ", h("strong", {}, "site visits this week"), " and ", h("strong", {}, "estimates out with no answer for 5+ days"), ", the two places bids get stuck. Below it, the ops row: total jobs, active this week, drying in progress, and jobs needing attention (equipment out 7+ days; click it for the Equipment tab). The Jobs tab lists every field job — click a row to open it in the field app. Search covers customer, address, and claim number.")),
     sec("✅ Approvals — everything waiting on your yes",
       p("Every ask the system is holding for the owner, soonest to expire first: the overdue-invoice reminder emails the morning brief drafts (on the new operations queue when the worker is sending email, otherwise on the text queue as before; a reminder is only ever on one of them), the adjuster emails sent for approval from a job's narrative page, the phases QuickBooks Time wants added to a board job, the texts the text assistant writes, the new queue's other texts and job-stage moves, and the nightly billing check's invoice gaps. Each card shows exactly what would happen (the whole email, every line of it, the text, the phase and its hours, every invoice line), the job, who asked, and when it expires, in Alaska time. An evidence link starts with the site it really opens (“opens mail.google.com — …”), ahead of the name whoever filed it gave it; check that before you click. If an ask is waiting but couldn't be shown, a line under Waiting on you says so: answer it by text, or tell Claude."),
       p(h("strong", {}, "Approve"), " does it after one confirm (the button says what: ", h("strong", {}, "Approve and send"), ", ", h("strong", {}, "Approve and add phase"), "…); ",
@@ -180,6 +191,16 @@ function renderHelp() {
         h("strong", {}, "↩ Return windows closing"), " for that job and store. The app can't know what got used, so it asks: take anything left over back and log the return, or click ",
         h("strong", {}, "Nothing left over"), " and that reminder goes away for good."),
       p("At a returns counter with only a phone, the job's 🧾 Receipts tile in Field Forms shows the same photos.")),
+    sec("🏷️ Equipment — where every unit is",
+      p(h("strong", {}, "Out now"), " lists every unit placed on a job's drying log and not yet removed, on every job, whether the crew scanned its QR label or typed the row: tag, type, job, room, since when and for how many days, and how it was logged. A pickup time typed ahead still counts as out; a run typed in Hrs with no removed time doesn't. The 7-day flag on Today and Jobs uses the same rule. A unit out ",
+        h("strong", {}, "7+ days"), " is flagged, and a unit out on ", h("strong", {}, "two jobs at once"),
+        " is listed first: it was pulled from one of them without a scan or a removal date, so open the job it left and type the date and time it really came off in its Removed cell (a Remove scan now would record today). Units still open on archived jobs are counted under the list and shown on request."),
+      p("The ", h("strong", {}, "fleet list"), " is one row per labelled machine: tag, type, make and model, rating, owned or rented, status (Active, Repair, Retired), where it is now and its last scan. ",
+        h("strong", {}, "+ Add units"), " adds a whole run at once: pick the type (the prefix follows: AM air mover, DH dehumidifier, AF air scrubber, HT heater; blank for plain numbers), the first and last number and the digits, and AM-001 to AM-040 go on in one go; tags already on the list are skipped. ",
+        h("strong", {}, "Edit"), " changes one unit. The office or a crew lead keeps the list. ",
+        h("strong", {}, "Tags seen, not in the fleet list"), " are tags scanned on a job that aren't on it yet: ", h("strong", {}, "Add"), " puts one on in one tap."),
+      p(h("strong", {}, "🖨 Print labels"), " prints all active units, the list as filtered, or the ticked rows, 10 to a US letter sheet of 2 × 4 in labels (Avery 5163 / 5523 layout), each with its QR code, the tag in large type, the type, make and model. Print at 100% with headers and footers off; a part-used sheet can skip its used labels. Use weatherproof laser labels (Avery 5523, or polyester laser stock), stuck on indoors above 50°F on a clean, dry spot on the top or handle side, never a grille or filter door."),
+      p("Out now works from the jobs as soon as this update is live. The fleet list and labels switch on after this feature's database update is applied.")),
     sec("👤 Contacts — the customer directory",
       p("Every customer, adjuster, and lead the business has ever touched, deduplicated automatically across the website, phone line, AI chat, texting, email, and field jobs. Search by name, phone, or email, filter by role with the chips (customers, adjusters, subs…), or click a recent contact — a green ", h("strong", {}, "marketing ✓"), " shows who's opted in to outreach."),
       p("A contact's page shows their identity (edit in place; the ", h("strong", {}, "marketing opt-in"), " checkbox lives here), every job on both the field and board sides, and the whole conversation — texts, emails, portal messages, and phone calls — in one timeline."),
@@ -259,9 +280,11 @@ function renderLogin() {
 }
 
 /* ---------- shared job summaries ---------- */
+// a unit out now (Equipment → Out now's rule: a planned pickup counts, a run typed in Hrs doesn't) for 7+ days
 function jobAttention(p) {
+  const now = Date.now();
   return (p.dryingLogs || []).some((d) => (d.equipment || []).some((e) =>
-    e.placed && !e.removed && (daysSince(e.placed) ?? 0) >= 7));
+    rowOutAt(e, now) && (daysSince(e.placed) ?? 0) >= 7));
 }
 function jobSummary(p) {
   return {
@@ -299,7 +322,7 @@ async function renderToday() {
     kpi(rows.length, "Total jobs"),
     kpi(active, "Active (last 7 days)"),
     kpi(drying, "Drying in progress"),
-    kpi(attention, "Need attention (7-day equip.)", attention > 0)));
+    kpi(attention, "Need attention (7-day equip.)", attention > 0, () => { location.hash = "#/equipment"; })));
 
   if (SYNC_ENABLED) {
     leadStats().then((s) => {
@@ -400,6 +423,12 @@ function renderApprovalsTab() {
 function receiptsModule() { return import("./receiptlibrary.js"); }
 function renderReceiptsTab() {
   lazyTab("#/receipts", "Receipts", receiptsModule, (m) => m.renderReceipts(view));
+}
+
+/* ---------- 🏷️ Equipment (#/equipment) — equipment.js ---------- */
+function equipmentModule() { return import("./equipment.js"); }
+function renderEquipmentTab() {
+  lazyTab("#/equipment", "Equipment", equipmentModule, (m) => m.renderEquipment(view));
 }
 
 /* ---------- Leads (#/leads) — the inbox lives in leads.js ---------- */

@@ -2,7 +2,7 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween, likelyOffline } from "./core.js";
+import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween, likelyOffline, uid } from "./core.js";
 import { exportPhotosZip, exportPhotoLogPdf, archivePhotos, archivableCount, photoFullSrc } from "./photoexport.js";
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import { magicplanPlanChips } from "./magicplanplan.js";
@@ -19,7 +19,7 @@ import {
   INSPECTION_TYPES, INSPECTION_RESULTS, PRECON_ITEMS, COMPLETION_ITEMS,
   blankScopeArea, blankScopeItem, blankAllowanceRow, blankPermitRow,
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
-  newPortalShare, portalMilestoneTrack, portalStatusFor, jobType, PORTAL_CLAIM_STAGES,
+  newPortalShare, portalMilestoneTrack, portalStatusFor, jobType, PORTAL_CLAIM_STAGES, author,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
 import { photoShareControl, photoShareSheetLine, buildPacketHtml, ensureUploaded, requireOnline } from "./photoshare.js";
@@ -38,6 +38,9 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
+import { applyScans, voidPlacement, scanRecord, releaseTypedScans, settleTypedRow, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
+import { fleetReady, refreshFleet } from "./fleet.js";
+import { BUILD, SYNC_ENABLED } from "./config.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -646,7 +649,168 @@ function equipSizingSection(project, d) {
     controls, resultsBox);
 }
 
+/* ---------- 📷 equipment scanning ----------
+   A scanned row is DERIVED from the job's scan events (scans.js
+   applyScans): its tag and placed time (and removed time, once a scan
+   removed it) come from the scan, so typing and the fill handle leave
+   them alone, and ✕ undoes the scan rather than deleting the row. The
+   overlay (scanner.js) and its decoder load on the first tap only. */
+export const scanDeps = { loadScanner: () => import("./scanner.js") };   // tests swap the overlay
+function scanLocked(row, key) {
+  if (!row || !row.scanId) return false;
+  if (key === "asset" || key === "placed" || key === "hours") return true;
+  // Removed: once a scan removed it
+  return key === "removed" && !!(row.scan && row.scan.removeId);
+}
+// a time a scan recorded (the printed S): a scanned row's Placed and scanned
+// Removed, and a typed row's Removed while it still shows the scan that filled it
+function scanTime(row, key) {
+  if (!row) return false;
+  if (row.scanId) return key === "placed" || (key === "removed" && !!(row.scan && row.scan.removeId));
+  const f = row.scanFill;
+  return key === "removed" && !!(f && f.removeId) && String(row.removed ?? "") === String(f.removed ?? "");
+}
+const LOCK_TITLE = "From the scan. To change it, undo the scan (✕) and scan again.";
+/* A typed Removed on a scanned row the unit was scanned back in after: it can
+   be corrected, but not cleared or set past that scan (the newer row starts there). */
+function endedRefusal(row, value) {
+  if (!row || !row.scanId || !row.scan || !row.scan.endedTyped) return "";
+  const back = wallTime(row.scan.backAt);
+  if (!String(value || "").trim()) return `Can't be cleared: ${row.asset} was scanned back in${back ? " " + wallShort(back) : ""} (the next row). Type the time it came off.`;
+  if (back && String(value).slice(0, 16) > back) return `Must be no later than ${wallShort(back)}, when ${row.asset} was scanned back in (the next row).`;
+  return "";
+}
+// one fleet read at a time: the packet renders every drying log at once
+let fleetCheck = null;
+function checkFleet() {
+  if (!fleetCheck) fleetCheck = refreshFleet().finally(() => { fleetCheck = null; });
+  return fleetCheck;
+}
+// "2026-10-08T14:30" (the row's datetime-local value) → "10/08/2026 14:30"
+function wallShort(w) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/.exec(String(w || ""));
+  return m ? `${m[2]}/${m[3]}/${m[1]} ${m[4]}` : String(w || "");
+}
+const SCAN_ACT = { place: "Placed", move: "Moved", remove: "Removed" };
+const SCAN_HOW = { camera: "Camera", photo: "Label photo", typed: "Typed tag" };
+const scanUndoCtx = () => ({ id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD });
+/* Hand edits on a log's typed rows a scan touched, carried onto those scans
+   (scans.js settleTypedRow) when the log opens, before its table repaints,
+   and once a field is left (opts: which edit). A row a sync graft replaced
+   is skipped: the row now in its place settles at the next repaint.
+   Returns the voids pushed. */
+function settleLog(project, d, rows, opts) {
+  const eq = Array.isArray(d.equipment) ? d.equipment : [];
+  let n = 0;
+  for (const row of rows || eq) {
+    if (row && !row.scanId && row.scanFill && eq.indexOf(row) >= 0) n += settleTypedRow(project, row, scanUndoCtx(), opts).length;
+  }
+  if (n) applyScans(project);
+  return n;
+}
+/* A typed equipment row's id (`rowId`), so a row drawn before a sync is
+   found again after it (the drying log merges whole and its rows are new
+   objects then). A row added here gets a fresh one; a row from an older
+   build is given one when its log is drawn, worked out from what it holds
+   (the tag, Placed, type and room, and which copy of those it is, past any
+   id a row already holds), so every phone drawing the same row gives it the
+   same id. It is saved with the next change to the job. */
+function rowHash(s) {
+  let a = 0x811c9dc5, b = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x5bd1e995);
+  }
+  return (a >>> 0).toString(36) + (b >>> 0).toString(36);
+}
+function typedRowIds(rows) {
+  const typed = rows.filter((r) => r && typeof r === "object" && !r.scanId);
+  const ids = new Map(), seen = new Map(), used = new Set();
+  for (const r of typed) if (r.rowId && !used.has(String(r.rowId))) { ids.set(r, String(r.rowId)); used.add(String(r.rowId)); }
+  for (const r of typed) {
+    if (ids.has(r)) continue;            // (a second row holding the same id is given its own)
+    const k = ["asset", "placed", "type", "location"].map((f) => String(r[f] ?? "").trim()).join("\u0001");
+    let n = seen.get(k) || 0, id;
+    do id = "k" + rowHash(k) + "." + ++n; while (used.has(id));
+    seen.set(k, n); used.add(id);
+    ids.set(r, id);
+  }
+  return ids;
+}
+/* Free text edited in a box whose row a sync replaced meanwhile, merged by
+   line against what the row held when the edit began: the crew's change
+   (what they took out goes, what they added stays, after the line it
+   followed) and the other device's change both stand, copy by copy, so a
+   repeated line or a blank one counts; when both did the same (both added a
+   copy, or both took one out) it counts once. The box keeps, in lines,
+   what it last wrote (last), the other device's change it read then (o), and
+   the most copies of each line it ever put on a row itself (ever): on the
+   next keystroke the other device's change is what it was plus what changed
+   on the row since, unless the row mostly has this box's own changes undone
+   (a newer copy that never had them), and copies past it that the box once put
+   there are the box's, pulled back (a half-typed line the crew went on to
+   change). */
+const lineCount = (a) => a.reduce((c, l) => c.set(l, (c.get(l) || 0) + 1), new Map());
+function mergeLines(began, mine, theirs, lines) {
+  const L = lines || { last: null, o: new Map(), ever: new Map() };
+  const m = mine.split("\n"), t = theirs.split("\n");
+  const n = (c, l) => (c && c.get(l)) || 0, bump = (c, l) => c.set(l, n(c, l) + 1);
+  const inB = lineCount(began.split("\n")), inM = lineCount(m), inT = lineCount(t);
+  const inL = L.last == null ? null : lineCount(L.last.split("\n"));
+  const all = [...new Set([...inB.keys(), ...inM.keys(), ...inT.keys(), ...(inL ? inL.keys() : [])])];
+  const was = (l) => (inL ? n(L.o, l) : 0), own = (l) => (inL ? n(inL, l) - n(inB, l) - was(l) : 0);   // the other device's change, and this box's, on the row it last wrote
+  const inc = (l) => n(inT, l) - (inL ? n(inL, l) : n(inB, l));                                      // the row's since
+  // a newer copy that never had this box's changes: more of the lines it changed back where they
+  // were than left as it put them (going by the lines only this box ever had, when there are any)
+  const novel = all.filter((l) => own(l) > 0 && !n(inB, l)), by = novel.length ? novel : all.filter((l) => own(l));
+  const lost = inL && by.filter((l) => inc(l) === -own(l)).length > by.filter((l) => inc(l) === 0).length;
+  const o = new Map(), want = new Map();
+  for (const l of all) {
+    const B = n(inB, l), T = n(inT, l);
+    let d = lost ? T - B : was(l) + inc(l);
+    if (inc(l) > 0 && d > was(l)) d = was(l) + Math.max(0, d - was(l) - Math.max(0, n(L.ever, l) - Math.max(0, own(l))));
+    d = Math.max(-B, d);
+    o.set(l, d);
+    const dC = n(inM, l) - B;
+    want.set(l, dC > 0 && d > 0 ? B + Math.max(dC, d) : dC < 0 && d < 0 ? B + Math.min(dC, d) : Math.max(0, B + dC + d));
+  }
+  let out;
+  if ([...o.values()].every((d) => d === 0)) out = m.slice();     // the other device changed nothing: the crew's text
+  else {
+    // the row's lines, its first copies of each; then the crew's still missing, each after
+    // the nearest line above it that is there; then any the other device's change still owes
+    const seen = new Map();
+    out = t.filter((l) => (bump(seen, l), n(seen, l) <= n(want, l)));
+    const nth = (l, k) => { for (let i = 0, c = 0; i < out.length; i++) if (out[i] === l && ++c === k) return i; return -1; };
+    const occ = new Map(), kth = m.map((l) => (bump(occ, l), n(occ, l)));
+    m.forEach((l, j) => {
+      const have = out.filter((x) => x === l).length;
+      if (have >= kth[j] || have >= n(want, l)) return;
+      let at = -1;
+      for (let i = j - 1; i >= 0 && at < 0; i--) at = nth(m[i], kth[i]);
+      out.splice(at + 1, 0, l);
+    });
+    for (const [l, k] of want) for (let c = out.filter((x) => x === l).length; c < k; c++) {
+      const i = out.lastIndexOf(l);
+      out.splice(i < 0 ? out.length : i + 1, 0, l);
+    }
+  }
+  const v = out.join("\n");
+  if (lines) {
+    const now = lineCount(out);
+    for (const [l, k] of now) { const mineNow = k - n(inB, l) - n(o, l); if (mineNow > n(L.ever, l)) L.ever.set(l, mineNow); }
+    L.last = v; L.o = o;
+  }
+  return v;
+}
+
 export function dryingLog(project, d) {
+  // scans made on another device (or rows a newer copy of this log dropped)
+  // land in the table before it paints
+  const merged = applyScans(project).changed;
+  if (settleLog(project, d) || merged) commit();
+
   /* drying-day counter: start → finish once a finish date is set, else start → today */
   const daysBanner = h("div", { class: "daysbig app-only", style: "margin-bottom:8px" });
   function renderBanner() {
@@ -669,7 +833,8 @@ export function dryingLog(project, d) {
   /* equipment deployment table */
   const eqBody = h("tbody");
   function refreshWarn() {
-    const flagged = d.equipment.filter((r) => r.placed && !r.removed && (daysSince(r.placed) ?? 0) >= 7);
+    // out now (a planned pickup still counts; a run typed in Hrs doesn't): scans.js rowOutAt, the office's rule
+    const flagged = d.equipment.filter((r) => rowOutAt(r, Date.now()) && (daysSince(r.placed) ?? 0) >= 7);
     if (flagged.length) {
       warnBox.hidden = false;
       warnBox.replaceChildren(h("strong", {}, "⚠ 7-day equipment check: "),
@@ -704,25 +869,163 @@ export function dryingLog(project, d) {
       const targets = rowsEls.map((_, idx) => idx).filter((idx) => rowsEls[idx].classList.contains("fill-target"));
       rowsEls.forEach((tr) => tr.classList.remove("fill-target"));
       if (!targets.length) return;
+      // the rows drawn are no longer the log's (a sync landed mid-edit): redraw first
+      if (grafted) { grafted = false; paintEq({ settle: false }); toast("The table was just updated from the other phone. Drag again.", 4000); return; }
+      const at = new Date().toISOString();
       const src = d.equipment[i][key] ?? "";
+      let filled = 0, kept = 0;
       targets.forEach((idx, k) => {
-        d.equipment[idx][key] = key === "asset" ? bumpAsset(src, k + 1) : src;
-        if (key === "hours") d.equipment[idx]._manualHrs = true;
+        const row = d.equipment[idx];
+        // a scan's tag / times are the scan's
+        if (scanLocked(row, key) || (key === "removed" && endedRefusal(row, src))) { kept++; return; }
+        row[key] = key === "asset" ? bumpAsset(src, k + 1) : src;
+        if (key === "hours") row._manualHrs = true;
+        // a typed Removed replaces a scan's; Notes written over get their move lines back, as on a scanned row
+        if (key === "removed" && !row.scanId) releaseTypedScans(project, row, scanUndoCtx());
+        if (key === "notes") restoreMoveLines(row);
+        filled++;
       });
+      // a Removed filled onto scanned rows: their hours are applyScans' figure
+      if (targets.some((idx) => d.equipment[idx] && d.equipment[idx].scanId) || key === "notes") applyScans(project);
+      // and onto typed rows: carried onto the scans they replaced, as typed
+      if (key === "removed") for (const idx of targets) settleLog(project, d, [d.equipment[idx]], { edit: "removed", since: at });
       paintEq(); refreshWarn(); commit();
-      toast(`Filled ${targets.length} row${targets.length > 1 ? "s" : ""}`);
+      toast((filled ? `Filled ${filled} row${filled > 1 ? "s" : ""}` : "Nothing filled")
+        + (kept ? ` · skipped ${kept} scanned` : ""));
     };
     handle.addEventListener("pointerup", finish);
     handle.addEventListener("pointercancel", finish);
     td.append(handle);
   }
 
+  /* A sync grafted this job into the page (app.js): equipment rows are new
+     objects then (they carry no \`id\`), and the table repaints, at once or, while
+     one of its fields is being edited, once the table is left (a repaint
+     the sync caused settles nothing: another phone's edit may be half done).
+     Until then each drawn row is matched to its counterpart across every
+     graft (matchRows), and an edit in a field whose row was replaced lands
+     on that counterpart (carryEdit), keystroke by keystroke. */
+  let grafted = false, drawn = [], held = [];          // the rows drawn; the log's rows as of the last paint or graft
+  const liveOf = new Map();                            // a drawn row -> its counterpart in the log now (null: none)
+  // the log's rows changed under the drawing (a graft, or rows the scans added or took off): re-matched
+  function remap() {
+    if (held.length === d.equipment.length && held.every((r, k) => r === d.equipment[k])) return;
+    const m = matchRows(held, d.equipment);
+    // a newer copy saved before its rows had ids: each keeps the one it was drawn with
+    for (const [a, b] of m) if (b && b !== a && !b.scanId && !b.rowId && a.rowId) b.rowId = a.rowId;
+    for (const r of drawn) {
+      const cur = liveOf.has(r) ? liveOf.get(r) : r;
+      liveOf.set(r, cur ? m.get(cur) || null : null);
+    }
+    held = d.equipment.slice();
+  }
+  function onGrafted(ev) {
+    if (!eqBody.isConnected) { document.removeEventListener("roybal:grafted", onGrafted); return; }
+    if (ev && ev.detail && ev.detail.id && ev.detail.id !== project.id) return;
+    remap();
+    if (eqBody.contains(document.activeElement)) { grafted = true; return; }
+    paintEq({ settle: false });
+  }
+  document.addEventListener("roybal:grafted", onGrafted);
+  eqBody.addEventListener("focusout", (ev) => {
+    if (!grafted || (ev.relatedTarget && eqBody.contains(ev.relatedTarget))) return;
+    grafted = false;
+    paintEq({ settle: false }); commit();
+  });
+  /* the rows before a graft matched to the rows after it: the same object,
+     the same scan, or the same row id (typedRowIds). Nothing else: a row with
+     no match is gone, and an edit to it is said rather than put on a row
+     that only looks like it. */
+  function matchRows(old, now) {
+    const m = new Map(), used = new Set();
+    const take = (a, b) => { m.set(a, b); used.add(b); };
+    for (const a of old) if (a && now.indexOf(a) >= 0) take(a, a);
+    for (const a of old) {
+      if (!a || m.has(a) || !a.scanId) continue;
+      const b = now.find((r) => r && r.scanId === a.scanId && !used.has(r));
+      if (b) take(a, b);
+    }
+    const was = typedRowIds(old), ids = typedRowIds(now), byId = new Map();
+    for (const [r, id] of ids) if (!used.has(r) && !byId.has(id)) byId.set(id, r);
+    for (const [a, id] of was) {
+      const b = byId.get(id);
+      if (!m.has(a) && b && !used.has(b)) take(a, b);
+    }
+    return m;
+  }
+  // a drawn row's counterpart in the log now (itself until a sync replaces it; null if it has none)
+  function liveRow(row) {
+    remap();
+    let cur = liveOf.has(row) ? liveOf.get(row) : row;
+    if (cur && d.equipment.indexOf(cur) < 0) {
+      cur = cur.scanId ? d.equipment.find((r) => r && r.scanId === cur.scanId) || null
+        : cur.rowId ? d.equipment.find((r) => r && !r.scanId && r.rowId === cur.rowId) || null : null;
+    }
+    if (cur && !cur.scanId && !cur.rowId && row.rowId) cur.rowId = row.rowId;   // matched by what it holds: the id goes with the edit
+    return cur;
+  }
+  // an edit whose row has no counterpart any more: said, and the table redrawn as the log is now
+  function lostRow(row) {
+    if (drawn.indexOf(row) < 0) return;                // a field from an earlier drawing
+    grafted = false;
+    paintEq({ settle: false });
+    toast("That row was changed on the other phone. Check it, then enter your change again.", 5000);
+  }
+  /* The crew's edit, made in a field whose row a sync replaced: only what
+     they changed (the field's value against what the row held when the edit
+     began) goes onto the row now in the log; a value the other device put
+     there stays unless the crew changed it. A Remove scan the merge filled
+     in, which the field never showed, stays: the crew's time goes under it,
+     as if typed before the scan arrived. wrote: what this field put on a row
+     during the edit; lines: Notes' line-merge record (mergeLines); over:
+     the other device's latest value it wrote over ({ v, manual }), put back
+     when the crew comes back to where they began.
+     Returns whether it changed the row. */
+  function carryEdit(cur, key, began, value, wrote, lines, over) {
+    const was = String(began ?? ""), live = String(cur[key] ?? "");
+    let now = String(value ?? "");
+    const theirs = live !== now && now === was && !wrote.has(live);  // the crew is back where they began: the other device's value stands
+    const back = now === was && over && wrote.has(live) && live !== over.v;
+    if (back) now = over.v;
+    if (scanLocked(cur, key)) return false;
+    if (key === "notes") {
+      const v = mergeLines(was, now, live, lines);
+      if (v === live) return false;
+      cur.notes = v;
+      return true;
+    }
+    if (key === "removed") {
+      if (endedRefusal(cur, now)) return false;
+      const f = cur.scanFill;
+      if (!cur.scanId && f && f.removeId && live === String(f.removed ?? "") && live !== was && !wrote.has(live)) {
+        const w = Object.assign({ hours: "", manualHrs: null }, f.was && typeof f.was === "object" ? f.was : {});
+        if (String(w.removed ?? "") === now && f.was) return false;
+        const hrs = cur.placed && now ? Math.round((new Date(now) - new Date(cur.placed)) / 3600000) : NaN;
+        f.was = Object.assign(w, { removed: now }, w.manualHrs ? {} : { hours: Number.isFinite(hrs) && hrs >= 0 ? hrs : "" });
+      } else {
+        if (live === now || theirs) return false;
+        cur.removed = now;
+        if (!cur.scanId) releaseTypedScans(project, cur, scanUndoCtx());
+      }
+      applyScans(project);
+      return true;
+    }
+    if (live === now || theirs) return false;
+    cur[key] = now;
+    if (key === "hours") {
+      if (back && !over.manual) delete cur._manualHrs;
+      else cur._manualHrs = true;
+    }
+    return true;
+  }
   function eqRow(row, i) {
-    const tr = h("tr");
+    const drawnRow = row;
+    const tr = h("tr", { class: row.scanId ? "eq-scanned" : null });
     const daysCell = h("td", { class: "calc", style: "min-width:46px" });
     function recalcDays() {
-      // auto total hours from placed→removed (unless manually set)
-      if (row.placed && row.removed && !row._manualHrs) {
+      // auto total hours from placed→removed (unless manually set; a scanned
+      // row's hours are applyScans' figure, on the Alaska clock)
+      if (row.placed && row.removed && !row._manualHrs && !row.scanId) {
         const ph = (new Date(row.removed) - new Date(row.placed)) / 3600000;
         if (isFinite(ph) && ph >= 0) { row.hours = Math.round(ph); if (hoursInput) hoursInput.value = row.hours; }
       }
@@ -730,27 +1033,116 @@ export function dryingLog(project, d) {
       let days = null;
       if (row.placed && row.removed) days = Math.max(1, daysBetween(row.placed, row.removed) ?? 0);
       else if (row.placed) days = daysSince(row.placed);
-      const ended = !row.removed && days != null && days >= 7;
+      const ended = rowOutAt(row, Date.now()) && (daysSince(row.placed) ?? 0) >= 7;
       daysCell.textContent = days == null ? "" : days + "d";
       tr.classList.toggle("flag7", !!ended);
     }
     let hoursInput;
     const mk = (key, w, type = "text") => {
       const c = h("td", { class: "fillcell" });
-      const input = h("input", { type, value: row[key] ?? "", style: `min-width:${w}`, step: type === "datetime-local" ? "60" : null });
+      const locked = scanLocked(row, key);
+      const input = h("input", { type, value: row[key] ?? "", step: type === "datetime-local" ? "60" : null,
+        style: `min-width:${w}` + (locked ? ";background:#f1f4f8;color:#44556b" : ""),
+        readonly: locked, title: locked ? LOCK_TITLE : null });
+      let began = String(row[key] ?? ""), wrote = new Set(), since = "", over = null;   // the value this edit began from; what it put on a row; its last step's time; the other device's value it last wrote over
+      // a typed row's Removed, each step of it: carried onto the scans it replaced at once, so
+      // each one's void is stamped when the crew picked it (one the app closed on is never left behind)
+      const settleStep = (r, at) => {
+        if (key !== "removed" || r.scanId) return;
+        since = at;
+        settleTyped(r, { edit: "removed", since: at });
+      };
+      // a field whose row a sync replaced: the edit goes onto the row now in its place
+      const carry = (at) => {
+        const cur = liveRow(row);
+        if (!cur) { lostRow(row); return null; }
+        grafted = true;
+        const pre = { v: String(cur[key] ?? ""), manual: !!cur._manualHrs };
+        if (scanLocked(cur, key)) input.value = cur[key] ?? "";
+        else if (carryEdit(cur, key, began, input.value, wrote, null, over)) {
+          if (String(cur[key] ?? "") !== pre.v && !wrote.has(pre.v)) over = pre;   // the other device's latest value
+          commit(); settleStep(cur, at);
+        }
+        wrote.add(input.value);
+        return cur;
+      };
       input.addEventListener("input", () => {
+        const at = new Date().toISOString();
+        if (liveRow(row) !== row) { carry(at); return; }
+        if (scanLocked(row, key)) { input.value = row[key] ?? ""; return; }
+        // an ended row's Removed: a value part-way through the picker waits for the change check
+        if (key === "removed" && endedRefusal(row, input.value)) return;
         row[key] = input.value;
         if (key === "hours") row._manualHrs = true;
+        // a Removed typed (or cleared) on a typed row replaces a scan that filled it: off the print too
+        const released = key === "removed" && !row.scanId ? releaseTypedScans(project, row, scanUndoCtx()) : [];
+        if (released.length) {
+          c.classList.remove("scan-cell");
+          c.querySelector("sup.scan-s")?.remove();
+          paintScanPrint();
+        }
+        if (row.scanId) { applyScans(project); if (hoursInput) hoursInput.value = row.hours ?? ""; }   // a typed removal on a scanned row
         recalcDays(); refreshWarn(); commit();
+        wrote.add(input.value);
+        settleStep(row, at);
+      });
+      input.addEventListener("change", () => {
+        const cur = liveRow(row) !== row ? carry(new Date().toISOString()) : row;
+        if (cur && key === "removed") {
+          const refused = endedRefusal(cur, input.value);
+          if (refused) { input.value = cur[key] ?? ""; toast(refused, 4000); }
+          settleTyped(cur, { edit: "removed", since });
+        }
+        began = input.value; wrote = new Set(); since = ""; over = null;
       });
       if (key === "hours") hoursInput = input;
       c.append(input);
+      // printed: a superscript S on a time the scan recorded (legend under the table)
+      if (scanTime(row, key)) {
+        c.classList.add("scan-cell");
+        c.append(h("sup", { class: "scan-s", style: "display:none" }, "S"));
+      }
       attachFill(c, i, key);
       return c;
     };
     // free-text columns grow with their text; the fill handle still works
     const mkTa = (key, w) => {
+      // a typed row's "moved to" line deleted or rewritten by hand (checked once the edit is done):
+      // what's typed replaces that move scan
+      const typedNotes = key === "notes" && !row.scanId;
       const c = taCell(row, key, { minWidth: w });
+      const ta = c.querySelector("textarea");
+      const fresh = () => ({ last: null, o: new Map(), ever: new Map() });
+      let began = String(row[key] ?? ""), wrote = new Set(), lines = fresh(), others = [], over = null;   // the text this edit began from; what it put on a row (whole and by line); its line-merge record (mergeLines); the other device's lines; the other device's value it last wrote over (type, room)
+      const wrote1 = (v) => { wrote.add(v); for (const l of v.split("\n")) wrote.add(l); };
+      // taCell writes each keystroke onto the row it was drawn for; a row a sync replaced
+      // gets the crew's change carried onto the row now in its place
+      const carry = () => {
+        const cur = liveRow(row);
+        if (!cur) { lostRow(row); return null; }
+        grafted = true;
+        const b = began.split("\n"), whole = String(cur[key] ?? ""), pre = whole.split("\n");
+        for (const l of pre) if (b.indexOf(l) < 0 && !wrote.has(l) && others.indexOf(l) < 0) others.push(l);
+        if (carryEdit(cur, key, began, ta.value, wrote, lines, key === "notes" ? null : over)) {
+          if (key !== "notes" && String(cur[key] ?? "") !== whole && !wrote.has(whole)) over = { v: whole };   // the other device's latest value
+          commit();
+        }
+        wrote1(ta.value);
+        return cur;
+      };
+      ta.addEventListener("input", () => {
+        if (liveRow(row) !== row) { carry(); return; }
+        // taCell wrote the box onto its own row: every copy past began's is the box's
+        const inB = lineCount(began.split("\n"));
+        for (const [l, k] of lineCount(ta.value.split("\n"))) if (k - (inB.get(l) || 0) > (lines.ever.get(l) || 0)) lines.ever.set(l, k - (inB.get(l) || 0));
+        wrote1(ta.value);
+      });
+      ta.addEventListener("change", () => {
+        const cur = liveRow(row) !== row ? carry() : row;
+        // the lines that were on the row before this edit: the box's, and the other device's
+        if (typedNotes && cur) settleTyped(cur, { edit: "notes", before: [began, ...others].join("\n") });
+        began = ta.value; wrote = new Set(); lines = fresh(); others = []; over = null;
+      });
       c.classList.add("fillcell");
       attachFill(c, i, key);
       return c;
@@ -758,15 +1150,119 @@ export function dryingLog(project, d) {
     const assetC = mk("asset", "50px"), typeC = mkTa("type", "150px"), locC = mkTa("location", "110px");
     const placedC = mk("placed", "150px", "datetime-local"), removedC = mk("removed", "150px", "datetime-local");
     const hoursC = mk("hours", "56px", "number"), notesC = mkTa("notes", "120px");
+    if (row.scanId) {
+      const sc = row.scan || {};
+      const who = sc.tech || sc.by || "";
+      const said = "Scanned on site" + (who ? " by " + who : "") + (row.placed ? " " + wallShort(row.placed) : "");
+      assetC.append(h("span", { class: "scan-mark app-only", title: said, "aria-label": said,
+        style: "position:absolute;left:2px;top:1px;font-size:11px;line-height:1;cursor:help",
+        onclick: () => toast(said, 3500) }, "📷"));
+    }
+    const del = () => {
+      const row = liveRow(drawnRow);
+      if (!row) { lostRow(drawnRow); return; }
+      if (row.scanId) {
+        // a scan is never deleted: a void event cancels it (scans.js), on every device
+        // (the printed scan record lists the scans that still count; the void
+        // and the scan it cancels both stay in the server's audit copy)
+        if (!confirm("Undo this scan? The row comes off the drying log; the scan stays in the server's scan log, marked undone.")) return;
+        if (!voidPlacement(project, row.scanId, scanUndoCtx()).length) {
+          applyScans(project);
+          // a row whose scan this device doesn't hold (applyScans leaves those): ✕ takes it off like a typed row
+          const at = d.equipment.indexOf(row);
+          if (at >= 0) d.equipment.splice(at, 1);
+        }
+      } else {
+        // a typed row a scan changed: its scans go with it, so a row typed in again isn't refilled
+        const sc = rowScans(project, row);
+        if (sc.removes.length + sc.moves.length
+          && !confirm("Take this row off the drying log? Its scans are undone with it. (To fix only a wrong Remove scan, retype or clear Removed instead.)")) return;
+        releaseTypedScans(project, row, scanUndoCtx(), "row");
+        const at = d.equipment.indexOf(row);
+        if (at >= 0) d.equipment.splice(at, 1);
+      }
+      paintEq(); refreshWarn(); commit();
+    };
     tr.append(assetC, typeC, locC, placedC, removedC, daysCell, hoursC, notesC,
-      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { d.equipment.splice(i, 1); paintEq(); refreshWarn(); commit(); } }, "✕")));
+      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", title: row.scanId ? "Undo this scan" : null, onclick: del }, "✕")));
     recalcDays();
     return tr;
   }
-  function paintEq() { eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); }
+  // a typed row's Removed or Notes edit, done: carried onto the scans it replaced
+  function settleTyped(row, opts) {
+    if (settleLog(project, d, [row], opts)) { paintScanPrint(); commit(); }
+  }
+  function paintEq(opts) {
+    if (!(opts && opts.settle === false) && settleLog(project, d)) commit();
+    for (const [r, id] of typedRowIds(d.equipment)) if (r.rowId !== id) r.rowId = id;
+    drawn = d.equipment.slice(); held = drawn.slice(); liveOf.clear();
+    eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); paintScanPrint();
+  }
+
+  /* printed under the table when this log holds scanned rows: the S legend,
+     then every scan on the job in time order (scans.js scanRecord) */
+  const scanPrint = h("div", { class: "print-only eqscan-print" });
+  function paintScanPrint() {
+    scanPrint.replaceChildren();
+    // this log's units only: its scanned rows' placements and its typed rows' scans
+    const rec = scanRecord(project, d.equipment.filter((r) => r && r.scanId).map((r) => r.scanId), d.id);
+    if (!rec.length && !d.equipment.some((r) => r && r.scanId)) return;
+    scanPrint.append(h("div", { class: "eqscan-legend" }, h("sup", {}, "S"), " = recorded by scanning the unit's QR label on site"));
+    if (!rec.length) return;
+    scanPrint.append(
+      h("div", { class: "eqscan-title" }, "Equipment scan record"),
+      h("table", { class: "grid eqscan-rec" },
+        h("thead", {}, h("tr", {}, ...["Time", "Tag", "Type", "Action", "Room", "Read by", "Tech"].map((c) => h("th", {}, c)))),
+        h("tbody", {}, ...rec.map((r) => h("tr", {},
+          h("td", {}, wallShort(r.at)), h("td", {}, r.tag), h("td", {}, r.type),
+          h("td", {}, SCAN_ACT[r.act] || r.act), h("td", {}, r.room),
+          h("td", {}, SCAN_HOW[r.how] || r.how), h("td", {}, r.tech || String(r.by || "").split("@")[0]))))),   // a login, not an email address, on the adjuster's copy
+      h("div", { class: "eqscan-foot" },
+        "Times come from the scanning device's clock at the moment the label was read. Each scan is also logged on Roybal's server when the device syncs, and that log can't be edited."));
+  }
   paintEq();
   const addEq = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add equipment");
-  addEq.addEventListener("click", () => { d.equipment.push(blankEquipRow()); paintEq(); commit(); });
+  addEq.addEventListener("click", () => { d.equipment.push({ ...blankEquipRow(), rowId: uid() }); paintEq(); commit(); });
+
+  /* 📷 Scan equipment: one button; the overlay stays open for the whole drop.
+     Switched off until the server has the fleet table (migration 0022) —
+     a device that has never reached it can't know, so it waits for one
+     connection rather than guess. */
+  const scanBtn = h("button", { type: "button", class: "btn btn--primary btn--sm app-only row-add", style: "width:auto" }, "📷 Scan equipment");
+  const scanNote = h("div", { class: "subtle app-only", hidden: true, style: "margin:6px 0 0" });
+  let scanState = fleetReady() ? "ready" : (!SYNC_ENABLED || likelyOffline()) ? "offline" : "checking";
+  let scanning = false;
+  function gateScan(state) {
+    scanState = state;
+    const msg = state === "missing" ? "Scanning switches on after this feature's database update is applied."
+      : state === "offline" ? "Connect once to switch scanning on"
+      : state === "checking" ? "Checking whether scanning is switched on…" : "";
+    scanBtn.disabled = scanning || state !== "ready";
+    scanNote.textContent = msg; scanNote.hidden = !msg;
+  }
+  gateScan(scanState);
+  if (SYNC_ENABLED && !likelyOffline()) {
+    // a read that hangs on a weak signal doesn't leave the button "checking"
+    const slow = setTimeout(() => { if (scanState === "checking") gateScan("offline"); }, 8000);
+    checkFleet().then((r) => {
+      clearTimeout(slow);
+      gateScan(r && r.ok ? "ready" : r && r.missing ? "missing" : fleetReady() ? "ready" : "offline");
+    });
+  }
+  scanBtn.addEventListener("click", async () => {
+    if (scanning || scanState !== "ready") return;
+    scanning = true; gateScan(scanState);
+    try {
+      const [{ openScanner }, all] = await Promise.all([scanDeps.loadScanner(), Store.all().catch(() => [])]);
+      const otherProjects = (all || []).filter((p) => p && p.id !== project.id);
+      // every logged scan, undo and photo saves the job like any other edit
+      await openScanner(project, { logId: d.id, otherProjects, onChange: () => { commit(); paintEq(); } });
+    } catch (e) {
+      toast("Couldn't open the scanner: " + ((e && e.message) || e));
+    } finally {
+      scanning = false; gateScan(scanState); paintEq();
+    }
+  });
 
   /* psychrometric readings table with GPP auto-calc */
   const psBody = h("tbody");
@@ -846,7 +1342,9 @@ export function dryingLog(project, d) {
       h("table", { class: "grid" },
         h("thead", {}, h("tr", {}, ...["Asset #", "Equipment Type / Make / Model", "Room / Location", "Placed", "Removed", "Days", "Hrs", "Notes"].map((c) => h("th", {}, c)), h("th", { class: "app-only" }, ""))),
         eqBody)),
-    addEq,
+    scanPrint,
+    h("div", { class: "app-only", style: "display:flex;flex-wrap:wrap;gap:8px;align-items:center" }, scanBtn, addEq),
+    scanNote,
 
     sectionTitle("Daily Psychrometric Readings"),
     h("div", { class: "note app-only" }, h("strong", {}, "Auto-calc: "), "Enter temperature (°F) and RH (%) — GPP fills automatically. Grain depression (GD) = Unaffected GPP − Affected GPP. Tap a GPP cell to override."),

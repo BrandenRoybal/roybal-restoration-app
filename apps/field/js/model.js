@@ -196,6 +196,7 @@ export function newProject() {
     invoices: [],
     reconEstimates: [],   // reconstruction estimates (restoration jobs — sent with the claim packet)
     receipts: [],         // job-level cost log: [{id, vendor, amount, category, date, notes}] — assistant receiptLog + budget flag
+    equipmentScans: [],   // equipment QR scan events, append-only (scans.js) — the drying log's scanned rows are derived from them
     portalShare: null,    // office config for the customer portal (Client Portal form)
     // construction / remodel forms
     scopeOfWork: null,

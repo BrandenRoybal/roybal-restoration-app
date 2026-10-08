@@ -21,10 +21,11 @@ import { budgetStatus } from "../../js/fincalc.js";
 import { runFinanceAction } from "./finactions.js";
 import { fetchUnreadEmails, fetchJobEmails, gmailSend, markEmailRead } from "../../js/gmail.js";
 import { fetchCalibration, calibrationContext } from "../../js/calibration.js";
+import { rowOutAt } from "../../js/scans.js";
 
 /* mirrors admin.js jobAttention(): drying equipment on site ≥7 days */
 const equipOut7 = (p) => (p.dryingLogs || []).some((d) =>
-  (d.equipment || []).some((e) => e.placed && !e.removed && (daysSince(e.placed) ?? 0) >= 7));
+  (d.equipment || []).some((e) => rowOutAt(e, Date.now()) && (daysSince(e.placed) ?? 0) >= 7));
 
 function jobRow(p) {
   const budget = budgetStatus(p);   // null when no approved estimate / contract amount

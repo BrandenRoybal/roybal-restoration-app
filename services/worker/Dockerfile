@@ -5,14 +5,16 @@ FROM node:22-slim
 WORKDIR /app
 
 # the billing check's detector and the field modules it loads
-# (lanes/billing.mjs → reconcile.js → dryingcalc.js + model.js → core.js;
-# none imports anything else). The root .dockerignore lets exactly these four
-# out of apps/field. No package.json comes with them: node 22 reads their
-# import/export as ES modules, as the phone agent's schedule.js is read.
+# (lanes/billing.mjs → reconcile.js → dryingcalc.js + model.js → core.js,
+# and scans.js, which imports nothing; none imports anything else). The root
+# .dockerignore lets exactly these five out of apps/field. No package.json
+# comes with them: node 22 reads their import/export as ES modules, as the
+# phone agent's schedule.js is read.
 COPY apps/field/js/reconcile.js apps/field/js/reconcile.js
 COPY apps/field/js/dryingcalc.js apps/field/js/dryingcalc.js
 COPY apps/field/js/model.js apps/field/js/model.js
 COPY apps/field/js/core.js apps/field/js/core.js
+COPY apps/field/js/scans.js apps/field/js/scans.js
 
 COPY services/worker services/worker
 WORKDIR /app/services/worker

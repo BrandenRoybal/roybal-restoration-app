@@ -6,10 +6,12 @@
      • stale    — no moisture-map reading in 36+ hours
      • stalled  — a moisture map's latest max MC% isn't below the
                   previous reading (and is still over the dry goal)
-     • equip7d  — drying equipment placed 7+ days ago, not removed
+     • equip7d  — drying equipment placed 7+ days ago and still out
+                  (scans.js rowOutAt, the office's Out now rule)
    A job with a signed/issued Certificate of Drying is done — never
-   flagged. Pure + dependency-free so it's Node-testable.
+   flagged. Pure (its one import, scans.js, is too) so it's Node-testable.
    ============================================================ */
+import { rowOutAt } from "./scans.js";
 
 const arr = (v) => (Array.isArray(v) ? v : []);
 const num = (v) => { const n = parseFloat(String(v ?? "").replace(/[^0-9.\-]/g, "")); return Number.isFinite(n) ? n : null; };
@@ -67,9 +69,9 @@ export function dryingFlags(p, now = Date.now()) {
   }
   if (stalled) flags.push({ kind: "stalled", tone: "warn", label: stalled + (stalled === 1 ? " area not drying down" : " areas not drying down") });
 
-  // equip7d — placed 7+ days ago, no removal date
+  // equip7d — placed 7+ days ago and out now (a planned pickup counts; a run typed in Hrs doesn't)
   const over = equip.filter((e) => {
-    if (!e.placed || e.removed) return false;
+    if (!e.placed || !rowOutAt(e, now)) return false;
     const h = hoursSince(e.placed, now);
     return h != null && h >= 7 * 24;
   }).length;

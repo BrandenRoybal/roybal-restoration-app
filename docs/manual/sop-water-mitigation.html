@@ -118,7 +118,7 @@
   <h2 class="sec" id="s-roles">Who does what</h2>
   <table>
     <tr><th style="width:20%">Role</th><th>Owns</th></tr>
-    <tr><td><b>Tech</b> (crew)</td><td>Takes every reading, photo and equipment entry in the app, on site, at the time. Follows the protocol exactly and calls the crew lead the moment something on the escalation list shows up.</td></tr>
+    <tr><td><b>Tech</b> (crew)</td><td>Takes every reading, photo and equipment entry in the app, on site, at the time. Equipment goes in by scanning each unit's label. Follows the protocol exactly and calls the crew lead the moment something on the escalation list shows up.</td></tr>
     <tr><td><b>Crew lead</b> (CJ)</td><td>Sets the category, class and reference points on day 0 when on site, checks each day's readings before the crew leaves, verifies dry before equipment is pulled, and prepares the Certificate of Drying.</td></tr>
     <tr><td><b>Branden</b> (IICRC WRT)</td><td>Approves any departure from the equipment worksheet, any Cat 3 or asbestos decision and any change of meter mid-job. Signs the Certificate of Drying as the certified technician.</td></tr>
   </table>
@@ -161,11 +161,13 @@
       <li>Moisture-proof flashlight and a non-contact voltage tester</li>
       <li>Extraction gear, 6-mil poly, zip poles, antimicrobial</li>
       <li>Drill and bits for weep holes (only with an OK)</li>
-      <li>Asset tags on every dehu, air mover, scrubber and heater</li>
+      <li>A readable QR asset label on every dehu, air mover, scrubber and heater</li>
       <li>Winter: ice cleats, a heater, and a warm spot for the meters</li>
     </ul>
   </div>
   </div>
+
+  <div class="note"><b>Asset tags</b>Each unit's label shows its tag in large print with a QR code that carries the same tag. Tags look like <b>AM-014</b>: two letters for the kind of unit (<b>AM</b> air mover, <b>DH</b> dehumidifier, <b>AF</b> air scrubber, <b>HT</b> heater) and the unit's number. The fleet list in Office Admin → Equipment is the master list and the labels print from it, so a tag is never made up or hand-written on site. A unit with a missing or torn label: tell the office so it prints a new one.</div>
 
   <h2 class="sec" id="s-meters">Meter check</h2>
   <p>Do this before the first job of the day, at room temperature, not in the truck.</p>
@@ -274,11 +276,23 @@
   </div></div>
   <figure class="tab"><div class="frame" style="height:2.28in"><img src="shots/sop-drying-tablet.jpg" alt="" style="margin-top:-5.24in"></div><figcaption><b>Equipment Sizing results</b> (shown on a tablet). Recommended vs. deployed for each kind of unit. Where we set less than the worksheet says, the Deviation column holds the reason, and that reason prints for the adjuster.</figcaption></figure>
   <div class="sopstep"><div class="n">14</div><div>
-    <h3>Set the equipment and log every unit</h3>
-    <p>Air movers aim along the wet wall at 15 to 45 degrees to the surface, all turning the same way around the room. Dehus go central, exhaust into the room and away from walls, drain line run to a sink or pump. Then in <span class="ui">Equipment Deployment &amp; Runtime</span> add a row per unit: asset tag, type, room, placed date and time. Place the same units on the map's <span class="ui">Equipment Placement</span> plan so the adjuster can see the layout.</p>
+    <h3>Set the equipment and scan every unit in</h3>
+    <p>Air movers aim along the wet wall at 15 to 45 degrees to the surface, all turning the same way around the room. Dehus go central, exhaust into the room and away from walls, drain line run to a sink or pump. Then in <span class="ui">Equipment Deployment &amp; Runtime</span> tap <span class="ui">📷 Scan equipment</span>, pick the room, check the toggle says <span class="ui">Place</span>, and scan each unit's label as it starts running. Each scan adds the unit's row with its asset tag, type, room, and placed date and time. Pick the next room with the room button before you scan that room's units, then tap <span class="ui">Done</span>. Check the count at the bottom of the scanner against the units you set. Place the same units on the map's <span class="ui">Equipment Placement</span> plan so the adjuster can see the layout.</p>
+    <p><b>Type only when a label won't read.</b> Wipe it and try the light first, then use <span class="ui">⌨ Type tag</span> in the scanner; it logs the tag with the same time and room. Only if the scanner can't open at all, add the row by hand with <span class="ui">+ Add equipment</span>: asset tag, type, room, placed date and time.</p>
     <p>If what you set is below the worksheet range, type the reason in the <b>Deviation</b> column (power limits, staged demo, Branden's call). A blank deviation next to a red number is the first line an adjuster cuts.</p>
   </div></div>
   <figure class="tab"><div class="frame" style="height:2.52in"><img src="shots/sop-drying-tablet.jpg" alt="" style="margin-top:-7.64in"></div><figcaption><b>Equipment Deployment &amp; Runtime.</b> One row per tagged unit; Days and Hrs fill in from the placed and removed times. A unit still on site after 7 days is flagged.</figcaption></figure>
+
+  <h2 class="sec">Equipment scanning on one card</h2>
+  <table>
+    <tr><th style="width:25%">When</th><th>Do this</th></tr>
+    <tr><td><b>Setting units</b></td><td>📷 Scan equipment, pick the room, toggle on <b>Place</b>, scan each label as the unit starts running. Room button before the next room. Done.</td></tr>
+    <tr><td><b>Moving a unit</b></td><td><b>Place</b>, pick the new room, scan it. It keeps its row; the app writes the "moved to" line in Notes.</td></tr>
+    <tr><td><b>Pulling units</b></td><td><b>Remove</b>, scan each unit as it's unplugged. Then a Notes line such as "pulled, area at goal".</td></tr>
+    <tr><td><b>Label won't read</b></td><td>Wipe it, light on, 6 to 10 in. away. Then ⌨ Type tag. Scanner won't open: + Add equipment.</td></tr>
+    <tr><td><b>Wrong scan</b></td><td>Undo on the card right away. Later: ✕ on a 📷 row, then scan it again. On a typed row, retype or clear Removed (or delete the moved-to line) instead.</td></tr>
+    <tr><td><b>Tags</b></td><td>AM air mover, DH dehumidifier, AF air scrubber, HT heater, then the unit's number (AM-014). The office's fleet list is the master list.</td></tr>
+  </table>
 
   <h2 class="sec" id="s-leave">Before you leave</h2>
   <div class="sopstep"><div class="n">15</div><div>
@@ -515,11 +529,11 @@
     <li><b>Look.</b> Walk every affected room before touching anything. Is everything running? Any new staining, smell, sag or water? Did the owner move or unplug anything? Photo anything new.</li>
     <li><b>Air.</b> Psychrometric row in the drying log (chapter 5).</li>
     <li><b>Materials.</b> Reference, then every point on every map, in number order (chapter 4).</li>
-    <li><b>Equipment.</b> Empty or check the dehu drain, clean filters, re-aim air movers onto the wettest points. Units removed today get a <b>Removed</b> date and time on their row; units added get a new row. Update the plan on the map if the layout changed.</li>
+    <li><b>Equipment.</b> Empty or check the dehu drain, clean filters, re-aim air movers onto the wettest points. Open <span class="ui">📷 Scan equipment</span>: units pulled today get scanned in <span class="ui">Remove</span>, which puts the <b>Removed</b> date and time on their row; units added get scanned in <span class="ui">Place</span>, which adds their row. A unit moved to another room keeps its row: pick the new room and scan it in <span class="ui">Place</span>, and the app adds a Notes line such as <span class="ui">moved to Bedroom 2 10/09 14:30</span>. Update the plan on the map if the layout changed.</li>
     <li><b>Photos.</b> Meter on the worst point and on the reference; anything removed or changed today. Stage <b>During</b>.</li>
     <li><b>Trend.</b> Check the Drying Trend on each map and the flags on the job list. Then write the Field Report.</li>
   </ol>
-  <div class="note"><b>Pull equipment as areas dry</b>When every point a unit serves is at goal, that unit comes out that day: Removed date and time, and a Notes line such as <span class="ui">pulled, area at goal</span>. Running equipment on dry material is the second line an adjuster cuts.</div>
+  <div class="note"><b>Pull equipment as areas dry</b>When every point a unit serves is at goal, that unit comes out that day: scan it out in <span class="ui">Remove</span> (that sets its Removed date and time), and add a Notes line such as <span class="ui">pulled, area at goal</span>. Running equipment on dry material is the second line an adjuster cuts.</div>
 
   <h2 class="sec" id="s-trend">Reading the trend</h2>
   <div class="diagram-wrap">
@@ -569,7 +583,7 @@
   </div></div>
   <div class="sopstep"><div class="n">C2</div><div>
     <h3>Keep the heat on, and add heat when the room runs cold</h3>
-    <p>Affected air below 70°F slows drying and cuts LGR capacity. Keep the house thermostat up, and add a heater when the sizing check says so. Log heaters as equipment rows like any other unit; they show on the certificate's equipment summary.</p>
+    <p>Affected air below 70°F slows drying and cuts LGR capacity. Keep the house thermostat up, and add a heater when the sizing check says so. Scan heaters in like any other unit (HT tags); they show on the certificate's equipment summary.</p>
   </div></div>
   <div class="sopstep"><div class="n">C3</div><div>
     <h3>Closed drying is the default in winter</h3>
@@ -610,7 +624,7 @@
   <h2 class="sec" id="s-pull">Pulling equipment</h2>
   <ol class="steps">
     <li>Final reading row on every map and a final psychrometric row, Notes <span class="ui">Dry verified</span> with who verified it.</li>
-    <li>Every remaining unit gets its <b>Removed</b> date and time in the drying log. Set the <b>Dry-out Finish Date</b>; the banner switches to "Drying complete — N days."</li>
+    <li>Every remaining unit gets scanned out in <span class="ui">Remove</span> as it's unplugged, which puts its <b>Removed</b> date and time in the drying log. A unit that won't scan: <span class="ui">⌨ Type tag</span> in the scanner, or type its Removed date and time on its row. No unit is left without a Removed time. Set the <b>Dry-out Finish Date</b>; the banner switches to "Drying complete — N days."</li>
     <li>After photos of every affected room from the same doorway spots as the before photos, plus the meter on the worst point at its final reading. Stage <b>After</b>, captioned.</li>
     <li>Leave the tape on the points for the rebuild crew and the adjuster, unless the owner asks for it off.</li>
   </ol>
@@ -663,7 +677,7 @@
         <li>Extract; remove with photos and reasons</li>
         <li>Antimicrobial (Cat 2 and 3); Cat 3 change order</li>
         <li>Size the equipment; deviations written</li>
-        <li>Every unit logged with asset tag and time</li>
+        <li>Every unit scanned in (Place), in the right room</li>
         <li>Day 0 psych row and reading rows</li>
         <li>Owner briefed; Field Report written</li>
       </ul>
@@ -678,7 +692,7 @@
         <li>Reference first, written in Notes</li>
         <li>Every point, in number order, at the point</li>
         <li>Dehu drained, filters clean, air movers re-aimed</li>
-        <li>Dry areas: equipment out, removed time logged</li>
+        <li>Dry areas scanned out (Remove); moves (Place)</li>
         <li>Photos: meter on worst point and reference</li>
         <li>Drying Trend checked; job list flags cleared</li>
         <li>Field Report written</li>

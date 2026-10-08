@@ -75,6 +75,11 @@ check("no drying docs -> no flags", dryingFlags({ ...base(), photos: [{}] }, NOW
   const f = dryingFlags(p, NOW);
   const eq = f.find((x) => x.kind === "equip7d");
   check("one unit over 7 days flagged", !!eq && eq.label.startsWith("1 unit"));
+  // out now, the office's rule: a pickup typed ahead still counts, a run typed in Hrs doesn't
+  p.dryingLogs[0].equipment.push({ type: "air_mover", placed: day(9), removed: day(-2) },
+    { type: "air_mover", placed: day(9), removed: "", hours: "48", _manualHrs: true });
+  const eq2 = dryingFlags(p, NOW).find((x) => x.kind === "equip7d");
+  check("a planned pickup counts, typed Hrs don't", !!eq2 && eq2.label.startsWith("2 units"));
 }
 
 // certified jobs are never flagged
