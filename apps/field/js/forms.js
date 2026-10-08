@@ -712,15 +712,17 @@ function settleLog(project, d, rows, opts) {
    line against what the row held when the edit began: what the crew took
    out goes, what they added stays (after the line it followed), and what
    the other device added stays. A line this box put on a row during the
-   edit (wrote) and the crew then changed is theirs to drop. */
-function mergeLines(began, mine, theirs, wrote) {
+   edit (wrote) and the crew then changed is theirs to drop; one the box
+   itself took off (took) and the crew typed back goes back. */
+function mergeLines(began, mine, theirs, wrote, took) {
   if (theirs === began) return mine;
   const b = began.split("\n"), m = mine.split("\n");
   const out = theirs.split("\n").filter((l) => m.indexOf(l) >= 0 || (b.indexOf(l) < 0 && !(wrote && wrote.has(l))));
   m.forEach((l, k) => {
-    if (b.indexOf(l) >= 0 || out.indexOf(l) >= 0) return;
-    const prev = k > 0 ? out.lastIndexOf(m[k - 1]) : -1;
-    out.splice(prev + 1, 0, l);
+    if (out.indexOf(l) >= 0 || (b.indexOf(l) >= 0 && !(took && took.has(l)))) return;   // there, or the other device took it off
+    let at = -1;                                        // after the nearest line above it that is there
+    for (let j = k - 1; j >= 0 && at < 0; j--) at = out.lastIndexOf(m[j]);
+    out.splice(at + 1, 0, l);
   });
   return out.join("\n");
 }
@@ -789,6 +791,9 @@ export function dryingLog(project, d) {
       const targets = rowsEls.map((_, idx) => idx).filter((idx) => rowsEls[idx].classList.contains("fill-target"));
       rowsEls.forEach((tr) => tr.classList.remove("fill-target"));
       if (!targets.length) return;
+      // the rows drawn are no longer the log's (a sync landed mid-edit): redraw first
+      if (grafted) { grafted = false; paintEq({ settle: false }); toast("The table was just updated from the other phone. Drag again.", 4000); return; }
+      const at = new Date().toISOString();
       const src = d.equipment[i][key] ?? "";
       let filled = 0, kept = 0;
       targets.forEach((idx, k) => {
@@ -804,6 +809,8 @@ export function dryingLog(project, d) {
       });
       // a Removed filled onto scanned rows: their hours are applyScans' figure
       if (targets.some((idx) => d.equipment[idx] && d.equipment[idx].scanId) || key === "notes") applyScans(project);
+      // and onto typed rows: carried onto the scans they replaced, as typed
+      if (key === "removed") for (const idx of targets) settleLog(project, d, [d.equipment[idx]], { edit: "removed", since: at });
       paintEq(); refreshWarn(); commit();
       toast((filled ? `Filled ${filled} row${filled > 1 ? "s" : ""}` : "Nothing filled")
         + (kept ? ` · skipped ${kept} scanned` : ""));
@@ -815,28 +822,77 @@ export function dryingLog(project, d) {
 
   /* A sync grafted this job into the page (app.js): equipment rows have no
      ids, so they are new objects and the table repaints, at once or, while
-     one of its fields is being edited, once the table is left. Until then
-     an edit in a field whose row was replaced lands on the row now in the
-     log (carryEdit), keystroke by keystroke. */
-  let grafted = false;
+     one of its fields is being edited, once the table is left (a repaint
+     the sync caused settles nothing: another phone's edit may be half done).
+     Until then each drawn row is matched to its counterpart across every
+     graft (matchRows), and an edit in a field whose row was replaced lands
+     on that counterpart (carryEdit), keystroke by keystroke. */
+  let grafted = false, drawn = [], held = [];          // the rows drawn; the log's rows as of the last paint or graft
+  const liveOf = new Map();                            // a drawn row -> its counterpart in the log now (null: none)
+  // the log's rows changed under the drawing (a graft, or rows the scans added or took off): re-matched
+  function remap() {
+    if (held.length === d.equipment.length && held.every((r, k) => r === d.equipment[k])) return;
+    const m = matchRows(held, d.equipment);
+    for (const r of drawn) {
+      const cur = liveOf.has(r) ? liveOf.get(r) : r;
+      liveOf.set(r, cur ? m.get(cur) || null : null);
+    }
+    held = d.equipment.slice();
+  }
   function onGrafted(ev) {
     if (!eqBody.isConnected) { document.removeEventListener("roybal:grafted", onGrafted); return; }
     if (ev && ev.detail && ev.detail.id && ev.detail.id !== project.id) return;
+    remap();
     if (eqBody.contains(document.activeElement)) { grafted = true; return; }
-    paintEq();
+    paintEq({ settle: false });
   }
   document.addEventListener("roybal:grafted", onGrafted);
   eqBody.addEventListener("focusout", (ev) => {
     if (!grafted || (ev.relatedTarget && eqBody.contains(ev.relatedTarget))) return;
     grafted = false;
-    paintEq(); commit();
+    paintEq({ settle: false }); commit();
   });
-  // the row object now in the log for one a sync replaced: the same scan, else the one row with the same tag and Placed
+  /* the rows before a graft matched to the rows after it: the same object or
+     scan, then the same tag and Placed (the nearest place among several), then
+     the row in the same place with the same tag or the same Placed (the other
+     device corrected one of them). A row with no match is gone. */
+  function matchRows(old, now) {
+    const m = new Map(), used = new Set();
+    const take = (a, b) => { m.set(a, b); used.add(b); };
+    const typed = (r) => r && typeof r === "object" && !r.scanId;
+    const key = (r) => String(r.asset ?? "") + "\n" + String(r.placed ?? "");
+    for (const a of old) if (a && now.indexOf(a) >= 0) take(a, a);
+    for (const a of old) {
+      if (!a || m.has(a) || !a.scanId) continue;
+      const b = now.find((r) => r && r.scanId === a.scanId && !used.has(r));
+      if (b) take(a, b);
+    }
+    old.forEach((a, i) => {
+      if (m.has(a) || !typed(a)) return;
+      let best = -1;
+      now.forEach((r, j) => { if (typed(r) && !used.has(r) && key(r) === key(a) && (best < 0 || Math.abs(j - i) < Math.abs(best - i))) best = j; });
+      if (best >= 0) take(a, now[best]);
+    });
+    old.forEach((a, i) => {
+      const b = now[i];
+      if (m.has(a) || !typed(a) || !typed(b) || used.has(b)) return;
+      if (String(a.asset ?? "") === String(b.asset ?? "") || String(a.placed ?? "") === String(b.placed ?? "")) take(a, b);
+    });
+    return m;
+  }
+  // a drawn row's counterpart in the log now (itself until a sync replaces it; null if it has none)
   function liveRow(row) {
-    if (!row || d.equipment.indexOf(row) >= 0) return row;
-    const same = d.equipment.filter((r) => r && (row.scanId ? r.scanId === row.scanId
-      : !r.scanId && String(r.asset ?? "") === String(row.asset ?? "") && String(r.placed ?? "") === String(row.placed ?? "")));
-    return same.length === 1 ? same[0] : row;
+    remap();
+    let cur = liveOf.has(row) ? liveOf.get(row) : row;
+    if (cur && d.equipment.indexOf(cur) < 0) cur = cur.scanId ? d.equipment.find((r) => r && r.scanId === cur.scanId) || null : null;
+    return cur;
+  }
+  // an edit whose row has no counterpart any more: said, and the table redrawn as the log is now
+  function lostRow(row) {
+    if (drawn.indexOf(row) < 0) return;                // a field from an earlier drawing
+    grafted = false;
+    paintEq({ settle: false });
+    toast("That row was changed on the other phone. Check it, then enter your change again.", 5000);
   }
   /* The crew's edit, made in a field whose row a sync replaced: only what
      they changed (the field's value against what the row held when the edit
@@ -845,12 +901,12 @@ export function dryingLog(project, d) {
      in, which the field never showed, stays: the crew's time goes under it,
      as if typed before the scan arrived. wrote: what this field put on a row
      during the edit. Returns whether it changed the row. */
-  function carryEdit(cur, key, began, value, wrote) {
+  function carryEdit(cur, key, began, value, wrote, took) {
     const was = String(began ?? ""), now = String(value ?? ""), live = String(cur[key] ?? "");
     const theirs = live !== now && now === was && !wrote.has(live);  // the crew is back where they began: the other device's value stands
     if (scanLocked(cur, key)) return false;
     if (key === "notes") {
-      const v = mergeLines(was, now, live, wrote);
+      const v = mergeLines(was, now, live, wrote, took);
       if (v === live) return false;
       cur.notes = v;
       return true;
@@ -877,6 +933,7 @@ export function dryingLog(project, d) {
     return true;
   }
   function eqRow(row, i) {
+    const drawnRow = row;
     const tr = h("tr", { class: row.scanId ? "eq-scanned" : null });
     const daysCell = h("td", { class: "calc", style: "min-width:46px" });
     function recalcDays() {
@@ -912,8 +969,8 @@ export function dryingLog(project, d) {
       // a field whose row a sync replaced: the edit goes onto the row now in its place
       const carry = (at) => {
         const cur = liveRow(row);
+        if (!cur) { lostRow(row); return null; }
         grafted = true;
-        if (d.equipment.indexOf(cur) < 0) return null;       // gone from the log: the repaint shows it
         if (scanLocked(cur, key)) input.value = cur[key] ?? "";
         else if (carryEdit(cur, key, began, input.value, wrote)) { commit(); settleStep(cur, at); }
         wrote.add(input.value);
@@ -921,7 +978,7 @@ export function dryingLog(project, d) {
       };
       input.addEventListener("input", () => {
         const at = new Date().toISOString();
-        if (d.equipment.indexOf(row) < 0) { carry(at); return; }
+        if (liveRow(row) !== row) { carry(at); return; }
         if (scanLocked(row, key)) { input.value = row[key] ?? ""; return; }
         // an ended row's Removed: a value part-way through the picker waits for the change check
         if (key === "removed" && endedRefusal(row, input.value)) return;
@@ -940,7 +997,7 @@ export function dryingLog(project, d) {
         settleStep(row, at);
       });
       input.addEventListener("change", () => {
-        const cur = d.equipment.indexOf(row) < 0 ? carry(new Date().toISOString()) : row;
+        const cur = liveRow(row) !== row ? carry(new Date().toISOString()) : row;
         if (cur && key === "removed") {
           const refused = endedRefusal(cur, input.value);
           if (refused) { input.value = cur[key] ?? ""; toast(refused, 4000); }
@@ -965,29 +1022,33 @@ export function dryingLog(project, d) {
       const typedNotes = key === "notes" && !row.scanId;
       const c = taCell(row, key, { minWidth: w });
       const ta = c.querySelector("textarea");
-      let began = String(row[key] ?? ""), wrote = new Set(), others = [];   // the text this edit began from; what it put on a row (whole and by line); the other device's lines
+      let began = String(row[key] ?? ""), wrote = new Set(), took = new Set(), others = [];   // the text this edit began from; what it put on a row (whole and by line); began lines it took off a row; the other device's lines
       const wrote1 = (v) => { wrote.add(v); for (const l of v.split("\n")) wrote.add(l); };
       // taCell writes each keystroke onto the row it was drawn for; a row a sync replaced
       // gets the crew's change carried onto the row now in its place
       const carry = () => {
         const cur = liveRow(row);
+        if (!cur) { lostRow(row); return null; }
         grafted = true;
-        if (d.equipment.indexOf(cur) < 0) return null;       // gone from the log: the repaint shows it
-        const b = began.split("\n");
-        for (const l of String(cur[key] ?? "").split("\n")) if (b.indexOf(l) < 0 && !wrote.has(l) && others.indexOf(l) < 0) others.push(l);
-        if (carryEdit(cur, key, began, ta.value, wrote)) commit();
+        const b = began.split("\n"), pre = String(cur[key] ?? "").split("\n");
+        for (const l of pre) if (b.indexOf(l) < 0 && !wrote.has(l) && others.indexOf(l) < 0) others.push(l);
+        if (carryEdit(cur, key, began, ta.value, wrote, took)) {
+          const post = String(cur[key] ?? "").split("\n");
+          for (const l of pre) if (b.indexOf(l) >= 0 && post.indexOf(l) < 0) took.add(l);
+          commit();
+        }
         wrote1(ta.value);
         return cur;
       };
       ta.addEventListener("input", () => {
-        if (d.equipment.indexOf(row) < 0) carry();
+        if (liveRow(row) !== row) carry();
         else wrote1(ta.value);
       });
       ta.addEventListener("change", () => {
-        const cur = d.equipment.indexOf(row) < 0 ? carry() : row;
+        const cur = liveRow(row) !== row ? carry() : row;
         // the lines that were on the row before this edit: the box's, and the other device's
         if (typedNotes && cur) settleTyped(cur, { edit: "notes", before: [began, ...others].join("\n") });
-        began = ta.value; wrote = new Set(); others = [];
+        began = ta.value; wrote = new Set(); took = new Set(); others = [];
       });
       c.classList.add("fillcell");
       attachFill(c, i, key);
@@ -1005,7 +1066,8 @@ export function dryingLog(project, d) {
         onclick: () => toast(said, 3500) }, "📷"));
     }
     const del = () => {
-      row = liveRow(row);
+      const row = liveRow(drawnRow);
+      if (!row) { lostRow(drawnRow); return; }
       if (row.scanId) {
         // a scan is never deleted: a void event cancels it (scans.js), on every device
         // (the printed scan record lists the scans that still count; the void
@@ -1037,8 +1099,9 @@ export function dryingLog(project, d) {
   function settleTyped(row, opts) {
     if (settleLog(project, d, [row], opts)) { paintScanPrint(); commit(); }
   }
-  function paintEq() {
-    if (settleLog(project, d)) commit();
+  function paintEq(opts) {
+    if (!(opts && opts.settle === false) && settleLog(project, d)) commit();
+    drawn = d.equipment.slice(); held = drawn.slice(); liveOf.clear();
     eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); paintScanPrint();
   }
 

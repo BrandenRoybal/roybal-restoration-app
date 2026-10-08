@@ -405,11 +405,13 @@ function rewrites(olds, lines, tracked, placed, before) {
     const p = nearest(moveLineMs(m, placed), cands.filter((x) => roomKey(parse(x)[1]) === roomKey(m[1])), (x) => x);
     if (p) take(old, p);
   }
+  // pass 3 (an edit's own new lines only): a line moved in room and time, within half a day of the scan's
   if (had) {
     for (const p of [...cands]) {
       const left = todo.filter((old) => !out.has(old));
       if (!left.length) break;
-      take(nearest(moveLineMs(parse(p), placed), left, (x) => x), p);
+      const t = moveLineMs(parse(p), placed), old = nearest(t, left, (x) => x);
+      if (Math.abs(moveLineMs(parse(old), placed) - t) <= 12 * 3600000) take(old, p);
     }
   }
   return out;
@@ -1043,9 +1045,11 @@ export function settleTypedRow(project, row, ctx, opts) {
   if (!isObj(f)) return out;
   const voidOf = latestVoids(project);
   const later = (a, b) => instant(a.at) > instant(b.at) || (instant(a.at) === instant(b.at) && byId(a.id, b.id) > 0);
-  const restate = (id, why, floor) => {
+  // a crew edit's restate takes the phone's clock; one that only lines a scan up with the row,
+  // just after the newest void it follows, so it never beats a later edit made elsewhere
+  const restate = (id, why, floor, crew) => {
     const last = voidOf.get(id);
-    const at = edit || !Number.isFinite(floor) ? stampAfter(c.at, floor) : new Date(floor + 1).toISOString();
+    const at = crew || !Number.isFinite(floor) ? stampAfter(c.at, floor) : new Date(floor + 1).toISOString();
     const ev = pushVoid(project, { id, tag: last.tag }, { ...c, at }, why);
     voidOf.set(id, ev);
     out.push(ev);
@@ -1064,7 +1068,7 @@ export function settleTypedRow(project, row, ctx, opts) {
   const floor = newest ? instant(newest.at) : NaN;
   for (const x of regs) {
     const says = isObj(x.last.set) ? str(x.last.set.removed) : null;
-    if (says !== typed || (edit === "removed" && instant(x.last.at) < since)) restate(str(x.r.id), { release: "removed", set: { removed: typed } }, floor);
+    if (says !== typed || (edit === "removed" && instant(x.last.at) < since)) restate(str(x.r.id), { release: "removed", set: { removed: typed } }, floor, edit === "removed");
     x.r.removed = typed;
   }
   const lines = str(row.notes).split("\n");
@@ -1078,7 +1082,7 @@ export function settleTypedRow(project, row, ctx, opts) {
     if (missing.indexOf(m) >= 0) put = to.get(str(m.line)) || "";
     else if (backLine(m)) put = moveLine(events.get(str(m.id)));          // deleted, then typed back
     if (put === null) continue;
-    restate(str(m.id), put ? { release: "notes", set: { line: put } } : { release: "notes" }, instant(last.at));
+    restate(str(m.id), put ? { release: "notes", set: { line: put } } : { release: "notes" }, instant(last.at), edit === "notes");
     m.line = put;
   }
   tidyFill(row);

@@ -324,12 +324,14 @@ await test("a sync that swaps the rows while the picker is open: the time the cr
   const other = JSON.parse(JSON.stringify(p));                     // the other phone's copy, newer
   const sheet = render(p);
   const removed = inputsOf(rowsOf(sheet).find((x) => inputsOf(x)[0].value === "AM-020"))[2];
+  removed.focus();                                                 // the picker open
   typeInto(removed, "2026-10-07T10:30");                           // the picker's first step, saved and pushed
   other.dryingLogs[0].readings.push({ id: "rd1" });
   other.updatedAt = "2026-10-08T00:00:00.000Z";
   const { merged } = mergeProjects(JSON.parse(JSON.stringify(p)), other);
   applyScans(merged);
   graftProject(p, merged);                                         // sync puts the merged copy in place (new row objects)
+  document.dispatchEvent(new CustomEvent("roybal:grafted", { detail: { id: p.id } }));
   typeInto(removed, "2026-10-07T09:00");
   removed.dispatchEvent(new window.Event("change", { bubbles: true }));
   const live = p.dryingLogs[0].equipment.find((r) => r.asset === "AM-020");
@@ -393,6 +395,23 @@ await test("Notes typed in a box whose row a sync replaced: the crew's lines go 
   assert.equal(boxes(rowOf(sheet, "AM-020"))[2].value, "fan on high\n2nd fan behind door\n" + line, "redrawn as saved");
 });
 
+await test("a sync whose redraw notice never came: the next edit still finds the row now in the log and carries only the crew's change", () => {
+  const p = job();
+  const sheet = render(p);
+  const ta = boxes(rowOf(sheet, "AM-020"))[2];
+  const other = clone(p);
+  recordScan(other, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e9", T2) });
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  const { merged } = mergeProjects(clone(p), clone(other));
+  applyScans(merged);
+  graftProject(p, merged);                                           // no roybal:grafted
+  const line = liveOf(p, "AM-020").notes;
+  enter(ta, "fan on high");
+  assert.equal(liveOf(p, "AM-020").notes, "fan on high\n" + line);
+  assert.ok(liveScans(p).some((e) => e.id === "e9"), "the move scan stands");
+  assert.equal(rowRoom(liveOf(p, "AM-020")), "Bedroom");
+});
+
 await test("a Removed picked in a field whose row a sync filled with a Remove scan goes under the scan; undoing the scan brings the pick back", () => {
   const p = job();
   const sheet = render(p);
@@ -425,6 +444,99 @@ await test("a time picked, then a sync whose newer copy never had it, then Done:
   removed.dispatchEvent(new window.Event("change", { bubbles: true }));   // Done
   assert.equal(liveOf(p, "AM-020").removed, "2026-10-07T10:30");
   assert.equal(pill.textContent, "Saving…", "saved");
+});
+
+await test("after a sync mid-edit each drawn row stays matched: a Placed corrected then Removed picked, a new unit typed field by field, a row the other phone re-timed, two blank rows", () => {
+  const p = job();
+  p.dryingLogs[0].equipment.push(blankEquipRow());                   // two blank rows at the bottom
+  const sheet = render(p);
+  const [, placed, removed] = inputsOf(rowOf(sheet, "AM-020"));
+  const blanks = rowsOf(sheet).slice(-2).map((tr) => inputsOf(tr));
+  const other = clone(p);
+  other.dryingLogs[0].readings.push({ id: "rdX" });
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  placed.focus();
+  syncIn(p, other);
+  enter(placed, "2026-10-05T08:30");                                 // the tag and Placed the row was matched by, changed
+  enter(removed, "2026-10-08T13:20");
+  assert.deepEqual([liveOf(p, "AM-020").placed, liveOf(p, "AM-020").removed], ["2026-10-05T08:30", "2026-10-08T13:20"]);
+  enter(blanks[0][0], "AM-031"); enter(blanks[0][1], "2026-10-08T09:00"); enter(blanks[0][2], "2026-10-10T09:00");
+  enter(blanks[1][0], "AM-032");
+  assert.deepEqual([liveOf(p, "AM-031").placed, liveOf(p, "AM-031").removed, !!liveOf(p, "AM-032")], ["2026-10-08T09:00", "2026-10-10T09:00", true]);
+  // the other phone corrects AM-020's Placed while this one picks its Removed again
+  other.dryingLogs[0] = clone(p.dryingLogs[0]);
+  other.dryingLogs[0].equipment[0].placed = "2026-10-05T08:00";
+  other.updatedAt = "2026-10-08T01:00:00.000Z";
+  removed.focus();
+  syncIn(p, other);
+  enter(removed, "2026-10-08T14:00");
+  assert.deepEqual([liveOf(p, "AM-020").placed, liveOf(p, "AM-020").removed], ["2026-10-05T08:00", "2026-10-08T14:00"]);
+  removed.blur();
+  assert.equal(inputsOf(rowOf(view.firstChild, "AM-020"))[2].value, "2026-10-08T14:00", "redrawn as saved");
+});
+
+await test("a line taken off and typed back in a Notes box whose row a sync replaced is kept, and its move scan stands", () => {
+  const p = job();
+  recordScan(p, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e9", T2) });
+  const sheet = render(p);
+  const ta = boxes(rowOf(sheet, "AM-020"))[2];
+  const line = ta.value;
+  assert.match(line, /^moved to Bedroom /);
+  const other = clone(p);
+  other.dryingLogs[0].readings.push({ id: "rdY" });
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  ta.focus();
+  syncIn(p, other);
+  typeInto(ta, line.slice(0, -1));                                   // a backspace
+  typeInto(ta, line);                                                // and the character typed back
+  assert.equal(liveOf(p, "AM-020").notes, line);
+  ta.blur();
+  assert.ok(liveScans(p).some((e) => e.id === "e9"), "the move scan stands");
+  assert.equal(rowRoom(liveOf(p, "AM-020")), "Bedroom");
+});
+
+await test("a sync landing on a phone that only has the log open redraws without settling: the other phone's half-typed Notes void nothing", () => {
+  const p = job();
+  recordScan(p, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e9", T2) });
+  render(p);
+  const half = clone(p);
+  half.dryingLogs[0].equipment[0].notes = "";                        // the other phone's lead cut the move line, mid-edit
+  half.updatedAt = "2026-10-08T00:00:00.000Z";
+  const n = p.equipmentScans.length;
+  syncIn(p, half);
+  assert.equal(p.equipmentScans.length, n, "no void pushed");
+  assert.ok(liveScans(p).some((e) => e.id === "e9"));
+});
+
+await test("the fill handle on a table a sync replaced mid-edit redraws instead of filling; ✕ answered No there keeps the row's later edits", () => {
+  const p = job();
+  const sheet = render(p);
+  const removed = inputsOf(rowOf(sheet, "AM-020"))[2];
+  const other = clone(p);
+  other.dryingLogs[0].equipment.splice(1, 0, { ...blankEquipRow(), asset: "AM-040", type: "Air mover", placed: "2026-10-08T08:00", removed: "2026-10-11T08:00" });
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  removed.focus();
+  syncIn(p, other);
+  enter(removed, "2026-10-10T09:00");
+  dragFill(sheet, 0, 4);
+  assert.match(toastText(), /updated from the other phone/);
+  assert.equal(liveOf(p, "AM-040").removed, "2026-10-11T08:00", "the other phone's row untouched");
+  assert.equal(liveOf(p, "AM-020").removed, "2026-10-10T09:00");
+  // ✕ on a row drawn before a sync, answered No, then that row's Notes
+  const q = job();
+  const sheetQ = render(q);
+  const tr = rowOf(sheetQ, "AM-014");
+  const ta = boxes(tr)[2];
+  ta.focus();
+  const otherQ = clone(q);
+  otherQ.dryingLogs[0].readings.push({ id: "rdZ" });
+  otherQ.updatedAt = "2026-10-08T00:00:00.000Z";
+  syncIn(q, otherQ);
+  confirmAnswer = false;
+  tr.querySelector(".rowdel").click();
+  confirmAnswer = true;
+  enter(ta, "dehu draining to sink");
+  assert.equal(liveOf(q, "AM-014").notes, "dehu draining to sink");
 });
 
 await test("✕ on a scanned row asks, then undoes the scan with void events (the row goes)", () => {

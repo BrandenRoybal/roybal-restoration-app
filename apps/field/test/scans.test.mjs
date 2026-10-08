@@ -1412,6 +1412,11 @@ test("settleTypedRow when a log only opens: a scan out of step is realigned just
   B = sync(A, B); A = clone(B);                                     // A's copy newer: r2's 10/09 12:00 shows, r1 still says 11:15
   assert.equal(row(A).removed, "2026-10-09T12:00");
   edit(B, "2026-10-08T13:20", "b2", 205);                           // B's lead: the real pickup
+  // a Notes edit on that phone lines the scan up the same way: it is no Removed edit
+  const N = clone(A), before = row(N).notes;
+  row(N).notes = "dehu draining to sink";
+  assert.deepEqual(settleTypedRow(N, row(N), ctx("note", 210), { edit: "notes", before }).map((e) => [e.voids, e.at]),
+    [["r1", new Date(Date.parse(at(176)) + 1).toISOString()]]);
   const pushed = settleTypedRow(A, row(A), ctx("view", 210));       // A only opens the log, not synced since
   assert.deepEqual(pushed.map((e) => [e.voids, e.set.removed, e.at]), [["r1", "2026-10-09T12:00", new Date(Date.parse(at(176)) + 1).toISOString()]],
     "stamped just after the edit it follows, not with A's clock");
@@ -1450,6 +1455,9 @@ test("settleTypedRow, a Notes edit: a move line already on the row is never a sc
   }
   const back = clone(B); row(back).notes = "fan on high"; restoreMoveLines(row(back));
   assert.equal(row(back).notes, "fan on high", "the fill handle never puts the hand line back as a scan line");
+  // the scan line deleted and a line for another day typed in the same edit: that line is the crew's own
+  const D = clone(both);
+  assert.deepEqual(noted(D, hand + "\nmoved to Utility 10/07 09:00", "d1", 12), ["(deleted)"]);
   // the scan line rewritten in room and time, the hand line still there: a rewrite
   const C = clone(both);
   assert.deepEqual(noted(C, hand + "\nmoved to Utility 10/08 09:35", "c1", 20), ["moved to Utility 10/08 09:35"]);
