@@ -29,7 +29,9 @@ const read = (fn) => readFileSync(join(fnDir, fn, "index.ts"), "utf8");
       user   — any valid signed-in user JWT
       staff  — a JWT whose profiles.role is admin|office|tech
       office — a JWT whose profiles.role is admin|office
-      cron   — the x-cron-secret header (a cron / an internal webhook) */
+      cron   — the x-cron-secret header (a cron / an internal webhook)
+      service — the service role itself (the worker): qbo-proxy only, see
+                the checks at the end of this file */
 const EXPECTED = {
   "qbo-proxy": {
     getStatus: ["user"],
@@ -38,6 +40,9 @@ const EXPECTED = {
     pushInvoice: ["staff"],
     invoiceLink: ["staff"],
     pullPayments: ["cron"],
+    listProjects: ["office", "service"],  // receipts phase 3: the admin's project picker + the worker's matcher
+    listPurchases: ["service"],           // every expense in a window: the worker only
+    completePurchase: ["service"],        // writes QuickBooks after an owner approval: the worker only
   },
   "qb-time-proxy": {
     exchangeCode: ["office"],
@@ -131,3 +136,31 @@ for (const [fn, expected] of Object.entries(EXPECTED)) {
       `${fn} lost the default-deny for unlisted actions`);
   });
 }
+
+/* The 'service' kind (receipts phase 3). The worker's key is an sb_secret_
+   key, which no user check can admit, so qbo-proxy proves it another way.
+   A shape test alone would hand QuickBooks writes to ANY sb_secret_ string,
+   so the proof must be the exact own key or the service-role-only ping, and
+   only qbo-proxy may know the kind at all. The behaviour itself is driven
+   through index.ts in qbo-proxy/purchases.test.mjs. */
+test("only qbo-proxy grants the service kind", () => {
+  // (each table is pinned to EXPECTED above, so checking EXPECTED is enough)
+  for (const [fn, expected] of Object.entries(EXPECTED)) {
+    if (fn === "qbo-proxy") continue;
+    assert.ok(!Object.values(expected).flat().includes("service"), `${fn} grants 'service', which nothing there can prove`);
+  }
+});
+
+test("qbo-proxy: a service caller is proven, never assumed from the key's shape", () => {
+  const src = read("qbo-proxy");
+  const body = /async function viaServiceKey[\s\S]*?\n\}\n/.exec(src)?.[0] ?? "";
+  assert.ok(body, "viaServiceKey is gone");
+  assert.match(body, /sameKey\(token, Deno\.env\.get\("SUPABASE_SERVICE_ROLE_KEY"\)/, "the fast path must be an exact compare with the function's own key");
+  assert.match(body, /\/rest\/v1\/rpc\/qbo_service_ping/, "another sb_secret_ key must be proven by the service-role-only ping");
+  assert.match(body, /\(await res\.json\(\)[^;]*\) === true;/, "the ping must answer exactly true");
+  assert.doesNotMatch(body, /console\./, "the key must never be logged");
+  // the service check sits inside the gate and admits only actions that list it
+  assert.match(src, /if \(allowed\.includes\("service"\) && await viaServiceKey\(req\)\)/);
+  // and a service-only action is not open to a user JWT
+  assert.match(src, /if \(!allowed\.some\(\(a\) => a !== "cron" && a !== "service"\)\)/);
+});
