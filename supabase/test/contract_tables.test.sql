@@ -385,9 +385,11 @@ $$;
 --     Deny by default is the whole point of agent_authority: a machine gets
 --     its grants from the owner, one at a time, with an event. The grants so
 --     far: 0019's, on the owner's go of 2026-10-06, agent:brief may PROPOSE
---     email.send (its overdue-invoice reminders); and 0021's, on the owner's
---     go of 2026-10-07, agent:billing may PROPOSE invoice.review_gaps (the
---     nightly billing check). Nothing more.
+--     email.send (its overdue-invoice reminders); 0021's, on the owner's go
+--     of 2026-10-07, agent:billing may PROPOSE invoice.review_gaps (the
+--     nightly billing check); and 0022's, on the owner's "Start Phase 3" of
+--     2026-10-07, agent:integrations (seeded by 0022 with its fixed id) may
+--     PROPOSE receipts.qbo_link (the nightly QuickBooks match). Nothing more.
 -- ---------------------------------------------------------------------------
 do $$
 declare
@@ -402,8 +404,8 @@ begin
   end if;
 
   select count(*) into n from public.agent_authority where revoked_at is null;
-  if n <> 2 then
-    raise exception '% live agent_authority grant(s); the seed is exactly agent:brief proposing email.send (0019) and agent:billing proposing invoice.review_gaps (0021)', n;
+  if n <> 3 then
+    raise exception '% live agent_authority grant(s); the seed is exactly agent:brief proposing email.send (0019), agent:billing proposing invoice.review_gaps (0021) and agent:integrations proposing receipts.qbo_link (0022)', n;
   end if;
 
   select * into g from public.agent_authority
@@ -432,6 +434,25 @@ begin
                   where kind = 'agent_authority.granted' and aggregate_type = 'agent_authority'
                     and aggregate_id = g.id) then
     raise exception 'the agent:billing grant has no agent_authority.granted event';
+  end if;
+
+  -- 0022's principal: a seventh agent with the id the worker and the grant name
+  if not exists (select 1 from public.agents
+                  where id = '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10' and name = 'agent:integrations'
+                    and kind = 'automation' and enabled and created_by_kind = 'system') then
+    raise exception 'agent:integrations is not seeded as 5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10, an enabled system automation';
+  end if;
+  select * into g from public.agent_authority
+   where revoked_at is null and agent_id = '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';
+  if g.agent_id is null or g.operation <> 'receipts.qbo_link'
+     or g.capability <> 'propose' or g.conditions <> '{}'::jsonb or g.expires_at is not null then
+    raise exception 'the 0022 grant is %/%/% (conditions %, expires %), not agent:integrations propose receipts.qbo_link',
+      g.agent_id, g.operation, g.capability, g.conditions, g.expires_at;
+  end if;
+  if not exists (select 1 from public.events
+                  where kind = 'agent_authority.granted' and aggregate_type = 'agent_authority'
+                    and aggregate_id = g.id) then
+    raise exception 'the agent:integrations grant has no agent_authority.granted event';
   end if;
 end
 $$;
