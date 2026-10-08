@@ -1657,6 +1657,150 @@ test("corrected scans on a row typed before them end the same whichever phone sy
   }
 });
 
+test("a row that kept its Removed over corrected scans moves only for a later Removed edit on such a row: a line-up, an undo or an older correction arriving late never moves it, and Hrs typed by hand stay", () => {
+  const typed = () => job({ updatedAt: at(-120), dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }])] });
+  const row = (p) => rows(p)[0];
+  const edit = (p, v, id, min) => {
+    row(p).removed = v;
+    releaseTypedScans(p, row(p), ctx(id + "a", min));
+    if (settleTypedRow(p, row(p), ctx(id + "b", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    if (settleTypedRow(p, row(p), ctx(id + "c", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    p.updatedAt = at(min);
+  };
+  const byHand = (p, h, min) => { row(p).hours = h; row(p)._manualHrs = true; p.updatedAt = at(min); };
+  const open = (p, id, min) => { const v = settleTypedRow(p, row(p), ctx(id, min)); if (v.length) { applyScans(p); p.updatedAt = at(min); } return v; };
+  const strip = ({ updatedAt, ...c }) => JSON.stringify(c);
+  const server = (init) => {   // sync.js absorb: merge with the server's copy, rebuild; a union adding something goes up stamped now
+    let srv = clone(init);
+    return {
+      get: () => srv,
+      sync(p, min) {
+        const m = mergeProjects(clone(p), clone(srv)).merged;
+        applyScans(m);
+        if (strip(m) === strip(srv)) return clone(srv);
+        m.updatedAt = at(min); srv = clone(m); return m;
+      },
+    };
+  };
+  const shows = (r) => `${r.removed}${r._manualHrs ? `, Hrs ${r.hours} by hand` : ""}`;
+  const ends = (ph, srv) => [...new Set(Object.values(ph).map((p) => shows(row(p))).concat(shows(row(srv.get()))))];
+  // A and C each correct their own scan; B, which never had either, types 09:40 (before both) and Hrs by hand last.
+  // A, holding C's row, then opens the log or types a remark offline: its line-up reaches B's winning row
+  for (const aDoes of ["opens", "types a remark"]) {
+    const srv = server(typed());
+    const ph = { A: clone(srv.get()), B: clone(srv.get()), C: clone(srv.get()) };
+    recordScan(ph.A, remove("AM-030", "s1", 0)); ph.A.updatedAt = at(0);
+    edit(ph.A, "2026-10-08T09:50", "a1", 2);
+    recordScan(ph.C, remove("AM-030", "s2", 20)); ph.C.updatedAt = at(20);
+    edit(ph.C, "2026-10-08T10:18", "c1", 22);
+    ph.C = srv.sync(ph.C, 23); ph.A = srv.sync(ph.A, 25);
+    edit(ph.B, "2026-10-08T09:40", "b1", 30); byHand(ph.B, "70", 31);
+    if (aDoes === "opens") assert.equal(open(ph.A, "openA", 33).length, 1, "A lines s1 up with C's correction");
+    else {
+      const before = row(ph.A).notes;
+      row(ph.A).notes = "fan on high";
+      assert.equal(settleTypedRow(ph.A, row(ph.A), ctx("notesA", 33), { edit: "notes", before }).length, 1);
+      applyScans(ph.A); ph.A.updatedAt = at(33);
+    }
+    ph.B = srv.sync(ph.B, 35);
+    assert.deepEqual(row(ph.B).scanFill.released.map((r) => [r.id, r.kept]).sort(), [["s1", true], ["s2", true]]);
+    ph.A = srv.sync(ph.A, 40);
+    for (let t = 45; t < 51; t += 3) for (const k of "ABC") { ph[k] = srv.sync(ph[k], t); open(ph[k], "open" + k + t, t + 0.5); }
+    assert.deepEqual(ends(ph, srv), ["2026-10-08T09:40, Hrs 70 by hand"], `A ${aDoes}`);
+  }
+  // a correction A made before B typed reaches the server after B's copy won, or before it: 09:30 either way
+  for (const order of ["A first", "B first"]) {
+    const srv = server(typed());
+    const ph = { A: clone(srv.get()), B: clone(srv.get()) };
+    const up = (k, min) => { ph[k] = srv.sync(ph[k], min); open(ph[k], "o" + k + min, min + 0.1); };
+    recordScan(ph.A, remove("AM-030", "s1", 0)); ph.A.updatedAt = at(0);
+    edit(ph.A, "2026-10-08T09:40", "a1", 1); up("A", 1.5);
+    edit(ph.A, "2026-10-08T09:45", "a2", 3);
+    edit(ph.B, "2026-10-08T09:30", "b1", 5);
+    if (order === "A first") { up("A", 4); up("B", 6); } else { up("B", 6); up("A", 8); }
+    for (let t = 10; t < 14; t += 2) { up("A", t); up("B", t + 1); }
+    assert.deepEqual(ends(ph, srv), ["2026-10-08T09:30"], order);
+  }
+  // an undo of one of the scans B's row kept over reaches it after the merge that kept them
+  {
+    const srv = server(typed());
+    const ph = { A: clone(srv.get()), B: clone(srv.get()), C: clone(srv.get()) };
+    recordScan(ph.C, remove("AM-030", "s2", -2)); ph.C.updatedAt = at(-2);
+    const r = recordScan(ph.A, remove("AM-030", "s1", 0)); ph.A.updatedAt = at(0);
+    ph.A = srv.sync(ph.A, 0.5); ph.C = srv.sync(ph.C, 1);
+    edit(ph.C, "2026-10-08T09:50", "c1", 2); ph.C = srv.sync(ph.C, 2.5);
+    assert.equal(undoTyped(ph.A, r, ctx("u1", 3)), "restored"); ph.A.updatedAt = at(3);
+    edit(ph.B, "2026-10-08T09:40", "b1", 30); byHand(ph.B, "70", 31);
+    ph.B = srv.sync(ph.B, 35); ph.A = srv.sync(ph.A, 40);
+    for (let t = 50; t < 60; t += 3) for (const k of "ABC") { ph[k] = srv.sync(ph[k], t); open(ph[k], "o" + k + t, t + 0.1); }
+    assert.deepEqual(ends(ph, srv), ["2026-10-08T09:40, Hrs 70 by hand"], "undo arrives late");
+  }
+  // a Removed edit on the kept row is marked, and ends the same register on a copy whose newer log wins with the old row
+  {
+    const srv = server(typed());
+    const ph = { A: clone(srv.get()), B: clone(srv.get()), X: clone(srv.get()) };
+    recordScan(ph.A, remove("AM-030", "s1", 0)); ph.A.updatedAt = at(0);
+    edit(ph.A, "2026-10-08T09:50", "a1", 2); ph.A = srv.sync(ph.A, 3);
+    edit(ph.B, "2026-10-08T09:40", "b1", 30); ph.B = srv.sync(ph.B, 35);
+    ph.X = srv.sync(ph.X, 36);
+    assert.deepEqual(row(ph.X).scanFill.released, [{ id: "s1", removed: "2026-10-08T09:40", v: "a1a", kept: true }]);
+    edit(ph.B, "2026-10-08T09:35", "b2", 40);
+    assert.deepEqual(ph.B.equipmentScans.filter((e) => e.kept === true).map((e) => [e.voids, e.set.removed]), [["s1", "2026-10-08T09:35"]]);
+    ph.B = srv.sync(ph.B, 41);
+    ph.X.dryingLogs[0].readings.push({ id: "rdX" }); ph.X.updatedAt = at(45);
+    ph.X = srv.sync(ph.X, 46);
+    for (let t = 50; t < 56; t += 3) for (const k of "ABX") { ph[k] = srv.sync(ph[k], t); open(ph[k], "o" + k + t, t + 0.1); }
+    assert.deepEqual(ends(ph, srv), ["2026-10-08T09:35"]);
+  }
+});
+
+test("a scan a ✕ took, on a copy that still shows the row: an open or a remark there lines nothing up, so the copy that wins keeps its own Removed", () => {
+  const typed = () => job({ updatedAt: at(-120), dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" }])] });
+  const row = (p) => rows(p).find((r) => r.asset === "AM-030");
+  const edit = (p, v, id, min) => {
+    row(p).removed = v;
+    releaseTypedScans(p, row(p), ctx(id + "a", min));
+    if (settleTypedRow(p, row(p), ctx(id + "b", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    if (settleTypedRow(p, row(p), ctx(id + "c", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    p.updatedAt = at(min);
+  };
+  const strip = ({ updatedAt, ...c }) => JSON.stringify(c);
+  for (const cDoes of ["nothing", "opens", "types a remark"]) {
+    let srv = typed();
+    const sync = (p, min) => {
+      const m = mergeProjects(clone(p), clone(srv)).merged;
+      applyScans(m);
+      if (strip(m) === strip(srv)) return clone(srv);
+      m.updatedAt = at(min); srv = clone(m); return m;
+    };
+    const ph = { A: clone(srv), C: clone(srv), D: clone(srv) };
+    recordScan(ph.A, remove("AM-030", "r1", 0)); ph.A.updatedAt = at(0);
+    edit(ph.A, "2026-10-09T12:00", "a1", 2);                        // a planned pickup instead
+    ph.A = sync(ph.A, 2.5); ph.D = sync(ph.D, 3);
+    recordScan(ph.A, remove("AM-030", "r2", 30)); ph.A.updatedAt = at(30);
+    ph.A = sync(ph.A, 30.5); ph.C = sync(ph.C, 31);
+    assert.deepEqual([row(ph.C).removed, row(ph.D).removed], ["2026-10-08T10:30", "2026-10-09T12:00"]);
+    releaseTypedScans(ph.A, row(ph.A), ctx("x1", 35), "row");      // A's ✕
+    rows(ph.A).splice(rows(ph.A).indexOf(row(ph.A)), 1); ph.A.updatedAt = at(35);
+    ph.A = sync(ph.A, 36);
+    ph.C.dryingLogs[0].readings.push({ id: "rdC" }); ph.C.updatedAt = at(40);
+    ph.C = sync(ph.C, 41);
+    const n0 = ph.C.equipmentScans.length;
+    if (cDoes === "opens") assert.deepEqual(settleTypedRow(ph.C, row(ph.C), ctx("openC", 42)), []);
+    if (cDoes === "types a remark") {
+      const before = row(ph.C).notes;
+      row(ph.C).notes = "fan on high\nbagged";
+      settleTypedRow(ph.C, row(ph.C), ctx("notesC", 42), { edit: "notes", before });
+      ph.C.updatedAt = at(42); ph.C = sync(ph.C, 43);
+    }
+    assert.equal(ph.C.equipmentScans.length, n0, `C ${cDoes}: nothing pushed`);
+    ph.D.dryingLogs[0].readings.push({ id: "rdD" }); ph.D.updatedAt = at(50);
+    ph.D = sync(ph.D, 51);
+    for (let t = 52; t < 61; t += 3) for (const k of "ACD") ph[k] = sync(ph[k], t);
+    assert.deepEqual([...new Set(Object.values(ph).map((p) => row(p).removed))], ["2026-10-09T12:00"], `C ${cDoes}`);
+  }
+});
+
 test("✕ after a correction: a copy that still shows the row keeps following the correction", () => {
   const fresh = () => ({ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" });
   const typed = () => job({ updatedAt: at(-60), dryingLogs: [log("L1", [fresh()])] });

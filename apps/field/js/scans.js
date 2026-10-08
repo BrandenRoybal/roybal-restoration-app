@@ -516,8 +516,8 @@ function fillTypedRow(row, mine, ctx) {
     if (!isObj(r) || !r.id || next.released.some((k) => k.id === str(r.id))) continue;
     const rv = ctx.voidOf.get(str(r.id));
     if (rv && rv.release !== "removed") continue;
-    // one the row kept its Removed over (claimReleased), no newer void since: it says what the row does
-    if (r.kept && (!rv || str(r.v) === rv.id)) { keeps.push(next.released.push({ id: str(r.id), removed: "", v: str(r.v), kept: true }) - 1); continue; }
+    // one the row kept its Removed over (claimReleased), and no crew edit of a Removed kept over it since: it says what the row does
+    if (r.kept && ctx.stillKept(r)) { keeps.push(next.released.push({ id: str(r.id), removed: "", v: str(r.v), kept: true }) - 1); continue; }
     const now = rv && isObj(rv.set) ? str(rv.set.removed) : str(r.removed);
     next.released.push(rv ? { id: str(r.id), removed: now, v: rv.id } : { id: str(r.id), removed: now });
     if (rv && (!newest || instant(rv.at) > instant(newest.rv.at) || (instant(rv.at) === instant(newest.rv.at) && byId(rv.id, newest.rv.id) > 0))) {
@@ -605,7 +605,7 @@ function fillTypedRow(row, mine, ctx) {
    undo, a deleted line and a deleted row bring nothing: the row keeps what
    it holds. Run to a fixed point, so a second applyScans adds nothing.
    Mutates the rows. */
-function claimReleased(logs, project, voidOf, follow) {
+function claimReleased(logs, project, voidOf, follow, stillKept) {
   const rows = [];
   for (const log of logs) for (const row of arr(log.equipment)) if (isObj(row) && !row.scanId && clean(row.placed)) rows.push({ log, row });
   if (!rows.length) return;
@@ -615,12 +615,14 @@ function claimReleased(logs, project, voidOf, follow) {
     if (f.removeId) listed.add(str(f.removeId));
     for (const x of arr(f.moves).concat(arr(f.released))) if (isObj(x) && x.id) listed.add(str(x.id));
   }
-  // a scan the row kept its Removed over (`kept`), and no newer void of it since
-  const keeps = (r) => isObj(r) && !!r.kept && (!follow.get(str(r.id)) || follow.get(str(r.id)).id === str(r.v));
-  // a row follows a correction once it lists one it didn't keep (or holds a scan handed elsewhere)...
+  // a scan the row kept its Removed over (`kept`), still kept (keptHolds)
+  const keeps = (r) => isObj(r) && !!r.kept && stillKept(r);
+  // a row follows a correction once it lists one it didn't keep and still stands (not undone),
+  // or holds a scan handed elsewhere...
+  const corrected = (id) => { const lv = follow.get(str(id)); return !lv || lv.release === "removed"; };
   const follows = (row) => {
     const f = fillOf(row), hv = f.removeId ? follow.get(str(f.removeId)) : null;
-    return arr(f.released).some((r) => isObj(r) && r.id && !keeps(r)) || !!(hv && hv.release === "removed");
+    return arr(f.released).some((r) => isObj(r) && r.id && !keeps(r) && corrected(r.id)) || !!(hv && hv.release === "removed");
   };
   // ...and then those it kept follow too: their voids' times decide between them all
   const unkeep = (row) => {
@@ -688,6 +690,24 @@ function latestVoids(project, corrections) {
     out.set(e.voids, e);
   }
   return out;
+}
+
+// A register the row kept its Removed over (`kept`, `v` the void it was kept at) holds until a
+// crew edit of a Removed some copy of the row kept over that scan (a void marked `kept`, by
+// settleTypedRow) comes after `v`. Nothing else ends it: a line-up, an undo of another scan, a ✕,
+// or a correction made on a copy that follows the scan (before or since) says nothing about the
+// Removed this row kept, so it ends the same whichever order the voids arrive in.
+function keptHolds(project) {
+  const voids = new Map();
+  for (const e of sortedEvents(project)) {
+    if (e.act !== "void") continue;
+    if (!voids.has(e.voids)) voids.set(e.voids, []);
+    voids.get(e.voids).push(e);
+  }
+  return (r) => {
+    const vs = voids.get(str(r.id)) || [];
+    return !vs.slice(vs.findIndex((e) => e.id === str(r.v)) + 1).some((e) => e.kept === true);
+  };
 }
 
 /** Write the scans into the drying logs' equipment rows: one row per
@@ -760,11 +780,11 @@ export function applyScans(project) {
   }
   // hand-typed rows: their scans written on, or taken off again once undone
   const claims = claimTypedRows(logs, onRows);
-  const voidOf = latestVoids(project, true);
-  claimReleased(logs, project, latestVoids(project), voidOf);
+  const voidOf = latestVoids(project, true), stillKept = keptHolds(project);
+  claimReleased(logs, project, latestVoids(project), voidOf, stillKept);
   for (const log of logs) {
     for (const row of arr(log.equipment)) {
-      if (isObj(row) && !row.scanId && (claims.has(row) || isObj(row.scanFill))) fillTypedRow(row, claims.get(row) || { removes: [], moves: [] }, { known, voidOf });
+      if (isObj(row) && !row.scanId && (claims.has(row) || isObj(row.scanFill))) fillTypedRow(row, claims.get(row) || { removes: [], moves: [] }, { known, voidOf, stillKept });
     }
   }
 
@@ -1168,7 +1188,10 @@ export function settleTypedRow(project, row, ctx, opts) {
   const out = releaseTypedScans(project, row, c, "notes", before);
   const f = row.scanFill;
   if (!isObj(f)) return out;
-  const voidOf = latestVoids(project, true);
+  const voidOf = latestVoids(project, true), plain = latestVoids(project);
+  // a scan a ✕ took (its latest void a "row" one): only the crew's own edit of that field restates
+  // it, never an open, since the value this copy shows may be one the ✕ undid on the phone that made it
+  const gone = (id) => !!plain.get(str(id)) && plain.get(str(id)).release === "row";
   const later = (a, b) => instant(a.at) > instant(b.at) || (instant(a.at) === instant(b.at) && byId(a.id, b.id) > 0);
   // a crew edit's restate takes the phone's clock; one that only lines a scan up with the row,
   // just after the newest void it follows, so it never beats a later edit made elsewhere
@@ -1196,8 +1219,13 @@ export function settleTypedRow(project, row, ctx, opts) {
     // one the row kept its Removed over is carried only by a Removed edit: an open or a Notes edit
     // isn't the crew's word on it, and this copy's Removed may be older than one typed elsewhere
     if (x.r.kept && edit !== "removed") { x.r.removed = typed; continue; }
+    if (edit !== "removed" && gone(x.r.id)) continue;
+    // (a Removed edit on a row that kept its Removed over the scan is marked `kept`: the one void
+    // that ends the same register on every other copy, keptHolds)
     const says = isObj(x.last.set) ? str(x.last.set.removed) : null;
-    if (says !== typed || (edit === "removed" && instant(x.last.at) < since)) restate(str(x.r.id), { release: "removed", set: { removed: typed } }, floor, edit === "removed");
+    if (x.r.kept || says !== typed || (edit === "removed" && instant(x.last.at) < since)) {
+      restate(str(x.r.id), { release: "removed", set: { removed: typed }, ...(x.r.kept ? { kept: true } : {}) }, floor, edit === "removed");
+    }
     x.r.removed = typed;
     x.r.v = voidOf.get(str(x.r.id)).id;
     delete x.r.kept;
@@ -1209,6 +1237,7 @@ export function settleTypedRow(project, row, ctx, opts) {
     arr(f.moves).filter((x) => isObj(x) && missing.indexOf(x) < 0).map((x) => str(x.line)), row.placed, before);
   for (const m of moved) {
     const last = voidOf.get(str(m.id));
+    if (edit !== "notes" && gone(m.id)) continue;
     let put = null;
     if (missing.indexOf(m) >= 0) put = to.get(str(m.line)) || "";
     else if (backLine(m)) put = moveLine(events.get(str(m.id)));          // deleted, then typed back
