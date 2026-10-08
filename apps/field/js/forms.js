@@ -38,7 +38,7 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
-import { applyScans, voidPlacement, scanRecord, releaseTypedScans, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
+import { applyScans, voidPlacement, scanRecord, releaseTypedScans, restateRelease, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
@@ -813,8 +813,11 @@ export function dryingLog(project, d) {
         if (key === "removed" && endedRefusal(row, input.value)) return;
         row[key] = input.value;
         if (key === "hours") row._manualHrs = true;
-        // a Removed typed (or cleared) on a typed row replaces a scan that filled it: off the print too
-        if (key === "removed" && !row.scanId && releaseTypedScans(project, row, scanUndoCtx()).length) {
+        // a Removed typed (or cleared) on a typed row replaces a scan that filled it: off the print
+        // too; the time it ends on is restated once the field is left (settleTyped)
+        const released = key === "removed" && !row.scanId ? releaseTypedScans(project, row, scanUndoCtx()) : [];
+        if (released.length) {
+          pendingOf(row).voids.push(...released);
           c.classList.remove("scan-cell");
           c.querySelector("sup.scan-s")?.remove();
           paintScanPrint();
@@ -826,6 +829,7 @@ export function dryingLog(project, d) {
         input.addEventListener("change", () => {
           const refused = endedRefusal(row, input.value);
           if (refused) { input.value = row[key] ?? ""; toast(refused, 4000); }
+          settleTyped(row);
         });
       }
       if (key === "hours") hoursInput = input;
@@ -840,14 +844,11 @@ export function dryingLog(project, d) {
     };
     // free-text columns grow with their text; the fill handle still works
     const mkTa = (key, w) => {
-      const c = taCell(row, key, { minWidth: w });
       // a typed row's "moved to" line deleted or rewritten by hand (checked once the edit is done):
       // what's typed replaces that move scan
-      if (key === "notes" && !row.scanId) {
-        c.querySelector("textarea").addEventListener("change", () => {
-          if (releaseTypedScans(project, row, scanUndoCtx(), "notes").length) { paintScanPrint(); commit(); }
-        });
-      }
+      const typedNotes = key === "notes" && !row.scanId;
+      const c = taCell(row, key, { minWidth: w, oninput: typedNotes ? () => { pendingOf(row).notes = true; } : null });
+      if (typedNotes) c.querySelector("textarea").addEventListener("change", () => settleTyped(row));
       c.classList.add("fillcell");
       attachFill(c, i, key);
       return c;
@@ -891,7 +892,26 @@ export function dryingLog(project, d) {
     recalcDays();
     return tr;
   }
-  function paintEq() { eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); paintScanPrint(); }
+  /* Hand edits on typed rows a scan touched, settled once the field is left
+     (or before the table repaints under it): the Removed the crew ended on,
+     restated on the scans it replaced, and move lines no longer in Notes. */
+  const pending = new Map();
+  const pendingOf = (row) => {
+    if (!pending.has(row)) pending.set(row, { voids: [], notes: false });
+    return pending.get(row);
+  };
+  function settleTyped(row) {
+    const p = pending.get(row);
+    if (!p) return;
+    pending.delete(row);
+    const n = restateRelease(project, row, p.voids, scanUndoCtx()).length
+      + (p.notes ? releaseTypedScans(project, row, scanUndoCtx(), "notes").length : 0);
+    if (n) { paintScanPrint(); commit(); }
+  }
+  function paintEq() {
+    for (const row of [...pending.keys()]) settleTyped(row);
+    eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); paintScanPrint();
+  }
 
   /* printed under the table when this log holds scanned rows: the S legend,
      then every scan on the job in time order (scans.js scanRecord) */

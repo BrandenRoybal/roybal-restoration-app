@@ -265,6 +265,31 @@ await test("clearing or retyping Removed on a typed row a scan filled voids that
   assert.equal(typedRow.removed, "", "not filled back");
 });
 
+await test("a typed row's Removed picked in steps: the scan gives way at once, and the time the crew ends on is what the void says", () => {
+  const p = job();
+  recordScan(p, { tag: "AM-020", mode: "remove", ...ctx("e5", T2) });
+  const sheet = render(p);
+  const tr = rowsOf(sheet).find((x) => inputsOf(x)[0].value === "AM-020");
+  const removed = inputsOf(tr)[2];
+  typeInto(removed, "");                                          // a segment cleared first
+  typeInto(removed, "2026-10-07T09:00");
+  assert.ok(!liveScans(p).some((e) => e.id === "e5"), "voided at the first step");
+  removed.dispatchEvent(new window.Event("change", { bubbles: true }));
+  const voids = p.equipmentScans.filter((e) => e.act === "void" && e.voids === "e5");
+  assert.deepEqual(voids.map((e) => e.set.removed), ["", "2026-10-07T09:00"], "the finished time restated");
+  // a deleted move line is settled even when the table repaints before the box is left
+  assert.equal(recordScan(p, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e6", "2026-10-07T16:00:00.000Z") }).outcome, "moved");
+  const sheet2 = render(p);
+  const tr2 = rowsOf(sheet2).find((x) => inputsOf(x)[0].value === "AM-020");
+  const ta = [...tr2.querySelectorAll("textarea.cell-ta")].pop();
+  assert.equal(ta.value, "moved to Bedroom 10/07 08:00");
+  ta.value = "";
+  ta.dispatchEvent(new window.Event("input", { bubbles: true }));
+  assert.ok(liveScans(p).some((e) => e.id === "e6"));
+  rowsOf(sheet2).pop().querySelector(".rowdel").click();          // ✕ the blank row: anything that repaints the table
+  assert.ok(!liveScans(p).some((e) => e.id === "e6"), "the move scan gave way before the repaint");
+});
+
 await test("✕ on a scanned row asks, then undoes the scan with void events (the row goes)", () => {
   const p = job();
   recordScan(p, { tag: "AM-014", mode: "place", room: "Bedroom", ...ctx("e3", T2) });   // a move

@@ -312,7 +312,12 @@ function dropLine(notes, line) {
 function dropMoveLine(notes, line) {
   const out = dropLine(notes, line);
   if (out !== notes || !line) return out;
-  return notes.split("\n").map((l) => (l.trim().startsWith(line + " ") ? l.trim().slice(line.length).trim() : l)).join("\n");
+  return notes.split("\n").map((l) => (isMoveLine(l, line) ? l.trim().slice(line.length).replace(/^[\s,.;:-]+/, "") : l)).join("\n");
+}
+// ... or swapped for the line the crew rewrote it as
+function swapMoveLine(notes, line, put) {
+  if (notes.includes(put)) return dropMoveLine(notes, line);
+  return notes.split("\n").map((l) => (isMoveLine(l, line) ? put : l)).join("\n");
 }
 
 /* Bring one scanned row in line with its placement. Asset, Placed and (when
@@ -359,7 +364,9 @@ function writeRow(row, P) {
 
 /* ---------- hand-typed rows a scan touched ---------- */
 // "moved to Bath 10/08 14:30" → epoch ms; the year is the row's Placed year (the next one for an earlier month)
-const MOVE_LINE_RE = /^moved to (.+?) (\d{2})\/(\d{2}) (\d{2}:\d{2})(?:\s.*)?$/;   // a remark typed after it is fine
+const MOVE_LINE_RE = /^moved to (.+?) (\d{2})\/(\d{2}) (\d{2}:\d{2})(?!\d)(.*)$/;   // a remark typed after it is fine
+// a notes line that still is the move line `line` (a remark after it allowed)
+const isMoveLine = (l, line) => !!line && l.trim().startsWith(line) && !/^\d/.test(l.trim().slice(line.length));
 function moveLineMs(m, placed) {
   const p = /^(\d{4})-(\d{2})/.exec(clean(placed));
   if (!m || !p) return NaN;
@@ -471,13 +478,17 @@ function fillTypedRow(row, mine, ctx) {
     return !!(mv && mv.release === "row");               // the row deleted elsewhere: this copy keeps its line
   };
   for (const m of arr(f.moves)) if (isObj(m) && m.id && keep(m)) next.moves.push({ id: str(m.id), line: str(m.line) });
-  for (const m of arr(f.moves)) {                         // a move since undone takes its line with it
-    if (isObj(m) && m.id && !next.moves.some((k) => k.id === m.id) && !next.moves.some((k) => k.line === str(m.line))) notes = dropMoveLine(notes, str(m.line));
+  for (const m of arr(f.moves)) {
+    if (!isObj(m) || !m.id || next.moves.some((k) => k.id === m.id) || next.moves.some((k) => k.line === str(m.line))) continue;
+    // a move since undone takes its line with it; one the crew rewrote on another device takes their line
+    const mv = ctx.voidOf.get(m.id);
+    const put = mv && mv.release === "notes" && isObj(mv.set) ? clean(mv.set.line) : "";
+    notes = put ? swapMoveLine(notes, str(m.line), put) : dropMoveLine(notes, str(m.line));
   }
   for (const x of mine.moves) {                          // each added once: a line the crew deleted stays deleted
     if (next.moves.some((k) => k.id === x.id)) continue;
     const line = moveLine(x);
-    if (!notes.includes(line)) notes = insertMoveLine(notes, line, row.placed);
+    if (!notes.split("\n").some((l) => isMoveLine(l, line))) notes = insertMoveLine(notes, line, row.placed);
     next.moves.push({ id: x.id, line });
   }
   row.notes = notes;
@@ -826,7 +837,7 @@ export function undoTyped(project, outcome, ctx) {
       if (!isObj(row) || row.scanId || !fillHas(row, id)) continue;
       const f = fillOf(row);
       showing = f.removeId === id ? str(row.removed) === str(f.removed)
-        : arr(f.moves).some((m) => isObj(m) && m.id === id && str(row.notes).includes(str(m.line)));
+        : arr(f.moves).some((m) => isObj(m) && m.id === id && str(row.notes).split("\n").some((l) => isMoveLine(l, str(m.line))));
     }
   }
   if (!voidEvent(project, id, ctx)) return "";
@@ -847,20 +858,44 @@ export function releaseTypedScans(project, row, ctx, what) {
   const mine = claimsOf(project, row);
   const f = fillOf(row);
   const notes = str(row.notes);
+  const lines = notes.split("\n").map((l) => l.trim());
   const lineOf = (e) => {
     const m = arr(f.moves).find((x) => isObj(x) && x.id === e.id);
     return m ? str(m.line) : moveLine(e);
   };
   const hits = kind === "removed" ? mine.removes
-    : kind === "notes" ? mine.moves.filter((e) => !notes.includes(lineOf(e)))
+    : kind === "notes" ? mine.moves.filter((e) => !lines.some((l) => isMoveLine(l, lineOf(e))))
       : mine.removes.concat(mine.moves);
+  // a move line rewritten (another room, same time) rather than deleted: the crew's line
+  const rewritten = (e) => {
+    const m = MOVE_LINE_RE.exec(lineOf(e));
+    const l = m ? lines.find((x) => { const n = MOVE_LINE_RE.exec(x); return n && n[2] === m[2] && n[3] === m[3] && n[4] === m[4]; }) : null;
+    return l ? { line: l } : null;
+  };
   if (isObj(row.scanFill)) {
     if (kind !== "notes") Object.assign(row.scanFill, { removeId: "", removed: "", was: null });
     if (kind !== "removed") row.scanFill.moves = arr(f.moves).filter((m) => isObj(m) && !hits.some((e) => e.id === m.id));
     if (!row.scanFill.removeId && !arr(row.scanFill.moves).length) delete row.scanFill;
   }
-  const why = kind === "removed" ? { release: kind, set: { removed: str(row.removed) } } : { release: kind };
-  return hits.map((e, i) => pushVoid(project, e, { ...c, id: i && c.id ? `${c.id}-${i}` : c.id }, why));
+  const why = (e) => {
+    if (kind === "removed") return { release: kind, set: { removed: str(row.removed) } };
+    const set = kind === "notes" ? rewritten(e) : null;
+    return set ? { release: kind, set } : { release: kind };
+  };
+  return hits.map((e, i) => pushVoid(project, e, { ...c, id: i && c.id ? `${c.id}-${i}` : c.id }, why(e)));
+}
+
+/** The Removed the crew finished on, after releaseTypedScans gave way to the
+    first value they typed (a date-time picker reports each step): for each
+    of those voids whose time differs, one more void saying the final time
+    (applyScans goes by an event's latest void). Returns the new voids. */
+export function restateRelease(project, row, voids, ctx) {
+  if (!isObj(project) || !isObj(row) || row.scanId) return [];
+  const c = isObj(ctx) ? ctx : {};
+  const now = str(row.removed);
+  const stale = arr(voids).filter((v) => isObj(v) && v.release === "removed" && isObj(v.set) && str(v.set.removed) !== now);
+  return stale.map((v, i) => pushVoid(project, { id: v.voids, tag: v.tag }, { ...c, id: i && c.id ? `${c.id}-${i}` : c.id },
+    { release: "removed", set: { removed: now } }));
 }
 
 /** Notes written over wholesale (the fill handle): a typed row's live move
