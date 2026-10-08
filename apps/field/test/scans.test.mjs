@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   TAG_PAD, TAG_PREFIXES, TYPE_LABELS, parseTag, tagKey, typeFromTag, liveScans, placements, openPlacement,
   wallTime, applyScans, recordScan, voidEvent, voidPlacement, openElsewhere, scanRecord, roomSuggestions, undoTyped,
-  releaseTypedScans, rowOutAt, rowRoom, rowScans, restoreMoveLines, restateRelease,
+  releaseTypedScans, rowOutAt, rowRoom, rowScans, restoreMoveLines, settleTypedRow,
 } from "../js/scans.js";
 import { equipClassOf, deployedCounts } from "../js/dryingcalc.js";
 import { mergeProjects, ID_COLLECTIONS, tombstoneItems } from "../js/merge.js";
@@ -1159,27 +1159,140 @@ test("a typed row's move line rewritten on one phone (another room, same time) h
   }
 });
 
-test("restateRelease: the Removed the crew ended on replaces the first value a picker reported", () => {
+test("settleTypedRow: a Removed corrected in two steps ends on the second, on every copy, whichever wins", () => {
   const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }])] });
   const a = typed();
   recordScan(a, remove("AM-030", "r1", 0));
   const b = mergeProjects(clone(typed()), clone(a)).merged;
   applyScans(b);
   const row = rows(b)[0];
-  row.removed = "";                                                // a segment cleared first
-  const first = releaseTypedScans(b, row, ctx("v1", 5));
-  assert.equal(first[0].set.removed, "");
-  row.removed = "2026-10-08T08:00";                                // then the time they meant
-  const again = restateRelease(b, row, first, ctx("v2", 6));
+  // step one (a segment cleared, or the date picked first), committed and settled
+  row.removed = "";
+  assert.equal(releaseTypedScans(b, row, ctx("v1", 5))[0].set.removed, "");
+  assert.deepEqual(settleTypedRow(b, row, ctx("v2", 6)), [], "nothing more to carry yet");
+  const mid = clone(b);                                             // what B pushed in between
+  // step two: no scan is live on the row any more, but its void still says ""
+  row.removed = "2026-10-08T08:00";
+  assert.deepEqual(releaseTypedScans(b, row, ctx("v3", 7)), []);
+  const again = settleTypedRow(b, row, ctx("v4", 8));
   assert.deepEqual(again.map((e) => [e.voids, e.release, e.set.removed]), [["r1", "removed", "2026-10-08T08:00"]]);
-  assert.deepEqual(restateRelease(b, row, again, ctx("v3", 7)), [], "only voids whose time differs");
+  assert.deepEqual(settleTypedRow(b, row, ctx("v5", 9)), [], "settled once");
+  // A, newer, either still holding the scan or having taken B's in-between copy
   const a2 = clone(a);
   recordScan(a2, place("AM-031", "Hall", "x1", 8));
+  const a3 = mergeProjects(clone(a2), clone(mid)).merged;
+  applyScans(a3);
+  assert.equal(rows(a3).find((q) => q.asset === "AM-030").removed, "", "A took the in-between value");
+  for (const newer of [a2, a3]) {
+    newer.updatedAt = "2026-10-12T00:00:00.000Z";
+    for (const [x, y] of [[newer, b], [b, newer]]) {
+      const { merged } = mergeProjects(clone(x), clone(y));
+      applyScans(merged);
+      const r = rows(merged).find((q) => q.asset === "AM-030");
+      assert.deepEqual([r.removed, r.hours], ["2026-10-08T08:00", 71]);
+      assert.equal(applyScans(merged).changed, false);
+      assert.deepEqual(settleTypedRow(merged, r, ctx("v6", 10)), [], "the merged copy agrees with its scans");
+    }
+  }
+});
+
+test("settleTypedRow: an edit never settled (the app closed first) is carried when the log next opens", () => {
+  const a = job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }])] });
+  recordScan(a, remove("AM-030", "r1", 0));
+  const b = clone(a);
+  const row = rows(b)[0];
+  row.removed = "";
+  releaseTypedScans(b, row, ctx("v1", 5));                          // the first input
+  row.removed = "2026-10-08T08:00";                                 // saved, then the app was killed
+  const opened = clone(b);
+  applyScans(opened);
+  assert.equal(rows(opened)[0].removed, "2026-10-08T08:00", "the row keeps what was typed");
+  const v = settleTypedRow(opened, rows(opened)[0], ctx("v2", 30));
+  assert.deepEqual(v.map((e) => [e.voids, e.set.removed]), [["r1", "2026-10-08T08:00"]]);
+  const a2 = clone(a);
+  a2.updatedAt = "2026-10-12T00:00:00.000Z";
+  const { merged } = mergeProjects(clone(a2), clone(opened));
+  applyScans(merged);
+  assert.equal(rows(merged)[0].removed, "2026-10-08T08:00");
+});
+
+test("settleTypedRow: a move line rewritten twice, or its time corrected, is the line every copy shows; a remark the other phone typed stays", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" }])] });
+  const a = typed();
+  recordScan(a, place("AM-030", "Bath", "m1", 0));
+  const fresh = () => { const b = mergeProjects(clone(typed()), clone(a)).merged; applyScans(b); return b; };
+  const newerA = (remark) => {
+    const a2 = clone(a);
+    recordScan(a2, place("AM-031", "Hall", "x1", 6));
+    if (remark) rows(a2)[0].notes = rows(a2)[0].notes.replace("moved to Bath 10/08 10:00", "moved to Bath 10/08 10:00 - 2nd fan behind door");
+    a2.updatedAt = "2026-10-12T00:00:00.000Z";
+    return a2;
+  };
+  const check = (b, want, a2 = newerA()) => {
+    for (const [x, y] of [[a2, b], [b, a2]]) {
+      const { merged } = mergeProjects(clone(x), clone(y));
+      applyScans(merged);
+      const r = rows(merged).find((q) => q.asset === "AM-030");
+      assert.equal(r.notes, want);
+      assert.equal(applyScans(merged).changed, false);
+    }
+  };
+  // twice: a typo, then the room meant
+  const b = fresh();
+  rows(b)[0].notes = "fan on high\nmoved to Laundy 10/08 10:00";
+  assert.deepEqual(settleTypedRow(b, rows(b)[0], ctx("v1", 5)).map((e) => e.set.line), ["moved to Laundy 10/08 10:00"]);
+  rows(b)[0].notes = "fan on high\nmoved to Laundry 10/08 10:00";
+  assert.deepEqual(settleTypedRow(b, rows(b)[0], ctx("v2", 6)).map((e) => [e.voids, e.set.line]), [["m1", "moved to Laundry 10/08 10:00"]]);
+  check(b, "fan on high\nmoved to Laundry 10/08 10:00");
+  assert.equal(rowRoom(rows(b)[0]), "Laundry");
+  // then deleted: the line goes on every copy
+  rows(b)[0].notes = "fan on high";
+  assert.equal(settleTypedRow(b, rows(b)[0], ctx("v3", 7)).length, 1);
+  check(b, "fan on high");
+  // the time corrected (scanned late), same room
+  const c = fresh();
+  rows(c)[0].notes = "fan on high\nmoved to Bath 10/08 09:35";
+  assert.deepEqual(settleTypedRow(c, rows(c)[0], ctx("v4", 5)).map((e) => e.set.line), ["moved to Bath 10/08 09:35"]);
+  check(c, "fan on high\nmoved to Bath 10/08 09:35");
+  // the room fixed on B while A added a remark on that line: A's remark stays
+  const e = fresh();
+  rows(e)[0].notes = "fan on high\nmoved to Laundry 10/08 10:00";
+  settleTypedRow(e, rows(e)[0], ctx("v5", 5));
+  check(e, "fan on high\nmoved to Laundry 10/08 10:00 - 2nd fan behind door", newerA(true));
+});
+
+test("settleTypedRow: two moves in one minute, one fixed or deleted, never takes the other scan's line", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" }])] });
+  const a = typed();
+  const m1 = recordScan(a, place("AM-030", "Bath", "m1", 0, { at: "2026-10-08T18:00:10.000Z" }));
+  recordScan(a, place("AM-030", "Laundry", "m2", 0, { at: "2026-10-08T18:00:40.000Z" }));
+  assert.equal(rows(a)[0].notes, "fan on high\nmoved to Bath 10/08 10:00\nmoved to Laundry 10/08 10:00");
+  const fresh = () => { const b = mergeProjects(clone(typed()), clone(a)).merged; applyScans(b); return b; };
+  // the Laundry line fixed to Utility
+  const b = fresh();
+  rows(b)[0].notes = "fan on high\nmoved to Bath 10/08 10:00\nmoved to Utility 10/08 10:00";
+  assert.deepEqual(settleTypedRow(b, rows(b)[0], ctx("v1", 5)).map((e) => [e.voids, e.set && e.set.line]), [["m2", "moved to Utility 10/08 10:00"]]);
+  const a2 = clone(a);
+  recordScan(a2, place("AM-031", "Hall", "x1", 6));
   a2.updatedAt = "2026-10-12T00:00:00.000Z";
   for (const [x, y] of [[a2, b], [b, a2]]) {
     const { merged } = mergeProjects(clone(x), clone(y));
     applyScans(merged);
-    assert.deepEqual([rows(merged).find((q) => q.asset === "AM-030").removed], ["2026-10-08T08:00"]);
+    assert.equal(rows(merged)[0].notes, "fan on high\nmoved to Bath 10/08 10:00\nmoved to Utility 10/08 10:00");
+    assert.equal(rowRoom(rows(merged)[0]), "Utility");
+  }
+  // the Laundry line deleted on B while A undoes the Bath move: no move left
+  const c = fresh();
+  rows(c)[0].notes = "fan on high\nmoved to Bath 10/08 10:00";
+  assert.deepEqual(settleTypedRow(c, rows(c)[0], ctx("v2", 5)).map((e) => [e.voids, e.set]), [["m2", undefined]]);
+  const a3 = clone(a);
+  assert.equal(undoTyped(a3, m1, ctx("u1", 6)), "restored");
+  a3.updatedAt = "2026-10-12T00:00:00.000Z";
+  for (const [x, y] of [[a3, c], [c, a3]]) {
+    const { merged } = mergeProjects(clone(x), clone(y));
+    applyScans(merged);
+    assert.equal(rows(merged)[0].notes, "fan on high");
+    assert.equal(rowRoom(rows(merged)[0]), "Kitchen");
   }
 });
 

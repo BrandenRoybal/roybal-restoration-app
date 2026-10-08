@@ -38,7 +38,7 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
-import { applyScans, voidPlacement, scanRecord, releaseTypedScans, restateRelease, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
+import { applyScans, voidPlacement, scanRecord, releaseTypedScans, settleTypedRow, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
@@ -694,11 +694,25 @@ function wallShort(w) {
 const SCAN_ACT = { place: "Placed", move: "Moved", remove: "Removed" };
 const SCAN_HOW = { camera: "Camera", photo: "Label photo", typed: "Typed tag" };
 const scanUndoCtx = () => ({ id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD });
+/* Hand edits on a log's typed rows a scan touched, carried onto those scans
+   (scans.js settleTypedRow) when the log opens, before its table repaints,
+   and once a field is left. A row a sync graft replaced is skipped: the row
+   now in its place settles at the next repaint. Returns the voids pushed. */
+function settleLog(project, d, rows) {
+  const eq = Array.isArray(d.equipment) ? d.equipment : [];
+  let n = 0;
+  for (const row of rows || eq) {
+    if (row && !row.scanId && row.scanFill && eq.indexOf(row) >= 0) n += settleTypedRow(project, row, scanUndoCtx()).length;
+  }
+  if (n) applyScans(project);
+  return n;
+}
 
 export function dryingLog(project, d) {
   // scans made on another device (or rows a newer copy of this log dropped)
   // land in the table before it paints
-  if (applyScans(project).changed) commit();
+  const merged = applyScans(project).changed;
+  if (settleLog(project, d) || merged) commit();
 
   /* drying-day counter: start → finish once a finish date is set, else start → today */
   const daysBanner = h("div", { class: "daysbig app-only", style: "margin-bottom:8px" });
@@ -814,10 +828,9 @@ export function dryingLog(project, d) {
         row[key] = input.value;
         if (key === "hours") row._manualHrs = true;
         // a Removed typed (or cleared) on a typed row replaces a scan that filled it: off the print
-        // too; the time it ends on is restated once the field is left (settleTyped)
+        // too; the time it ends on is carried onto that scan once the field is left (settleTyped)
         const released = key === "removed" && !row.scanId ? releaseTypedScans(project, row, scanUndoCtx()) : [];
         if (released.length) {
-          pendingOf(row).voids.push(...released);
           c.classList.remove("scan-cell");
           c.querySelector("sup.scan-s")?.remove();
           paintScanPrint();
@@ -829,6 +842,16 @@ export function dryingLog(project, d) {
         input.addEventListener("change", () => {
           const refused = endedRefusal(row, input.value);
           if (refused) { input.value = row[key] ?? ""; toast(refused, 4000); }
+          else if (!row.scanId && String(row.removed ?? "") !== input.value) {
+            // a sync rewrote the row while the picker was open: what the crew picked stands
+            row.removed = input.value;
+            if (releaseTypedScans(project, row, scanUndoCtx()).length) {
+              c.classList.remove("scan-cell");
+              c.querySelector("sup.scan-s")?.remove();
+              paintScanPrint();
+            }
+            recalcDays();
+          }
           settleTyped(row);
         });
       }
@@ -847,7 +870,7 @@ export function dryingLog(project, d) {
       // a typed row's "moved to" line deleted or rewritten by hand (checked once the edit is done):
       // what's typed replaces that move scan
       const typedNotes = key === "notes" && !row.scanId;
-      const c = taCell(row, key, { minWidth: w, oninput: typedNotes ? () => { pendingOf(row).notes = true; } : null });
+      const c = taCell(row, key, { minWidth: w });
       if (typedNotes) c.querySelector("textarea").addEventListener("change", () => settleTyped(row));
       c.classList.add("fillcell");
       attachFill(c, i, key);
@@ -892,24 +915,12 @@ export function dryingLog(project, d) {
     recalcDays();
     return tr;
   }
-  /* Hand edits on typed rows a scan touched, settled once the field is left
-     (or before the table repaints under it): the Removed the crew ended on,
-     restated on the scans it replaced, and move lines no longer in Notes. */
-  const pending = new Map();
-  const pendingOf = (row) => {
-    if (!pending.has(row)) pending.set(row, { voids: [], notes: false });
-    return pending.get(row);
-  };
+  // a typed row's Removed or Notes edit, done: carried onto the scans it replaced
   function settleTyped(row) {
-    const p = pending.get(row);
-    if (!p) return;
-    pending.delete(row);
-    const n = restateRelease(project, row, p.voids, scanUndoCtx()).length
-      + (p.notes ? releaseTypedScans(project, row, scanUndoCtx(), "notes").length : 0);
-    if (n) { paintScanPrint(); commit(); }
+    if (settleLog(project, d, [row])) { paintScanPrint(); commit(); }
   }
   function paintEq() {
-    for (const row of [...pending.keys()]) settleTyped(row);
+    if (settleLog(project, d)) commit();
     eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); paintScanPrint();
   }
 

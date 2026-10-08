@@ -43,7 +43,7 @@ const { Store } = await import("../js/core.js");
 const { newDryingLog, blankEquipRow } = await import("../js/model.js");
 const { setCtx } = await import("../js/formkit.js");
 const { dryingLog, scanDeps } = await import("../js/forms.js");
-const { recordScan, scanRecord, placements, liveScans, applyScans } = await import("../js/scans.js");
+const { recordScan, scanRecord, placements, liveScans, applyScans, rowRoom } = await import("../js/scans.js");
 const fleet = await import("../js/fleet.js");
 const { qrSvg, qrModules } = await import("../js/qr.js");
 const { BUILD } = await import("../js/config.js");
@@ -288,6 +288,30 @@ await test("a typed row's Removed picked in steps: the scan gives way at once, a
   assert.ok(liveScans(p).some((e) => e.id === "e6"));
   rowsOf(sheet2).pop().querySelector(".rowdel").click();          // ✕ the blank row: anything that repaints the table
   assert.ok(!liveScans(p).some((e) => e.id === "e6"), "the move scan gave way before the repaint");
+});
+
+await test("a typed row edited in two commits (Removed, or a move line): each one is what the scan's latest void says; one never committed is carried when the log opens", () => {
+  const p = job();
+  recordScan(p, { tag: "AM-020", mode: "remove", ...ctx("e5", T2) });
+  const sheet = render(p);
+  const tr = rowsOf(sheet).find((x) => inputsOf(x)[0].value === "AM-020");
+  const removed = inputsOf(tr)[2];
+  enter(removed, "2026-10-07T10:30");                              // the date picked, then the time
+  enter(removed, "2026-10-07T09:00");
+  const said = () => p.equipmentScans.filter((e) => e.act === "void" && e.voids === "e5").map((e) => e.set.removed);
+  assert.deepEqual(said(), ["2026-10-07T10:30", "2026-10-07T09:00"]);
+  typeInto(removed, "2026-10-07T08:45");                           // then the app closed before the field was left
+  render(p);
+  assert.equal(said().pop(), "2026-10-07T08:45", "carried when the log opened again");
+  // a move line rewritten twice
+  assert.equal(recordScan(p, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e6", "2026-10-07T16:00:00.000Z") }).outcome, "moved");
+  const tr2 = rowsOf(render(p)).find((x) => inputsOf(x)[0].value === "AM-020");
+  const ta = [...tr2.querySelectorAll("textarea.cell-ta")].pop();
+  enter(ta, "moved to Bedrom 10/07 08:00");
+  enter(ta, "moved to Bedroom 2 10/07 08:00");
+  const lines = p.equipmentScans.filter((e) => e.act === "void" && e.voids === "e6").map((e) => e.set && e.set.line);
+  assert.deepEqual(lines, ["moved to Bedrom 10/07 08:00", "moved to Bedroom 2 10/07 08:00"]);
+  assert.equal(rowRoom(p.dryingLogs[0].equipment.find((r) => r.asset === "AM-020")), "Bedroom 2");
 });
 
 await test("✕ on a scanned row asks, then undoes the scan with void events (the row goes)", () => {
