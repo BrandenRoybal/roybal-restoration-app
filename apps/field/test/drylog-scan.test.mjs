@@ -903,6 +903,11 @@ await test("a Removed this phone typed before the other phone's corrected scan, 
   B.updatedAt = "2026-10-07T20:05:00.000Z";
   syncIn(B, A);
   assert.equal(liveOf(B, "AM-020").removed, "2026-10-07T11:30", "B's copy won: its 11:30 stands");
+  const events = B.equipmentScans.length, stamp = B.updatedAt;
+  render(B);                                                         // only opening the log changes nothing, saves nothing
+  assert.equal(B.equipmentScans.length, events);
+  assert.equal(B.updatedAt, stamp);
+  assert.equal(pill.textContent, "✓ Saved");
   enter(inputsOf(rowOf(view.firstChild, "AM-020"))[2], "");             // B's lead: still running after all
   B.updatedAt = "2026-10-08T00:00:00.000Z";
   syncIn(B, A);

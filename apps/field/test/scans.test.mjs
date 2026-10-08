@@ -1449,7 +1449,7 @@ test("a typed row's scan corrected on a phone whose copy then lost the merge to 
     both(A, B, (r) => assert.equal(r.removed, put, put || "cleared"));
   }
   // a Removed B typed before the scan's time: the scan never filled it, nor does its correction.
-  // The row lists it (following its correction), and an open lines it up just after A's edit
+  // The row lists it as one it kept its Removed over, so an open lines nothing up
   {
     const A = typed(), B = typed({ removed: "2026-10-08T09:30" });
     recordScan(A, remove("AM-030", "r1", 0));
@@ -1459,14 +1459,8 @@ test("a typed row's scan corrected on a phone whose copy then lost the merge to 
     offline(B, 10);
     both(A, B, (r) => {
       assert.equal(r.removed, "2026-10-08T09:30");
-      assert.deepEqual(r.scanFill.released.map((x) => [x.id, x.removed, x.v]), [["r1", "2026-10-08T09:40", "a1"]]);
-    }, false);
-    const m = sync(A, B);
-    assert.deepEqual(settleTypedRow(m, row(m), ctx("open", 300)).map((e) => [e.voids, e.set.removed, e.at]),
-      [["r1", "2026-10-08T09:30", new Date(Date.parse(at(2)) + 1).toISOString()]]);
-    assert.equal(applyScans(m).changed, false);
-    assert.equal(row(m).removed, "2026-10-08T09:30");
-    assert.deepEqual(settleTypedRow(m, row(m), ctx("open2", 301)), [], "lined up once");
+      assert.deepEqual(r.scanFill.released.map((x) => [x.id, x.removed, x.v, x.kept]), [["r1", "2026-10-08T09:30", "a1", true]]);
+    });
   }
   // a moved-to line the crew rewrote (the picker was left on the wrong room)
   {
@@ -1573,6 +1567,153 @@ test("a corrected scan the winning copy's Removed was typed before: a later edit
     edit(A, later, "a2", 240);
     assert.equal(applyScans(A).changed, false, later || "cleared");
     for (const [x, y] of [[A, B], [B, A]]) assert.equal(row(sync(x, y)).removed, later, later || "cleared");
+  }
+});
+
+test("a scan the winning row kept its Removed over: opening the log carries nothing, so a later hand edit on the other phone stands", () => {
+  const typed = () => job({ updatedAt: at(-60), dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }])] });
+  const row = (p) => rows(p)[0];
+  const edit = (p, v, id, min) => {
+    row(p).removed = v;
+    releaseTypedScans(p, row(p), ctx(id + "a", min));
+    if (settleTypedRow(p, row(p), ctx(id + "b", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    if (settleTypedRow(p, row(p), ctx(id + "c", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    p.updatedAt = at(min);
+  };
+  const open = (p, id, min) => { const v = settleTypedRow(p, row(p), ctx(id, min)); if (v.length) { applyScans(p); p.updatedAt = at(min); } return v; };
+  const strip = ({ updatedAt, ...c }) => JSON.stringify(c);
+  for (const aOpens of [false, true]) {
+    let server = typed();
+    const sync = (p, min) => {   // sync.js absorb: merge with the server's copy, rebuild; a union adding something goes up stamped now
+      const m = mergeProjects(clone(p), clone(server)).merged;
+      applyScans(m);
+      if (strip(m) === strip(server)) return clone(server);
+      m.updatedAt = at(min); server = clone(m); return m;
+    };
+    let A = clone(server), B = clone(server);
+    recordScan(B, remove("AM-030", "r1", 0)); B.updatedAt = at(0);
+    edit(B, "2026-10-08T09:50", "b1", 2);                         // B's lead: the real pull time
+    edit(A, "2026-10-08T09:40", "a1", 10); A = sync(A, 11);         // A never saw the scan
+    B = sync(B, 12);
+    assert.equal(row(B).removed, "2026-10-08T09:40", "A's copy won");
+    assert.deepEqual(row(B).scanFill.released, [{ id: "r1", removed: "2026-10-08T09:40", v: "b1a", kept: true }]);
+    edit(A, "2026-10-08T09:30", "a2", 13);                         // A's lead, not synced since: the last edit
+    assert.deepEqual(open(B, "openB", 14), [], "an open on B carries nothing");
+    A = sync(A, 15);
+    if (aOpens) assert.deepEqual(open(A, "openA", 15.5), []);
+    B = sync(B, 16);
+    for (let k = 0; k < 3; k++) { A = sync(A, 17 + 2 * k); B = sync(B, 18 + 2 * k); }
+    assert.deepEqual([row(A).removed, row(B).removed], ["2026-10-08T09:30", "2026-10-08T09:30"], aOpens ? "A opened too" : "only B opened");
+  }
+});
+
+test("corrected scans on a row typed before them end the same whichever phone synced first", () => {
+  const typed = (extra = {}) => job({ updatedAt: at(-120), dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", ...extra }])] });
+  const row = (p) => rows(p)[0];
+  const edit = (p, v, id, min) => {
+    row(p).removed = v;
+    releaseTypedScans(p, row(p), ctx(id + "a", min));
+    if (settleTypedRow(p, row(p), ctx(id + "b", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    if (settleTypedRow(p, row(p), ctx(id + "c", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    p.updatedAt = at(min);
+  };
+  const open = (p, id, min) => { for (const r of rows(p)) if (!r.scanId && r.scanFill && settleTypedRow(p, r, ctx(id, min)).length) applyScans(p); };
+  const run = (ph, order) => {   // through the server one at a time (each union stamped now), the log opened after each, then everyone pulls
+    let srv = null, clock = 400;
+    const syncPhone = (k) => {
+      clock += 10;
+      if (srv) { const m = mergeProjects(clone(ph[k]), clone(srv)).merged; applyScans(m); m.updatedAt = at(clock); ph[k] = m; }
+      open(ph[k], "open" + k + clock, clock + 1);
+      srv = clone(ph[k]);
+    };
+    for (const k of order) syncPhone(k);
+    for (const k of order) syncPhone(k);
+    assert.equal(applyScans(clone(srv)).changed, false);
+    return [...new Set(Object.values(ph).map((p) => row(p).removed).concat(row(srv).removed))];
+  };
+  // A makes it a planned pickup over its scan; C corrects its own scan last; B's hand-typed 10:15 (before C's scan) wins the row
+  const three = () => {
+    const ph = { A: typed(), B: typed(), C: typed() };
+    recordScan(ph.A, remove("AM-030", "s1", 0)); ph.A.updatedAt = at(0);
+    edit(ph.A, "2026-10-09T12:00", "a1", 2);
+    recordScan(ph.C, remove("AM-030", "s2", 30)); ph.C.updatedAt = at(30);
+    edit(ph.C, "2026-10-08T10:25", "c1", 35);
+    edit(ph.B, "2026-10-08T10:15", "b1", 16);
+    ph.B.dryingLogs[0].readings.push({ id: "rd" }); ph.B.updatedAt = at(300);
+    return ph;
+  };
+  for (const order of ["ABC", "ACB", "BAC", "BCA", "CAB", "CBA"]) assert.deepEqual(run(three(), [...order]), ["2026-10-08T10:25"], order);
+  // two scans, each corrected, both after the 09:30 B typed, and B's copy the newest: it keeps 09:30
+  // whether A's correction reached it first or both came in one merge
+  const A = typed(); recordScan(A, remove("AM-030", "r1", 0)); A.updatedAt = at(0); edit(A, "2026-10-08T09:40", "a1", 2);
+  const D = typed(); recordScan(D, remove("AM-030", "r2", 10)); D.updatedAt = at(10); edit(D, "2026-10-08T09:50", "d1", 30);
+  const B = typed({ removed: "2026-10-08T09:30" }); B.dryingLogs[0].readings.push({ id: "rd" }); B.updatedAt = at(40);
+  const merge = (x, y) => { const m = mergeProjects(clone(x), clone(y)).merged; applyScans(m); return m; };
+  const ends = [merge(merge(A, B), D), merge(merge(A, D), B), merge(merge(D, B), A)];
+  for (const m of ends) {
+    assert.equal(row(m).removed, "2026-10-08T09:30");
+    assert.deepEqual(row(m).scanFill.released.map((r) => [r.id, r.kept]).sort(), [["r1", true], ["r2", true]]);
+    assert.deepEqual(settleTypedRow(m, row(m), ctx("open", 60)), [], "an open carries nothing");
+  }
+});
+
+test("✕ after a correction: a copy that still shows the row keeps following the correction", () => {
+  const fresh = () => ({ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" });
+  const typed = () => job({ updatedAt: at(-60), dryingLogs: [log("L1", [fresh()])] });
+  const row = (p) => rows(p).find((r) => r.asset === "AM-030");
+  const sync = (x, y) => { const m = mergeProjects(clone(x), clone(y)).merged; applyScans(m); return m; };
+  const X = (p, id, min) => {
+    const voids = releaseTypedScans(p, row(p), ctx(id, min), "row");
+    rows(p).splice(rows(p).indexOf(row(p)), 1);
+    p.updatedAt = at(min);
+    return voids;
+  };
+  // A corrects the Remove scan C already pulled (or clears it: the wrong unit), then ✕; C's copy, newer, brings the row back
+  for (const put of ["2026-10-07T16:00", ""]) {
+    const A = typed();
+    recordScan(A, remove("AM-030", "r1", 0)); A.updatedAt = at(0);
+    const C = sync(typed(), A); C.updatedAt = at(1);
+    row(A).removed = put;
+    releaseTypedScans(A, row(A), ctx("a1", 2));
+    assert.deepEqual(X(A, "x1", 5).map((e) => [e.voids, e.release]), [["r1", "row"]]);
+    C.dryingLogs[0].readings.push({ id: "rd" }); C.updatedAt = at(10);
+    for (const [x, y] of [[A, C], [C, A]]) {
+      const m = sync(x, y);
+      assert.equal(row(m).removed, put, put || "cleared");
+      assert.equal(applyScans(m).changed, false);
+    }
+  }
+  // a moved-to line rewritten (the picker was on the wrong room), then ✕
+  {
+    const A = typed();
+    recordScan(A, place("AM-030", "Bath", "m1", 270)); A.updatedAt = at(270);
+    const C = sync(typed(), A); C.updatedAt = at(271);
+    const before = row(A).notes;
+    row(A).notes = "fan on high\nmoved to Bedroom 10/08 14:30";
+    if (settleTypedRow(A, row(A), ctx("a2", 272), { edit: "notes", before }).length) applyScans(A);
+    X(A, "x2", 275);
+    C.dryingLogs[0].readings.push({ id: "rd" }); C.updatedAt = at(280);
+    for (const [x, y] of [[A, C], [C, A]]) {
+      const m = sync(x, y);
+      assert.equal(row(m).notes, "fan on high\nmoved to Bedroom 10/08 14:30");
+      assert.equal(rowRoom(row(m)), "Bedroom");
+    }
+  }
+  // the ✕ phone's clock behind the phone that made the correction: the row typed in again still isn't refilled
+  for (const skew of [0, 10]) {
+    let A = typed(), B = typed();
+    recordScan(A, remove("AM-030", "r1", 0)); A.updatedAt = at(0);
+    B = sync(B, A);
+    row(B).removed = "2026-10-08T09:40";
+    releaseTypedScans(B, row(B), ctx("b1", 2 + skew));               // B's clock reads 10:02 + skew
+    B.updatedAt = at(2 + skew);
+    A = sync(A, B); A.updatedAt = at(3);
+    const [v] = X(A, "x1", 5);                                       // A's clock: 10:05
+    assert.ok(v.at > A.equipmentScans.find((e) => e.id === "b1").at, "after the correction it follows");
+    rows(A).push({ ...fresh(), notes: "" });
+    A.dryingLogs[0].readings.push({ id: "rd" }); A.updatedAt = at(20);
+    assert.equal(applyScans(A).changed, false, `skew ${skew}`);
+    assert.equal(row(sync(B, A)).removed, "", `skew ${skew}`);
   }
 });
 
