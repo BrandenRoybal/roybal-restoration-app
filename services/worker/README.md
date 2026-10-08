@@ -418,6 +418,9 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   1. Migration 0023 ("staging", then "production"): the two tables, the
      doors, the executor, agent:integrations and its propose grant, the
      nightly cron row and `qbo_service_ping`.
+     0022 (equipment scan, PR #271) goes to each database first: the DB
+     push has no `--include-all`, so a database holding 0023 refuses a
+     later 0022.
   2. qbo-proxy ("deploy qbo-proxy", or the **Function deploy** workflow):
      the service-only actions this worker calls (`listProjects`,
      `listPurchases`, `completePurchase`). It proves the worker's key through

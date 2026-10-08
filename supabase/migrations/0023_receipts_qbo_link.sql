@@ -136,6 +136,13 @@
 -- two tables; agent:integrations gains one propose grant; crew_lead, crew,
 -- viewer, agent logins and anon read and write exactly what they did before.
 --
+-- PUSH ORDER: 0022_equipment_scan.sql (PR #271) goes to each database before
+-- this file. db-push.yml runs `supabase db push` without --include-all, so a
+-- database that has 0023 refuses a later 0022 ("Found local migration files
+-- to be inserted before the last migration on remote database"). If this
+-- file has to reach a database first, 0022 is renumbered after it instead;
+-- --include-all is not the answer.
+--
 -- KILL SWITCH AND ROLLBACK: RECEIPTS_QBO=off on the worker makes every run
 -- return {skipped: "off"} and stops serving the 'qbo' channel, so no outbox
 -- row is delivered and the door files nothing (qbo_lane_off). To stop the
