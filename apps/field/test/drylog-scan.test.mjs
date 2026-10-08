@@ -208,22 +208,34 @@ await test("a scan's Remove locks Removed, computes the hours and prints an S on
   assert.ok(placed.parentElement.classList.contains("scan-cell"));
 });
 
-await test("a Removed typed on a scanned row, then the unit scanned back in: the old Removed locks with no S, the new row is open", () => {
+await test("a Removed typed on a scanned row, then the unit scanned back in: the old Removed can be corrected, not cleared or set past the re-scan; no S", () => {
   const p = job();
   const log = p.dryingLogs[0];
-  log.equipment.find((r) => r.scanId === "e1").removed = "2026-10-06T08:00";
+  const oldRow = () => log.equipment.find((r) => r.scanId === "e1");
+  oldRow().removed = "2026-10-06T08:00";
   applyScans(p);
-  recordScan(p, { tag: "AM-014", mode: "place", room: "Bedroom", logId: "log1", ...ctx("e9", T2) });
-  const sheet = render(p);
-  const old = rowsOf(sheet).find((tr) => inputsOf(tr)[2].value === "2026-10-06T08:00");
-  const [, placed, removed] = inputsOf(old);
-  assert.ok(removed.readOnly, "the ended row's Removed is locked");
-  assert.match(removed.title, /undo the newer row/);
-  assert.equal(old.querySelectorAll("sup.scan-s").length, 1, "S on placed only: the typed removal is not a scan");
+  recordScan(p, { tag: "AM-014", mode: "place", room: "Bedroom", logId: "log1", ...ctx("e9", T2) });   // back in 10/07 12:00
+  let sheet = render(p);
+  const find = () => rowsOf(view.firstChild).find((tr) => inputsOf(tr)[0].value === "AM-014" && inputsOf(tr)[1].value === "2026-10-05T10:00");
+  let [, placed, removed] = inputsOf(find());
+  assert.ok(!removed.readOnly, "a typed removal stays correctable");
+  assert.equal(find().querySelectorAll("sup.scan-s").length, 1, "S on placed only: the typed removal is not a scan");
   assert.ok(placed.readOnly);
   typeInto(removed, "");
-  assert.equal(log.equipment.find((r) => r.scanId === "e1").removed, "2026-10-06T08:00", "unchanged");
+  assert.equal(oldRow().removed, "2026-10-06T08:00", "clearing is refused");
+  assert.equal(removed.value, "2026-10-06T08:00");
+  assert.match(toastText(), /Can't be cleared: AM-014 was scanned back in 10\/07\/2026 12:00/);
+  typeInto(removed, "2026-10-07T13:00");
+  assert.equal(oldRow().removed, "2026-10-06T08:00", "a time past the re-scan is refused");
+  assert.match(toastText(), /no later than 10\/07\/2026 12:00/);
+  typeInto(removed, "2026-10-07T09:00");
+  assert.equal(oldRow().removed, "2026-10-07T09:00", "a correction is kept");
+  assert.equal(oldRow().hours, 47, "and its hours follow");
+  applyScans(p);
+  assert.equal(oldRow().removed, "2026-10-07T09:00", "and survives the next run");
   assert.equal(log.equipment.filter((r) => r.asset === "AM-014").length, 2, "the new row");
+  const newRow = log.equipment.find((r) => r.scanId === "e9");
+  assert.equal(newRow.placed, "2026-10-07T12:00", "the newer row keeps its start");
 });
 
 await test("clearing or retyping Removed on a typed row a scan filled voids that scan, so it never comes back", () => {
@@ -236,7 +248,7 @@ await test("clearing or retyping Removed on a typed row a scan filled voids that
   const tr = rowsOf(sheet).find((x) => inputsOf(x)[0].value === "AM-020");
   const removed = inputsOf(tr)[2];
   assert.ok(!removed.readOnly, "a typed row stays editable");
-  assert.equal(tr.querySelectorAll("sup.scan-s").length, 0, "and has no S");
+  assert.equal(tr.querySelectorAll("sup.scan-s").length, 1, "the scanned Removed prints an S");
   typeInto(removed, "");
   assert.equal(typedRow.removed, "");
   assert.ok(!liveScans(p).some((e) => e.id === "e5"), "the scan is voided");
@@ -267,8 +279,10 @@ await test("✕ on a scanned row asks, then undoes the scan with void events (th
   assert.deepEqual(rowsOf(sheet).map((tr) => inputsOf(tr)[0].value), ["AM-020", "AM-015", ""]);
   assert.equal(pill.textContent, "Saving…", "the undo is saved like any edit");
   assert.ok(!scanRecord(p).some((r) => r.tag === "AM-014"), "the record prints only what still counts");
-  // a typed row's ✕ still just deletes it
+  // a typed row's ✕ still just deletes it (no scans on it: no question)
+  const asked = confirms.length;
   rowsOf(sheet)[0].querySelector(".rowdel").click();
+  assert.equal(confirms.length, asked);
   assert.deepEqual(p.dryingLogs[0].equipment.map((r) => r.asset), ["AM-015", ""]);
   // a scanned row whose scan isn't on this device (applyScans leaves it): ✕ takes it off, no void
   p.dryingLogs[0].equipment.push({ asset: "AM-099", type: "Air mover", location: "Den", placed: "2026-10-05T09:00",
@@ -337,6 +351,83 @@ await test("a log with no scanned rows prints nothing extra", () => {
   const sheet = render(p);
   assert.equal(sheet.querySelector(".eqscan-print").childElementCount, 0);
   assert.equal(sheet.querySelectorAll("sup.scan-s").length, 0);
+});
+
+await test("a log of typed rows only: their scans print (legend, record, S on a scanned Removed)", () => {
+  const log = newDryingLog();
+  log.id = "logT";
+  log.equipment = [
+    { ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" },
+    { ...blankEquipRow(), asset: "AM-031", type: "Air mover", location: "Hall", placed: "2026-10-05T09:00" },
+  ];
+  const p = { id: "job3", customer: "Typed Only", dryingLogs: [log], equipmentScans: [] };
+  recordScan(p, { tag: "AM-031", mode: "place", room: "Bath", ...ctx("t1", T1) });
+  recordScan(p, { tag: "AM-030", mode: "remove", ...ctx("t2", T2) });
+  const sheet = render(p);
+  const pr = sheet.querySelector(".eqscan-print");
+  assert.equal(pr.querySelector(".eqscan-legend").textContent, "S = recorded by scanning the unit's QR label on site");
+  const cells = [...pr.querySelectorAll(".eqscan-rec tbody tr")].map((tr) => [...tr.children].map((td) => td.textContent));
+  assert.deepEqual(cells, [
+    ["10/05/2026 10:05", "AM-031", "Air mover", "Moved", "Bath", "Camera", "Tech A"],
+    ["10/07/2026 12:00", "AM-030", "Air mover", "Removed", "Kitchen", "Camera", "Tech A"],
+  ]);
+  assert.equal(rowsOf(sheet)[0].querySelectorAll("sup.scan-s").length, 1, "the scanned Removed");
+  assert.equal(rowsOf(sheet)[1].querySelectorAll("sup.scan-s").length, 0, "a move changes no time");
+  // another log on the job doesn't print them
+  const other = newDryingLog(); other.id = "logU"; other.equipment = [];
+  p.dryingLogs.push(other);
+  assert.equal(render(p, other).querySelector(".eqscan-print").childElementCount, 0);
+});
+
+await test("✕ on a typed row a scan changed asks first, and its scans go with it: the row typed in again isn't refilled", () => {
+  const p = job();
+  recordScan(p, { tag: "AM-020", mode: "remove", ...ctx("e5", T2) });
+  const log = p.dryingLogs[0];
+  let sheet = render(p);
+  confirmAnswer = false;
+  rowsOf(sheet)[0].querySelector(".rowdel").click();
+  assert.match(confirms.pop(), /^Take this row off the drying log\? Its scans are undone with it\./);
+  assert.ok(log.equipment.some((r) => r.asset === "AM-020"), "said no: the row stays");
+  assert.ok(liveScans(p).some((e) => e.id === "e5"));
+  confirmAnswer = true;
+  rowsOf(view.firstChild)[0].querySelector(".rowdel").click();
+  assert.ok(!log.equipment.some((r) => r.asset === "AM-020"), "the row goes");
+  assert.ok(!liveScans(p).some((e) => e.id === "e5"), "and its scan is undone");
+  log.equipment.push({ ...blankEquipRow(), asset: "AM-020", type: "Air mover", location: "Hall", placed: "2026-10-05T09:00" });
+  applyScans(p);
+  assert.equal(log.equipment.find((r) => r.asset === "AM-020").removed, "", "typed in again: not refilled");
+});
+
+await test("deleting a typed row's moved-to line undoes that move scan; it doesn't come back", () => {
+  const p = job();
+  const log = p.dryingLogs[0];
+  const row = log.equipment.find((r) => r.asset === "AM-020");
+  row.notes = "fan on high";
+  recordScan(p, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e6", T2) });
+  assert.equal(row.notes, "fan on high\nmoved to Bedroom 10/07 12:00");
+  const sheet = render(p);
+  const notesTa = [...rowsOf(sheet)[0].querySelectorAll("textarea.cell-ta")].pop();   // the last free-text column
+  notesTa.value = "fan on high";
+  notesTa.dispatchEvent(new window.Event("input", { bubbles: true }));
+  assert.ok(!liveScans(p).some((e) => e.id === "e6"), "the move scan is undone");
+  applyScans(p);
+  assert.equal(row.notes, "fan on high", "the line stays deleted");
+  assert.equal(row.scanFill, undefined);
+});
+
+await test("the 7-day check counts what is out now: a planned pickup yes, a run typed in Hrs no", () => {
+  const local = (ms) => new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const day = 86400000, now = Date.now();
+  const log = newDryingLog();
+  log.equipment = [
+    { ...blankEquipRow(), asset: "AM-040", type: "Air mover", location: "Den", placed: local(now - 9 * day), hours: "48", _manualHrs: true },
+    { ...blankEquipRow(), asset: "AM-041", type: "Air mover", location: "Den", placed: local(now - 8 * day), removed: local(now + day) },
+    { ...blankEquipRow(), asset: "AM-042", type: "Air mover", location: "Den", placed: local(now - 8 * day), removed: local(now - day) },
+  ];
+  const p = { id: "job4", customer: "Seven Days", dryingLogs: [log], equipmentScans: [] };
+  const sheet = render(p);
+  assert.deepEqual(rowsOf(sheet).map((tr) => tr.classList.contains("flag7")), [false, true, false]);
+  assert.match(sheet.querySelector(".warn").textContent, /1 unit\(s\) on site 7\+ days/);
 });
 
 /* ---------- the 📷 Scan equipment button ---------- */

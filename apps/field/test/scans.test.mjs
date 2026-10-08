@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   TAG_PAD, TAG_PREFIXES, TYPE_LABELS, parseTag, tagKey, typeFromTag, liveScans, placements, openPlacement,
   wallTime, applyScans, recordScan, voidEvent, voidPlacement, openElsewhere, scanRecord, roomSuggestions, undoTyped,
-  releaseTypedScans, rowOutAt, rowRoom,
+  releaseTypedScans, rowOutAt, rowRoom, rowScans,
 } from "../js/scans.js";
 import { equipClassOf, deployedCounts } from "../js/dryingcalc.js";
 import { mergeProjects, ID_COLLECTIONS, tombstoneItems } from "../js/merge.js";
@@ -201,7 +201,7 @@ test("a scan replaces the new log's blank seed row with a scanned row in the rig
     asset: "AM-014", type: "Air mover", location: "Kitchen", placed: "2026-10-08T10:00", removed: "", hours: "", notes: "",
     scanId: "s1",
     scan: { placeId: "s1", removeId: "", by: "crew@example.com", tech: "Pat Tech", how: "camera", placedAt: at(0),
-      removedAt: "", removedBy: "", removedTech: "", model: "", moves: [], removedTyped: false, endedTyped: false, plan: "" },
+      removedAt: "", removedBy: "", removedTech: "", model: "", moves: [], removedTyped: false, endedTyped: false, backAt: "", plan: "" },
   });
   assert.equal(applyScans(p).changed, false, "a second run changes nothing");
   // the existing readers see an ordinary row
@@ -819,7 +819,10 @@ test("a hand-typed row stays a typed row: Remove fills in Removed and Hrs, Place
   const row = rows(p)[0];
   assert.deepEqual([row.asset, row.placed, row.removed, row.hours, row.notes, !!row.scanId], ["am 14", "2026-10-05T09:00", "2026-10-08T10:00", 73, "behind fridge", false]);
   assert.equal(recordScan(p, remove("AM-014", "s3", 5)).outcome, "not_here", "once removed, it is not out");
-  assert.equal(scanRecord(p, []).length, 0, "not on a log's printed scan record (no S claims for a typed row)");
+  assert.equal(scanRecord(p, []).length, 0, "only a log's own record has it");
+  assert.deepEqual(scanRecord(p, [], "L1").map((x) => [x.tag, x.act, x.room]), [["AM-014", "remove", "Kitchen"]]);
+  assert.deepEqual(row.scanFill, { removeId: "s2", removed: "2026-10-08T10:00", was: { removed: "", hours: "", manualHrs: null }, moves: [] },
+    "the row keeps what the scan replaced");
   // the card's Undo voids the scan and puts the row back as it was typed
   assert.equal(undoTyped(p, r, ctx("v1", 1)), "restored");
   assert.deepEqual([row.removed, row.hours, row.notes], ["", "", "behind fridge"]);
@@ -963,6 +966,118 @@ test("scanRecord reads a place that moved a unit as a move, and keeps one log's 
   assert.deepEqual(scanRecord(p).map((r) => [r.tag, r.act]), [["AM-001", "place"], ["AM-002", "place"], ["AM-001", "move"]]);
   const onA = p.dryingLogs[0].equipment.map((r) => r.scanId);
   assert.deepEqual(scanRecord(p, onA).map((r) => [r.tag, r.act, r.room]), [["AM-001", "place", "Kitchen"], ["AM-001", "move", "Hall"]]);
+});
+
+test("Undo of a typed row's scan holds after another phone's newer copy of the log wins the merge", () => {
+  for (const removed of ["", "2026-10-10T09:00"]) {                // open, then with a planned pickup
+    const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-015", type: "Air mover", location: "Kitchen", placed: "2026-10-05T10:00", removed }])] });
+    const a = typed();
+    const r = recordScan(a, remove("AM-015", "s1", 0));            // a wrong-mode Remove on phone A
+    const b = mergeProjects(clone(typed()), clone(a)).merged;      // phone B pulls it
+    applyScans(b);
+    assert.equal(rows(b)[0].removed, "2026-10-08T10:00");
+    assert.equal(undoTyped(a, r, ctx("v1", 1)), "restored");       // A undoes it
+    assert.equal(rows(a)[0].removed, removed);
+    b.dryingLogs[0].readings = [{ id: "r1" }];                     // B saves before it pulls the undo
+    b.updatedAt = "2026-10-12T00:00:00.000Z";
+    for (const [x, y] of [[a, b], [b, a]]) {
+      const { merged } = mergeProjects(clone(x), clone(y));
+      applyScans(merged);
+      assert.equal(rows(merged)[0].removed, removed, "the undo holds on the merged copy");
+      assert.equal(rows(merged)[0].scanFill, undefined);
+      assert.equal(rowOutAt(rows(merged)[0], Date.parse(at(24 * 60))), true, "still out the next day");
+      assert.equal(applyScans(merged).changed, false);
+      assert.equal(recordScan(merged, remove("AM-015", "s9", 24 * 60)).outcome, "removed", "the real pickup the next day is taken");
+    }
+  }
+});
+
+test("two phones Remove-scan one typed row: the earlier counts, and undoing it lets the later one stand", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-016", type: "Air mover", location: "Kitchen", placed: "2026-10-05T10:00" }])] });
+  const a = typed(), b = typed();
+  const ra = recordScan(a, remove("AM-016", "sa", 0));
+  recordScan(b, remove("AM-016", "sb", 30));
+  b.updatedAt = "2026-10-12T00:00:00.000Z";
+  const { merged } = mergeProjects(clone(a), clone(b));
+  applyScans(merged);
+  assert.equal(rows(merged)[0].removed, "2026-10-08T10:00");
+  assert.equal(undoTyped(merged, ra, ctx("v1", 40)), "restored");
+  assert.equal(rows(merged)[0].removed, "2026-10-08T10:30", "the other phone's scan now");
+  assert.equal(applyScans(merged).changed, false);
+});
+
+test("the same unit typed twice with the same Placed: each Remove scan closes its own row", () => {
+  const row = () => ({ ...blankEquipRow(), asset: "AM-014", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" });
+  const p = job({ dryingLogs: [log("L1", [row(), row()])] });
+  assert.equal(recordScan(p, remove("AM-014", "s1", 0)).outcome, "removed");
+  assert.equal(recordScan(p, remove("AM-014", "s2", 1)).outcome, "removed");
+  assert.deepEqual(rows(p).map((r) => r.removed), ["2026-10-08T10:00", "2026-10-08T10:01"]);
+  assert.equal(recordScan(p, remove("AM-014", "s3", 2)).outcome, "not_here");
+  assert.equal(applyScans(clone(p)).changed, false);
+});
+
+test("two phones move one typed row: the lines merge in time order and the room is the later move", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-014", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }])] });
+  const a = typed(), b = typed();
+  recordScan(a, place("AM-014", "Bath", "sa", 0));
+  recordScan(b, place("AM-014", "Hall", "sb", 5));
+  b.updatedAt = "2026-10-12T00:00:00.000Z";
+  for (const [x, y] of [[a, b], [b, a]]) {
+    const { merged } = mergeProjects(clone(x), clone(y));
+    applyScans(merged);
+    assert.equal(rows(merged)[0].notes, "moved to Bath 10/08 10:00\nmoved to Hall 10/08 10:05");
+    assert.equal(rowRoom(rows(merged)[0]), "Hall");
+    assert.equal(recordScan(merged, place("AM-014", "Hall", "s9", 10)).outcome, "already");
+  }
+  assert.equal(rowRoom({ placed: "2026-12-30T09:00", location: "Den", notes: "moved to Bath 01/02 08:00\nmoved to Hall 12/31 09:00" }), "Bath", "into the new year");
+});
+
+test("a typed row's move: a line the crew deletes stays deleted, and undoing the move takes its line off", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-014", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" }])] });
+  const p = typed();
+  recordScan(p, place("AM-014", "Bedroom", "s1", 0));
+  const row = rows(p)[0];
+  row.notes = "fan on high";                                       // deleted by hand
+  assert.deepEqual(releaseTypedScans(p, row, ctx("v1", 1), "notes").map((e) => e.voids), ["s1"]);
+  applyScans(p);
+  assert.equal(row.notes, "fan on high");
+  assert.equal(rowRoom(row), "Kitchen");
+  const q = typed();
+  const mv = recordScan(q, place("AM-014", "Bedroom", "s1", 0));
+  assert.deepEqual(rowScans(q, rows(q)[0]).moves.map((e) => e.id), ["s1"]);
+  assert.equal(undoTyped(q, mv, ctx("v1", 1)), "restored");
+  assert.equal(rows(q)[0].notes, "fan on high");
+  assert.equal(rows(q)[0].scanFill, undefined);
+  // ✕ on the row: every scan on it is undone
+  const z = typed();
+  recordScan(z, place("AM-014", "Bedroom", "s1", 0));
+  recordScan(z, remove("AM-014", "s2", 5));
+  assert.deepEqual(releaseTypedScans(z, rows(z)[0], ctx("v1", 6), "row").map((e) => e.voids).sort(), ["s1", "s2"]);
+});
+
+test("✕ on an old closed row keeps a later placement that a stale phone's move started", () => {
+  const base = job();
+  recordScan(base, place("AM-020", "Kitchen", "p0", -60));
+  const a = clone(base), b = clone(base);
+  recordScan(a, remove("AM-020", "a1", 0));                         // pulled at 10:00
+  recordScan(b, place("AM-020", "Bath", "b1", 180));                // offline phone: into the Bath at 13:00
+  const { merged } = mergeProjects(a, b);
+  applyScans(merged);
+  assert.deepEqual(scanned(merged).map((r) => [r.location, r.scanId]), [["Kitchen", "p0"], ["Bath", "b1"]]);
+  voidPlacement(merged, "p0", ctx("v1", 200));
+  assert.deepEqual(scanned(merged).map((r) => [r.location, r.removed, r.scanId]), [["Bath", "", "b1"]], "the Bath row stays");
+  assert.ok(openPlacement(merged, "AM-020"));
+});
+
+test("a scanned row a scan removed is in, even when the removing phone's clock ran ahead", () => {
+  const p = job();
+  recordScan(p, place("DH-002", "Kitchen", "s1", 0));
+  recordScan(p, remove("DH-002", "s2", 60 + 40));
+  const row = scanned(p)[0];
+  assert.equal(rowOutAt(row, Date.parse(at(80))), false, "removed by a scan stamped 20 minutes ahead");
+  row.scan = { ...row.scan, removeId: "" };
+  row.removed = "2026-10-08T13:00";                                 // a typed pickup (no remove scan) still plans ahead
+  assert.equal(rowOutAt(row, Date.parse(at(60))), true);
 });
 
 /* ---------- the module's own rules ---------- */

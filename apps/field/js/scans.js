@@ -17,6 +17,9 @@
    the log as a hand-typed row carries `onRow: { placed }` (that row's
    typed Placed): it is never a placement; applyScans fills that row's
    Removed from it, or adds its "moved to" line, and the row stays typed.
+   The row keeps what each fill replaced (`row.scanFill`), so a fill whose
+   scan is undone comes off again on every device, whichever copy of the
+   log wins a merge.
 
    It is an ID collection (merge.js), so two devices' scans union by
    id, and the server copies each one, once, into an insert-only
@@ -218,11 +221,12 @@ const MOVE_SKEW_MS = 10 * 60 * 1000;
     { placeId, tag, tagKey, room (where it is now), placedRoom, type, model,
       logId, placedAt, by, tech, how, moves: [{id, at, room, by, tech}],
       removeId, removedAt, removedBy, removedTech, endedTyped, typedEnd,
-      elsewhere }.
+      backAt, elsewhere }.
     A place while the unit is out in another room is a move; in the same
     room it is ignored, as is a move or remove of a unit that isn't out. A
     place naming the open placement in `after` ends it (endedTyped, at its
-    typed `endedAt`) and starts a new one. */
+    typed `endedAt`; backAt = when the unit was scanned back in) and starts
+    a new one. */
 export function placements(project) {
   const open = new Map(), out = [], byPlace = new Map();
   const moveTo = (P, e) => {
@@ -234,14 +238,29 @@ export function placements(project) {
       placeId: e.id, tag: clean(e.tag), tagKey: key, room: clean(e.room), placedRoom: clean(e.room),
       type: clean(e.type), model: clean(e.model), logId: str(e.logId), placedAt: e.at,
       by: str(e.by), tech: str(e.tech), how: str(e.how), moves: [],
-      removeId: "", removedAt: "", removedBy: "", removedTech: "", endedTyped: false, typedEnd: "",
+      removeId: "", removedAt: "", removedBy: "", removedTech: "", endedTyped: false, typedEnd: "", backAt: "",
       elsewhere: isObj(e.elsewhere) ? { ...e.elsewhere } : null,
     };
     open.set(key, P);
     byPlace.set(P.placeId, P);
     out.push(P);
   };
-  const undone = voidedIds(sortedEvents(project));
+  const all = sortedEvents(project);
+  const undone = voidedIds(all);
+  const eventOf = new Map(all.map((e) => [e.id, e]));
+  /* A move recorded while its placement was out, when that placement has
+     since been undone (✕): it goes with it, unless the unit had come off
+     well before it (then the move scan put it back out: a placement of its own). */
+  const movedUndone = (e) => {
+    const from = eventOf.get(str(e.from));
+    if (!from || !undone.has(from.id)) return false;
+    const key = tagKey(e.tag), t0 = instant(from.at), t = instant(e.at);
+    let off = NaN;
+    for (const r of all) {
+      if (r.act === "remove" && !isObj(r.onRow) && tagKey(r.tag) === key && instant(r.at) > t0 && instant(r.at) <= t) off = instant(r.at);
+    }
+    return !Number.isFinite(off) || t - off <= MOVE_SKEW_MS;
+  };
   for (const e of liveScans(project)) {
     if (isObj(e.onRow)) continue;                      // a hand-typed row's scan (applyScans)
     const key = tagKey(e.tag);
@@ -249,13 +268,13 @@ export function placements(project) {
     if (e.act === "place" && cur && e.after && e.after === cur.placeId) {
       cur.endedTyped = true;
       cur.typedEnd = Number.isFinite(instant(e.endedAt)) ? str(e.endedAt).trim() : "";
+      cur.backAt = e.at;
       start(e, key);
       continue;
     }
     const newRoom = !!cur && roomKey(e.room) !== "" && roomKey(e.room) !== roomKey(cur.room);
     if (e.act === "place" && !cur) {
-      // a move of a placement since undone (✕) goes with it
-      if (e.from && undone.has(str(e.from))) continue;
+      if (e.from && movedUndone(e)) continue;
       const was = e.from ? byPlace.get(str(e.from)) : null;
       if (was && was.removeId && instant(e.at) - instant(was.removedAt) <= MOVE_SKEW_MS) continue;
       start(e, key);
@@ -328,42 +347,121 @@ function writeRow(row, P) {
     placedAt: P.placedAt, removedAt: P.removedAt, removedBy: P.removedBy, removedTech: P.removedTech,
     model: P.model, moves: P.moves.map((m) => ({ at: m.at, room: m.room })),
     removedTyped: !P.removeId && clean(row.removed) !== "",
-    endedTyped: !!P.endedTyped, plan,
+    endedTyped: !!P.endedTyped, backAt: P.backAt, plan,
   };
 }
 
-// the hand-typed row a scan with `onRow` names: same tag and typed Placed (its own log first)
-function typedRowOf(logs, e) {
-  const key = tagKey(e.tag), placed = clean(e.onRow && e.onRow.placed);
-  if (!key || !placed) return null;
-  const mine = logs.filter((l) => e.logId && l.id === e.logId);
-  for (const log of mine.concat(logs.filter((l) => mine.indexOf(l) < 0))) {
-    for (const row of arr(log.equipment)) {
-      if (isObj(row) && !row.scanId && tagKey(row.asset) === key && clean(row.placed) === placed) return row;
-    }
-  }
-  return null;
+/* ---------- hand-typed rows a scan touched ---------- */
+// "moved to Bath 10/08 14:30" → epoch ms; the year is the row's Placed year (the next one for an earlier month)
+const MOVE_LINE_RE = /^moved to (.+?) (\d{2})\/(\d{2}) (\d{2}:\d{2})$/;
+function moveLineMs(m, placed) {
+  const p = /^(\d{4})-(\d{2})/.exec(clean(placed));
+  if (!m || !p) return NaN;
+  const y = +p[1] + (m[2] < p[2] ? 1 : 0);
+  return wallMs(`${y}-${m[2]}-${m[3]}T${m[4]}`);
 }
 
-/* A hand-typed row's scan, written onto it: a remove fills Removed and Hrs
-   unless the row holds a removal at or before the scan (a later one is a
-   planned pickup the scan replaces); a move adds its "moved to" line. The
-   crew typing over that Removed voids the scan (releaseTypedScans), so
-   a scan never undoes what was typed after it. */
-function fillTypedRow(logs, e) {
-  const row = typedRowOf(logs, e);
-  if (!row) return;
-  if (e.act === "remove") {
-    const t = clean(row.removed) ? wallMs(row.removed) : NaN;
-    if (clean(row.removed) && !(Number.isFinite(t) && t > instant(e.at))) return;
+// a "moved to" line into the notes among the others, in time order
+function insertMoveLine(notes, line, placed) {
+  const t = moveLineMs(MOVE_LINE_RE.exec(line), placed);
+  const lines = notes ? notes.split("\n") : [];
+  const at = Number.isFinite(t) ? lines.findIndex((l) => moveLineMs(MOVE_LINE_RE.exec(l.trim()), placed) > t) : -1;
+  if (at < 0) return notes + (notes && !notes.endsWith("\n") ? "\n" : "") + line;
+  lines.splice(at, 0, line);
+  return lines.join("\n");
+}
+
+const fillOf = (row) => (isObj(row.scanFill) ? row.scanFill : {});
+const fillHas = (row, id) => fillOf(row).removeId === id || arr(fillOf(row).moves).some((m) => isObj(m) && m.id === id);
+
+// a remove scan still fills a typed row whose Removed (as the crew left it) is empty or later
+function fillsRow(row, e) {
+  const f = fillOf(row);
+  const typed = f.removeId && str(row.removed) === str(f.removed) && isObj(f.was) ? str(f.was.removed) : str(row.removed);
+  if (!clean(typed)) return true;
+  const t = wallMs(typed);
+  return Number.isFinite(t) && t > instant(e.at);
+}
+
+/* Which hand-typed row each live onRow scan goes on: the row that already
+   holds it, else one with the same tag and typed Placed (its own log first),
+   for a remove the first no other remove holds that it still applies to.
+   Map row → { removes, moves }, each in time order. */
+function claimTypedRows(logs, events) {
+  const rows = [];
+  for (const log of logs) for (const row of arr(log.equipment)) if (isObj(row) && !row.scanId && clean(row.placed)) rows.push({ log, row });
+  const claims = new Map();
+  const slot = (row) => {
+    if (!claims.has(row)) claims.set(row, { removes: [], moves: [] });
+    return claims.get(row);
+  };
+  const add = (row, e) => (e.act === "remove" ? slot(row).removes : slot(row).moves).push(e);
+  const later = [];
+  for (const e of events) {
+    const held = rows.find((x) => fillHas(x.row, e.id));
+    if (held) add(held.row, e); else later.push(e);
+  }
+  for (const e of later) {
+    const key = tagKey(e.tag), placed = clean(e.onRow.placed);
+    const same = rows.filter((x) => tagKey(x.row.asset) === key && clean(x.row.placed) === placed);
+    const cands = same.filter((x) => e.logId && x.log.id === e.logId).concat(same.filter((x) => !(e.logId && x.log.id === e.logId)));
+    if (!cands.length) continue;
+    const free = (x) => !(claims.get(x.row) || { removes: [] }).removes.length;
+    const hit = e.act === "remove"
+      ? cands.find((x) => free(x) && fillsRow(x.row, e)) || cands.find(free) || cands[0]
+      : cands.find((x) => rowOutAt(x.row, instant(e.at))) || cands[0];
+    add(hit.row, e);
+  }
+  for (const c of claims.values()) c.removes.sort((a, b) => instant(a.at) - instant(b.at) || byId(a.id, b.id));
+  return claims;
+}
+
+/* Write a typed row's scans onto it, the way writeRow does for a scanned row:
+   Removed and Hrs from the earliest remove scan before what the crew typed
+   (a later typed time is a planned pickup the scan replaces), one "moved to"
+   line per move scan. `row.scanFill` keeps what the remove replaced and the
+   lines the moves added, so a scan that is undone comes off again, while a
+   line or time the crew changed since stays theirs. */
+function fillTypedRow(row, mine, known) {
+  const f = fillOf(row), next = { removeId: "", removed: "", was: null, moves: [] };
+  const holds = !!f.removeId && str(row.removed) === str(f.removed);
+  const base = holds && isObj(f.was) ? f.was : null;
+  const e = mine.removes.find((x) => fillsRow(row, x));
+  if (e && holds && f.removeId === e.id) Object.assign(next, { removeId: f.removeId, removed: f.removed, was: f.was });
+  else if (e) {
+    next.was = base || { removed: str(row.removed), hours: row.hours ?? "", manualHrs: has(row, "_manualHrs") ? row._manualHrs : null };
     row.removed = wallTime(e.at);
     const ms = wallMs(row.removed) - wallMs(row.placed);
     row.hours = Number.isFinite(ms) && ms >= 0 ? Math.round(ms / HOUR) : "";
     delete row._manualHrs;
-  } else if (e.act === "place") {
-    const line = moveLine(e), notes = str(row.notes);
-    if (!notes.split("\n").some((l) => l.trim() === line)) row.notes = notes + (notes && !notes.endsWith("\n") ? "\n" : "") + line;
+    Object.assign(next, { removeId: e.id, removed: row.removed });
+  } else if (holds && !known.has(f.removeId)) {
+    Object.assign(next, { removeId: f.removeId, removed: f.removed, was: f.was });   // a scan this copy doesn't hold: left as it is
+  } else if (base) {
+    row.removed = str(base.removed);                     // its scan was undone: back to what the crew had
+    row.hours = base.hours ?? "";
+    if (base.manualHrs != null) row._manualHrs = base.manualHrs;
+    else delete row._manualHrs;
   }
+
+  let notes = str(row.notes);
+  const live = new Set(mine.moves.map((x) => x.id));
+  for (const m of arr(f.moves)) {
+    if (!isObj(m) || !m.id) continue;
+    if (live.has(m.id) || !known.has(m.id)) next.moves.push({ id: str(m.id), line: str(m.line) });
+  }
+  for (const m of arr(f.moves)) {                         // a move since undone takes its line with it
+    if (isObj(m) && m.id && !next.moves.some((k) => k.id === m.id) && !next.moves.some((k) => k.line === str(m.line))) notes = dropLine(notes, str(m.line));
+  }
+  for (const x of mine.moves) {                          // each added once: a line the crew deleted stays deleted
+    if (next.moves.some((k) => k.id === x.id)) continue;
+    const line = moveLine(x);
+    if (!notes.split("\n").some((l) => l.trim() === line)) notes = insertMoveLine(notes, line, row.placed);
+    next.moves.push({ id: x.id, line });
+  }
+  row.notes = notes;
+  if (next.removeId || next.moves.length) row.scanFill = next;
+  else delete row.scanFill;
 }
 
 /** Write the scans into the drying logs' equipment rows: one row per
@@ -378,8 +476,9 @@ export function applyScans(project) {
   const logs = arr(project.dryingLogs).filter(isObj);
   const ps = placements(project);
   const scannedRow = (r) => isObj(r) && !!r.scanId;
+  const touched = (r) => scannedRow(r) || (isObj(r) && isObj(r.scanFill));
   const onRows = liveScans(project).filter((e) => isObj(e.onRow));
-  if (!ps.length && !onRows.length && !logs.some((l) => arr(l.equipment).some(scannedRow))) return { changed: false };
+  if (!ps.length && !onRows.length && !logs.some((l) => arr(l.equipment).some(touched))) return { changed: false };
   const before = logs.map((l) => canonStr(l.equipment === undefined ? null : l.equipment));
 
   // where each placement's row lives; a second copy (another log, or the same
@@ -432,7 +531,13 @@ export function applyScans(project) {
     }
     writeRow(row, P);
   }
-  for (const e of onRows) fillTypedRow(logs, e);
+  // hand-typed rows: their scans written on, or taken off again once undone
+  const claims = claimTypedRows(logs, onRows);
+  for (const log of logs) {
+    for (const row of arr(log.equipment)) {
+      if (isObj(row) && !row.scanId && (claims.has(row) || isObj(row.scanFill))) fillTypedRow(row, claims.get(row) || { removes: [], moves: [] }, known);
+    }
+  }
 
   const changed = logs.some((l, i) => canonStr(l.equipment === undefined ? null : l.equipment) !== before[i]);
   return { changed };
@@ -505,6 +610,8 @@ function outAt(project, P, atMs) {
     in TYPED Hrs (_manualHrs, the billing check's rule). Scanned or typed. */
 export function rowOutAt(row, atMs) {
   if (!isObj(row) || !clean(row.placed)) return false;
+  // a scanned row a scan removed (or the next scan ended) is in, whatever its clock said
+  if (row.scanId && isObj(row.scan) && (row.scan.removeId || row.scan.endedTyped)) return false;
   if (clean(row.removed)) {
     const t = wallMs(row.removed);
     return Number.isFinite(t) && t > atMs;
@@ -525,11 +632,18 @@ function typedRowFor(project, key, atMs) {
   return best;
 }
 
-/** Where a row's unit is now: the room of its last "moved to" line, else its Location. */
-const MOVE_LINE_RE = /^moved to (.+?) \d{2}\/\d{2} \d{2}:\d{2}$/;
+/** Where a row's unit is now: the room of its latest "moved to" line (by
+    its time; two phones' lines can merge out of order), else its Location. */
 export function rowRoom(row) {
-  const moved = str(row.notes).split("\n").map((l) => MOVE_LINE_RE.exec(l.trim())).filter(Boolean).pop();
-  return moved ? clean(moved[1]) : clean(row.location);
+  if (!isObj(row)) return "";
+  let best = null;
+  for (const l of str(row.notes).split("\n")) {
+    const m = MOVE_LINE_RE.exec(l.trim());
+    if (!m) continue;
+    const t = moveLineMs(m, row.placed);
+    if (!best || !(t < best.t)) best = { t, room: clean(m[1]) };
+  }
+  return best ? best.room : clean(row.location);
 }
 
 // "10/03 09:00" from a wall time
@@ -567,9 +681,10 @@ function stampAfter(at, floorMs) {
 
     A unit on this job's log as a hand-typed row (a job started before
     scanning, or a row added because the scanner wouldn't open) stays a
-    typed row: a Remove fills in its Removed and Hrs, a Place in another
-    room adds the "moved to" line, and no event is recorded. `typed` on the
-    outcome holds what it was, for undoTyped. */
+    typed row: the scan is an event naming that row (`onRow`), and
+    applyScans fills in its Removed and Hrs (Remove) or adds the "moved to"
+    line (Place in another room). `typed` on the outcome says which row,
+    for undoTyped. */
 export function recordScan(project, input) {
   const inp = isObj(input) ? input : {};
   const unit = isObj(inp.unit) ? inp.unit : null;
@@ -648,47 +763,76 @@ function typedRowScan(project, typed, o) {
   if (!o.remove && (!where || roomKey(where) === roomKey(o.room))) {
     return o.done("already", null, `${o.tag} is already on this log${where ? ` in ${where}` : ""} (typed row)`, null);
   }
-  const was = { removed: row.removed, hours: row.hours, notes: row.notes, manual: has(row, "_manualHrs"), manualHrs: row._manualHrs };
   const ev = newEvent(project, { ...o.inp, at: o.atIso }, o.tag, o.remove ? "remove" : "place", o.remove ? where : o.room);
   ev.type = clean(row.type);
   ev.logId = str(typed.log.id);
   ev.onRow = { placed: clean(row.placed) };
   pushEvent(project, ev);
   applyScans(project);
-  const typedInfo = { key: tagKey(o.tag), placed: clean(row.placed), logId: str(typed.log.id), room: ev.room,
-    was, set: { removed: row.removed, notes: row.notes } };
+  const typedInfo = { key: tagKey(o.tag), placed: clean(row.placed), logId: str(typed.log.id), room: ev.room };
   return o.remove
     ? o.done("removed", ev, `${o.tag} removed${where ? ` from ${where}` : ""} (typed row)`, null, typedInfo)
     : o.done("moved", ev, `${o.tag} moved ${where} → ${o.room} (typed row)`, null, typedInfo);
 }
 
+// the live scans written onto one hand-typed row: { removes, moves }
+function claimsOf(project, row) {
+  const logs = arr(project.dryingLogs).filter(isObj);
+  const c = claimTypedRows(logs, liveScans(project).filter((e) => isObj(e.onRow))).get(row);
+  return c || { removes: [], moves: [] };
+}
+
+/** The live scans on a hand-typed row (an object in this project's logs):
+    { removes, moves }. */
+export function rowScans(project, row) {
+  return isObj(project) && isObj(row) && !row.scanId ? claimsOf(project, row) : { removes: [], moves: [] };
+}
+
 /** Undo a scan of a hand-typed row (the outcome recordScan returned): void
-    its event, then put the row back as it was, if it still holds what that
-    scan wrote (found again by tag and Placed: a sync may have swapped the row
-    object). "restored", "voided" (the row changed since; left as it is) or "". */
+    its event; applyScans then takes what it wrote off the row, on every
+    device. "restored" (the row showed that scan), "voided" (the row was
+    changed since; left as it is) or "" (nothing to undo). */
 export function undoTyped(project, outcome, ctx) {
   const t = isObj(outcome) && isObj(outcome.typed) ? outcome.typed : null;
   if (!isObj(project) || !t || !isObj(outcome.event)) return "";
-  if (!voidEvent(project, outcome.event.id, ctx)) return "";
-  const row = typedRowOf(arr(project.dryingLogs).filter(isObj), { tag: t.key, onRow: { placed: t.placed }, logId: t.logId });
-  if (!row || str(row.removed) !== str(t.set.removed) || str(row.notes) !== str(t.set.notes)) return "voided";
-  const was = t.was;
-  row.removed = was.removed;
-  row.hours = was.hours;
-  row.notes = was.notes;
-  if (was.manual) row._manualHrs = was.manualHrs;
-  else delete row._manualHrs;
-  return "restored";
+  const id = str(outcome.event.id);
+  let showing = false;
+  for (const log of arr(project.dryingLogs)) {
+    for (const row of arr(isObj(log) ? log.equipment : null)) {
+      if (!isObj(row) || row.scanId || !fillHas(row, id)) continue;
+      const f = fillOf(row);
+      showing = f.removeId === id ? str(row.removed) === str(f.removed)
+        : arr(f.moves).some((m) => isObj(m) && m.id === id && str(row.notes).split("\n").some((l) => l.trim() === str(m.line)));
+    }
+  }
+  if (!voidEvent(project, id, ctx)) return "";
+  return showing ? "restored" : "voided";
 }
 
-/** The crew typed (or cleared) Removed on a hand-typed row: what they typed
-    replaces any scan that filled it, so those scans are voided and never
-    fill it again. Returns the void events. */
-export function releaseTypedScans(project, row, ctx) {
-  if (!isObj(project) || !isObj(row) || row.scanId || !clean(row.placed)) return [];
-  const key = tagKey(row.asset), placed = clean(row.placed);
+/** The crew changed a hand-typed row by hand, so its scans give way:
+    what = "removed" (Removed typed or cleared: its remove scans), "notes"
+    (Notes edited: the move scans whose line is gone) or "row" (✕: every
+    scan on it). Those scans are voided, so they never write it again, and
+    what the crew typed is the record. Returns the void events. */
+export function releaseTypedScans(project, row, ctx, what) {
+  if (!isObj(project) || !isObj(row) || row.scanId) return [];
+  const kind = what === "notes" || what === "row" ? what : "removed";
   const c = isObj(ctx) ? ctx : {};
-  const hits = liveScans(project).filter((e) => e.act === "remove" && isObj(e.onRow) && tagKey(e.tag) === key && clean(e.onRow.placed) === placed);
+  const mine = claimsOf(project, row);
+  const f = fillOf(row);
+  const lines = str(row.notes).split("\n").map((l) => l.trim());
+  const lineOf = (e) => {
+    const m = arr(f.moves).find((x) => isObj(x) && x.id === e.id);
+    return m ? str(m.line) : moveLine(e);
+  };
+  const hits = kind === "removed" ? mine.removes
+    : kind === "notes" ? mine.moves.filter((e) => lines.indexOf(lineOf(e)) < 0)
+      : mine.removes.concat(mine.moves);
+  if (isObj(row.scanFill)) {
+    if (kind !== "notes") Object.assign(row.scanFill, { removeId: "", removed: "", was: null });
+    if (kind !== "removed") row.scanFill.moves = arr(f.moves).filter((m) => isObj(m) && !hits.some((e) => e.id === m.id));
+    if (!row.scanFill.removeId && !arr(row.scanFill.moves).length) delete row.scanFill;
+  }
   return hits.map((e, i) => pushVoid(project, e, { ...c, id: i && c.id ? `${c.id}-${i}` : c.id }));
 }
 
@@ -776,25 +920,43 @@ export function openElsewhere(projects, tag, exceptJobId, atMs) {
 /** The printed scan record: one row per live event, in time order —
     { at (Alaska wall time), tag, type, act, room, how, tech, by }. A move or
     remove shows the type its unit was placed with; a place that moved a unit
-    already out reads "move". `placeIds` (optional) keeps only the events of
-    those placements: one drying log's own rows. */
-export function scanRecord(project, placeIds) {
+    already out reads "move", as does a scan that moved a hand-typed row.
+    `placeIds` (optional) keeps only the events of those placements, and
+    `logId` adds the scans of that log's hand-typed rows: one drying log's
+    own record. */
+export function scanRecord(project, placeIds, logId) {
   const typeOf = new Map(), moved = new Set(), owner = new Map();
   for (const P of placements(project)) {
     owner.set(P.placeId, P.placeId);
     for (const m of P.moves) { moved.add(m.id); owner.set(m.id, P.placeId); }
     if (P.removeId) owner.set(P.removeId, P.placeId);
   }
+  const live = liveScans(project);
+  // a hand-typed row's scans belong to the log that row is on
+  const rowLog = new Map();
+  const logs = arr(project && project.dryingLogs).filter(isObj);
+  const claims = claimTypedRows(logs, live.filter((e) => isObj(e.onRow)));
+  for (const log of logs) {
+    for (const row of arr(log.equipment)) {
+      const c = claims.get(row);
+      if (c) for (const e of c.removes.concat(c.moves)) rowLog.set(e.id, str(log.id));
+    }
+  }
   const only = placeIds ? new Set(placeIds) : null;
   const out = [];
-  for (const e of liveScans(project)) {
+  for (const e of live) {
     const key = tagKey(e.tag);
     let type = clean(e.type);
-    // a move another device's remove overtook (placements() drops it) still reads as a move
-    const act = moved.has(e.id) || (e.act === "place" && e.from && !owner.has(e.id)) ? "move" : e.act;
+    // a move another device's remove overtook (placements() drops it) still reads as a move, of the row it moved
+    const dropped = e.act === "place" && !!e.from && !owner.has(e.id) && !isObj(e.onRow);
+    const act = moved.has(e.id) || dropped || (isObj(e.onRow) && e.act === "place") ? "move" : e.act;
     if (act === "place" && type) typeOf.set(key, type);
     if (!type) type = typeOf.get(key) || labelOf(typeFromTag(e.tag));
-    if (only && !only.has(owner.get(e.id))) continue;
+    if (only) {
+      const mine = isObj(e.onRow) ? !!logId && rowLog.get(e.id) === str(logId)
+        : only.has(owner.get(e.id)) || (dropped && only.has(owner.get(str(e.from))));
+      if (!mine) continue;
+    }
     out.push({ at: wallTime(e.at), tag: clean(e.tag), type, act, room: clean(e.room), how: str(e.how), tech: str(e.tech), by: str(e.by) });
   }
   return out;

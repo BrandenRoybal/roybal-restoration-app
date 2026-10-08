@@ -20,6 +20,7 @@ import { contactsTab, renderContactPage } from "./contacts.js";
 import { campaignsPanel, campaignsBusy } from "./campaigns.js";
 import { leadsTab, leadsBusy, leadsResetBusy, refreshLeadsBadge, leadStats, fmtTouch } from "./leads.js";
 import { analyticsTab } from "./analytics.js";
+import { rowOutAt } from "../../js/scans.js";
 import { mountAssistProvider } from "../../js/assist.js";
 import { adminAssistProvider } from "./assistctx.js";
 
@@ -191,7 +192,7 @@ function renderHelp() {
         h("strong", {}, "Nothing left over"), " and that reminder goes away for good."),
       p("At a returns counter with only a phone, the job's 🧾 Receipts tile in Field Forms shows the same photos.")),
     sec("🏷️ Equipment — where every unit is",
-      p(h("strong", {}, "Out now"), " lists every unit placed on a job's drying log and not yet removed, on every job, whether the crew scanned its QR label or typed the row: tag, type, job, room, since when and for how many days, and how it was logged. A unit out ",
+      p(h("strong", {}, "Out now"), " lists every unit placed on a job's drying log and not yet removed, on every job, whether the crew scanned its QR label or typed the row: tag, type, job, room, since when and for how many days, and how it was logged. A pickup time typed ahead still counts as out; a run typed in Hrs with no removed time doesn't. The 7-day flag on Today and Jobs uses the same rule. A unit out ",
         h("strong", {}, "7+ days"), " is flagged, and a unit out on ", h("strong", {}, "two jobs at once"),
         " is listed first: it was pulled from one of them without a scan or a removal date, so open the job it left and type the date and time it really came off in its Removed cell (a Remove scan now would record today). Units still open on archived jobs are counted under the list and shown on request."),
       p("The ", h("strong", {}, "fleet list"), " is one row per labelled machine: tag, type, make and model, rating, owned or rented, status (Active, Repair, Retired), where it is now and its last scan. ",
@@ -279,9 +280,11 @@ function renderLogin() {
 }
 
 /* ---------- shared job summaries ---------- */
+// a unit out now (Equipment → Out now's rule: a planned pickup counts, a run typed in Hrs doesn't) for 7+ days
 function jobAttention(p) {
+  const now = Date.now();
   return (p.dryingLogs || []).some((d) => (d.equipment || []).some((e) =>
-    e.placed && !e.removed && (daysSince(e.placed) ?? 0) >= 7));
+    rowOutAt(e, now) && (daysSince(e.placed) ?? 0) >= 7));
 }
 function jobSummary(p) {
   return {

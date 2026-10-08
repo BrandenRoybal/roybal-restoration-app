@@ -38,7 +38,7 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
-import { applyScans, voidPlacement, scanRecord, releaseTypedScans } from "./scans.js";
+import { applyScans, voidPlacement, scanRecord, releaseTypedScans, rowScans, rowOutAt, wallTime } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
@@ -659,13 +659,27 @@ export const scanDeps = { loadScanner: () => import("./scanner.js") };   // test
 function scanLocked(row, key) {
   if (!row || !row.scanId) return false;
   if (key === "asset" || key === "placed" || key === "hours") return true;
-  // Removed: once a scan removed it, or once the unit was scanned back in after a typed removal
-  return key === "removed" && !!(row.scan && (row.scan.removeId || row.scan.endedTyped));
+  // Removed: once a scan removed it
+  return key === "removed" && !!(row.scan && row.scan.removeId);
 }
-// a time the scan itself recorded (the printed S); a typed removal the next scan ended is not one
-const scanTime = (row, key) => !!(row && row.scanId) && (key === "placed" || (key === "removed" && !!(row.scan && row.scan.removeId)));
+// a time a scan recorded (the printed S): a scanned row's Placed and scanned
+// Removed, and a typed row's Removed while it still shows the scan that filled it
+function scanTime(row, key) {
+  if (!row) return false;
+  if (row.scanId) return key === "placed" || (key === "removed" && !!(row.scan && row.scan.removeId));
+  const f = row.scanFill;
+  return key === "removed" && !!(f && f.removeId) && String(row.removed ?? "") === String(f.removed ?? "");
+}
 const LOCK_TITLE = "From the scan. To change it, undo the scan (✕) and scan again.";
-const ENDED_TITLE = "Typed, and the unit was scanned back in after it. To change it, undo the newer row (✕) first.";
+/* A typed Removed on a scanned row the unit was scanned back in after: it can
+   be corrected, but not cleared or set past that scan (the newer row starts there). */
+function endedRefusal(row, value) {
+  if (!row || !row.scanId || !row.scan || !row.scan.endedTyped) return "";
+  const back = wallTime(row.scan.backAt);
+  if (!String(value || "").trim()) return `Can't be cleared: ${row.asset} was scanned back in${back ? " " + wallShort(back) : ""} (the next row). Type the time it came off.`;
+  if (back && String(value).slice(0, 16) > back) return `Must be no later than ${wallShort(back)}, when ${row.asset} was scanned back in (the next row).`;
+  return "";
+}
 // one fleet read at a time: the packet renders every drying log at once
 let fleetCheck = null;
 function checkFleet() {
@@ -708,7 +722,8 @@ export function dryingLog(project, d) {
   /* equipment deployment table */
   const eqBody = h("tbody");
   function refreshWarn() {
-    const flagged = d.equipment.filter((r) => r.placed && !r.removed && (daysSince(r.placed) ?? 0) >= 7);
+    // out now (a planned pickup still counts; a run typed in Hrs doesn't): scans.js rowOutAt, the office's rule
+    const flagged = d.equipment.filter((r) => rowOutAt(r, Date.now()) && (daysSince(r.placed) ?? 0) >= 7);
     if (flagged.length) {
       warnBox.hidden = false;
       warnBox.replaceChildren(h("strong", {}, "⚠ 7-day equipment check: "),
@@ -747,14 +762,16 @@ export function dryingLog(project, d) {
       let filled = 0, kept = 0;
       targets.forEach((idx, k) => {
         const row = d.equipment[idx];
-        if (scanLocked(row, key)) { kept++; return; }   // a scan's tag / times are the scan's
+        // a scan's tag / times are the scan's
+        if (scanLocked(row, key) || (key === "removed" && endedRefusal(row, src))) { kept++; return; }
         row[key] = key === "asset" ? bumpAsset(src, k + 1) : src;
         if (key === "hours") row._manualHrs = true;
-        if (key === "removed" && !row.scanId) releaseTypedScans(project, row, scanUndoCtx());   // what's typed replaces a scan's
+        // what's typed replaces a scan's
+        if ((key === "removed" || key === "notes") && !row.scanId) releaseTypedScans(project, row, scanUndoCtx(), key);
         filled++;
       });
       // a Removed filled onto scanned rows: their hours are applyScans' figure
-      if (targets.some((idx) => d.equipment[idx] && d.equipment[idx].scanId)) applyScans(project);
+      if (targets.some((idx) => d.equipment[idx] && d.equipment[idx].scanId) || key === "notes") applyScans(project);
       paintEq(); refreshWarn(); commit();
       toast((filled ? `Filled ${filled} row${filled > 1 ? "s" : ""}` : "Nothing filled")
         + (kept ? ` · skipped ${kept} scanned` : ""));
@@ -778,7 +795,7 @@ export function dryingLog(project, d) {
       let days = null;
       if (row.placed && row.removed) days = Math.max(1, daysBetween(row.placed, row.removed) ?? 0);
       else if (row.placed) days = daysSince(row.placed);
-      const ended = !row.removed && days != null && days >= 7;
+      const ended = rowOutAt(row, Date.now()) && (daysSince(row.placed) ?? 0) >= 7;
       daysCell.textContent = days == null ? "" : days + "d";
       tr.classList.toggle("flag7", !!ended);
     }
@@ -788,9 +805,11 @@ export function dryingLog(project, d) {
       const locked = scanLocked(row, key);
       const input = h("input", { type, value: row[key] ?? "", step: type === "datetime-local" ? "60" : null,
         style: `min-width:${w}` + (locked ? ";background:#f1f4f8;color:#44556b" : ""),
-        readonly: locked, title: locked ? (key === "removed" && !scanTime(row, key) ? ENDED_TITLE : LOCK_TITLE) : null });
+        readonly: locked, title: locked ? LOCK_TITLE : null });
       input.addEventListener("input", () => {
         if (scanLocked(row, key)) { input.value = row[key] ?? ""; return; }
+        const refused = key === "removed" ? endedRefusal(row, input.value) : "";
+        if (refused) { input.value = row[key] ?? ""; toast(refused, 4000); return; }
         row[key] = input.value;
         if (key === "hours") row._manualHrs = true;
         // a Removed typed (or cleared) on a typed row replaces a scan that filled it
@@ -810,7 +829,9 @@ export function dryingLog(project, d) {
     };
     // free-text columns grow with their text; the fill handle still works
     const mkTa = (key, w) => {
-      const c = taCell(row, key, { minWidth: w });
+      // a typed row's "moved to" line deleted or edited by hand: what's typed replaces that scan
+      const oninput = key === "notes" && !row.scanId ? () => releaseTypedScans(project, row, scanUndoCtx(), "notes") : null;
+      const c = taCell(row, key, { minWidth: w, oninput });
       c.classList.add("fillcell");
       attachFill(c, i, key);
       return c;
@@ -838,7 +859,15 @@ export function dryingLog(project, d) {
           const at = d.equipment.indexOf(row);
           if (at >= 0) d.equipment.splice(at, 1);
         }
-      } else d.equipment.splice(i, 1);
+      } else {
+        // a typed row a scan changed: its scans go with it, so a row typed in again isn't refilled
+        const sc = rowScans(project, row);
+        if (sc.removes.length + sc.moves.length
+          && !confirm("Take this row off the drying log? Its scans are undone with it. (To fix only a wrong Remove scan, retype or clear Removed instead.)")) return;
+        releaseTypedScans(project, row, scanUndoCtx(), "row");
+        const at = d.equipment.indexOf(row);
+        if (at >= 0) d.equipment.splice(at, 1);
+      }
       paintEq(); refreshWarn(); commit();
     };
     tr.append(assetC, typeC, locC, placedC, removedC, daysCell, hoursC, notesC,
@@ -853,9 +882,10 @@ export function dryingLog(project, d) {
   const scanPrint = h("div", { class: "print-only eqscan-print" });
   function paintScanPrint() {
     scanPrint.replaceChildren();
-    if (!d.equipment.some((r) => r && r.scanId)) return;
+    // this log's units only: its scanned rows' placements and its typed rows' scans
+    const rec = scanRecord(project, d.equipment.filter((r) => r && r.scanId).map((r) => r.scanId), d.id);
+    if (!rec.length && !d.equipment.some((r) => r && r.scanId)) return;
     scanPrint.append(h("div", { class: "eqscan-legend" }, h("sup", {}, "S"), " = recorded by scanning the unit's QR label on site"));
-    const rec = scanRecord(project, d.equipment.filter((r) => r && r.scanId).map((r) => r.scanId));   // this log's units only
     if (!rec.length) return;
     scanPrint.append(
       h("div", { class: "eqscan-title" }, "Equipment scan record"),
