@@ -1,5 +1,5 @@
 /* The receipts.qbo_match queue kind — the nightly QuickBooks match (migration
-   0022, receipts phase 3).
+   0023, receipts phase 3).
 
    pg_cron enqueues {run_date} for the Alaska date at 14:50 UTC, after the
    QuickBooks payment pull has refreshed the token; a manual run is
@@ -7,7 +7,7 @@
    qbo-proxy for the QuickBooks projects and for the expenses (Purchases)
    dated from a day before the oldest receipt it will match to today, and
    hands it all to the pure matcher (lanes/qbomatch.mjs). It then writes
-   what the matcher found through the two 0022 doors and nothing else:
+   what the matcher found through the two 0023 doors and nothing else:
 
      receipt_qbo_links_note   the states that need no approval (in_qbo,
                               unmatched, conflict), one call for every job in

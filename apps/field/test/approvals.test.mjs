@@ -1138,7 +1138,7 @@ test("invoice gaps: a line or hint of any odd shape still reads as words, never 
 });
 
 /* ---------- the nightly QuickBooks match: receipts.qbo_link ---------- */
-const INTEGRATIONS = "5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10";      // agent:integrations (0022's fixed id)
+const INTEGRATIONS = "5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10";      // agent:integrations (0023's fixed id)
 const ALSTON = "a628eea5-5c1e-4b7a-9d2f-3e8c1b0a7f42";              // "2156 Alston rd."
 const sha = (c) => "media:" + c.repeat(64) + ":184211";
 const CITI = "3176 - Citi - Home Depot Consumer Credit Card";

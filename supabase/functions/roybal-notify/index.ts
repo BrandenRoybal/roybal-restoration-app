@@ -53,7 +53,7 @@
  *   (the job page's adjuster email) needs "YES n"; a bare keyword with only
  *   that one live gets "Reply YES n to approve …" and nothing runs. An
  *   invoice-gaps ask (invoice.review_gaps, 0021) and a QuickBooks receipts
- *   ask (receipts.qbo_link, 0022) are answered in the inbox only: both
+ *   ask (receipts.qbo_link, 0023) are answered in the inbox only: both
  *   spine reads leave them out (INBOX_ONLY_FILTER), so their numbers get
  *   the same answer as a number no ask holds.
  *

@@ -69,7 +69,7 @@
  *   SUPABASE_SERVICE_ROLE_KEY, or, for another `sb_secret_…` key of the same
  *   project (a project can hold several), when PostgREST accepts it for
  *   rpc/qbo_service_ping, which is granted to service_role only (migration
- *   0022). A proven key is remembered by its sha256 for five minutes. The key
+ *   0023). A proven key is remembered by its sha256 for five minutes. The key
  *   itself is never logged.
  *
  *   Regression guard: supabase/functions/qb-time-proxy/authgate.test.mjs

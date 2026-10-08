@@ -9,9 +9,9 @@ import { deliverOne } from "../lanes/outbox.mjs";
 import { fakeSupa, testConfig, recordingLog, fakeFetch, outboxRow } from "./helpers.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const MIGRATION = fs.readFileSync(path.join(REPO, "supabase/migrations/0022_receipts_qbo_link.sql"), "utf8");
+const MIGRATION = fs.readFileSync(path.join(REPO, "supabase/migrations/0023_receipts_qbo_link.sql"), "utf8");
 
-/* An outbox 'qbo' row as op_exec_receipts_qbo_link writes it (0022): Purchase
+/* An outbox 'qbo' row as op_exec_receipts_qbo_link writes it (0023): Purchase
    10577, Home Depot, tag to Pollen Apartments and attach the receipt photo. */
 const qboRow = (over = {}) => outboxRow({
   channel: "qbo",
@@ -53,7 +53,7 @@ test("send posts the row's payload to qbo-proxy completePurchase under the servi
   assert.deepEqual(body, { ...row.payload, action: "completePurchase" });
 });
 
-test("the provider id is exactly what the 0022 trigger reads back into the receipt's link row", async () => {
+test("the provider id is exactly what the 0023 trigger reads back into the receipt's link row", async () => {
   const pattern = /regexp_match\(coalesce\(new\.provider_id, ''\), '(\^Purchase:[^']+)'\)/.exec(MIGRATION);
   assert.ok(pattern, "outbox_qbo_link_result parses provider_id with a ^Purchase:… pattern");
   assert.equal(pattern[1], "^Purchase:([0-9]{1,20}):([0-9]{1,20})$");

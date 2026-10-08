@@ -1,5 +1,5 @@
 -- ============================================================================
--- Assertions for 0022_receipts_qbo_link.sql (receipts phase 3, v1: the
+-- Assertions for 0023_receipts_qbo_link.sql (receipts phase 3, v1: the
 -- nightly QuickBooks match notes what is already in QuickBooks, files one
 -- receipts.qbo_link card per job for what needs a tag or a photo, and the
 -- owner's approval queues one 'qbo' outbox row per receipt).
@@ -10,7 +10,7 @@
 -- Everything it writes is rolled back (sequence values it draws are not; that
 -- is what every proposal does anyway).
 --
--- The rules it holds 0022 to:
+-- The rules it holds 0023 to:
 --   1. The catalog row is money, runtime sql, owner-approved, with the
 --      template, emits, amount field and schema the worker and the inbox
 --      read; receipts.qbo_match is a queue kind, never an operation; every

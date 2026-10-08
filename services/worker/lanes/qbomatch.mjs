@@ -1,7 +1,7 @@
-/* The QuickBooks matcher behind receipts.qbo_match (migration 0022, receipts
+/* The QuickBooks matcher behind receipts.qbo_match (migration 0023, receipts
    phase 3). PURE: no I/O and no clock (today comes in), so the same rows
    always give the same answer. lanes/receipts.mjs reads the rows, calls
-   matchReceipts, and writes what it returns through the two 0022 doors.
+   matchReceipts, and writes what it returns through the two 0023 doors.
 
    What it decides, per live receipt on a live job:
      in_qbo     its QuickBooks expense is already tagged to the job, and has a

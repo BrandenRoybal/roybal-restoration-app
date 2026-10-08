@@ -3,7 +3,7 @@
    The library, the returns-counter viewer, logging / changing / deleting a
    return, the pull races (compare-and-swap, graft), two devices changing
    one return, the phone check, the return windows page, the
-   window-closing reminder, and QuickBooks (0022): each receipt's badge and
+   window-closing reminder, and QuickBooks (0023): each receipt's badge and
    the job's project link.
    Run: node apps/field/test/admin-receipts.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
@@ -41,7 +41,7 @@ let missing = false;                 // 0018 not applied yet
 let floorN = 202;                    // app_settings min_field_build, as field_build_floor reads it
 let W = [{ vendor_key: "home depot", display_name: "Home Depot", return_days: 90, notes: "" }];
 const R = [];
-let qboMissing = false;              // 0022 not applied yet
+let qboMissing = false;              // 0023 not applied yet
 let qboProxyOld = false;             // a qbo-proxy from before phase 3: no listProjects
 let QL = [];                         // job_qbo_links
 const QR = [];                       // receipt_qbo_links
@@ -435,7 +435,7 @@ await test("⚙ Settings card links to the windows page", async () => {
   assert.equal(btn(slot, "Set return windows").getAttribute("href"), "#/receipts/vendors");
 });
 
-/* ---------- QuickBooks (0022): each receipt's state, each job's project ---------- */
+/* ---------- QuickBooks (0023): each receipt's state, each job's project ---------- */
 const idOf = (rowEl) => decodeURIComponent(rowEl.querySelector(".rl-row__main").getAttribute("href").split("/").pop());
 const rowFor = (id) => [...view.querySelectorAll(".rl-row")].find((r) => idOf(r) === id);
 const badgesOf = (el) => [...el.querySelectorAll(".badge")].map((b) => b.textContent);
@@ -614,7 +614,7 @@ await test("a job with no QuickBooks Time match starts with nothing picked; a jo
   assert.ok(button(view, "Link to QuickBooks"), "still unlinked");
 });
 
-await test("before 0022 lands, the receipts show with no QuickBooks badge or link, quietly", async () => {
+await test("before 0023 lands, the receipts show with no QuickBooks badge or link, quietly", async () => {
   qboMissing = true;
   const from = calls.length;
   await go("#/receipts");

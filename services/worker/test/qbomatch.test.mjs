@@ -8,7 +8,7 @@ import { matchReceipts, purchaseWindow, vendorFamily, docAgrees, scoreOf, contra
 import * as oct7 from "./qbo-oct7.fixture.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const MIGRATION = fs.readFileSync(path.join(REPO, "supabase/migrations/0022_receipts_qbo_link.sql"), "utf8");
+const MIGRATION = fs.readFileSync(path.join(REPO, "supabase/migrations/0023_receipts_qbo_link.sql"), "utf8");
 
 /* ---- what the database will hold the worker's output to ----
    The card's input is checked three times before anything reaches
@@ -208,7 +208,7 @@ const p10566 = (over = {}) => ({ id: "10566", syncToken: "2", txnDate: "2026-09-
   vendorName: "Sherwin Williams", docNumber: "80669163000926", note: "Job materials",
   lines: [line({ amount: 36, ...POLLEN })], attachments: ["SW_InvNo_80669163000926.pdf"], hasAttachment: true, ...over });
 
-// The shape DESIGN's store entry section gives (not set by 0022: off until the owner says so)
+// The shape DESIGN's store entry section gives (not set by 0023: off until the owner says so)
 const STORES = {
   spenard: { account_id: "53", vendor_id: "65", doc: "exact", expense_account_id: "42", class_id: "1000000001", min_age_days: 0 },
   sherwin: { account_id: "52", vendor_id: "9", doc: "prefix", expense_account_id: "42", class_id: "1000000001", min_age_days: 0 },

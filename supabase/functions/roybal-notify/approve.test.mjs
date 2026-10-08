@@ -585,7 +585,7 @@ test("an invoice-gaps row that ever reached the matcher is named by its dollar l
   assert.deepEqual([t.lane, t.hit.code, t.reason], ["text", 12, "ok"]);
 });
 
-/** The nightly QuickBooks match's ask (0022): money, one card per job,
+/** The nightly QuickBooks match's ask (0023): money, one card per job,
     filed proposed_via 'agent' with a one-sentence rationale. */
 const QBO_WHY = "2 receipts on 2156 Alston rd. match QuickBooks expenses that have no job tag or photo.";
 const qbo = (sms_code, o = {}) => sp(sms_code, { operation: "receipts.qbo_link@1", proposed_via: "agent", rationale: QBO_WHY,

@@ -30,12 +30,12 @@
    RETURN WINDOWS and "Nothing left over" live in Supabase (migration
    0018), owner/office only, written through their two doors.
 
-   QUICKBOOKS (phase 3, migration 0022): each receipt shows where it
+   QUICKBOOKS (phase 3, migration 0023): each receipt shows where it
    stands with QuickBooks (receipt_qbo_links, written by the nightly
    matcher and the approval path, only read here), and each job can be
    linked to its QuickBooks project (job_qbo_links, written here through
    job_qbo_link_set, from the list qbo-proxy listProjects gives). Before
-   0022 is applied both reads answer 404 and every QuickBooks control
+   0023 is applied both reads answer 404 and every QuickBooks control
    stays off the page.
 
    admin.js loads this file by dynamic import. It imports only names
@@ -248,7 +248,7 @@ function returnsGate() {
   return null;
 }
 
-/** A write through one of 0018's doors (or 0022's job_qbo_link_set, which
+/** A write through one of 0018's doors (or 0023's job_qbo_link_set, which
     names its own `missing` sentence); throws with a sentence for a toast. */
 async function door(fn, args, missing = "Return windows switch on after this feature's database update is applied.") {
   let res;
@@ -331,14 +331,14 @@ export function fillSettingsCard(slot) {
   loadWindows().then(say);
 }
 
-/* ---------- QuickBooks: each receipt's state, each job's project (0022) ---------- */
+/* ---------- QuickBooks: each receipt's state, each job's project (0023) ---------- */
 /* Read fresh each time a page draws, never kept across pages: the nightly
    match, an approval and the outbox move these on server-side, and a stale
    "Waiting on QuickBooks" would send the office looking for nothing. When
-   job_qbo_links doesn't answer (0022 not applied yet: a 404; offline) the
+   job_qbo_links doesn't answer (0023 not applied yet: a 404; offline) the
    badges and the link control stay off the page, quietly. */
 let jobLinks = new Map();              // job id -> its job_qbo_links row
-const QBO_ID = /^[0-9]{1,20}$/;        // 0022's check on a QuickBooks id
+const QBO_ID = /^[0-9]{1,20}$/;        // 0023's check on a QuickBooks id
 const QBO_MISSING = "Linking jobs to QuickBooks switches on after this feature's database update is applied.";
 const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
 const low = (s) => String(s || "").toLowerCase();

@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0022 — receipts.qbo_link: the nightly QuickBooks match tags each receipt's
+-- 0023 — receipts.qbo_link: the nightly QuickBooks match tags each receipt's
 --        expense to the job and attaches the photo, one owner approval per
 --        job (receipts phase 3, v1).
 --
@@ -194,7 +194,7 @@ create table if not exists public.job_qbo_links (
 );
 
 comment on table public.job_qbo_links is
-  'Which QuickBooks project (a QBO Customer with Job = true) a job''s costs go to: qbo_customer_id is the CustomerRef a tagged expense line carries, qbo_project_ref the line-level ProjectRef when known, qbo_name the DisplayName at link time. source: picked (the office picker), suggested_tagged or suggested_qbtime (a receipts.qbo_link card the owner approved). Written only through job_qbo_link_set() and op_exec_receipts_qbo_link() (0022).';
+  'Which QuickBooks project (a QBO Customer with Job = true) a job''s costs go to: qbo_customer_id is the CustomerRef a tagged expense line carries, qbo_project_ref the line-level ProjectRef when known, qbo_name the DisplayName at link time. source: picked (the office picker), suggested_tagged or suggested_qbtime (a receipts.qbo_link card the owner approved). Written only through job_qbo_link_set() and op_exec_receipts_qbo_link() (0023).';
 
 create table if not exists public.receipt_qbo_links (
   receipt_id       text          primary key check (char_length(receipt_id) between 1 and 64),
@@ -216,7 +216,7 @@ create table if not exists public.receipt_qbo_links (
 );
 
 comment on table public.receipt_qbo_links is
-  'Where each receipt stands with QuickBooks: in_qbo (matched, nothing to change), unmatched (no expense found; detail.reason), conflict (found but not written; detail.reason), queued (approved, outbox row written), done (QuickBooks updated), failed (outbox row dead; detail.error). The matcher writes the first three through receipt_qbo_links_note(); the approval writes queued; the outbox_qbo_link_result trigger writes done and failed (0022).';
+  'Where each receipt stands with QuickBooks: in_qbo (matched, nothing to change), unmatched (no expense found; detail.reason), conflict (found but not written; detail.reason), queued (approved, outbox row written), done (QuickBooks updated), failed (outbox row dead; detail.error). The matcher writes the first three through receipt_qbo_links_note(); the approval writes queued; the outbox_qbo_link_result trigger writes done and failed (0023).';
 comment on column public.receipt_qbo_links.changes is
   'What the approved card asked QuickBooks for: tag (the job''s project on every line), attach (the receipt photo), create (a new expense, store-account entry; off until app_settings receipts.qbo_store_accounts is set).';
 
@@ -327,7 +327,7 @@ $$;
 
 alter function public.receipts_qbo_fingerprint(uuid, text[]) owner to postgres;
 comment on function public.receipts_qbo_fingerprint(uuid, text[]) is
-  'md5 hex of a job''s job_receipts rows for the given ids, ordered by id, each {id, amount::text, receipt_date, photo_ref, live} or {id, missing: true}: what a receipts.qbo_link card was filed against. STABLE (reads job_receipts). Internal: the filing door stamps it and op_exec_receipts_qbo_link compares it (0022).';
+  'md5 hex of a job''s job_receipts rows for the given ids, ordered by id, each {id, amount::text, receipt_date, photo_ref, live} or {id, missing: true}: what a receipts.qbo_link card was filed against. STABLE (reads job_receipts). Internal: the filing door stamps it and op_exec_receipts_qbo_link compares it (0023).';
 revoke all on function public.receipts_qbo_fingerprint(uuid, text[]) from public, anon, authenticated, service_role;
 
 
@@ -750,7 +750,7 @@ $$;
 
 alter function public.op_exec_receipts_qbo_link(public.proposals, jsonb, text, uuid) owner to postgres;
 comment on function public.op_exec_receipts_qbo_link(public.proposals, jsonb, text, uuid) is
-  'Executor for receipts.qbo_link@1: under the job''s advisory lock, re-checks receipts_qbo_fingerprint (fails with nothing written when it moved), links the job when the card suggested a project and the job has none, refuses a tag when the job is linked to another project, then per approved item marks receipt_qbo_links queued and writes one outbox row on channel qbo (key outbox:<proposal key>:<receipt id>); emits receipts.qbo_link_queued. An edited approval may only drop items (0022).';
+  'Executor for receipts.qbo_link@1: under the job''s advisory lock, re-checks receipts_qbo_fingerprint (fails with nothing written when it moved), links the job when the card suggested a project and the job has none, refuses a tag when the job is linked to another project, then per approved item marks receipt_qbo_links queued and writes one outbox row on channel qbo (key outbox:<proposal key>:<receipt id>); emits receipts.qbo_link_queued. An edited approval may only drop items (0023).';
 revoke all on function public.op_exec_receipts_qbo_link(public.proposals, jsonb, text, uuid) from public, anon, authenticated, service_role;
 
 
@@ -812,7 +812,7 @@ create or replace function public.receipts_qbo_link_file(
   set search_path to 'public', 'pg_temp'
 as $$
 declare
-  v_agent     constant uuid := '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';   -- agent:integrations (0022 seed)
+  v_agent     constant uuid := '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';   -- agent:integrations (0023 seed)
   v_offers    constant integer := 50;   -- offers 0–49 of one set of items on one set of receipts
   -- an approval that failed on a filing-time check, in op_exec_receipts_qbo_link's
   -- words (op_execute keeps only the message): offered again (THE OFFER, above)
@@ -990,7 +990,7 @@ $$;
 
 alter function public.receipts_qbo_link_file(uuid, jsonb, text, jsonb, interval) owner to postgres;
 comment on function public.receipts_qbo_link_file(uuid, jsonb, text, jsonb, interval) is
-  'The filing door for receipts.qbo_link (worker, receipts.qbo_match): skips a missing or deleted job, a qbo lane no worker serves and receipts that left the job or changed (amount, date, photo) since the worker read them; stamps receipts_qbo_fingerprint, the items hash and the offer number into the input, files through op_propose as agent:integrations (proposed_via agent), and supersedes the job''s other open receipts.qbo_link cards; an empty items list supersedes them as nothing_to_do. The same items on the same receipts are offered again (offer + 1, at most 50 offers) only when the last card expired, was superseded, or failed one of the executor''s filing-time checks (receipts changed or left the job, the job unlinked or relinked); an open card is returned as is, and a declined or executed one, or one that failed on its items, stays quiet and supersedes the job''s other open cards as items_changed. Returns {filed, proposal_id, status, superseded} or {skipped}. service_role only (0022).';
+  'The filing door for receipts.qbo_link (worker, receipts.qbo_match): skips a missing or deleted job, a qbo lane no worker serves and receipts that left the job or changed (amount, date, photo) since the worker read them; stamps receipts_qbo_fingerprint, the items hash and the offer number into the input, files through op_propose as agent:integrations (proposed_via agent), and supersedes the job''s other open receipts.qbo_link cards; an empty items list supersedes them as nothing_to_do. The same items on the same receipts are offered again (offer + 1, at most 50 offers) only when the last card expired, was superseded, or failed one of the executor''s filing-time checks (receipts changed or left the job, the job unlinked or relinked); an open card is returned as is, and a declined or executed one, or one that failed on its items, stays quiet and supersedes the job''s other open cards as items_changed. Returns {filed, proposal_id, status, superseded} or {skipped}. service_role only (0023).';
 revoke all on function public.receipts_qbo_link_file(uuid, jsonb, text, jsonb, interval) from public, anon, authenticated;
 grant execute on function public.receipts_qbo_link_file(uuid, jsonb, text, jsonb, interval) to service_role;
 
@@ -1206,7 +1206,7 @@ $$;
 
 alter function public.receipt_qbo_links_note(uuid[], jsonb) owner to postgres;
 comment on function public.receipt_qbo_links_note(uuid[], jsonb) is
-  'The receipts.qbo_match matcher''s nightly write: removes the in_qbo, unmatched and conflict rows of the given jobs that p_rows no longer names, then upserts in_qbo, unmatched and conflict rows of receipt_qbo_links by receipt id, never touching a queued, done or failed row (reported as kept). Returns {written, kept, removed}. service_role only (0022).';
+  'The receipts.qbo_match matcher''s nightly write: removes the in_qbo, unmatched and conflict rows of the given jobs that p_rows no longer names, then upserts in_qbo, unmatched and conflict rows of receipt_qbo_links by receipt id, never touching a queued, done or failed row (reported as kept). Returns {written, kept, removed}. service_role only (0023).';
 revoke all on function public.receipt_qbo_links_note(uuid[], jsonb) from public, anon, authenticated;
 grant execute on function public.receipt_qbo_links_note(uuid[], jsonb) to service_role;
 
@@ -1306,7 +1306,7 @@ $$;
 
 alter function public.job_qbo_link_set(uuid, text, text, text) owner to postgres;
 comment on function public.job_qbo_link_set(uuid, text, text, text) is
-  'Office door for job_qbo_links: link a live job to a QuickBooks project (source picked, by the caller, now), change it, or unlink it with a null or empty customer id; emits job.qbo_linked / job.qbo_unlinked. Returns the row, or null after an unlink. Raises 42501 for anyone but owner/office (0022).';
+  'Office door for job_qbo_links: link a live job to a QuickBooks project (source picked, by the caller, now), change it, or unlink it with a null or empty customer id; emits job.qbo_linked / job.qbo_unlinked. Returns the row, or null after an unlink. Raises 42501 for anyone but owner/office (0023).';
 revoke all on function public.job_qbo_link_set(uuid, text, text, text) from public, anon, authenticated, service_role;
 grant execute on function public.job_qbo_link_set(uuid, text, text, text) to authenticated;
 
@@ -1379,7 +1379,7 @@ $$;
 
 alter function public.outbox_qbo_link_result() owner to postgres;
 comment on function public.outbox_qbo_link_result() is
-  'AFTER UPDATE OF status on outbox, channel qbo, status now sent or dead: marks the receipt_qbo_links row that wrote that outbox row done (provider id, sync token) or failed (error). Exception-guarded: it never fails the outbox update (0022).';
+  'AFTER UPDATE OF status on outbox, channel qbo, status now sent or dead: marks the receipt_qbo_links row that wrote that outbox row done (provider id, sync token) or failed (error). Exception-guarded: it never fails the outbox update (0023).';
 revoke all on function public.outbox_qbo_link_result() from public, anon, authenticated, service_role;
 
 drop trigger if exists outbox_qbo_link_result on public.outbox;
@@ -1409,7 +1409,7 @@ $$;
 
 alter function public.qbo_service_ping() owner to postgres;
 comment on function public.qbo_service_ping() is
-  'Returns true. Granted to service_role only: qbo-proxy calls it through PostgREST with a presented key to prove that key is the service role (0022).';
+  'Returns true. Granted to service_role only: qbo-proxy calls it through PostgREST with a presented key to prove that key is the service role (0023).';
 revoke all on function public.qbo_service_ping() from public, anon, authenticated;
 grant execute on function public.qbo_service_ping() to service_role;
 
@@ -1423,15 +1423,15 @@ grant execute on function public.qbo_service_ping() to service_role;
 -- ---------------------------------------------------------------------------
 do $$
 declare
-  v_agent  constant uuid := '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';   -- agent:integrations (0022 seed)
+  v_agent  constant uuid := '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';   -- agent:integrations (0023 seed)
   v_reason constant text :=
     'Phase 3 QuickBooks link: the nightly receipts.qbo_match run files each job''s receipts whose QuickBooks expense '
     || 'needs a job tag or the photo as one receipts.qbo_link proposal; the owner approves every one in the inbox. '
-    || 'Granted by migration 0022 on the owner''s go, 2026-10-07.';
+    || 'Granted by migration 0023 on the owner''s go, 2026-10-07.';
   v_id     uuid;
 begin
   if not exists (select 1 from public.agents where id = v_agent and name = 'agent:integrations') then
-    raise exception '0022: agent:integrations (agents %) is missing; section 1 seeds it', v_agent;
+    raise exception '0023: agent:integrations (agents %) is missing; section 1 seeds it', v_agent;
   end if;
 
   insert into public.agent_authority as aa
@@ -1448,7 +1448,7 @@ begin
       'agent_authority.granted', null, 'agent_authority', v_id, null, null, null,
       jsonb_build_object('agent_id', v_agent, 'agent', 'agent:integrations',
                          'operation', 'receipts.qbo_link', 'capability', 'propose',
-                         'reason', v_reason, 'granted_by', 'migration 0022'),
+                         'reason', v_reason, 'granted_by', 'migration 0023'),
       'agent_authority.granted:' || v_id, 'system', null);
   end if;
 end
@@ -1488,7 +1488,7 @@ $$;
 do $$
 begin
   if not exists (select 1 from pg_extension where extname = 'pg_cron') then
-    raise notice '0022: pg_cron is not installed here; receipts-qbo-match-nightly not scheduled';
+    raise notice '0023: pg_cron is not installed here; receipts-qbo-match-nightly not scheduled';
     return;
   end if;
   perform cron.schedule('receipts-qbo-match-nightly', '50 14 * * *', $cmd$select public.enqueue(

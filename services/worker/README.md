@@ -115,7 +115,7 @@ few milliseconds inside one request.
   `attach_error=<code>`), and the receipt reads "Tagged in QuickBooks; photo
   not attached". Everything else, QuickBooks down or throttling, a stale
   SyncToken, the function unreachable, retries.
-  The provider id `Purchase:<id>:<SyncToken>` is what the 0022 trigger reads
+  The provider id `Purchase:<id>:<SyncToken>` is what the 0023 trigger reads
   back into the receipt's row. Served only while `qbo` is in
   `OUTBOX_CHANNELS` (the default); `RECEIPTS_QBO=off` takes it out.
 - **`portal` outbox rows are not touched** (no adapter yet); they wait as
@@ -264,7 +264,7 @@ THIS WORKER  lanes/billing.mjs
   finishes older ones `{"skipped":"stale"}`. To see a first
   result without waiting for the morning, enqueue a manual run (above).
 
-## The nightly QuickBooks match (`receipts.qbo_match`, migration 0022)
+## The nightly QuickBooks match (`receipts.qbo_match`, migration 0023)
 
 Every morning it finds each job receipt's expense in QuickBooks and files,
 per job, ONE `receipts.qbo_link` card in the Approvals inbox listing the
@@ -403,7 +403,7 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   1. the kill switch above;
   2. stop the schedule: `select cron.unschedule('receipts-qbo-match-nightly')`
      (to schedule it again, run the `cron.schedule` statement in migration
-     0022, section 13);
+     0023, section 13);
   3. stop filing for good: `update public.agent_authority set revoked_at = now() where agent_id = '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10' and operation = 'receipts.qbo_link' and revoked_at is null`
      (do 1 or 2 as well, or every run records each job as a 42501 error);
   4. open cards: decline them in the inbox, or let them expire (14 days);
@@ -415,13 +415,13 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   nightly rows would wait `queued` forever.
 - **Deploy order**: the database, then qbo-proxy, then roybal-notify, then
   the worker.
-  1. Migration 0022 ("staging", then "production"): the two tables, the
+  1. Migration 0023 ("staging", then "production"): the two tables, the
      doors, the executor, agent:integrations and its propose grant, the
      nightly cron row and `qbo_service_ping`.
   2. qbo-proxy ("deploy qbo-proxy", or the **Function deploy** workflow):
      the service-only actions this worker calls (`listProjects`,
      `listPurchases`, `completePurchase`). It proves the worker's key through
-     `qbo_service_ping`, so it goes after 0022. Until it is live a run ends
+     `qbo_service_ping`, so it goes after 0023. Until it is live a run ends
      `qbo_proxy_not_updated` and writes nothing.
   3. roybal-notify ("deploy roybal-notify"): this build keeps
      `receipts.qbo_link` cards out of "YES n" text approvals, so they are
@@ -667,11 +667,11 @@ project every key the detector reads), the QuickBooks matcher on the real
 Oct 7 shapes and on a trimmed copy of that day's books
 (`test/qbo-oct7.fixture.mjs`, no email address or phone number in it), with
 every card it builds checked against the catalog's `input_schema` read from
-migration 0022, the executor's item checks and the note door's row checks,
+migration 0023, the executor's item checks and the note door's row checks,
 the nightly match lane against an in-memory PostgREST and a stubbed qbo-proxy
 (the `(job_id, id)` keyset past a row cap, the 404 skip, one job's error, a
 manual run's scope, the stale and off skips, the summary), the QuickBooks
-adapter (its verdicts, and the provider id the 0022 trigger parses), that `set-gmail-secret.sh` checks
+adapter (its verdicts, and the provider id the 0023 trigger parses), that `set-gmail-secret.sh` checks
 every path the Dockerfile copies, the heartbeat (which
 leases it names, and that the final one names none) and dead-letter text
 with its 24 h guard, and the real HTTP server booting, answering `/healthz`

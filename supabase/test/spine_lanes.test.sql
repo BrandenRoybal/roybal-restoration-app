@@ -20,9 +20,9 @@
 --      matches it, and nothing else: not sms.send, not execute, never approve.
 --      The lane's second grant, 0021's (agent:billing may PROPOSE
 --      invoice.review_gaps), is held to the same shape beside it (2b); the
---      rest of 0021 is billing_review_gaps.test.sql. So is the third, 0022's
+--      rest of 0021 is billing_review_gaps.test.sql. So is the third, 0023's
 --      (agent:integrations may PROPOSE receipts.qbo_link, 2c); the rest of
---      0022 is receipts_qbo_link.test.sql.
+--      0023 is receipts_qbo_link.test.sql.
 --   3. current_agent_id is the agents row a machine login acts as, and null
 --      for a human, a disabled agent, a human login wrongly linked to an
 --      agents row, and a caller with no identity.
@@ -214,7 +214,7 @@ begin
 end
 $$;
 
--- 2c. agent:integrations' grant (0022), the same way
+-- 2c. agent:integrations' grant (0023), the same way
 do $$
 declare
   integ   constant uuid := '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';
@@ -238,15 +238,15 @@ begin
     raise exception 'the agent:integrations grant has no agent_authority.granted event naming it';
   end if;
   if (select reason from public.agent_authority
-       where agent_id = integ and operation = 'receipts.qbo_link' and revoked_at is null) !~ '0022.*2026-10-07' then
-    raise exception 'the agent:integrations grant does not say it is 0022 on the owner''s go of 2026-10-07';
+       where agent_id = integ and operation = 'receipts.qbo_link' and revoked_at is null) !~ '0023.*2026-10-07' then
+    raise exception 'the agent:integrations grant does not say it is 0023 on the owner''s go of 2026-10-07';
   end if;
 
   if not public.op_agent_permits(integ, 'receipts.qbo_link', 'money', 'propose') then
     raise exception 'agent:integrations may not propose receipts.qbo_link';
   end if;
   if public.op_agent_permits(integ, 'receipts.qbo_link', 'money', 'execute') then
-    raise exception 'agent:integrations may execute receipts.qbo_link; 0022 grants propose only';
+    raise exception 'agent:integrations may execute receipts.qbo_link; 0023 grants propose only';
   end if;
   if public.op_agent_permits(integ, 'receipts.qbo_link', 'money', 'approve') then
     raise exception 'agent:integrations may approve';

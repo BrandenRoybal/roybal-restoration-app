@@ -1,5 +1,5 @@
 /* QuickBooks adapter — delivers an outbox `qbo` row (receipts.qbo_link@1, one
-   row per approved receipt, migration 0022) through the qbo-proxy edge
+   row per approved receipt, migration 0023) through the qbo-proxy edge
    function's completePurchase action under the service role key, the way
    adapters/sms.mjs goes through roybal-notify. qbo-proxy stays the only
    holder of the QuickBooks token (it refreshes and rotates it; a second

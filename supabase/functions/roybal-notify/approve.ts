@@ -493,7 +493,7 @@ export const offeredByText = (r: Blob) => r?.proposed_via === "cron";
     reads append (the live read and the late lookup, index.ts; `*` is
     LIKE's `%`). An invoice.review_gaps proposal (0021) is money whose
     lines and evidence show only in the inbox, and a 160-character label
-    can't carry them; so is a receipts.qbo_link proposal (0022), a list of
+    can't carry them; so is a receipts.qbo_link proposal (0023), a list of
     QuickBooks expenses to tag and photos to attach, one per receipt. So
     neither "YES n" nor a bare YES ever reaches one: its number answers
     like a number no ask holds, and its fate is never quoted back. Both
