@@ -2,8 +2,9 @@
    (jsdom), local Store (fake-indexeddb), Supabase answered by a fake fetch.
    The library, the returns-counter viewer, logging / changing / deleting a
    return, the pull races (compare-and-swap, graft), two devices changing
-   one return, the phone check, the return windows page and the
-   window-closing reminder.
+   one return, the phone check, the return windows page, the
+   window-closing reminder, and QuickBooks (0022): each receipt's badge and
+   the job's project link.
    Run: node apps/field/test/admin-receipts.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -40,6 +41,16 @@ let missing = false;                 // 0018 not applied yet
 let floorN = 202;                    // app_settings min_field_build, as field_build_floor reads it
 let W = [{ vendor_key: "home depot", display_name: "Home Depot", return_days: 90, notes: "" }];
 const R = [];
+let qboMissing = false;              // 0022 not applied yet
+let qboProxyOld = false;             // a qbo-proxy from before phase 3: no listProjects
+let QL = [];                         // job_qbo_links
+const QR = [];                       // receipt_qbo_links
+// listProjects rows as qbo-proxy compacts them (ids from the Oct 7 read)
+const PROJECTS = [
+  { id: "444", name: "1192 Bemis Ct.", fqn: "1192 Bemis Ct.", parentId: "", isProject: true },
+  { id: "112", name: "Pollen Apartments", fqn: "Pollen Apartments", parentId: "", isProject: true },
+  { id: "514", name: "Smith addition", fqn: "Smith:Smith addition", parentId: "88", isProject: false },
+];
 // PostgREST pages: limit/offset honoured, so a read past 1000 rows must page
 const page = (rows, u) => {
   const q = new URL(u).searchParams;
@@ -52,6 +63,27 @@ globalThis.fetch = async (url, opts = {}) => {
   calls.push({ u, body });
   const json = (status, data) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
   if (u.includes("/rest/v1/rpc/role_is")) return role === "error" ? json(503, {}) : json(200, role);
+  if (qboMissing && /\/rest\/v1\/(job_qbo_links|receipt_qbo_links|rpc\/job_qbo_link_set)/.test(u)) {
+    return json(404, { code: "PGRST205", message: "Could not find the table 'public.job_qbo_links' in the schema cache" });
+  }
+  if (u.includes("/rest/v1/rpc/job_qbo_link_set")) {
+    if (body.p_job_id === JOB2) return json(400, { code: "P0002", message: "job_qbo_link_set: no job " + JOB2 });   // not synced up yet
+    QL = QL.filter((l) => l.job_id !== body.p_job_id);
+    if (!body.p_qbo_customer_id) return json(200, null);
+    const row = { job_id: body.p_job_id, qbo_customer_id: body.p_qbo_customer_id, qbo_project_ref: body.p_qbo_project_ref,
+      qbo_name: body.p_qbo_name, source: "picked", set_by_kind: "human" };
+    QL.push(row);
+    return json(200, row);
+  }
+  if (u.includes("/rest/v1/job_qbo_links")) return json(200, page(QL, u));
+  if (u.includes("/rest/v1/receipt_qbo_links")) {
+    const ids = JSON.parse("[" + new URL(u).searchParams.get("receipt_id").match(/^in\.\((.*)\)$/)[1] + "]");
+    return json(200, QR.filter((r) => ids.includes(r.receipt_id)));
+  }
+  if (u.includes("/functions/v1/qbo-proxy")) {
+    if (qboProxyOld) return json(404, { ok: false, error: "Unknown action: listProjects" });
+    return json(200, { projects: PROJECTS, ok: true, data: { projects: PROJECTS } });   // both places, as qbo-proxy answers
+  }
   if (missing && /receipt_vendor|receipt_return_review|field_build_floor/.test(u)) return json(404, { code: "PGRST205", message: "Could not find the table" });
   if (u.includes("/rest/v1/rpc/field_build_floor")) {
     return role === false ? json(403, { code: "42501", message: "only the office can read the field app build floor" }) : json(200, floorN);
@@ -83,7 +115,9 @@ const enc = encodeURIComponent;
 const btn = (root, text) => [...root.querySelectorAll("button, a")].find((b) => b.textContent.trim() === text);
 const type = (el, v) => { el.value = v; el.dispatchEvent(new window.Event("input", { bubbles: true })); };
 const toastText = () => document.getElementById("toast").textContent;
-const noJunk = (el) => assert.ok(!/\bnull\b|\bundefined\b|NaN/.test(el.textContent), el.textContent.match(/.{0,40}(null|undefined|NaN).{0,40}/));
+// letters, not \b, around the word: a stray null glued between "$49.96" and
+// "1192" is junk too
+const noJunk = (el) => assert.ok(!/(?<![A-Za-z])(null|undefined|NaN)(?![A-Za-z])/.test(el.textContent), el.textContent.match(/.{0,40}(null|undefined|NaN).{0,40}/));
 
 let pass = 0;
 const test = async (name, fn) => { await fn(); console.log("  ✓ " + name); pass++; };
@@ -95,7 +129,7 @@ const ago = (n) => L.addDaysISO(today, -n);
 const JOB = "11111111-1111-4111-8111-111111111111", JOB2 = "22222222-2222-4222-8222-222222222222";
 const IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const SLIP_IMG = IMG.replace("iVBOR", "iVBOr");
-await Store.put({ id: JOB, customer: "Pollen", address: "1192 Bemis Ct", claimNo: "CLM-9", updatedAt: "2026-10-01T00:00:00.000Z", receipts: [
+await Store.put({ id: JOB, customer: "Pollen", address: "1192 Bemis Ct", claimNo: "CLM-9", qbJobcodeName: "1192 Bemis Ct.", updatedAt: "2026-10-01T00:00:00.000Z", receipts: [
   { id: "R1", vendor: "THE HOME DEPOT #1234", date: ago(80), amount: "569.76", subtotal: "", tax: "", category: "materials", receiptNo: "0612-00412",
     cardLast4: "4558", paidWith: "card", by: "CJ", photo: IMG, extraPages: [], items: [
       { id: "i1", desc: '3/4" CDX plywood 4x8', qty: "10", unit: "ea", price: "52.98", sku: "166073" },
@@ -401,6 +435,206 @@ await test("⚙ Settings card links to the windows page", async () => {
   assert.equal(btn(slot, "Set return windows").getAttribute("href"), "#/receipts/vendors");
 });
 
+/* ---------- QuickBooks (0022): each receipt's state, each job's project ---------- */
+const idOf = (rowEl) => decodeURIComponent(rowEl.querySelector(".rl-row__main").getAttribute("href").split("/").pop());
+const rowFor = (id) => [...view.querySelectorAll(".rl-row")].find((r) => idOf(r) === id);
+const badgesOf = (el) => [...el.querySelectorAll(".badge")].map((b) => b.textContent);
+const qboReads = (from) => calls.slice(from).filter((c) => c.u.includes("/rest/v1/receipt_qbo_links"));
+const button = (root, text) => [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+const saveIn = (pick) => [...pick.querySelectorAll("button")].find((b) => /^Link/.test(b.textContent));
+const jobFilter = (id) => {
+  const sel = [...view.querySelectorAll("select")].find((s) => [...s.options].some((o) => o.value === JOB));
+  sel.value = id; sel.dispatchEvent(new window.Event("change"));
+};
+
+await test("each receipt says where it stands with QuickBooks, from one select of the receipts on screen", async () => {
+  const ret = (await credits()).find((c) => c.returnOf === "R2");
+  QR.push(
+    { receipt_id: "R1", state: "in_qbo", qbo_txn_id: "10577", detail: { qbo_account_name: "3176 - Citi - Home Depot Consumer Credit Card" } },
+    { receipt_id: "R2", state: "unmatched", qbo_txn_id: null, detail: { reason: "waiting_feed" } },
+    { receipt_id: ret.id, state: "queued", qbo_txn_id: "10580", detail: {} },
+    { receipt_id: "S1", state: "conflict", qbo_txn_id: "10563", detail: { reason: "tagged_other", qbo_customer_name: "Pollen Apartments" } },
+    { receipt_id: "S2", state: "failed", qbo_txn_id: "10566", detail: { error: "tagged_other: expense 10566 is already tagged to Pollen Apartments in QuickBooks" } },
+    { receipt_id: "NOT-ON-SCREEN", state: "done", qbo_txn_id: "1", detail: {} });
+  const from = calls.length;
+  await go("#/receipts");
+  const reads = qboReads(from);
+  assert.equal(reads.length, 1, "one select");
+  const asked = JSON.parse("[" + new URL(reads[0].u).searchParams.get("receipt_id").slice(4, -1) + "]");
+  assert.deepEqual(asked.sort(), [...view.querySelectorAll(".rl-row")].map(idOf).sort(), "the ids on screen, no others");
+  assert.ok(badgesOf(rowFor("R1")).includes("In QuickBooks ✓ #10577"));
+  assert.match(rowFor("R1").querySelector(".badge.disp-g[title]").title, /QuickBooks expense 10577 · 3176 - Citi/);
+  assert.ok(badgesOf(rowFor("R2")).includes("Waiting for the bank feed"));
+  assert.ok(badgesOf(rowFor(ret.id)).includes("Waiting on QuickBooks"));
+  assert.deepEqual(badgesOf(rowFor("S1")), ["Check in QuickBooks: tagged to Pollen Apartments"]);
+  assert.equal(rowFor("S1").querySelector(".rl-badges").hidden, false, "a row with no other badge shows its line once the badge lands");
+  assert.deepEqual(badgesOf(rowFor("S2")), ["QuickBooks refused: expense 10566 is already tagged to Pollen Apartments in QuickBooks"]);
+  noJunk(view);
+  // a search repaints the rows from what this page already read
+  type(view.querySelector(".rl-search"), "spenard");
+  await settle(220);
+  assert.equal(qboReads(from).length, 1, "nothing asked twice");
+  assert.deepEqual(badgesOf(rowFor("S1")), ["Check in QuickBooks: tagged to Pollen Apartments"]);
+  type(view.querySelector(".rl-search"), "");
+  await settle(220);
+});
+
+await test("every QuickBooks state reads in the office's words", async () => {
+  const t = (state, detail = {}, txn = null) => (M.qboStatus({ state, qbo_txn_id: txn, detail }) || {}).text;
+  assert.equal(t("in_qbo", {}, "10577"), "In QuickBooks ✓ #10577");
+  assert.equal(t("done", {}, "10519"), "In QuickBooks ✓ #10519");
+  assert.equal(t("done"), "In QuickBooks ✓", "a store entry before its id came back");
+  assert.equal(t("queued"), "Waiting on QuickBooks");
+  assert.equal(t("unmatched", { reason: "waiting_feed" }), "Waiting for the bank feed");
+  assert.equal(t("unmatched", { reason: "store_not_entered" }), "Not in QuickBooks yet");
+  // a dump ticket is booked as a Bill, which the match doesn't read: never "not in QuickBooks"
+  assert.equal(t("unmatched", { reason: "bill_not_checked" }), "Booked as a bill: not checked");
+  assert.equal(t("unmatched", { reason: "needs_job_link" }), "Link the job to QuickBooks");
+  assert.equal(t("unmatched", { reason: "not_found" }), "No QuickBooks match");
+  assert.equal(t("unmatched", { reason: "constructor" }), "No QuickBooks match", "a reason this page doesn't know");
+  assert.equal(t("conflict", { reason: "ambiguous" }), "Check in QuickBooks: more than one expense matches");
+  assert.equal(t("conflict", { reason: "partly_tagged" }), "Check in QuickBooks: only part of the expense is tagged to a job");
+  assert.equal(t("conflict", { reason: "tagged_other" }), "Check in QuickBooks: tagged to another job");
+  assert.equal(t("conflict", { reason: "claimed_by_other" }), "Check in QuickBooks: another receipt has this expense");
+  assert.equal(t("failed", { error: "changed_in_qbo: expense 10577 changed in QuickBooks since the card was filed" }),
+    "QuickBooks refused: expense 10577 changed in QuickBooks since the card was filed");
+  // a refusal is QuickBooks (or the card) saying no; anything else outlasted the retries without QuickBooks answering
+  assert.equal(t("failed"), "Couldn't update QuickBooks: the change didn't go through");
+  assert.equal(t("failed", { error: "qbo_not_connected: QuickBooks is not connected" }), "Couldn't update QuickBooks: QuickBooks is not connected");
+  assert.equal(t("failed", { error: "qbo-proxy unreachable: fetch failed" }), "Couldn't update QuickBooks: qbo-proxy unreachable: fetch failed");
+  assert.equal(t("failed", { error: "lease expired (held by w1)" }), "Couldn't update QuickBooks: lease expired (held by w1)");
+  assert.equal(t("failed", { error: "photo_type: the stored photo is image/heic" }), "QuickBooks refused: the stored photo is image/heic");
+  // the tag (or the new entry) went in and the photo didn't: not a ✓, and not "refused"
+  assert.equal(t("done", { provider_status: "tagged=done;attached=0;attach_error=qbo_refused" }, "10577"),
+    "Tagged in QuickBooks #10577; photo not attached: QuickBooks refused it");
+  assert.equal(t("done", { provider_status: "tagged=done;attached=0;attach_error=photo_type" }),
+    "Tagged in QuickBooks; photo not attached: the photo isn't a JPEG, PNG or PDF");
+  assert.equal(t("done", { provider_status: "tagged=done;attached=1" }, "10577"), "In QuickBooks ✓ #10577");
+  const long = "qbo_refused: QuickBooks refused the change (400 / 6000): " + "a business validation error ".repeat(10);
+  const f = M.qboStatus({ state: "failed", qbo_txn_id: "10577", detail: { error: long } });
+  assert.ok(f.text.length <= "QuickBooks refused: ".length + 140 && f.text.endsWith("…"), "the badge clips a long refusal");
+  assert.equal(f.title, "QuickBooks expense 10577 · " + long, "the whole of it on hover");
+  assert.equal(M.qboStatus({ state: "in_qbo", qbo_txn_id: "1", detail: {} }).tone, "disp-g");
+  assert.equal(M.qboStatus({ state: "failed", detail: {} }).tone, "disp-r");
+  // the refusal codes are the approvals card's (a field export the admin page itself never imports)
+  const { QBO_REFUSED } = await import("../js/approvals.js");
+  assert.deepEqual([...M.QBO_REFUSED_CODES].sort(), Object.keys(QBO_REFUSED).sort());
+  assert.equal(M.qboStatus(null), null);
+  assert.equal(M.qboStatus({ state: "something_new", detail: {} }), null, "a state this page doesn't know shows nothing");
+});
+
+await test("Link to QuickBooks: the picker starts on the QuickBooks Time match, searches, and saves through job_qbo_link_set", async () => {
+  await go("#/receipts");
+  assert.equal(button(view, "Link to QuickBooks"), undefined, "no job header while every job is listed");
+  jobFilter(JOB);
+  await settle();
+  assert.match(view.textContent, /1192 Bemis CtLink to QuickBooks/);
+  const from = calls.length;
+  button(view, "Link to QuickBooks").click();
+  await settle();
+  const pick = document.querySelector(".rl-qbo-pick");
+  assert.ok(pick, "the picker opened");
+  assert.deepEqual(calls.slice(from).filter((c) => c.u.includes("/functions/v1/qbo-proxy")).map((c) => c.body), [{ action: "listProjects" }]);
+  assert.equal(pick.querySelectorAll("[aria-pressed]").length, 3);
+  assert.match(pick.querySelector('[aria-pressed="true"]').textContent, /^1192 Bemis Ct\..*QuickBooks Time match/);
+  assert.match(pick.textContent, /Smith:Smith addition.*sub-customer/);
+  assert.equal(saveIn(pick).textContent, "Link to 1192 Bemis Ct.");
+  type(pick.querySelector("input[type=search]"), "pollen apart");
+  assert.deepEqual([...pick.querySelectorAll("[aria-pressed]")].map((b) => b.textContent), ["Pollen Apartments"]);
+  pick.querySelector("[aria-pressed]").click();
+  assert.equal(saveIn(pick).textContent, "Link to Pollen Apartments");
+  const sv = saveIn(pick);
+  sv.click(); sv.click();                          // a double click
+  await settle(80);
+  const sets = calls.slice(from).filter((c) => c.u.includes("rpc/job_qbo_link_set"));
+  assert.deepEqual(sets.map((c) => c.body), [{ p_job_id: JOB, p_qbo_customer_id: "112", p_qbo_name: "Pollen Apartments", p_qbo_project_ref: null }], "one save");
+  assert.equal(document.querySelector(".rl-qbo-pick"), null, "closed");
+  assert.match(view.textContent, /QuickBooks: Pollen Apartments · Change/);
+  assert.match(toastText(), /1192 Bemis Ct is linked to Pollen Apartments in QuickBooks\. The next QuickBooks check uses it\./);
+  noJunk(view);
+  jobFilter("");                                       // every job again, for the tests after
+  await settle();
+  assert.equal(button(view, "Change"), undefined, "the header goes with the filter");
+});
+
+await test("a receipt's page shows its QuickBooks badge and the job's project; Change starts on it, Unlink clears it", async () => {
+  await go(`#/receipts/${JOB}/R1`);
+  assert.ok(badgesOf(view.querySelector(".rl-badges")).includes("In QuickBooks ✓ #10577"));
+  assert.match(view.textContent, /after returnsQuickBooks: Pollen Apartments · ChangeAll of this job's receipts ›/, "in the job card");
+  assert.doesNotMatch(view.textContent, /null/, "no stray null where a receipt has no returns card");
+  button(view, "Change").click();
+  await settle();
+  const pick = document.querySelector(".rl-qbo-pick");
+  assert.match(pick.textContent, /Linked now: Pollen Apartments\./);
+  assert.match(pick.querySelector('[aria-pressed="true"]').textContent, /^Pollen Apartments.*linked now/);
+  assert.equal(saveIn(pick).textContent, "Linked");
+  assert.equal(saveIn(pick).disabled, true, "saving the same project again is not offered");
+  const from = calls.length;
+  button(pick, "Unlink").click();
+  await settle(80);
+  assert.deepEqual(calls.slice(from).filter((c) => c.u.includes("rpc/job_qbo_link_set")).map((c) => c.body),
+    [{ p_job_id: JOB, p_qbo_customer_id: "", p_qbo_name: "", p_qbo_project_ref: null }]);
+  assert.deepEqual(QL, []);
+  assert.equal(document.querySelector(".rl-qbo-pick"), null);
+  assert.ok(button(view, "Link to QuickBooks"), "back to the link button");
+  noJunk(view);
+});
+
+await test("a qbo-proxy without listProjects yet: the picker says so and saves nothing", async () => {
+  qboProxyOld = true;
+  await go(`#/receipts/${JOB}/R1`);
+  const from = calls.length;
+  button(view, "Link to QuickBooks").click();
+  await settle();
+  const pick = document.querySelector(".rl-qbo-pick");
+  assert.match(pick.textContent, /The QuickBooks project list isn't available yet\./);
+  assert.equal(saveIn(pick).disabled, true);
+  document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }));
+  assert.equal(document.querySelector(".rl-qbo-pick"), null, "Esc closes it");
+  assert.equal(calls.slice(from).filter((c) => c.u.includes("rpc/job_qbo_link_set")).length, 0);
+  qboProxyOld = false;
+});
+
+await test("a job with no QuickBooks Time match starts with nothing picked; a job the server hasn't seen says so", async () => {
+  await go(`#/receipts/${JOB2}/S1`);
+  button(view, "Link to QuickBooks").click();
+  await settle();
+  const pick = document.querySelector(".rl-qbo-pick");
+  assert.equal(pick.querySelector('[aria-pressed="true"]'), null, "nothing picked for the office");
+  assert.equal(saveIn(pick).textContent, "Link");
+  assert.equal(saveIn(pick).disabled, true);
+  [...pick.querySelectorAll("[aria-pressed]")].find((b) => /^Smith addition/.test(b.textContent)).click();
+  saveIn(pick).click();
+  await settle(80);
+  assert.ok(document.querySelector(".rl-qbo-pick"), "stays open to try again");
+  assert.match(pick.querySelector(".warn").textContent, /This job hasn't reached the server yet\. Try again after it syncs\./);
+  assert.equal(saveIn(pick).disabled, false);
+  button(pick, "Cancel").click();
+  assert.equal(document.querySelector(".rl-qbo-pick"), null);
+  assert.ok(button(view, "Link to QuickBooks"), "still unlinked");
+});
+
+await test("before 0022 lands, the receipts show with no QuickBooks badge or link, quietly", async () => {
+  qboMissing = true;
+  const from = calls.length;
+  await go("#/receipts");
+  assert.equal(view.querySelectorAll(".rl-row").length, 5);
+  assert.doesNotMatch(view.textContent, /QuickBooks/);
+  jobFilter(JOB);
+  await settle();
+  assert.doesNotMatch(view.textContent, /QuickBooks/, "no job header either");
+  await go(`#/receipts/${JOB}/R1`);
+  assert.doesNotMatch(view.textContent, /QuickBooks/);
+  assert.ok(view.querySelector(".rl-facts"), "the rest of the page is all there");
+  assert.equal(qboReads(from).length, 0, "job_qbo_links' 404 stops the badge read too");
+  assert.equal(document.querySelector(".warn"), null);
+  qboMissing = false;
+  await go("#/receipts");
+  jobFilter("");
+  await settle();
+  assert.equal(view.querySelectorAll(".rl-row").length, 5);
+});
+
 await test("before the database update lands, the library still works and windows say why they're off", async () => {
   missing = true;
   await go("#/receipts/vendors");
@@ -445,6 +679,15 @@ await test("a crew login on the windows page is told the office sets them", asyn
   assert.equal(view.querySelectorAll("input.rl-days").length, 0);
   await go(`#/receipts/${JOB}/R1/return`);
   assert.match(view.textContent, /Returns are logged by the office\./);
+});
+
+await test("a crew login gets no QuickBooks link control (the door and the project list are office-only)", async () => {
+  QL.push({ job_id: JOB, qbo_customer_id: "112", qbo_project_ref: null, qbo_name: "Pollen Apartments", source: "picked" });
+  await go(`#/receipts/${JOB}/R1`);
+  assert.equal(button(view, "Change"), undefined);
+  assert.equal(button(view, "Link to QuickBooks"), undefined);
+  assert.doesNotMatch(view.textContent, /QuickBooks: Pollen/);
+  QL = [];
 });
 
 await test("changing a return logged as store credit keeps its override, so it saves", async () => {
@@ -607,7 +850,7 @@ await test("a return whose item was read again since won't open in Change: it sa
   assert.equal(view.querySelector(".rl-form"), null);
 });
 
-const stray = calls.filter((c) => !/\/rest\/v1\/(rpc\/role_is|rpc\/receipt_|rpc\/field_build_floor|receipt_vendors|receipt_return_reviews)/.test(c.u));
+const stray = calls.filter((c) => !/\/rest\/v1\/(rpc\/role_is|rpc\/receipt_|rpc\/field_build_floor|receipt_vendors|receipt_return_reviews|job_qbo_links|receipt_qbo_links|rpc\/job_qbo_link_set)|\/functions\/v1\/qbo-proxy/.test(c.u));
 console.log("  (sync nudges: " + [...new Set(stray.map((c) => c.u.replace(/\?.*$/, "")))].join(", ") + ")");
 console.log(`\n${pass} passed`);
 process.exit(0);

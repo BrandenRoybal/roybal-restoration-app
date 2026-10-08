@@ -30,6 +30,14 @@
    RETURN WINDOWS and "Nothing left over" live in Supabase (migration
    0018), owner/office only, written through their two doors.
 
+   QUICKBOOKS (phase 3, migration 0022): each receipt shows where it
+   stands with QuickBooks (receipt_qbo_links, written by the nightly
+   matcher and the approval path, only read here), and each job can be
+   linked to its QuickBooks project (job_qbo_links, written here through
+   job_qbo_link_set, from the list qbo-proxy listProjects gives). Before
+   0022 is applied both reads answer 404 and every QuickBooks control
+   stays off the page.
+
    admin.js loads this file by dynamic import. It imports only names
    that existed in the field modules before it was written: the office
    browser can run one load on a stale cached copy of a field module
@@ -38,7 +46,7 @@
    ============================================================ */
 import { h, clear, Store, toast, fileToDataURL, todayISO, uid, onProjectSaved, onProjectDeleted } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
-import { rest, currentEmail } from "../../js/supa.js";
+import { rest, currentEmail, callFunction } from "../../js/supa.js";
 import { syncNow, onSyncRowChanged } from "../../js/sync.js";
 import { tombstoneItems } from "../../js/merge.js";
 import { isMediaMarker } from "../../js/media.js";
@@ -240,15 +248,16 @@ function returnsGate() {
   return null;
 }
 
-/** A write through one of 0018's doors; throws with a sentence for a toast. */
-async function door(fn, args) {
+/** A write through one of 0018's doors (or 0022's job_qbo_link_set, which
+    names its own `missing` sentence); throws with a sentence for a toast. */
+async function door(fn, args, missing = "Return windows switch on after this feature's database update is applied.") {
   let res;
   try { res = await rest("rpc/" + fn, { method: "POST", body: JSON.stringify(args) }); }
   catch { throw new Error("No connection. Try again when you're online."); }
   if (res.ok) return res.json();
   let msg = "";
   try { const b = await res.json(); msg = (b && (b.message || b.hint)) || ""; } catch { /* not json */ }
-  if (res.status === 404) throw new Error("Return windows switch on after this feature's database update is applied.");
+  if (res.status === 404) throw new Error(missing);
   if (res.status === 403 || /42501|only the office/i.test(msg)) throw new Error("Only the office can change this.");
   throw new Error(msg || `Couldn't save (${res.status}).`);
 }
@@ -320,6 +329,337 @@ export function fillSettingsCard(slot) {
     h("p", { class: "subtle" }, "How many days each store takes returns. The Receipts tab reminds you before a window closes on materials nothing has been returned from.", status),
     h("div", { class: "qb-panel__row" }, h("a", { class: "btn btn--ghost btn--sm", href: VENDORS }, "Set return windows"))));
   loadWindows().then(say);
+}
+
+/* ---------- QuickBooks: each receipt's state, each job's project (0022) ---------- */
+/* Read fresh each time a page draws, never kept across pages: the nightly
+   match, an approval and the outbox move these on server-side, and a stale
+   "Waiting on QuickBooks" would send the office looking for nothing. When
+   job_qbo_links doesn't answer (0022 not applied yet: a 404; offline) the
+   badges and the link control stay off the page, quietly. */
+let jobLinks = new Map();              // job id -> its job_qbo_links row
+const QBO_ID = /^[0-9]{1,20}$/;        // 0022's check on a QuickBooks id
+const QBO_MISSING = "Linking jobs to QuickBooks switches on after this feature's database update is applied.";
+const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + "…" : s);
+const low = (s) => String(s || "").toLowerCase();
+
+async function loadJobLinks() {
+  if (!SYNC_ENABLED) return false;
+  try {
+    const r = await readAll("job_qbo_links?select=job_id,qbo_customer_id,qbo_project_ref,qbo_name,source&order=job_id");
+    if (!r.rows) return false;
+    jobLinks = new Map(r.rows.map((x) => [x.job_id, x]));
+    return true;
+  } catch { return false; }
+}
+
+/** One page's QuickBooks read: { on: the tables answered, office: the link
+    control may show }. The door and listProjects are owner/office only, so a
+    crew login gets badges (if its read returns any) but no control. */
+function qboLoad() {
+  return loadJobLinks().then(async (on) => ({ on, office: on && (await officeRole()) !== false }));
+}
+
+// PostgREST's in.(…) with each id double-quoted: an id holding a comma, dot
+// or parenthesis would otherwise split
+const inList = (ids) => "in.(" + ids.map((id) => '"' + String(id).replace(/["\\]/g, "\\$&") + '"').join(",") + ")";
+
+/** receipt_qbo_links for these ids into `known` (id -> row, null for none).
+    The page shows 60 rows at a time, so a paint is one select. False when
+    the table can't be read. */
+async function readReceiptStates(ids, known) {
+  for (let i = 0; i < ids.length; i += 100) {
+    const part = ids.slice(i, i + 100);
+    const res = await rest(`receipt_qbo_links?select=receipt_id,state,qbo_txn_id,detail&receipt_id=${enc(inList(part))}`, { method: "GET" });
+    if (!res.ok) return false;
+    const rows = await res.json();
+    for (const id of part) known.set(id, null);
+    for (const r of Array.isArray(rows) ? rows : []) if (r && part.includes(r.receipt_id)) known.set(r.receipt_id, r);
+  }
+  return true;
+}
+
+const UNMATCHED = {
+  waiting_feed: ["Waiting for the bank feed", "disp-x"],      // a card charge under a week old
+  store_not_entered: ["Not in QuickBooks yet", "disp-x"],     // a store-account invoice not entered yet
+  // a dump ticket: the office books those as Bills, which the match doesn't
+  // read, so finding no expense says nothing about whether it's entered
+  bill_not_checked: ["Booked as a bill: not checked", "disp-b"],
+  needs_job_link: ["Link the job to QuickBooks", "disp-b"],   // found, but the job has no project to tag
+  not_found: ["No QuickBooks match", "disp-x"],
+};
+function conflictWords(d) {
+  const name = typeof d.qbo_customer_name === "string" ? d.qbo_customer_name.trim() : "";
+  if (d.reason === "tagged_other") return "tagged to " + (name ? clip(name, 60) : "another job");
+  if (d.reason === "partly_tagged") return "only part of the expense is tagged to a job";
+  if (d.reason === "ambiguous") return "more than one expense matches";
+  // the note door's own reason: an approval gave the expense to another receipt first
+  if (d.reason === "claimed_by_other") return "another receipt has this expense";
+  return String(d.reason || "").replace(/_/g, " ").trim() || "the expense needs a look";
+}
+// qbo-proxy's error starts with its code ("tagged_other: expense 10566 is
+// already tagged to …"); the words after the code are the ones for people
+function refusalWords(err) {
+  const s = String(err || "").replace(/^[a-z_]+:\s*/, "").replace(/\s+/g, " ").trim();
+  return s ? clip(s, 140) : "the change didn't go through";
+}
+// The codes qbo-proxy refuses with for good: QuickBooks, or the card, said
+// no. Any other failed row outlasted the worker's retries without QuickBooks
+// answering (QuickBooks down or not connected, qbo-proxy out of reach, a
+// row cancelled by hand), so it isn't called a refusal. The same codes as
+// QBO_REFUSED in apps/field/js/approvals.js (a test holds them equal).
+export const QBO_REFUSED_CODES = ["tagged_other", "partly_tagged", "untaggable", "untaggable_line", "changed_in_qbo",
+  "purchase_missing", "photo_missing", "photo_type", "photo_unreadable", "photo_too_big", "upload_refused", "qbo_refused",
+  "bad_request", "relinked"];
+const codeOf = (err) => (/^([a-z_]+):/.exec(String(err || "").trim()) || [])[1] || "";
+// The photo QuickBooks refused after the tag (or the new entry) went in: the
+// worker marks the sent row attach_error=<code>, and the row is done
+const PHOTO_WORDS = {
+  photo_missing: "the photo is missing", photo_type: "the photo isn't a JPEG, PNG or PDF",
+  photo_unreadable: "the photo couldn't be read", photo_too_big: "the photo is over 20 MB",
+  upload_refused: "QuickBooks refused it", qbo_refused: "QuickBooks refused it",
+};
+function photoNotAttached(d) {
+  const code = (/(?:^|;)attach_error=([a-z_]+)/.exec(typeof d.provider_status === "string" ? d.provider_status : "") || [])[1];
+  if (!code) return "";
+  return Object.prototype.hasOwnProperty.call(PHOTO_WORDS, code) ? PHOTO_WORDS[code] : code.replace(/_/g, " ");
+}
+
+/** A receipt_qbo_links row → its badge { text, tone, title }, or null. */
+export function qboStatus(row) {
+  if (!row || typeof row !== "object") return null;
+  const d = row.detail && typeof row.detail === "object" ? row.detail : {};
+  const txn = QBO_ID.test(String(row.qbo_txn_id || "")) ? String(row.qbo_txn_id) : "";
+  const title = [txn ? "QuickBooks expense " + txn : "", d.qbo_account_name, d.qbo_doc_number ? "doc # " + d.qbo_doc_number : ""]
+    .filter((x) => x && typeof x === "string").join(" · ");
+  const out = (text, tone, more = "") => ({ text, tone, title: [title, more].filter(Boolean).join(" · ") });
+  switch (row.state) {
+    case "done": {
+      const why = photoNotAttached(d);
+      if (why) return out("Tagged in QuickBooks" + (txn ? " #" + txn : "") + "; photo not attached: " + why, "disp-b");
+      return out("In QuickBooks ✓" + (txn ? " #" + txn : ""), "disp-g");
+    }
+    case "in_qbo": return out("In QuickBooks ✓" + (txn ? " #" + txn : ""), "disp-g");
+    case "queued": return out("Waiting on QuickBooks", "disp-b");
+    case "unmatched": return out(...(Object.prototype.hasOwnProperty.call(UNMATCHED, d.reason) ? UNMATCHED[d.reason] : UNMATCHED.not_found));
+    case "conflict": return out("Check in QuickBooks: " + conflictWords(d), "disp-r");
+    // the badge clips a long refusal; hovering shows all of it
+    case "failed": return out((QBO_REFUSED_CODES.includes(codeOf(d.error)) ? "QuickBooks refused: " : "Couldn't update QuickBooks: ")
+      + refusalWords(d.error), "disp-r", typeof d.error === "string" ? clip(d.error, 600) : "");
+    default: return null;
+  }
+}
+
+/* One page's QuickBooks badges. Each row paints at once with a hidden slot;
+   fill() reads the ids on screen in one select and swaps a badge in. Ids
+   this page already read aren't asked again ("Show more" reads only the new
+   rows), and reads run one after another so two quick paints never ask for
+   the same id twice. */
+function qboBadges(ready, live) {
+  const known = new Map();
+  let slots = new Map();               // receipt id -> [slot], this paint's
+  let chain = Promise.resolve();
+  return {
+    reset() { slots = new Map(); },
+    slot(id) {
+      const s = h("span", { hidden: true });
+      slots.set(id, [...(slots.get(id) || []), s]);
+      return s;
+    },
+    fill() {
+      const mine = slots;
+      chain = chain.then(async () => {
+        if (!(await ready).on) return;
+        const want = [...mine.keys()].filter((id) => !known.has(id));
+        if (want.length && !(await readReceiptStates(want, known))) return;
+        if (!live()) return;
+        for (const [id, list] of mine) {
+          const st = qboStatus(known.get(id));
+          if (!st) continue;
+          for (const s of list) {
+            const line = s.parentElement;
+            if (!line) continue;
+            const b = badge(st.text, st.tone);
+            if (st.title) b.title = st.title;
+            s.replaceWith(b);
+            line.hidden = false;
+          }
+        }
+      }).catch(() => { /* offline mid-read: no badges this time */ });
+      return chain;
+    },
+  };
+}
+
+const qboName = (link) => String(link.qbo_name || "").trim() || "project " + link.qbo_customer_id;
+
+/** The job's QuickBooks project: "QuickBooks: Pollen Apartments · Change",
+    or a "Link to QuickBooks" button. Stays hidden (with `shell`, the card
+    around it) until job_qbo_links answers, for a crew login, and for a job
+    the server hasn't seen yet (the door checks field_projects). */
+function qboJobLine(jobId, label, ready, live, shell = null) {
+  const box = h("div", { class: "rl-small", style: "margin:8px 0 0", hidden: true });
+  const paint = () => {
+    const link = jobLinks.get(jobId);
+    const open = () => pickQboProject(jobId, label).then((v) => { if (v !== undefined && box.isConnected) paint(); });
+    const btn = (text) => h("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: open }, text);
+    box.replaceChildren(...(link ? ["QuickBooks: ", h("strong", {}, qboName(link)), " · ", btn("Change")] : [btn("Link to QuickBooks")]));
+    box.hidden = false;
+    if (shell) shell.hidden = false;
+  };
+  ready.then((q) => { if (q.office && UUID.test(jobId) && live()) paint(); });
+  return box;
+}
+
+/** qbo-proxy listProjects with the office's session (callFunction, the path
+    the QuickBooks connect panel's calls take): every active QuickBooks
+    Customer with Job = true. Throws a sentence for the picker. */
+async function listProjects() {
+  if (!SYNC_ENABLED) throw new Error("QuickBooks needs a connection.");
+  let res;
+  try { res = await callFunction("qbo-proxy", { action: "listProjects" }); }
+  catch { throw new Error("No connection. Try again when you're online."); }
+  const body = await res.json().catch(() => ({}));
+  // a qbo-proxy from before phase 3 answers 404 "Unknown action: listProjects"
+  if (res.status === 404) throw new Error("The QuickBooks project list isn't available yet.");
+  if (res.status === 403) throw new Error("Only the office can link a job to QuickBooks.");
+  if (!res.ok || !body || body.ok === false) throw new Error((body && body.error) || `QuickBooks didn't answer (${res.status}).`);
+  // the reply carries the list at the top level and under data
+  const list = Array.isArray(body.projects) ? body.projects : body.data && Array.isArray(body.data.projects) ? body.data.projects : null;
+  if (!list) throw new Error("The QuickBooks project list isn't available yet.");
+  return list.filter((p) => p && QBO_ID.test(String(p.id)) && String(p.name || "").trim())
+    .map((p) => ({ id: String(p.id), name: String(p.name).trim(), fqn: String(p.fqn || "").trim(),
+      isProject: typeof p.isProject === "boolean" ? p.isProject : null }));
+}
+
+/* The project picker (the QuickBooks Time job-code picker's look, qbtime.js
+   pickJobcode). Resolves to the saved link row, null after an unlink, or
+   undefined when closed with nothing changed. A job already linked starts on
+   its project; otherwise the one project named exactly like the job's
+   QuickBooks Time job starts picked, the same rule the nightly match
+   suggests a link by. Nothing is saved until Link. */
+let picking = false;
+function pickQboProject(jobId, label) {
+  if (picking) return Promise.resolve(undefined);
+  picking = true;
+  return new Promise((resolve) => {
+    const link = jobLinks.get(jobId) || null;
+    let done = false, all = [], chosen = null, match = null, busy = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true; picking = false;
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("hashchange", onHash);
+      resolve(v);
+    };
+    const onKey = (e) => { if (e.key === "Escape" && !busy) finish(undefined); };
+    const onHash = () => finish(undefined);
+    const note = (t) => h("div", { class: "subtle", style: "padding:8px 2px;font-size:13px" }, t);
+
+    const search = h("input", { type: "search", placeholder: "Search QuickBooks projects", "aria-label": "Search QuickBooks projects",
+      style: "width:100%;padding:9px 10px;border:1px solid #cdd5df;border-radius:8px;margin-bottom:8px;font-size:16px" });
+    const listBox = h("div", { style: "max-height:46vh;overflow:auto" }, note("Loading QuickBooks projects…"));
+    const err = h("div", { class: "warn", hidden: true, style: "margin-top:10px" });
+    const save = h("button", { type: "button", class: "btn btn--primary btn--sm", disabled: true }, "Link");
+    const unlink = link ? h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Unlink") : null;
+    const cancel = h("button", { type: "button", class: "btn btn--ghost btn--sm", onclick: () => { if (!busy) finish(undefined); } }, "Cancel");
+
+    const card = h("div", { style: "background:#fff;border-radius:16px;padding:18px;max-width:480px;width:92%;box-shadow:0 16px 50px rgba(0,0,0,.3)" },
+      h("div", { style: "font-weight:800;font-size:18px;color:var(--navy,#0f1b2d);margin-bottom:2px" }, "QuickBooks project"),
+      h("div", { class: "subtle", style: "font-size:13px;margin-bottom:10px" },
+        `Pick the QuickBooks project ${label}'s expenses are tagged to.`,
+        link ? h("span", {}, " Linked now: ", h("strong", {}, qboName(link)), ".") : null),
+      search, listBox, err,
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap;justify-content:space-between;margin-top:14px" },
+        unlink || h("span"),
+        h("div", { style: "display:flex;gap:8px" }, cancel, save)));
+    const overlay = h("div", { class: "rl-qbo-pick", role: "dialog", "aria-modal": "true", "aria-label": "QuickBooks project",
+      style: "position:fixed;inset:0;background:rgba(15,27,45,.55);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px",
+      onclick: (e) => { if (e.target === overlay && !busy) finish(undefined); } }, card);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("hashchange", onHash);
+    document.body.append(overlay);
+
+    const paintSave = () => {
+      const same = !!(chosen && link && chosen.id === link.qbo_customer_id);
+      save.disabled = busy || !chosen || same;
+      save.textContent = !chosen ? "Link" : same ? "Linked" : "Link to " + clip(chosen.name, 40);
+    };
+    const projectRow = (p) => {
+      const on = !!(chosen && chosen.id === p.id);
+      const tags = [link && link.qbo_customer_id === p.id ? "linked now" : "", match && match.id === p.id ? "QuickBooks Time match" : "",
+        p.isProject === false ? "sub-customer" : ""].filter(Boolean).join(" · ");
+      return h("button", { type: "button", "aria-pressed": on ? "true" : "false",
+        style: "display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 10px;margin:3px 0;cursor:pointer;border-radius:10px;" +
+          (on ? "border:2px solid var(--orange,#f26a21);background:#fff6f0" : "border:1px solid #e2e6ec;background:#fff"),
+        onclick: () => { if (busy) return; chosen = p; err.hidden = true; paintList(); paintSave(); } },
+        h("span", { style: "min-width:0" },
+          h("span", { style: "font-weight:600;color:var(--navy,#0f1b2d)" }, p.name),
+          p.fqn && p.fqn !== p.name ? h("div", { class: "subtle", style: "font-size:12px" }, p.fqn) : null),
+        on || tags ? h("span", { class: "subtle", style: "margin-left:auto;font-size:12px;white-space:nowrap" }, [on ? "✓" : "", tags].filter(Boolean).join(" ")) : null);
+    };
+    const paintList = () => {
+      const words = low(search.value).split(/\s+/).filter(Boolean);
+      const rows = all.filter((p) => words.every((w) => low(p.name + " " + p.fqn).includes(w)));
+      if (!rows.length) { listBox.replaceChildren(note(all.length ? "No project matches." : "QuickBooks has no active projects.")); return; }
+      const shown = rows.slice(0, 200);
+      listBox.replaceChildren(...shown.map(projectRow),
+        ...(rows.length > shown.length ? [note(`${rows.length - shown.length} more: type to narrow the list.`)] : []));
+    };
+    search.addEventListener("input", () => { if (all.length) paintList(); });
+
+    const say = (e) => {
+      const m = String((e && e.message) || e);
+      err.textContent = /no job/i.test(m) ? "This job hasn't reached the server yet. Try again after it syncs."
+        : /is deleted/i.test(m) ? "This job was deleted." : m;
+      err.hidden = false;
+    };
+    save.addEventListener("click", async () => {
+      if (busy || !chosen) return;
+      const p = chosen;
+      busy = true; paintSave(); save.textContent = "Saving…"; err.hidden = true;
+      if (unlink) unlink.disabled = true;
+      try {
+        // p_qbo_project_ref stays null: the line-level ProjectRef is another id
+        // space, which the nightly match learns from lines already tagged
+        const row = await door("job_qbo_link_set",
+          { p_job_id: jobId, p_qbo_customer_id: p.id, p_qbo_name: p.name.slice(0, 160), p_qbo_project_ref: null }, QBO_MISSING);
+        const saved = row && typeof row === "object" && row.job_id ? row
+          : { job_id: jobId, qbo_customer_id: p.id, qbo_project_ref: null, qbo_name: p.name, source: "picked" };
+        jobLinks.set(jobId, saved);
+        toast(`${label} is linked to ${p.name} in QuickBooks. The next QuickBooks check uses it.`, 4000);
+        finish(saved);
+      } catch (e) {
+        busy = false; paintSave();
+        if (unlink) unlink.disabled = false;
+        say(e);
+      }
+    });
+    if (unlink) unlink.addEventListener("click", async () => {
+      if (busy || !confirm(`Unlink ${label} from ${qboName(link)}? Nothing already in QuickBooks changes.`)) return;
+      busy = true; unlink.disabled = true; paintSave(); err.hidden = true;
+      try {
+        await door("job_qbo_link_set", { p_job_id: jobId, p_qbo_customer_id: "", p_qbo_name: "", p_qbo_project_ref: null }, QBO_MISSING);
+        jobLinks.delete(jobId);
+        toast(`${label} is no longer linked to QuickBooks.`);
+        finish(null);
+      } catch (e) { busy = false; unlink.disabled = false; paintSave(); say(e); }
+    });
+
+    Promise.all([listProjects(), Store.get(jobId).catch(() => null)]).then(([projects, p]) => {
+      if (done) return;
+      all = projects;
+      const code = low(p && p.qbJobcodeName).trim();
+      const same = code ? all.filter((x) => x.isProject === true && low(x.name).trim() === code) : [];
+      match = same.length === 1 ? same[0] : null;
+      chosen = (link && all.find((x) => x.id === link.qbo_customer_id)) || match;
+      paintList(); paintSave();
+      const on = listBox.querySelector('[aria-pressed="true"]');
+      if (on && typeof on.scrollIntoView === "function") on.scrollIntoView({ block: "nearest" });
+      search.focus();
+    }).catch((e) => { if (!done) listBox.replaceChildren(note(String((e && e.message) || e))); });
+  });
 }
 
 /* ---------- the full-screen viewer (the returns-counter view) ---------- */
@@ -423,10 +763,14 @@ async function renderList(view, live) {
 
   const flagSlot = h("div");
   const nudge = h("div");
+  const jobHead = h("div");
+  let headFor = null;                  // the job jobHead was drawn for
   const summary = h("p", { class: "rl-sum" });
   const list = h("div");
   const more = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "margin:12px auto 0;display:block",
     onclick: () => { limit += PAGE; paint(); } });
+  const qboReady = entries.length ? qboLoad() : Promise.resolve({ on: false, office: false });
+  const qb = qboBadges(qboReady, live);
 
   body.append(
     pill,
@@ -440,7 +784,7 @@ async function renderList(view, live) {
       pick("Store", [["", "All stores"], ...groups.map((g) => [g.key, `${g.label} (${g.count})`])], "vendor"),
       pick("Job", [["", "All jobs"], ...jobs], "job"),
       pick("Dates", L.DATE_PRESETS, "preset")),
-    chips, summary, list, more);
+    chips, jobHead, summary, list, more);
 
   if (!entries.length) {
     list.replaceChildren(h("div", { class: "empty" }, h("div", { class: "big" }, "🧾"),
@@ -473,7 +817,10 @@ async function renderList(view, live) {
         `${L.fmtMoney(s.spent)} net`].filter(Boolean).join(" · ")
       : "";
     const q = filters.q.trim();
-    list.replaceChildren(...rows.slice(0, limit).map((e) => row(e, q)));
+    qb.reset();
+    list.replaceChildren(...rows.slice(0, limit).map((e) => row(e, q, qb)));
+    qb.fill();
+    paintJobHead();
     if (!rows.length) {
       list.append(h("div", { class: "empty" },
         h("p", {}, q ? `Nothing matches “${q}”${hidden ? " with these filters" : ""}.` : "No receipts with these filters."),
@@ -486,9 +833,22 @@ async function renderList(view, live) {
     more.hidden = rows.length <= limit;
     more.textContent = `Show ${Math.min(PAGE, rows.length - limit)} more`;
   }
+
+  /* The list is every job's receipts, newest first, so a job's QuickBooks
+     project shows as a header once the Job filter narrows it to one job
+     (and on each receipt's page, in its job card). */
+  function paintJobHead() {
+    if (headFor === filters.job) return;
+    headFor = filters.job;
+    const label = (jobs.find(([id]) => id === filters.job) || [])[1];
+    if (!filters.job || !label) { jobHead.replaceChildren(); return; }
+    const card = h("div", { class: "card", hidden: true, style: "margin-top:10px" }, h("strong", {}, label));
+    card.append(qboJobLine(filters.job, label, qboReady, () => live() && headFor === filters.job, card));
+    jobHead.replaceChildren(card);
+  }
 }
 
-function row(e, q) {
+function row(e, q, qb = null) {
   const st = L.returnStatus(e);
   const badges = [];
   if (e.kind === "return") badges.push(badge("↩ Return", "disp-g"));
@@ -509,7 +869,8 @@ function row(e, q) {
         h("span", { class: "rl-amt" + (e.amount < 0 ? " rl-amt--ret" : "") }, e.amount ? L.fmtMoney(e.amount) : "—")),
       h("div", { class: "muted rl-small" }, [L.fmtDay(e.date) || "No date", L.jobLabel(e.job),
         e.receiptNo ? "#" + e.receiptNo : "", e.cardLast4 ? "••" + e.cardLast4 : ""].filter(Boolean).join(" · ")),
-      badges.length ? h("div", { class: "badgeline rl-badges" }, ...badges) : null,
+      // hidden until it holds a badge: the QuickBooks one arrives after the read
+      h("div", { class: "badgeline rl-badges", hidden: !badges.length }, ...badges, qb ? qb.slot(e.id) : null),
       lines.length ? h("div", { class: "rl-lines" }, ...lines.map((it) => h("div", {},
         `${it.desc || "Item"}${it.qty !== 1 ? " × " + L.fmtQty(it.qty) : ""} — ${L.fmtMoney(it.price)}` +
         (e.returnedQty[it.id] ? ` · ${L.fmtQty(e.returnedQty[it.id])} returned` : "")))) : null));
@@ -533,17 +894,21 @@ async function renderDetail(view, jobId, id, live) {
   watch(pill, entries, (all) => all.filter((x) => x.jobId === jobId));
   const ret = e.kind === "return";
   const windowSlot = h("div");
+  const qboReady = qboLoad();
+  const qb = qboBadges(qboReady, live);
 
-  body.append(pill,
+  // filtered: DOM append() writes a null as the text "null" (no returns card)
+  body.append(...[pill,
     h("div", { class: "atoolbar" },
       h("h1", {}, (ret ? "↩ Return · " : "") + (e.vendor || "Unknown vendor")),
       h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, back,
         e.hasPhoto ? h("button", { type: "button", class: "btn btn--primary btn--sm", onclick: () => viewer(r) }, "🧾 Show at the counter") : null)),
-    factsCard(e, r, jobId, windowSlot),
+    factsCard(e, r, jobId, windowSlot, qb.slot(e.id)),
     photoCard(r),
     ret ? creditLinesCard(e, jobEntries) : itemsCard(e),
     ret ? null : returnsCard(e, jobEntries, p, view),
-    jobCard(e, jobEntries));
+    jobCard(e, jobEntries, qboJobLine(jobId, L.jobLabel(e.job), qboReady, live))].filter(Boolean));
+  qb.fill();
 
   const paintWindow = () => windowSlot.replaceChildren(...(ret ? [] : [windowLine(e)].filter(Boolean)));
   paintWindow();
@@ -553,7 +918,7 @@ async function renderDetail(view, jobId, id, live) {
 function fact(k, v) {
   return v ? h("div", {}, h("div", { class: "rl-fact__k" }, k), h("div", { class: "rl-fact__v" }, v)) : null;
 }
-function factsCard(e, r, jobId, windowSlot) {
+function factsCard(e, r, jobId, windowSlot, qboSlot) {
   const ret = e.kind === "return";
   const paid = PAID_WITH.find((x) => x.value === r.paidWith);
   const st = L.returnStatus(e);
@@ -565,7 +930,8 @@ function factsCard(e, r, jobId, windowSlot) {
       st === "all" ? badge("↩ All returned", "disp-g") : st === "part" ? badge(`↩ ${L.fmtMoney(e.returned)} returned`, "disp-b") : null,
       L.overReturned(e) ? badge("Returns are more than the receipt", "disp-r") : null,
       L.needsTotal(e) ? badge("Needs a total", "disp-r") : null,
-      e.ai ? badge("✨ AI read", "disp-x") : null),
+      e.ai ? badge("✨ AI read", "disp-x") : null,
+      qboSlot),
     h("div", { class: "rl-facts" },
       fact("Job", h("a", { href: `${FIELD_ROOT}#/p/${jobId}` }, L.jobLabel(e.job))),
       fact(ret ? "Slip #" : "Receipt #", e.receiptNo),
@@ -658,12 +1024,13 @@ function returnsCard(e, jobEntries, p, view) {
           onclick: () => deleteCredit(c.jobId, c, () => renderReceipts(view)) }, "Delete")))));
 }
 
-function jobCard(e, jobEntries) {
+function jobCard(e, jobEntries, qboLine) {
   const s = L.summarize(jobEntries);
   return h("div", { class: "card" },
     h("div", { class: "rl-row__top" },
       h("span", {}, h("strong", {}, L.jobLabel(e.job)), h("span", { class: "muted rl-small" }, ` · ${plural(s.purchases, "receipt")}${s.returns ? " · " + plural(s.returns, "return") : ""}`)),
       h("strong", {}, `${L.fmtMoney(s.spent)}${s.returns ? " after returns" : ""}`)),
+    qboLine,
     h("a", { class: "atoggle", href: LIST, onclick: () => { Object.assign(filters, { q: "", vendor: "", job: e.jobId, preset: "", show: "all" }); } },
       "All of this job's receipts ›"));
 }

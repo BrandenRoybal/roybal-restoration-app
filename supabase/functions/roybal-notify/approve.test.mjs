@@ -553,13 +553,21 @@ const gaps = (sms_code, o = {}) => sp(sms_code, { operation: "invoice.review_gap
   rationale: `${GAPS_WHY}\nLimits: an internal leak check, not carrier-grade justification.`,
   input: { job_id: "j1", lines: [], total_usd: 325.08, unpriced_count: 1 }, ...o });
 
-test("an invoice-gaps ask is the inbox's: both spine reads carry one filter that leaves it out", () => {
-  assert.equal(INBOX_ONLY_FILTER, "&operation=not.like.invoice.review_gaps*");
-  // it rides the query string as written: one more filter, nothing to encode
+test("invoice-gaps and QuickBooks receipts asks are the inbox's: both spine reads carry filters that leave them out", () => {
+  assert.equal(INBOX_ONLY_FILTER, "&operation=not.like.invoice.review_gaps*&operation=not.like.receipts.qbo_link*");
+  // it rides the query string as written: two more filters on one column,
+  // which PostgREST ANDs, and nothing to encode
   const q = new URLSearchParams(`status=eq.proposed&sms_code=not.is.null${INBOX_ONLY_FILTER}&select=id`);
-  assert.deepEqual([...q.keys()], ["status", "sms_code", "operation", "select"]);
-  assert.equal(q.get("operation"), "not.like.invoice.review_gaps*", "PostgREST reads * as LIKE's %");
-  assert.equal(encodeURIComponent(q.get("operation")), q.get("operation"));
+  assert.deepEqual([...q.keys()], ["status", "sms_code", "operation", "operation", "select"]);
+  assert.deepEqual(q.getAll("operation"), ["not.like.invoice.review_gaps*", "not.like.receipts.qbo_link*"],
+    "PostgREST reads * as LIKE's %");
+  for (const f of q.getAll("operation")) assert.equal(encodeURIComponent(f), f);
+  // each LIKE pattern leaves out its own operation at any version, and nothing
+  // else (LIKE reads _ as any one character, and PostgREST * as %)
+  const like = (pattern, op) => new RegExp("^" + pattern.replace(/[.]/g, "\\.").replace(/_/g, ".").replace(/\*/g, ".*") + "$").test(op);
+  const out = (op) => q.getAll("operation").some((f) => like(f.replace(/^not\.like\./, ""), op));
+  for (const op of ["invoice.review_gaps@1", "receipts.qbo_link@1", "receipts.qbo_link@2"]) assert.equal(out(op), true, op);
+  for (const op of ["email.send@1", "sms.send@1", "job.set_stage@1", "receipts.qbo_match@1"]) assert.equal(out(op), false, op);
 });
 
 test("an invoice-gaps row that ever reached the matcher is named by its dollar line, and a bare YES never runs it", () => {
@@ -570,6 +578,24 @@ test("an invoice-gaps row that ever reached the matcher is named by its dollar l
   assert.equal(spineLabel(gaps(7, { rationale: "" })), "invoice.review_gaps", "no rationale: the operation");
   assert.ok(Array.from(spineLabel(gaps(7, { rationale: "x".repeat(400) }))).length <= 160);
   // a bare YES never runs it, alone or beside the asks a text did offer
+  assert.equal(matchAcross([], [g], null).reason, "needs-number");
+  const r = matchAcross([], [g, sp(4)], null);
+  assert.deepEqual([r.lane, r.hit.sms_code, r.reason], ["spine", 4, "ok"], "the brief's reminder is the bare YES's");
+  const t = matchAcross([txt(12)], [g], null);
+  assert.deepEqual([t.lane, t.hit.code, t.reason], ["text", 12, "ok"]);
+});
+
+/** The nightly QuickBooks match's ask (0022): money, one card per job,
+    filed proposed_via 'agent' with a one-sentence rationale. */
+const QBO_WHY = "2 receipts on 2156 Alston rd. match QuickBooks expenses that have no job tag or photo.";
+const qbo = (sms_code, o = {}) => sp(sms_code, { operation: "receipts.qbo_link@1", proposed_via: "agent", rationale: QBO_WHY,
+  input: { job_id: "j1", job_name: "2156 Alston rd.", qbo_customer_id: "112", items: [], total_usd: 1581.78 }, ...o });
+
+test("a QuickBooks receipts row that ever reached the matcher is named by its sentence, and a bare YES never runs it", () => {
+  const g = qbo(9);
+  assert.equal(offeredByText(g), false, "proposed_via 'agent': no text offered it");
+  assert.equal(spineLabel(g), QBO_WHY.replace(/\.$/, ""));
+  assert.equal(spineLabel(qbo(9, { rationale: "" })), "receipts.qbo_link", "no rationale: the operation");
   assert.equal(matchAcross([], [g], null).reason, "needs-number");
   const r = matchAcross([], [g, sp(4)], null);
   assert.deepEqual([r.lane, r.hit.sms_code, r.reason], ["spine", 4, "ok"], "the brief's reminder is the bare YES's");

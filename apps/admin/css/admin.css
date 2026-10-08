@@ -315,6 +315,11 @@ input.rl-days { width: 90px; flex: 0 0 auto; }
 .ap-line__why { font-size: 12.5px; color: var(--muted); }
 .ap-line .ap-refs, .ap-hints .ap-refs { font-size: 12.5px; color: var(--muted); }
 .ap-hints { margin: 0; padding-left: 18px; }
+/* QuickBooks receipts (the nightly QuickBooks match): a money ask with its own
+   chip, a row per receipt (.ap-line above), and "Approve all QuickBooks cards"
+   above the list when two or more wait */
+.badge.ap-qbo { background: #e3f4e8; color: #1d6b37; }
+.ap-bulk { display: flex; justify-content: flex-end; margin: 0 0 10px; }
 .ap-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
 .ap-yes { font-size: 12.5px; color: var(--muted); }
 /* a spine email while the worker isn't sending email: approving only queues it */
@@ -332,4 +337,5 @@ input.rl-days { width: 90px; flex: 0 0 auto; }
   .ap-k { flex-basis: 58px; }
   .ap-actions .btn { flex: 1 1 auto; white-space: nowrap; }   /* each its own width, one line, full row between them */
   .ap-yes { flex-basis: 100%; text-align: center; }
+  .ap-bulk .btn { flex: 1 1 auto; }   /* Approve all: the full row on a phone */
 }

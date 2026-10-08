@@ -33,6 +33,13 @@
    job has none, out of the total), the total, what to check, no YES number,
    only the field job read, and Approve and add lines landing as what the
    executor did; superseded with no gaps left reads as no longer needed.
+   Then the nightly QuickBooks match's receipts cards: a line per receipt
+   and the project link, no YES number, the heartbeat read for the "qbo"
+   channel (and the line when it's off), every outbox row of an approved
+   card read and counted ("2 of 3 updated in QuickBooks; 1 refused: …"),
+   and "Approve all QuickBooks cards (N)": one confirm, then each card
+   through the same call its own Approve makes, stopping at the first that
+   doesn't go through, then a fresh read.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -79,6 +86,8 @@ const FIELD1 = "11111111-1111-4111-8111-111111111111";
 const BOARD1 = "22222222-2222-4222-8222-222222222222";
 const AGENT = "1af33481-7f1c-4485-87f5-7b0ec5e27554";
 const BILLING = "193d7dd0-74f9-407d-9891-8cb7aab22f82";          // agent:billing
+const INTEGRATIONS = "5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10";     // agent:integrations (0022)
+const ALSTON = "a628eea5-5c1e-4b7a-9d2f-3e8c1b0a7f42";           // a field job, "2156 Alston rd."
 const id = (lane, n) => (lane === "text" ? "aaaaaaaa" : "bbbbbbbb") + `-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 const reminder = { id: id("text", 1), code: 12, kind: "emailSend", proposed_by: "morning-brief", status: "pending",
@@ -103,7 +112,8 @@ const stale = { ...email, id: id("spine", 4), expires_at: iso(-20) };
 let PA = [reminder, phase, sent, failed, lapsed, swept];
 let PR = [email, delivered, declined, stale];
 const CATALOG = [{ name: "email.send", version: 1, description: "Send one email. Execution writes one outbox row; the worker delivers it through Gmail." },
-  { name: "invoice.review_gaps", version: 1, description: "Add the lines the nightly billing check found documented but not billed. Execution appends one new draft invoice to the job." }];
+  { name: "invoice.review_gaps", version: 1, description: "Add the lines the nightly billing check found documented but not billed. Execution appends one new draft invoice to the job." },
+  { name: "receipts.qbo_link", version: 1, description: "Update QuickBooks for this job's receipts. Execution queues one QuickBooks change per receipt: tag the matching expense to the job's QuickBooks project and attach the receipt photo; it never edits a tag already set and it refuses if the receipts changed since the card was filed." }];
 let OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
 /* the newest worker heartbeat, as of the page's clock: sending email unless a test says otherwise */
 const beatAt = (minsAgo, channels) => () => json(200, [{ at: new Date(Date.now() - minsAgo * 60e3).toISOString(),
@@ -156,15 +166,17 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (u.includes("/rest/v1/operation_catalog?select=name,version,description")) return json(200, CATALOG);
   if (u.includes("/rest/v1/agents?select=id,name&")) {
-    return json(200, [{ id: AGENT, name: "agent:brief" }, { id: BILLING, name: "agent:billing" }].filter((a) => ids(u, "id").includes(a.id)));
+    return json(200, [{ id: AGENT, name: "agent:brief" }, { id: BILLING, name: "agent:billing" }, { id: INTEGRATIONS, name: "agent:integrations" }]
+      .filter((a) => ids(u, "id").includes(a.id)));
   }
   if (u.includes("/rest/v1/field_projects?select=id,title:data->>title,customer:data->>customer,address:data->>address&")) {
-    return json(200, ids(u, "id").includes(FIELD1) ? [{ id: FIELD1, title: null, customer: "Pollen", address: "1192 Bemis Ct" }] : []);
+    return json(200, [{ id: FIELD1, title: null, customer: "Pollen", address: "1192 Bemis Ct" },
+      { id: ALSTON, title: "2156 Alston rd.", customer: "Pollen Apartments", address: "2156 Alston Rd" }].filter((j) => ids(u, "id").includes(j.id)));
   }
   if (u.includes("/rest/v1/coordination_jobs?select=id,title:data->>title,customer:data->>customer,address:data->>address&")) {
     return json(200, ids(u, "id").includes(BOARD1) ? [{ id: BOARD1, title: "Smith remodel", customer: "Smith", address: null }] : []);
   }
-  if (u.includes("/rest/v1/outbox?select=proposal_id,status,next_attempt_at,error,created_at,updated_at&")) {
+  if (u.includes("/rest/v1/outbox?select=proposal_id,status,next_attempt_at,error,provider_status,created_at,updated_at&")) {
     return json(200, OUTBOX.filter((o) => ids(u, "proposal_id").includes(o.proposal_id)));
   }
   throw new Error("unexpected fetch " + u);
@@ -966,7 +978,7 @@ await test("a send the worker gave up on after its card aged off shows again in 
   // nothing else on the page names its job or proposer: they were read for it
   assert.match(c.querySelector(".ap-meta").textContent, /^Pollen, 1192 Bemis Ct · from Brief agent · answered /);
   const ob = calls.slice(before).find((x) => x.u.includes("/outbox?select="));
-  assert.match(ob.u, /select=proposal_id,status,next_attempt_at,error,created_at,updated_at&/);
+  assert.match(ob.u, /select=proposal_id,status,next_attempt_at,error,provider_status,created_at,updated_at&/);
   assert.deepEqual(ids(ob.u, "proposal_id"), [late.id]);
   assert.equal(beats(before), 0, "an older send waits on nothing: no heartbeat read");
   assert.equal(view.querySelector(".ap-lane"), null);
@@ -1210,6 +1222,224 @@ await test("Approve and add lines: one confirm naming the lines, the priced tota
   await settle();
   assert.equal(card("spine:" + gapsRow.id).querySelector(".ap-out").textContent,
     "Failed: invoice.review_gaps: the job's invoices changed since this was proposed, so nothing was added; the nightly check files a fresh card if the work is still unbilled and the job is still one it checks (not archived, not every invoice paid)");
+  noJunk(view);
+  reset5();
+});
+
+/* ---------- the nightly QuickBooks match: receipts.qbo_link ---------- */
+const CITI = "3176 - Citi - Home Depot Consumer Credit Card";
+const photo = (c) => "media:" + c.repeat(64) + ":184211";
+/* the Oct 7 read: Citi Home Depot bank-rule expenses with no job tag and no photo */
+const hdItem = (receipt_id, date, amount, txn, c) => ({ receipt_id, vendor: "Home Depot", date, amount, receipt_no: "1303 00001 50615",
+  qbo_txn_type: "Purchase", qbo_txn_id: txn, qbo_sync_token: "0", qbo_doc_number: "", qbo_account_name: CITI, qbo_total: amount,
+  changes: ["tag", "attach"], photo_refs: [photo(c)], project_ref: "412739523" });
+const qboInput = (items, o = {}) => ({ job_id: ALSTON, job_name: "2156 Alston rd.", receipts_fingerprint: "0123456789abcdef0123456789abcdef",
+  items_hash: "fedcba9876543210fedcba9876543210", offer: 0, qbo_customer_id: "112", qbo_name: "Pollen Apartments",
+  link: { qbo_customer_id: "112", qbo_name: "Pollen Apartments", qbo_project_ref: "412739523", source: "suggested_tagged",
+    why: "1 of this job's receipts matches a QuickBooks expense already tagged to Pollen Apartments" },
+  items, total_usd: items.reduce((t, i) => t + Math.abs(i.amount), 0), matcher: "receipts.qbo_match@1", ...o });
+const qboRow = (n, items, o = {}) => ({ id: id("spine", 40 + n), operation: "receipts.qbo_link@1", sms_code: 30 + n, status: "proposed", edited_params: null,
+  input: qboInput(items), proposed_by_kind: "agent", proposed_by_id: INTEGRATIONS,
+  rationale: `${items.length} receipt${items.length === 1 ? "" : "s"} on 2156 Alston rd. ${items.length === 1 ? "matches a QuickBooks expense that has" : "match QuickBooks expenses that have"} no job tag or photo.`,
+  evidence_refs: [], job_id: ALSTON, created_at: iso(-9), expires_at: iso(14 * 24 - 9 + n), approved_at: null, updated_at: iso(-9),
+  decline_reason: null, result: null, error: null, ...o });
+const q1 = qboRow(1, [hdItem("r-6788", "2026-09-24", 67.88, "10519", "b"), hdItem("r-1369", "2026-09-30", 1369.5, "10577", "a")]);
+const q2 = qboRow(2, [hdItem("r-2790", "2026-10-01", 27.9, "10584", "c")], { job_id: FIELD1, input: { ...qboInput([hdItem("r-2790", "2026-10-01", 27.9, "10584", "c")]), job_id: FIELD1, job_name: "1192 Bemis Ct", link: undefined } });
+const q3 = qboRow(3, [hdItem("r-4506", "2026-10-03", 45.06, "10614", "d")], { input: qboInput([hdItem("r-4506", "2026-10-03", 45.06, "10614", "d")], { link: undefined }) });
+const QBO_HEAD = "QuickBooksUpdate QuickBooks for this job's receipts: ";
+const QBO_OFF_WAITING = "QuickBooks updates are off on the worker right now: approving queues these, and they wait until updates are back on.";
+const kvKeys = (root) => [...root.querySelectorAll(".ap-ev > .ap-kv > .ap-k")].map((k) => k.textContent);
+const bulkBtn = () => view.querySelector(".ap-bulk button");
+/* op_proposal_approve on a receipts card: runtime sql, so the row comes back
+   executed with what the executor queued, and the next read finds it so too */
+const answered = (r) => { PR = PR.map((x) => (x.id === r.id ? r : x)); return json(200, r); };
+const queued = (r) => answered({ ...r, status: "executed", approved_at: new Date().toISOString(), approved_via: "inbox", updated_at: new Date().toISOString(),
+  result: { queued: r.input.items.length, skipped: 0, outbox_ids: r.input.items.map((_, i) => `0000000${i}-0000-4000-8000-000000000000`) } });
+
+await test("a QuickBooks receipts card shows a line per receipt and the project link, from the integrations agent, with no YES number", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "qbo"]);
+  PA = [];
+  PR = [q1];
+  const before = since0();
+  await go();
+  const c = card("spine:" + q1.id);
+  assert.equal(c.querySelector(".ap-head").textContent, QBO_HEAD + "2156 Alston rd.: 2 receipts");
+  assert.ok(c.querySelector(".ap-head .badge").classList.contains("ap-qbo"), "its own chip");
+  assert.match(c.querySelector(".ap-meta").textContent, /^2156 Alston rd\. · from Integrations agent · asked .+ · expires in 1[34] days$/);
+  assert.equal(c.querySelector(".ap-yes"), null, "answered here only: roybal-notify never reads these");
+  assert.equal(row(c, "Project").textContent,
+    "Links this job to QuickBooks project Pollen Apartments: 1 of this job's receipts matches a QuickBooks expense already tagged to Pollen Apartments");
+  assert.deepEqual([...c.querySelectorAll(".ap-lines > .ap-line")].map((l) => l.textContent), [
+    `Home Depot · Sep 24 · $67.88 → QuickBooks expense 10519 (${CITI}): tag to Pollen Apartments, attach the photo`,
+    `Home Depot · Sep 30 · $1,369.50 → QuickBooks expense 10577 (${CITI}): tag to Pollen Apartments, attach the photo`,
+  ]);
+  assert.equal(row(c, "Why").textContent, q1.rationale);
+  assert.deepEqual(kvKeys(c), ["Project", "Receipts", "Why"], "the link, the receipts, then why; no evidence links");
+  assert.equal(c.querySelector(".ap-lane"), null, "the worker is serving qbo: nothing about it");
+  assert.equal(btn(c, "Approve: update QuickBooks").disabled, false);
+  assert.equal(bulkBtn(), null, "one card: no Approve all");
+  // the reads: the field job only, the agent's name, and the heartbeat (is the worker serving qbo)
+  const reads = calls.slice(before);
+  assert.ok(reads.some((x) => x.u.includes("/field_projects?") && ids(x.u, "id").includes(ALSTON)));
+  assert.ok(!reads.some((x) => x.u.includes("/coordination_jobs?")), "receipts are on a field job");
+  assert.ok(reads.some((x) => x.u.includes("/agents?") && ids(x.u, "id").includes(INTEGRATIONS)));
+  assert.equal(beats(before), 1);
+  noJunk(view);
+  // the worker not serving qbo (RECEIPTS_QBO=off): approving queues them, and the card says so before the tap
+  heartbeat = beatAt(0.5, ["sms", "email"]);
+  await go();
+  const lane = card("spine:" + q1.id).querySelector(".ap-lane");
+  assert.equal(lane.textContent, QBO_OFF_WAITING);
+  assert.ok(lane.compareDocumentPosition(card("spine:" + q1.id).querySelector(".ap-actions")) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+  reset5();
+});
+
+await test("an approved QuickBooks card reads every outbox row it wrote and says how they went", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "qbo"]);
+  const items = [...q1.input.items, hdItem("r-2790", "2026-10-01", 27.9, "10584", "c")];
+  const done = { ...qboRow(4, items), sms_code: null, status: "executed", approved_at: iso(-3), updated_at: iso(-3),
+    result: { queued: 3, skipped: 0, outbox_ids: [] } };
+  const ob = (status, error = null) => ({ proposal_id: done.id, status, next_attempt_at: iso(-3), error, created_at: iso(-3), updated_at: iso(-2) });
+  PA = [];
+  PR = [done];
+  OUTBOX = [ob("sent"), ob("dead", "tagged_other: expense 10584 is already tagged to Bemis Ct in QuickBooks"), ob("sent")];
+  const before = since0();
+  await go();
+  const out = card("spine:" + done.id).querySelector(".ap-out");
+  assert.equal(out.textContent, "2 of 3 updated in QuickBooks; 1 refused: tagged to another job");
+  assert.ok(out.classList.contains("ap-out--bad"));
+  const read = calls.slice(before).find((x) => x.u.includes("/outbox?select="));
+  assert.deepEqual(ids(read.u, "proposal_id"), [done.id]);
+  assert.match(read.u, /&order=created_at\.desc&limit=1000$/, "a row per receipt: room for many cards' worth");
+  // all through
+  OUTBOX = [ob("sent"), ob("sent"), ob("delivered")];
+  await go();
+  assert.equal(card("spine:" + done.id).querySelector(".ap-out").textContent, "All 3 updated in QuickBooks");
+  // still going with the worker's qbo channel off
+  heartbeat = beatAt(0.5, ["sms", "email"]);
+  OUTBOX = [ob("sent"), ob("pending"), ob("failed", "qbo_unavailable: QuickBooks 503")];
+  await go();
+  assert.equal(card("spine:" + done.id).querySelector(".ap-out").textContent, "1 of 3 updated in QuickBooks; 2 waiting (QuickBooks updates are off on the worker)");
+  noJunk(view);
+  reset5();
+});
+
+await test("Approve on one QuickBooks card: one confirm naming the receipts and the job, the single RPC, and it lands as queued", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "qbo"]);
+  PA = [];
+  PR = [q1];
+  await go();
+  asked.length = 0;
+  spine = (fn, body) => (fn === "op_proposal_approve" && body.p_proposal_id === q1.id ? queued(q1) : json(500, { message: "unexpected" }));
+  const before = since0();
+  btn(card("spine:" + q1.id), "Approve: update QuickBooks").click();
+  await settle();
+  assert.deepEqual(asked, ["Update QuickBooks for 2 receipts on 2156 Alston rd.?"]);
+  const rpc = calls.slice(before).filter((x) => x.u.includes("/rpc/op_proposal_"));
+  assert.equal(rpc.length, 1);
+  assert.deepEqual(rpc[0].body, { p_proposal_id: q1.id, p_via: "inbox" }, "no edit: every receipt");
+  const out = card("spine:" + q1.id).querySelector(".ap-out");
+  assert.equal(out.textContent, "2 queued for QuickBooks");
+  assert.ok(out.classList.contains("ap-out--wait"));
+  assert.equal(document.getElementById("toast").textContent, "2 queued for QuickBooks");
+  reset5();
+});
+
+await test("Approve all QuickBooks cards: shown for two or more, one confirm, each card through its own Approve call in order, then a fresh read", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "qbo"]);
+  PA = [reminder];
+  PR = [email, q3, q1, q2];
+  await go();
+  assert.equal(bulkBtn().textContent, "Approve all QuickBooks cards (3)");
+  const keys = waiting().map((c) => c.dataset.key);
+  assert.deepEqual(keys, ["spine:" + email.id, "text:" + reminder.id, "spine:" + q1.id, "spine:" + q2.id, "spine:" + q3.id]);
+  assert.ok(bulkBtn().closest(".ap-bulk").compareDocumentPosition(waiting()[0]) & window.Node.DOCUMENT_POSITION_FOLLOWING, "above the list");
+  // nothing happens without the yes
+  asked.length = 0;
+  confirmAnswer = false;
+  let before = since0();
+  bulkBtn().click();
+  await settle();
+  assert.deepEqual(asked, ["Update QuickBooks for all 3 cards: 4 receipts on 2 jobs? Each card is approved in turn, and it stops at the first one that doesn't go through."]);
+  assert.equal(calls.slice(before).filter((x) => x.u.includes("/rpc/op_proposal_")).length, 0);
+  confirmAnswer = true;
+  // yes: each in turn, waiting on the one before it
+  asked.length = 0;
+  const order = [];
+  const rowsById = { [q1.id]: q1, [q2.id]: q2, [q3.id]: q3 };
+  let running = 0, most = 0;
+  spine = async (fn, body) => {
+    order.push([fn, body]);
+    running++; most = Math.max(most, running);
+    await settle(5);
+    running--;
+    return queued(rowsById[body.p_proposal_id]);
+  };
+  before = since0();
+  bulkBtn().click();
+  await settle(150);
+  assert.equal(asked.length, 1, "the one confirm; no per-card confirm after it");
+  assert.deepEqual(order, [q1, q2, q3].map((r) => ["op_proposal_approve", { p_proposal_id: r.id, p_via: "inbox" }]), "soonest expiry first, the single Approve's call");
+  assert.equal(most, 1, "one at a time");
+  assert.deepEqual(waiting().map((c) => c.dataset.key), ["spine:" + email.id, "text:" + reminder.id], "the others untouched");
+  assert.deepEqual([q1, q2, q3].map((r) => card("spine:" + r.id).querySelector(".ap-out").textContent),
+    ["2 queued for QuickBooks", "Queued for QuickBooks", "Queued for QuickBooks"]);
+  assert.equal(document.getElementById("toast").textContent, "Approved 3 QuickBooks cards.");
+  assert.equal(bulkBtn(), null, "nothing left to approve all");
+  // then it reads where things stand
+  const after = calls.slice(before);
+  const lastRpc = after.findLastIndex((x) => x.u.includes("/rpc/op_proposal_"));
+  assert.ok(after.slice(lastRpc).some((x) => x.u.includes("/rest/v1/proposals?select=")), "a fresh read after the last answer");
+  noJunk(view);
+  reset5();
+});
+
+await test("Approve all stops at the first card that doesn't go through: a refusal, or a card the executor failed", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "qbo"]);
+  const MOVED = "receipts.qbo_link: the receipts changed since this card was filed, so nothing was queued; tonight's match files a fresh card if QuickBooks still needs the change";
+  // the second card's executor fails (its receipts changed since filing): the approval stands, the card failed
+  PA = [];
+  PR = [q1, q2, q3];
+  await go();
+  let order = [];
+  spine = (fn, body) => {
+    order.push(body.p_proposal_id);
+    if (body.p_proposal_id === q2.id) {
+      return answered({ ...q2, status: "failed", approved_at: new Date().toISOString(), updated_at: new Date().toISOString(), error: MOVED });
+    }
+    return queued(body.p_proposal_id === q1.id ? q1 : q3);
+  };
+  bulkBtn().click();
+  await settle(150);
+  assert.deepEqual(order, [q1.id, q2.id], "the third is never sent");
+  assert.equal(card("spine:" + q1.id).querySelector(".ap-out").textContent, "2 queued for QuickBooks");
+  assert.equal(card("spine:" + q2.id).querySelector(".ap-out").textContent, "Failed: " + MOVED);
+  assert.deepEqual(waiting().map((c) => c.dataset.key), ["spine:" + q3.id], "the rest still waiting");
+  assert.equal(document.getElementById("toast").textContent, "Stopped after 1 of 3: one didn't go through, and the rest are still waiting.");
+  // a refusal on the first: its line under the card, nothing else sent
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "qbo"]);
+  PA = [];
+  PR = [q1, q2, q3];
+  await go();
+  order = [];
+  spine = (fn, body) => { order.push(body.p_proposal_id); return json(403, { code: "42501", message: "op spine: not allowed" }); };
+  const before = since0();
+  bulkBtn().click();
+  await settle(150);
+  assert.deepEqual(order, [q1.id]);
+  assert.equal(errText("spine:" + q1.id), "Your login isn't allowed to answer this one.");
+  assert.equal(btn(card("spine:" + q1.id), "Approve: update QuickBooks").disabled, false, "its buttons back");
+  assert.deepEqual(waiting().map((c) => c.dataset.key), [q1, q2, q3].map((r) => "spine:" + r.id));
+  assert.equal(bulkBtn().textContent, "Approve all QuickBooks cards (3)", "and the button, to try again");
+  assert.equal(bulkBtn().disabled, false);
+  assert.equal(document.getElementById("toast").textContent, "Stopped after 0 of 3: one didn't go through, and the rest are still waiting.");
+  assert.ok(calls.slice(before).some((x) => x.u.includes("/rest/v1/proposals?select=")), "a fresh read");
   noJunk(view);
   reset5();
 });

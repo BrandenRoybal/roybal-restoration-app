@@ -44,8 +44,14 @@
    way (kind "gaps", its lines and total as text on the card); an
    older copy makes them a plain card for that one load: Why and
    Evidence, a plain Approve, and a YES number roybal-notify won't
-   take. Anything added later that has to be a call is checked
-   first (typeof A.x === "function"). The sends that died in the last
+   take. The nightly QuickBooks match's receipts cards ride the
+   same way (kind "qbo": a line per receipt, the project link, an
+   outcome counted from the card's outbox rows, the "qbo" lane in
+   needs' answer), and so does "Approve all QuickBooks cards": a
+   loop over the one call a single Approve makes (decisionRequest,
+   spineAnswer), shown only when the field module names the kind.
+   Anything added later that has to be a call is checked first
+   (typeof A.x === "function"). The sends that died in the last
    48 hours with a proposal older than the 7-day read (diedLate) are
    plain reads here, no new call: their proposal rows join the rest
    before inbox runs.
@@ -59,14 +65,15 @@ const HASH = "#/approvals";
 const REFRESH_MS = 45000;
 const enc = encodeURIComponent;
 /* the shared .badge tones: the chip by kind, the outcome line by how it went
-   (invoice gaps, a money ask, get admin.css's own) */
-const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", gaps: "ap-money", other: "disp-x" };
+   (invoice gaps and QuickBooks receipts, money asks, get admin.css's own) */
+const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", gaps: "ap-money", qbo: "ap-qbo", other: "disp-x" };
 const tone = (kind) => (Object.prototype.hasOwnProperty.call(TONE, kind) ? TONE[kind] : TONE.other);   // not Object.hasOwn: Safari < 15.4
 
 const TEXT_COLS = "id,code,kind,label,params,job_id,proposed_by,status,result,created_at,expires_at,executed_at";
 const SPINE_COLS = "id,operation,input,edited_params,proposed_by_kind,proposed_by_id,rationale,evidence_refs," +
   "job_id,status,expires_at,approved_at,decline_reason,result,error,created_at,updated_at,sms_code";
-/* the newest worker heartbeat: is the worker sending email right now (owner/office RLS, 0016) */
+/* the newest worker heartbeat: is the worker sending email, or QuickBooks
+   changes, right now (owner/office RLS, 0016) */
 const BEAT_PATH = "worker_heartbeats?select=at,meta&order=at.desc&limit=1";
 const JOB_COLS = "id,title:data->>title,customer:data->>customer,address:data->>address";
 
@@ -132,19 +139,22 @@ async function load(now) {
   const later = A.needs(Array.isArray(bare.older) ? bare.older : []);
   const need = {};
   for (const k of ["field", "board", "agents", "people", "outbox"]) need[k] = [...new Set([...(shown[k] || []), ...(later[k] || [])])];
-  // only when a spine email is on the page (an older field module never
-  // asks); a read that fails is null, "can't tell", never "sending is off".
-  // An older send that comes back has died, and a dead row waits on nothing.
-  const mail = Array.isArray(shown.lanes) && shown.lanes.includes("email");
+  // only when a spine email or a QuickBooks receipts card is on the page (an
+  // older field module never asks); a read that fails is null, "can't
+  // tell", never "sending is off". An older send that comes back has died,
+  // and a dead row waits on nothing.
+  const beat = Array.isArray(shown.lanes) && (shown.lanes.includes("email") || shown.lanes.includes("qbo"));
   const [ops, field, board, agents, profiles, outbox, heartbeats] = await Promise.all([
     pr.length && !catalog ? rows("operation_catalog?select=name,version,description&limit=100").catch(() => null) : catalog,
     lookup(need.field, `field_projects?select=${JOB_COLS}&id=${inList(need.field)}&limit=100`),
     lookup(need.board, `coordination_jobs?select=${JOB_COLS}&id=${inList(need.board)}&limit=100`),
     lookup(need.agents, `agents?select=id,name&id=${inList(need.agents)}&limit=100`),
     lookup(need.people, `profiles?select=id,full_name&id=${inList(need.people)}&limit=100`),
-    lookup(need.outbox, `outbox?select=proposal_id,status,next_attempt_at,error,created_at,updated_at` +
-      `&proposal_id=${inList(need.outbox)}&order=created_at.desc&limit=100`),
-    mail ? rows(BEAT_PATH).then((r) => (Array.isArray(r) ? r : null), () => null) : null,
+    // a QuickBooks receipts card has a row per receipt (up to 50), so the
+    // read takes up to PostgREST's 1000, not one row per card
+    lookup(need.outbox, `outbox?select=proposal_id,status,next_attempt_at,error,provider_status,created_at,updated_at` +
+      `&proposal_id=${inList(need.outbox)}&order=created_at.desc&limit=1000`),
+    beat ? rows(BEAT_PATH).then((r) => (Array.isArray(r) ? r : null), () => null) : null,
   ]);
   if (ops) catalog = ops;
   const look = A.lookFrom({ catalog: catalog || [], agents, profiles, jobs: [...field, ...board], outbox, heartbeats, now });
@@ -224,6 +234,7 @@ const notes = new Map();         // card key → { text, gone, declineOnly }: th
    refreshes and re-renders, brought up to date by A.sawApproved */
 const seenApproved = new Map();
 let lastTextRead = NaN;          // when the text queue last loaded: a longer gap restarts those sightings
+let bulk = null;                 // "Approve all QuickBooks cards" while it runs: { at, of }
 /* card key → the card as this tab's own answer settled it (Sent, Declined,
    Failed: …). A send whose executed stamp didn't land leaves the server row
    at 'approved', and the refresh that rebuilds the card from it would turn a
@@ -321,6 +332,9 @@ export async function renderApprovals(view) {
     // an ask that wouldn't make a card (console.warn names it) is still said out loud
     const skipped = A.skippedLine(box.skipped);
     if (skipped) kids.push(h("div", { class: "warn ap-skipped", role: "status" }, skipped));
+    // the nightly QuickBooks match files one card per job: two or more can be answered in one go
+    const qbo = box.waiting.filter((c) => c.kind === "qbo");
+    if (qbo.length >= 2 || bulk) kids.push(approveAllBar(qbo));
     if (box.waiting.length) kids.push(...box.waiting.map((c) => waitingCard(c, now)));
     else if (!skipped) kids.push(h("p", { class: "muted ap-none" }, "Nothing is waiting on you."));
     const gone = A.expiredLine(box.expired);
@@ -364,19 +378,61 @@ export async function renderApprovals(view) {
       err);
   }
 
-  /* Approve: one confirm naming the action. Decline: a confirm on the text
-     queue, a prompt for an optional reason on the spine (op_proposal_decline
-     keeps it). While it runs that card's buttons are off, the other cards
-     stay usable, and no refresh repaints. Another card's answer can repaint
-     the page meanwhile, so the card is found again (uis) when this one lands. */
-  async function decide(c, decision) {
-    if (inflight.has(c.key)) return;
+  /* "Approve all QuickBooks cards (N)": one confirm for all of them, then
+     each card in turn (soonest expiry first) through the very call its own
+     Approve makes, with that card's buttons showing Working… as usual. It
+     stops at the first one that doesn't go through, a refusal or a card
+     the executor failed (the receipts changed since filing, say): that card
+     says why, the rest stay waiting, and the page reads where things stand. */
+  function approveAllBar(cards) {
+    const label = bulk ? `Approving ${bulk.at} of ${bulk.of}…` : `Approve all QuickBooks cards (${cards.length})`;
+    const all = h("button", { type: "button", class: "btn btn--primary btn--sm", disabled: !!bulk }, label);
+    all.addEventListener("click", () => approveAll(cards));
+    return h("div", { class: "ap-bulk" }, all);
+  }
+  async function approveAll(cards) {
+    if (bulk || !cards.length) return;
+    const n = cards.reduce((k, c) => k + (Array.isArray(c.evidence.receipts) ? c.evidence.receipts.length : 0), 0);
+    const jobs = new Set(cards.map((c) => c.jobId || c.key)).size;
+    if (!confirm(`Update QuickBooks for all ${cards.length} cards: ${n} ${n === 1 ? "receipt" : "receipts"} on ${jobs} ${jobs === 1 ? "job" : "jobs"}? ` +
+      "Each card is approved in turn, and it stops at the first one that doesn't go through.")) return;
+    bulk = { at: 0, of: cards.length };
+    let stopped = false, done = 0;
+    try {
+      for (const c of cards) {
+        if (!live()) { stopped = true; break; }
+        // answered meanwhile (another tap, a refresh): nothing left to approve on it
+        if (!state.box.waiting.some((w) => w.key === c.key)) continue;
+        bulk.at++;
+        paint();
+        const ok = await decide(c, "approve", true);
+        if (ok === false) { stopped = true; break; }
+        if (ok) done++;
+      }
+    } finally { bulk = null; }
+    if (!live()) return;
+    toast(stopped ? `Stopped after ${done} of ${cards.length}: one didn't go through, and the rest are still waiting.`
+      : `Approved ${done} QuickBooks ${done === 1 ? "card" : "cards"}.`);
+    paint();
+    refresh();
+  }
+
+  /* Approve: one confirm naming the action (asked: the Approve-all confirm
+     already covered it). Decline: a confirm on the text queue, a prompt for
+     an optional reason on the spine (op_proposal_decline keeps it). While it
+     runs that card's buttons are off, the other cards stay usable, and no
+     refresh repaints. Another card's answer can repaint the page meanwhile,
+     so the card is found again (uis) when this one lands. Returns true when
+     the answer landed and the ask didn't fail, false when it didn't, and
+     null when nothing was sent (already out, or not confirmed). */
+  async function decide(c, decision, asked = false) {
+    if (inflight.has(c.key)) return null;
     let reason = "";
-    if (decision === "approve") { if (!confirm(A.approveConfirm(c))) return; }
-    else if (c.lane === "text") { if (!confirm(A.declineConfirm(c))) return; }
+    if (decision === "approve") { if (!asked && !confirm(A.approveConfirm(c))) return null; }
+    else if (c.lane === "text") { if (!confirm(A.declineConfirm(c))) return null; }
     else {
       const r = prompt(A.declinePrompt(c), "");
-      if (r === null) return;
+      if (r === null) return null;
       reason = r;
     }
     inflight.set(c.key, decision); epoch++;
@@ -394,19 +450,22 @@ export async function renderApprovals(view) {
     refreshApprovalsBadge();
     const ans = !res ? { ok: false, error: isSignedIn() ? A.NO_CONNECTION : A.SIGNED_OUT }
       : c.lane === "text" ? A.pendingAnswer(res.status, b, c, decision) : A.spineAnswer(res.status, b);
+    let landed = false;
     if (ans.ok) {
       const done = c.lane === "text" ? A.decidedText(c, ans) : A.fromProposal(ans.row, state.look);
       if (c.lane === "text" && done.status !== "approved") heard.set(c.key, done);
       state = { ...state, box: A.settle(state.box, c, done) };
       toast(A.outcome(done).text);
+      landed = done.status !== "failed";
     } else {
       notes.set(c.key, { text: ans.error, gone: !!ans.gone, declineOnly: !!ans.declineOnly });
     }
     // the office moved off this page while it was out; if it came back, that page reads where things stand
-    if (!live()) { if (onShow) onShow(); return; }
+    if (!live()) { if (onShow) onShow(); return landed; }
     const ui = !ans.ok && uis.get(c.key);
     if (ui) { ui.idle(notes.get(c.key)); ui.note(ans.error); }
     else paint();
+    return landed;
   }
 }
 
@@ -457,6 +516,15 @@ function evidence(c) {
       kv("Total", e.total),
       hints.length ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "To check"),
         h("ul", { class: "ap-v ap-hints" }, ...hints.map((x) => h("li", {}, x.text, refList(x.refs))))) : null);
+  } else if (c.kind === "qbo") {
+    // the nightly QuickBooks match: the project link approving sets (the job
+    // had none), then each receipt with the expense it matched and what that
+    // expense gets, a job tag or the photo. Every line arrives as text from
+    // the field module.
+    const receipts = Array.isArray(e.receipts) ? e.receipts : [];
+    parts.push(kv("Project", e.link),
+      receipts.length ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Receipts"),
+        h("ol", { class: "ap-v ap-lines" }, ...receipts.map((x) => h("li", { class: "ap-line" }, x.text)))) : null);
   }
   parts.push(kv("Why", e.rationale));
   if (e.refs.length) {

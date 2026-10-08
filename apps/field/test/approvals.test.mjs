@@ -14,7 +14,14 @@
    total counted as Postgres counts them (exact decimals, half away from
    zero, rounded once), the lines an edit kept, the confirm, the executor's
    three results, superseded as no longer needed or as closed when the
-   check's findings changed, and no YES number (inbox only).
+   check's findings changed, and no YES number (inbox only). Then the nightly
+   QuickBooks match's receipts.qbo_link: one line per receipt (vendor, date,
+   amount, the QuickBooks expense, what it gets), the project link a card
+   suggests, the receipts an edit kept, the confirm, no YES number (inbox
+   only), what came of it counted from its outbox rows (updated, waiting,
+   refused or failed and why, in words from qbo-proxy's error codes), the
+   worker's "qbo" channel off, and a change the worker gave up on after the
+   card aged off coming back for 48 hours.
    Run: node --test test/approvals.test.mjs */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -25,6 +32,7 @@ import {
   decidedText, settle, NO_CONNECTION, SIGNED_OUT, NEVER_REPORTED,
   NEVER_REPORTED_PHASE, WAIT_MS, sawApproved, skippedLine, labelOf, READ_GAP_MS,
   emailLaneOf, HEARTBEAT_FRESH_MS, LANE_OFF_WAITING, LANE_OFF_QUEUED, LANE_OFF_FAILED,
+  qboLaneOf, QBO_OFF_WAITING, QBO_OFF_QUEUED,
 } from "../js/approvals.js";
 
 // 10:00 AM Alaska (AKDT, UTC-8) on Tue Oct 6 2026
@@ -249,7 +257,10 @@ test("lookFrom: catalog by name@version and name, agents and profiles by id, the
   assert.equal(LOOK.people[AGENT], "Brief agent");
   assert.equal(LOOK.people[PERSON], "Gregory Roybal");
   assert.equal(LOOK.outbox[delivered.id].status, "delivered");
-  assert.deepEqual(lookFrom(), { jobs: {}, ops: {}, people: {}, outbox: {}, emailLane: null }, "no heartbeat read: can't tell");
+  // every row too, in the order read (a QuickBooks receipts card has one per receipt)
+  assert.deepEqual(LOOK.outboxes[delivered.id].map((o) => o.status), ["delivered", "pending"]);
+  assert.deepEqual(lookFrom(), { jobs: {}, ops: {}, people: {}, outbox: {}, outboxes: {}, emailLane: null, qboLane: null },
+    "no heartbeat read: can't tell");
 });
 
 test("outcomes: sent, phase added, already there, queued with the quiet-hours time, delivered, declined with why, failed with why", () => {
@@ -1124,4 +1135,295 @@ test("invoice gaps: a line or hint of any odd shape still reads as words, never 
     assert.equal(approveConfirm(c), "Add 0 lines ($0.00) as a new draft invoice on Pollen, 1192 Bemis Ct?");
     for (const t of texts(c)) assert.ok(!JUNK.test(t), t);
   }
+});
+
+/* ---------- the nightly QuickBooks match: receipts.qbo_link ---------- */
+const INTEGRATIONS = "5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10";      // agent:integrations (0022's fixed id)
+const ALSTON = "a628eea5-5c1e-4b7a-9d2f-3e8c1b0a7f42";              // "2156 Alston rd."
+const sha = (c) => "media:" + c.repeat(64) + ":184211";
+const CITI = "3176 - Citi - Home Depot Consumer Credit Card";
+/* the Oct 7 read: two Citi Home Depot bank-rule expenses with no job tag, no
+   ref number and no photo; the job's Spenard expense was already tagged to
+   Pollen Apartments, so the matcher suggests linking the job to it */
+const hd = { receipt_id: "r-1369", vendor: "Home Depot", date: "2026-09-30", amount: 1369.5, receipt_no: "1303 00001 50615",
+  qbo_txn_type: "Purchase", qbo_txn_id: "10577", qbo_sync_token: "0", qbo_doc_number: "", qbo_account_name: CITI, qbo_total: 1369.5,
+  changes: ["tag", "attach"], photo_refs: [sha("a")], project_ref: "412739523" };
+const hd2 = { ...hd, receipt_id: "r-6788", date: "2026-09-24", amount: 67.88, receipt_no: "1303 00001 49377",
+  qbo_txn_id: "10519", qbo_sync_token: "1", qbo_total: 67.88, photo_refs: [sha("b")] };
+const qboInput = {
+  job_id: ALSTON, job_name: "2156 Alston rd.", receipts_fingerprint: "0123456789abcdef0123456789abcdef",
+  items_hash: "fedcba9876543210fedcba9876543210", offer: 0, qbo_customer_id: "112", qbo_name: "Pollen Apartments",
+  link: { qbo_customer_id: "112", qbo_name: "Pollen Apartments", qbo_project_ref: "412739523", source: "suggested_tagged",
+    why: "1 of this job's receipts matches a QuickBooks expense already tagged to Pollen Apartments" },
+  items: [hd2, hd], total_usd: 1437.38, matcher: "receipts.qbo_match@1",
+};
+const qboCard = {
+  id: "bbbbbbbb-0000-4000-8000-0000000000c1", operation: "receipts.qbo_link@1", action_type: "money", sms_code: 22,
+  input: qboInput, edited_params: null, proposed_by_kind: "agent", proposed_by_id: INTEGRATIONS, proposed_via: "agent",
+  rationale: "2 receipts on 2156 Alston rd. match QuickBooks expenses that have no job tag or photo.", evidence_refs: [],
+  job_id: ALSTON, status: "proposed", created_at: iso(-9), expires_at: iso(14 * 24 - 9), approved_at: null, updated_at: iso(-9),
+  decline_reason: null, result: null, error: null,
+};
+const QBO_DESC = "Update QuickBooks for this job's receipts. Execution queues one QuickBooks change per receipt: tag the matching expense to the job's QuickBooks project and attach the receipt photo; it never edits a tag already set and it refuses if the receipts changed since the card was filed.";
+const qboLook = (o = {}) => lookFrom({
+  catalog: [...CATALOG, { name: "receipts.qbo_link", version: 1, description: QBO_DESC }],
+  agents: [{ id: INTEGRATIONS, name: "agent:integrations" }],
+  jobs: [{ id: ALSTON, title: "2156 Alston rd.", customer: "Pollen", address: "2156 Alston Rd" }], now: NOW, ...o });
+const QBO_LOOK = qboLook();
+const HD_LINE = `Home Depot · Sep 30 · $1,369.50 → QuickBooks expense 10577 (${CITI}): tag to Pollen Apartments, attach the photo`;
+const HD2_LINE = `Home Depot · Sep 24 · $67.88 → QuickBooks expense 10519 (${CITI}): tag to Pollen Apartments, attach the photo`;
+/* every string a QuickBooks card puts on screen */
+const qboTexts = (c) => [c.title, c.chip, c.approveLabel, c.yesHint, c.job, c.by, c.laneHint, approveConfirm(c), outcome(c, NOW).text,
+  c.evidence.link, ...c.evidence.receipts.map((x) => x.text)];
+
+test("QuickBooks receipts: one card per job, a line per receipt saying what its expense gets, the project link it suggests, from the integrations agent, with no YES number", () => {
+  const c = fromProposal(qboCard, QBO_LOOK);
+  assert.deepEqual([c.lane, c.kind, c.chip, c.approveLabel], ["spine", "qbo", "QuickBooks", "Approve: update QuickBooks"]);
+  assert.equal(c.title, "Update QuickBooks for this job's receipts: 2156 Alston rd.: 2 receipts");
+  assert.equal(c.code, 22, "op_propose numbered it");
+  assert.equal(c.yesHint, "", "inbox only: roybal-notify never reads these rows");
+  assert.deepEqual([c.jobTable, c.jobId, c.job, c.by], ["field", ALSTON, "2156 Alston rd.", "Integrations agent"]);
+  assert.deepEqual(c.evidence.receipts, [{ id: "r-6788", text: HD2_LINE }, { id: "r-1369", text: HD_LINE }], "in card order");
+  assert.equal(c.evidence.link, "Links this job to QuickBooks project Pollen Apartments: 1 of this job's receipts matches a QuickBooks expense already tagged to Pollen Apartments");
+  assert.equal(c.evidence.rationale, qboCard.rationale);
+  assert.deepEqual(c.evidence.refs, [], "photos are media markers, not links");
+  assert.equal(c.laneHint, "", "no heartbeat read: nothing to say");
+  // the page asks for the field job, the agent's name and the worker's heartbeat (is it serving "qbo")
+  assert.deepEqual(needs([c]), { field: [ALSTON], board: [], agents: [INTEGRATIONS], people: [], outbox: [], lanes: ["qbo"] });
+  // a job already linked: no link line, and the tag names its project
+  const linked = fromProposal({ ...qboCard, input: { ...qboInput, link: undefined, qbo_name: "Bemis Ct" } }, QBO_LOOK);
+  assert.equal(linked.evidence.link, "");
+  assert.match(linked.evidence.receipts[0].text, /: tag to Bemis Ct, attach the photo$/);
+  // the catalog unreadable: the operation's name stands in; the job lookup missed: the matcher's job name
+  const bare = fromProposal(qboCard);
+  assert.equal(bare.title, "receipts.qbo_link: 2156 Alston rd.: 2 receipts");
+  assert.equal(bare.job, "2156 Alston rd.");
+  assert.equal(fromProposal(qboCard, qboLook({ jobs: [{ id: ALSTON, customer: "Pollen", address: "2156 Alston Rd" }] })).job,
+    "Pollen, 2156 Alston Rd", "the looked-up name wins on the meta line");
+  // every other card carries the same fields, empty
+  for (const other of [fromProposal(email, LOOK), fromPending(reminder, LOOK), fromProposal(gaps, GAPS_LOOK)]) {
+    assert.deepEqual([other.evidence.receipts, other.evidence.link, other.outboxes, other.qboLane], [[], "", [], null]);
+  }
+  for (const t of qboTexts(c)) assert.ok(!JUNK.test(t), t);
+});
+
+test("QuickBooks receipts: attach-only, a store invoice the app enters, a return and several photos each read as words", () => {
+  const spenard = { ...hd, receipt_id: "r-sbs", vendor: "Spenard", date: "2026-09-28", amount: 212.28, receipt_no: "700624817",
+    qbo_txn_id: "10563", qbo_doc_number: "700624817", qbo_account_name: "SBS Store Credit", qbo_total: 212.28, changes: ["attach"] };
+  const sherwin = { receipt_id: "r-sw", vendor: "Sherwin", date: "2026-10-02", amount: 11.13, receipt_no: "8230-1", qbo_txn_type: "Purchase",
+    qbo_txn_id: "", qbo_sync_token: "", qbo_doc_number: "82301", qbo_account_name: "Sherwin Store Credit", qbo_total: null,
+    changes: ["create", "attach"], photo_refs: [sha("c")], project_ref: "412739523",
+    create: { account_id: "52", vendor_id: "9", payment_type: "CreditCard", credit: false, doc_number: "82301", expense_account_id: "42",
+      class_id: "1000000001", txn_date: "2026-10-02", amount_abs: 11.13, memo: "Sherwin 8230-1 (from the job receipts app)" } };
+  const back = { ...hd, receipt_id: "r-ret", date: "2026-10-01", amount: -45.06, qbo_txn_id: "10614", qbo_total: 45.06,
+    changes: ["tag"], photo_refs: [] };
+  const pages = { ...hd, receipt_id: "r-pages", photo_refs: [sha("d"), sha("e")], changes: ["attach"] };
+  const c = fromProposal({ ...qboCard, input: { ...qboInput, items: [spenard, sherwin, back, pages] } }, QBO_LOOK);
+  assert.deepEqual(c.evidence.receipts.map((x) => x.text), [
+    "Spenard · Sep 28 · $212.28 → QuickBooks expense 10563 (ref 700624817, SBS Store Credit): attach the photo",
+    "Sherwin · Oct 2 · $11.13 → a new QuickBooks expense on Sherwin Store Credit (ref 82301): enter it, tagged to Pollen Apartments, attach the photo",
+    `Home Depot · Oct 1 · -$45.06 (return) → QuickBooks expense 10614 (${CITI}): tag to Pollen Apartments`,
+    `Home Depot · Sep 30 · $1,369.50 → QuickBooks expense 10577 (${CITI}): attach the 2 photos`,
+  ]);
+  assert.equal(c.title, "Update QuickBooks for this job's receipts: 2156 Alston rd.: 4 receipts");
+  assert.equal(approveConfirm(c), "Update QuickBooks for 4 receipts on 2156 Alston rd.?");
+});
+
+test("QuickBooks receipts: the confirm names how many receipts and the job", () => {
+  assert.equal(approveConfirm(fromProposal(qboCard, QBO_LOOK)), "Update QuickBooks for 2 receipts on 2156 Alston rd.?");
+  const one = fromProposal({ ...qboCard, input: { ...qboInput, items: [hd] } }, QBO_LOOK);
+  assert.equal(approveConfirm(one), "Update QuickBooks for 1 receipt on 2156 Alston rd.?");
+  assert.equal(one.title, "Update QuickBooks for this job's receipts: 2156 Alston rd.: 1 receipt");
+  const nameless = fromProposal({ ...qboCard, input: { ...qboInput, job_name: "" } });
+  assert.equal(approveConfirm(nameless), "Update QuickBooks for 2 receipts on this job?", "no name anywhere");
+  assert.equal(nameless.title, "receipts.qbo_link: 2 receipts");
+});
+
+test("QuickBooks receipts: an edit can only drop receipts, and the card shows the kept ones as the proposal holds them (the executor's rule)", () => {
+  const c = fromProposal({ ...qboCard, edited_params: { items: [{ ...hd, amount: 1, qbo_txn_id: "99999" }, { receipt_id: "r-nope" }] } }, QBO_LOOK);
+  assert.deepEqual(c.evidence.receipts, [{ id: "r-1369", text: HD_LINE }], "its own content, not the edit's");
+  assert.equal(approveConfirm(c), "Update QuickBooks for 1 receipt on 2156 Alston rd.?");
+  assert.equal(fromProposal({ ...qboCard, edited_params: { total_usd: 1 } }, QBO_LOOK).evidence.receipts.length, 2, "an edit naming no items keeps them all");
+});
+
+test("QuickBooks receipts: what came of it is counted from its outbox rows, refusals in plain words from qbo-proxy's codes", () => {
+  const ran = { queued: 3, skipped: 0, outbox_ids: ["o1", "o2", "o3"] };
+  const executed = { ...qboCard, status: "executed", approved_at: iso(-2), updated_at: iso(-2), result: ran,
+    input: { ...qboInput, items: [hd2, hd, { ...hd, receipt_id: "r-2790", amount: 27.9, qbo_txn_id: "10584", qbo_total: 27.9 }] } };
+  // the outbox rows as the page reads them: all of this proposal's, one per receipt
+  const row = (status, error = null) => ({ proposal_id: executed.id, status, error, next_attempt_at: iso(-2), created_at: iso(-2), updated_at: iso(-1) });
+  const TAGGED = "tagged_other: expense 10584 is already tagged to Bemis Ct in QuickBooks";
+  const at = (rows, o = {}) => outcome(fromProposal({ ...executed, ...o }, qboLook({ outbox: rows })), NOW);
+  assert.deepEqual(at([row("sent"), row("sent"), row("sent")]), { text: "All 3 updated in QuickBooks", tone: "ok" });
+  assert.deepEqual(at([row("sent"), row("sent"), row("dead", TAGGED)]),
+    { text: "2 of 3 updated in QuickBooks; 1 refused: tagged to another job", tone: "bad" }, "the design's own example");
+  assert.deepEqual(at([row("sent"), row("pending"), row("failed", "qbo_throttled: QuickBooks is throttling: 429")]),
+    { text: "1 of 3 updated in QuickBooks; 2 waiting", tone: "wait" }, "between retries is still waiting");
+  assert.deepEqual(at([row("pending"), row("sending"), row("pending")]), { text: "3 queued for QuickBooks", tone: "wait" });
+  assert.deepEqual(at([row("dead", TAGGED), row("dead", "photo_missing: the receipt photo (page 1) is no longer in storage"),
+    row("dead", "qbo_unavailable: QuickBooks 503: Service Unavailable")]),
+  { text: "None of 3 updated in QuickBooks; 2 refused: tagged to another job, the receipt photo is missing; 1 failed: QuickBooks was down", tone: "bad" });
+  assert.deepEqual(at([row("dead", TAGGED), row("dead", TAGGED), row("sent")]),
+    { text: "1 of 3 updated in QuickBooks; 2 refused: tagged to another job", tone: "bad" }, "one reason said once");
+  // every code qbo-proxy's completePurchase answers with reads as words
+  const words = {
+    tagged_other: "tagged to another job", partly_tagged: "only partly tagged to this job", untaggable: "the expense has no lines to tag",
+    untaggable_line: "a line QuickBooks can't tag to a job", changed_in_qbo: "changed in QuickBooks since the card was filed",
+    purchase_missing: "the expense is gone from QuickBooks", photo_missing: "the receipt photo is missing",
+    photo_type: "the photo isn't a JPEG, PNG or PDF", photo_unreadable: "the photo couldn't be read", photo_too_big: "the photo is over 20 MB",
+    upload_refused: "QuickBooks refused the photo", qbo_refused: "QuickBooks refused the change", bad_request: "the app sent QuickBooks a bad request",
+    stale_object: "the expense kept changing in QuickBooks", qbo_not_connected: "QuickBooks isn't connected", qbo_throttled: "QuickBooks was too busy",
+    qbo_unavailable: "QuickBooks was down", qbo_unreachable: "couldn't reach QuickBooks", storage_unavailable: "couldn't read the photo from storage",
+    create_unclear: "QuickBooks didn't confirm the new expense", upload_unclear: "QuickBooks didn't confirm the photo",
+    relinked: "the job's QuickBooks project changed after approval", link_unreadable: "couldn't read the job's QuickBooks link",
+  };
+  const one = (error) => outcome(fromProposal({ ...executed, result: { queued: 1, skipped: 0 }, input: { ...qboInput, items: [hd] } },
+    qboLook({ outbox: [row("dead", error)] })), NOW);
+  for (const [code, said] of Object.entries(words)) {
+    assert.deepEqual(one(`${code}: what qbo-proxy said`), { text: "Not updated in QuickBooks: " + said, tone: "bad" }, code);
+  }
+  // an error that isn't a code: as written, clipped; none at all says so
+  assert.equal(one("qbo-proxy unreachable: fetch failed").text, "Not updated in QuickBooks: qbo-proxy unreachable: fetch failed");
+  assert.equal(one("x".repeat(300)).text, "Not updated in QuickBooks: " + "x".repeat(119) + "…");
+  assert.equal(one(null).text, "Not updated in QuickBooks: no reason given");
+  assert.equal(one("constructor: nope").text, "Not updated in QuickBooks: constructor: nope", "a prototype name is no code");
+  // one receipt, done
+  assert.deepEqual(outcome(fromProposal({ ...executed, result: { queued: 1 }, input: { ...qboInput, items: [hd] } },
+    qboLook({ outbox: [row("sent")] })), NOW), { text: "Updated in QuickBooks", tone: "ok" });
+});
+
+test("QuickBooks receipts: a photo QuickBooks refused after the tag went in reads as tagged, photo not attached, never 'Not updated'", () => {
+  const executed = { ...qboCard, status: "executed", approved_at: iso(-2), updated_at: iso(-2), result: { queued: 3, skipped: 0 },
+    input: { ...qboInput, items: [hd2, hd, { ...hd, receipt_id: "r-2790", amount: 27.9, qbo_txn_id: "10584", qbo_total: 27.9 }] } };
+  const row = (status, provider_status = null, error = null) => ({ proposal_id: executed.id, status, error, provider_status,
+    next_attempt_at: iso(-2), created_at: iso(-2), updated_at: iso(-1) });
+  const SENT = "tagged=done;attached=1";
+  const at = (rows, o = {}) => outcome(fromProposal({ ...executed, ...o }, qboLook({ outbox: rows })), NOW);
+  const one = at([row("sent", "tagged=done;attached=0;attach_error=qbo_refused")],
+    { result: { queued: 1 }, input: { ...qboInput, items: [hd] } });
+  assert.deepEqual(one, { text: "Tagged in QuickBooks; photo not attached: QuickBooks refused the photo", tone: "bad" });
+  assert.deepEqual(at([row("sent", "tagged=done;attached=0;attach_error=upload_refused"), row("sent", SENT), row("sent", SENT)]),
+    { text: "All 3 updated in QuickBooks; 1 photo not attached: QuickBooks refused the photo", tone: "bad" });
+  assert.deepEqual(at([row("sent", "tagged=done;attached=0;attach_error=photo_type"), row("pending"),
+    row("dead", null, "tagged_other: expense 10584 is already tagged to Bemis Ct in QuickBooks")]),
+  { text: "1 of 3 updated in QuickBooks; 1 photo not attached: the photo isn't a JPEG, PNG or PDF; 1 waiting; 1 refused: tagged to another job", tone: "bad" });
+  // a sent row whose photo went, or that had none to send, is just updated
+  assert.deepEqual(at([row("sent", SENT), row("sent", "tagged=adopted;attached=0;already_attached=true"), row("sent")]),
+    { text: "All 3 updated in QuickBooks", tone: "ok" });
+});
+
+test("QuickBooks receipts: the QuickBooks vendor rides on the line, so a vendor that isn't the receipt's shows before approving", () => {
+  const fred = { ...hd, qbo_vendor_name: "Fred Meyer" };
+  const c = fromProposal({ ...qboCard, input: { ...qboInput, items: [fred] } }, QBO_LOOK);
+  assert.deepEqual(c.evidence.receipts.map((r) => r.text),
+    [`Home Depot · Sep 30 · $1,369.50 → QuickBooks expense 10577 (Fred Meyer, ${CITI}): tag to Pollen Apartments, attach the photo`]);
+});
+
+test("QuickBooks receipts: just approved (rows not read yet) it says what the executor queued; the rest of its fate reads like any spine card's", () => {
+  const box = inbox([], [qboCard], QBO_LOOK, NOW);
+  const ran = { ...qboCard, status: "executed", approved_at: iso(0), approved_via: "inbox", updated_at: iso(0),
+    result: { queued: 2, skipped: 0, outbox_ids: ["5d41402a-bc4b-4a76-b971-9d911017c592", "7d41402a-bc4b-4a76-b971-9d911017c592"] } };
+  const after = settle(box, box.waiting[0], fromProposal(ran, QBO_LOOK));
+  assert.deepEqual(outcome(after.recent[0], NOW), { text: "2 queued for QuickBooks", tone: "wait" });
+  assert.equal(after.recent[0].yesHint, "");
+  // once read, the page asks for its rows
+  assert.deepEqual(needs(after.recent).outbox, [qboCard.id]);
+  // every receipt already on its way from an earlier card: the executor skipped them all
+  assert.deepEqual(outcome(fromProposal({ ...ran, result: { queued: 0, skipped: 2, outbox_ids: [] } }, QBO_LOOK), NOW),
+    { text: "Already on its way to QuickBooks from an earlier card", tone: "ok" });
+  assert.deepEqual(outcome(fromProposal({ ...ran, result: null }, QBO_LOOK), NOW), { text: "Queued for QuickBooks", tone: "wait" });
+  const at = (status, result, error = null) =>
+    outcome(fromProposal({ ...qboCard, status, approved_at: iso(-1), updated_at: iso(-1), result, error }, QBO_LOOK), NOW);
+  const MOVED = "receipts.qbo_link: the receipts changed since this card was filed, so nothing was queued; tonight's match files a fresh card if QuickBooks still needs the change";
+  assert.deepEqual(at("failed", null, MOVED), { text: "Failed: " + MOVED, tone: "bad" });
+  // receipts_qbo_link_file's reasons
+  assert.deepEqual(at("superseded", { superseded_reason: "nothing_to_do" }), { text: "No longer needed: QuickBooks has what it needs", tone: "no" });
+  assert.deepEqual(at("superseded", { superseded_reason: "items_changed" }), { text: "Closed: the nightly QuickBooks match's findings changed", tone: "no" });
+  assert.deepEqual(at("superseded", { superseded_by: "bbbbbbbb-0000-4000-8000-0000000000c2" }), { text: "Replaced by a newer ask", tone: "no" });
+  assert.equal(outcome(fromProposal({ ...qboCard, status: "declined", decline_reason: "I'll tag these by hand" }, QBO_LOOK), NOW).text,
+    "Declined: I'll tag these by hand");
+});
+
+test("QuickBooks receipts: the worker not serving the 'qbo' channel says so on a waiting card and on queued rows; nothing else changes", () => {
+  const beat = (mins, channels) => [{ at: new Date(NOW - mins * 60e3).toISOString(), meta: { channels } }];
+  assert.equal(qboLaneOf(beat(0.5, ["sms", "email", "qbo"]), NOW), true);
+  assert.equal(qboLaneOf(beat(0.5, ["sms", "email"]), NOW), false, "RECEIPTS_QBO=off");
+  assert.equal(qboLaneOf(beat(11, ["qbo"]), NOW), false, "a stopped worker");
+  assert.equal(qboLaneOf(null, NOW), null);
+  assert.equal(emailLaneOf(beat(0.5, ["qbo"]), NOW), false, "each channel on its own");
+  const executed = { ...qboCard, status: "executed", approved_at: iso(-2), updated_at: iso(-2), result: { queued: 2, skipped: 0 } };
+  const row = (status) => ({ proposal_id: executed.id, status, created_at: iso(-2), updated_at: iso(-1) });
+  const off = qboLook({ heartbeats: beat(0.5, ["sms", "email"]) });
+  const on = qboLook({ heartbeats: beat(0.5, ["sms", "email", "qbo"]) });
+  const w = fromProposal(qboCard, off);
+  assert.deepEqual([w.qboLane, w.laneHint], [false, QBO_OFF_WAITING]);
+  assert.equal(QBO_OFF_WAITING, "QuickBooks updates are off on the worker right now: approving queues these, and they wait until updates are back on.");
+  assert.equal(approveConfirm(w), "Update QuickBooks for 2 receipts on 2156 Alston rd.?", "the confirm is as it was");
+  assert.equal(fromProposal(qboCard, on).laneHint, "");
+  assert.equal(fromProposal(email, off).laneHint, "", "the email lane is its own: sending");
+  assert.equal(fromProposal(executed, off).laneHint, "", "only a waiting card carries the line");
+  const say = (rows, look) => outcome(fromProposal(executed, qboLook({ ...look, outbox: rows })), NOW);
+  assert.deepEqual(say([row("pending"), row("failed")], { heartbeats: beat(0.5, ["sms"]) }), { text: QBO_OFF_QUEUED, tone: "wait" });
+  assert.equal(QBO_OFF_QUEUED, "Queued, but QuickBooks updates are off on the worker: nothing goes until they're back on");
+  assert.deepEqual(say([row("sent"), row("pending")], { heartbeats: beat(0.5, ["sms"]) }),
+    { text: "1 of 2 updated in QuickBooks; 1 waiting (QuickBooks updates are off on the worker)", tone: "wait" });
+  assert.deepEqual(say([row("sent"), row("sent")], { heartbeats: beat(0.5, ["sms"]) }), { text: "All 2 updated in QuickBooks", tone: "ok" });
+  assert.deepEqual(outcome(fromProposal(executed, off), NOW), { text: QBO_OFF_QUEUED, tone: "wait" }, "just approved here, rows not read yet");
+  assert.deepEqual(say([row("pending"), row("pending")], {}), { text: "2 queued for QuickBooks", tone: "wait" }, "can't tell: as before");
+});
+
+test("QuickBooks receipts: a change the worker gave up on after the card aged off comes back to Recently decided for 48 hours from then", () => {
+  const late = { ...qboCard, status: "executed", created_at: iso(-61), expires_at: iso(14 * 24 - 61), approved_at: iso(-60), updated_at: iso(-60),
+    result: { queued: 2, skipped: 0 } };
+  const row = (status, updated_at, error = null) => ({ proposal_id: late.id, status, error, created_at: iso(-60), updated_at });
+  const bare = inbox([], [late], {}, NOW);
+  assert.deepEqual(bare.older.map((c) => c.id), [late.id], "answered past the 48 hours: its rows are read");
+  assert.deepEqual(needs(bare.older).outbox, [late.id]);
+  const box = (rows) => inbox([], [late], qboLook({ outbox: rows }), NOW);
+  const b = box([row("sent", iso(-59)), row("dead", iso(-3), "changed_in_qbo: expense 10577 changed in QuickBooks since the card was filed")]);
+  assert.deepEqual(b.recent.map((c) => c.id), [late.id]);
+  assert.deepEqual(outcome(b.recent[0], NOW), { text: "1 of 2 updated in QuickBooks; 1 refused: changed in QuickBooks since the card was filed", tone: "bad" });
+  assert.equal(isRecent(b.recent[0], Date.parse(iso(44.9))), true);
+  assert.equal(isRecent(b.recent[0], Date.parse(iso(45.1))), false, "48 hours after it died it ages off");
+  // the latest of its dead rows counts; none dead, or dead too long ago: off the list
+  assert.equal(box([row("dead", iso(-40), "x"), row("dead", iso(-2), "y")]).recent.length, 1);
+  for (const rows of [[row("sent", iso(-59)), row("sent", iso(-58))], [row("dead", iso(-49), "x")], [row("pending", iso(-60))], []]) {
+    assert.equal(box(rows).recent.length, 0, JSON.stringify(rows.map((r) => r.status)));
+  }
+});
+
+test("QuickBooks receipts: a number it holds is never offered, so a text-queue ask on the same number keeps its hint", () => {
+  const box = inbox([{ ...reminder, code: 22 }], [qboCard], QBO_LOOK, NOW);
+  assert.deepEqual(box.waiting.map((c) => [c.kind, c.yesHint]), [["email", "or text YES 22"], ["qbo", ""]]);
+});
+
+test("QuickBooks receipts: an item or link of any odd shape still reads as words, never null, undefined or NaN", () => {
+  const odd = fromProposal({ ...qboCard, input: { ...qboInput, qbo_name: null, link: { qbo_customer_id: "112", why: null },
+    items: [
+      { receipt_id: "r1", vendor: "", date: "2026-02-30", amount: "12", changes: "tag", photo_refs: "x" },
+      { receipt_id: "r2", vendor: "Lowe's", date: "2026-13-01", amount: NaN, changes: ["attach", "frob"], qbo_txn_id: null, qbo_account_name: null },
+      null, "x", 7, [],
+      { receipt_id: "r3", vendor: "Costco", date: "2026-10-03", amount: 0.1 + 0.2, changes: ["create"], qbo_doc_number: "", qbo_account_name: "" },
+    ] } }, QBO_LOOK);
+  assert.deepEqual(odd.evidence.receipts.map((x) => x.text), [
+    "A receipt → QuickBooks expense: no change listed",
+    "Lowe's → QuickBooks expense: attach the photo",
+    "A receipt → QuickBooks expense: no change listed", "A receipt → QuickBooks expense: no change listed",
+    "A receipt → QuickBooks expense: no change listed", "A receipt → QuickBooks expense: no change listed",
+    "Costco · Oct 3 · $0.30 → a new QuickBooks expense: enter it, tagged to the job's QuickBooks project",
+  ]);
+  assert.equal(odd.evidence.link, "Links this job to QuickBooks project number 112");
+  for (const t of qboTexts(odd)) assert.ok(!JUNK.test(t), t);
+  // no items at all, or no input: still a card, and still words
+  for (const input of [{ ...qboInput, items: "none", link: [] }, null]) {
+    const c = fromProposal({ ...qboCard, input }, QBO_LOOK);
+    assert.deepEqual([c.evidence.receipts, c.evidence.link], [[], ""]);
+    assert.equal(approveConfirm(c), "Update QuickBooks for 0 receipts on 2156 Alston rd.?");
+    for (const t of qboTexts(c)) assert.ok(!JUNK.test(t), t);
+  }
+  // an executed card whose rows and result won't read
+  const junk = fromProposal({ ...qboCard, status: "executed", approved_at: iso(-1), updated_at: iso(-1), result: { queued: "lots" } },
+    qboLook({ outbox: [{ proposal_id: qboCard.id, status: "dead", error: { code: 1 } }, { proposal_id: qboCard.id, status: null }] }));
+  assert.deepEqual(outcome(junk, NOW), { text: "None of 2 updated in QuickBooks; 1 waiting; 1 failed: no reason given", tone: "bad" });
+  assert.ok(!JUNK.test(outcome(junk, NOW).text));
 });
