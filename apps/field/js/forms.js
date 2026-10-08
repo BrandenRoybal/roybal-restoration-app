@@ -712,9 +712,9 @@ function settleLog(project, d, rows, opts) {
    found again after it (the drying log merges whole and its rows are new
    objects then). A row added here gets a fresh one; a row from an older
    build is given one when its log is drawn, worked out from what it holds
-   (the tag, Placed, type and room, and which copy of those it is), so every
-   phone drawing the same row gives it the same id. It is saved with the
-   next change to the job. */
+   (the tag, Placed, type and room, and which copy of those it is, past any
+   id a row already holds), so every phone drawing the same row gives it the
+   same id. It is saved with the next change to the job. */
 function rowHash(s) {
   let a = 0x811c9dc5, b = 0x01000193;
   for (let i = 0; i < s.length; i++) {
@@ -725,46 +725,84 @@ function rowHash(s) {
   return (a >>> 0).toString(36) + (b >>> 0).toString(36);
 }
 function typedRowIds(rows) {
-  const ids = new Map(), seen = new Map();
-  for (const r of rows) {
-    if (!r || typeof r !== "object" || r.scanId) continue;
-    if (r.rowId) { ids.set(r, String(r.rowId)); continue; }
+  const typed = rows.filter((r) => r && typeof r === "object" && !r.scanId);
+  const ids = new Map(), seen = new Map(), used = new Set();
+  for (const r of typed) if (r.rowId && !used.has(String(r.rowId))) { ids.set(r, String(r.rowId)); used.add(String(r.rowId)); }
+  for (const r of typed) {
+    if (ids.has(r)) continue;            // (a second row holding the same id is given its own)
     const k = ["asset", "placed", "type", "location"].map((f) => String(r[f] ?? "").trim()).join("\u0001");
-    const n = (seen.get(k) || 0) + 1;
-    seen.set(k, n);
-    ids.set(r, "k" + rowHash(k) + "." + n);
+    let n = seen.get(k) || 0, id;
+    do id = "k" + rowHash(k) + "." + ++n; while (used.has(id));
+    seen.set(k, n); used.add(id);
+    ids.set(r, id);
   }
   return ids;
 }
 /* Free text edited in a box whose row a sync replaced meanwhile, merged by
-   line against what the row held when the edit began: what the crew took
-   out goes, what they added stays (after the line it followed), and what
-   the other device added stays. A line this box put on a row during the
-   edit (wrote) and the crew then changed is theirs to drop; one the box
-   itself took off (took) and the crew typed back goes back. */
-function mergeLines(began, mine, theirs, wrote, took) {
-  if (theirs === began) return mine;
-  const b = began.split("\n"), m = mine.split("\n");
-  const n = (c, l) => c.get(l) || 0, bump = (c, l) => c.set(l, n(c, l) + 1);
-  const count = (a) => a.reduce((c, l) => bump(c, l), new Map());
-  const inB = count(b), inM = count(m), seen = new Map(), kept = new Map();
-  // the row's lines, copy by copy: each one the crew still has, and each the other
-  // device added (past what the row began with, and not a line this box wrote)
-  const out = theirs.split("\n").filter((l) => {
-    bump(seen, l);
-    if (n(kept, l) < n(inM, l)) { bump(kept, l); return true; }
-    return n(seen, l) > n(inB, l) && !(wrote && wrote.has(l));
-  });
-  const nth = (l, k) => { for (let i = 0, c = 0; i < out.length; i++) if (out[i] === l && ++c === k) return i; return -1; };
-  const occ = new Map(), kth = m.map((l) => (bump(occ, l), n(occ, l)));
-  m.forEach((l, j) => {
-    if (out.filter((x) => x === l).length >= kth[j]) return;                // there
-    if (kth[j] <= n(inB, l) && !(took && took.has(l))) return;              // the other device took it off
-    let at = -1;                                        // after the nearest line above it that is there
-    for (let i = j - 1; i >= 0 && at < 0; i--) at = nth(m[i], kth[i]);
-    out.splice(at + 1, 0, l);
-  });
-  return out.join("\n");
+   line against what the row held when the edit began: the crew's change
+   (what they took out goes, what they added stays, after the line it
+   followed) and the other device's change both stand, copy by copy, so a
+   repeated line or a blank one counts; when both did the same (both added a
+   copy, or both took one out) it counts once. The box keeps, in lines,
+   what it last wrote (last), the other device's change it read then (o), and
+   the most copies of each line it ever put on a row itself (ever): on the
+   next keystroke the other device's change is what it was plus what changed
+   on the row since, unless the row mostly has this box's own changes undone
+   (a newer copy that never had them), and copies past it that the box once put
+   there are the box's, pulled back (a half-typed line the crew went on to
+   change). */
+const lineCount = (a) => a.reduce((c, l) => c.set(l, (c.get(l) || 0) + 1), new Map());
+function mergeLines(began, mine, theirs, lines) {
+  const L = lines || { last: null, o: new Map(), ever: new Map() };
+  const m = mine.split("\n"), t = theirs.split("\n");
+  const n = (c, l) => (c && c.get(l)) || 0, bump = (c, l) => c.set(l, n(c, l) + 1);
+  const inB = lineCount(began.split("\n")), inM = lineCount(m), inT = lineCount(t);
+  const inL = L.last == null ? null : lineCount(L.last.split("\n"));
+  const all = [...new Set([...inB.keys(), ...inM.keys(), ...inT.keys(), ...(inL ? inL.keys() : [])])];
+  const was = (l) => (inL ? n(L.o, l) : 0), own = (l) => (inL ? n(inL, l) - n(inB, l) - was(l) : 0);   // the other device's change, and this box's, on the row it last wrote
+  const inc = (l) => n(inT, l) - (inL ? n(inL, l) : n(inB, l));                                      // the row's since
+  // a newer copy that never had this box's changes: more of the lines it changed back where they
+  // were than left as it put them (going by the lines only this box ever had, when there are any)
+  const novel = all.filter((l) => own(l) > 0 && !n(inB, l)), by = novel.length ? novel : all.filter((l) => own(l));
+  const lost = inL && by.filter((l) => inc(l) === -own(l)).length > by.filter((l) => inc(l) === 0).length;
+  const o = new Map(), want = new Map();
+  for (const l of all) {
+    const B = n(inB, l), T = n(inT, l);
+    let d = lost ? T - B : was(l) + inc(l);
+    if (inc(l) > 0 && d > was(l)) d = was(l) + Math.max(0, d - was(l) - Math.max(0, n(L.ever, l) - Math.max(0, own(l))));
+    d = Math.max(-B, d);
+    o.set(l, d);
+    const dC = n(inM, l) - B;
+    want.set(l, dC > 0 && d > 0 ? B + Math.max(dC, d) : dC < 0 && d < 0 ? B + Math.min(dC, d) : Math.max(0, B + dC + d));
+  }
+  let out;
+  if ([...o.values()].every((d) => d === 0)) out = m.slice();     // the other device changed nothing: the crew's text
+  else {
+    // the row's lines, its first copies of each; then the crew's still missing, each after
+    // the nearest line above it that is there; then any the other device's change still owes
+    const seen = new Map();
+    out = t.filter((l) => (bump(seen, l), n(seen, l) <= n(want, l)));
+    const nth = (l, k) => { for (let i = 0, c = 0; i < out.length; i++) if (out[i] === l && ++c === k) return i; return -1; };
+    const occ = new Map(), kth = m.map((l) => (bump(occ, l), n(occ, l)));
+    m.forEach((l, j) => {
+      const have = out.filter((x) => x === l).length;
+      if (have >= kth[j] || have >= n(want, l)) return;
+      let at = -1;
+      for (let i = j - 1; i >= 0 && at < 0; i--) at = nth(m[i], kth[i]);
+      out.splice(at + 1, 0, l);
+    });
+    for (const [l, k] of want) for (let c = out.filter((x) => x === l).length; c < k; c++) {
+      const i = out.lastIndexOf(l);
+      out.splice(i < 0 ? out.length : i + 1, 0, l);
+    }
+  }
+  const v = out.join("\n");
+  if (lines) {
+    const now = lineCount(out);
+    for (const [l, k] of now) { const mineNow = k - n(inB, l) - n(o, l); if (mineNow > n(L.ever, l)) L.ever.set(l, mineNow); }
+    L.last = v; L.o = o;
+  }
+  return v;
 }
 
 export function dryingLog(project, d) {
@@ -873,6 +911,8 @@ export function dryingLog(project, d) {
   function remap() {
     if (held.length === d.equipment.length && held.every((r, k) => r === d.equipment[k])) return;
     const m = matchRows(held, d.equipment);
+    // a newer copy saved before its rows had ids: each keeps the one it was drawn with
+    for (const [a, b] of m) if (b && b !== a && !b.scanId && !b.rowId && a.rowId) b.rowId = a.rowId;
     for (const r of drawn) {
       const cur = liveOf.has(r) ? liveOf.get(r) : r;
       liveOf.set(r, cur ? m.get(cur) || null : null);
@@ -937,10 +977,11 @@ export function dryingLog(project, d) {
      there stays unless the crew changed it. A Remove scan the merge filled
      in, which the field never showed, stays: the crew's time goes under it,
      as if typed before the scan arrived. wrote: what this field put on a row
-     during the edit; over: the other device's value it first wrote over
-     ({ v, manual }), put back when the crew comes back to where they began.
+     during the edit; lines: Notes' line-merge record (mergeLines); over:
+     the other device's latest value it wrote over ({ v, manual }), put back
+     when the crew comes back to where they began.
      Returns whether it changed the row. */
-  function carryEdit(cur, key, began, value, wrote, took, over) {
+  function carryEdit(cur, key, began, value, wrote, lines, over) {
     const was = String(began ?? ""), live = String(cur[key] ?? "");
     let now = String(value ?? "");
     const theirs = live !== now && now === was && !wrote.has(live);  // the crew is back where they began: the other device's value stands
@@ -948,7 +989,7 @@ export function dryingLog(project, d) {
     if (back) now = over.v;
     if (scanLocked(cur, key)) return false;
     if (key === "notes") {
-      const v = mergeLines(was, now, live, wrote, took);
+      const v = mergeLines(was, now, live, lines);
       if (v === live) return false;
       cur.notes = v;
       return true;
@@ -1003,7 +1044,7 @@ export function dryingLog(project, d) {
       const input = h("input", { type, value: row[key] ?? "", step: type === "datetime-local" ? "60" : null,
         style: `min-width:${w}` + (locked ? ";background:#f1f4f8;color:#44556b" : ""),
         readonly: locked, title: locked ? LOCK_TITLE : null });
-      let began = String(row[key] ?? ""), wrote = new Set(), since = "", over = null;   // the value this edit began from; what it put on a row; its last step's time; the value it first wrote over
+      let began = String(row[key] ?? ""), wrote = new Set(), since = "", over = null;   // the value this edit began from; what it put on a row; its last step's time; the other device's value it last wrote over
       // a typed row's Removed, each step of it: carried onto the scans it replaced at once, so
       // each one's void is stamped when the crew picked it (one the app closed on is never left behind)
       const settleStep = (r, at) => {
@@ -1019,7 +1060,7 @@ export function dryingLog(project, d) {
         const pre = { v: String(cur[key] ?? ""), manual: !!cur._manualHrs };
         if (scanLocked(cur, key)) input.value = cur[key] ?? "";
         else if (carryEdit(cur, key, began, input.value, wrote, null, over)) {
-          if (!over && String(cur[key] ?? "") !== pre.v) over = pre;
+          if (String(cur[key] ?? "") !== pre.v && !wrote.has(pre.v)) over = pre;   // the other device's latest value
           commit(); settleStep(cur, at);
         }
         wrote.add(input.value);
@@ -1071,7 +1112,8 @@ export function dryingLog(project, d) {
       const typedNotes = key === "notes" && !row.scanId;
       const c = taCell(row, key, { minWidth: w });
       const ta = c.querySelector("textarea");
-      let began = String(row[key] ?? ""), wrote = new Set(), took = new Set(), others = [], over = null;   // the text this edit began from; what it put on a row (whole and by line); began lines it took off a row; the other device's lines; the value it first wrote over (type, room)
+      const fresh = () => ({ last: null, o: new Map(), ever: new Map() });
+      let began = String(row[key] ?? ""), wrote = new Set(), lines = fresh(), others = [], over = null;   // the text this edit began from; what it put on a row (whole and by line); its line-merge record (mergeLines); the other device's lines; the other device's value it last wrote over (type, room)
       const wrote1 = (v) => { wrote.add(v); for (const l of v.split("\n")) wrote.add(l); };
       // taCell writes each keystroke onto the row it was drawn for; a row a sync replaced
       // gets the crew's change carried onto the row now in its place
@@ -1081,24 +1123,25 @@ export function dryingLog(project, d) {
         grafted = true;
         const b = began.split("\n"), whole = String(cur[key] ?? ""), pre = whole.split("\n");
         for (const l of pre) if (b.indexOf(l) < 0 && !wrote.has(l) && others.indexOf(l) < 0) others.push(l);
-        if (carryEdit(cur, key, began, ta.value, wrote, took, key === "notes" ? null : over)) {
-          if (key !== "notes" && !over && String(cur[key] ?? "") !== whole) over = { v: whole };
-          const post = String(cur[key] ?? "").split("\n");
-          for (const l of pre) if (b.indexOf(l) >= 0 && post.indexOf(l) < 0) took.add(l);
+        if (carryEdit(cur, key, began, ta.value, wrote, lines, key === "notes" ? null : over)) {
+          if (key !== "notes" && String(cur[key] ?? "") !== whole && !wrote.has(whole)) over = { v: whole };   // the other device's latest value
           commit();
         }
         wrote1(ta.value);
         return cur;
       };
       ta.addEventListener("input", () => {
-        if (liveRow(row) !== row) carry();
-        else wrote1(ta.value);
+        if (liveRow(row) !== row) { carry(); return; }
+        // taCell wrote the box onto its own row: every copy past began's is the box's
+        const inB = lineCount(began.split("\n"));
+        for (const [l, k] of lineCount(ta.value.split("\n"))) if (k - (inB.get(l) || 0) > (lines.ever.get(l) || 0)) lines.ever.set(l, k - (inB.get(l) || 0));
+        wrote1(ta.value);
       });
       ta.addEventListener("change", () => {
         const cur = liveRow(row) !== row ? carry() : row;
         // the lines that were on the row before this edit: the box's, and the other device's
         if (typedNotes && cur) settleTyped(cur, { edit: "notes", before: [began, ...others].join("\n") });
-        began = ta.value; wrote = new Set(); took = new Set(); others = []; over = null;
+        began = ta.value; wrote = new Set(); lines = fresh(); others = []; over = null;
       });
       c.classList.add("fillcell");
       attachFill(c, i, key);
@@ -1151,7 +1194,7 @@ export function dryingLog(project, d) {
   }
   function paintEq(opts) {
     if (!(opts && opts.settle === false) && settleLog(project, d)) commit();
-    for (const [r, id] of typedRowIds(d.equipment)) if (!r.rowId) r.rowId = id;
+    for (const [r, id] of typedRowIds(d.equipment)) if (r.rowId !== id) r.rowId = id;
     drawn = d.equipment.slice(); held = drawn.slice(); liveOf.clear();
     eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); paintScanPrint();
   }

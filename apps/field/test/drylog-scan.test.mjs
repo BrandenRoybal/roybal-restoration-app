@@ -636,6 +636,97 @@ await test("Notes typed in a box whose row a sync replaced keep a repeated line,
   assert.equal(liveOf(p, "AM-020").notes, "fan on high\nok\nok\n\nday 2 dry\n\nday 3 dry\ncarpet lifted");
 });
 
+await test("Notes in a box whose row a sync replaced: the other phone's repeated line or blank line stays, and one of two same lines retyped stays", () => {
+  const cases = [
+    // the other phone empties the dehu again: a second "dehu emptied"; this phone adds a line, keystroke by keystroke
+    ["fan on high\ndehu emptied", "fan on high\ndehu emptied\ndehu emptied", (ta) => { for (const s of ["\n", "\np", "\npad pulled"]) typeInto(ta, "fan on high\ndehu emptied" + s); },
+      "fan on high\ndehu emptied\npad pulled\ndehu emptied"],
+    // the other phone adds a paragraph under a blank line
+    ["fan on high\n\nday 2 dry", "fan on high\n\nday 2 dry\n\nA: day 3 dry", (ta) => { for (const s of ["\n", "\np", "\npad pulled"]) typeInto(ta, "fan on high\n\nday 2 dry" + s); },
+      "fan on high\n\nday 2 dry\npad pulled\n\nA: day 3 dry"],
+    // two visits' "dehu emptied": this phone backspaces the second one's last letter and types it back
+    ["dehu emptied\nfan on high\ndehu emptied", "dehu emptied\nfan on high\ndehu emptied\nA: pad pulled", (ta) => { typeInto(ta, "dehu emptied\nfan on high\ndehu emptie"); typeInto(ta, "dehu emptied\nfan on high\ndehu emptied"); },
+      "dehu emptied\nfan on high\ndehu emptied\nA: pad pulled"],
+  ];
+  for (const [began, theirs, typing, saved] of cases) {
+    const p = job();
+    p.dryingLogs[0].equipment[0].notes = began;
+    const sheet = render(p);
+    const ta = boxes(rowOf(sheet, "AM-020"))[2];
+    const other = clone(p);
+    other.dryingLogs[0].equipment[0].notes = theirs;
+    other.updatedAt = "2026-10-08T00:00:00.000Z";
+    ta.focus();
+    syncIn(p, other);
+    typing(ta);
+    ta.dispatchEvent(new window.Event("change", { bubbles: true }));
+    assert.equal(liveOf(p, "AM-020").notes, saved, began);
+  }
+});
+
+await test("a field put back where it began after two syncs, each bringing a new value from the other phone: its latest value stands", () => {
+  const p = job();
+  const sheet = render(p);
+  const tr = rowOf(sheet, "AM-020");
+  const room = boxes(tr)[1];
+  const other = clone(p);
+  other.dryingLogs[0].equipment[0].location = "Laundry";
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  room.focus();
+  syncIn(p, other);
+  typeInto(room, room.value + " x");                                 // a slip, carried over Laundry
+  const again = clone(p);
+  again.dryingLogs[0].equipment[0].location = "Bath";               // the other phone sees it and sets Bath
+  again.updatedAt = "2026-10-08T01:00:00.000Z";
+  syncIn(p, again);
+  const began = room.value.slice(0, -2);
+  typeInto(room, began + " ");
+  enter(room, began);                                                // back where it began
+  assert.equal(liveOf(p, "AM-020").location, "Bath");
+});
+
+await test("rows saved before they had ids keep the ids they were drawn with through a sync from such a copy, and no two rows share one", () => {
+  const p = job();
+  const eq = p.dryingLogs[0].equipment;
+  for (const r of eq) delete r.rowId;
+  eq.splice(eq.length - 1, 1,
+    { ...blankEquipRow(), type: "Air mover", location: "Bath", placed: "2026-10-08T09:00" },
+    { ...blankEquipRow(), type: "Air mover", location: "Bath", placed: "2026-10-08T09:00" });
+  const old = clone(p);                                              // a copy no phone on this build has saved yet
+  const sheet = render(p);
+  const ids = () => p.dryingLogs[0].equipment.filter((r) => !r.scanId).map((r) => r.rowId);
+  const drawn = ids();
+  assert.ok(drawn.every(Boolean) && new Set(drawn).size === drawn.length, "each typed row its own id");
+  const first = rowsOf(sheet).at(-2);
+  old.updatedAt = "2026-10-08T00:00:00.000Z";                        // that copy, newer (a photo taken on it)
+  inputsOf(first)[0].focus();
+  syncIn(p, old);
+  enter(inputsOf(first)[0], "AM-041");
+  render(p);
+  assert.deepEqual(ids(), drawn, "the same ids after the sync, the tag typed and the repaint");
+  // the second air mover still takes its own edits, also after another sync lands mid-edit
+  const later = clone(p);
+  later.dryingLogs[0].readings.push({ id: "rd9" });
+  later.updatedAt = "2026-10-08T01:00:00.000Z";
+  const sheet2 = view.firstChild, twin = rowsOf(sheet2).at(-1);
+  inputsOf(twin)[2].focus();
+  document.getElementById("toast").textContent = "";
+  syncIn(p, later);
+  enter(inputsOf(twin)[2], "2026-10-10T09:00");
+  assert.equal(toastText(), "");
+  assert.deepEqual(p.dryingLogs[0].equipment.slice(-2).map((r) => [r.asset, r.removed]), [["AM-041", ""], ["", "2026-10-10T09:00"]]);
+  // a blank row from a phone on an older build never takes the id a row already holds
+  const q = job();
+  q.equipmentScans = [];
+  q.dryingLogs[0].equipment = [{ ...blankEquipRow() }];               // a new log's seed row
+  render(q);
+  q.dryingLogs[0].equipment[0].asset = "AM-030";                      // typed into, it keeps its id
+  q.dryingLogs[0].equipment.push({ ...blankEquipRow() });              // + Add on the older build: no id
+  render(q);
+  const qi = q.dryingLogs[0].equipment.map((r) => r.rowId);
+  assert.ok(qi.length === 2 && qi[0] && qi[1] && qi[0] !== qi[1], qi.join(" "));
+});
+
 await test("✕ on a scanned row asks, then undoes the scan with void events (the row goes)", () => {
   const p = job();
   recordScan(p, { tag: "AM-014", mode: "place", room: "Bedroom", ...ctx("e3", T2) });   // a move

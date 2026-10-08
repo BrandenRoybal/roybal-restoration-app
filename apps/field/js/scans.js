@@ -521,9 +521,10 @@ function fillTypedRow(row, mine, ctx) {
       newest = { rv, now, was: str(r.removed), news: r.v != null && str(r.v) !== rv.id };
     }
   }
+  // (moved only when it says something else: a void that agrees with the row changes nothing on it)
   if (newest && (handed || newest.now !== newest.was || newest.news)) {
-    if (holds) base = typedBase(newest.now);
-    else {
+    if (holds) { if (!base || str(base.removed) !== newest.now) base = typedBase(newest.now); }
+    else if (str(row.removed) !== newest.now) {
       row.removed = newest.now;
       row.hours = hoursOf(row.placed, newest.now);
       delete row._manualHrs;
@@ -588,38 +589,48 @@ function fillTypedRow(row, mine, ctx) {
    a "moved to" line rewritten) on a phone whose copy of the log then lost
    the merge to one that never had the scan: no row lists it, so it is put
    on the row it was made on (same tag and Placed, its own log first) as the
-   crew left it, the way that row would have listed it. A Removed only if
-   the scan would have filled it (empty, or a pickup still ahead of it); an
-   undo, a deleted line and a deleted row bring nothing. Mutates the rows. */
+   crew left it, the way that row would have listed it. A Removed retyped
+   goes on a row that already follows a corrected scan (their voids' times
+   decide between them), else only if the scan would have filled it (empty,
+   or a pickup still ahead of it). A Removed cleared (the wrong unit), an
+   undo, a deleted line and a deleted row bring nothing: the row keeps what
+   it holds. Run to a fixed point, so a second applyScans adds nothing.
+   Mutates the rows. */
 function claimReleased(logs, project, voidOf) {
   const rows = [];
   for (const log of logs) for (const row of arr(log.equipment)) if (isObj(row) && !row.scanId && clean(row.placed)) rows.push({ log, row });
+  if (!rows.length) return;
   const listed = new Set();
   for (const { row } of rows) {
     const f = fillOf(row);
     if (f.removeId) listed.add(str(f.removeId));
     for (const x of arr(f.moves).concat(arr(f.released))) if (isObj(x) && x.id) listed.add(str(x.id));
   }
-  for (const e of sortedEvents(project)) {
-    if (e.act === "void" || !isObj(e.onRow) || listed.has(e.id)) continue;
-    const v = voidOf.get(e.id);
-    const removed = e.act === "remove" && v && v.release === "removed" && isObj(v.set);
-    const moved = e.act !== "remove" && v && v.release === "notes" && isObj(v.set) && !!movePart(v.set.line);
-    if (!removed && !moved) continue;
-    const key = tagKey(e.tag), placed = clean(e.onRow.placed);
-    const same = rows.filter((x) => tagKey(x.row.asset) === key && clean(x.row.placed) === placed);
-    const hit = same.find((x) => e.logId && x.log.id === e.logId) || same[0];
-    if (!hit) continue;
-    const row = hit.row, f = isObj(row.scanFill) ? row.scanFill : { removeId: "", removed: "", was: null, moves: [] };
-    if (removed) {
-      const typed = f.removeId && str(row.removed) === str(f.removed) && isObj(f.was) ? str(f.was.removed) : str(row.removed);
-      if (!appliesOver(typed, e)) continue;
-      f.released = arr(f.released).concat([{ id: e.id, removed: typed }]);
-    } else {
-      f.moves = arr(f.moves).concat([{ id: e.id, line: "" }]);
+  const waiting = sortedEvents(project).filter((e) => e.act !== "void" && isObj(e.onRow) && !listed.has(e.id));
+  for (let claimed = true; claimed;) {
+    claimed = false;
+    for (const e of waiting) {
+      if (listed.has(e.id)) continue;
+      const v = voidOf.get(e.id);
+      const removed = e.act === "remove" && v && v.release === "removed" && isObj(v.set) && !!clean(v.set.removed);
+      const moved = e.act !== "remove" && v && v.release === "notes" && isObj(v.set) && !!movePart(v.set.line);
+      if (!removed && !moved) continue;
+      const key = tagKey(e.tag), placed = clean(e.onRow.placed);
+      const same = rows.filter((x) => tagKey(x.row.asset) === key && clean(x.row.placed) === placed);
+      const hit = same.find((x) => e.logId && x.log.id === e.logId) || same[0];
+      if (!hit) continue;
+      const row = hit.row, f = isObj(row.scanFill) ? row.scanFill : { removeId: "", removed: "", was: null, moves: [] };
+      if (removed) {
+        const typed = f.removeId && str(row.removed) === str(f.removed) && isObj(f.was) ? str(f.was.removed) : str(row.removed);
+        if (!arr(f.released).length && !appliesOver(typed, e)) continue;
+        f.released = arr(f.released).concat([{ id: e.id, removed: typed }]);
+      } else {
+        f.moves = arr(f.moves).concat([{ id: e.id, line: "" }]);
+      }
+      row.scanFill = f;
+      listed.add(e.id);
+      claimed = true;
     }
-    row.scanFill = f;
-    listed.add(e.id);
   }
 }
 
