@@ -1,7 +1,8 @@
 # Roybal worker — the operations spine's hands (Fly app `roybal-worker`)
 
-The always-on Node process that turns an approved proposal into a sent text
-or email, and runs the nightly billing check. The spine (migrations
+The always-on Node process that turns an approved proposal into a sent text,
+an email or a QuickBooks change, and runs the nightly billing check and the
+nightly QuickBooks match. The spine (migrations
 0013–0017) decides *what* may happen and records that it did; this process is
 the only thing that *does* it. It is its own Fly app, never co-hosted with the
 phone agent: a stalled send must never touch a live call, and the dead-worker
@@ -9,13 +10,14 @@ alarm assumes this app is the only writer of `worker_heartbeats`.
 
 ```
 owner approves (admin app / YES by text)
-  → op_proposal_approve → executor writes an outbox row (email.send, sms.send)
+  → op_proposal_approve → executor writes outbox rows (email.send, sms.send, receipts.qbo_link)
                         → or enqueues a jobs_queue row (worker-runtime ops; none yet)
 pg_cron 14:45 UTC → enqueues a billing.reconcile row (the nightly billing check, below)
+pg_cron 14:50 UTC → enqueues a receipts.qbo_match row (the nightly QuickBooks match, below)
                                       ↓ polled every 5 s
 THIS WORKER (Fly, one machine)
-  outbox lane   outbox_claim → Twilio via roybal-notify | Gmail API → outbox_sent / outbox_failed
-  queue lane    claim_job → op_execute | billing check → finish_job
+  outbox lane   outbox_claim → Twilio via roybal-notify | Gmail API | qbo-proxy → outbox_sent / outbox_failed
+  queue lane    claim_job → op_execute | billing check | QuickBooks match → finish_job
   heartbeat     worker_heartbeat every 30 s; dead-letter text to the owner
                                       ↓
 pg_cron (in the database, every 5 min)   worker_liveness_check: 10 min of silence
@@ -90,12 +92,39 @@ few milliseconds inside one request.
   reaching the customer days later, maybe after they paid. The adopt check
   runs first, so an old row an earlier attempt did send is still recorded
   as sent, never refused.
-- **`qbo` and `portal` outbox rows are not touched** (no adapter yet); they
-  wait as `pending` until a later phase.
+- **QuickBooks changes** (`qbo` rows: one per receipt of an approved
+  `receipts.qbo_link` card) go through the `qbo-proxy` edge function's
+  `completePurchase` action under the service role key (`adapters/qbo.mjs`),
+  the way texts go through roybal-notify. qbo-proxy stays the only holder of
+  the QuickBooks token (it refreshes and rotates it; a second refresher here
+  would race it) and the only code that knows Intuit's rules: it tags every
+  line of the expense to the job's project, attaches the receipt photo from
+  field-media, or enters a store invoice first. There is no adopt lookup in
+  the worker: completePurchase adopts its own earlier work (a tag already
+  equal to the job's project, an attachment whose name carries
+  `[r:<receipt id>]`, an entry with the same DocNumber), so a retry finishes
+  what a dead attempt started and never doubles it. qbo-proxy answers HTTP
+  409 when retrying cannot help (tagged to another job, changed in
+  QuickBooks since the card was filed, the photo gone, Intuit refused the
+  write, the job relinked to another project since the approval): the row
+  is dead at once, and the receipt shows the reason (the error starts with
+  the code, `tagged_other: …`). The photo is read and checked before
+  anything is written, so a photo that cannot go refuses the whole change;
+  an upload QuickBooks refuses after the tag or the store entry went in
+  answers ok with `attach_error`, the row is sent (provider status
+  `attach_error=<code>`), and the receipt reads "Tagged in QuickBooks; photo
+  not attached". Everything else, QuickBooks down or throttling, a stale
+  SyncToken, the function unreachable, retries.
+  The provider id `Purchase:<id>:<SyncToken>` is what the 0022 trigger reads
+  back into the receipt's row. Served only while `qbo` is in
+  `OUTBOX_CHANNELS` (the default); `RECEIPTS_QBO=off` takes it out.
+- **`portal` outbox rows are not touched** (no adapter yet); they wait as
+  `pending` until a later phase.
 - **Queue kinds**: `proposal.execute` (runs `op_execute` as the approver; a
   proposal whose executor fails is recorded on the proposal, and the job is
-  done with that outcome) and `billing.reconcile` (the nightly billing check,
-  below). Only the kinds in `QUEUE_KINDS` are claimed; a row of any other
+  done with that outcome), `billing.reconcile` (the nightly billing check,
+  below) and `receipts.qbo_match` (the nightly QuickBooks match, below).
+  Only the kinds in `QUEUE_KINDS` are claimed; a row of any other
   kind waits as `queued` until a worker that knows it is deployed. A kind
   that is listed but has no handler is dead on arrival.
 
@@ -228,12 +257,188 @@ THIS WORKER  lanes/billing.mjs
      ```
      (or the **Fly deploy** workflow from main, once `FLY_API_TOKEN` is set).
      Check: `fly logs -a roybal-worker` shows `worker.start` with
-     `"kinds":["proposal.execute","billing.reconcile"]`, as does `/healthz`.
+     `billing.reconcile` among its `"kinds"`, as does `/healthz`.
   Until the worker is deployed, the nightly rows wait `queued` (the old
   worker does not claim the kind), so no card is filed before roybal-notify
   (step 2) is live; the new worker runs yesterday's and today's, and
   finishes older ones `{"skipped":"stale"}`. To see a first
   result without waiting for the morning, enqueue a manual run (above).
+
+## The nightly QuickBooks match (`receipts.qbo_match`, migration 0022)
+
+Every morning it finds each job receipt's expense in QuickBooks and files,
+per job, ONE `receipts.qbo_link` card in the Approvals inbox listing the
+expenses that need the job's tag, the receipt photo, or both. Approving the
+card queues one `qbo` outbox row per receipt, and the outbox lane delivers
+each through qbo-proxy (above). This lane only reads and files; it never
+writes QuickBooks.
+
+```
+pg_cron 14:50 UTC (05:50 AKST / 06:50 AKDT), receipts-qbo-match-nightly
+  → enqueue('receipts.qbo_match', {run_date: <Alaska date>}, key receipts.qbo_match:<date>, priority -10, agent:integrations)
+THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
+  job_receipts        every live receipt, the ten columns the matcher reads, paged by (job_id, id)
+  receipt_qbo_links   where each receipt stands; job_qbo_links: each job's QuickBooks project
+  field_projects      title, address, customer, qbJobcodeName and deleted of the jobs with receipts
+  app_settings        receipts.qbo_store_accounts (store entry, below; unset = off)
+  qbo-proxy           listProjects; listPurchases from a day before the oldest receipt to today
+  → receipt_qbo_links_note(job ids, rows)                         in_qbo / unmatched / conflict, one call
+  → receipts_qbo_link_file(job, input | null, rationale, evidence) per job: its card, or none
+```
+
+- **Payloads.** Nightly: `{"run_date": "YYYY-MM-DD"}` (the Alaska date).
+  Manual: `{"job_ids": ["<field job id>", …]}`, 1 to 100 ids. Anything else
+  is dead on arrival with the reason. A manual run still matches every
+  receipt, so an expense goes to the same receipt a full run would give it,
+  but writes rows and cards for the jobs it names only.
+- **What a match is.** QuickBooks is the books: a wrong tag moves a cost to
+  someone else's job, so a match is conservative. The same cents; the
+  receipt's sign (a return matches only a credit); a QuickBooks date from a
+  day before the receipt to three days after; and a score of at least 2:
+  +3 the receipt number in the DocNumber (Sherwin's `8066-9` is DocNumber
+  `80669163000926`), +2 the same store (the vendor's name, or the memo a
+  bank rule writes), +1 the same day, +1 the card's last four in the payment
+  account's name. An expense that says it is not the receipt's is never a
+  candidate: another known store, another card (a card account whose name
+  carries a different number), a payment (every line on the clearing
+  account 1150040008), or, for a receipt charged to a store account, money
+  paid from the bank. The surest receipt chooses first, one expense goes to
+  one receipt, and two equally good expenses are left to a person. Receipts
+  dated in the last 60 days are matched; an older one keeps the row it had.
+- **What each receipt gets.** A line on its job's card when the expense needs
+  `tag`, `attach` or both (a tag already set is never changed), or a row in
+  `receipt_qbo_links`:
+  - `in_qbo`: tagged to the job, and a document attached or no photo to add
+    (a receipt with no photo yet). Nothing to do.
+  - `unmatched`, `detail.reason`: `waiting_feed` (a card charge a week old or
+    less; the bank feed lags), `store_not_entered` (a receipt on a store
+    account, Spenard or Sherwin, whose invoice is not in QuickBooks yet; they
+    are entered by hand about nine days late), `bill_not_checked` (a dump
+    ticket: the office books those as Bills, which the match does not read),
+    `needs_job_link` (found, but the job has no QuickBooks project; nothing
+    goes on the card, not even the photo, until the job is linked, because
+    an approved attach would leave the receipt done and its tag never
+    offered), `not_found`.
+  - `conflict`, `detail.reason`: `ambiguous` (the expenses in
+    `detail.candidates`), `tagged_other` (tagged to another customer,
+    `detail.qbo_customer_name`), `partly_tagged`.
+  Receipts the approval path holds (`queued`, `done`, `failed`) are not
+  looked at again; re-filing a failed one is not in v1.
+- **The job's project.** A job in `job_qbo_links` tags to its project. A job
+  with none gets a suggestion on its card, and approving the card links it:
+  `suggested_tagged` when tonight's matched expenses for the job are all
+  tagged to one customer and it is an active project (never a parent
+  customer or a sub-customer that is not a project; store invoices are
+  tagged as they are entered), unless the job's QuickBooks Time jobcode names
+  another project (then nothing is suggested); else `suggested_qbtime` when
+  the jobcode has exactly one project's name.
+- **The door, per job.** Items → a new card (`filed`; the job's older open
+  card is superseded). The same items on the same receipts as a card still
+  open, or one already answered, stand (`unchanged`); one whose approval
+  failed a filing-time check (the receipts changed, a receipt left the job,
+  the job lost or changed its link) is offered again once they are back as
+  filed. Each item carries the receipt's amount, date and `read_photo_ref`
+  as the run read them, and a receipt edited since (a photo retaken, a
+  total corrected) is not filed (`receipts_moved`); the next night files it
+  fresh. No items → the job's open card, if any, is superseded (`empty`). A
+  job the run did not reach keeps its card, which expires in 14 days, and an
+  approval of a card whose receipts changed is refused with nothing written.
+- **The summary** is the job's result, in the `job.done` event:
+  `{run_date, receipts, matched, in_qbo, unmatched, conflicts, cards_filed,
+  skipped: {reason: count}, errors: [≤20 {job_id, message}]}`. `skipped`
+  counts `queued`, `done` and `failed` (receipts the approval path holds),
+  then each door answer that filed nothing: `unchanged`, `empty`,
+  `qbo_lane_off` (no worker serves the `qbo` channel), `receipts_moved` (a
+  receipt left the job or was edited since the run read it),
+  `job_missing`, `job_deleted`. One job's error (a 42501 when
+  agent:integrations' propose grant is revoked) is recorded in `errors` and
+  the run goes on; a read, a qbo-proxy answer or the note write that fails
+  fails the run, and the queue retries it (both doors are idempotent). A
+  qbo-proxy that answers 404 (a build without these actions) ends the run
+  `{"skipped":"qbo_proxy_not_updated"}` before anything is written. The last
+  runs:
+  `select at, data -> 'result' as summary from public.events where kind = 'job.done' and operation = 'receipts.qbo_match' order by at desc limit 5`.
+  `fly logs` shows one `receipts.run` line per run (counts only), a
+  `receipts.filed` per card and a `receipts.job_failed` per error.
+- **A missed night is not caught up**: a `run_date` older than yesterday in
+  Alaska finishes done with `{"skipped":"stale"}`.
+- **Run it now** (Supabase SQL editor). One job, or a few:
+  ```sql
+  select public.enqueue('receipts.qbo_match', '{"job_ids":["<field job id>"]}'::jsonb,
+    'receipts.qbo_match:manual:' || gen_random_uuid(), now(), -10, 'agent',
+    '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10'::uuid);
+  ```
+  The whole nightly pass, now:
+  ```sql
+  select public.enqueue('receipts.qbo_match',
+    jsonb_build_object('run_date', to_char(now() at time zone 'America/Anchorage', 'YYYY-MM-DD')),
+    'receipts.qbo_match:rerun:' || gen_random_uuid(), now(), -10, 'agent',
+    '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10'::uuid);
+  ```
+- **Store entry is built and OFF.** With `app_settings`
+  `receipts.qbo_store_accounts` set, an unentered store-account receipt on a
+  job with a project becomes a `create` line instead of `store_not_entered`:
+  approving it enters the invoice as an expense (DocNumber = the receipt
+  number's digits, at least 5 of them: qbo-proxy finds the bookkeeper's own
+  entry by that prefix, so a shorter number stays `store_not_entered`) and
+  attaches the photo. qbo-proxy looks for the
+  bookkeeper's own entry of the same invoice first and adopts it, so it never
+  doubles one; `min_age_days` gives the bookkeeper that many days first.
+  Equipment receipts book to expense account 1150040005 instead of the
+  store's; dump tickets are never entered (FNSB bills them). Turn it on only on the owner's word:
+  ```sql
+  insert into public.app_settings (key, value) values ('receipts.qbo_store_accounts',
+    '{"spenard": {"account_id":"53","vendor_id":"65","doc":"exact","expense_account_id":"42","class_id":"1000000001","min_age_days":0},
+      "sherwin": {"account_id":"52","vendor_id":"9","doc":"prefix","expense_account_id":"42","class_id":"1000000001","min_age_days":0}}'::jsonb)
+  on conflict (key) do update set value = excluded.value;
+  ```
+  Off again: `delete from public.app_settings where key = 'receipts.qbo_store_accounts'`.
+  A store entry with an id that is not digits is ignored (that store stays off).
+- **Kill switch**: `fly secrets set -a roybal-worker RECEIPTS_QBO=off` (Fly
+  restarts the worker with it). The nightly row finishes done with
+  `{"skipped":"off"}` and nothing is read or filed, and the worker stops
+  serving the `qbo` channel, so an approved change waits as `pending` and is
+  not sent. Undo: `fly secrets unset -a roybal-worker RECEIPTS_QBO`.
+- **Rollback.** Steps 1 and 2 each stop new cards on their own:
+  1. the kill switch above;
+  2. stop the schedule: `select cron.unschedule('receipts-qbo-match-nightly')`
+     (to schedule it again, run the `cron.schedule` statement in migration
+     0022, section 13);
+  3. stop filing for good: `update public.agent_authority set revoked_at = now() where agent_id = '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10' and operation = 'receipts.qbo_link' and revoked_at is null`
+     (do 1 or 2 as well, or every run records each job as a 42501 error);
+  4. open cards: decline them in the inbox, or let them expire (14 days);
+  5. an approved change nobody should send: mark its outbox row dead
+     (`update public.outbox set status = 'dead' where id = …`; the receipt then
+     shows failed). A tag or photo already written stays in QuickBooks, where
+     the office edits it like any other.
+  Taking `receipts.qbo_match` out of `QUEUE_KINDS` is NOT a rollback: the
+  nightly rows would wait `queued` forever.
+- **Deploy order**: the database, then qbo-proxy, then roybal-notify, then
+  the worker.
+  1. Migration 0022 ("staging", then "production"): the two tables, the
+     doors, the executor, agent:integrations and its propose grant, the
+     nightly cron row and `qbo_service_ping`.
+  2. qbo-proxy ("deploy qbo-proxy", or the **Function deploy** workflow):
+     the service-only actions this worker calls (`listProjects`,
+     `listPurchases`, `completePurchase`). It proves the worker's key through
+     `qbo_service_ping`, so it goes after 0022. Until it is live a run ends
+     `qbo_proxy_not_updated` and writes nothing.
+  3. roybal-notify ("deploy roybal-notify"): this build keeps
+     `receipts.qbo_link` cards out of "YES n" text approvals, so they are
+     approved in the inbox only. It must be live before the worker files the
+     first card.
+  4. The worker, as in the billing check's step 3. `fly secrets list -a roybal-worker`
+     first: a `QUEUE_KINDS` set on the app replaces the default and must add
+     `receipts.qbo_match`
+     (`fly secrets set -a roybal-worker QUEUE_KINDS=proposal.execute,billing.reconcile,receipts.qbo_match`,
+     or `fly secrets unset -a roybal-worker QUEUE_KINDS`), and an
+     `OUTBOX_CHANNELS` set there must add `qbo`, or approved changes wait
+     `pending` and the door answers `qbo_lane_off`. Check: `worker.start` in
+     `fly logs -a roybal-worker` (and `/healthz`) shows `receipts.qbo_match`
+     among the `"kinds"` and `qbo` among the `"channels"`.
+  Until the worker is deployed the nightly rows wait `queued`; the new
+  worker runs yesterday's and today's. To see a first result without waiting
+  for the morning, enqueue a manual run (above).
 
 ## Two alarms, both to the owner's cell
 
@@ -254,7 +459,10 @@ THIS WORKER  lanes/billing.mjs
   until the first text, so a restart hides nothing) and texts the owner once
   per 24 h, saying where to look: an approved email that gave up shows in
   the admin app's Approvals tab, under Recently decided, as "Couldn't send"
-  with the reason. Needs `OWNER_CELL` on the Fly app.
+  with the reason. QuickBooks rows are counted apart (qbo-proxy refuses one
+  for good on its first try, so it did not give up "after retries"): "N
+  QuickBooks receipt changes weren't made", and the receipts card under
+  Recently decided says why. Needs `OWNER_CELL` on the Fly app.
 
 Both alarm states live in `app_settings` (`worker.liveness_alert`,
 `worker.alert_texted`, `worker.deadletter_alert`), so a restart never
@@ -353,7 +561,8 @@ Order matters: the database first, then the edge function, then the app.
      without `--stage`) is refused before the secret is asked for
      (`brew upgrade flyctl`). To see it took, `fly logs -a roybal-worker`
      shows a new `worker.start` line with `"email":true` and
-     `"channels":["sms","email"]` and no `email.disabled` after it;
+     `"channels":["sms","email","qbo"]` (no `"qbo"` while `RECEIPTS_QBO=off`)
+     and no `email.disabled` after it;
      `/healthz` and the heartbeat show the
      same channels, which is how the apps learn email sending is on. A
      wrong secret still boots and shows up later as `outbox.failed` with
@@ -422,13 +631,17 @@ which re-applies `fly.toml`.
   the edge function reads it live.
 - **Env knobs** (fly.toml `[env]` or secrets, restart to apply):
   `WORKER_POLL_MS` 5000, `WORKER_HEARTBEAT_MS` 30000, `QUEUE_LEASE_S` 300,
-  `OUTBOX_LEASE_S` 120, `OUTBOX_BATCH` 10, `OUTBOX_CHANNELS` `sms,email`,
-  `QUEUE_KINDS` `proposal.execute,billing.reconcile` (a value set on the app
-  replaces the whole list, so it must name both), `SHUTDOWN_GRACE_MS` 25000,
+  `OUTBOX_LEASE_S` 120, `OUTBOX_BATCH` 10, `OUTBOX_CHANNELS` `sms,email,qbo`
+  (email drops out without the Gmail pair, qbo with `RECEIPTS_QBO=off`),
+  `QUEUE_KINDS` `proposal.execute,billing.reconcile,receipts.qbo_match` (a
+  value set on the app replaces the whole list, so it must name all three),
+  `SHUTDOWN_GRACE_MS` 25000,
   `EMAIL_MAX_AGE_HOURS` 48 (1 to 720; a value that is not a number, or a
   blank one, keeps 48, so a typo can neither switch the limit off nor stop
   the worker booting), `BILLING_RECONCILE` (`off` stops the billing check;
-  unset, or anything else, leaves it on).
+  unset, or anything else, leaves it on), `RECEIPTS_QBO` (`off` stops the
+  QuickBooks match and the `qbo` channel; unset, or anything else, leaves
+  them on), `QBO_PROXY_URL` (default `<SUPABASE_URL>/functions/v1/qbo-proxy`).
 
 ## Tests
 
@@ -450,13 +663,22 @@ PostgREST and the real detector (which jobs are in scope, paging past a
 server's row cap, the filing door's arguments, the rev_moved re-read, no
 lines and hints only, the stale and off skips, one job's error, the summary,
 hours rows with no employee in them, and that the scan and the per-job read
-project every key the detector reads), that `set-gmail-secret.sh` checks
+project every key the detector reads), the QuickBooks matcher on the real
+Oct 7 shapes and on a trimmed copy of that day's books
+(`test/qbo-oct7.fixture.mjs`, no email address or phone number in it), with
+every card it builds checked against the catalog's `input_schema` read from
+migration 0022, the executor's item checks and the note door's row checks,
+the nightly match lane against an in-memory PostgREST and a stubbed qbo-proxy
+(the `(job_id, id)` keyset past a row cap, the 404 skip, one job's error, a
+manual run's scope, the stale and off skips, the summary), the QuickBooks
+adapter (its verdicts, and the provider id the 0022 trigger parses), that `set-gmail-secret.sh` checks
 every path the Dockerfile copies, the heartbeat (which
 leases it names, and that the final one names none) and dead-letter text
 with its 24 h guard, and the real HTTP server booting, answering `/healthz`
 through an outage, and stopping clean. The database
 half is `supabase/test/worker_spine.test.sql` (and, for the billing check's
-door and executor, `supabase/test/billing_review_gaps.test.sql`), run by the
+door and executor, `supabase/test/billing_review_gaps.test.sql`; for the
+QuickBooks link's, `supabase/test/receipts_qbo_link.test.sql`), run by the
 DB replay workflow against a database rebuilt from the migrations. The
 detector's own rules are `apps/field/test/reconcile.test.mjs` (root
 `npm run field:test`). The alert function's rules

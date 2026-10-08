@@ -126,7 +126,7 @@ test("an outage on finish_job is retried per configured delay, then logged as fi
 test("billing.reconcile is claimed by default and dispatched to the billing check, which finishes done with its summary", async () => {
   const env = { SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k" };
   const kinds = loadConfig(env).queueKinds;
-  assert.deepEqual(kinds, ["proposal.execute", "billing.reconcile"]);
+  assert.deepEqual(kinds, ["proposal.execute", "billing.reconcile", "receipts.qbo_match"]);
   assert.deepEqual(loadConfig({ ...env, QUEUE_KINDS: "proposal.execute" }).queueKinds, ["proposal.execute"],
     "a QUEUE_KINDS set on the app still wins, so it must name the new kind");
   assert.equal(handlers["billing.reconcile"].name, "billingReconcile");
@@ -135,7 +135,7 @@ test("billing.reconcile is claimed by default and dispatched to the billing chec
   const supa = fakeSupa({ rpc: { claim_job: [job], finish_job: (a) => ({ status: a.p_ok ? "done" : "failed" }) } });
   const ctx = ctxWith(supa, { cfg: testConfig({ queueKinds: kinds }), now: () => new Date("2026-10-07T20:00:00Z") });
   assert.equal(await runQueueOnce(ctx), 1);
-  assert.deepEqual(supa.rpcs("claim_job")[0].p_kinds, ["proposal.execute", "billing.reconcile"]);
+  assert.deepEqual(supa.rpcs("claim_job")[0].p_kinds, ["proposal.execute", "billing.reconcile", "receipts.qbo_match"]);
   assert.equal(supa.rpcs("op_execute").length, 0);
   assert.deepEqual(supa.calls.select.map((c) => c.table), ["coordination_jobs", "field_projects"]);
   const fin = supa.rpcs("finish_job")[0];

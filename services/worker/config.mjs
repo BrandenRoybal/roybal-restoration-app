@@ -5,7 +5,11 @@
    dead-letter text is off; the dead-WORKER text is the database's job, not
    this process's), EMAIL_MAX_AGE_HOURS (default 48), BILLING_RECONCILE
    (`off` = the nightly billing check answers {skipped:"off"} and reads
-   nothing; anything else, or unset, leaves it on). Numbers are clamped so
+   nothing; anything else, or unset, leaves it on), RECEIPTS_QBO (`off` = the
+   nightly QuickBooks match answers {skipped:"off"} and the 'qbo' outbox
+   channel is not served, so approved QuickBooks changes wait as pending and
+   no new card is filed; anything else, or unset, leaves both on),
+   QBO_PROXY_URL (default: the project's qbo-proxy). Numbers are clamped so
    a typo cannot make the worker spin or go silent. */
 import os from "node:os";
 
@@ -70,7 +74,13 @@ export function loadConfig(env = process.env) {
   const gmailClientId = String(env.GMAIL_CLIENT_ID ?? "").trim();
   const gmailClientSecret = String(env.GMAIL_CLIENT_SECRET ?? "").trim();
   const emailEnabled = Boolean(gmailClientId && gmailClientSecret);
-  const channels = list("OUTBOX_CHANNELS", "sms,email").filter((c) => c !== "email" || emailEnabled);
+  const receiptsQbo = String(env.RECEIPTS_QBO ?? "").trim().toLowerCase() !== "off";
+  // The heartbeat reports these channels, and a channel listed there is
+  // what the database's filing doors take as "someone delivers this"
+  // (outbox_channel_ready): with RECEIPTS_QBO=off, 'qbo' is not served, so
+  // receipts_qbo_link_file files no card either.
+  const channels = list("OUTBOX_CHANNELS", "sms,email,qbo")
+    .filter((c) => (c !== "email" || emailEnabled) && (c !== "qbo" || receiptsQbo));
 
   return {
     supabaseUrl: url,
@@ -92,11 +102,15 @@ export function loadConfig(env = process.env) {
     outboxBatch: num("OUTBOX_BATCH", 10, 1, 100),
     channels,
     // An unlisted kind waits `queued` forever, so a QUEUE_KINDS set on the
-    // app (fly.toml [env] or a secret) must name billing.reconcile too.
-    queueKinds: list("QUEUE_KINDS", "proposal.execute,billing.reconcile"),
+    // app (fly.toml [env] or a secret) must name billing.reconcile and
+    // receipts.qbo_match too.
+    queueKinds: list("QUEUE_KINDS", "proposal.execute,billing.reconcile,receipts.qbo_match"),
     // The billing check's kill switch (README, Day-2 ops): the queue row is
     // still claimed and finished, done with {skipped:"off"}.
     billingReconcile: String(env.BILLING_RECONCILE ?? "").trim().toLowerCase() !== "off",
+    // The QuickBooks link's kill switch: the nightly match finishes done with
+    // {skipped:"off"} and the 'qbo' channel is dropped above.
+    receiptsQbo,
     emailEnabled,
     gmailClientId,
     gmailClientSecret,
@@ -108,6 +122,7 @@ export function loadConfig(env = process.env) {
     emailMaxAgeHours: num("EMAIL_MAX_AGE_HOURS", EMAIL_MAX_AGE_HOURS_DEFAULT, 1, 720),
     ownerCell,
     notifyUrl: String(env.NOTIFY_URL ?? "").trim() || `${url}/functions/v1/roybal-notify`,
+    qboProxyUrl: String(env.QBO_PROXY_URL ?? "").trim() || `${url}/functions/v1/qbo-proxy`,
     outboxAgentId: String(env.OUTBOX_AGENT_ID ?? "").trim() || OUTBOX_AGENT_ID,
     shutdownGraceMs: num("SHUTDOWN_GRACE_MS", 25_000, 1_000, 60_000),
   };

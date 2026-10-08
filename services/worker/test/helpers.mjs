@@ -44,6 +44,8 @@ export function testConfig(over = {}) {
     gmailClientSecret: "gsecret",
     ownerCell: "+19075550199",
     notifyUrl: "https://stub.supabase.co/functions/v1/roybal-notify",
+    receiptsQbo: true,
+    qboProxyUrl: "https://stub.supabase.co/functions/v1/qbo-proxy",
     outboxAgentId: "0a7ac824-5042-4bb5-ab0d-8569cea209b1",
     shutdownGraceMs: 2000,
     ...over,

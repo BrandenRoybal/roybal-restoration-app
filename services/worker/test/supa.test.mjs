@@ -59,12 +59,14 @@ test("loadConfig requires the url and key, clamps numbers, and turns email off w
   assert.equal(c.heartbeatMs, 120_000);
   assert.equal(c.workerId, "roybal-worker-abc");
   assert.equal(c.emailEnabled, false);
-  assert.deepEqual(c.channels, ["sms"]);
+  assert.deepEqual(c.channels, ["sms", "qbo"]);
   assert.equal(c.notifyUrl, "https://ref.supabase.co/functions/v1/roybal-notify");
+  assert.equal(c.qboProxyUrl, "https://ref.supabase.co/functions/v1/qbo-proxy");
+  assert.equal(c.receiptsQbo, true);
   assert.equal(c.outboxAgentId, "0a7ac824-5042-4bb5-ab0d-8569cea209b1");
   const e = loadConfig({ ...base, GMAIL_CLIENT_ID: "id", GMAIL_CLIENT_SECRET: "s" });
   assert.equal(e.emailEnabled, true);
-  assert.deepEqual(e.channels, ["sms", "email"]);
+  assert.deepEqual(e.channels, ["sms", "email", "qbo"]);
   const half = loadConfig({ ...base, GMAIL_CLIENT_ID: "id" });
   assert.equal(half.emailEnabled, false);
 });
@@ -86,6 +88,27 @@ test("EMAIL_MAX_AGE_HOURS defaults to 48, is clamped to 1..720, and nonsense kee
   assert.equal(hours("   "), 48);
   // The same blank-is-unset rule for the other knobs: a blank poll no longer clamps to the 250 ms floor.
   assert.equal(loadConfig({ ...base, WORKER_POLL_MS: "" }).pollMs, 5000);
+});
+
+test("RECEIPTS_QBO=off turns the QuickBooks link off: the qbo channel is not served and the match is told to skip", () => {
+  const base = { SUPABASE_URL: "https://ref.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k", GMAIL_CLIENT_ID: "id", GMAIL_CLIENT_SECRET: "s" };
+  for (const v of ["off", "OFF", " off "]) {
+    const c = loadConfig({ ...base, RECEIPTS_QBO: v });
+    assert.equal(c.receiptsQbo, false, v);
+    assert.deepEqual(c.channels, ["sms", "email"], v);
+    assert.ok(c.queueKinds.includes("receipts.qbo_match"), "the nightly row is still claimed, and finishes {skipped:'off'}");
+  }
+  for (const v of [undefined, "", "on", "yes", "0"]) {
+    const c = loadConfig(v === undefined ? base : { ...base, RECEIPTS_QBO: v });
+    assert.equal(c.receiptsQbo, true, String(v));
+    assert.deepEqual(c.channels, ["sms", "email", "qbo"], String(v));
+  }
+  // an OUTBOX_CHANNELS set on the app replaces the list, and the switch still wins over it
+  assert.deepEqual(loadConfig({ ...base, OUTBOX_CHANNELS: "sms,qbo" }).channels, ["sms", "qbo"]);
+  assert.deepEqual(loadConfig({ ...base, OUTBOX_CHANNELS: "sms,qbo", RECEIPTS_QBO: "off" }).channels, ["sms"]);
+  assert.deepEqual(loadConfig({ ...base, OUTBOX_CHANNELS: "sms,email" }).channels, ["sms", "email"]);
+  assert.equal(loadConfig({ ...base, QBO_PROXY_URL: " https://x.example/functions/v1/qbo-proxy " }).qboProxyUrl,
+    "https://x.example/functions/v1/qbo-proxy");
 });
 
 test("loadConfig refuses the wrong Supabase key and pasted placeholders at boot, naming the variable but never the value", () => {
@@ -301,7 +324,7 @@ test("set-gmail-secret.sh stages exactly the pair on stdin, deploys after, never
       `${FIELD_SUPABASE_URL}/functions/v1/roybal-notify/version`], on);
     assert.match(ok.output, /last step of turning email on: migration 0019 applied, roybal-notify deployed/);
     assert.match(ok.output, /worker\.start line with "email":true/);
-    assert.match(ok.output, /"channels":\["sms","email"\]/);
+    assert.match(ok.output, /"channels":\["sms","email","qbo"\]/);
     assert.match(ok.output, /email\.disabled/);
     assert.doesNotMatch(ok.output, /no deploy/i);
   }
