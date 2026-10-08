@@ -333,3 +333,107 @@ input.rl-days { width: 90px; flex: 0 0 auto; }
   .ap-actions .btn { flex: 1 1 auto; white-space: nowrap; }   /* each its own width, one line, full row between them */
   .ap-yes { flex-basis: 100%; text-align: center; }
 }
+
+/* ============================================================
+   🏷️ Equipment (equipment scan in and out) — equipment.js
+   ============================================================ */
+.eq-intro { font-size: 13px; color: var(--muted); margin: 0 0 4px; }
+.eq-small { font-size: 12.5px; }
+.eq-card { padding: 14px 16px; }
+.eq-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.eq-head .btn { width: auto; }
+.eq-flags { border-left: 4px solid var(--red); }
+.eq-flag { padding: 8px 0; border-top: 1px solid var(--line); margin-top: 6px; font-size: 13.5px; overflow-wrap: anywhere; }
+.eq-flag a { color: var(--orange-dark); }
+
+/* out now + the fleet list: tables that scroll inside their card, never the page */
+.eq-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 8px; }
+table.eq-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.eq-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted);
+  padding: 7px 10px; border-bottom: 1px solid var(--line); background: #f7f9fc; white-space: nowrap; }
+table.eq-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.eq-table tr:last-child td { border-bottom: 0; }
+table.eq-table a { color: var(--orange-dark); text-decoration: none; }
+table.eq-table a:hover { text-decoration: underline; }
+table.eq-table .btn { width: auto; }
+.eq-nowrap { white-space: nowrap; }
+table.eq-table td > strong { white-space: nowrap; }   /* AM-014 never breaks at its dash */
+.eq-badge { margin-left: 6px; white-space: nowrap; }
+.eq-row--bad { background: #fdf3f1; }
+.eq-row--dim td { color: var(--muted); }
+th.eq-tick, td.eq-tick { width: 34px; padding-right: 0; }
+.eq-tick input { width: 18px; height: 18px; min-height: 0; margin: 0; }
+select.eq-status { width: auto; min-height: 36px; padding: 4px 8px; font-size: 14px; }
+.eq-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.eq-search { flex: 1 1 240px; min-width: 0; min-height: 44px; padding: 10px 13px; font-size: 16px; /* 16px: no iOS zoom-on-focus */
+  border: 1px solid var(--line-strong); border-radius: 10px; background: #fff; font-family: inherit; }
+.eq-filters select { width: auto; flex: 0 1 170px; min-width: 0; }
+.eq-filters .btn { width: auto; }
+.eq-seen { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 9px 0; border-top: 1px solid var(--line); }
+.eq-seen__main { flex: 1 1 240px; min-width: 0; }
+.eq-seen select { margin-left: 6px; }
+@media (max-width: 700px) { table.eq-table { min-width: 640px; } }
+
+/* Add units / Edit / Print: a dialog over the page (a bottom sheet on a phone) */
+.eq-dlg { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 1000; display: flex; align-items: flex-start;
+  justify-content: center; padding: 6vh 16px 16px; overflow-y: auto; background: rgba(15, 27, 45, .45); }
+.eq-dlg__box { width: 100%; max-width: 560px; background: #fff; border-radius: 14px; box-shadow: var(--shadow-lg); padding: 16px 18px; }
+.eq-dlg__head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+.eq-dlg__head strong { font-size: 17px; color: var(--navy); }
+.eq-dlg__head .btn { width: auto; }
+.eq-range { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.eq-preview { margin: -2px 0 12px; font-weight: 600; color: var(--navy); }
+.rl-check.eq-choice { display: flex; min-height: 44px; font-size: 15px; }
+.rl-check.eq-choice input { width: 18px; height: 18px; }
+@media (max-width: 560px) {
+  .eq-range { grid-template-columns: 1fr 1fr; }
+  .eq-dlg { align-items: flex-end; padding: 0; }
+  .eq-dlg__box { border-radius: 14px 14px 0 0; max-height: 92vh; overflow-y: auto; }
+}
+
+/* the label sheet (#/equipment/labels). On screen each sheet is drawn at
+   paper size with the label edges dashed; printing shows only the sheets
+   (body.eq-print, set while this page is open, with a no-margin @page that
+   equipment.js adds and removes with it). */
+.eq-tip { border-left: 4px solid var(--orange); font-size: 14px; }
+input.eq-short { width: 80px; min-height: 38px; padding: 6px 9px; margin-left: 6px; }
+.eq-sheets { overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 4px 0 20px; }
+/* One US letter sheet of Avery 5163 / 5523: 2 × 5 labels of 4 × 2 in;
+   0.5 in top margin, 0.156 in each side, 0.188 in between the two
+   columns, none between the rows:
+     across  0.156 + 4 + 0.188 + 4 + 0.156 = 8.5 in
+     down    0.5 + 5 × 2 = 10.5 in, + the 0.5 in bottom margin = 11 in
+   The box stops at 10.5 in (the bottom margin stays blank paper), so a
+   sheet can never spill onto a page of its own. */
+.eq-page { box-sizing: border-box; width: 8.5in; height: 10.5in; padding: 0.5in 0.156in 0 0.156in;
+  display: grid; grid-template-columns: 4in 4in; grid-template-rows: repeat(5, 2in);
+  column-gap: 0.188in; row-gap: 0; overflow: hidden;
+  margin: 0 auto 18px; background: #fff; box-shadow: var(--shadow); }
+/* QR 1.5 in on the left; the text column gets 4 − 0.22 − 1.5 − 0.14 − 0.16 = 1.98 in */
+.eq-label { box-sizing: border-box; width: 4in; height: 2in; padding: 0.25in 0.16in 0.25in 0.22in;
+  display: flex; align-items: center; gap: 0.14in; overflow: hidden; color: #000;
+  outline: 1px dashed #c9d1dc; outline-offset: -1px; }
+.eq-label--blank { background: #f3f4f6; }
+.eq-label__qr { flex: 0 0 1.5in; width: 1.5in; height: 1.5in; }
+.eq-label__qr svg { display: block; width: 100%; height: 100%; }
+.eq-label__text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; justify-content: center;
+  font-family: Arial, Helvetica, sans-serif; line-height: 1.15; }
+.eq-label__tag { font-weight: 800; line-height: 1; white-space: nowrap; }   /* size per tag length, equipment.js tagPt */
+.eq-label__type { font-size: 12pt; font-weight: 700; margin-top: 5pt; }
+.eq-label__model { font-size: 8.5pt; margin-top: 3pt; overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.eq-label__co { font-size: 8pt; margin-top: 5pt; letter-spacing: .03em; }
+
+@media print {
+  body.eq-print { background: #fff !important; padding: 0 !important; margin: 0 !important; }
+  body.eq-print > *:not(#view) { display: none !important; }
+  body.eq-print #view { max-width: none !important; margin: 0 !important; padding: 0 !important; }
+  body.eq-print .eq-noprint { display: none !important; }
+  body.eq-print .eq-sheets { overflow: visible; padding: 0; }
+  body.eq-print .eq-page { margin: 0; box-shadow: none; break-inside: avoid; page-break-inside: avoid;
+    break-after: page; page-break-after: always; }
+  body.eq-print .eq-page:last-child { break-after: auto; page-break-after: auto; }
+  body.eq-print .eq-label { outline: none; }
+  body.eq-print .eq-label--blank { background: none; }
+}

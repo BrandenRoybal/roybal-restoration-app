@@ -30,11 +30,14 @@ import { PREVIEW_OF, isPreviewEntry } from "./thumbs.js";
 
 /* every multi-instance collection whose elements carry a stable `id`
    (see model.js factories) — safe to union. merge.test.mjs cross-checks
-   this registry against model.js FORMS so a new form can't be forgotten. */
+   this registry against model.js FORMS so a new form can't be forgotten,
+   and merge-sql-parity.test.mjs against the server's two lists.
+   `equipmentScans` is the append-only equipment scan log (scans.js): its
+   events are never edited, so the union is the whole story. */
 export const ID_COLLECTIONS = [
   "photos", "moistureMaps", "dryingLogs", "constructionLogs",
   "invoices", "reconEstimates", "changeOrders", "receipts",
-  "inspections", "contents", "boxes", "supportDocs",
+  "inspections", "contents", "boxes", "supportDocs", "equipmentScans",
 ];
 
 /* ---------- per-item delete tombstones ----------

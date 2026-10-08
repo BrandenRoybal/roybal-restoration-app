@@ -142,7 +142,7 @@ const FIELD_CONFIG = fs.readFileSync(path.join(REPO, "apps/field/js/config.js"),
 const FIELD_CLIENT_ID = /export const GMAIL_CLIENT_ID = "([^"]+)"/.exec(FIELD_CONFIG)?.[1];
 const FIELD_SUPABASE_URL = /export const SUPABASE_URL = "([^"]+)"/.exec(FIELD_CONFIG)?.[1];
 // The field modules the worker image copies (services/worker/Dockerfile).
-const COPIED_FIELD = ["reconcile.js", "dryingcalc.js", "model.js", "core.js"].map((f) => `apps/field/js/${f}`);
+const COPIED_FIELD = ["reconcile.js", "dryingcalc.js", "model.js", "core.js", "scans.js"].map((f) => `apps/field/js/${f}`);
 const CHECKOUT_FILES = ["apps/field/js/config.js", "services/worker/set-gmail-secret.sh",
   "services/worker/adapters/email.mjs", "services/worker/fly.toml", "services/worker/Dockerfile", ".dockerignore",
   ...COPIED_FIELD];
@@ -411,7 +411,7 @@ test("set-gmail-secret.sh checks every path the worker's Dockerfile copies, so n
   const dockerfile = fs.readFileSync(path.join(REPO, "services/worker/Dockerfile"), "utf8");
   const sources = [...dockerfile.matchAll(/^COPY\s+(?:--\S+\s+)*(.+?)\s+\S+\s*$/gm)].flatMap((m) => m[1].split(/\s+/));
   assert.deepEqual(sources, ["apps/field/js/reconcile.js", "apps/field/js/dryingcalc.js", "apps/field/js/model.js",
-    "apps/field/js/core.js", "services/worker"]);
+    "apps/field/js/core.js", "apps/field/js/scans.js", "services/worker"]);
   for (const src of sources) {
     assert.ok(listed.some((p) => src === p || src.startsWith(`${p}/`)), `IMAGE_PATHS covers ${src}`);
   }

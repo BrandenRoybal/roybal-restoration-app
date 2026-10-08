@@ -121,11 +121,20 @@ THIS WORKER  lanes/billing.mjs
   coordination_jobs   board stage of each linked field job (data.fieldJobId)
   field_projects      scope keys for every job, paged by id; then each candidate's detector keys
   time_entries        the job's QuickBooks Time rows by jobcode: id, date, hours, qbTimesheetId, updated_at, source
-  detector            apps/field/js/reconcile.js (pure; copied into the image)
+  detector            apps/field/js/reconcile.js (pure; copied into the image, with scans.js for scanned equipment)
   → billing_review_gaps_file(job, rev read, input | null, rationale, evidence)
        stamps the invoice fingerprint, files as agent:billing, supersedes the job's older open card
 ```
 
+- **Scanned equipment.** A unit scanned on site (the field app's 📷 Scan
+  equipment, migration 0022) is an event in the job's `equipmentScans`, and
+  its drying-log row is derived from the events. The detector derives the
+  rows again (`apps/field/js/scans.js` `applyScans`, on a copy) before
+  counting, so a row a newer copy of the log dropped still counts and an
+  undone scan does not. A scanned row's evidence id is
+  `<log id>#scan:<scan id>`, stable however the rows move; typed rows keep
+  `<log id>#eq<index>`. The per-job read projects `equipmentScans` (and
+  `deletedIds`, so a deleted scan's row goes as it does on a phone) for this.
 - **Payloads.** Nightly: `{"run_date": "YYYY-MM-DD"}` (the Alaska date).
   Manual: `{"job_ids": ["<field job id>", …]}`, 1 to 100 ids. Anything else
   is dead on arrival with the reason.
@@ -218,7 +227,7 @@ THIS WORKER  lanes/billing.mjs
      worker. `GET …/roybal-notify/version` answers the same with or without
      this build, so it can't tell you.
   3. The worker, on the Mac, from an up-to-date main (the image now carries
-     the four field modules the check imports, so build from the repo root as
+     the five field modules the check imports, so build from the repo root as
      always):
      ```sh
      cd ~/roybal-restoration-app
@@ -318,7 +327,7 @@ Order matters: the database first, then the edge function, then the app.
      run from anything the deploy must not build: not the repo root, not on
      main, not GitHub's latest main (it runs `git fetch origin main` and
      compares: an older checkout would roll back a worker fix deployed from
-     GitHub since), local changes in `services/worker`, the four
+     GitHub since), local changes in `services/worker`, the five
      `apps/field/js` modules the image copies or `.dockerignore` (untracked
      files too: the image would take them), or a worker without
      the 48-hour email limit (`staleEmailReason`). Each time it says to run

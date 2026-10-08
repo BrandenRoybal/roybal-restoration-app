@@ -19,10 +19,12 @@
    is left unpriced for the office.
 
    Runs in the worker's billing.reconcile queue kind; the field app
-   does not load it. Imports only dryingcalc.js and model.js.
+   does not load it. Imports only dryingcalc.js, model.js and
+   scans.js.
    ============================================================ */
 import { equipClassOf } from "./dryingcalc.js";
 import { jobType, lossTypesOf } from "./model.js";
+import { applyScans } from "./scans.js";
 
 export const DETECTOR = "billing.reconcile@0.1";
 
@@ -139,7 +141,21 @@ const unitDays = (hours) => Math.max(1, Math.ceil(hours / 24 - 1e-9));
 // a type of nothing, "N/A", "na", "none" or "-" is a placeholder row (or the blank row every new log seeds), not a machine
 const placeholderType = (t) => /^(n\/?a|none|-)?$/.test(str(t).replace(/\s+/g, "").toLowerCase());
 
-function equipmentFacts(p, today = "") {
+/* Scanned equipment (scans.js): the scan events are the record and a
+   drying log's scanned rows are derived from them, so they are derived
+   again here, on a copy of the logs, before anything is counted. The blob
+   the worker reads may hold rows a newer copy of a log dropped, or an undo
+   not yet written into the rows. The job itself is never changed. */
+function withScans(p) {
+  const rowScanned = (log) => obj(log) && arr(log.equipment).some((e) => obj(e) && filled(e.scanId));
+  if (!arr(p.equipmentScans).length && !arr(p.dryingLogs).some(rowScanned)) return p;
+  const copy = { ...p, dryingLogs: JSON.parse(JSON.stringify(arr(p.dryingLogs))) };
+  try { applyScans(copy); } catch { return p; }
+  return copy;
+}
+
+function equipmentFacts(job, today = "") {
+  const p = withScans(job);
   // a removed or dry-out finish stamp after today has not happened yet (end of today, Alaska)
   const cutoff = validDate(today) ? parseStamp(today).ms + DAY_MS : Infinity;
   const rows = [];          // counted rows
@@ -158,7 +174,8 @@ function equipmentFacts(p, today = "") {
       // skipped whole and without a hint: its stamps bound no window either
       if (placeholderType(e.type)) return;
       const type = clip(e.type, 80), asset = clip(e.asset, 40);
-      const id = `${logId}#eq${i}`;
+      // a scanned row keeps its id when rows are added, removed or rebuilt; a typed row has only its place
+      const id = filled(e.scanId) ? `${logId}#scan:${clip(e.scanId, 64)}` : `${logId}#eq${i}`;
       const placed = parseStamp(e.placed), removed = parseStamp(e.removed);
       if (placed) { info.placed.push(placed.date); placedDates.push(placed.date); }
       if (removed) { info.removed.push(removed.date); removedDates.push(removed.date); }

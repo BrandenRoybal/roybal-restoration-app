@@ -496,4 +496,44 @@ test("SCOPE_KEYS and JOB_KEYS cover every blob key scopeOf and reconcileJob read
     if (!TOP_LEVEL.has(k) && !DATE_PARTS.has(k)) assert.ok(JOB_KEYS.includes(k), `the per-job read projects ${k}`);
   }
   assert.ok(lossTypes.has("smokeType") && lossTypes.has("waterCategory"), "the source scan found lossTypesOf's keys");
+  // the detector rebuilds scanned rows with scans.js applyScans, which reads the scan log, the drying logs
+  // and the delete marks; every project.<key> it reads is projected
+  const scans = src("scans.js");
+  const applyBody = /export function applyScans\([\s\S]*?\n\}\n/.exec(scans)?.[0] ?? "";
+  assert.match(applyBody, /project\.dryingLogs/);
+  for (const [, k] of applyBody.matchAll(/\bproject\.([A-Za-z_$][\w$]*)/g)) {
+    assert.ok(JOB_KEYS.includes(k), `the per-job read projects ${k}, which applyScans reads`);
+  }
+  for (const k of ["equipmentScans", "dryingLogs", "deletedIds"]) {
+    assert.ok(JOB_KEYS.includes(k), `the per-job read projects ${k}`);
+    assert.ok(scans.includes(`project.${k}`), `scans.js reads ${k}`);
+  }
+});
+
+/* A unit scanned on site lives in equipmentScans; its drying-log row is
+   derived from the events, and the blob's log may have lost it to a newer
+   copy. The per-job read carries the events, and the detector bills from them. */
+test("scanned equipment: the per-job read carries equipmentScans, so a unit whose row the log lost is still counted, with a stable evidence id", async () => {
+  const id = uuid(1);
+  const scan = (act, sid, at, extra = {}) => ({ id: sid, tag: "DH-001", act, at, room: "Kitchen", type: "", model: "",
+    logId: "dl1", voids: "", how: "camera", by: "", tech: "", build: "v208", ...extra });
+  const job = gapJob({
+    dryingLogs: [{ id: "dl1", dryoutStart: "", dryoutFinish: "", equipment: [], readings: [] }],
+    equipmentScans: [
+      scan("place", "s1", "2026-07-28T23:00:00.000Z", { type: "Dehumidifier" }),   // 07-28 15:00 in Alaska
+      scan("remove", "s2", "2026-08-04T17:00:00.000Z"),                            // 08-04 09:00: 7 unit-days
+    ],
+  });
+  const seen = [];
+  const { supa, ctx } = world({ projects: [row(id, job)], time: [qbTime("t1", "2026-07-28", 6, "ts1")], detector: await spyDetector(seen) });
+  const out = await billingReconcile(ctx, nightly());
+  assert.equal(out.filed, 1);
+  const detail = selects(supa, "field_projects").find((q) => q.includes(`id=eq.${id}`));
+  assert.match(detail, /equipmentScans:data->equipmentScans/);
+  assert.equal(seen[0].p.equipmentScans.length, 2);
+  assert.deepEqual(seen[0].p.dryingLogs[0].equipment, [], "the detector never writes the job it reads");
+  const [a] = doorCalls(supa);
+  const dehu = a.p_input.lines.find((l) => l.finding_id === "equip:dehu");
+  assert.equal(dehu.qty, 3, "7 documented, 4 billed");
+  assert.deepEqual(dehu.refs.filter((r) => r.kind === "equipment_row").map((r) => r.id), ["dl1#scan:s1"]);
 });

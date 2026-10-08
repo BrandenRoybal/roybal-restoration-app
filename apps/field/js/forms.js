@@ -2,7 +2,7 @@
    Roybal Field Forms — the 7 form renderers
    Each returns a printable .sheet built from bound inputs.
    ============================================================ */
-import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween, likelyOffline } from "./core.js";
+import { h, Store, sketchPad, equipmentPad, EQUIP_TYPES, gpp, grainDepression, money, toast, fmtDate, todayISO, fileToDataURL, shrinkDataURL, downloadFile, DRY_STANDARDS, goalFor, daysSince, daysBetween, likelyOffline, uid } from "./core.js";
 import { exportPhotosZip, exportPhotoLogPdf, archivePhotos, archivableCount, photoFullSrc } from "./photoexport.js";
 import { fileToFloorPlan, fileToDocPages } from "./pdf.js";
 import { magicplanPlanChips } from "./magicplanplan.js";
@@ -19,7 +19,7 @@ import {
   INSPECTION_TYPES, INSPECTION_RESULTS, PRECON_ITEMS, COMPLETION_ITEMS,
   blankScopeArea, blankScopeItem, blankAllowanceRow, blankPermitRow,
   blankSelectionRow, blankSubRow, blankPunchRow, blankDrawRow, newInvoice,
-  newPortalShare, portalMilestoneTrack, portalStatusFor, jobType, PORTAL_CLAIM_STAGES,
+  newPortalShare, portalMilestoneTrack, portalStatusFor, jobType, PORTAL_CLAIM_STAGES, author,
 } from "./model.js";
 import { portalProjection, portalShareLink, newShareToken, publishPortal, fetchPortalThread, sendOfficeReply, markThreadReadByOffice, portalDigest, threadForAi, postMilestoneNudge, dryingSummary } from "./portal.js";
 import { photoShareControl, photoShareSheetLine, buildPacketHtml, ensureUploaded, requireOnline } from "./photoshare.js";
@@ -38,6 +38,9 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
+import { applyScans, voidPlacement, scanRecord } from "./scans.js";
+import { fleetReady, refreshFleet } from "./fleet.js";
+import { BUILD, SYNC_ENABLED } from "./config.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
 function jobInfo(project, fields) {
@@ -646,7 +649,38 @@ function equipSizingSection(project, d) {
     controls, resultsBox);
 }
 
+/* ---------- 📷 equipment scanning ----------
+   A scanned row is DERIVED from the job's scan events (scans.js
+   applyScans): its tag and placed time (and removed time, once a scan
+   removed it) come from the scan, so typing and the fill handle leave
+   them alone, and ✕ undoes the scan rather than deleting the row. The
+   overlay (scanner.js) and its decoder load on the first tap only. */
+export const scanDeps = { loadScanner: () => import("./scanner.js") };   // tests swap the overlay
+function scanLocked(row, key) {
+  if (!row || !row.scanId) return false;
+  if (key === "asset" || key === "placed" || key === "hours") return true;
+  return key === "removed" && !!(row.scan && row.scan.removeId);
+}
+// one fleet read at a time: the packet renders every drying log at once
+let fleetCheck = null;
+function checkFleet() {
+  if (!fleetCheck) fleetCheck = refreshFleet().finally(() => { fleetCheck = null; });
+  return fleetCheck;
+}
+// "2026-10-08T14:30" (the row's datetime-local value) → "10/08/2026 14:30"
+function wallShort(w) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/.exec(String(w || ""));
+  return m ? `${m[2]}/${m[3]}/${m[1]} ${m[4]}` : String(w || "");
+}
+const SCAN_ACT = { place: "Placed", move: "Moved", remove: "Removed" };
+const SCAN_HOW = { camera: "Camera", photo: "Label photo", typed: "Typed tag" };
+const scanUndoCtx = () => ({ id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD });
+
 export function dryingLog(project, d) {
+  // scans made on another device (or rows a newer copy of this log dropped)
+  // land in the table before it paints
+  if (applyScans(project).changed) commit();
+
   /* drying-day counter: start → finish once a finish date is set, else start → today */
   const daysBanner = h("div", { class: "daysbig app-only", style: "margin-bottom:8px" });
   function renderBanner() {
@@ -705,12 +739,17 @@ export function dryingLog(project, d) {
       rowsEls.forEach((tr) => tr.classList.remove("fill-target"));
       if (!targets.length) return;
       const src = d.equipment[i][key] ?? "";
+      let filled = 0, kept = 0;
       targets.forEach((idx, k) => {
-        d.equipment[idx][key] = key === "asset" ? bumpAsset(src, k + 1) : src;
-        if (key === "hours") d.equipment[idx]._manualHrs = true;
+        const row = d.equipment[idx];
+        if (scanLocked(row, key)) { kept++; return; }   // a scan's tag / times are the scan's
+        row[key] = key === "asset" ? bumpAsset(src, k + 1) : src;
+        if (key === "hours") row._manualHrs = true;
+        filled++;
       });
       paintEq(); refreshWarn(); commit();
-      toast(`Filled ${targets.length} row${targets.length > 1 ? "s" : ""}`);
+      toast((filled ? `Filled ${filled} row${filled > 1 ? "s" : ""}` : "Nothing filled")
+        + (kept ? ` · skipped ${kept} scanned` : ""));
     };
     handle.addEventListener("pointerup", finish);
     handle.addEventListener("pointercancel", finish);
@@ -718,11 +757,12 @@ export function dryingLog(project, d) {
   }
 
   function eqRow(row, i) {
-    const tr = h("tr");
+    const tr = h("tr", { class: row.scanId ? "eq-scanned" : null });
     const daysCell = h("td", { class: "calc", style: "min-width:46px" });
     function recalcDays() {
-      // auto total hours from placed→removed (unless manually set)
-      if (row.placed && row.removed && !row._manualHrs) {
+      // auto total hours from placed→removed (unless manually set; a scanned
+      // row's hours are applyScans' figure, on the Alaska clock)
+      if (row.placed && row.removed && !row._manualHrs && !row.scanId) {
         const ph = (new Date(row.removed) - new Date(row.placed)) / 3600000;
         if (isFinite(ph) && ph >= 0) { row.hours = Math.round(ph); if (hoursInput) hoursInput.value = row.hours; }
       }
@@ -737,14 +777,24 @@ export function dryingLog(project, d) {
     let hoursInput;
     const mk = (key, w, type = "text") => {
       const c = h("td", { class: "fillcell" });
-      const input = h("input", { type, value: row[key] ?? "", style: `min-width:${w}`, step: type === "datetime-local" ? "60" : null });
+      const locked = scanLocked(row, key);
+      const input = h("input", { type, value: row[key] ?? "", step: type === "datetime-local" ? "60" : null,
+        style: `min-width:${w}` + (locked ? ";background:#f1f4f8;color:#44556b" : ""),
+        readonly: locked, title: locked ? "From the scan. To change it, undo the scan (✕) and scan again." : null });
       input.addEventListener("input", () => {
+        if (scanLocked(row, key)) { input.value = row[key] ?? ""; return; }
         row[key] = input.value;
         if (key === "hours") row._manualHrs = true;
+        if (row.scanId) { applyScans(project); if (hoursInput) hoursInput.value = row.hours ?? ""; }   // a typed removal on a scanned row
         recalcDays(); refreshWarn(); commit();
       });
       if (key === "hours") hoursInput = input;
       c.append(input);
+      // printed: a superscript S on a time the scan recorded (legend under the table)
+      if (locked && (key === "placed" || key === "removed")) {
+        c.classList.add("scan-cell");
+        c.append(h("sup", { class: "scan-s", style: "display:none" }, "S"));
+      }
       attachFill(c, i, key);
       return c;
     };
@@ -758,15 +808,99 @@ export function dryingLog(project, d) {
     const assetC = mk("asset", "50px"), typeC = mkTa("type", "150px"), locC = mkTa("location", "110px");
     const placedC = mk("placed", "150px", "datetime-local"), removedC = mk("removed", "150px", "datetime-local");
     const hoursC = mk("hours", "56px", "number"), notesC = mkTa("notes", "120px");
+    if (row.scanId) {
+      const sc = row.scan || {};
+      const who = sc.tech || sc.by || "";
+      const said = "Scanned on site" + (who ? " by " + who : "") + (row.placed ? " " + wallShort(row.placed) : "");
+      assetC.append(h("span", { class: "scan-mark app-only", title: said, "aria-label": said,
+        style: "position:absolute;left:2px;top:1px;font-size:11px;line-height:1;cursor:help",
+        onclick: () => toast(said, 3500) }, "📷"));
+    }
+    const del = () => {
+      if (row.scanId) {
+        // a scan is never deleted: a void event cancels it (scans.js), on every device
+        // (the printed scan record lists the scans that still count; the void
+        // and the scan it cancels both stay in the server's audit copy)
+        if (!confirm("Undo this scan? The row comes off the drying log; the scan stays in the server's scan log, marked undone.")) return;
+        if (!voidPlacement(project, row.scanId, scanUndoCtx()).length) {
+          applyScans(project);
+          // a row whose scan this device doesn't hold (applyScans leaves those): ✕ takes it off like a typed row
+          const at = d.equipment.indexOf(row);
+          if (at >= 0) d.equipment.splice(at, 1);
+        }
+      } else d.equipment.splice(i, 1);
+      paintEq(); refreshWarn(); commit();
+    };
     tr.append(assetC, typeC, locC, placedC, removedC, daysCell, hoursC, notesC,
-      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { d.equipment.splice(i, 1); paintEq(); refreshWarn(); commit(); } }, "✕")));
+      h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", title: row.scanId ? "Undo this scan" : null, onclick: del }, "✕")));
     recalcDays();
     return tr;
   }
-  function paintEq() { eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); }
+  function paintEq() { eqBody.replaceChildren(...d.equipment.map(eqRow)); refreshWarn(); paintScanPrint(); }
+
+  /* printed under the table when this log holds scanned rows: the S legend,
+     then every scan on the job in time order (scans.js scanRecord) */
+  const scanPrint = h("div", { class: "print-only eqscan-print" });
+  function paintScanPrint() {
+    scanPrint.replaceChildren();
+    if (!d.equipment.some((r) => r && r.scanId)) return;
+    scanPrint.append(h("div", { class: "eqscan-legend" }, h("sup", {}, "S"), " = recorded by scanning the unit's QR label on site"));
+    const rec = scanRecord(project);
+    if (!rec.length) return;
+    scanPrint.append(
+      h("div", { class: "eqscan-title" }, "Equipment scan record"),
+      h("table", { class: "grid eqscan-rec" },
+        h("thead", {}, h("tr", {}, ...["Time", "Tag", "Type", "Action", "Room", "Read by", "Tech"].map((c) => h("th", {}, c)))),
+        h("tbody", {}, ...rec.map((r) => h("tr", {},
+          h("td", {}, wallShort(r.at)), h("td", {}, r.tag), h("td", {}, r.type),
+          h("td", {}, SCAN_ACT[r.act] || r.act), h("td", {}, r.room),
+          h("td", {}, SCAN_HOW[r.how] || r.how), h("td", {}, r.tech || String(r.by || "").split("@")[0]))))),   // a login, not an email address, on the adjuster's copy
+      h("div", { class: "eqscan-foot" },
+        "Times come from the scanning device's clock at the moment the label was read. Each scan is also logged on Roybal's server when the device syncs, and that log can't be edited."));
+  }
   paintEq();
   const addEq = h("button", { type: "button", class: "btn btn--ghost btn--sm app-only row-add" }, "+ Add equipment");
   addEq.addEventListener("click", () => { d.equipment.push(blankEquipRow()); paintEq(); commit(); });
+
+  /* 📷 Scan equipment: one button; the overlay stays open for the whole drop.
+     Switched off until the server has the fleet table (migration 0022) —
+     a device that has never reached it can't know, so it waits for one
+     connection rather than guess. */
+  const scanBtn = h("button", { type: "button", class: "btn btn--primary btn--sm app-only row-add", style: "width:auto" }, "📷 Scan equipment");
+  const scanNote = h("div", { class: "subtle app-only", hidden: true, style: "margin:6px 0 0" });
+  let scanState = fleetReady() ? "ready" : (!SYNC_ENABLED || likelyOffline()) ? "offline" : "checking";
+  let scanning = false;
+  function gateScan(state) {
+    scanState = state;
+    const msg = state === "missing" ? "Scanning switches on after this feature's database update is applied."
+      : state === "offline" ? "Connect once to switch scanning on"
+      : state === "checking" ? "Checking whether scanning is switched on…" : "";
+    scanBtn.disabled = scanning || state !== "ready";
+    scanNote.textContent = msg; scanNote.hidden = !msg;
+  }
+  gateScan(scanState);
+  if (SYNC_ENABLED && !likelyOffline()) {
+    // a read that hangs on a weak signal doesn't leave the button "checking"
+    const slow = setTimeout(() => { if (scanState === "checking") gateScan("offline"); }, 8000);
+    checkFleet().then((r) => {
+      clearTimeout(slow);
+      gateScan(r && r.ok ? "ready" : r && r.missing ? "missing" : fleetReady() ? "ready" : "offline");
+    });
+  }
+  scanBtn.addEventListener("click", async () => {
+    if (scanning || scanState !== "ready") return;
+    scanning = true; gateScan(scanState);
+    try {
+      const [{ openScanner }, all] = await Promise.all([scanDeps.loadScanner(), Store.all().catch(() => [])]);
+      const otherProjects = (all || []).filter((p) => p && p.id !== project.id);
+      // every logged scan, undo and photo saves the job like any other edit
+      await openScanner(project, { logId: d.id, otherProjects, onChange: () => { commit(); paintEq(); } });
+    } catch (e) {
+      toast("Couldn't open the scanner: " + ((e && e.message) || e));
+    } finally {
+      scanning = false; gateScan(scanState); paintEq();
+    }
+  });
 
   /* psychrometric readings table with GPP auto-calc */
   const psBody = h("tbody");
@@ -846,7 +980,9 @@ export function dryingLog(project, d) {
       h("table", { class: "grid" },
         h("thead", {}, h("tr", {}, ...["Asset #", "Equipment Type / Make / Model", "Room / Location", "Placed", "Removed", "Days", "Hrs", "Notes"].map((c) => h("th", {}, c)), h("th", { class: "app-only" }, ""))),
         eqBody)),
-    addEq,
+    scanPrint,
+    h("div", { class: "app-only", style: "display:flex;flex-wrap:wrap;gap:8px;align-items:center" }, scanBtn, addEq),
+    scanNote,
 
     sectionTitle("Daily Psychrometric Readings"),
     h("div", { class: "note app-only" }, h("strong", {}, "Auto-calc: "), "Enter temperature (°F) and RH (%) — GPP fills automatically. Grain depression (GD) = Unaffected GPP − Affected GPP. Tap a GPP cell to override."),

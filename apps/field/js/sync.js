@@ -41,6 +41,7 @@ import { thumbKey, makeThumb, previewPhotos, restorePhotoMarkers } from "./thumb
 import { shrinkDataURL } from "./core.js";
 import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "./merge.js";
 import { pruneForeignMeasured } from "./magicplancalc.js";
+import { applyScans } from "./scans.js";
 import { isBlankProject } from "./model.js";
 
 const K_CURSOR = "roybal-sync-cursor";
@@ -98,13 +99,18 @@ function sameContent(a, b) {
 }
 
 /* Rules a merge can't hold on its own, applied to every copy sync stores
-   from a merge or from the server. Today one: a job switched to another
+   from a merge or from the server. Two today: a job switched to another
    Magicplan project keeps only that project's measured Floor Plan rows —
    the table merges filled-beats-empty (here and in the server's merge), so
-   a phone that missed the switch would put the old scan's rows back.
-   magicplan.test.mjs checks every mergeProjects call here is followed by it. */
-function settleMerged(p) {
+   a phone that missed the switch would put the old scan's rows back; and
+   the drying log's scanned equipment rows are rewritten from the unioned
+   scan events (scans.js), since a log merges newer-wins whole and the older
+   device's scanned rows would otherwise be lost with it.
+   magicplan.test.mjs checks every mergeProjects call here is followed by it.
+   `out.rebuilt` tells a caller the scan rows had to be rewritten. */
+function settleMerged(p, out) {
   try { pruneForeignMeasured(p); } catch { /* never block a sync on it */ }
+  try { const r = applyScans(p); if (out) out.rebuilt = !!(r && r.changed); } catch { /* never block a sync on it */ }
   return p;
 }
 
@@ -185,10 +191,20 @@ async function adoptServerMerge(localRef, res, fetchMedia, have) {
   }
   const local = (await Store.get(id)) || localRef;
   await Store.backup(local);                       // our side stays restorable
-  settleMerged(full);                              // the server's union follows the same rules as ours
+  const settled = {};
+  settleMerged(full, settled);                     // the server's union follows the same rules as ours
   const { added, filledForms } = countRecovered(local, full);
   full.id = id;
   delete full.rev;                                 // revs live in sync bookkeeping
+  // The server's merge keeps a drying log newer-wins whole, so its union can
+  // hold another device's scans without their rows; settleMerged just wrote
+  // them back. Leave the row dirty so that copy goes up ONCE, on the rev
+  // adopted below: the server writes it outright (no merge, no rebuild left),
+  // and the next adopt or pull finds nothing to rewrite. Without this the
+  // server's copy, which the morning brief and the portal read, lacks the
+  // rows until someone edits the job again.
+  const owed = !!settled.rebuilt;
+  if (owed) full.updatedAt = laterThan(localRef.updatedAt, full.updatedAt);
   // CAS on the SNAPSHOT this push was built from, not on the row we just read:
   // the union the server built cannot contain anything typed after that
   // snapshot (deflate + media upload + round-trip can take minutes on a
@@ -196,7 +212,8 @@ async function adoptServerMerge(localRef, res, fetchMedia, have) {
   // dirty and next cycle merges the newer local copy in.
   if (!(await Store.putIf(full, localRef.updatedAt))) return "raced";
   revs[id] = Number(res.rev) || 0; saveRevs();
-  pushed[id] = full.updatedAt; savePushed();       // clean: the stored row matches the server
+  if (owed) needsAnotherPass = true;               // dirty: the rebuilt rows go up next pass
+  else { pushed[id] = full.updatedAt; savePushed(); }   // clean: the stored row matches the server
   mediaWait.delete(id);
   if (added || filledForms) {
     try { mergeCb({ id, customer: full.customer || full.address || "job", added, filledForms, why: "server-merge" }); }

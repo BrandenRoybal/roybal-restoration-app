@@ -56,6 +56,7 @@
     <a href="#s-newjob">Starting a job</a>
     <a href="#s-jobpage">The job page</a>
     <a href="#s-restforms">Restoration forms</a>
+    <a href="#s-scan">Scanning equipment in and out</a>
     <a href="#s-photos">Job photos</a>
     <a href="#s-workauth">Signatures and the work authorization</a>
     <a href="#s-receipts">Receipts</a>
@@ -71,6 +72,7 @@
     <a href="#s-leads">Leads</a>
     <a href="#s-ajobs">Jobs</a>
     <a href="#s-areceipts">Receipts and returns</a>
+    <a href="#s-aequip">Equipment</a>
     <a href="#s-contacts">Contacts and campaigns</a>
     <a href="#s-settings">Analytics and settings</a>
     <a class="ch" href="#ch4">4. Job Board</a>
@@ -147,8 +149,8 @@
   <table>
     <tr><th style="width:16%">Role</th><th>What it can do</th></tr>
     <tr><td><b>owner</b></td><td>Everything. Only the owner sees and answers <b>Approvals</b>, which covers every money decision and anything that sends to a customer or adjuster.</td></tr>
-    <tr><td><b>office</b></td><td>Office work: Magicplan create/link/pull, site-walk recordings, logging receipt returns, lead and contact edits. (Nobody holds this role yet.)</td></tr>
-    <tr><td><b>crew_lead</b></td><td>All field forms, photos, receipts, AI drafting and sync. Bid actions that write to the board (site visit done, estimate sent) save on the phone and are logged by the office.</td></tr>
+    <tr><td><b>office</b></td><td>Office work: Magicplan create/link/pull, site-walk recordings, logging receipt returns, lead and contact edits, the equipment fleet list. (Nobody holds this role yet.)</td></tr>
+    <tr><td><b>crew_lead</b></td><td>All field forms, photos, receipts, AI drafting and sync. Bid actions that write to the board (site visit done, estimate sent) save on the phone and are logged by the office. Can add and edit units on the equipment fleet list.</td></tr>
     <tr><td><b>crew</b></td><td>Same as crew lead in the field app.</td></tr>
     <tr><td><b>agent</b></td><td>The automated helpers (phone receptionist, morning brief). They can propose work but can never approve it, and they cannot change job files.</td></tr>
     <tr><td><b>new signup</b></td><td>Read-only. A brand-new login can sign in and see jobs, but nothing it changes is saved to the cloud until Branden gives it a role.</td></tr>
@@ -289,7 +291,7 @@
       <h3>💧 Drying Log</h3>
       <ul>
         <li><span class="ui">🧮 Size the equipment</span> works out how many units the room needs.</li>
-        <li><span class="ui">+ Add equipment</span> for each unit (asset #, type, location, placed, removed).</li>
+        <li><span class="ui">📷 Scan equipment</span> logs each unit from its QR label as it goes in, moves or comes out (<a href="#s-scan">Scanning equipment in and out</a>). <span class="ui">+ Add equipment</span> still adds a row by hand (asset #, type, location, placed, removed) when a unit can't be scanned.</li>
         <li><span class="ui">+ Add reading</span> each visit: outside, reference and affected temperature and RH. GPP and grain depression calculate themselves, and any unit on site 7+ days is flagged for the carrier.</li>
       </ul>
       <h3>✅ Cert. of Drying</h3>
@@ -301,6 +303,54 @@
     <figure class="phone"><div class="frame" style="height:3.4in"><img src="shots/field-drying-log.jpg"></div><figcaption><b>Drying Log</b>: drying system, category and class.</figcaption></figure>
     <figure class="phone"><div class="frame" style="height:3.4in"><img src="shots/field-drying-log.jpg" style="margin-top:-7.6in"></div><figcaption><b>Equipment</b> placed and removed, with runtime.</figcaption></figure>
   </div>
+
+  <h2 class="sec" id="s-scan">Scanning equipment in and out</h2>
+  <p>Every dehumidifier, air mover, air scrubber and heater carries a QR label with its asset tag, such as <b>AM-014</b>. Scanning the label is how a unit goes on the drying log: the device writes the row (tag, type, room, and the date and time to the minute), so nobody types tags or times. One button opens the scanner and it stays open for the whole drop. Once the room is picked there is nothing to tap per unit.</p>
+  <h3>Setting units (Place)</h3>
+  <ol class="steps">
+    <li>Open the job's <b>💧 Drying Log</b>. Under <b>Equipment Deployment &amp; Runtime</b> tap <span class="ui">📷 Scan equipment</span>. The first time on a device it asks who you are, from the same list as <span class="ui">👤 Set tech</span>.</li>
+    <li>Pick the room. The suggestions are rooms already used on this job, the floor plan's rooms and the moisture map labels; tap one, or type the room and tap <span class="ui">Use</span>. Spell it the way the job already does.</li>
+    <li>Check the toggle at the top says <span class="ui">Place</span>. Point the camera at a label from 6 to 10 in. away. A green flash, a beep and a buzz mean it's logged, and the card at the bottom reads like <i>AM-014 Air mover → Kitchen</i>. Go to the next unit.</li>
+    <li>Next room: tap <span class="ui">Room: Kitchen ▾</span>, pick the room and keep scanning. The room stays picked until you change it.</li>
+    <li>Tap <span class="ui">Done</span>. Each unit is now a row on the drying log with a small 📷 in its Asset cell. Check the counter (<i>Placed 6 · Moved 0 · Removed 0</i>) against the units you set.</li>
+  </ol>
+  <h3>Pulling and moving units</h3>
+  <ul>
+    <li><b>Pulling:</b> switch the toggle to <span class="ui">Remove</span> and scan each unit as it comes out. No room is needed. Its Removed time and Hrs fill in on its row.</li>
+    <li><b>Moving to another room:</b> stay in <span class="ui">Place</span>, pick the new room and scan the unit. It keeps its one row, so it is never counted twice, and the app adds a Notes line such as <i>moved to Bedroom 2 10/09 14:30</i>.</li>
+    <li>The Place / Remove toggle stays where you left it, even the next time the scanner opens. Look at it before the first scan.</li>
+  </ul>
+  <table class="keep">
+    <tr><th style="width:40%">An amber card says</th><th>What it means</th></tr>
+    <tr><td><i>AM-014 is already in Kitchen</i></td><td>Scanned twice. Nothing new was logged.</td></tr>
+    <tr><td><i>AM-014 isn't out on this job</i></td><td>Remove mode, but the unit was never placed on this job. Check the toggle and the job.</td></tr>
+    <tr><td><i>… (still out on another job)</i></td><td>It's logged here anyway. The other job never recorded it coming out; the office sees both and sorts it out.</td></tr>
+    <tr><td><i>What is 101?</i></td><td>A tag with no letters that isn't on the fleet list yet. Tap Air mover, Dehumidifier, Air scrubber or Heater once.</td></tr>
+    <tr><td><i>That QR code isn't an equipment label.</i></td><td>It read some other QR code, such as a contents box label.</td></tr>
+  </table>
+  <h3>When a label won't scan</h3>
+  <ul>
+    <li>Wipe the label, move a little closer or farther, and turn on <span class="ui">🔦</span> if the device shows it.</li>
+    <li>Tap <span class="ui">⌨ Type tag</span> at the bottom of the scanner, type the tag (<i>AM-014</i>, or <i>am 14</i>) and tap <span class="ui">Use</span>. It's logged like a scan, with the time and room, and marked as typed.</li>
+    <li>If the scanner says <b>Camera didn't start.</b>, it offers <span class="ui">📷 Photo of the label</span> (take a picture of the label and the app reads the QR code from it), <span class="ui">⌨ Type the tag</span> and <span class="ui">Try the camera again</span>. On an iPhone or iPad, check that Settings → Safari → Camera isn't set to Deny.</li>
+    <li>If the scanner won't open at all, add the row by hand with <span class="ui">+ Add equipment</span> as before. A typed row counts everywhere a scanned row does.</li>
+  </ul>
+  <h3>Undo and fixing a row</h3>
+  <ul>
+    <li>Scanned the wrong unit or the wrong room? Tap <span class="ui">Undo</span> on the card right away, before the next scan, then scan again.</li>
+    <li>Later, on the drying log, ✕ on a scanned row asks <i>Undo this scan?</i> and undoes the whole row: its placing, any moves and its removal. Then scan the unit again the right way.</li>
+    <li>On a scanned row the tag, the placed time and Hrs come from the scan and can't be typed over, and neither can the removed time once the unit was scanned out. The fill handle skips them. Type, Location and Notes stay editable, so you can still fix a room's spelling or write why a unit is still needed after 7 days.</li>
+    <li>A scanned unit that came out without being scanned: type its Removed date and time on its row.</li>
+  </ul>
+  <h3>Good to know</h3>
+  <ul>
+    <li><span class="ui">📸 Room photo</span> in the scanner takes a During photo of the room you're in, captioned with the room and the tags you scanned there (<i>Equipment - Kitchen - AM-014, AM-015</i>).</li>
+    <li>Scanning works with no signal once the device has been online at least once since scanning was switched on. Two people can scan on the same job at the same time; every scan is kept and the rows come out the same on both devices after they sync.</li>
+    <li>Each scan records the device's date and time, the room, the login and the tech set on the device. Leave the device's Date &amp; Time on <i>Set Automatically</i>.</li>
+    <li>The "still out on another job" check is only as fresh as the device's last sync.</li>
+  </ul>
+  <div class="note"><b>What prints</b>On the drying log sheet, a placed or removed time recorded by a scan carries a small <b>S</b>, with the legend "S = recorded by scanning the unit's QR label on site". Under the equipment table, the <b>Equipment scan record</b> lists every scan in time order (Time, Tag, Type, Action, Room, Read by, Tech). Its footnote tells the adjuster that the times come from the scanning device's clock, and that each scan is also logged on Roybal's server when the device syncs, in a log that can't be edited. An undone scan comes off the row and the printed record; the server log keeps both the scan and the undo.</div>
+  <div class="gate"><b>Switching on</b>The <span class="ui">📷 Scan equipment</span> button stays greyed out until this feature's database update is applied, with the note "Scanning switches on after this feature's database update is applied." A device that hasn't been online since then says "Connect once to switch scanning on": get a signal and open the drying log again. Until then, add rows with <span class="ui">+ Add equipment</span>.</div>
 
   <h2 class="sec" id="s-photos">Job photos</h2>
   <div class="row">
@@ -458,19 +508,20 @@
     <li>If the app says <b>"This app is out of date — close and reopen it to update, then sync"</b>, swipe the app closed and open it again. Your work is still on the phone and syncs after the update.</li>
     <li>The app updates itself in the background and reloads when you are not typing. The build number is at the bottom of the job list.</li>
     <li>If a merge happened you'll see "🔀 merged changes from another device". Nothing was lost.</li>
+    <li>Equipment scans from two devices on the same job merge too: every scan is kept, and the drying log rows come out the same on both.</li>
   </ul>
 </section>
 
 <!-- ============================ 3. OFFICE ADMIN ============================ -->
 <section class="chapter" id="ch3">
   <div class="chapter__head"><div class="num">Chapter 3</div><h1>Office Admin</h1><div class="who">For Branden at the desk · app.roybalconstruction.com/admin</div></div>
-  <p>The Office Admin is the owner's desk. Tabs run across the top: <span class="ui">Today</span> <span class="ui">Approvals</span> <span class="ui">Leads</span> <span class="ui">Jobs</span> <span class="ui">Receipts</span> <span class="ui">Contacts</span> <span class="ui">Campaigns</span> <span class="ui">Analytics</span> <span class="ui">⚙ Settings</span> and <span class="ui">❓ Help</span>. Leads and Approvals carry a count badge when something is waiting. The 💬 button opens the same assistant as the field app, with every job in view.</p>
+  <p>The Office Admin is the owner's desk. Tabs run across the top: <span class="ui">Today</span> <span class="ui">Approvals</span> <span class="ui">Leads</span> <span class="ui">Jobs</span> <span class="ui">Receipts</span> <span class="ui">Equipment</span> <span class="ui">Contacts</span> <span class="ui">Campaigns</span> <span class="ui">Analytics</span> <span class="ui">⚙ Settings</span> and <span class="ui">❓ Help</span>. Leads and Approvals carry a count badge when something is waiting. The 💬 button opens the same assistant as the field app, with every job in view.</p>
 
   <h2 class="sec" id="s-today">Today</h2>
   <figure class="wide"><div class="frame" style="height:3.9in"><img src="shots/admin-today.jpg"></div><figcaption><b>Today</b>: lead numbers, job numbers, company texting and job email.</figcaption></figure>
   <ul>
     <li><b>Lead row:</b> unworked leads, overdue follow-ups, pipeline value, average first touch, site visits this week, and estimates out with no answer after 5 days. Click a tile to jump to Leads.</li>
-    <li><b>Ops row:</b> total jobs, active in the last 7 days, drying in progress, and jobs that need attention (equipment out 7+ days).</li>
+    <li><b>Ops row:</b> total jobs, active in the last 7 days, drying in progress, and jobs that need attention (equipment out 7+ days; click it for the Equipment tab).</li>
     <li><b>↩ Return windows closing</b> appears only when a store's return window is about to close on leftover material. <span class="ui">Nothing left over</span> clears it.</li>
     <li><b>💬 Company texting:</b> the latest conversations on the toll-free number, newest first, with new replies marked.</li>
     <li><b>📧 Job email waiting:</b> unread job email matched to a job by claim # or customer. <span class="ui">✓ Read</span> or <span class="ui">Mark all read</span>; anything you handle in Gmail clears itself.</li>
@@ -530,6 +581,30 @@
     <li><span class="ui">Return windows</span> sets how many days each store allows (for example 90 days at the hardware store, 30 at the lumber yard). The Today screen warns before a window closes.</li>
   </ul>
   <div class="gate"><b>Gated</b><span class="ui">↩ Log a return</span> stays greyed out until every crew phone is on field build v202 or newer. When Branden writes <b>"require v202"</b>, the app starts requiring that build; phones on an older build stop saving until Field Forms is closed and reopened. Returns and return windows are owner and office only.</div>
+
+  <h2 class="sec" id="s-aequip">Equipment</h2>
+  <p>The <span class="ui">🏷️ Equipment</span> tab shows where every drying unit is, from the jobs' drying logs and the QR labels the crew scans on site (<a href="#s-scan">Scanning equipment in and out</a>). It also keeps the <b>fleet list</b> the labels print from.</p>
+  <ul>
+    <li><b>Out now</b> lists every unit placed on a job's drying log and not yet removed, on every job, scanned or typed: tag, type, job (click it to open the job in Field Forms), room, since, days out, and how it was logged (📷 Scanned, 📷 Label photo, ⌨ Tag typed in, or ✎ Typed for a row added by hand). A unit out <b>7+ days</b> is flagged. Units still open on archived jobs are counted under the list, and <span class="ui">Show them</span> lists them.</li>
+    <li><b>⚠ Out on two jobs at once</b> is listed first. A unit can only be in one place, so it came off one of those jobs without a scan or a removal date. Open the job it left and scan it out (Remove), or type its removal date on that drying log.</li>
+    <li><b>Fleet list:</b> one row per labelled unit, with its tag, type, make and model, rating, owned or rented, status, where it is now and its last scan. Search it, filter by type and status, and set a unit to Active, Repair or Retired from its row. <span class="ui">Edit</span> changes one unit.</li>
+    <li><b>Tags seen, not in the fleet list:</b> tags scanned on a job that aren't on the list yet. <span class="ui">Add</span> puts one on in one tap (the type comes from the letters; pick it for a plain number), or <span class="ui">Add all</span> takes them all. Once a tag is on the list, its labels print and the scanner names it.</li>
+  </ul>
+  <h3>Adding units</h3>
+  <ol class="steps">
+    <li>Tap <span class="ui">+ Add units</span> and pick the type. The prefix follows it: <b>AM</b> air mover, <b>DH</b> dehumidifier, <b>AF</b> air scrubber, <b>HT</b> heater. Clear the prefix for plain numbers.</li>
+    <li>Enter the first and last number and the digits (3 makes AM-001), plus the make, model, rating and owned or rented when the whole run shares them. The form shows the tags it will add.</li>
+    <li>Tap <span class="ui">Add units</span>. The whole run goes on at once, and tags already on the list are skipped.</li>
+  </ol>
+  <h3>Printing labels</h3>
+  <ol class="steps">
+    <li>Tap <span class="ui">🖨 Print labels</span>, choose all active units, the list as filtered now, or the ticked units, and tap <span class="ui">Open the label sheet</span>.</li>
+    <li>On a part-used sheet, enter how many labels on the first sheet are already used.</li>
+    <li>Tap <span class="ui">🖨 Print</span> and print at 100% (Actual size, not Fit to page) with headers and footers off. Each sheet is 10 labels of 2 × 4 in (Avery 5163 / 5523 layout). Each label has the QR code on the left, then the tag in large type, the type, the make and model, and Roybal Construction.</li>
+  </ol>
+  <div class="tip"><b>Label stock</b>Use weatherproof laser labels (Avery 5523, or polyester laser stock). Stick them on indoors above 50°F on a clean, dry spot on the top or handle side, never a grille or filter door. Try one on an air mover first. Changing a unit's tag changes what its label says, so print a new one; scans already logged on jobs keep the tag they read.</div>
+  <div class="gate"><b>Switching on</b>Out now works from the jobs right away. The fleet list, the labels and the crew's <span class="ui">📷 Scan equipment</span> button switch on after this feature's database update is applied; until then each one says so. The owner, the office and crew leads can change the fleet list. Every phone and tablet should run field build v208 or newer before the crew scans: an older build doesn't know about scans and can drop the ones another device made when it saves. When Branden writes <b>"require v208"</b>, phones on an older build stop saving until Field Forms is closed and reopened.</div>
+  <p class="small muted">Every scan is also logged on Roybal's server with the time the server received it. That log only adds: an undo is logged as one more entry, and nothing in it can be edited.</p>
 
   <h2 class="sec" id="s-contacts">Contacts and campaigns</h2>
   <figure class="wide"><div class="frame" style="height:2.5in"><img src="shots/admin-contacts.jpg"></div><figcaption><b>Contacts</b>: customers, adjusters, agents, property managers and subs.</figcaption></figure>
@@ -712,6 +787,7 @@
     <tr><td>✅ Approvals inbox</td><td>Live</td><td>Owner only. Both the text-YES queue and the newer approval queue in one list.</td></tr>
     <tr><td>One-tap overdue-invoice reminders and adjuster emails</td><td>Live</td><td>Cards in Approvals, answered by tap or by texting YES and the card's number. Nothing sends without the owner's yes.</td></tr>
     <tr><td>🧾 Invoice gaps (nightly billing check)</td><td>Live</td><td>Each night, water jobs are checked for drying-log equipment days, QuickBooks Time hours (hourly invoices only) and recorded Cat 3 work that no invoice bills. Gaps arrive as cards in Approvals; approving adds them once as a new draft invoice for the office to price. Approvals tab only, never by text.</td></tr>
+    <tr><td>📷 Equipment scan in and out</td><td>Waiting</td><td>Field build v208. A QR label on every unit; the crew scans units in, between rooms and out from the Drying Log, and Office Admin → Equipment shows where every unit is, keeps the fleet list and prints the labels. Scanning, the fleet list and labels switch on once this feature's database update is applied; Branden writes "require v208" before the crew starts scanning. Out now works from the jobs right away.</td></tr>
     <tr><td>Receipts matched to QuickBooks</td><td>Planned</td><td>Nightly match to bank-feed charges, then "tag + attach" approvals; materials onto T&amp;M invoices; cost vs estimate.</td></tr>
     <tr><td>Magicplan quantities into the estimate</td><td>Planned</td><td>Room measurements flowing straight into estimate line items.</td></tr>
     <tr><td>📅 My Week</td><td>Parked</td><td>Hidden until the board schedule feeds it reliably, so crews never see wrong days.</td></tr>
@@ -727,9 +803,9 @@
   <table>
     <tr><th style="width:24%">When</th><th>Restoration job</th><th>Construction job</th></tr>
     <tr><td><b>Day 1, before work</b></td><td>Job header complete (claim #, carrier, category and class). Work authorization signed. Before photos of every room.</td><td>Pre-construction checklist: contract, deposit, permits. Before photos.</td></tr>
-    <tr><td><b>Every visit</b></td><td>Moisture readings at every marker. Drying log reading and equipment count. During photos. Receipts snapped.</td><td>Progress photos by room. Receipts snapped. Field report for anything the office needs to know.</td></tr>
+    <tr><td><b>Every visit</b></td><td>Moisture readings at every marker. Drying log reading and equipment count. Units set, moved or pulled today scanned with 📷 Scan equipment. During photos. Receipts snapped.</td><td>Progress photos by room. Receipts snapped. Field report for anything the office needs to know.</td></tr>
     <tr><td><b>Leaving site</b></td><td>Check the job page's completeness panel. Sync dot green.</td><td>Punch items logged with photos. Sync dot green.</td></tr>
-    <tr><td><b>Closing out</b></td><td>Dry standard met on every material; Cert. of Drying signed; equipment removed dates entered; after photos.</td><td>Punch list cleared; inspections passed; Cert. of Completion signed; after photos.</td></tr>
+    <tr><td><b>Closing out</b></td><td>Dry standard met on every material; Cert. of Drying signed; every unit scanned out (Remove) or its removed date entered; after photos.</td><td>Punch list cleared; inspections passed; Cert. of Completion signed; after photos.</td></tr>
   </table>
 
   <h2 class="sec" id="s-trouble">When something looks wrong</h2>
@@ -741,17 +817,22 @@
     <tr><td>A job looks old on this phone</td><td>👤 → ↻ Sync. Still old: sign out and back in to re-pull it.</td></tr>
     <tr><td>Something you entered is missing</td><td>Open the job, unfold ⏪ Backups on this device and tap ⏪ Restore; it only adds back what is missing. Last resort: ☁ Cloud copy → Take the cloud's copy. Call the office first.</td></tr>
     <tr><td>AI button does nothing, "AI needs internet"</td><td>Get signal; typed entries are already saved.</td></tr>
+    <tr><td>📷 Scan equipment greyed out</td><td>"Connect once to switch scanning on": get signal and open the drying log again. "Scanning switches on after this feature's database update is applied": not switched on yet; use + Add equipment.</td></tr>
+    <tr><td>Scanner says "Camera didn't start."</td><td>Tap 📷 Photo of the label or ⌨ Type the tag. On an iPhone or iPad, check Settings → Safari → Camera isn't set to Deny.</td></tr>
+    <tr><td>A label won't scan</td><td>Wipe it, turn on 🔦, hold the camera 6 to 10 in. away. Still nothing: ⌨ Type tag in the scanner, and tell the office the label needs replacing.</td></tr>
     <tr><td>Start bid greyed out</td><td>A job for that customer or claim # already exists. Open that job.</td></tr>
     <tr><td>Office connection shows ▲ Needs reconnect</td><td>Office Admin → ⚙ Settings → reconnect that panel.</td></tr>
   </table>
 
   <h2 class="sec" id="s-glossary">Glossary</h2>
   <table>
-    <tr><td style="width:24%"><b>Bid file</b></td><td>The Field Forms job created by 📐 Start bid. It becomes the job when the lead is won.</td></tr>
+    <tr><td style="width:24%"><b>Asset tag</b></td><td>The number on a drying unit's label, such as AM-014: AM air mover, DH dehumidifier, AF air scrubber, HT heater, then the unit's number. The label's QR code carries the same tag. The fleet list in Office Admin → Equipment is the master list of tags.</td></tr>
+    <tr><td><b>Bid file</b></td><td>The Field Forms job created by 📐 Start bid. It becomes the job when the lead is won.</td></tr>
     <tr><td><b>Category / Class</b></td><td>IICRC water category (1 clean, 2 gray, 3 black) and class of water (evaporation load 1 to 4).</td></tr>
     <tr><td><b>Completeness panel</b></td><td>The list on each job of what is still missing before it can be billed.</td></tr>
     <tr><td><b>Confirm chip</b></td><td>An action the assistant proposes; nothing happens until someone taps it.</td></tr>
     <tr><td><b>Dry goal</b></td><td>The moisture content a material must reach to count as dry, filled in from the material.</td></tr>
+    <tr><td><b>Fleet list</b></td><td>The office's list of every labelled unit (tag, type, make, model, status), in Office Admin → Equipment. Labels print from it.</td></tr>
     <tr><td><b>GPP / grain depression</b></td><td>Grains of moisture per pound of air, and the difference between the room air and the dehumidifier output. Both calculate themselves.</td></tr>
     <tr><td><b>Packet</b></td><td>All of a job's completed forms in one PDF for the carrier.</td></tr>
     <tr><td><b>Portal</b></td><td>The customer's private job page.</td></tr>

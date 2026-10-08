@@ -21,6 +21,8 @@ const MIME = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".ico": "image/x-icon",
+  // the scanner's decoder: streaming wasm compile needs this exact type
+  ".wasm": "application/wasm",
 };
 
 const server = createServer(async (req, res) => {
