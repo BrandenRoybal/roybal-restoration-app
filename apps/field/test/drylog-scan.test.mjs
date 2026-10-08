@@ -90,6 +90,8 @@ function eqTable(sheet) {
 const rowsOf = (sheet) => [...eqTable(sheet).querySelector("tbody").children];
 const inputsOf = (tr) => [...tr.querySelectorAll("input")];   // asset, placed, removed, hours
 const typeInto = (el, v) => { el.value = v; el.dispatchEvent(new window.Event("input", { bubbles: true })); };
+// typed, then the field left (the picker closed): what a change listener sees
+const enter = (el, v) => { typeInto(el, v); el.dispatchEvent(new window.Event("change", { bubbles: true })); };
 const btn = (scope, label) => [...scope.querySelectorAll("button")].find((b) => b.textContent.trim() === label);
 
 /* drag a cell's fill handle from row `from` down to the last row (jsdom has no
@@ -221,13 +223,17 @@ await test("a Removed typed on a scanned row, then the unit scanned back in: the
   assert.ok(!removed.readOnly, "a typed removal stays correctable");
   assert.equal(find().querySelectorAll("sup.scan-s").length, 1, "S on placed only: the typed removal is not a scan");
   assert.ok(placed.readOnly);
-  typeInto(removed, "");
+  enter(removed, "");
   assert.equal(oldRow().removed, "2026-10-06T08:00", "clearing is refused");
   assert.equal(removed.value, "2026-10-06T08:00");
   assert.match(toastText(), /Can't be cleared: AM-014 was scanned back in 10\/07\/2026 12:00/);
-  typeInto(removed, "2026-10-07T13:00");
+  enter(removed, "2026-10-07T13:00");
   assert.equal(oldRow().removed, "2026-10-06T08:00", "a time past the re-scan is refused");
   assert.match(toastText(), /no later than 10\/07\/2026 12:00/);
+  // the date picked before the time: the step in between waits, the finished value goes in
+  typeInto(removed, "2026-10-07T13:00");
+  assert.equal(removed.value, "2026-10-07T13:00", "not snapped back while picking");
+  assert.equal(oldRow().removed, "2026-10-06T08:00");
   typeInto(removed, "2026-10-07T09:00");
   assert.equal(oldRow().removed, "2026-10-07T09:00", "a correction is kept");
   assert.equal(oldRow().hours, 47, "and its hours follow");
@@ -249,7 +255,10 @@ await test("clearing or retyping Removed on a typed row a scan filled voids that
   const removed = inputsOf(tr)[2];
   assert.ok(!removed.readOnly, "a typed row stays editable");
   assert.equal(tr.querySelectorAll("sup.scan-s").length, 1, "the scanned Removed prints an S");
+  assert.ok(sheet.querySelector(".eqscan-rec").textContent.includes("AM-020"));
   typeInto(removed, "");
+  assert.equal(tr.querySelectorAll("sup.scan-s").length, 0, "the S comes off at once");
+  assert.ok(!sheet.querySelector(".eqscan-rec").textContent.includes("AM-020"), "and so does the scan record line");
   assert.equal(typedRow.removed, "");
   assert.ok(!liveScans(p).some((e) => e.id === "e5"), "the scan is voided");
   applyScans(p);
@@ -406,10 +415,18 @@ await test("deleting a typed row's moved-to line undoes that move scan; it doesn
   recordScan(p, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e6", T2) });
   assert.equal(row.notes, "fan on high\nmoved to Bedroom 10/07 12:00");
   const sheet = render(p);
+  assert.ok(sheet.querySelector(".eqscan-rec").textContent.includes("AM-020"), "the move prints");
   const notesTa = [...rowsOf(sheet)[0].querySelectorAll("textarea.cell-ta")].pop();   // the last free-text column
+  notesTa.value = "fan on high\nmoved to Bedroom 10/07 12:00 - on high";   // a remark after it keeps the move
+  notesTa.dispatchEvent(new window.Event("input", { bubbles: true }));
+  notesTa.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(liveScans(p).some((e) => e.id === "e6"));
   notesTa.value = "fan on high";
   notesTa.dispatchEvent(new window.Event("input", { bubbles: true }));
+  assert.ok(liveScans(p).some((e) => e.id === "e6"), "nothing undone while still typing");
+  notesTa.dispatchEvent(new window.Event("change", { bubbles: true }));
   assert.ok(!liveScans(p).some((e) => e.id === "e6"), "the move scan is undone");
+  assert.ok(!view.firstChild.querySelector(".eqscan-rec").textContent.includes("AM-020"), "and off the print at once");
   applyScans(p);
   assert.equal(row.notes, "fan on high", "the line stays deleted");
   assert.equal(row.scanFill, undefined);

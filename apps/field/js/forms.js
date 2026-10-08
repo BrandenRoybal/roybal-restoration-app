@@ -38,7 +38,7 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
-import { applyScans, voidPlacement, scanRecord, releaseTypedScans, rowScans, rowOutAt, wallTime } from "./scans.js";
+import { applyScans, voidPlacement, scanRecord, releaseTypedScans, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
@@ -766,8 +766,9 @@ export function dryingLog(project, d) {
         if (scanLocked(row, key) || (key === "removed" && endedRefusal(row, src))) { kept++; return; }
         row[key] = key === "asset" ? bumpAsset(src, k + 1) : src;
         if (key === "hours") row._manualHrs = true;
-        // what's typed replaces a scan's
-        if ((key === "removed" || key === "notes") && !row.scanId) releaseTypedScans(project, row, scanUndoCtx(), key);
+        // a typed Removed replaces a scan's; Notes written over get their move lines back, as on a scanned row
+        if (key === "removed" && !row.scanId) releaseTypedScans(project, row, scanUndoCtx());
+        if (key === "notes") restoreMoveLines(row);
         filled++;
       });
       // a Removed filled onto scanned rows: their hours are applyScans' figure
@@ -808,15 +809,25 @@ export function dryingLog(project, d) {
         readonly: locked, title: locked ? LOCK_TITLE : null });
       input.addEventListener("input", () => {
         if (scanLocked(row, key)) { input.value = row[key] ?? ""; return; }
-        const refused = key === "removed" ? endedRefusal(row, input.value) : "";
-        if (refused) { input.value = row[key] ?? ""; toast(refused, 4000); return; }
+        // an ended row's Removed: a value part-way through the picker waits for the change check
+        if (key === "removed" && endedRefusal(row, input.value)) return;
         row[key] = input.value;
         if (key === "hours") row._manualHrs = true;
-        // a Removed typed (or cleared) on a typed row replaces a scan that filled it
-        if (key === "removed" && !row.scanId) releaseTypedScans(project, row, scanUndoCtx());
+        // a Removed typed (or cleared) on a typed row replaces a scan that filled it: off the print too
+        if (key === "removed" && !row.scanId && releaseTypedScans(project, row, scanUndoCtx()).length) {
+          c.classList.remove("scan-cell");
+          c.querySelector("sup.scan-s")?.remove();
+          paintScanPrint();
+        }
         if (row.scanId) { applyScans(project); if (hoursInput) hoursInput.value = row.hours ?? ""; }   // a typed removal on a scanned row
         recalcDays(); refreshWarn(); commit();
       });
+      if (key === "removed") {
+        input.addEventListener("change", () => {
+          const refused = endedRefusal(row, input.value);
+          if (refused) { input.value = row[key] ?? ""; toast(refused, 4000); }
+        });
+      }
       if (key === "hours") hoursInput = input;
       c.append(input);
       // printed: a superscript S on a time the scan recorded (legend under the table)
@@ -829,9 +840,14 @@ export function dryingLog(project, d) {
     };
     // free-text columns grow with their text; the fill handle still works
     const mkTa = (key, w) => {
-      // a typed row's "moved to" line deleted or edited by hand: what's typed replaces that scan
-      const oninput = key === "notes" && !row.scanId ? () => releaseTypedScans(project, row, scanUndoCtx(), "notes") : null;
-      const c = taCell(row, key, { minWidth: w, oninput });
+      const c = taCell(row, key, { minWidth: w });
+      // a typed row's "moved to" line deleted or rewritten by hand (checked once the edit is done):
+      // what's typed replaces that move scan
+      if (key === "notes" && !row.scanId) {
+        c.querySelector("textarea").addEventListener("change", () => {
+          if (releaseTypedScans(project, row, scanUndoCtx(), "notes").length) { paintScanPrint(); commit(); }
+        });
+      }
       c.classList.add("fillcell");
       attachFill(c, i, key);
       return c;
