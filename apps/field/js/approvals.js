@@ -22,7 +22,8 @@
             collide). Since step 5, "YES n" by text reaches these rows
             too (roybal-notify's handleApproval matches sms_code), and a
             waiting spine card offers it the way a text-queue card does,
-            all but the nightly billing check's invoice gaps: roybal-notify
+            all but the nightly billing check's invoice gaps and the
+            nightly QuickBooks match's receipts cards: roybal-notify
             never reads those, so they are answered here only.
             An email here goes out through the worker, which sends only
             while its heartbeat lists the "email" channel; the page
@@ -30,6 +31,10 @@
             is off. A send the worker gave up on stays in Recently
             decided for 48 hours from when it did (its outbox row's last
             update), however old the approval, so "Couldn't send" is seen.
+            A QuickBooks receipts card (receipts.qbo_link) works the same
+            way with one outbox row per receipt on the "qbo" channel:
+            "executed" only means they were queued, so its outcome counts
+            those rows (updated, waiting, refused and why).
 
    The office page (apps/admin/js/approvals.js) reads both queues and
    the names around them; everything that decides what a card says
@@ -66,10 +71,17 @@ const KINDS = {
   phase: { chip: "Board phase", approve: "Approve and add phase" },
   stage: { chip: "Job stage", approve: "Approve and move job" },
   gaps: { chip: "Invoice gaps", approve: "Approve and add lines" },
+  qbo: { chip: "QuickBooks", approve: "Approve: update QuickBooks" },
   other: { chip: "", approve: "Approve" },
 };
 const TEXT_KIND = { emailSend: "email", sendText: "text", boardEdit: "phase" };
-const SPINE_KIND = { "email.send": "email", "sms.send": "text", "job.set_stage": "stage", "invoice.review_gaps": "gaps" };
+const SPINE_KIND = { "email.send": "email", "sms.send": "text", "job.set_stage": "stage", "invoice.review_gaps": "gaps",
+  "receipts.qbo_link": "qbo" };
+/* the spine kinds roybal-notify never reads (its INBOX_ONLY_FILTER): no YES number on them */
+const INBOX_ONLY = ["gaps", "qbo"];
+/* the spine kinds whose approval writes outbox rows the worker delivers: what
+   came of one is in those rows, not in the proposal */
+const SENDS = ["email", "text", "qbo"];
 /* what each queue calls an answered row */
 const DECIDED = {
   text: ["approved", "executed", "failed", "declined"],
@@ -206,13 +218,18 @@ function refsOf(v) {
            isn't sending email, null when the page couldn't tell), laneHint
            (the line a waiting card shows about that, or ""),
            answeredHere (set by decidedText: this tab just answered it; the
-           page sets it too while this tab's answer to it is still out) }
+           page sets it too while this tab's answer to it is still out),
+           qboLane (a QuickBooks receipts card only: the emailLane of the
+           "qbo" channel), outboxes (a QuickBooks receipts card only: every
+           outbox row of its proposal, one per receipt; [] elsewhere) }
    evidence carries every kind's fields, empty where they don't apply; an
    invoice-gaps card fills lines, hints, total, totalUsd, unpriced, sent and
-   invoice (gapsOf)
+   invoice (gapsOf); a QuickBooks receipts card fills receipts and link
+   (qboOf)
    look: { jobs: {id: name}, ops: {"email.send@1": description},
-           people: {id: name}, outbox: {proposalId: outbox row},
-           emailLane: true | false | null } */
+           people: {id: name}, outbox: {proposalId: newest outbox row},
+           outboxes: {proposalId: [its outbox rows]},
+           emailLane, qboLane: true | false | null } */
 
 /* What a spine email says while the worker isn't sending email, in the
    words roybal-notify texts back when a YES lands in that state ("It's
@@ -223,6 +240,11 @@ function refsOf(v) {
 export const LANE_OFF_WAITING = "Email sending is off on the worker right now: approving queues this, and it waits up to 48 hours for sending to come back, then it isn't sent.";
 export const LANE_OFF_QUEUED = "Queued, but email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent";
 export const LANE_OFF_FAILED = "Send failed, and email sending is off on the worker: it waits up to 48 hours for that, then it isn't sent";
+/* The same for a QuickBooks receipts card while the worker isn't serving the
+   "qbo" channel (RECEIPTS_QBO=off, or a worker that stopped). Its rows have
+   no age limit: they wait, and go when the channel is back. */
+export const QBO_OFF_WAITING = "QuickBooks updates are off on the worker right now: approving queues these, and they wait until updates are back on.";
+export const QBO_OFF_QUEUED = "Queued, but QuickBooks updates are off on the worker: nothing goes until they're back on";
 
 /** One pending_actions row → a card. */
 export function fromPending(row, look = {}) {
@@ -250,11 +272,11 @@ export function fromPending(row, look = {}) {
       to: str(p.to), cc: "", subject: str(p.subject), body: str(p.body),
       message: str(p.message), audience: str(p.audience),
       phase: str(phase.name), hours: Number.isFinite(hours) && hours > 0 ? hours : null,
-      stage: "", rationale: "", refs: [], reason: "", ...noGaps(),
+      stage: "", rationale: "", refs: [], reason: "", ...noGaps(), ...noQbo(),
     },
-    result: res, error: str(res.error), outbox: null,
+    result: res, error: str(res.error), outbox: null, outboxes: [],
     // the text queue's email goes out through gmail-proxy, not the worker
-    emailLane: null, laneHint: "",
+    emailLane: null, qboLane: null, laneHint: "",
   };
 }
 
@@ -335,6 +357,66 @@ function gapsOf(r) {
   };
 }
 
+/* ---------- QuickBooks receipts (the nightly QuickBooks match) ---------- */
+const noQbo = () => ({ receipts: [], link: "" });
+/* "2026-09-30" → "Sep 30": the receipt's own calendar date, never shifted by a timezone */
+const DATE_ONLY = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
+function dayOf(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str(v));
+  if (!m) return "";
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]) ? DATE_ONLY.format(d) : "";
+}
+
+/* A receipts.qbo_link row (receipts.qbo_match files it; input shape:
+   services/worker/lanes/qbomatch.mjs) → what approving does, one line per
+   receipt: "Home Depot · Sep 30 · $1,369.50 → QuickBooks expense 10577
+   (3176 - Citi - Home Depot Consumer Credit Card): tag to Pollen
+   Apartments, attach the photo". The receipts are the ones
+   op_exec_receipts_qbo_link would queue: the proposal's own, less any an
+   edit dropped (an edit may only drop items, each kept exactly as filed,
+   so the content always comes from the input). A card that also links the
+   job to a QuickBooks project (the job had none; approving is the pick)
+   says so and why. Every figure is formatted here, so the page prints no
+   null, NaN or undefined. */
+function qboOf(r) {
+  const input = obj(r.input);
+  const pick = obj(r.edited_params).items;
+  const keep = Array.isArray(pick) ? new Set(pick.map((i) => str(obj(i).receipt_id))) : null;
+  const link = obj(input.link);
+  const project = str(input.qbo_name) || str(link.qbo_name) || "the job's QuickBooks project";
+  const receipts = arr(input.items).map(obj).filter((i) => !keep || keep.has(str(i.receipt_id))).slice(0, 50).map((i) => {
+    const amount = num(i.amount);
+    const money = amount == null ? "" : USD.format(cents(decimal(amount))) + (amount < 0 ? " (return)" : "");
+    const head = [str(i.vendor) || "A receipt", dayOf(i.date), money].filter(Boolean).join(" · ");
+    const changes = arr(i.changes).map(str);
+    const doc = str(i.qbo_doc_number), account = str(i.qbo_account_name), txn = str(i.qbo_txn_id);
+    const vendor = str(i.qbo_vendor_name);
+    const create = changes.includes("create");
+    // where it goes: the expense already in QuickBooks (its id, then the
+    // vendor, the ref number and the account QuickBooks shows it under, so a
+    // vendor that isn't the receipt's shows before approving), or the one
+    // approving enters
+    const about = [vendor, doc && "ref " + doc, account].filter(Boolean).join(", ");
+    const target = create
+      ? "a new QuickBooks expense" + (account ? ` on ${account}` : "") + (doc ? ` (ref ${doc})` : "")
+      : "QuickBooks expense" + (txn ? " " + txn : "") + (about ? ` (${about})` : "");
+    // what it gets: entering a store invoice tags its one line as it goes
+    const photos = arr(i.photo_refs).length;
+    const what = [
+      create ? `enter it, tagged to ${project}` : changes.includes("tag") ? `tag to ${project}` : "",
+      changes.includes("attach") ? (photos > 1 ? `attach the ${photos} photos` : "attach the photo") : "",
+    ].filter(Boolean).join(", ") || "no change listed";
+    return { id: str(i.receipt_id), text: `${head} → ${target}: ${what}` };
+  });
+  const linking = str(link.qbo_customer_id) || str(link.qbo_name);
+  const why = str(link.why);
+  return {
+    receipts,
+    link: linking ? `Links this job to QuickBooks project ${str(link.qbo_name) || "number " + str(link.qbo_customer_id)}${why ? ": " + why : ""}` : "",
+  };
+}
+
 /** One proposals row → a card. The input it shows is what would run:
     input with edited_params on top (op_execute's merge). */
 export function fromProposal(row, look = {}) {
@@ -348,29 +430,36 @@ export function fromProposal(row, look = {}) {
   // from it, so the card, the lookup and the confirm name that job; the
   // row's own job_id only stands in when the params name none
   const jobId = kind === "stage" ? str(edited.job_id ?? obj(r.input).job_id) || str(r.job_id) : str(r.job_id);
-  const job = own(look.jobs, jobId) || "";
+  // a QuickBooks receipts card carries the job's name as the matcher read
+  // it, for when the lookup can't name the job
+  const jobNamed = kind === "qbo" ? str(obj(r.input).job_name) : "";
+  const job = own(look.jobs, jobId) || jobNamed;
   const what = firstSentence(own(look.ops, str(r.operation)) || own(look.ops, name)) || name || "An ask";
   const gaps = kind === "gaps" ? gapsOf(r) : noGaps();
+  const qbo = kind === "qbo" ? qboOf(r) : noQbo();
   const key = kind === "email" || kind === "text" ? str(input.to) : kind === "stage" ? stageLabel(input.stage)
-    : kind === "gaps" ? `${plural(gaps.lines.length, "line")} · ${USD.format(gaps.totalUsd)}${gaps.unpriced ? ` · ${gaps.unpriced} unpriced` : ""}` : "";
+    : kind === "gaps" ? `${plural(gaps.lines.length, "line")} · ${USD.format(gaps.totalUsd)}${gaps.unpriced ? ` · ${gaps.unpriced} unpriced` : ""}`
+    : kind === "qbo" ? [jobNamed || job, plural(qbo.receipts.length, "receipt")].filter(Boolean).join(": ") : "";
   const byId = str(r.proposed_by_id);
   const status = str(r.status);
   // proposals_sms_code_seq numbers a row while it is proposed (unique only
   // among those, then free for reuse), so only a waiting row offers its number
   const code = Number(r.sms_code) || null;
-  const sending = own(look, "emailLane");
+  const sending = own(look, "emailLane"), serving = own(look, "qboLane");
   const emailLane = kind === "email" && (sending === true || sending === false) ? sending : null;
+  const qboLane = kind === "qbo" && (serving === true || serving === false) ? serving : null;
   return {
     key: "spine:" + str(r.id), lane: "spine", id: str(r.id), code, kind,
     chip: KINDS[kind].chip || name || "Ask",
     title: key ? `${what}: ${key}` : what,
     approveLabel: KINDS[kind].approve,
-    // invoice gaps are answered here only: roybal-notify reads none of them,
-    // so a YES with their number would answer like no such number
-    yesHint: code && status === "proposed" && kind !== "gaps" ? `or text YES ${code}` : "",
-    // job.set_stage moves a board job and invoice gaps go on a field job;
-    // anything else may name either table
-    jobId, jobTable: kind === "stage" ? "board" : kind === "gaps" ? "field" : "either", job,
+    // invoice gaps and QuickBooks receipts are answered here only:
+    // roybal-notify reads none of them, so a YES with their number would
+    // answer like no such number
+    yesHint: code && status === "proposed" && !INBOX_ONLY.includes(kind) ? `or text YES ${code}` : "",
+    // job.set_stage moves a board job; invoice gaps and receipts are on a
+    // field job; anything else may name either table
+    jobId, jobTable: kind === "stage" ? "board" : kind === "gaps" || kind === "qbo" ? "field" : "either", job,
     by: proposerName(r.proposed_by_kind, own(look.people, byId)),
     byKind: str(r.proposed_by_kind), byId,
     status, createdAt: str(r.created_at), expiresAt: str(r.expires_at),
@@ -382,12 +471,13 @@ export function fromProposal(row, look = {}) {
       message: kind === "text" ? str(input.body) : "", audience: "",
       phase: "", hours: null, stage: kind === "stage" ? stageLabel(input.stage) : "",
       rationale: str(r.rationale), refs: refsOf(r.evidence_refs),
-      reason: str(r.decline_reason), ...gaps,
+      reason: str(r.decline_reason), ...gaps, ...qbo,
     },
     result: obj(r.result), error: str(r.error),
     outbox: own(look.outbox, str(r.id)) || null,
-    emailLane,
-    laneHint: emailLane === false && status === "proposed" ? LANE_OFF_WAITING : "",
+    outboxes: kind === "qbo" ? arr(own(look.outboxes, str(r.id))) : [],
+    emailLane, qboLane,
+    laneHint: status !== "proposed" ? "" : emailLane === false ? LANE_OFF_WAITING : qboLane === false ? QBO_OFF_WAITING : "",
   };
 }
 const PROPOSER_KINDS = { human: "Someone in the office", agent: "An agent", policy: "A policy",
@@ -407,11 +497,17 @@ export const isExpired = (c, now = Date.now()) =>
   (c.status === "expired" || (c.status === openStatus(c) && ms(c.expiresAt) <= now)) &&
   ms(c.expiresAt) > now - EXPIRED_MS;
 /* When the worker gave up on a spine send (its outbox row went 'dead': the
-   row's last update), else NaN. Only a string time counts: this runs over
-   every card, outside cardsOf's guard. */
+   row's last update), else NaN; for a QuickBooks receipts card, the latest
+   of its rows that did. Only a string time counts: this runs over every
+   card, outside cardsOf's guard. */
 function diedAt(c) {
-  const o = c.lane === "spine" && c.status === "executed" ? obj(c.outbox) : {};
-  return o.status === "dead" && typeof o.updated_at === "string" ? ms(o.updated_at) : NaN;
+  if (c.lane !== "spine" || c.status !== "executed") return NaN;
+  let at = NaN;
+  for (const o of (c.kind === "qbo" ? arr(c.outboxes) : [c.outbox]).map(obj)) {
+    const t = o.status === "dead" && typeof o.updated_at === "string" ? ms(o.updated_at) : NaN;
+    if (Number.isFinite(t) && !(t <= at)) at = t;
+  }
+  return at;
 }
 /* The time a card counts as recent from: its answer, or when its send died
    if that came later. The worker can give up on an email long after the
@@ -461,7 +557,7 @@ export function inbox(pendingRows, proposalRows, look = {}, now = Date.now()) {
   const recent = cards.filter((c) => isRecent(c, now))
     .sort((a, b) => recentAt(b) - recentAt(a));
   const older = cards.filter((c) => c.lane === "spine" && c.status === "executed" &&
-    (c.kind === "email" || c.kind === "text") && !isRecent(c, now));
+    SENDS.includes(c.kind) && !isRecent(c, now));
   return { waiting, recent, expired: cards.filter((c) => isExpired(c, now)).length, skipped, older };
 }
 /* One number live on both queues at once can't be answered by text:
@@ -489,9 +585,10 @@ export function skippedLine(skipped) {
 
 /** The ids the page must name for the cards it shows: job ids per table
     (uuids only: one bad id would sink an in.() read; "either" goes to
-    both), proposers per kind, the spine sends whose outbox row says how
-    delivery went, and lanes: ["email"] when a spine email is waiting or
-    was sent, so the page reads the worker's heartbeat. */
+    both), proposers per kind, the spine sends whose outbox rows say how
+    delivery went (a QuickBooks receipts card's too), and lanes: "email"
+    when a spine email is waiting or was sent, "qbo" when a QuickBooks
+    receipts card is, so the page reads the worker's heartbeat. */
 export function needs(cards) {
   const out = { field: new Set(), board: new Set(), agents: new Set(), people: new Set(), outbox: new Set(), lanes: new Set() };
   for (const c of cards || []) {
@@ -502,8 +599,8 @@ export function needs(cards) {
     if (c.lane !== "spine") continue;
     if (UUID.test(c.byId) && c.byKind === "agent") out.agents.add(c.byId);
     if (UUID.test(c.byId) && c.byKind === "human") out.people.add(c.byId);
-    if (c.status === "executed" && (c.kind === "email" || c.kind === "text")) out.outbox.add(c.id);
-    if (c.kind === "email" && (c.status === "proposed" || c.status === "executed")) out.lanes.add("email");
+    if (c.status === "executed" && SENDS.includes(c.kind)) out.outbox.add(c.id);
+    if ((c.kind === "email" || c.kind === "qbo") && (c.status === "proposed" || c.status === "executed")) out.lanes.add(c.kind);
   }
   return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v]]));
 }
@@ -513,22 +610,28 @@ export function needs(cards) {
     its meta.channels lists "email"; false when it didn't (or no worker has
     ever beaten: outbox_channel_ready's rule); null when the read failed or
     the row won't read, which says nothing new on any card. */
-export function emailLaneOf(heartbeats, now = Date.now()) {
+export function emailLaneOf(heartbeats, now = Date.now()) { return laneOf(heartbeats, "email", now); }
+/** The same for the "qbo" channel: is the worker delivering QuickBooks
+    receipts changes (RECEIPTS_QBO=off drops it). */
+export function qboLaneOf(heartbeats, now = Date.now()) { return laneOf(heartbeats, "qbo", now); }
+function laneOf(heartbeats, channel, now) {
   if (!Array.isArray(heartbeats)) return null;
   if (!heartbeats.length) return false;
   const row = obj(heartbeats[0]);
   const at = ms(row.at);
   const channels = obj(row.meta).channels;
   if (!Number.isFinite(at) || !Array.isArray(channels)) return null;
-  return at > now - HEARTBEAT_FRESH_MS && channels.includes("email");
+  return at > now - HEARTBEAT_FRESH_MS && channels.includes(channel);
 }
 
 /** The lookup reads → the `look` the cards are built with. jobs are
-    {id, title, customer, address}; outbox rows newest first; heartbeats
-    the newest worker_heartbeats row as read (null: not read, or the read
-    failed), judged at now. */
+    {id, title, customer, address}; outbox rows newest first (outbox keeps
+    each proposal's newest, outboxes all of them: a QuickBooks receipts
+    card has one per receipt); heartbeats the newest worker_heartbeats row
+    as read (null: not read, or the read failed), judged at now. */
 export function lookFrom({ catalog = [], agents = [], profiles = [], jobs = [], outbox = [], heartbeats = null, now = Date.now() } = {}) {
-  const look = { jobs: {}, ops: {}, people: {}, outbox: {}, emailLane: emailLaneOf(heartbeats, now) };
+  const look = { jobs: {}, ops: {}, people: {}, outbox: {}, outboxes: {},
+    emailLane: emailLaneOf(heartbeats, now), qboLane: qboLaneOf(heartbeats, now) };
   for (const j of jobs) if (j && j.id) put(look.jobs, str(j.id), jobName(j));
   for (const o of catalog) {
     if (!o || !o.name) continue;
@@ -537,7 +640,12 @@ export function lookFrom({ catalog = [], agents = [], profiles = [], jobs = [], 
   }
   for (const a of agents) if (a && a.id && agentName(a.name)) put(look.people, str(a.id), agentName(a.name));
   for (const p of profiles) if (p && p.id && str(p.full_name)) put(look.people, str(p.id), str(p.full_name));
-  for (const o of outbox) if (o && o.proposal_id && !own(look.outbox, str(o.proposal_id))) put(look.outbox, str(o.proposal_id), o);
+  for (const o of outbox) {
+    if (!o || !o.proposal_id) continue;
+    const p = str(o.proposal_id);
+    if (!own(look.outbox, p)) { put(look.outbox, p, o); put(look.outboxes, p, []); }
+    own(look.outboxes, p).push(o);
+  }
   return look;
 }
 
@@ -586,6 +694,86 @@ function delivery(o, now) {
   return own({ sending: "Sending", sent: "Sent", delivered: "Delivered", failed: "Send failed, retrying",
     dead: "Couldn't send" + (str(o && o.error) ? ": " + str(o.error) : "") }, st) || "";
 }
+/* What qbo-proxy's completePurchase answered, in words. An outbox row the
+   worker gave up on keeps that answer as its error, which starts with the
+   code ("tagged_other: expense 10577 is already tagged to …"). Refusals
+   are QuickBooks or the card saying no (retrying can't help: the row died
+   at once); the rest are troubles that outlasted the worker's retries. */
+export const QBO_REFUSED = {
+  tagged_other: "tagged to another job", partly_tagged: "only partly tagged to this job",
+  untaggable: "the expense has no lines to tag", untaggable_line: "a line QuickBooks can't tag to a job",
+  changed_in_qbo: "changed in QuickBooks since the card was filed", purchase_missing: "the expense is gone from QuickBooks",
+  photo_missing: "the receipt photo is missing", photo_type: "the photo isn't a JPEG, PNG or PDF",
+  photo_unreadable: "the photo couldn't be read", photo_too_big: "the photo is over 20 MB",
+  upload_refused: "QuickBooks refused the photo", qbo_refused: "QuickBooks refused the change",
+  bad_request: "the app sent QuickBooks a bad request",
+  relinked: "the job's QuickBooks project changed after approval",
+};
+const QBO_FAILED = {
+  stale_object: "the expense kept changing in QuickBooks", qbo_not_connected: "QuickBooks isn't connected",
+  qbo_throttled: "QuickBooks was too busy", qbo_unavailable: "QuickBooks was down", qbo_unreachable: "couldn't reach QuickBooks",
+  storage_unavailable: "couldn't read the photo from storage", create_unclear: "QuickBooks didn't confirm the new expense",
+  upload_unclear: "QuickBooks didn't confirm the photo", link_unreadable: "couldn't read the job's QuickBooks link",
+};
+/* A dead row's error → ["refused" | "failed", words]. An error that doesn't
+   start with a known code (the worker couldn't reach qbo-proxy, a row
+   cancelled by hand) shows as written, clipped. */
+function qboWhy(error) {
+  const e = typeof error === "string" ? error.trim() : "", code = (/^([a-z_]+):/.exec(e) || [])[1] || "";
+  if (own(QBO_REFUSED, code)) return ["refused", own(QBO_REFUSED, code)];
+  if (own(QBO_FAILED, code)) return ["failed", own(QBO_FAILED, code)];
+  return ["failed", e ? (e.length > 120 ? e.slice(0, 119) + "…" : e) : "no reason given"];
+}
+/* A sent row whose photo QuickBooks refused after the tag (or the new
+   store entry) went in: the worker marks it attach_error=<code> in its
+   provider status. The change is in the books; the photo isn't. "" when
+   the photo went (or none was asked for). */
+function photoRefused(o) {
+  const code = (/(?:^|;)attach_error=([a-z_]+)/.exec(str(o.provider_status)) || [])[1] || "";
+  if (!code) return "";
+  if (code === "qbo_refused") return "QuickBooks refused the photo";
+  return own(QBO_REFUSED, code) || own(QBO_FAILED, code) || code.replace(/_/g, " ");
+}
+/* An executed QuickBooks receipts card → how its outbox rows went: "All 3
+   updated in QuickBooks", "1 of 3 updated in QuickBooks; 2 waiting", "2 of 3
+   updated in QuickBooks; 1 refused: tagged to another job", "Tagged in
+   QuickBooks; photo not attached: …". Before its rows are read (just
+   approved here) it counts what the executor queued. */
+function qboOutcome(c) {
+  const rows = arr(c.outboxes).map(obj);
+  const queued = Number(c.result.queued), skipped = Number(c.result.skipped);
+  const n = Math.max(rows.length, Number.isInteger(queued) && queued > 0 ? queued : 0);
+  if (!n) {
+    // every receipt was already queued or done by an earlier card for the same expense
+    if (Number.isInteger(skipped) && skipped > 0) return { text: "Already on its way to QuickBooks from an earlier card", tone: "ok" };
+    return { text: c.qboLane === false ? QBO_OFF_QUEUED : "Queued for QuickBooks", tone: "wait" };
+  }
+  const sent = rows.filter((o) => o.status === "sent" || o.status === "delivered");
+  const done = sent.length;
+  const dead = rows.filter((o) => o.status === "dead");
+  const waiting = n - done - dead.length;
+  const unattached = sent.map(photoRefused).filter(Boolean);
+  const noPhoto = unattached.length
+    ? `${unattached.length === 1 ? "1 photo" : `${unattached.length} photos`} not attached: ${[...new Set(unattached)].join(", ")}` : "";
+  if (done === n && n === 1 && noPhoto) return { text: "Tagged in QuickBooks; photo not attached: " + unattached[0], tone: "bad" };
+  if (done === n) {
+    const all = n === 1 ? "Updated in QuickBooks" : `All ${n} updated in QuickBooks`;
+    return noPhoto ? { text: `${all}; ${noPhoto}`, tone: "bad" } : { text: all, tone: "ok" };
+  }
+  // still in line (or between retries) while the worker isn't serving "qbo": it waits for that
+  const off = c.qboLane === false;
+  if (!dead.length && !done) return { text: off ? QBO_OFF_QUEUED : n === 1 ? "Queued for QuickBooks" : `${n} queued for QuickBooks`, tone: "wait" };
+  if (n === 1 && dead.length) return { text: "Not updated in QuickBooks: " + qboWhy(dead[0].error)[1], tone: "bad" };
+  const parts = [done ? `${done} of ${n} updated in QuickBooks` : `None of ${n} updated in QuickBooks`];
+  if (noPhoto) parts.push(noPhoto);
+  if (waiting > 0) parts.push(`${waiting} waiting` + (off ? " (QuickBooks updates are off on the worker)" : ""));
+  for (const verb of ["refused", "failed"]) {
+    const why = dead.map((o) => qboWhy(o.error)).filter(([v]) => v === verb).map(([, w]) => w);
+    if (why.length) parts.push(`${why.length} ${verb}: ${[...new Set(why)].join(", ")}`);
+  }
+  return { text: parts.join("; "), tone: dead.length || noPhoto ? "bad" : "wait" };
+}
+
 /* A text-queue row goes pending → approved → executed / failed inside the one
    request that answered it. Seen at 'approved', it may be mid-run (a YES text
    being handled right now, a tap on another phone, or this tab's own answer
@@ -623,10 +811,15 @@ export function outcome(c, now = Date.now(), seenAt = now) {
     if (c.status === "approved" || c.status === "executing") return { text: "Approved, queued to run", tone: "wait" };
     if (c.status === "superseded") {
       // billing_review_gaps_file's reasons: nothing left to add (no_gaps), or
-      // the night's findings no longer match this card's (findings_changed)
+      // the night's findings no longer match this card's (findings_changed);
+      // receipts_qbo_link_file's: QuickBooks needs nothing more for the job
+      // (nothing_to_do), or the owner answered tonight's items on another
+      // card (items_changed)
       const why = c.result.superseded_reason;
       return { text: why === "no_gaps" ? "No longer needed: the invoice covers it"
-        : why === "findings_changed" ? "Closed: the nightly check's findings changed" : "Replaced by a newer ask", tone: "no" };
+        : why === "findings_changed" ? "Closed: the nightly check's findings changed"
+        : why === "nothing_to_do" ? "No longer needed: QuickBooks has what it needs"
+        : why === "items_changed" ? "Closed: the nightly QuickBooks match's findings changed" : "Replaced by a newer ask", tone: "no" };
     }
     if (c.status === "executed") {
       if (c.kind === "email" || c.kind === "text") {
@@ -641,6 +834,8 @@ export function outcome(c, now = Date.now(), seenAt = now) {
         return { text: d || "Queued to send", tone: st === "dead" ? "bad" : st === "sent" || st === "delivered" ? "ok" : "wait" };
       }
       if (c.kind === "stage") return { text: "Moved to " + (stageLabel(c.result.to) || c.evidence.stage), tone: "ok" };
+      // "executed" only says the changes were queued: the outbox rows say how they went
+      if (c.kind === "qbo") return qboOutcome(c);
       if (c.kind === "gaps") {
         // op_exec_invoice_review_gaps's result.status; only added wrote the job
         const st = str(c.result.status), n = Number(c.result.lines_added);
@@ -692,6 +887,7 @@ export function approveConfirm(c) {
     const n = arr(e.lines).length, open = Number(e.unpriced) || 0;
     return `Add ${plural(n, "line")} (${USD.format(Number(e.totalUsd) || 0)}${open ? `, ${open} unpriced` : ""}) as a new draft invoice on ${c.job || "this job"}?`;
   }
+  if (c.kind === "qbo") return `Update QuickBooks for ${plural(arr(e.receipts).length, "receipt")} on ${c.job || "this job"}?`;
   return `Approve: ${c.title}?`;
 }
 /** Decline on the text queue asks once; on the spine it asks for a reason. */

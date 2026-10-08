@@ -26,6 +26,21 @@
  *                  a concurrent crew edit is never clobbered (a conflict
  *                  just retries the next night). One capture_events row per
  *                  run; the morning brief reads the recorded payments.
+ *   listProjects     — RECEIPTS PHASE 3 (the QuickBooks link). Every active
+ *                      QuickBooks project (a Customer with Job = true), for
+ *                      the admin's "Link to QuickBooks" picker and the
+ *                      worker's nightly matcher.
+ *   listPurchases    — the worker's nightly read: every expense (Purchase)
+ *                      dated in {from, to}, cut down to what the matcher
+ *                      needs, with the file names attached to each.
+ *   completePurchase — the worker's qbo outbox adapter, after the owner
+ *                      approved a receipts.qbo_link card: tag one expense to
+ *                      the job's QuickBooks project and attach the receipt
+ *                      photo (or enter a store invoice first, when that
+ *                      switch is on). Every decision lives in ./purchases.ts
+ *                      (pure + unit-tested); it never writes a second
+ *                      expense, never overwrites a job tag, and adopts its
+ *                      own earlier work on a retry.
  *
  * AUTH — the per-action gate (findings.json F-003, Critical, E0)
  *   verify_jwt=true on this function is NOT a caller check: the gateway
@@ -45,6 +60,17 @@
  *                   Still the admin page's own signed-in OAuth redirect flow.
  *     disconnect    admin|office JWT
  *     pullPayments  the cron secret ONLY (unchanged)
+ *     listProjects  admin|office JWT, or the service role (the worker)
+ *     listPurchases / completePurchase   the service role ONLY
+ *
+ *   The 'service' kind is the worker. Its key is an `sb_secret_…` key, not a
+ *   JWT, so userJwt refuses it by shape and it never gets a user identity.
+ *   It passes when the bearer is exactly this function's own
+ *   SUPABASE_SERVICE_ROLE_KEY, or, for another `sb_secret_…` key of the same
+ *   project (a project can hold several), when PostgREST accepts it for
+ *   rpc/qbo_service_ping, which is granted to service_role only (migration
+ *   0023). A proven key is remembered by its sha256 for five minutes. The key
+ *   itself is never logged.
  *
  *   Regression guard: supabase/functions/qb-time-proxy/authgate.test.mjs
  *   (npm run fn:test) fails if an action is dispatched without a line here.
@@ -60,6 +86,11 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { applyBalanceToInvoice, trackedInvoices, type Inv } from "./payments.ts";
+import {
+  QboError, ProvenKeys, bearerOf, sameKey, sha256Hex, completePurchase, toCompleteError, retryLater,
+  pagedRows, projectsQuery, purchasesQuery, attachablesSinceQuery, attachableSince, attachmentsByPurchase,
+  compactPurchase, compactProject, parseWindow, storageMissing, type CompleteIO,
+} from "./purchases.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -80,6 +111,10 @@ function json(body: unknown, status = 200) {
 }
 const ok = (data: unknown) => json({ ok: true, data });
 const err = (message: string, status = 400) => json({ ok: false, error: message }, status);
+/** The receipts actions answer the browser (apps/field/js/qbo.js unwraps
+    `data`) and the worker (which reads the fields at the top level), so the
+    result rides in both places. */
+const both = (data: Record<string, unknown>) => json({ ...data, ok: true, data });
 
 function basicAuth() {
   const id = Deno.env.get("QBO_CLIENT_ID"), secret = Deno.env.get("QBO_CLIENT_SECRET");
@@ -111,11 +146,26 @@ async function getConnection(supabase: ReturnType<typeof serviceDb>) {
   });
   if (!res.ok) throw new Error(`QuickBooks token refresh failed: ${await res.text()}`);
   const t = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
-  await supabase.from("qbo_tokens").update({
+  // Conditional on the refresh token we started from, as qb-time-proxy does.
+  // Since phase 3 the worker's nightly matcher and its outbox lane refresh
+  // here too, alongside the 14:30 payment pull and a browser push, so two
+  // callers can refresh at once. Writing our pair over the winner's could
+  // store a refresh token Intuit has already rotated past and kill the
+  // connection. 0 rows updated = someone else rotated first: re-read the row
+  // and use the winner's tokens.
+  const { data: won } = await supabase.from("qbo_tokens").update({
     access_token: t.access_token, refresh_token: t.refresh_token,
     expires_at: new Date(Date.now() + t.expires_in * 1000).toISOString(),
     updated_at: new Date().toISOString(),
-  }).eq("id", row.id);
+  }).eq("id", row.id).eq("refresh_token", row.refresh_token as string).select("id");
+  if (Array.isArray(won) && won.length) return { accessToken: t.access_token, realmId };
+  const { data: winner } = await supabase
+    .from("qbo_tokens").select("access_token, refresh_token").eq("id", row.id).maybeSingle();
+  if (winner?.access_token && winner.refresh_token !== row.refresh_token) {
+    return { accessToken: winner.access_token as string, realmId };
+  }
+  // the write failed with nobody else in the way: our fresh access token
+  // still works for this call
   return { accessToken: t.access_token, realmId };
 }
 
@@ -132,14 +182,45 @@ async function qboFetch(realmId: string, accessToken: string, path: string, opts
     },
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`QBO API ${res.status}: ${text.slice(0, 500)}`);
+    // same message as always; QboError also carries Intuit's Fault code
+    // (completePurchase tells a stale object, 5010, from a refusal)
+    throw new QboError(res.status, await res.text());
   }
   return (await res.json()) as Record<string, unknown>;
 }
+
 const qboQuery = (realmId: string, tok: string, q: string) =>
   qboFetch(realmId, tok, `/query?query=${encodeURIComponent(q)}`);
 const escapeQ = (s: string) => String(s).replace(/'/g, "\\'");
+
+/** POST /upload: the Attachable upload is multipart/form-data, which
+    qboFetch (JSON in, JSON out) cannot send. The body and its boundary come
+    from purchases.ts multipartBody. */
+async function qboUpload(realmId: string, accessToken: string, body: Uint8Array, contentType: string) {
+  const res = await fetch(`${QBO_BASE}/v3/company/${realmId}/upload?minorversion=${MINOR_VERSION}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": contentType, Accept: "application/json" },
+    // (the cast: newer TypeScript libs type a Uint8Array's buffer loosely; the
+    // bytes are a plain ArrayBuffer-backed array from multipartBody)
+    body: body as BodyInit,
+  });
+  const text = await res.text();
+  if (!res.ok) throw new QboError(res.status, text);
+  try { return JSON.parse(text) as Record<string, unknown>; } catch { return {}; }
+}
+
+/** One receipt photo from the private field-media bucket, read with the
+    service key: the data-URL text, or null when the object is gone. */
+async function mediaText(hash: string): Promise<string | null> {
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+  const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/storage/v1/object/field-media/${hash}`, {
+    headers: { apikey: key, Authorization: `Bearer ${key}` },
+  });
+  if (res.ok) return await res.text();
+  const text = await res.text().catch(() => "");
+  if (storageMissing(res.status, text)) return null;
+  throw retryLater("storage_unavailable", `field-media read failed (${res.status})`, 503);
+}
 
 /** Find-or-create the customer. Returns the customer Id.
     CRM (migration 228/229): the contact is the durable identity. The QBO Id
@@ -223,7 +304,7 @@ const STAFF_ROLES = ["office", "owner", "crew_lead", "crew"]; // the signed-in c
 /** Which callers each action admits. DEFAULT-DENY: an action that is not
     listed here is refused before dispatch (see authorize), so adding a new
     action to the handler without a line here fails closed instead of open. */
-type AuthKind = "user" | "staff" | "office" | "cron";
+type AuthKind = "user" | "staff" | "office" | "cron" | "service";
 const ACTION_AUTH: Record<string, AuthKind[]> = {
   getStatus: ["user"],
   exchangeCode: ["office"],
@@ -231,6 +312,9 @@ const ACTION_AUTH: Record<string, AuthKind[]> = {
   pushInvoice: ["staff"],
   invoiceLink: ["staff"],
   pullPayments: ["cron"],
+  listProjects: ["office", "service"],   // the admin's project picker, and the worker's matcher
+  listPurchases: ["service"],            // every expense in a date window: the worker only
+  completePurchase: ["service"],         // writes QuickBooks after an owner approval: the worker only
 };
 
 /** The caller's bearer token, or "" when it is not a user JWT at all.
@@ -282,6 +366,33 @@ function viaCronSecret(req: Request): boolean {
   return !!secret && req.headers.get("x-cron-secret") === secret;
 }
 
+/** Is this the service role (the worker)? Exactly this function's own key,
+    or an `sb_secret_…` key that PostgREST lets call qbo_service_ping, which
+    only service_role may execute. Any other bearer, a JWT included, is not
+    the service role here; it goes on to the user checks. Only a yes is
+    remembered (by sha256, for five minutes). */
+const provenServiceKeys = new ProvenKeys();
+async function viaServiceKey(req: Request): Promise<boolean> {
+  const token = bearerOf(req.headers.get("authorization"));
+  if (!token) return false;
+  if (sameKey(token, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "")) return true;
+  if (!token.startsWith("sb_secret_")) return false;
+  const hash = await sha256Hex(token);
+  if (provenServiceKeys.has(hash)) return true;
+  try {
+    const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/rest/v1/rpc/qbo_service_ping`, {
+      method: "POST",
+      headers: { apikey: token, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const yes = res.status === 200 && (await res.json().catch(() => null)) === true;
+    if (yes) provenServiceKeys.add(hash);
+    return yes;
+  } catch (_) {
+    return false;                                     // an unreachable PostgREST proves nothing
+  }
+}
+
 /** The gate. Returns a refusal Response, or the caller it resolved (so the
     handler does not have to look the role up a second time). */
 async function authorize(
@@ -292,7 +403,9 @@ async function authorize(
   const allowed = ACTION_AUTH[action];
   if (!allowed) return { deny: err(`Unknown action: ${action}`, 404), role: null, cron: false };
   if (allowed.includes("cron") && viaCronSecret(req)) return { deny: null, role: null, cron: true };
-  if (!allowed.some((a) => a !== "cron")) return { deny: err(`${action} is cron-only`, 401), role: null, cron: false };
+  if (allowed.includes("service") && await viaServiceKey(req)) return { deny: null, role: null, cron: false };
+  if (!allowed.some((a) => a !== "cron" && a !== "service"))
+    return { deny: err(`${action} is ${allowed.includes("service") ? "server" : "cron"}-only`, 401), role: null, cron: false };
 
   const { uid, role } = await callerIdentity(req, sb);
   if (!uid) return { deny: err("Sign in to use the QuickBooks connection", 401), role: null, cron: false };
@@ -559,6 +672,70 @@ serve(async (req) => {
       }]).then(() => {}, () => { /* the sync itself matters more than its receipt */ });
 
       return ok({ checked: slots.length, updated, conflicts, payments: events });
+    }
+
+    // ── listProjects (office or the worker) ───────────────────────────────
+    // IsProject cannot be queried, so read every active Job customer and say
+    // which are projects; the picker and the matcher choose.
+    if (action === "listProjects") {
+      const { accessToken, realmId } = await getConnection(supabase);
+      const rows = await pagedRows((q) => qboQuery(realmId, accessToken, q), "Customer", projectsQuery);
+      const projects = rows.map(compactProject).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      return both({ projects });
+    }
+
+    // ── listPurchases (the worker) ────────────────────────────────────────
+    // Intuit refuses AccountRef/EntityRef as Purchase predicates, so read the
+    // date window whole and let the matcher filter; then mark which expenses
+    // already carry a document (and its file names, so the adapter's own
+    // "[r:<id>]" uploads are recognisable).
+    if (action === "listPurchases") {
+      const w = parseWindow(body);
+      if ("error" in w) return err(w.error);
+      const { accessToken, realmId } = await getConnection(supabase);
+      const run = (q: string) => qboQuery(realmId, accessToken, q);
+      const purchases = await pagedRows(run, "Purchase", (start) => purchasesQuery(w.from, w.to, start));
+      const files = attachmentsByPurchase(
+        await pagedRows(run, "Attachable", (start) => attachablesSinceQuery(attachableSince(w.from), start)));
+      return both({ purchases: purchases.map((p) => compactPurchase(p, files.get(String(p.Id)) ?? [])) });
+    }
+
+    // ── completePurchase (the worker's qbo outbox adapter) ────────────────
+    // Body = one outbox payload. Replies {ok:true, purchaseId, syncToken,
+    // tagged, attached, already_attached, adopted, attach_error?}, or
+    // {ok:false, error, code, permanent}: HTTP 409 when retrying cannot help
+    // (the outbox row goes dead and the inbox shows why), 502/503 when it
+    // can. A tag is refused (relinked) when job_qbo_links no longer names
+    // the payload's project.
+    if (action === "completePurchase") {
+      try {
+        let conn: { accessToken: string; realmId: string };
+        try { conn = await getConnection(supabase); } catch (e) {
+          throw retryLater("qbo_not_connected", e instanceof Error ? e.message : "QuickBooks is not connected", 503);
+        }
+        const { accessToken, realmId } = conn;
+        const io: CompleteIO = {
+          query: (q) => qboQuery(realmId, accessToken, q),
+          getPurchase: async (id) =>
+            (await qboFetch(realmId, accessToken, `/purchase/${encodeURIComponent(id)}`)).Purchase as Record<string, unknown>,
+          postPurchase: async (payload, requestId) =>
+            (await qboFetch(realmId, accessToken, requestId ? `/purchase?requestid=${encodeURIComponent(requestId)}` : "/purchase",
+              { method: "POST", body: JSON.stringify(payload) })).Purchase as Record<string, unknown>,
+          photo: mediaText,
+          upload: (bytes, contentType) => qboUpload(realmId, accessToken, bytes, contentType),
+          // the job's link as it is now, not as it was at approval
+          jobLink: async (jobId) => {
+            const { data, error } = await supabase
+              .from("job_qbo_links").select("qbo_customer_id").eq("job_id", jobId).maybeSingle();
+            if (error) throw retryLater("link_unreadable", `could not read the job's QuickBooks link: ${error.message}`);
+            return data ? { qbo_customer_id: String(data.qbo_customer_id ?? "") } : null;
+          },
+        };
+        return both(await completePurchase(body, io));
+      } catch (e) {
+        const f = toCompleteError(e);
+        return json({ ok: false, error: `${f.code}: ${f.message}`, code: f.code, permanent: f.permanent }, f.status);
+      }
     }
 
     return err(`Unknown action: ${action}`, 404);

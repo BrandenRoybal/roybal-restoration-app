@@ -52,9 +52,10 @@
  *   the brief filed (proposed_via 'cron'). A spine ask filed from a screen
  *   (the job page's adjuster email) needs "YES n"; a bare keyword with only
  *   that one live gets "Reply YES n to approve …" and nothing runs. An
- *   invoice-gaps ask (invoice.review_gaps, 0021) is answered in the inbox
- *   only: both spine reads leave it out (INBOX_ONLY_FILTER), so its number
- *   gets the same answer as a number no ask holds.
+ *   invoice-gaps ask (invoice.review_gaps, 0021) and a QuickBooks receipts
+ *   ask (receipts.qbo_link, 0023) are answered in the inbox only: both
+ *   spine reads leave them out (INBOX_ONLY_FILTER), so their numbers get
+ *   the same answer as a number no ask holds.
  *
  * Version (GET …/roybal-notify/version):
  *   200 {"ok":true,"function":"roybal-notify","answers":["text","spine"]}

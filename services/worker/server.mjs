@@ -28,6 +28,7 @@ import { makeSupa } from "./supa.mjs";
 import { makeLog, errText } from "./log.mjs";
 import { smsAdapter } from "./adapters/sms.mjs";
 import { emailAdapter } from "./adapters/email.mjs";
+import { qboAdapter } from "./adapters/qbo.mjs";
 import { runQueueOnce, handlers } from "./lanes/queue.mjs";
 import { runOutboxOnce } from "./lanes/outbox.mjs";
 import { tick as heartbeatTick, beat } from "./heartbeat.mjs";
@@ -53,6 +54,9 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
   };
   ctx.adapters.sms = smsAdapter(ctx);
   if (cfg.emailEnabled) ctx.adapters.email = emailAdapter(ctx);
+  // Only when the channel is served: with RECEIPTS_QBO=off (or an
+  // OUTBOX_CHANNELS without it) no QuickBooks write is made from here.
+  if (cfg.channels.includes("qbo")) ctx.adapters.qbo = qboAdapter(ctx);
 
   const loops = [];
   let beatTimer = null;
@@ -119,6 +123,7 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
       channels: cfg.channels, kinds: cfg.queueKinds, email: cfg.emailEnabled, owner_cell: Boolean(cfg.ownerCell),
     });
     if (!cfg.emailEnabled) log("email.disabled", { reason: "GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET not set; email rows wait as pending" });
+    if (cfg.receiptsQbo === false) log("receipts_qbo.disabled", { reason: "RECEIPTS_QBO=off; the QuickBooks match skips and qbo rows wait as pending" });
     if (!cfg.ownerCell) log("deadletter.disabled", { reason: "OWNER_CELL not set" });
     await heartbeatTick(ctx, state);
     scheduleBeat();

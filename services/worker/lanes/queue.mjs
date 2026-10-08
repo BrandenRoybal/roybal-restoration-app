@@ -1,13 +1,15 @@
 /* The queue lane — claim_job → handler → finish_job.
 
-   Two kinds. `proposal.execute`, which op_proposal_approve enqueues for an
+   Three kinds. `proposal.execute`, which op_proposal_approve enqueues for an
    operation whose runtime is `worker` (none is yet; the lane exists so the
    day one lands, nothing else has to): the handler runs op_execute as the
    job's own principal (the approver), exactly as the SQL runtime path does.
    A proposal whose executor fails is NOT a failed job: the proposal records
    its failure and a re-run would return the same row, so the job is done
    with that outcome in its result. `billing.reconcile`, the nightly billing
-   check pg_cron enqueues (lanes/billing.mjs): its summary is the result.
+   check pg_cron enqueues (lanes/billing.mjs), and `receipts.qbo_match`, the
+   nightly QuickBooks match (lanes/receipts.mjs): each one's summary is the
+   result.
 
    Only the kinds in QUEUE_KINDS are ever claimed; any other kind waits as
    `queued` until a worker that knows it is deployed. A kind that IS listed
@@ -18,6 +20,7 @@
 
 import { errText } from "../log.mjs";
 import { billingReconcile } from "./billing.mjs";
+import { receiptsQboMatch } from "./receipts.mjs";
 
 const SETTLE_RETRY_MS = [500, 1500, 3000];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -42,6 +45,7 @@ export const handlers = {
     return { proposal_id: proposalId, status: row?.status ?? null, error: row?.error ?? null };
   },
   "billing.reconcile": billingReconcile,
+  "receipts.qbo_match": receiptsQboMatch,
 };
 
 export async function finishJob(ctx, job, { ok, result = null, error = null, permanent = false }) {

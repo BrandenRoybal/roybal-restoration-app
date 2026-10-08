@@ -64,16 +64,31 @@ export async function beat(ctx, state, { extend = true } = {}) {
   return row;
 }
 
-export function deadLetterText({ count, since }) {
+/* count: dead outbox rows other than QuickBooks, and dead queue jobs; qbo:
+   dead QuickBooks rows. Those are told apart: qbo-proxy refuses a change for
+   good on the first try (tagged to another job, changed in QuickBooks), so
+   "after retries" is not true of them, and they show on the receipts card,
+   not as an email that couldn't send. */
+export function deadLetterText({ count, qbo = 0, since }) {
   const fmt = (d) => new Date(d).toLocaleString("en-US", {
     timeZone: "America/Anchorage", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   });
-  const what = count === 1 ? "1 message or task" : `${count} messages or tasks`;
-  // There is no outbox screen: an approved email that gave up shows on its
-  // card in the Approvals tab (apps/field/js/approvals.js, outbox status dead).
-  return `Roybal worker: ${what} gave up after retries since ${fmt(since)} Alaska time. ` +
-    `An approved email that gave up shows in the admin app's Approvals tab, under Recently decided, ` +
-    `as "Couldn't send" with the reason.`;
+  const parts = [];
+  if (count) {
+    const what = count === 1 ? "1 message or task" : `${count} messages or tasks`;
+    // There is no outbox screen: an approved email that gave up shows on its
+    // card in the Approvals tab (apps/field/js/approvals.js, outbox status dead).
+    parts.push(`${what} gave up after retries since ${fmt(since)} Alaska time. ` +
+      `An approved email that gave up shows in the admin app's Approvals tab, under Recently decided, ` +
+      `as "Couldn't send" with the reason.`);
+  }
+  if (qbo) {
+    const what = qbo === 1 ? "1 QuickBooks receipt change wasn't made" : `${qbo} QuickBooks receipt changes weren't made`;
+    parts.push(count
+      ? `${what}: the receipts card there says why.`
+      : `${what} since ${fmt(since)} Alaska time. The receipts card in the admin app's Approvals tab, under Recently decided, says why.`);
+  }
+  return `Roybal worker: ${parts.join(" ")}`;
 }
 
 export async function deadLetterCheck(ctx, state) {
@@ -83,11 +98,12 @@ export async function deadLetterCheck(ctx, state) {
   const rows = await supa.select("app_settings", "select=key,value&key=eq.worker.deadletter_alert");
   const st = rows[0]?.value ?? {};
   const since = st.watermark || new Date(Date.parse(state.bootIso) - DAY_MS).toISOString();
-  const [deadOutbox, deadJobs] = await Promise.all([
-    supa.count("outbox", `status=eq.dead&updated_at=gt.${encodeURIComponent(since)}`),
+  const [deadOutbox, deadQbo, deadJobs] = await Promise.all([
+    supa.count("outbox", `status=eq.dead&updated_at=gt.${encodeURIComponent(since)}&channel=neq.qbo`),
+    supa.count("outbox", `status=eq.dead&updated_at=gt.${encodeURIComponent(since)}&channel=eq.qbo`),
     supa.count("jobs_queue", `status=eq.dead&finished_at=gt.${encodeURIComponent(since)}`),
   ]);
-  const count = deadOutbox + deadJobs;
+  const count = deadOutbox + deadQbo + deadJobs;
   if (!count) return { texted: false, reason: "nothing dead", count };
 
   const guarded = st.alerted_at && Date.now() - Date.parse(st.alerted_at) < DAY_MS;
@@ -99,7 +115,7 @@ export async function deadLetterCheck(ctx, state) {
     headers: { apikey: cfg.serviceKey, Authorization: `Bearer ${cfg.serviceKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       action: "sendSms", to: cfg.ownerCell, kind: "brief", captured_by: "worker-deadletter",
-      body: deadLetterText({ count, since }),
+      body: deadLetterText({ count: deadOutbox + deadJobs, qbo: deadQbo, since }),
     }),
   });
   const data = await res.json().catch(() => ({}));

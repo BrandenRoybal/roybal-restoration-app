@@ -66,6 +66,28 @@ test("the email lane is off, and says so, without the Gmail client secret", asyn
   await w.stop("test");
 });
 
+test("the QuickBooks adapter is registered only while the qbo channel is served, and RECEIPTS_QBO=off says so", async () => {
+  let cfg = testConfig({ port: 0, ownerCell: "", channels: ["sms", "email", "qbo"], queueKinds: ["receipts.qbo_match"] });
+  let log = recordingLog();
+  let w = createWorker({ cfg, log, fetchImpl: stubRest(cfg) });
+  await w.start();
+  assert.equal(w.ctx.adapters.qbo?.channel, "qbo");
+  const port = w.server.address().port;
+  const body = await (await globalThis.fetch(`http://127.0.0.1:${port}/healthz`)).json();
+  assert.deepEqual(body.channels, ["sms", "email", "qbo"]);
+  assert.deepEqual(body.kinds, ["receipts.qbo_match"]);
+  assert.ok(!log.events().includes("receipts_qbo.disabled"));
+  await w.stop("test");
+
+  cfg = testConfig({ port: 0, ownerCell: "", channels: ["sms", "email"], receiptsQbo: false });
+  log = recordingLog();
+  w = createWorker({ cfg, log, fetchImpl: stubRest(cfg) });
+  await w.start();
+  assert.equal(w.ctx.adapters.qbo, undefined);
+  assert.ok(log.events().includes("receipts_qbo.disabled"));
+  await w.stop("test");
+});
+
 test("a database outage does not take /healthz down", async () => {
   const cfg = testConfig({ port: 0, pollMs: 250, ownerCell: "" });
   const fetch = fakeFetch([{ match: () => true, reply: () => ({ status: 503, body: { message: "db down" } }) }]);

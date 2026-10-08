@@ -20,7 +20,9 @@
 --      matches it, and nothing else: not sms.send, not execute, never approve.
 --      The lane's second grant, 0021's (agent:billing may PROPOSE
 --      invoice.review_gaps), is held to the same shape beside it (2b); the
---      rest of 0021 is billing_review_gaps.test.sql.
+--      rest of 0021 is billing_review_gaps.test.sql. So is the third, 0023's
+--      (agent:integrations may PROPOSE receipts.qbo_link, 2c); the rest of
+--      0023 is receipts_qbo_link.test.sql.
 --   3. current_agent_id is the agents row a machine login acts as, and null
 --      for a human, a disabled agent, a human login wrongly linked to an
 --      agents row, and a caller with no identity.
@@ -208,6 +210,55 @@ begin
   end if;
   if public.op_agent_permits(brief, 'invoice.review_gaps', 'money', 'propose') then
     raise exception 'agent:brief may propose invoice.review_gaps with no grant of its own';
+  end if;
+end
+$$;
+
+-- 2c. agent:integrations' grant (0023), the same way
+do $$
+declare
+  integ   constant uuid := '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';
+  billing constant uuid := '193d7dd0-74f9-407d-9891-8cb7aab22f82';
+begin
+  if (select count(*) from public.agent_authority
+       where agent_id = integ and operation = 'receipts.qbo_link' and capability = 'propose'
+         and revoked_at is null) <> 1 then
+    raise exception 'agent:integrations does not hold exactly one live receipts.qbo_link propose grant';
+  end if;
+  if (select count(*) from public.agent_authority where agent_id = integ and revoked_at is null) <> 1 then
+    raise exception 'agent:integrations holds a live grant beside receipts.qbo_link propose';
+  end if;
+  if not exists (select 1 from public.agent_authority g
+                   join public.events e on e.aggregate_type = 'agent_authority' and e.aggregate_id = g.id
+                  where g.agent_id = integ and g.operation = 'receipts.qbo_link'
+                    and e.kind = 'agent_authority.granted' and e.principal_kind = 'system'
+                    and e.idempotency_key = 'agent_authority.granted:' || g.id
+                    and e.data ->> 'operation' = 'receipts.qbo_link' and e.data ->> 'capability' = 'propose'
+                    and e.data ->> 'agent' = 'agent:integrations') then
+    raise exception 'the agent:integrations grant has no agent_authority.granted event naming it';
+  end if;
+  if (select reason from public.agent_authority
+       where agent_id = integ and operation = 'receipts.qbo_link' and revoked_at is null) !~ '0023.*2026-10-07' then
+    raise exception 'the agent:integrations grant does not say it is 0023 on the owner''s go of 2026-10-07';
+  end if;
+
+  if not public.op_agent_permits(integ, 'receipts.qbo_link', 'money', 'propose') then
+    raise exception 'agent:integrations may not propose receipts.qbo_link';
+  end if;
+  if public.op_agent_permits(integ, 'receipts.qbo_link', 'money', 'execute') then
+    raise exception 'agent:integrations may execute receipts.qbo_link; 0023 grants propose only';
+  end if;
+  if public.op_agent_permits(integ, 'receipts.qbo_link', 'money', 'approve') then
+    raise exception 'agent:integrations may approve';
+  end if;
+  if public.op_agent_permits(integ, 'invoice.review_gaps', 'money', 'propose') then
+    raise exception 'agent:integrations may propose invoice.review_gaps';
+  end if;
+  if public.op_agent_permits(integ, 'email.send', 'comms', 'propose') then
+    raise exception 'agent:integrations may propose email.send';
+  end if;
+  if public.op_agent_permits(billing, 'receipts.qbo_link', 'money', 'propose') then
+    raise exception 'agent:billing may propose receipts.qbo_link with no grant of its own';
   end if;
 end
 $$;

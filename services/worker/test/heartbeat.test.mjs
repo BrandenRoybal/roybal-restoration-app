@@ -64,7 +64,7 @@ test("the dead-letter check is off without OWNER_CELL and quiet when nothing is 
 test("dead rows text the owner once through roybal-notify (kind brief) and move the watermark", async () => {
   const cfg = testConfig();
   const fetch = fakeFetch([{ match: (u) => u === cfg.notifyUrl, reply: () => ({ body: { ok: true, sid: "SM1", status: "queued" } }) }]);
-  const supa = fakeSupa({ count: { outbox: 2, jobs_queue: 1 } });
+  const supa = fakeSupa({ count: { outbox: (q) => (q.endsWith("&channel=eq.qbo") ? 0 : 2), jobs_queue: 1 } });
   const log = recordingLog();
   const r = await deadLetterCheck({ cfg, supa, log, fetch }, freshState());
   assert.equal(r.texted, true);
@@ -82,6 +82,21 @@ test("dead rows text the owner once through roybal-notify (kind brief) and move 
   assert.ok(up.rows[0].value.alerted_at && up.rows[0].value.watermark);
   assert.equal(up.rows[0].value.last_count, 3);
   assert.ok(log.events().includes("deadletter.texted"));
+  assert.doesNotMatch(body.body, /QuickBooks/);
+});
+
+test("a dead QuickBooks row is counted apart: it was refused, not retried, and its receipts card says why", async () => {
+  const cfg = testConfig();
+  const fetch = fakeFetch([{ match: (u) => u === cfg.notifyUrl, reply: () => ({ body: { ok: true, sid: "SM3" } }) }]);
+  const supa = fakeSupa({ count: { outbox: (q) => (q.endsWith("&channel=eq.qbo") ? 1 : q.endsWith("&channel=neq.qbo") ? 0 : 99), jobs_queue: 0 } });
+  const r = await deadLetterCheck({ cfg, supa, log: recordingLog(), fetch }, freshState());
+  assert.equal(r.texted, true);
+  assert.equal(r.count, 1);
+  assert.deepEqual(supa.calls.count.filter((c) => c.table === "outbox").map((c) => c.query.replace(/updated_at=gt\.[^&]*/, "…")),
+    ["status=eq.dead&…&channel=neq.qbo", "status=eq.dead&…&channel=eq.qbo"]);
+  const text = fetch.calls[0].body.body;
+  assert.match(text, /^Roybal worker: 1 QuickBooks receipt change wasn't made since .* Alaska time\. The receipts card in the admin app's Approvals tab, under Recently decided, says why\.$/);
+  assert.doesNotMatch(text, /after retries|email|Couldn't send/);
 });
 
 test("inside the 24 h guard nothing is texted and the watermark does not move", async () => {
@@ -124,8 +139,11 @@ test("deadLetterText reads as a sentence in Alaska time", () => {
   assert.match(deadLetterText({ count: 3, since: "2026-10-05T18:00:00Z" }), /3 messages or tasks/);
   // Points at the screen that exists: the Approvals tab's Recently decided card.
   assert.match(t, /admin app's Approvals tab, under Recently decided, as "Couldn't send" with the reason\.$/);
-  assert.doesNotMatch(t, /outbox|status dead/);
+  assert.doesNotMatch(t, /outbox|status dead|QuickBooks/);
   assert.ok(t.length < 320);
+  const both = deadLetterText({ count: 1, qbo: 2, since: "2026-10-05T18:00:00Z" });
+  assert.match(both, /^Roybal worker: 1 message or task gave up after retries since Oct 5, 10:00 AM Alaska time\. .* 2 QuickBooks receipt changes weren't made: the receipts card there says why\.$/);
+  assert.ok(both.length < 320);
 });
 
 test("tick swallows a failing heartbeat and records the error for /healthz", async () => {
