@@ -43,7 +43,7 @@ const { Store } = await import("../js/core.js");
 const { newDryingLog, blankEquipRow } = await import("../js/model.js");
 const { setCtx } = await import("../js/formkit.js");
 const { dryingLog, scanDeps } = await import("../js/forms.js");
-const { recordScan, scanRecord, placements, liveScans, applyScans, rowRoom } = await import("../js/scans.js");
+const { recordScan, scanRecord, placements, liveScans, applyScans, rowRoom, undoTyped } = await import("../js/scans.js");
 const { mergeProjects } = await import("../js/merge.js");
 const { graftProject } = await import("../js/graft.js");
 const fleet = await import("../js/fleet.js");
@@ -292,7 +292,7 @@ await test("a typed row's Removed picked in steps: the scan gives way at once, a
   assert.ok(!liveScans(p).some((e) => e.id === "e6"), "the move scan gave way before the repaint");
 });
 
-await test("a typed row edited in two commits (Removed, or a move line): each one is what the scan's latest void says; one never committed is carried when the log opens", () => {
+await test("a typed row edited in two commits (Removed, or a move line): each one is what the scan's latest void says; a Removed the app closed on is carried at once", () => {
   const p = job();
   recordScan(p, { tag: "AM-020", mode: "remove", ...ctx("e5", T2) });
   const sheet = render(p);
@@ -303,8 +303,10 @@ await test("a typed row edited in two commits (Removed, or a move line): each on
   const said = () => p.equipmentScans.filter((e) => e.act === "void" && e.voids === "e5").map((e) => e.set.removed);
   assert.deepEqual(said(), ["2026-10-07T10:30", "2026-10-07T09:00"]);
   typeInto(removed, "2026-10-07T08:45");                           // then the app closed before the field was left
+  assert.equal(said().pop(), "2026-10-07T08:45", "carried with the step itself");
+  const n = said().length;
   render(p);
-  assert.equal(said().pop(), "2026-10-07T08:45", "carried when the log opened again");
+  assert.equal(said().length, n, "nothing left for the next open");
   // a move line rewritten twice
   assert.equal(recordScan(p, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e6", "2026-10-07T16:00:00.000Z") }).outcome, "moved");
   const tr2 = rowsOf(render(p)).find((x) => inputsOf(x)[0].value === "AM-020");
@@ -334,6 +336,95 @@ await test("a sync that swaps the rows while the picker is open: the time the cr
   assert.equal(live.removed, "2026-10-07T09:00");
   const said = p.equipmentScans.filter((e) => e.act === "void" && e.voids === "e5").map((e) => e.set.removed);
   assert.equal(said.pop(), "2026-10-07T09:00");
+});
+
+/* a sync landing while the log is open (app.js: graftProject, then the roybal:grafted event) */
+const clone = (o) => JSON.parse(JSON.stringify(o));
+function syncIn(p, other) {
+  const { merged } = mergeProjects(clone(p), clone(other));
+  applyScans(merged);
+  graftProject(p, merged);
+  document.dispatchEvent(new CustomEvent("roybal:grafted", { detail: { id: p.id } }));
+}
+const rowOf = (sheet, tag) => rowsOf(sheet).find((tr) => inputsOf(tr)[0].value === tag);
+const boxes = (tr) => [...tr.querySelectorAll("textarea.cell-ta")];   // type, location, notes
+const liveOf = (p, tag) => p.dryingLogs[0].equipment.find((r) => r.asset === tag);
+
+await test("a sync landing while the log is open redraws the table; one landing mid-edit waits until the table is left", () => {
+  const p = job();
+  const sheet = render(p);
+  const other = clone(p);
+  other.dryingLogs[0].equipment[0].notes = "dehu draining to sink";
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  syncIn(p, other);
+  assert.equal(boxes(rowOf(sheet, "AM-020"))[2].value, "dehu draining to sink", "redrawn at once");
+  const asset = inputsOf(rowOf(sheet, "AM-020"))[0];
+  asset.focus();
+  other.dryingLogs[0].equipment[0].location = "Hall closet";
+  other.updatedAt = "2026-10-08T01:00:00.000Z";
+  syncIn(p, other);
+  assert.ok(rowOf(sheet, "AM-020").contains(asset), "not redrawn under the crew's cursor");
+  assert.equal(boxes(rowOf(sheet, "AM-020"))[1].value, "Hall", "still as drawn");
+  asset.blur();
+  assert.ok(!rowOf(sheet, "AM-020").contains(asset), "redrawn once the table is left");
+  assert.equal(boxes(rowOf(sheet, "AM-020"))[1].value, "Hall closet");
+});
+
+await test("Notes typed in a box whose row a sync replaced: the crew's lines go onto the row now in the log, beside the other phone's move line, and are saved", () => {
+  const p = job();
+  const sheet = render(p);
+  const ta = boxes(rowOf(sheet, "AM-020"))[2];
+  const other = clone(p);
+  recordScan(other, { tag: "AM-020", mode: "place", room: "Bedroom", ...ctx("e7", T2) });   // moved, on the other phone
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  ta.focus();
+  syncIn(p, other);
+  const line = liveOf(p, "AM-020").notes;
+  assert.match(line, /^moved to Bedroom 10\/07 12:00$/);
+  pill.textContent = "✓ Saved";
+  enter(ta, "fan on high");                                          // typed into the box as it was drawn
+  assert.equal(liveOf(p, "AM-020").notes, "fan on high\n" + line);
+  assert.ok(liveScans(p).some((e) => e.id === "e7"), "the move scan stands");
+  assert.equal(rowRoom(liveOf(p, "AM-020")), "Bedroom");
+  assert.equal(pill.textContent, "Saving…", "saved");
+  enter(ta, "fan on high\n2nd fan behind door");                     // a second edit, same box
+  assert.equal(liveOf(p, "AM-020").notes, "fan on high\n2nd fan behind door\n" + line);
+  ta.blur();
+  assert.equal(boxes(rowOf(sheet, "AM-020"))[2].value, "fan on high\n2nd fan behind door\n" + line, "redrawn as saved");
+});
+
+await test("a Removed picked in a field whose row a sync filled with a Remove scan goes under the scan; undoing the scan brings the pick back", () => {
+  const p = job();
+  const sheet = render(p);
+  const removed = inputsOf(rowOf(sheet, "AM-020"))[2];
+  const other = clone(p);
+  const o = recordScan(other, { tag: "AM-020", mode: "remove", ...ctx("e8", T2) });   // taken out, on the other phone
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  removed.focus();
+  syncIn(p, other);
+  enter(removed, "2026-10-12T09:00");                                // the planned pickup, picked in the field as drawn
+  assert.equal(liveOf(p, "AM-020").removed, "2026-10-07T12:00", "the scan's removal stands");
+  assert.ok(liveScans(p).some((e) => e.id === "e8"));
+  assert.equal(liveOf(p, "AM-020").scanFill.was.removed, "2026-10-12T09:00", "the pick, under it");
+  assert.equal(undoTyped(p, o, ctx("u8", T2)), "restored");
+  assert.equal(liveOf(p, "AM-020").removed, "2026-10-12T09:00");
+});
+
+await test("a time picked, then a sync whose newer copy never had it, then Done: the pick stands on the row now in the log and is saved", () => {
+  const p = job();
+  const other = clone(p);
+  other.dryingLogs[0].readings.push({ id: "rd9" });
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  const sheet = render(p);
+  const removed = inputsOf(rowOf(sheet, "AM-020"))[2];
+  removed.focus();
+  typeInto(removed, "2026-10-07T10:30");                             // the picker's step, saved
+  syncIn(p, other);
+  assert.equal(liveOf(p, "AM-020").removed, "", "the newer copy's row");
+  pill.textContent = "✓ Saved";
+  removed.dispatchEvent(new window.Event("change", { bubbles: true }));   // Done
+  assert.equal(liveOf(p, "AM-020").removed, "2026-10-07T10:30");
+  assert.equal(pill.textContent, "Saving…", "saved");
 });
 
 await test("✕ on a scanned row asks, then undoes the scan with void events (the row goes)", () => {

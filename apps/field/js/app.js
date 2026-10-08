@@ -163,7 +163,10 @@ function startSyncUI() {
   onSyncRowChanged(async (id) => {
     if (!liveProject || liveProject.id !== id) return;
     const fresh = await Store.get(id);
-    if (fresh) graftProject(liveProject, fresh);
+    if (!fresh) return;
+    graftProject(liveProject, fresh);
+    // a page holding rows that have no ids (the drying log's equipment) repaints them
+    document.dispatchEvent(new CustomEvent("roybal:grafted", { detail: { id } }));
   });
   // a Magicplan write that finishes after the user moved on (the home's
   // auto-create or auto-adopt, a slow Pull) lands on the page now on screen
