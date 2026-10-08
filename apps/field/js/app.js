@@ -163,7 +163,10 @@ function startSyncUI() {
   onSyncRowChanged(async (id) => {
     if (!liveProject || liveProject.id !== id) return;
     const fresh = await Store.get(id);
-    if (fresh) graftProject(liveProject, fresh);
+    if (!fresh) return;
+    graftProject(liveProject, fresh);
+    // a page holding rows that have no ids (the drying log's equipment) repaints them
+    document.dispatchEvent(new CustomEvent("roybal:grafted", { detail: { id } }));
   });
   // a Magicplan write that finishes after the user moved on (the home's
   // auto-create or auto-adopt, a slow Pull) lands on the page now on screen
@@ -2897,14 +2900,20 @@ if ("serviceWorker" in navigator) {
   // Reload once when an updated service worker takes control — but NEVER
   // out from under someone typing (deploys were yanking open desktop tabs
   // mid-edit). If a text field is focused, defer the reload until the user
-  // navigates or leaves the tab.
+  // navigates or leaves the tab. An open equipment scanner (scanner.js)
+  // counts as typing: a crew is mid-drop, all buttons and no text field.
   let hadController = !!navigator.serviceWorker.controller;
   let reloading = false;
   const typing = () => {
     const a = document.activeElement;
-    return a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable);
+    return !!document.querySelector(".sc") || !!(a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable));
   };
-  const doReload = () => { if (!reloading) { reloading = true; location.reload(); } };
+  // the last edit (autosave waits 350 ms) is saved before the page goes
+  const doReload = () => {
+    if (reloading) return;
+    reloading = true;
+    Promise.resolve().then(flushPending).catch(() => {}).then(() => location.reload());
+  };
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (hadController && !reloading) {
       if (!typing()) doReload();

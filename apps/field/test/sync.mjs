@@ -21,7 +21,14 @@ const serverRows = new Map();
 let onPatch = null;      // test hook: runs while a push PATCH is "in flight"
 let clock = 1;
 const nowIso = () => new Date(1700000000000 + clock++ * 1000).toISOString();
-const resp = (status, body) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
+/* Every body comes back the way Postgres hands out jsonb: object keys sorted
+   by length, then bytes — never in the order the client wrote them. A
+   client check that reads key order (rather than content) sees a change on
+   every server copy and re-pushes forever, the Jul 2026 loop; this keeps
+   every case below honest about that. */
+const jsonbOrder = (v) => Array.isArray(v) ? v.map(jsonbOrder) : v && typeof v === "object"
+  ? Object.keys(v).sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0)).reduce((o, k) => { o[k] = jsonbOrder(v[k]); return o; }, {}) : v;
+const resp = (status, body) => ({ ok: status < 400, status, json: async () => jsonbOrder(body), text: async () => JSON.stringify(jsonbOrder(body)) });
 
 const mediaStore = new Map();   // field-media bucket: hash -> text
 let mediaGets = 0;              // GETs that actually went to the "network"
@@ -384,6 +391,47 @@ const { tombstoneItems } = await import("../js/merge.js");
   ok(server6.photos.map((x) => x.id).sort().join("") === "ABC", "…and the pushed union carries all three to the server");
   ok(Number(server6.rev) === 3, "merged union lands as the next rev (no clobber, no fork)");
   ok((await Store.backups("p6")).length >= 1, "the pre-merge local copy was snapshotted first");
+
+  // ---------- a server merge that drops scanned rows: they go back up ONCE ----------
+  // The server keeps a drying log newer-wins whole, so when another device's
+  // newer copy lands mid-push the union carries this device's scan event but
+  // not its row. The device rebuilds the row (settleMerged) and must push that
+  // copy once, or the server's copy (the morning brief and the portal read it)
+  // shows the unit missing until someone edits the job again.
+  if (SYNC_VIA_RPC) {
+    const { recordScan } = await import("../js/scans.js");
+    await Store.put({ id: "pS", customer: "Scan", dryingLogs: [{ id: "L1", equipment: [], readings: [] }] });
+    await syncNow();                                    // server rev 1, clean
+    const pS = await Store.get("pS");
+    recordScan(pS, { tag: "AM-014", room: "Kitchen", mode: "place", id: "sc1", at: "2026-10-08T15:00:00.000Z", logId: "L1" });
+    await Store.put(pS, { quiet: true });
+    // another device's newer copy (a reading on the same log, no scan) lands while this push is in flight
+    onPatch = async () => {
+      serverRows.set("pS", { id: "pS", deleted: false, updated_at: nowIso(), data: {
+        id: "pS", customer: "Scan", rev: 2,
+        dryingLogs: [{ id: "L1", equipment: [], readings: [{ id: "r1", rh: 55 }] }],
+        updatedAt: new Date(Date.now() + 36e5).toISOString(),
+      } });
+    };
+    await syncNow();                                    // push → 'merged': the union lacks the row
+    const mid = serverRows.get("pS").data;
+    ok((mid.equipmentScans || []).some((e) => e.id === "sc1") && !mid.dryingLogs[0].equipment.length,
+      "the server's union holds the scan but its merge dropped the row (the case under test)");
+    await syncNow();                                    // the rebuilt copy goes up
+    const up = serverRows.get("pS").data;
+    ok(up.dryingLogs[0].equipment.some((r) => r.scanId === "sc1" && r.asset === "AM-014")
+      && up.dryingLogs[0].readings.length === 1, "the rebuilt row reaches the server, beside the other device's reading");
+    const revUp = Number(up.rev);
+    await syncNow(); await syncNow();
+    ok(Number(serverRows.get("pS").data.rev) === revUp, "…once: no further pushes once the server holds it");
+    // another tab wrote the same content; this one re-pushes on a stale rev and gets 'current' back,
+    // in jsonb key order: adopted CLEAN, nothing owed (a key-order "change" here was an endless loop)
+    const srow = serverRows.get("pS");
+    srow.data = { ...srow.data, rev: revUp + 1 };
+    await Store.put(await Store.get("pS"), { quiet: true });
+    await syncNow(); await syncNow(); await syncNow();
+    ok(Number(serverRows.get("pS").data.rev) === revUp + 1, "a 'current' answer holding scanned rows is adopted clean: no push owed");
+  }
 
   // ---------- pull merge: dirty local + newer remote = union, not replace ----------
   await Store.put({ id: "p7", customer: "Golf", receipts: [{ id: "R1", amount: 40 }] });

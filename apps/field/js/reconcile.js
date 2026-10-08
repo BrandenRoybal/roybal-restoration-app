@@ -19,10 +19,12 @@
    is left unpriced for the office.
 
    Runs in the worker's billing.reconcile queue kind; the field app
-   does not load it. Imports only dryingcalc.js and model.js.
+   does not load it. Imports only dryingcalc.js, model.js and
+   scans.js.
    ============================================================ */
 import { equipClassOf } from "./dryingcalc.js";
 import { jobType, lossTypesOf } from "./model.js";
+import { applyScans, tagKey } from "./scans.js";
 
 export const DETECTOR = "billing.reconcile@0.1";
 
@@ -139,7 +141,21 @@ const unitDays = (hours) => Math.max(1, Math.ceil(hours / 24 - 1e-9));
 // a type of nothing, "N/A", "na", "none" or "-" is a placeholder row (or the blank row every new log seeds), not a machine
 const placeholderType = (t) => /^(n\/?a|none|-)?$/.test(str(t).replace(/\s+/g, "").toLowerCase());
 
-function equipmentFacts(p, today = "") {
+/* Scanned equipment (scans.js): the scan events are the record and a
+   drying log's scanned rows are derived from them, so they are derived
+   again here, on a copy of the logs, before anything is counted. The blob
+   the worker reads may hold rows a newer copy of a log dropped, or an undo
+   not yet written into the rows. The job itself is never changed. */
+function withScans(p) {
+  const rowScanned = (log) => obj(log) && arr(log.equipment).some((e) => obj(e) && filled(e.scanId));
+  if (!arr(p.equipmentScans).length && !arr(p.dryingLogs).some(rowScanned)) return p;
+  const copy = { ...p, dryingLogs: JSON.parse(JSON.stringify(arr(p.dryingLogs))) };
+  try { applyScans(copy); } catch { return p; }
+  return copy;
+}
+
+function equipmentFacts(job, today = "") {
+  const p = withScans(job);
   // a removed or dry-out finish stamp after today has not happened yet (end of today, Alaska)
   const cutoff = validDate(today) ? parseStamp(today).ms + DAY_MS : Infinity;
   const rows = [];          // counted rows
@@ -158,7 +174,8 @@ function equipmentFacts(p, today = "") {
       // skipped whole and without a hint: its stamps bound no window either
       if (placeholderType(e.type)) return;
       const type = clip(e.type, 80), asset = clip(e.asset, 40);
-      const id = `${logId}#eq${i}`;
+      // a scanned row keeps its id when rows are added, removed or rebuilt; a typed row has only its place
+      const id = filled(e.scanId) ? `${logId}#scan:${clip(e.scanId, 64)}` : `${logId}#eq${i}`;
       const placed = parseStamp(e.placed), removed = parseStamp(e.removed);
       if (placed) { info.placed.push(placed.date); placedDates.push(placed.date); }
       if (removed) { info.removed.push(removed.date); removedDates.push(removed.date); }
@@ -177,17 +194,17 @@ function equipmentFacts(p, today = "") {
         start = placed.ms; end = finish.ms; hours = wallHours(start, end); basis = "placed to dry-out finish";
       } else {
         // still running (no removed, no dry-out finish) or stamps that cannot be measured
-        open.push({ cls, id, asset: asset.toLowerCase(), name, startDate: placed && !filled(e.removed) ? placed.date : "" });
+        open.push({ cls, id, asset: tagKey(asset), name, startDate: placed && !filled(e.removed) ? placed.date : "" });
         return;
       }
       if (end != null && end > cutoff) {
         // an end stamp ahead of today (a planned pickup, a date slip): still running, not measured
-        open.push({ cls, id, asset: asset.toLowerCase(), name, startDate: placed ? placed.date : "" });
+        open.push({ cls, id, asset: tagKey(asset), name, startDate: placed ? placed.date : "" });
         return;
       }
       const startDate = start != null ? dateOfMs(start) : "", endDate = end != null ? dateOfMs(end) : "";
       rows.push({
-        cls, id, logId, asset: asset.toLowerCase(), start, end, hours, basis, startDate, endDate,
+        cls, id, logId, asset: tagKey(asset), start, end, hours, basis, startDate, endDate,
         ref: { kind: "equipment_row", id, label: clip(`${name}: ${span(startDate, endDate) || basis}, ${plural(unitDays(hours), "day")}`, 120), ...(startDate ? { date: startDate } : {}) },
       });
     });
@@ -200,7 +217,7 @@ function equipmentFacts(p, today = "") {
      row with hours but no placed time counts only where it is larger than the
      tag's other rows. */
   const days = { dehu: 0, airMover: 0, scrubber: 0, heater: 0 };
-  const byAsset = new Map();   // cls|asset -> its timed rows and its largest untimed (manual hours, no placed) figure
+  const byAsset = new Map();   // cls|tag key (AM-14 = AM-014 = am 14) -> its timed rows and its largest untimed (manual hours, no placed) figure
   for (const r of rows) {
     if (!r.asset) { days[r.cls] += unitDays(r.hours); continue; }
     const k = r.cls + "|" + r.asset;

@@ -516,8 +516,8 @@ test("sync prunes after every merge it stores (sync.js)", () => {
   assert.ok(merges.length >= 2);
   for (const i of merges) assert.ok(lines.slice(i, i + 5).some((l) => /settleMerged\(merged\)/.test(l)), `sync.js:${i + 1} merges without settleMerged`);
   assert.match(src, /settleMerged\(serverFull\);[^\n]*\n\s*const \{ merged \} = mergeProjects\(cur, serverFull\)/, "the revive check prunes the tombstone's copy first");
-  assert.ok(/settleMerged\(full\);\s*\/\/ the server's union/.test(src), "the server's own union (push 'merged') is pruned too");
-  assert.ok((src.match(/settleMerged\(full\)/g) || []).length >= 3, "and a clean pull, and Take the cloud copy");
+  assert.ok(/settleMerged\(full(, settled)?\);\s*\/\/ the server's union/.test(src), "the server's own union (push 'merged') is pruned too");
+  assert.ok((src.match(/settleMerged\(full[,)]/g) || []).length >= 3, "and a clean pull, and Take the cloud copy");
 });
 test("two devices adopting the same project's ESX sketch write one Supporting Doc; a relink back never lands on a tombstoned id", () => {
   const esx = { path: "sitevisit/bj-9/mp-eeeeeeee-x.esx", name: "x.esx", hash: "e".repeat(64) };

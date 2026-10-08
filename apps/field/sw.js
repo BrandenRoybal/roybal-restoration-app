@@ -44,6 +44,10 @@ const CORE = [
   // ✉️ Adjuster email: the narrative page loads adjustersend.js on demand (the
   // owner's approve-to-send); precached like receiptlib.js
   "js/adjustersend.js",
+  // 📷 Scan equipment: sync.js and forms.js import scans.js, forms.js imports
+  // fleet.js (both in the startup graph), and forms.js loads scanner.js on
+  // demand — precached so the scanner opens with no signal in a loss house
+  "js/scans.js", "js/fleet.js", "js/scanner.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];
@@ -51,6 +55,10 @@ const OPTIONAL = [
   "assets/vendor/pdfjs/pdf.min.mjs",
   "assets/vendor/pdfjs/pdf.worker.min.mjs",
   "assets/vendor/qrcode/qrcode.mjs",
+  // the scanner's QR decoder (zxing-wasm reader; the wasm is ~950 KB)
+  "assets/vendor/zxing/reader/index.js",
+  "assets/vendor/zxing/share.js",
+  "assets/vendor/zxing/zxing_reader.wasm",
   "assets/logo-full.png",
 ];
 

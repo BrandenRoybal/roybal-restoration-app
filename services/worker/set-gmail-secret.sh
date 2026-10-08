@@ -26,7 +26,7 @@
 # GitHub's main exactly (git fetch, then HEAD = origin/main: a main older
 # than the last worker deploy from GitHub would roll that deploy back), with
 # no local changes, untracked files included, in what the image is built
-# from (IMAGE_PATHS: services/worker and the four apps/field/js modules the
+# from (IMAGE_PATHS: services/worker and the five apps/field/js modules the
 # Dockerfile copies, and .dockerignore, which picks the build context), and
 # with staleEmailReason (adapters/email.mjs):
 # an image without it would send an approved email days late and file its
@@ -76,7 +76,7 @@ DOCKERFILE=services/worker/Dockerfile
 # What the image is built from: every COPY source in the Dockerfile, and the
 # .dockerignore that picks the build context (test/supa.test.mjs holds this
 # list to the Dockerfile's COPY lines).
-IMAGE_PATHS='services/worker apps/field/js/reconcile.js apps/field/js/dryingcalc.js apps/field/js/model.js apps/field/js/core.js .dockerignore'
+IMAGE_PATHS='services/worker apps/field/js/reconcile.js apps/field/js/dryingcalc.js apps/field/js/model.js apps/field/js/core.js apps/field/js/scans.js .dockerignore'
 UPDATE='cd ~/roybal-restoration-app && git checkout main && git pull'
 RERUN='cd ~/roybal-restoration-app && sh services/worker/set-gmail-secret.sh'
 

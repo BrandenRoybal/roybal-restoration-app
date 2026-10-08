@@ -351,6 +351,14 @@ test("asset dedupe: the same machine in two rows unions its times; different mac
   ] });
   assert.equal(twoLogs.dehu.days, 5, "08-01 10:00 → 08-06 10:00 once, not 3 + 3");
   assert.equal(twoLogs.dehu.rows.length, 2);
+  // a typed "dh 1" and a scanned DH-001 are one machine: the tag key, not the spelling
+  for (const typedTag of ["DH-1", "dh 1", "DH-001"]) {
+    const spelled = eqDays([
+      { asset: typedTag, type: "dehu", placed: "2026-08-01T10:00", removed: "2026-08-08T10:00" },
+      { asset: "DH-001", type: "dehu", placed: "2026-08-03T10:00", removed: "2026-08-08T10:00" },
+    ]);
+    assert.equal(spelled.dehu.days, 7, typedTag);
+  }
   const moved = eqDays([
     { asset: "D-1", type: "dehu", placed: "2026-08-01T10:00", removed: "2026-08-02T10:00" },
     { asset: "D-1", type: "dehu", placed: "2026-08-05T10:00", removed: "2026-08-06T10:00" },
@@ -389,6 +397,55 @@ test("pooled duplicate logs: rows split across two logs add up", () => {
   assert.deepEqual(r.airMover.rows.map((x) => x.id), ["A#eq0", "B#eq0"]);
   assert.ok(r.airMover.rows.every((x) => x.kind === "equipment_row" && x.label && x.date));
   assert.ok(r.dehu.days === 0 && r.scrubber.days === 0 && r.heater.days === 0);
+});
+
+/* Scanned units (scans.js): the scan events are the record. The detector
+   derives the rows again from them, on a copy, before counting, so a row a
+   newer copy of the log dropped still counts and an undone scan does not;
+   a scanned row's evidence id is its scan, not its place in the list. */
+test("scanned equipment: rows rebuilt from the scan events on a copy, evidence ids from the scan", () => {
+  const ev = (act, tag, id, at, extra = {}) => ({ id, tag, act, at, room: "Kitchen", type: "", model: "", logId: "dl1",
+    voids: "", how: "camera", by: "", tech: "", build: "v208", ...extra });
+  const p = baseJob();
+  p.equipmentScans = [
+    ev("place", "AM-007", "s1", "2026-07-28T23:00:00.000Z", { type: "Air mover" }),     // 07-28 15:00 Alaska
+    ev("remove", "AM-007", "s2", "2026-08-02T17:00:00.000Z"),                            // 08-02 09:00: 5 days
+    ev("place", "AM-008", "s3", "2026-07-28T23:00:00.000Z", { type: "Air mover" }),
+    ev("void", "AM-008", "s4", "2026-07-28T23:05:00.000Z", { voids: "s3", room: "", logId: "" }),
+    ev("place", "DH-002", "s5", "2026-08-05T17:00:00.000Z", { type: "Dehumidifier", room: "Hall" }),   // still running
+  ];
+  // the blob's log lost the AM-007 row to a newer copy, and still holds the undone AM-008 one
+  p.dryingLogs[0].equipment.push({ asset: "AM-008", type: "Air mover", location: "Kitchen", placed: "2026-07-28T15:00",
+    removed: "2026-08-04T09:00", hours: 162, notes: "", scanId: "s3", scan: {} });
+  const before = clone(p);
+  const r = checked(run(p));
+  assert.deepEqual(p, before, "the job itself is never changed");
+  const am = line(r, "equip:air_mover");
+  assert.equal(am.qty, 5, "15 documented (two typed rows and AM-007), 10 billed; the undone AM-008 is not counted");
+  assert.match(am.basis, /15 air-mover-days from 3 unit rows/);
+  assert.deepEqual(am.refs.filter((x) => x.kind === "equipment_row").map((x) => x.id), ["dl1#eq1", "dl1#eq2", "dl1#scan:s1"]);
+  assert.deepEqual(hint(r, "open_equipment_row").refs.map((x) => x.id), ["dl1#scan:s5"]);
+  // the same through equipmentUnitDays, and the id holds when the rows are reordered
+  const u = equipmentUnitDays(p, { today: "2026-08-07" });
+  assert.equal(u.airMover.days, 15);
+  const q = clone(p);
+  q.dryingLogs[0].equipment.reverse();
+  assert.ok(equipmentUnitDays(q, { today: "2026-08-07" }).airMover.rows.some((x) => x.id === "dl1#scan:s1"));
+  // undo every scan: only the typed rows are left, and the stale scanned row is not counted
+  p.equipmentScans.push(ev("void", "AM-007", "v1", "2026-08-06T17:00:00.000Z", { voids: "s1" }),
+    ev("void", "DH-002", "v2", "2026-08-06T17:00:00.000Z", { voids: "s5" }));
+  assert.equal(equipmentUnitDays(p, { today: "2026-08-07" }).airMover.days, 10);
+  // every scan event deleted (tombstoned): a leftover scanned row is not counted either
+  const gone = clone(p);
+  gone.deletedIds = Object.fromEntries(gone.equipmentScans.map((e) => [e.id, "2026-08-06T18:00:00.000Z"]));
+  gone.equipmentScans = [];
+  assert.equal(equipmentUnitDays(gone, { today: "2026-08-07" }).airMover.days, 10);
+  // a copy that simply lacks the scan log (one an older build wrote) keeps its scanned row
+  // as the drying record, and it counts like a typed row: 10 + AM-008's 7
+  p.equipmentScans = [];
+  assert.equal(equipmentUnitDays(p, { today: "2026-08-07" }).airMover.days, 17);
+  // and a job with no scans reads exactly as before
+  assert.deepEqual(checked(run(baseJob())).lines.map((l) => l.finding_id), ["equip:dehu", "labor:hours"]);
 });
 
 test("blank seed rows are ignored; unmatched types raise a hint", () => {
@@ -1295,10 +1352,12 @@ test("every result: finite numbers, 2 dp money, B3/B4 shapes, no junk text", () 
 });
 
 /* ---------- purity ---------- */
-test("the module is pure: imports only dryingcalc.js and model.js, reads no clock, touches no DOM or network", () => {
+test("the module is pure: imports only dryingcalc.js, model.js and scans.js, reads no clock, touches no DOM or network", () => {
   const src = readFileSync(new URL("../js/reconcile.js", import.meta.url), "utf8");
   const imports = [...src.matchAll(/^\s*import\s[^;]*?from\s+"([^"]+)"/gm)].map((m) => m[1]).sort();
-  assert.deepEqual(imports, ["./dryingcalc.js", "./model.js"]);
+  assert.deepEqual(imports, ["./dryingcalc.js", "./model.js", "./scans.js"]);
+  // scans.js is used for applyScans and tagKey alone, which read no clock (scans.test.mjs: no imports, no DOM, no network)
+  assert.deepEqual([...src.matchAll(/import\s*\{([^}]*)\}\s*from\s+"\.\/scans\.js"/g)].map((m) => m[1].trim()), ["applyScans, tagKey"]);
   assert.ok(!/\bimport\s*\(/.test(src), "no dynamic import");
   assert.ok(!/Date\.now\s*\(/.test(src), "no Date.now()");
   assert.ok(!/new Date\(\s*\)/.test(src), "no argument-less new Date()");
