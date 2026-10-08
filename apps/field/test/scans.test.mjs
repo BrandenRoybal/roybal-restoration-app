@@ -1296,6 +1296,72 @@ test("settleTypedRow: two moves in one minute, one fixed or deleted, never takes
   }
 });
 
+test("settleTypedRow: the newest hand edit wins across a row's scans, not the first one that changed", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" }])] });
+  const row = (p) => rows(p)[0];
+  const edit = (p, v, id, min) => {                                // forms.js: input, then change
+    row(p).removed = v;
+    releaseTypedScans(p, row(p), ctx(id + "a", min));
+    if (settleTypedRow(p, row(p), ctx(id + "b", min)).length) applyScans(p);
+  };
+  const sync = (x, y) => { const m = mergeProjects(clone(x), clone(y)).merged; applyScans(m); return m; };
+  let a = typed();
+  recordScan(a, remove("AM-030", "r1", 0));
+  let b = sync(a, typed());
+  edit(a, "2026-10-09T12:00", "a1", 20);                            // a planned pickup
+  b = sync(a, b); a = clone(b);
+  edit(b, "2026-10-08T11:15", "b1", 110);                           // B, not synced since
+  assert.equal(recordScan(a, remove("AM-030", "r2", 159)).outcome, "removed");
+  edit(a, "2026-10-09T12:00", "a2", 176);                           // A's lead puts the pickup back, last
+  a.updatedAt = "2026-10-12T00:00:00.000Z";
+  for (const [x, y] of [[a, b], [b, a]]) {
+    const m = sync(x, y);
+    assert.equal(row(m).removed, "2026-10-09T12:00");
+    assert.equal(applyScans(m).changed, false);
+    const v = settleTypedRow(m, row(m), ctx("v9", 200));               // the log opened: the older register catches up
+    assert.deepEqual(v.map((e) => [e.voids, e.set.removed]), [["r1", "2026-10-09T12:00"]]);
+    assert.deepEqual(settleTypedRow(m, row(m), ctx("v10", 201)), []);
+  }
+});
+
+test("settleTypedRow: lines from two phones' same-minute scans, one line deleted then rewritten elsewhere, room and time both fixed; applyScans stays idempotent", () => {
+  const typed = () => job({ dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" }])] });
+  const row = (p) => rows(p)[0];
+  const sync = (x, y) => { const m = mergeProjects(clone(x), clone(y)).merged; applyScans(m); return m; };
+  const newer = (p, min) => { recordScan(p, place("AM-031", "Hall", "x" + min, min)); p.updatedAt = at(min); return p; };
+  // two phones scanned the unit into the Bath in the same minute: one line, two scans
+  const a = typed(), b = typed();
+  recordScan(a, place("AM-030", "Bath", "m1", 0, { at: "2026-10-08T18:00:05.000Z" }));
+  recordScan(b, place("AM-030", "Bath", "m2", 0, { at: "2026-10-08T18:00:40.000Z" }));
+  b.updatedAt = at(1);
+  const both = sync(a, b);
+  assert.equal(row(both).notes, "fan on high\nmoved to Bath 10/08 10:00");
+  const fixed = clone(both);
+  row(fixed).notes = "fan on high\nmoved to Laundry 10/08 10:00";
+  assert.deepEqual(settleTypedRow(fixed, row(fixed), ctx("v1", 5)).map((e) => e.set.line), ["moved to Laundry 10/08 10:00", "moved to Laundry 10/08 10:00"]);
+  const other = newer(clone(both), 6);
+  for (const [x, y] of [[other, fixed], [fixed, other]]) assert.equal(row(sync(x, y)).notes, "fan on high\nmoved to Laundry 10/08 10:00");
+  // deleted on one phone, rewritten on the other (later): the rewrite comes back on the deleting phone's newer copy
+  const one = typed();
+  recordScan(one, place("AM-030", "Bath", "m1", 0));
+  const p = sync(one, typed()), q = clone(p);
+  row(p).notes = "fan on high";
+  assert.equal(settleTypedRow(p, row(p), ctx("d1", 10)).length, 1);
+  row(q).notes = "fan on high\nmoved to Laundry 10/08 09:35";        // room and time both fixed: still a rewrite
+  assert.deepEqual(settleTypedRow(q, row(q), ctx("d2", 20)).map((e) => e.set.line), ["moved to Laundry 10/08 09:35"]);
+  newer(p, 30);
+  for (const [x, y] of [[p, q], [q, p]]) {
+    const m = sync(x, y);
+    assert.equal(row(m).notes, "fan on high\nmoved to Laundry 10/08 09:35");
+    assert.equal(rowRoom(row(m)), "Laundry");
+  }
+  // a rewritten line's scan and a new move scan keep their order: nothing changes on the next run
+  const r = clone(q);
+  recordScan(r, place("AM-030", "Bedroom", "m3", 40));
+  assert.deepEqual(row(r).scanFill.moves.map((m) => m.id), ["m1", "m3"]);
+  assert.equal(applyScans(r).changed, false);
+});
+
 /* ---------- the module's own rules ---------- */
 test("scans.js is pure and safe on old iOS: no imports, no DOM or network, none of the newer built-ins", () => {
   const src = readFileSync(fileURLToPath(SCANS_URL), "utf8");

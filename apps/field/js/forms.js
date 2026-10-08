@@ -796,6 +796,14 @@ export function dryingLog(project, d) {
     td.append(handle);
   }
 
+  // the row object now in the log: a sync graft swaps id-less rows for fresh copies, so an
+  // open field finds its row again (same scan, else the one row with the same tag and Placed)
+  function liveRow(row) {
+    if (!row || d.equipment.indexOf(row) >= 0) return row;
+    const same = d.equipment.filter((r) => r && (row.scanId ? r.scanId === row.scanId
+      : !r.scanId && String(r.asset ?? "") === String(row.asset ?? "") && String(r.placed ?? "") === String(row.placed ?? "")));
+    return same.length === 1 ? same[0] : row;
+  }
   function eqRow(row, i) {
     const tr = h("tr", { class: row.scanId ? "eq-scanned" : null });
     const daysCell = h("td", { class: "calc", style: "min-width:46px" });
@@ -822,6 +830,7 @@ export function dryingLog(project, d) {
         style: `min-width:${w}` + (locked ? ";background:#f1f4f8;color:#44556b" : ""),
         readonly: locked, title: locked ? LOCK_TITLE : null });
       input.addEventListener("input", () => {
+        row = liveRow(row);
         if (scanLocked(row, key)) { input.value = row[key] ?? ""; return; }
         // an ended row's Removed: a value part-way through the picker waits for the change check
         if (key === "removed" && endedRefusal(row, input.value)) return;
@@ -840,10 +849,11 @@ export function dryingLog(project, d) {
       });
       if (key === "removed") {
         input.addEventListener("change", () => {
+          row = liveRow(row);
           const refused = endedRefusal(row, input.value);
           if (refused) { input.value = row[key] ?? ""; toast(refused, 4000); }
           else if (!row.scanId && String(row.removed ?? "") !== input.value) {
-            // a sync rewrote the row while the picker was open: what the crew picked stands
+            // a sync rewrote (or swapped) the row while the picker was open: what the crew picked stands
             row.removed = input.value;
             if (releaseTypedScans(project, row, scanUndoCtx()).length) {
               c.classList.remove("scan-cell");
@@ -871,7 +881,15 @@ export function dryingLog(project, d) {
       // what's typed replaces that move scan
       const typedNotes = key === "notes" && !row.scanId;
       const c = taCell(row, key, { minWidth: w });
-      if (typedNotes) c.querySelector("textarea").addEventListener("change", () => settleTyped(row));
+      if (typedNotes) {
+        const ta = c.querySelector("textarea");
+        ta.addEventListener("change", () => {
+          const was = row;
+          row = liveRow(row);
+          if (row !== was) row.notes = ta.value;               // a sync swapped the row while the box was open
+          settleTyped(row);
+        });
+      }
       c.classList.add("fillcell");
       attachFill(c, i, key);
       return c;
@@ -888,6 +906,7 @@ export function dryingLog(project, d) {
         onclick: () => toast(said, 3500) }, "📷"));
     }
     const del = () => {
+      row = liveRow(row);
       if (row.scanId) {
         // a scan is never deleted: a void event cancels it (scans.js), on every device
         // (the printed scan record lists the scans that still count; the void

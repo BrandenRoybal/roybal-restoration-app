@@ -374,7 +374,8 @@ function movePart(l) {
 }
 /* The line a scan's move line was rewritten as (room or time corrected)
    rather than deleted: a move line in `lines` no scan on the row wrote
-   (`tracked`), at the same time, else the nearest in the same room. "" if none. */
+   (`tracked`), at the same time, else the nearest in the same room, else
+   the only one there is. "" if none. */
 function rewrittenAs(lines, line, tracked, placed) {
   const m = MOVE_LINE_RE.exec(line);
   if (!m) return "";
@@ -389,7 +390,7 @@ function rewrittenAs(lines, line, tracked, placed) {
     const g = Math.abs(moveLineMs(n, placed) - t0);
     if (!best || g < gap) { best = p; gap = g; }
   }
-  return best;
+  return best || (cands.length === 1 ? cands[0] : "");
 }
 function moveLineMs(m, placed) {
   const p = /^(\d{4})-(\d{2})/.exec(clean(placed));
@@ -478,22 +479,27 @@ function fillTypedRow(row, mine, ctx) {
   // the fill's scan was undone (back to `was`) or given way to a hand edit made
   // on another device, whose own copy of the log may have lost the merge
   const v = holds ? ctx.voidOf.get(f.removeId) : null;
-  if (v && v.release === "removed" && isObj(v.set)) {
-    base = typedBase(str(v.set.removed));
-    next.released.push({ id: str(f.removeId), removed: base.removed });
-  } else if (v && v.release) { holds = false; base = null; }   // the row deleted elsewhere: this copy keeps what it shows
-  // a Removed retyped since, on any device: the time in its latest void
+  const handed = !!(v && v.release === "removed" && isObj(v.set));
+  if (v && v.release && !handed) { holds = false; base = null; }   // the row deleted elsewhere: this copy keeps what it shows
+  // a Removed retyped since, on any device: the newest of those scans' latest voids
+  // (a void is newer by `at`, then id: the order every device walks them)
+  let newest = handed ? { rv: v, now: str(v.set.removed), was: null } : null;
+  if (handed) next.released.push({ id: str(f.removeId), removed: newest.now });
   for (const r of arr(f.released)) {
     if (!isObj(r) || !r.id || next.released.some((k) => k.id === str(r.id))) continue;
     const rv = ctx.voidOf.get(str(r.id));
     if (rv && rv.release !== "removed") continue;
     const now = rv && isObj(rv.set) ? str(rv.set.removed) : str(r.removed);
     next.released.push({ id: str(r.id), removed: now });
-    if (now === str(r.removed)) continue;
-    if (holds) base = typedBase(now);
+    if (rv && (!newest || instant(rv.at) > instant(newest.rv.at) || (instant(rv.at) === instant(newest.rv.at) && byId(rv.id, newest.rv.id) > 0))) {
+      newest = { rv, now, was: str(r.removed) };
+    }
+  }
+  if (newest && (handed || newest.now !== newest.was)) {
+    if (holds) base = typedBase(newest.now);
     else {
-      row.removed = now;
-      row.hours = hoursOf(row.placed, now);
+      row.removed = newest.now;
+      row.hours = hoursOf(row.placed, newest.now);
       delete row._manualHrs;
     }
   }
@@ -518,22 +524,27 @@ function fillTypedRow(row, mine, ctx) {
   let notes = str(row.notes);
   const shows = (line) => notes.split("\n").some((l) => isMoveLine(l, line));
   const live = new Set(mine.moves.map((x) => x.id));
-  const gone = [];
-  for (const m of arr(f.moves)) {
-    if (!isObj(m) || !m.id || next.moves.some((k) => k.id === str(m.id))) continue;
-    const id = str(m.id), line = str(m.line), mv = ctx.voidOf.get(id);
-    const stays = m.released
-      ? !(mv && mv.release === "notes")
-      : live.has(id) || !ctx.known.has(id) || !!(mv && mv.release === "row");   // the row deleted elsewhere: this copy keeps its line
-    if (stays) next.moves.push(m.released ? { id, line, released: true } : { id, line });
-    else gone.push({ id, line, mv });
-  }
-  for (const g of gone) {
-    // a move since undone takes its line with it; one the crew rewrote (on any device) takes their line
-    const put = g.mv && g.mv.release === "notes" && isObj(g.mv.set) ? movePart(g.mv.set.line) : "";
-    if (put && put === g.line) { next.moves.push({ id: g.id, line: put, released: true }); continue; }   // as the crew left it
-    if (!next.moves.some((k) => k.line === g.line)) notes = put ? swapMoveLine(notes, g.line, put) : dropMoveLine(notes, g.line);
-    if (put && shows(put) && !next.moves.some((k) => k.line === put)) next.moves.push({ id: g.id, line: put, released: true });
+  const entries = [];
+  for (const m of arr(f.moves)) if (isObj(m) && m.id && !entries.some((k) => k.id === str(m.id))) entries.push(m);
+  const voidOfMove = (m) => ctx.voidOf.get(str(m.id));
+  const stays = (m) => {
+    const mv = voidOfMove(m);
+    return m.released ? !(mv && mv.release === "notes")
+      : live.has(str(m.id)) || !ctx.known.has(str(m.id)) || !!(mv && mv.release === "row");   // the row deleted elsewhere: this copy keeps its line
+  };
+  const kept = new Set(entries.filter(stays).map((m) => str(m.line)));
+  for (const m of entries) {                             // in the order the row lists them
+    const id = str(m.id), line = str(m.line);
+    if (stays(m)) { next.moves.push(m.released ? { id, line, released: true } : { id, line }); continue; }
+    // a move since undone takes its line with it; one the crew rewrote or deleted (on any device) takes theirs
+    const mv = voidOfMove(m);
+    const crew = !!(mv && mv.release === "notes");
+    const put = crew && isObj(mv.set) ? movePart(mv.set.line) : "";
+    if (crew && put === line) { next.moves.push({ id, line, released: true }); continue; }   // as the crew left it
+    const shared = kept.has(line) || next.moves.some((k) => k.line === line);
+    if (line && !shared) notes = put ? swapMoveLine(notes, line, put) : dropMoveLine(notes, line);
+    else if (!line && put && !shows(put)) notes = insertMoveLine(notes, put, row.placed);   // deleted here, rewritten on the other phone since
+    if (crew && (!put || shows(put))) next.moves.push({ id, line: put, released: true });
   }
   for (const x of mine.moves) {                          // each added once: a line the crew deleted stays deleted
     if (next.moves.some((k) => k.id === x.id)) continue;
@@ -938,9 +949,14 @@ export function releaseTypedScans(project, row, ctx, what) {
   const puts = new Map();
   if (kind === "notes") {
     const tracked = arr(f.moves).filter(isObj).map((m) => str(m.line)).concat(mine.moves.map(lineOf));
+    const byLine = new Map();                            // scans that shared one line take the same rewrite
     for (const e of hits) {
-      const put = rewrittenAs(lines, lineOf(e), tracked, row.placed);
-      if (put) { puts.set(e.id, put); tracked.push(put); }
+      const was = lineOf(e);
+      if (!byLine.has(was)) {
+        byLine.set(was, rewrittenAs(lines, was, tracked, row.placed));
+        if (byLine.get(was)) tracked.push(byLine.get(was));
+      }
+      if (byLine.get(was)) puts.set(e.id, byLine.get(was));
     }
   }
   const hit = (id) => hits.some((e) => e.id === id);
@@ -952,8 +968,9 @@ export function releaseTypedScans(project, row, ctx, what) {
       fill.released = arr(fill.released).filter((r) => isObj(r) && !hit(r.id))
         .concat(hits.map((e) => ({ id: e.id, removed: str(row.removed) })));
     } else {
-      fill.moves = arr(fill.moves).filter((m) => isObj(m) && !hit(m.id))
-        .concat(hits.filter((e) => puts.has(e.id)).map((e) => ({ id: e.id, line: puts.get(e.id), released: true })));
+      fill.moves = arr(fill.moves).map((m) => (isObj(m) && hit(m.id) ? { id: str(m.id), line: puts.get(m.id) || "", released: true } : m))
+        .filter(isObj);
+      for (const e of hits) if (!fill.moves.some((m) => m.id === e.id)) fill.moves.push({ id: e.id, line: puts.get(e.id) || "", released: true });
     }
     tidyFill(row);
   } else if (isObj(row.scanFill)) {
@@ -977,6 +994,13 @@ export function releaseTypedScans(project, row, ctx, what) {
     however many edits that took. Returns the voids pushed. */
 export function settleTypedRow(project, row, ctx) {
   if (!isObj(project) || !isObj(row) || row.scanId || !isObj(row.scanFill)) return [];
+  // nothing to carry (the common case, on every repaint): every line the row
+  // lists still shows and every Removed it gave way to still says the same
+  const shown = (line) => str(row.notes).split("\n").some((l) => isMoveLine(l, line));
+  const f0 = row.scanFill;
+  const typed0 = f0.removeId && str(row.removed) === str(f0.removed) && isObj(f0.was) ? str(f0.was.removed) : str(row.removed);
+  if (!arr(f0.moves).some((m) => isObj(m) && m.line && !shown(str(m.line)))
+    && !arr(f0.released).some((r) => isObj(r) && str(r.removed) !== typed0)) return [];
   const c = isObj(ctx) ? ctx : {};
   const out = releaseTypedScans(project, row, c, "notes");
   const f = row.scanFill;
@@ -997,16 +1021,20 @@ export function settleTypedRow(project, row, ctx) {
     r.removed = typed;
   }
   const lines = str(row.notes).split("\n");
+  const byLine = new Map();                              // released scans that shared one line take the same rewrite
   for (const m of arr(f.moves)) {
-    if (!isObj(m) || !m.released || lines.some((l) => isMoveLine(l, str(m.line)))) continue;
+    if (!isObj(m) || !m.released || !m.line || lines.some((l) => isMoveLine(l, str(m.line)))) continue;
     const last = voidOf.get(str(m.id));
     if (!last || last.release !== "notes") continue;
-    const others = arr(f.moves).filter((x) => isObj(x) && x !== m).map((x) => str(x.line));
-    const put = rewrittenAs(lines, str(m.line), others, row.placed);
+    const was = str(m.line);
+    if (!byLine.has(was)) {
+      const others = arr(f.moves).filter((x) => isObj(x) && str(x.line) !== was).map((x) => str(x.line));
+      byLine.set(was, rewrittenAs(lines, was, others, row.placed));
+    }
+    const put = byLine.get(was);
     restate(str(m.id), put ? { release: "notes", set: { line: put } } : { release: "notes" });
     m.line = put;
   }
-  f.moves = arr(f.moves).filter((m) => isObj(m) && (!m.released || m.line));
   tidyFill(row);
   return out;
 }
@@ -1016,9 +1044,9 @@ export function settleTypedRow(project, row, ctx) {
     and so does a line the crew rewrote one as. */
 export function restoreMoveLines(row) {
   if (!isObj(row) || row.scanId || !isObj(row.scanFill)) return;
-  const kept = arr(row.scanFill.moves).filter((m) => isObj(m) && m.released && m.line);
+  const kept = arr(row.scanFill.moves).filter((m) => isObj(m) && m.released);
   for (const m of kept) {
-    if (!str(row.notes).split("\n").some((l) => isMoveLine(l, str(m.line)))) row.notes = insertMoveLine(str(row.notes), str(m.line), row.placed);
+    if (m.line && !str(row.notes).split("\n").some((l) => isMoveLine(l, str(m.line)))) row.notes = insertMoveLine(str(row.notes), str(m.line), row.placed);
   }
   row.scanFill.moves = kept;
   tidyFill(row);

@@ -44,6 +44,8 @@ const { newDryingLog, blankEquipRow } = await import("../js/model.js");
 const { setCtx } = await import("../js/formkit.js");
 const { dryingLog, scanDeps } = await import("../js/forms.js");
 const { recordScan, scanRecord, placements, liveScans, applyScans, rowRoom } = await import("../js/scans.js");
+const { mergeProjects } = await import("../js/merge.js");
+const { graftProject } = await import("../js/graft.js");
 const fleet = await import("../js/fleet.js");
 const { qrSvg, qrModules } = await import("../js/qr.js");
 const { BUILD } = await import("../js/config.js");
@@ -314,6 +316,26 @@ await test("a typed row edited in two commits (Removed, or a move line): each on
   assert.equal(rowRoom(p.dryingLogs[0].equipment.find((r) => r.asset === "AM-020")), "Bedroom 2");
 });
 
+await test("a sync that swaps the rows while the picker is open: the time the crew picks lands on the row now in the log", () => {
+  const p = job();
+  recordScan(p, { tag: "AM-020", mode: "remove", ...ctx("e5", T2) });
+  const other = JSON.parse(JSON.stringify(p));                     // the other phone's copy, newer
+  const sheet = render(p);
+  const removed = inputsOf(rowsOf(sheet).find((x) => inputsOf(x)[0].value === "AM-020"))[2];
+  typeInto(removed, "2026-10-07T10:30");                           // the picker's first step, saved and pushed
+  other.dryingLogs[0].readings.push({ id: "rd1" });
+  other.updatedAt = "2026-10-08T00:00:00.000Z";
+  const { merged } = mergeProjects(JSON.parse(JSON.stringify(p)), other);
+  applyScans(merged);
+  graftProject(p, merged);                                         // sync puts the merged copy in place (new row objects)
+  typeInto(removed, "2026-10-07T09:00");
+  removed.dispatchEvent(new window.Event("change", { bubbles: true }));
+  const live = p.dryingLogs[0].equipment.find((r) => r.asset === "AM-020");
+  assert.equal(live.removed, "2026-10-07T09:00");
+  const said = p.equipmentScans.filter((e) => e.act === "void" && e.voids === "e5").map((e) => e.set.removed);
+  assert.equal(said.pop(), "2026-10-07T09:00");
+});
+
 await test("✕ on a scanned row asks, then undoes the scan with void events (the row goes)", () => {
   const p = job();
   recordScan(p, { tag: "AM-014", mode: "place", room: "Bedroom", ...ctx("e3", T2) });   // a move
@@ -478,7 +500,7 @@ await test("deleting a typed row's moved-to line undoes that move scan; it doesn
   assert.ok(!view.firstChild.querySelector(".eqscan-rec").textContent.includes("AM-020"), "and off the print at once");
   applyScans(p);
   assert.equal(row.notes, "fan on high", "the line stays deleted");
-  assert.equal(row.scanFill, undefined);
+  assert.deepEqual(row.scanFill.moves, [{ id: "e6", line: "", released: true }], "kept listed, so a rewrite made on another phone since still lands");
 });
 
 await test("the 7-day check counts what is out now: a planned pickup yes, a run typed in Hrs no", () => {
