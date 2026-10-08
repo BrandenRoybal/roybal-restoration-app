@@ -1448,7 +1448,8 @@ test("a typed row's scan corrected on a phone whose copy then lost the merge to 
     offline(B, 10);
     both(A, B, (r) => assert.equal(r.removed, put, put || "cleared"));
   }
-  // a Removed B typed before the scan's time: the scan never filled it, nor does its correction
+  // a Removed B typed before the scan's time: the scan never filled it, nor does its correction.
+  // The row lists it (following its correction), and an open lines it up just after A's edit
   {
     const A = typed(), B = typed({ removed: "2026-10-08T09:30" });
     recordScan(A, remove("AM-030", "r1", 0));
@@ -1456,7 +1457,16 @@ test("a typed row's scan corrected on a phone whose copy then lost the merge to 
     releaseTypedScans(A, row(A), ctx("a1", 2));
     A.updatedAt = at(2);
     offline(B, 10);
-    both(A, B, (r) => assert.equal(r.removed, "2026-10-08T09:30"));
+    both(A, B, (r) => {
+      assert.equal(r.removed, "2026-10-08T09:30");
+      assert.deepEqual(r.scanFill.released.map((x) => [x.id, x.removed, x.v]), [["r1", "2026-10-08T09:40", "a1"]]);
+    }, false);
+    const m = sync(A, B);
+    assert.deepEqual(settleTypedRow(m, row(m), ctx("open", 300)).map((e) => [e.voids, e.set.removed, e.at]),
+      [["r1", "2026-10-08T09:30", new Date(Date.parse(at(2)) + 1).toISOString()]]);
+    assert.equal(applyScans(m).changed, false);
+    assert.equal(row(m).removed, "2026-10-08T09:30");
+    assert.deepEqual(settleTypedRow(m, row(m), ctx("open2", 301)), [], "lined up once");
   }
   // a moved-to line the crew rewrote (the picker was left on the wrong room)
   {
@@ -1523,6 +1533,73 @@ test("a scan cleared as the wrong unit on a phone whose copy then lost the merge
     const m = sync(x, y);
     assert.equal(row(m).removed, "2026-10-08T10:30");
     assert.equal(applyScans(m).changed, false);
+  }
+});
+
+test("a corrected scan the winning copy's Removed was typed before: a later edit of that Removed stands, it is never filled with the correction then", () => {
+  const typed = () => job({ updatedAt: at(-60), dryingLogs: [log("L1", [{ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", notes: "fan on high" }])] });
+  const row = (p) => rows(p)[0];
+  const sync = (x, y) => { const m = mergeProjects(clone(x), clone(y)).merged; applyScans(m); return m; };
+  const edit = (p, v, id, min) => {   // forms.js mk: input (release, settle), then change (settle again)
+    row(p).removed = v;
+    releaseTypedScans(p, row(p), ctx(id + "a", min));
+    if (settleTypedRow(p, row(p), ctx(id + "b", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    if (settleTypedRow(p, row(p), ctx(id + "c", min), { edit: "removed", since: at(min) }).length) applyScans(p);
+    p.updatedAt = at(min);
+  };
+  // B's lead typed the pull time 09:30 (10:05) over A's correction 09:40 (10:02): B's copy wins, then B changes it again
+  for (const later of ["2026-10-08T10:15", ""]) {
+    let A = typed(), B = typed();
+    recordScan(A, remove("AM-030", "r1", 0)); A.updatedAt = at(0);
+    edit(A, "2026-10-08T09:40", "a1", 2);
+    edit(B, "2026-10-08T09:30", "b1", 5);
+    B = sync(B, A); A = sync(A, B);
+    assert.equal(row(A).removed, "2026-10-08T09:30");
+    edit(B, later, "b2", 360);
+    assert.equal(applyScans(B).changed, false, later || "cleared");
+    assert.equal(row(B).removed, later);
+    for (const [x, y] of [[A, B], [B, A]]) assert.equal(row(sync(x, y)).removed, later, later || "cleared");
+  }
+  // both leads typed the same 09:40; synced; then A clears it (still running) or types a later pickup
+  for (const later of ["", "2026-10-10T09:00"]) {
+    let A = typed(), B = typed();
+    recordScan(A, remove("AM-030", "r1", 0)); A.updatedAt = at(0);
+    edit(A, "2026-10-08T09:40", "a1", 2);
+    edit(B, "2026-10-08T09:40", "b1", 3);
+    B.dryingLogs[0].readings.push({ id: "rd" }); B.updatedAt = at(5);
+    A = sync(A, B); B = sync(B, A);
+    assert.equal(row(A).removed, "2026-10-08T09:40");
+    assert.deepEqual(settleTypedRow(A, row(A), ctx("open", 100)), [], "nothing to line up: the row says what the correction does");
+    edit(A, later, "a2", 240);
+    assert.equal(applyScans(A).changed, false, later || "cleared");
+    for (const [x, y] of [[A, B], [B, A]]) assert.equal(row(sync(x, y)).removed, later, later || "cleared");
+  }
+});
+
+test("✕ on a typed row whose scans an edit already released: the row typed in again is not refilled", () => {
+  const fresh = () => ({ ...blankEquipRow(), asset: "AM-030", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00" });
+  const row = (p) => rows(p)[0];
+  for (const kind of ["removed", "moved"]) {
+    const A = job({ dryingLogs: [log("L1", [{ ...fresh(), notes: "fan on high" }])] });
+    if (kind === "removed") {
+      recordScan(A, remove("AM-030", "r1", 0));
+      row(A).removed = "2026-10-08T09:40";
+      releaseTypedScans(A, row(A), ctx("a1", 2));
+    } else {
+      recordScan(A, place("AM-030", "Laundry", "m1", 270));
+      const before = row(A).notes;
+      row(A).notes = "fan on high\nmoved to Bath 10/08 14:30";
+      if (settleTypedRow(A, row(A), ctx("a2", 272), { edit: "notes", before }).length) applyScans(A);
+    }
+    applyScans(A);
+    const sc = rowScans(A, row(A));
+    assert.equal(sc.removes.length + sc.moves.length, 0, "no live scan on it: ✕ asks nothing");
+    const voids = releaseTypedScans(A, row(A), ctx("x1", 300), "row");
+    assert.deepEqual(voids.map((e) => [e.voids, e.release]), [[kind === "removed" ? "r1" : "m1", "row"]]);
+    rows(A).splice(0, 1);
+    rows(A).push(fresh());                                           // typed in again, still running
+    assert.equal(applyScans(A).changed, false, kind);
+    assert.deepEqual([row(A).removed, row(A).notes, rowRoom(row(A))], ["", "", "Kitchen"]);
   }
 });
 

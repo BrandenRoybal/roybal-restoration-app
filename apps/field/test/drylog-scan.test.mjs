@@ -869,6 +869,50 @@ await test("✕ on a typed row a scan changed asks first, and its scans go with 
   assert.equal(log.equipment.find((r) => r.asset === "AM-020").removed, "", "typed in again: not refilled");
 });
 
+await test("✕ on a typed row whose scan an edit already corrected asks nothing, and the row typed in again isn't refilled", () => {
+  const p = job();
+  recordScan(p, { tag: "AM-020", mode: "remove", ...ctx("e6", T2) });
+  const log = p.dryingLogs[0];
+  const sheet = render(p);
+  enter(inputsOf(rowOf(sheet, "AM-020"))[2], "2026-10-07T11:40");   // the real pull time
+  assert.equal(liveOf(p, "AM-020").removed, "2026-10-07T11:40");
+  assert.ok(!liveScans(p).some((e) => e.id === "e6"), "the edit released the scan");
+  const asked0 = confirms.length;
+  rowOf(view.firstChild, "AM-020").querySelector(".rowdel").click();
+  assert.equal(confirms.length, asked0, "no live scan on it: nothing asked");
+  assert.ok(!log.equipment.some((r) => r.asset === "AM-020"), "the row goes");
+  assert.equal(p.equipmentScans.filter((e) => e.act === "void" && e.voids === "e6").pop().release, "row");
+  log.equipment.push({ ...blankEquipRow(), asset: "AM-020", type: "Air mover", location: "Hall", placed: "2026-10-05T09:00" });
+  assert.equal(applyScans(p).changed, false);
+  assert.equal(liveOf(p, "AM-020").removed, "", "typed in again: not refilled");
+});
+
+await test("a Removed this phone typed before the other phone's corrected scan, on the copy that won: a later edit here stands through the next sync", () => {
+  const two = () => {
+    const p = job();
+    p.dryingLogs[0].equipment[0].notes = "fan on high";
+    return p;
+  };
+  const A = two(), B = two();
+  recordScan(A, { tag: "AM-020", mode: "remove", ...ctx("e7", T2) });    // A's tech scans it out at 12:00...
+  render(A);
+  enter(inputsOf(rowOf(view.firstChild, "AM-020"))[2], "2026-10-07T11:40");   // ...and the lead types 11:40
+  A.updatedAt = "2026-10-07T20:02:00.000Z";
+  render(B);
+  enter(inputsOf(rowOf(view.firstChild, "AM-020"))[2], "2026-10-07T11:30");   // B, not synced: 11:30, typed later
+  B.updatedAt = "2026-10-07T20:05:00.000Z";
+  syncIn(B, A);
+  assert.equal(liveOf(B, "AM-020").removed, "2026-10-07T11:30", "B's copy won: its 11:30 stands");
+  enter(inputsOf(rowOf(view.firstChild, "AM-020"))[2], "");             // B's lead: still running after all
+  B.updatedAt = "2026-10-08T00:00:00.000Z";
+  syncIn(B, A);
+  assert.equal(liveOf(B, "AM-020").removed, "", "the clear stands");
+  assert.equal(inputsOf(rowOf(view.firstChild, "AM-020"))[2].value, "");
+  const m = mergeProjects(clone(A), clone(B)).merged;
+  applyScans(m);
+  assert.equal(m.dryingLogs[0].equipment.find((r) => r.asset === "AM-020").removed, "", "and every copy ends on it");
+});
+
 await test("deleting a typed row's moved-to line undoes that move scan; it doesn't come back", () => {
   const p = job();
   const log = p.dryingLogs[0];

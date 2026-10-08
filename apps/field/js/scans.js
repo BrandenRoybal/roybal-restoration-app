@@ -592,7 +592,11 @@ function fillTypedRow(row, mine, ctx) {
    crew left it, the way that row would have listed it. A Removed retyped
    goes on a row that already follows a corrected scan (their voids' times
    decide between them), else only if the scan would have filled it (empty,
-   or a pickup still ahead of it). A Removed cleared (the wrong unit), an
+   or a pickup still ahead of it). One that would not have (a Removed typed
+   before the scan) is listed all the same, as following its correction
+   with the row keeping its Removed: it is decided at the merge that brings
+   it, and an edit made after restates it (settleTypedRow) rather than
+   letting it fill the row then. A Removed cleared (the wrong unit), an
    undo, a deleted line and a deleted row bring nothing: the row keeps what
    it holds. Run to a fixed point, so a second applyScans adds nothing.
    Mutates the rows. */
@@ -607,20 +611,26 @@ function claimReleased(logs, project, voidOf) {
     for (const x of arr(f.moves).concat(arr(f.released))) if (isObj(x) && x.id) listed.add(str(x.id));
   }
   const waiting = sortedEvents(project).filter((e) => e.act !== "void" && isObj(e.onRow) && !listed.has(e.id));
+  // the row a corrected scan goes on, and its latest void (null: it brings nothing)
+  const target = (e) => {
+    const v = voidOf.get(e.id);
+    const removed = e.act === "remove" && v && v.release === "removed" && isObj(v.set) && !!clean(v.set.removed);
+    const moved = e.act !== "remove" && v && v.release === "notes" && isObj(v.set) && !!movePart(v.set.line);
+    if (!removed && !moved) return null;
+    const key = tagKey(e.tag), placed = clean(e.onRow.placed);
+    const same = rows.filter((x) => tagKey(x.row.asset) === key && clean(x.row.placed) === placed);
+    const hit = same.find((x) => e.logId && x.log.id === e.logId) || same[0];
+    return hit ? { v, removed, row: hit.row } : null;
+  };
+  const fill = (row) => (isObj(row.scanFill) ? row.scanFill : { removeId: "", removed: "", was: null, moves: [] });
   for (let claimed = true; claimed;) {
     claimed = false;
     for (const e of waiting) {
       if (listed.has(e.id)) continue;
-      const v = voidOf.get(e.id);
-      const removed = e.act === "remove" && v && v.release === "removed" && isObj(v.set) && !!clean(v.set.removed);
-      const moved = e.act !== "remove" && v && v.release === "notes" && isObj(v.set) && !!movePart(v.set.line);
-      if (!removed && !moved) continue;
-      const key = tagKey(e.tag), placed = clean(e.onRow.placed);
-      const same = rows.filter((x) => tagKey(x.row.asset) === key && clean(x.row.placed) === placed);
-      const hit = same.find((x) => e.logId && x.log.id === e.logId) || same[0];
-      if (!hit) continue;
-      const row = hit.row, f = isObj(row.scanFill) ? row.scanFill : { removeId: "", removed: "", was: null, moves: [] };
-      if (removed) {
+      const t = target(e);
+      if (!t) continue;
+      const row = t.row, f = fill(row);
+      if (t.removed) {
         const typed = f.removeId && str(row.removed) === str(f.removed) && isObj(f.was) ? str(f.was.removed) : str(row.removed);
         if (!arr(f.released).length && !appliesOver(typed, e)) continue;
         f.released = arr(f.released).concat([{ id: e.id, removed: typed }]);
@@ -631,6 +641,17 @@ function claimReleased(logs, project, voidOf) {
       listed.add(e.id);
       claimed = true;
     }
+  }
+  // what still waits would not have filled its row, which follows no correction: listed as
+  // following its own (the register says what its void does), so the row keeps its Removed
+  for (const e of waiting) {
+    if (listed.has(e.id)) continue;
+    const t = target(e);
+    if (!t || !t.removed) continue;
+    const f = fill(t.row);
+    f.released = arr(f.released).concat([{ id: e.id, removed: str(t.v.set.removed), v: t.v.id }]);
+    t.row.scanFill = f;
+    listed.add(e.id);
   }
 }
 
@@ -1001,13 +1022,13 @@ function tidyFill(row) {
 /** The crew changed a hand-typed row by hand, so its scans give way:
     what = "removed" (Removed typed or cleared: its remove scans), "notes"
     (Notes edited: the move scans whose line is no longer in them) or "row"
-    (✕: every scan on it). Those scans are voided, so they never write it
-    again, and what the crew typed is the record: each void says why
-    (`release`), and carries what they typed (`set`: the Removed, or the
-    line a move line was rewritten as), so another phone's newer copy of the
-    log ends up with it too. The row keeps those scans listed (scanFill
-    `released`, or a move entry marked `released`) for settleTypedRow.
-    Returns the voids. */
+    (✕: every scan on it, and those an edit released before). Those scans
+    are voided, so they never write it again, and what the crew typed is
+    the record: each void says why (`release`), and carries what they
+    typed (`set`: the Removed, or the line a move line was rewritten as),
+    so another phone's newer copy of the log ends up with it too. The row
+    keeps those scans listed (scanFill `released`, or a move entry marked
+    `released`) for settleTypedRow. Returns the voids. */
 export function releaseTypedScans(project, row, ctx, what, before) {
   if (!isObj(project) || !isObj(row) || row.scanId) return [];
   const kind = what === "notes" || what === "row" ? what : "removed";
@@ -1023,6 +1044,15 @@ export function releaseTypedScans(project, row, ctx, what, before) {
     : kind === "notes" ? mine.moves.filter((e) => !lines.some((l) => isMoveLine(l, lineOf(e))))
       : mine.removes.concat(mine.moves);
   if (!hits.length && kind === "notes") return [];
+  // ✕ takes the scans the row lists as released with it too, so a row typed in again isn't refilled
+  if (kind === "row") {
+    const voidOf = latestVoids(project), events = new Map(sortedEvents(project).map((e) => [e.id, e]));
+    const ids = arr(f.released).concat(arr(f.moves).filter((m) => isObj(m) && m.released)).filter((x) => isObj(x) && x.id).map((x) => str(x.id));
+    for (const id of new Set(ids)) {
+      const e = events.get(id), last = voidOf.get(id);
+      if (e && last && (last.release === "removed" || last.release === "notes") && !hits.some((x) => x.id === id)) hits.push(e);
+    }
+  }
   // a move line rewritten rather than deleted: the crew's line (never another scan's own line)
   const puts = new Map();
   if (kind === "notes") {
@@ -1048,6 +1078,7 @@ export function releaseTypedScans(project, row, ctx, what, before) {
   } else if (isObj(row.scanFill)) {
     Object.assign(row.scanFill, { removeId: "", removed: "", was: null });
     row.scanFill.moves = arr(row.scanFill.moves).filter((m) => isObj(m) && !hit(m.id));
+    row.scanFill.released = arr(row.scanFill.released).filter((r) => isObj(r) && !hit(r.id));
     tidyFill(row);
   }
   const why = (e) => {
