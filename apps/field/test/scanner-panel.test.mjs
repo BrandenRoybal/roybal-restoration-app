@@ -619,12 +619,13 @@ await test("a unit typed on the log by hand: Remove fills in its row (no second 
   assert.ok(row.removed, "Removed filled in");
   assert.ok(Number(row.hours) > 0, "and Hrs");
   assert.equal(row.scanId, undefined, "still a typed row");
-  assert.equal(live(p).length, 0, "no scan event");
+  assert.deepEqual(live(p).map((e) => [e.act, e.onRow && e.onRow.placed]), [["remove", "2026-10-05T09:00"]], "kept like any scan");
   assert.equal(cardText().replace("Undo", ""), "AM-030 removed from Kitchen (typed row)");
   assert.equal(countText(), "Placed 0 · Moved 0 · Removed 1");
   assert.equal(saves, 1);
   tap(btn("Undo", document.querySelector(".sc-card")));
   assert.deepEqual([row.removed, row.hours], ["", ""], "back as it was typed");
+  assert.equal(live(p).length, 0, "the scan is voided");
   assert.equal(countText(), "Placed 0 · Moved 0 · Removed 0");
   assert.match(cardText(), /^Undone: AM-030 removed/);
   assert.equal(saves, 2);
@@ -632,6 +633,32 @@ await test("a unit typed on the log by hand: Remove fills in its row (no second 
   tap(btn("Done"));
   await done;
   window.localStorage.removeItem("roybal-scan-mode");
+  hashUntouched();
+});
+
+await test("typing one tag while another label is in view never frees that label's guard", async () => {
+  cameraPlays = true;
+  setCamera(async () => fakeStream());
+  roomPref("job-a", "Kitchen");
+  window.localStorage.removeItem("roybal-scan-mode");
+  const p = job();
+  const done = openScanner(p, { onChange: () => {} });
+  await until(() => ov() && /Point at a label/.test(ov().querySelector(".sc-status").textContent));
+  frames.push("RC:AM-014");
+  await until(() => live(p).length === 1);
+  nowMs += 500;
+  tap(btn("Remove"));                              // AM-014 still in frame
+  tap(btn("⌨ Type tag"));
+  nowMs += 2500;                                   // typing a torn label's tag
+  sheet().querySelector(".sc-input").value = "AM-020";
+  tap(btn("Use", sheet()));
+  await settle(5);
+  frames.push("RC:AM-014", "RC:AM-014");
+  await until(() => frames.length === 0); await settle(20);
+  assert.deepEqual(live(p).map((e) => `${e.act}:${e.tag}`).sort(), ["place:AM-014"], "AM-014 is not pulled (AM-020 was never out)");
+  tap(btn("Place"));
+  tap(btn("Done"));
+  await done;
   hashUntouched();
 });
 

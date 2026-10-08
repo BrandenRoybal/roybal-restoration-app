@@ -37,7 +37,7 @@ import { SYNC_ENABLED } from "../../js/config.js";
 import { rest, currentEmail } from "../../js/supa.js";
 import { syncNow } from "../../js/sync.js";
 import { qrSvg } from "../../js/qr.js";
-import { TAG_PAD, TAG_PREFIXES, TYPE_LABELS, parseTag, tagKey, typeFromTag, liveScans, placements, applyScans, wallTime } from "../../js/scans.js";
+import { TAG_PAD, TAG_PREFIXES, TYPE_LABELS, parseTag, tagKey, typeFromTag, liveScans, placements, applyScans, wallTime, rowOutAt, rowRoom } from "../../js/scans.js";
 import { loadFleet, saveFleet, unitFor, unitLabel, unitModelText, labelPayload } from "../../js/fleet.js";
 
 const HASH = "#/equipment";
@@ -98,13 +98,16 @@ function jobName(p) {
 
 /* ---------- what the jobs say: every unit out, every scan ---------- */
 /** From the local job blobs (pure apart from scans.js): { out, scans }.
-    out: one entry per drying-log row placed and not removed, scanned or
-    typed (and a scanned unit still out whose job lost its drying log) —
+    out: one entry per drying-log row out now (scans.js rowOutAt: placed,
+    not removed yet, so a planned pickup still counts; a run measured in
+    typed Hrs doesn't), scanned or typed (and a scanned unit still out whose
+    job lost its drying log) —
     { key, tag, type, jobId, job, address, archived, room, placed (wall
     time), days, scanned, how, tech, by }. scans: every live scan event
     — { key, tag, type, act, at, jobId, job }. */
-export function equipmentIndex(projects) {
+export function equipmentIndex(projects, atMs) {
   const out = [], scans = [];
+  const now = Number.isFinite(atMs) ? atMs : Date.now();
   for (const p of Array.isArray(projects) ? projects : []) {
     if (!p || typeof p !== "object" || !p.id) continue;
     const job = jobName(p), jobId = String(p.id), archived = !!clean(p.archivedAt);
@@ -124,13 +127,13 @@ export function equipmentIndex(projects) {
         if (!row || typeof row !== "object") continue;
         if (row.scanId) onLog.add(row.scanId);
         const placed = clean(row.placed);
-        if (!placed || clean(row.removed)) continue;
+        if (!rowOutAt(row, now)) continue;
         const P = row.scanId ? byPlace.get(row.scanId) : null;
         // a scanned row this copy holds no scan for keeps what the row says (scans.js leaves it as it was)
         const sc = !P && row.scanId && row.scan && typeof row.scan === "object" ? row.scan : {};
         out.push({
           ...base, key: tagKey(row.asset), tag: clean(row.asset), type: clean(row.type),
-          room: P ? P.room : clean(row.location), placed, days: daysSince(placed),
+          room: P ? P.room : rowRoom(row), placed, days: daysSince(placed),
           scanned: !!(P || row.scanId), how: P ? P.how : clean(sc.how), tech: P ? P.tech : clean(sc.tech), by: P ? P.by : clean(sc.by),
         });
       }
@@ -146,7 +149,8 @@ export function equipmentIndex(projects) {
     // a place that moved a unit already out reads as a move (scans.js scanRecord says the same)
     const moved = new Set(ps.flatMap((P) => P.moves.map((m) => m.id)));
     const starts = new Set(ps.map((P) => P.placeId));
-    const actOf = (e) => (moved.has(e.id) || (e.act === "place" && e.from && !starts.has(e.id)) ? "move" : e.act);
+    // a typed row's move (onRow) and a move another device's remove overtook read as moves too
+    const actOf = (e) => (moved.has(e.id) || (e.act === "place" && (e.from || e.onRow) && !starts.has(e.id)) ? "move" : e.act);
     for (const e of live) scans.push({ key: tagKey(e.tag), tag: clean(e.tag), type: clean(e.type), act: actOf(e), at: e.at, jobId, job });
   }
   return { out, scans };

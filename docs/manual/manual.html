@@ -318,7 +318,7 @@
   <ul>
     <li><b>Pulling:</b> switch the toggle to <span class="ui">Remove</span> and scan each unit as it comes out. No room is needed. Its Removed time and Hrs fill in on its row.</li>
     <li><b>Moving to another room:</b> stay in <span class="ui">Place</span>, pick the new room and scan the unit. It keeps its one row, so it is never counted twice, and the app adds a Notes line such as <i>moved to Bedroom 2 10/09 14:30</i>.</li>
-    <li><b>Units already typed on the log</b> (a job started before scanning, or a row added by hand): scan them the same way. The row stays a typed row: a Remove scan fills in its Removed time and Hrs, and a Place in another room adds the moved-to line. It never adds a second row for the same unit, and you can still fix the row by typing.</li>
+    <li><b>Units already typed on the log</b> (a job started before scanning, or a row added by hand): scan them the same way. The row stays a typed row: a Remove scan fills in its Removed time and Hrs, and a Place in another room adds the moved-to line. It never adds a second row for the same unit. The scan is kept like any other, and if you type over or clear that Removed time, what you type wins.</li>
     <li>The Place / Remove toggle stays where you left it, even the next time the scanner opens. Look at it before the first scan.</li>
   </ul>
   <table class="keep">
@@ -342,7 +342,7 @@
     <li>Scanned the wrong unit or the wrong room? Tap <span class="ui">Undo</span> on the card right away, before the next scan, then scan again.</li>
     <li>Later, on the drying log, ✕ on a scanned row asks <i>Undo this scan?</i> and undoes the whole row: its placing, any moves and its removal. Then scan the unit again the right way.</li>
     <li>On a scanned row the tag, the placed time and Hrs come from the scan and can't be typed over, and neither can the removed time once the unit was scanned out. The fill handle skips them. Type, Location and Notes stay editable, so you can still fix a room's spelling or write why a unit is still needed after 7 days.</li>
-    <li>A scanned unit that came out without being scanned: type its Removed date and time on its row. That time is its removal: a Remove scan after it changes nothing, and scanning the unit back in starts a new row. A Removed time still ahead (a planned pickup) leaves the unit out, and the Remove scan at pickup replaces it.</li>
+    <li>A scanned unit that came out without being scanned: type its Removed date and time on its row. That time is its removal: a Remove scan after it changes nothing, and scanning the unit back in starts a new row. From then on the old row's Removed is locked; to change it, ✕ the newer row first. A Removed time still ahead (a planned pickup) leaves the unit out, and the Remove scan at pickup replaces it (Undo on the card puts the planned time back).</li>
   </ul>
   <h3>Good to know</h3>
   <ul>

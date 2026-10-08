@@ -123,7 +123,8 @@ async function runScanner(project, opts) {
     let torchOn = false, tickTimer = 0, reading = false, flashTimer = 0;
     let canvas = null, ctx = null;
     let sheetEl = null;
-    let lastKey = "", lastAt = 0, sheetGuard = false;
+    const seenAt = new Map();  // tag key → when the camera last read it (or it was last handled)
+    let sheetGuard = [];
     let audio = null;
     const counts = { placed: 0, moved: 0, removed: 0 };
     const roomTags = {};       // room → tags placed / moved in / removed this session (photo caption)
@@ -346,17 +347,20 @@ async function runScanner(project, opts) {
       } catch { return null; }
     }
     // a tag just handled (any way) is ignored by the camera while it stays in view
-    function quiet(tag) { lastKey = tagKey(tag); lastAt = deps.now(); }
-    // keep a label that is still in view quiet a while longer; one that left
-    // view long enough ago counts again (an expired guard is never re-armed)
-    function guardLive() { return deps.now() - lastAt < SAME_TAG_MS; }
-    function holdGuard() { if (guardLive()) lastAt = deps.now(); }
+    // one guard per label, so handling one tag never frees another still in view
+    function quiet(tag) { seenAt.set(tagKey(tag), deps.now()); }
+    // the labels read within the window: likely still in view
+    function liveKeys() { const now = deps.now(); return [...seenAt].filter(([, t]) => now - t < SAME_TAG_MS).map(([k]) => k); }
+    // keep those quiet a while longer; one that left view long enough ago
+    // counts again (an expired guard is never re-armed)
+    function holdGuard(keys) { const now = deps.now(); for (const k of keys || liveKeys()) seenAt.set(k, now); }
     function onCameraText(text) {
       const tag = parseTag(text);
       const key = tag ? tagKey(tag) : "raw:" + text;
       const now = deps.now();
-      const seen = key === lastKey && now - lastAt < SAME_TAG_MS;
-      lastKey = key; lastAt = now;       // stays quiet while the label stays in view
+      const seen = now - (seenAt.has(key) ? seenAt.get(key) : -Infinity) < SAME_TAG_MS;
+      seenAt.set(key, now);              // stays quiet while the label stays in view
+      if (seenAt.size > 64) for (const [k, t] of seenAt) if (now - t >= SAME_TAG_MS) seenAt.delete(k);
       if (seen) return;
       if (!tag) return feedback("warn", "That QR code isn't an equipment label.", "");
       handleTag(tag, "camera", null);
@@ -416,17 +420,19 @@ async function runScanner(project, opts) {
       }
     }
     function undo(r, where, tag) {
-      if (!r) return;
-      if (r.event) {
-        if (!voidEvent(project, r.event.id, { id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD })) return;
-      } else if (!undoTyped(r)) return;     // a typed row the scan filled in goes back as it was
+      if (!r || !r.event) return;
+      const uctx = { id: uid(), at: new Date().toISOString(), by: author(), tech: techName(), build: BUILD };
+      // a typed row the scan filled in goes back as it was, unless it changed since
+      const typed = r.typed ? undoTyped(project, r, uctx) : "";
+      if (r.typed ? !typed : !voidEvent(project, r.event.id, uctx)) return;
       counts[r.outcome] = Math.max(0, counts[r.outcome] - 1);
       const list = where && roomTags[where];
       const i = list ? list.lastIndexOf(tag) : -1;
       if (i >= 0) list.splice(i, 1);
       paintCount();
       quiet(tag);              // the label is likely still in view: don't log it straight back
-      showCard("undone", "Undone: " + (r.message || tag), "", null);
+      showCard("undone", "Undone: " + (r.message || tag),
+        typed === "voided" ? `Its row was changed since, so it was left as it is: check ${tag} on the drying log.` : "", null);
       changed();
     }
     function changed() {
@@ -463,13 +469,13 @@ async function runScanner(project, opts) {
     /* ---------- sheets (room, type, typed tag) ---------- */
     function openSheet(...children) {
       closeSheet();
-      sheetGuard = guardLive();     // the label that opened it (if any) is likely still in view
+      sheetGuard = liveKeys();      // the label that opened it (if any) is likely still in view
       sheetEl = h("div", { class: "sc-sheet", role: "dialog" }, ...children);
       overlay.appendChild(sheetEl);
       return sheetEl;
     }
     // reads pause under a sheet: a label still in view after Cancel must not reopen it
-    function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; if (sheetGuard) lastAt = deps.now(); } }
+    function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; holdGuard(sheetGuard); sheetGuard = []; } }
 
     function openRoomSheet(then) {
       const err = h("div", { class: "sc-err", hidden: true });

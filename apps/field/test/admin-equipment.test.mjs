@@ -194,6 +194,27 @@ await test("the scans are written into a copy: the jobs on this device are untou
   assert.equal(p.updatedAt, "2026-10-01T00:00:00.000Z");
 });
 
+await test("Out now uses the field's rule: a planned pickup is out, a run in typed Hrs isn't, a typed row shows the room it moved to", () => {
+  const T = Date.UTC(2026, 9, 8, 18, 0);              // 10:00 AKDT 10/08
+  const row = (extra) => ({ asset: "AM-001", type: "Air mover", location: "Kitchen", placed: "2026-10-05T09:00", removed: "", hours: "", notes: "", ...extra });
+  const jobOf = (id, rows, extra = {}) => ({ id, customer: id, address: "", dryingLogs: [{ id: "L", equipment: rows }], equipmentScans: [], ...extra });
+  const idx = M.equipmentIndex([
+    jobOf("planned", [row({ asset: "AM-101", removed: "2026-10-10T09:00", hours: 96 })]),
+    jobOf("done", [row({ asset: "AM-102", hours: "72", _manualHrs: true }), row({ asset: "AM-103", removed: "2026-10-07T09:00" })]),
+    jobOf("left", [row({ asset: "AM-104", hours: 120 })]),       // Hrs the page worked out from a Removed since cleared
+    jobOf("moved", [row({ asset: "AM-105", notes: "behind fridge\nmoved to Bath 10/07 08:00" })]),
+    jobOf("ended", [row({ asset: "AM-106", placed: "", location: "" })], { equipmentScans: [
+      { id: "s1", tag: "AM-106", act: "place", at: "2026-10-05T18:00:00.000Z", room: "Hall", type: "Air mover", model: "", logId: "L", voids: "", how: "camera", by: "", tech: "", build: "" },
+    ] }),
+  ], T);
+  const byTag = new Map(idx.out.map((o) => [o.tag, o]));
+  assert.ok(byTag.has("AM-101"), "a planned pickup is out");
+  assert.ok(!byTag.has("AM-102") && !byTag.has("AM-103"), "a typed-Hrs run and a past removal are not");
+  assert.ok(byTag.has("AM-104"), "worked-out Hrs with no Removed: still out");
+  assert.equal(byTag.get("AM-105").room, "Bath");
+  assert.ok(byTag.has("AM-106"));
+});
+
 await test("the fleet list: active units by default, where each is now and its last scan; filters and search", async () => {
   assert.deepEqual(fleetTags(), ["AM-014", "DH-002"]);
   assert.deepEqual(JSON.parse(localStorage.getItem("roybal-fleet")).map((u) => u.tag).sort(), ["AM-003", "AM-014", "DH-002", "HT-001"],

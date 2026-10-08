@@ -38,7 +38,7 @@ import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, ta
 import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
-import { applyScans, voidPlacement, scanRecord } from "./scans.js";
+import { applyScans, voidPlacement, scanRecord, releaseTypedScans } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
@@ -659,8 +659,13 @@ export const scanDeps = { loadScanner: () => import("./scanner.js") };   // test
 function scanLocked(row, key) {
   if (!row || !row.scanId) return false;
   if (key === "asset" || key === "placed" || key === "hours") return true;
-  return key === "removed" && !!(row.scan && row.scan.removeId);
+  // Removed: once a scan removed it, or once the unit was scanned back in after a typed removal
+  return key === "removed" && !!(row.scan && (row.scan.removeId || row.scan.endedTyped));
 }
+// a time the scan itself recorded (the printed S); a typed removal the next scan ended is not one
+const scanTime = (row, key) => !!(row && row.scanId) && (key === "placed" || (key === "removed" && !!(row.scan && row.scan.removeId)));
+const LOCK_TITLE = "From the scan. To change it, undo the scan (✕) and scan again.";
+const ENDED_TITLE = "Typed, and the unit was scanned back in after it. To change it, undo the newer row (✕) first.";
 // one fleet read at a time: the packet renders every drying log at once
 let fleetCheck = null;
 function checkFleet() {
@@ -745,6 +750,7 @@ export function dryingLog(project, d) {
         if (scanLocked(row, key)) { kept++; return; }   // a scan's tag / times are the scan's
         row[key] = key === "asset" ? bumpAsset(src, k + 1) : src;
         if (key === "hours") row._manualHrs = true;
+        if (key === "removed" && !row.scanId) releaseTypedScans(project, row, scanUndoCtx());   // what's typed replaces a scan's
         filled++;
       });
       // a Removed filled onto scanned rows: their hours are applyScans' figure
@@ -782,18 +788,20 @@ export function dryingLog(project, d) {
       const locked = scanLocked(row, key);
       const input = h("input", { type, value: row[key] ?? "", step: type === "datetime-local" ? "60" : null,
         style: `min-width:${w}` + (locked ? ";background:#f1f4f8;color:#44556b" : ""),
-        readonly: locked, title: locked ? "From the scan. To change it, undo the scan (✕) and scan again." : null });
+        readonly: locked, title: locked ? (key === "removed" && !scanTime(row, key) ? ENDED_TITLE : LOCK_TITLE) : null });
       input.addEventListener("input", () => {
         if (scanLocked(row, key)) { input.value = row[key] ?? ""; return; }
         row[key] = input.value;
         if (key === "hours") row._manualHrs = true;
+        // a Removed typed (or cleared) on a typed row replaces a scan that filled it
+        if (key === "removed" && !row.scanId) releaseTypedScans(project, row, scanUndoCtx());
         if (row.scanId) { applyScans(project); if (hoursInput) hoursInput.value = row.hours ?? ""; }   // a typed removal on a scanned row
         recalcDays(); refreshWarn(); commit();
       });
       if (key === "hours") hoursInput = input;
       c.append(input);
       // printed: a superscript S on a time the scan recorded (legend under the table)
-      if (locked && (key === "placed" || key === "removed")) {
+      if (scanTime(row, key)) {
         c.classList.add("scan-cell");
         c.append(h("sup", { class: "scan-s", style: "display:none" }, "S"));
       }
