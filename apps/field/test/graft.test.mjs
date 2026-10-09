@@ -57,4 +57,25 @@ test("result deep-equals fresh (non-id arrays replaced wholesale)", () => {
   assert.deepEqual(live, fresh);
 });
 
+test("a Moisture Map reading row (no id, an rk) keeps its identity, so a cell mid-edit stays bound", () => {
+  const row = { rk: "r1", date: "2026-10-08", values: ["17", ""], notes: "" };
+  const values = row.values;
+  const live = { moistureMaps: [{ id: "m", readings: [row] }] };
+  graftProject(live, { moistureMaps: [{ id: "m", readings: [
+    { rk: "r1", date: "2026-10-08", values: ["17", "12"], notes: "" },
+    { rk: "r2", date: "2026-10-09", values: ["", ""], notes: "" }] }] });
+  assert.equal(live.moistureMaps[0].readings[0], row);
+  assert.equal(row.values, values);
+  assert.deepEqual(row.values, ["17", "12"]);
+  assert.equal(live.moistureMaps[0].readings[1].rk, "r2");
+});
+
+test("a key twice in the fresh copy makes two rows, never one object twice", () => {
+  const live = { rows: [{ rk: "r1", v: 1 }] };
+  const fresh = { rows: [{ rk: "r1", v: 2 }, { rk: "r1", v: 3 }] };
+  graftProject(live, fresh);
+  assert.notEqual(live.rows[0], live.rows[1]);
+  assert.deepEqual(live, fresh);
+});
+
 console.log(`\n${pass} graft checks passed.`);

@@ -33,11 +33,14 @@ import { PREVIEW_OF, isPreviewEntry } from "./thumbs.js";
    this registry against model.js FORMS so a new form can't be forgotten,
    and merge-sql-parity.test.mjs against the server's two lists.
    `equipmentScans` is the append-only equipment scan log (scans.js): its
-   events are never edited, so the union is the whole story. */
+   events are never edited, so the union is the whole story. `meterPhotos`
+   are the meter-screen photos on Moisture Map readings (meterphotos.js),
+   kept out of the map element so a newer copy of the map can't drop one. */
 export const ID_COLLECTIONS = [
   "photos", "moistureMaps", "dryingLogs", "constructionLogs",
   "invoices", "reconEstimates", "changeOrders", "receipts",
   "inspections", "contents", "boxes", "supportDocs", "equipmentScans",
+  "meterPhotos",
 ];
 
 /* ---------- per-item delete tombstones ----------
@@ -222,6 +225,41 @@ export function mergeProjects(a, b) {
         return out;
       });
       if (upgraded) notes.push(`photos ↑${upgraded}`);
+    }
+  }
+
+  // ---------- a meter photo's read and check are never undone ----------
+  // A meterPhotos element (meterphotos.js) only ever gains its `read` (the
+  // number the reader saw, with the `filled` it put in an empty cell) and
+  // its `ok` (the tech's check, with any `fixed` typed over it). A copy of
+  // the job saved before either landed — the office opened it, a second
+  // phone pulled it — can still be the NEWER copy, and its element would
+  // otherwise win whole and drop them: the photo read (and billed) again,
+  // the check asked again. So whichever copy has them keeps them, field by
+  // field, like the preview rule above. Twin: 0024's merge_project_blobs.
+  if (Array.isArray(merged.meterPhotos) && Array.isArray(older.meterPhotos)) {
+    const isSet = (v) => typeof v === "string" && v !== "";
+    const prev = new Map();
+    for (const el of older.meterPhotos) {
+      if (isObj(el) && isSet(el.id) && !gone.has(el.id) && !prev.has(el.id)) prev.set(el.id, el);
+    }
+    if (prev.size) {
+      let kept = 0;
+      merged.meterPhotos = merged.meterPhotos.map((el) => {
+        const o = isObj(el) && isSet(el.id) ? prev.get(el.id) : null;
+        if (!o) return el;
+        let out = el;
+        if (!isObj(el.read) && isObj(o.read)) {
+          out = { ...out, read: clone(o.read), filled: "filled" in o ? clone(o.filled) : "" };
+        }
+        if (!isSet(el.ok) && isSet(o.ok)) {
+          out = { ...out, ok: o.ok };
+          if ("fixed" in o) out.fixed = clone(o.fixed);
+        }
+        if (out !== el) kept++;
+        return out;
+      });
+      if (kept) notes.push(`meterPhotos ✓${kept}`);
     }
   }
 

@@ -42,6 +42,7 @@ import { shrinkDataURL } from "./core.js";
 import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "./merge.js";
 import { pruneForeignMeasured } from "./magicplancalc.js";
 import { applyScans } from "./scans.js";
+import { sweepDeletedMapPhotos } from "./meterphotos.js";
 import { isBlankProject } from "./model.js";
 
 const K_CURSOR = "roybal-sync-cursor";
@@ -99,18 +100,24 @@ function sameContent(a, b) {
 }
 
 /* Rules a merge can't hold on its own, applied to every copy sync stores
-   from a merge or from the server. Two today: a job switched to another
+   from a merge or from the server. Three today: a job switched to another
    Magicplan project keeps only that project's measured Floor Plan rows —
    the table merges filled-beats-empty (here and in the server's merge), so
-   a phone that missed the switch would put the old scan's rows back; and
-   the drying log's scanned equipment rows are rewritten from the unioned
+   a phone that missed the switch would put the old scan's rows back; the
+   drying log's scanned equipment rows are rewritten from the unioned
    scan events (scans.js), since a log merges newer-wins whole and the older
-   device's scanned rows would otherwise be lost with it.
+   device's scanned rows would otherwise be lost with it; and meter photos
+   on a deleted moisture map are dropped (meterphotos.js: one taken offline
+   after the delete arrives with its own new id, and nothing would ever
+   show it).
    magicplan.test.mjs checks every mergeProjects call here is followed by it.
-   `out.rebuilt` tells a caller the scan rows had to be rewritten. */
+   `out.rebuilt` tells a caller the copy had to be rewritten. */
 function settleMerged(p, out) {
+  let rebuilt = false;
   try { pruneForeignMeasured(p); } catch { /* never block a sync on it */ }
-  try { const r = applyScans(p); if (out) out.rebuilt = !!(r && r.changed); } catch { /* never block a sync on it */ }
+  try { const r = applyScans(p); rebuilt = !!(r && r.changed); } catch { /* never block a sync on it */ }
+  try { if (sweepDeletedMapPhotos(p)) rebuilt = true; } catch { /* never block a sync on it */ }
+  if (out) out.rebuilt = rebuilt;
   return p;
 }
 
@@ -268,7 +275,9 @@ const savePushed = () => localStorage.setItem(K_PUSHED, JSON.stringify(pushed));
 const saveRevs = () => localStorage.setItem(K_REVS, JSON.stringify(revs));
 const saveDeletes = () => localStorage.setItem(K_DELETES, JSON.stringify(Object.fromEntries(deletes)));
 const saveCursor = () => localStorage.setItem(K_CURSOR, cursor);
-const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-3000)));
+// 6000: meter photos (meterphotos.js) add many small objects; a hash this
+// device forgets is uploaded again on its next push
+const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-6000)));
 const saveThumbsDone = () => localStorage.setItem(K_THUMBS, JSON.stringify([...thumbsDone].slice(-5000)));
 const saveSwept = () => localStorage.setItem(K_SWEPT, JSON.stringify(sweptAt));
 

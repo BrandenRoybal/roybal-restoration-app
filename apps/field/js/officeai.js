@@ -9,7 +9,7 @@
    same monthly cap + ai_usage ledger as voice/narrative.
    ============================================================ */
 import { SUPABASE_URL, SUPABASE_KEY, SYNC_ENABLED } from "./config.js";
-import { isSignedIn, accessToken } from "./supa.js";
+import { isSignedIn, accessToken, ensureFresh } from "./supa.js";
 import { getUnifiedJobId } from "./spine.js";
 import { capturedBy } from "./tech.js";
 import { jobType, lossTypesOf } from "./model.js";
@@ -37,9 +37,10 @@ export function aiAvailable() {
 
 /* project may be null (board/admin mounts have no field project) — the job
    link and tech identity then come from the payload, or stay null/default. */
-async function callOffice(project, action, payload) {
+async function callOffice(project, action, payload, { signal } = {}) {
   const res = await fetch(FN_URL, {
     method: "POST",
+    signal,
     headers: {
       apikey: SUPABASE_KEY,
       Authorization: "Bearer " + accessToken(),
@@ -53,8 +54,9 @@ async function callOffice(project, action, payload) {
     }),
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok || body.ok === false) throw new Error(body.error || `${action} failed (${res.status})`);
-  if (body.capped) throw new Error(`Monthly AI spend cap reached ($${body.spend?.cap_usd ?? "?"}) — resets next month.`);
+  // .status and .capped let a caller tell a refusal from a capped month
+  if (!res.ok || body.ok === false) throw Object.assign(new Error(body.error || `${action} failed (${res.status})`), { status: res.status });
+  if (body.capped) throw Object.assign(new Error(`Monthly AI spend cap reached ($${body.spend?.cap_usd ?? "?"}) — resets next month.`), { status: res.status, capped: true });
   return body;
 }
 
@@ -361,6 +363,37 @@ export function digestSupportDoc(project, pages, hint) {
     deployed before that sends neither, and drops a negative total). */
 export function readReceipt(project, pages) {
   return callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }).then((b) => b.receipt || {});
+}
+
+/** Read the number on a photo of the moisture meter's screen (one photo, a
+    data URL). Resolves to { meter, fill, off }:
+      meter = { device, readable, value, unit, mode, confidence, note, fillable, model }
+      fill  = the server lets the app prefill an empty cell (METER_READ=fill)
+      off   = the reader is switched off (no AI spend; the photo is still kept)
+    or { capped: true } in a month past the AI spend cap, or { missing: true }
+    from a function deployed before meterRead existed (its 400 "Unknown
+    action"); meterui.js stops asking for the session on either, and the photo
+    waits. Anything else throws: a TypeError or AbortError when the signal
+    went (or the 40 s timeout), an Error with .status for a refusal.
+    hint.photoId / mapId / rowKey / loc go into the server's record of the
+    read, so a read can be matched to the number typed in that cell. */
+export async function readMeter(project, photo, hint = {}) {
+  await ensureFresh().catch(() => { /* the call below reports it */ });   // a phone back after hours offline
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), 40000) : null;
+  try {
+    const b = await callOffice(project, "meterRead", {
+      photo, meter: hint.meter || "", material: hint.material || "",
+      photoId: hint.photoId || "", mapId: hint.mapId || "", rowKey: hint.rowKey || "", loc: Number.isInteger(hint.loc) ? hint.loc : null,
+    }, { signal: ctl ? ctl.signal : undefined });
+    return { meter: b.meter || null, fill: b.fill === true, off: b.off === true };
+  } catch (e) {
+    if (e && e.capped) return { capped: true };
+    if (e && e.status === 400 && /^Unknown action/.test(e.message || "")) return { missing: true };
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /* ---------- Xactimate / carrier estimate import ----------

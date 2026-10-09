@@ -34,12 +34,20 @@ function graftObj(live, fresh) {
   }
 }
 
+/* An element is matched by its `id`, or — for a Moisture Map reading row,
+   which has no id on purpose (model.js blankReadingRow) — by its `rk`, so
+   the row a cell is typing into survives a graft too. */
+const keyOf = (x) => (!isObj(x) ? null : x.id != null ? "id:" + x.id : x.rk != null ? "rk:" + x.rk : null);
+
 function graftArr(live, fresh) {
   const byId = new Map();
-  for (const x of live) if (isObj(x) && x.id != null) byId.set(x.id, x);
+  for (const x of live) { const k = keyOf(x); if (k != null) byId.set(k, x); }
+  const used = new Set();   // a key twice in `fresh` must not make one object two rows
   const next = fresh.map((v) => {
-    if (isObj(v) && v.id != null && byId.has(v.id)) {
-      const keep = byId.get(v.id);
+    const k = keyOf(v);
+    if (k != null && byId.has(k) && !used.has(k)) {
+      used.add(k);
+      const keep = byId.get(k);
       graftObj(keep, v);
       return keep;
     }

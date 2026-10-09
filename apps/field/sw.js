@@ -3,7 +3,7 @@
    same-origin assets = stale-while-revalidate (instant load, refreshes in
    the background so updates land on the next open); large vendor files =
    cache-first. This makes new deploys self-update without manual cache bumps. */
-const CACHE = "roybal-field-v209";
+const CACHE = "roybal-field-v211";
 
 const CORE = [
   ".", "index.html", "manifest.webmanifest",
@@ -48,6 +48,15 @@ const CORE = [
   // fleet.js (both in the startup graph), and forms.js loads scanner.js on
   // demand — precached so the scanner opens with no signal in a loss house
   "js/scans.js", "js/fleet.js", "js/scanner.js",
+  // 📷 Meter photos on Moisture Map readings: forms.js imports meterui.js
+  // (→ meterphotos.js); a photo is taken with no signal, so both precache
+  "js/meterui.js", "js/meterphotos.js",
+  // in the startup graph but missing from this list until v211 (they cached
+  // only on a first online load, so a cache bump read offline could break
+  // forms.js): forms.js → photoshare.js, signdocs.js; sync.js/merge.js →
+  // thumbs.js; assist.js → calibration.js. test/sw-core.test.mjs now fails
+  // when a static import is missing here.
+  "js/photoshare.js", "js/signdocs.js", "js/thumbs.js", "js/calibration.js",
   "assets/emblem-mark.svg", "assets/icon-16.png", "assets/icon-32.png",
   "assets/icon-180.png", "assets/icon-192.png", "assets/icon-512.png", "assets/icon-512-maskable.png",
 ];

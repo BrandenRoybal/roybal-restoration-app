@@ -286,6 +286,7 @@
         <li>Tap <span class="ui">① Number</span> and drop a numbered marker at each reading location.</li>
         <li>Pick the <b>material</b>; the IICRC dry goal fills itself in.</li>
         <li>Each visit, tap <span class="ui">+ Add reading date</span> and enter MC% per location. Readings turn green when dry and red when wet, and the trend graph plots each location against the dry goal.</li>
+        <li>Tap the <span class="ui">📷</span> under a reading on today's row to photograph the meter screen. The photo is kept with that reading as proof (no signal needed), prints with the map, and shows beside the final reading on the certificate. When the app's meter reader is on, a photo of an empty cell fills the number in amber with a <b>?</b>: tap it and check the number against the photo.</li>
         <li>Place equipment icons on the plan (dehus, air movers, scrubbers) so the packet shows the equipment layout.</li>
       </ol>
       <h3>💧 Drying Log</h3>
@@ -295,7 +296,7 @@
         <li><span class="ui">+ Add reading</span> each visit: outside, reference and affected temperature and RH. GPP and grain depression calculate themselves, and any unit on site 7+ days is flagged for the carrier.</li>
       </ul>
       <h3>✅ Cert. of Drying</h3>
-      <p>The S500 dry-standard table (material, meter, goal, final reading, dry ✓) and a three-way sign-off: tech, owner and adjuster. Sign on the device or upload a signed copy.</p>
+      <p>The S500 dry-standard table (material, meter, goal, final reading, dry ✓) and a three-way sign-off: tech, owner and adjuster. Sign on the device or upload a signed copy. Final readings that have a meter photo show it under <b>Final Readings with Meter Photos</b>; the certificate can't go out for signature while one of those numbers is still an unchecked amber <b>?</b>.</p>
       <div class="tip"><b>Voice</b>Moisture Map, Drying Log, Photos and several other forms have <span class="ui">🎙️ Transcribe</span>: say the readings, tap ⏹ Stop, then confirm the values it heard.</div>
     </div>
   </div>
@@ -792,6 +793,7 @@
     <tr><td>One-tap overdue-invoice reminders and adjuster emails</td><td>Live</td><td>Cards in Approvals, answered by tap or by texting YES and the card's number. Nothing sends without the owner's yes.</td></tr>
     <tr><td>🧾 Invoice gaps (nightly billing check)</td><td>Live</td><td>Each night, water jobs are checked for drying-log equipment days, QuickBooks Time hours (hourly invoices only) and recorded Cat 3 work that no invoice bills. Gaps arrive as cards in Approvals; approving adds them once as a new draft invoice for the office to price. Approvals tab only, never by text.</td></tr>
     <tr><td>📷 Equipment scan in and out</td><td>Waiting</td><td>Field build v208. A QR label on every unit; the crew scans units in, between rooms and out from the Drying Log, and Office Admin → Equipment shows where every unit is, keeps the fleet list and prints the labels. Scanning, the fleet list and labels switch on once this feature's database update is applied; Branden writes "require v208" before the crew starts scanning. Out now works from the jobs right away.</td></tr>
+    <tr><td>📷 Meter photos on moisture readings</td><td>Waiting</td><td>Field build v211. A 📷 under each of today's readings on the Moisture Map photographs the meter screen; the photo prints with the map and beside the final reading on the Cert. of Drying. The 📷 switches on once this feature's database update is applied. The app filling the number in from the photo stays off until it reads the crews' first 50 or so meter photos correctly; until then every number is typed.</td></tr>
     <tr><td>Receipts matched to QuickBooks</td><td>Planned</td><td>Nightly match to bank-feed charges, then "tag + attach" approvals; materials onto T&amp;M invoices; cost vs estimate.</td></tr>
     <tr><td>Magicplan quantities into the estimate</td><td>Planned</td><td>Room measurements flowing straight into estimate line items.</td></tr>
     <tr><td>📅 My Week</td><td>Parked</td><td>Hidden until the board schedule feeds it reliably, so crews never see wrong days.</td></tr>
@@ -822,6 +824,8 @@
     <tr><td>Something you entered is missing</td><td>Open the job, unfold ⏪ Backups on this device and tap ⏪ Restore; it only adds back what is missing. Last resort: ☁ Cloud copy → Take the cloud's copy. Call the office first.</td></tr>
     <tr><td>AI button does nothing, "AI needs internet"</td><td>Get signal; typed entries are already saved.</td></tr>
     <tr><td>📷 Scan equipment greyed out</td><td>"Connect once to switch scanning on": get signal and open the drying log again. "Scanning switches on after this feature's database update is applied": not switched on yet; use + Add equipment.</td></tr>
+    <tr><td>No 📷 under the moisture readings</td><td>"Connect once to switch meter photos on": get signal and open the map again. "Meter photos switch on after this feature's database update is applied": not on yet; type the readings as usual. The 📷 only shows on today's row and the newest one.</td></tr>
+    <tr><td>Cert. of Drying won't go out for signature: "a moisture reading the app read from a meter photo hasn't been checked yet"</td><td>Open the Moisture Map and tap each amber ? to check it against its photo.</td></tr>
     <tr><td>Scanner says "Camera didn't start."</td><td>Tap 📷 Photo of the label or ⌨ Type the tag. On an iPhone or iPad, check Settings → Safari → Camera isn't set to Deny.</td></tr>
     <tr><td>A label won't scan</td><td>Wipe it, turn on 🔦, hold the camera 6 to 10 in. away. Still nothing: ⌨ Type tag in the scanner, and tell the office the label needs replacing.</td></tr>
     <tr><td>Start bid greyed out</td><td>A job for that customer or claim # already exists. Open that job.</td></tr>

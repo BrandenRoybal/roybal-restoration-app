@@ -220,6 +220,43 @@ table.grid--inv .invsec__row input { flex: 1; text-align: left; font-weight: 700
 td.dry input, input.dry { background: #e3f6ec !important; color: var(--green); font-weight: 700; }
 td.wet input, input.wet { background: #fbe3e0 !important; color: var(--red); font-weight: 700; }
 .flagnote { font-size: 12px; color: var(--muted); margin: 2px 0 8px; }
+/* meter photos on moisture readings (meterui.js): a 📷 strip under each of
+   today's readings (the column keeps its width); a number the reader filled
+   in stays amber until the tech confirms it */
+table.grid td.mp-td input.mc { display: block; width: 100%; }
+.mp-btn {
+  display: flex; align-items: center; justify-content: center; width: 100%; min-width: 42px; height: 28px;
+  padding: 0; margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; cursor: pointer;
+  background: #f3f5f8; font-size: 14px; line-height: 1; color: var(--ink);
+}
+.mp-btn[hidden] { display: none; }
+.mp-btn.mp-none { opacity: .55; }
+.mp-btn.mp-pending, .mp-btn.mp-photo { background: #e3f6ec; }
+.mp-btn.mp-check { background: var(--amber); color: #fff; font-weight: 800; font-size: 16px; }
+.mp-btn.mp-differs { background: var(--red); color: #fff; font-weight: 800; font-size: 16px; }
+.mp-gate { font-size: 12px; margin: -2px 0 8px; }
+table.grid td.mp-fill input.mc { background: #fff4cc !important; color: #7a5a00 !important; font-weight: 700; }
+.mp-banner { background: #fff4cc; border: 1px solid #f0d8a8; border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; color: #7a5a1a; margin: 4px 0 8px; }
+.mp-banner[hidden] { display: none; }
+.mpsheet { position: fixed; inset: 0; z-index: 210; background: rgba(8, 14, 24, .88); display: flex; align-items: center; justify-content: center; padding: 12px; }
+.mpsheet__panel { background: #fff; border-radius: var(--radius); width: min(560px, 100%); max-height: 100%; overflow: auto; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); }
+.mpsheet__top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.mpsheet__title { font-weight: 700; font-size: 15px; }
+.mpsheet__close { margin-left: auto; width: 40px; height: 40px; border-radius: 999px; border: 0; background: #eef1f5; font-size: 17px; cursor: pointer; }
+.mpsheet__img { display: block; width: 100%; max-height: 55vh; object-fit: contain; background: #0f1b2d; border-radius: var(--radius-sm); }
+.mp-cloud { padding: 40px 16px; text-align: center; color: #dfe6ef; font-size: 14px; }
+.mpsheet__status { font-size: 14px; margin: 10px 0; }
+.mpsheet__acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.mpsheet__acts .btn { min-height: 44px; }
+.mpsheet__meta { font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+@media print { .mpsheet { display: none !important; } }
+.mp-cert { margin: 12px 0; }
+.mp-cert .mp-print__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+.mp-cert .mp-print__fig { margin: 0; cursor: zoom-in; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: #fff; }
+.mp-cert .mp-print__fig img { display: block; width: 100%; aspect-ratio: 4/3; object-fit: contain; background: #0f1b2d; }
+.mp-cert .mp-print__none { padding: 24px 6px; font-size: 12px; color: var(--muted); text-align: center; }
+.mp-cert figcaption { font-size: 12px; padding: 4px 6px; }
+
 .flagnote .dot { font-weight: 800; }
 .flagnote .dot.g { color: var(--green); }
 .flagnote .dot.r { color: var(--red); }
