@@ -1,11 +1,11 @@
 /* ============================================================
-   Roybal Field Forms — texting via SMS links (Path 1: no gateway)
+   Roybal Field Forms — texting
    ------------------------------------------------------------
-   Builds sms: links that open the phone's Messages app pre-filled —
-   the tech reviews and taps send, so the text comes from THEIR number
-   (crew → office keeps a human sender; customers can reply to a person).
-   No provider, no cost, works offline. A future Path 2 (Twilio edge
-   function) can automate sends behind the same buttons.
+   Every text button sends from the company number (Path 2, below:
+   Twilio through the roybal-notify edge function). The sms: links
+   built here (Path 1) are the fallback: when a company send can't go
+   through, the phone's Messages app opens pre-filled — the tech
+   reviews and taps send, so the text still goes out, from THEIR number.
    ============================================================ */
 import { COMPANY } from "./model.js";
 import { toast } from "./core.js";
@@ -100,20 +100,14 @@ export const SMS_KIND_LABELS = {
 /* ============================================================
    Path 2 — company-number texting (Twilio via roybal-notify)
    ------------------------------------------------------------
-   A per-device toggle (default OFF). While OFF, every text button
-   keeps its Path-1 behavior: open Messages pre-filled from the tech's
-   phone. Flip it ON once the toll-free number is verified + the
-   roybal-notify function is deployed, and the same buttons send from
-   the company number, record the real Twilio sid/status on the message
-   log, and fall back to the sms: link if the send can't go through.
+   Always on. Every text button sends from the company number and
+   records the real Twilio sid/status on the message log; where a
+   refusal allows it (each sender below says when), a send that can't
+   go through falls back to the sms: link. Until field v210 this was a
+   per-device checkbox, "Send texts from the company number", off by
+   default; the checkbox is gone, and its old roybal-company-sms
+   setting is simply never read.
    ============================================================ */
-const COMPANY_SEND_KEY = "roybal-company-sms";
-export function companySendEnabled() {
-  try { return localStorage.getItem(COMPANY_SEND_KEY) === "1"; } catch (_) { return false; }
-}
-export function setCompanySend(on) {
-  try { on ? localStorage.setItem(COMPANY_SEND_KEY, "1") : localStorage.removeItem(COMPANY_SEND_KEY); } catch (_) { /* ignore */ }
-}
 
 /* Send ONE text through the company number. Resolves to { sid, status };
    throws with a readable message on any failure. supa.js is imported lazily
@@ -135,17 +129,12 @@ export async function sendViaCompany({ to, body, kind, by, unifiedJobId }) {
 /* Assistant confirm-chip send WITHOUT a field project (board / admin mounts —
    the server's sms_messages row is the log there). Same lane rules as
    smartSend, except a quiet_hours refusal NEVER falls back to the device
-   link — that would sidestep the guard the user just hit. Must be called
-   synchronously from the tap so the Path-1 sms: link fires in its window. */
+   link — that would sidestep the guard the user just hit. */
 export function assistSend({ to, message, audience, by }) {
   const num = normalizePhone(to);
   const msg = String(message || "").trim();
   if (!num || !msg) return { ok: false, detail: "missing a phone number or message" };
   const kind = audience === "crew" ? "assistCrew" : "assist";
-  if (!companySendEnabled()) {
-    location.href = smsHref(num, msg);            // synchronous in the tap window
-    return { ok: true, detail: "opened Messages — review and hit send" };
-  }
   return sendViaCompany({ to: num, body: msg, kind, by: by || "", unifiedJobId: null })
     .then(() => ({ ok: true, detail: "sent from the company number" }))
     .catch((e) => {
@@ -156,21 +145,23 @@ export function assistSend({ to, message, audience, by }) {
     });
 }
 
-/* Shared handler behind every text button. OFF -> Path 1 (open Messages,
-   synchronous on the tap so iOS allows it). ON -> Path 2 (send from the
-   company number, one message per recipient), upgrading the just-logged
-   entry with the real sid/status, and falling back to the sms: link if the
-   company send fails. onChange persists the project after each state change. */
+/* Shared handler behind the job's text buttons (on our way, Field Report →
+   office): sends from the company number, one message per recipient,
+   upgrading the just-logged entry with the real sid/status, and falling back
+   to the sms: link if the company send fails. A tap on the same text while it
+   is still sending is ignored: on a weak signal nothing shows for a few
+   seconds, and a second tap would text the customer twice. onChange persists
+   the project after each state change. */
+const sending = new Set();
 export async function smartSend(project, { recipients, body, kind, by, onChange }) {
   const to = (Array.isArray(recipients) ? recipients : [recipients]).map(normalizePhone).filter(Boolean);
   if (!to.length) { toast("No phone number to text."); return; }
+  const key = [kind, to.join(","), body].join("|");
+  if (sending.has(key)) { toast("Still sending that text…"); return; }
+  sending.add(key);
   const entry = logSms(project, { kind, to, body, by });
   onChange && onChange();
-
-  if (!companySendEnabled()) {
-    location.href = smsHref(to, body);          // Path 1 — must stay synchronous on the tap
-    return;
-  }
+  toast("Sending from the company number…", 30000);   // the result toast replaces it
   try {
     const results = [];
     for (const num of to) results.push(await sendViaCompany({ to: num, body, kind, by }));
@@ -185,5 +176,7 @@ export async function smartSend(project, { recipients, body, kind, by, onChange 
     onChange && onChange();
     toast("Company send failed — opening Messages instead");
     location.href = smsHref(to, body);          // best-effort fallback
+  } finally {
+    sending.delete(key);
   }
 }
