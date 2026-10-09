@@ -35,7 +35,7 @@ import { aiAvailable, aiReady, analyzePhotos, applyPhotoAnalysis, photoAiOutdate
 import { pushInvoiceToQbo } from "./qbo.js";
 import { dictateBtn } from "./dictate.js";
 import { siteVisitPanel, pricingCounts, pricingSummary, pricedTag, draftText, takeSiteVisitOpen } from "./sitevisit.js";
-import { smsHref, officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, companySendEnabled, sendViaCompany } from "./sms.js";
+import { officeNumbers, officeNumbersRaw, setOfficeNumbers, fieldReportSms, logSms, smartSend, normalizePhone, sendViaCompany } from "./sms.js";
 import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
 import { applyScans, voidPlacement, scanRecord, releaseTypedScans, settleTypedRow, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
@@ -1436,9 +1436,9 @@ function termRow(k, v) {
    Hours live in the Labor Log (QuickBooks Time); the old per-day work
    log + QB pull are gone (legacy rows stay stored, just not shown).
    ============================================================ */
-/* app-only: open Messages pre-filled with this report, addressed to the
-   assigned office numbers — sent from the tech's own phone so the office
-   can text straight back. Numbers are per-device (⚙), office # by default. */
+/* app-only: text this report to the assigned office numbers from the
+   company number (Messages opens pre-filled if that send can't go through).
+   Numbers are per-device (⚙), office # by default. */
 function textToOfficeBar(project, c) {
   const bar = h("div", { class: "app-only", style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0" });
   const send = h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto" }, "📱 Text to office");
@@ -1447,7 +1447,6 @@ function textToOfficeBar(project, c) {
     if (!nums.length) { toast("Add an office number first (⚙)."); return; }
     const body = fieldReportSms(project, c, techName());
     if (body.split("\n").length < 2) { toast("Nothing to send yet — add a note, issue or materials."); return; }
-    // Path 1 (Messages) or Path 2 (company number) per the messaging toggle
     smartSend(project, { recipients: nums, body, kind: "fieldReport", by: techName(), onChange: commit });
   });
   const cfg = h("button", { type: "button", class: "btn btn--ghost btn--sm", style: "width:auto", title: "Office numbers this report texts to" }, "⚙");
@@ -4200,23 +4199,10 @@ export function portalShareForm(project) {
     textBtn.addEventListener("click", async () => {
       const to = normalizePhone(project.phone);
       if (!to) { toast("No customer phone on this job — add it on the Job Home form."); return; }
-      if (!companySendEnabled()) {
-        // device lane: the sms: link must fire synchronously in THIS tap
-        // (iOS), so a never-published portal publishes now and asks for a
-        // re-tap — never text a link that isn't live yet.
-        if (!s.publishedAt) {
-          toast("Making the link live first — tap Text again in a moment.");
-          ensurePublished();
-          return;
-        }
-        logSms(project, { kind: "portalLink", to, body: linkMsg, by: techName() });
-        commit();
-        location.href = smsHref(to, linkMsg);
-        return;
-      }
-      // company lane: make sure the link is live, then send. A quiet-hours or
-      // opted-out refusal must NOT fall back to the device link — that would
-      // sidestep the guard the server just enforced (the assistSend rule).
+      // from the company number: make sure the link is live, then send. A
+      // quiet-hours or opted-out refusal must NOT fall back to the device
+      // link — that would sidestep the guard the server just enforced (the
+      // assistSend rule).
       textBtn.disabled = true;
       try {
         if (!(await ensurePublished())) return;

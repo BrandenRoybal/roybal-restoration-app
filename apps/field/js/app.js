@@ -34,7 +34,7 @@ import { buildFlags } from "./buildwatch.js";
 import { startMediaQueue, mediaQueueBanner } from "./mediaqueue.js";
 import { convertToConstruction, rebuildFacts } from "./convert.js";
 import { dictateBtn } from "./dictate.js";
-import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend, companySendEnabled, setCompanySend } from "./sms.js";
+import { smsHref, onOurWaySms, logSms, SMS_KIND_LABELS, smartSend } from "./sms.js";
 import { planPhases, pushPlanToBoard, pushActuals, findBoardRow, boardRowFor, fetchBoardRowsSafe, fetchHistoryDigest, isoDateOnly, ensureBoardTile, adoptBoardJobs, healBoardDuplicates, markBoardPhaseDone, fetchBoardCalendarSafe } from "./boardpush.js";
 import { boardFlagsByJob } from "./myweekcalc.js";
 import { ghostLeadRows, unlinkedLeadTiles, isBidFile, bidCard, bidState, bidChip, archiveLostBidFiles, wonPhotosCard,
@@ -1295,24 +1295,11 @@ function cloudCopyCard(project) {
   return h("div", { class: "card app-only" }, head, bodyBox);
 }
 
+/* The job's text log: what the text buttons sent (always from the company
+   number now; there is no per-phone checkbox) and the customer's replies.
+   Hidden until there is something to list. */
 function messageLogCard(project) {
   const log = Array.isArray(project.smsLog) ? project.smsLog : [];
-
-  // per-device toggle: send texts from the company (toll-free) number vs the
-  // tech's phone. Off by default; flip on once the number is verified + deployed.
-  const toggle = h("input", { type: "checkbox", checked: companySendEnabled() });
-  const hint = h("div", { class: "subtle", style: "font-size:12px;margin:2px 0 0" });
-  const paintHint = () => {
-    hint.textContent = companySendEnabled()
-      ? "On — text buttons send from your company number and log delivery status."
-      : "Off — text buttons open your phone's Messages app to send.";
-  };
-  toggle.addEventListener("change", () => { setCompanySend(toggle.checked); paintHint(); });
-  paintHint();
-  const setting = h("div", {},
-    h("label", { class: "check", style: "margin:0" }, toggle,
-      h("span", {}, "Send texts from the company number")),
-    hint);
 
   const via = (e) => e.via === "company"
     ? h("span", { style: "color:var(--green);font-weight:700" }, " · sent ✓")
@@ -1345,9 +1332,9 @@ function messageLogCard(project) {
       m.body ? h("div", { style: "font-size:12px" }, String(m.body).slice(0, 200)) : null);
 
   const heading = h("div", { style: "font-weight:700" }, "💬 Messaging");
-  const divider = h("hr", { class: "divider", style: "margin:10px 0", hidden: true });
-  const rowsBox = h("div");
+  const rowsBox = h("div", { style: "margin-top:6px" });
   const more = h("p", { class: "subtle", style: "font-size:12px;margin-top:6px", hidden: true });
+  const card = h("div", { class: "card app-only" }, heading, rowsBox, more);
 
   const paintRows = (inbound) => {
     const items = [
@@ -1355,10 +1342,8 @@ function messageLogCard(project) {
       ...inbound.map((m) => ({ at: m.created_at || "", node: inboundRow(m) })),
     ].sort((a, b) => (a.at < b.at ? 1 : -1));   // newest first
     rowsBox.replaceChildren(...items.slice(0, 10).map((x) => x.node));
-    heading.textContent = items.length
-      ? `💬 Messaging — log (${log.length} sent${inbound.length ? ` · ${inbound.length} received` : ""})`
-      : "💬 Messaging";
-    divider.hidden = !items.length;
+    heading.textContent = `💬 Messaging — log (${log.length} sent${inbound.length ? ` · ${inbound.length} received` : ""})`;
+    card.hidden = !items.length;
     more.hidden = items.length <= 10;
     more.textContent = `+ ${items.length - 10} earlier`;
   };
@@ -1386,7 +1371,7 @@ function messageLogCard(project) {
     } catch (_) { /* offline / signed out — sends-only view is fine */ }
   })();
 
-  return h("div", { class: "card app-only" }, heading, setting, divider, rowsBox, more);
+  return card;
 }
 
 function projectHome(project) {
@@ -1437,10 +1422,10 @@ function projectHome(project) {
       h("a", { class: "btn btn--ghost btn--sm", style: "width:auto;text-decoration:none", href: "tel:" + tel }, "📞 Call"),
       (() => {
         const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto",
-          title: companySendEnabled() ? "Sends from your company number" : "Opens Messages pre-filled — review and send" },
+          title: "Sends from your company number" },
           "🚗 Text: on our way");
-        // Path 1 (Messages) or Path 2 (company number) per the messaging toggle;
-        // either way the send is logged as claim documentation.
+        // From the company number (Messages pre-filled if that send can't go
+        // through); either way the send is logged as claim documentation.
         btn.addEventListener("click", () => smartSend(project, {
           recipients: project.phone,
           body: onOurWaySms(project, techName()),
