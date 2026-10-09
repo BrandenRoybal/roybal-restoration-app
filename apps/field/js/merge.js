@@ -122,6 +122,34 @@ const SCALAR_SKIP = new Set([
 const clone = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 const isObj = (v) => v != null && typeof v === "object" && !Array.isArray(v);
 
+/* A meter photo's reading row in one copy of its map: the row with its rk,
+   else the one row with its date (meterphotos.js rowFor, kept here so the
+   merge imports no screen code). */
+function readingRow(map, ph) {
+  const rows = isObj(map) && Array.isArray(map.readings) ? map.readings : [];
+  if (typeof ph.rowKey === "string" && ph.rowKey !== "") {
+    const r = rows.find((x) => isObj(x) && x.rk === ph.rowKey);
+    if (r) return r;
+  }
+  if (typeof ph.date !== "string" || ph.date === "") return null;
+  const same = rows.filter((x) => isObj(x) && x.date === ph.date);
+  return same.length === 1 ? same[0] : null;
+}
+/* A reading cell still holds this number ("17.40" = "17.4", "17,4" = "17.4").
+   Only a string is a typed number (a missing or null cell is ""); a number
+   is compared as one when it is short (40 characters, a 2-digit exponent at
+   most), so the server can compare it as a float8 and agree exactly. Twin:
+   the same test in 0024's merge_project_blobs. */
+const NUM_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d{1,2})?$/;
+const EDGE_WS = /^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g;
+function sameNumber(a, b) {
+  const s = (v) => (v == null ? "" : typeof v === "string" ? v.replace(",", ".").replace(EDGE_WS, "") : null);
+  const x = s(a), y = s(b);
+  if (x === null || y === null) return false;
+  if (x === "" || y === "") return x === y;
+  return NUM_RE.test(x) && NUM_RE.test(y) && x.length <= 40 && y.length <= 40 ? Number(x) === Number(y) : x === y;
+}
+
 /* "nothing here yet" — the values a factory blank / untouched field holds */
 const isEmptyish = (v) => v == null || v === "" ||
   (Array.isArray(v) && v.length === 0) ||
@@ -260,6 +288,42 @@ export function mergeProjects(a, b) {
         return out;
       });
       if (kept) notes.push(`meterPhotos ✓${kept}`);
+    }
+  }
+
+  // ---------- a deleted photo's unchecked number goes with it ----------
+  // Deleting or retaking a meter photo whose number the reader filled in,
+  // unchecked, takes that number out of its cell (meterphotos.js
+  // dropPrefill). A moisture map merges whole, so a newer copy of the map
+  // saved before the delete would put the number back, looking typed. So for
+  // a photo the tombstones drop here that carries an unchecked `filled` (no
+  // copy of it has `ok`): when the merged map's cell still holds that number
+  // and the other copy of the map has something else there, the merged cell
+  // takes the other copy's value. Twin: 0024's merge_project_blobs.
+  if (gone.size && Array.isArray(merged.moistureMaps)) {
+    const isSet = (v) => typeof v === "string" && v !== "";
+    const drops = new Map();                       // photo id → { ph, filled, ok }
+    for (const side of [newer, older]) {
+      for (const el of Array.isArray(side.meterPhotos) ? side.meterPhotos : []) {
+        if (!isObj(el) || !isSet(el.id) || !gone.has(el.id)) continue;
+        let d = drops.get(el.id);
+        if (!d) drops.set(el.id, (d = { ph: el, filled: "", ok: false }));
+        if (!d.filled && isSet(el.filled)) d.filled = el.filled;
+        if (isSet(el.ok)) d.ok = true;
+      }
+    }
+    const mapOf = (list, id) => (Array.isArray(list) ? list.find((m) => isObj(m) && m.id === id) : null) || null;
+    for (const { ph, filled, ok } of drops.values()) {
+      if (!filled || ok || !isSet(ph.mapId) || !Number.isInteger(ph.loc) || ph.loc < 0) continue;
+      if (!mapOf(newer.moistureMaps, ph.mapId)) continue;   // the merged map is not the newer copy's
+      const mm = mapOf(merged.moistureMaps, ph.mapId), om = mapOf(older.moistureMaps, ph.mapId);
+      const mr = readingRow(mm, ph), or = readingRow(om, ph);
+      if (!mr || !or || !Array.isArray(mr.values)) continue;
+      const theirs = Array.isArray(or.values) ? or.values[ph.loc] : undefined;
+      if (sameNumber(mr.values[ph.loc], filled) && !sameNumber(theirs, filled)) {
+        mr.values[ph.loc] = theirs == null ? "" : clone(theirs);
+        notes.push("meter number taken out");
+      }
     }
   }
 

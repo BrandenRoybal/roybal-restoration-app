@@ -21,6 +21,10 @@
 --   2. merge_project_blobs: a photo's `read` and `ok` (with `filled` and
 --      `fixed`) are never undone by a newer copy saved before they landed —
 --      the twin of the same rule in merge.js.
+--   3. merge_project_blobs: a photo deleted while the number it filled in was
+--      unchecked takes that number out of the merged map too, when the other
+--      copy already took it out — the twin of the same rule in merge.js.
+--   4. app_settings min_field_build is raised to 211 (THE PHONE CHECK below).
 -- Grants survive CREATE OR REPLACE; none are restated.
 --
 -- WHY THE PHONES WAIT FOR IT: until this is applied the server merge treats
@@ -38,12 +42,23 @@
 -- the photos server-side yet: the office sees them in the field app's own
 -- Moisture Map and Certificate of Drying views, from the blob.
 --
--- THE PHONE CHECK: v210 and older never write meterPhotos and carry another
--- phone's as a plain value (filled beats empty), which this merge then
--- unions; raising min_field_build to v211 is optional and the owner's call.
+-- THE PHONE CHECK — this file raises the floor. A build before v211 merges
+-- meterPhotos on the phone as one value (its own list whole), so after a
+-- merge on the phone it can hold a copy missing another phone's photos,
+-- reads and checks on the rev it adopted, and push it: push_project writes a
+-- copy on the current rev over the server's as is (the 'applied' path never
+-- merges). A dropped photo has no other copy. Meter photos only exist once
+-- this file is applied (the phones' check above), so the same step raises
+-- app_settings min_field_build to 211 (never lowers it): from then on
+-- _sync_guard refuses every save from an older build with "update the app",
+-- and its saves wait on the phone until it reloads onto v211. v211 re-bases
+-- any row an older build left dirty, once per install, so the server merges
+-- it (apps/field/js/sync.js rebaseDirtyOnce). Unlike 0018 and 0022, which
+-- left the floor to the owner, this one is not optional.
 --
 -- ROLLBACK: put 0022's two definitions back. Phones that already switched the
--- 📷 on keep it on, so only roll back once no phone writes meter photos.
+-- 📷 on keep it on, so only roll back once no phone writes meter photos. The
+-- floor stays; lowering it is the owner's call.
 -- ============================================================================
 
 
@@ -65,6 +80,8 @@ declare
   o_rooms jsonb; n_rooms jsonb; r jsonb; m jsonb; ov jsonb;
   marks jsonb; any_gone boolean;
   skip_keys text[];
+  d record; locn numeric; loc int; mi int; ri int; mri int; ori int; s int;
+  mm jsonb; om jsonb; cur jsonb; theirs jsonb; same_cur boolean; same_theirs boolean;
 begin
   -- NOTE ON PARITY: proven byte-equal to apps/field/js/merge.js over 2033
   -- randomized cases. Two divergences remain, both UNREACHABLE with real data
@@ -281,6 +298,120 @@ begin
     if m is not null then merged := jsonb_set(merged, array['meterPhotos'], m, true); end if;
   end if;
 
+  -- ---------- a deleted photo's unchecked number goes with it ----------
+  -- Twin of the same block in apps/field/js/merge.js (new in 0024). Deleting
+  -- or retaking a meter photo whose number the reader filled in, unchecked,
+  -- takes the number out of its cell on the phone. A moisture map merges
+  -- whole, so a newer copy of the map saved before the delete would put it
+  -- back, looking typed. For each photo the marks drop that carries an
+  -- unchecked `filled` (the first non-empty one, newer copy first; no copy
+  -- has `ok`), when the newer copy has its map: if the merged cell still
+  -- holds that number and the older copy's cell does not, the merged cell
+  -- takes the older copy's value ("" for none). The row is the one with the
+  -- photo's rowKey, else the one row with its date. A cell matches when both
+  -- are the same string, or both are short numbers (40 characters, a 2-digit
+  -- exponent at most) equal as float8, after the first comma becomes a point
+  -- and edge whitespace goes; a null cell is "", and a non-string never
+  -- matches. Photos go in the order merge.js meets them.
+  if any_gone and jsonb_typeof(merged -> 'moistureMaps') = 'array' then
+    for d in
+      with sides as (
+        select sd.side, e.el, e.ord
+          from (values (0, newer -> 'meterPhotos'), (1, older -> 'meterPhotos')) as sd(side, list)
+          cross join lateral jsonb_array_elements(
+            case when jsonb_typeof(sd.list) = 'array' then sd.list else '[]'::jsonb end) with ordinality as e(el, ord)
+         where jsonb_typeof(e.el) = 'object'
+           and jsonb_typeof(e.el -> 'id') = 'string' and e.el ->> 'id' <> ''
+           and jsonb_exists(marks, e.el ->> 'id')
+      )
+      select (array_agg(el order by side, ord))[1] as ph,
+             (array_agg(el ->> 'filled' order by side, ord)
+                filter (where jsonb_typeof(el -> 'filled') = 'string' and el ->> 'filled' <> ''))[1] as filled,
+             bool_or(jsonb_typeof(el -> 'ok') = 'string' and el ->> 'ok' <> '') as ok
+        from sides
+       group by el ->> 'id'
+       order by min(side::bigint * 4294967296 + ord)
+    loop
+      if d.filled is null or d.ok then continue; end if;
+      if jsonb_typeof(d.ph -> 'mapId') is distinct from 'string' or d.ph ->> 'mapId' = '' then continue; end if;
+      if jsonb_typeof(d.ph -> 'loc') is distinct from 'number' then continue; end if;
+      locn := (d.ph ->> 'loc')::numeric;
+      -- past any real array: merge.js finds nothing there either
+      if locn < 0 or locn <> trunc(locn) or locn > 2147483646 then continue; end if;
+      loc := locn::int;
+      if not exists (
+        select 1 from jsonb_array_elements(
+          case when jsonb_typeof(newer -> 'moistureMaps') = 'array' then newer -> 'moistureMaps' else '[]'::jsonb end) x
+         where jsonb_typeof(x) = 'object' and x -> 'id' = d.ph -> 'mapId') then
+        continue;                                                 -- the merged map is not the newer copy's
+      end if;
+      select (x.ord - 1)::int, x.el into mi, mm
+        from jsonb_array_elements(merged -> 'moistureMaps') with ordinality as x(el, ord)
+       where jsonb_typeof(x.el) = 'object' and x.el -> 'id' = d.ph -> 'mapId'
+       order by x.ord limit 1;
+      select x.el into om
+        from jsonb_array_elements(
+          case when jsonb_typeof(older -> 'moistureMaps') = 'array' then older -> 'moistureMaps' else '[]'::jsonb end)
+          with ordinality as x(el, ord)
+       where jsonb_typeof(x.el) = 'object' and x.el -> 'id' = d.ph -> 'mapId'
+       order by x.ord limit 1;
+      mri := null; ori := null;
+      for s in 0..1 loop
+        ri := null;
+        if jsonb_typeof(d.ph -> 'rowKey') = 'string' and d.ph ->> 'rowKey' <> '' then
+          select (x.ord - 1)::int into ri
+            from jsonb_array_elements(case when jsonb_typeof((case s when 0 then mm else om end) -> 'readings') = 'array'
+                                           then (case s when 0 then mm else om end) -> 'readings' else '[]'::jsonb end)
+                 with ordinality as x(el, ord)
+           where jsonb_typeof(x.el) = 'object' and jsonb_typeof(x.el -> 'rk') = 'string'
+             and x.el ->> 'rk' = d.ph ->> 'rowKey'
+           order by x.ord limit 1;
+        end if;
+        if ri is null and jsonb_typeof(d.ph -> 'date') = 'string' and d.ph ->> 'date' <> '' then
+          select case when count(*) = 1 then (min(x.ord) - 1)::int end into ri
+            from jsonb_array_elements(case when jsonb_typeof((case s when 0 then mm else om end) -> 'readings') = 'array'
+                                           then (case s when 0 then mm else om end) -> 'readings' else '[]'::jsonb end)
+                 with ordinality as x(el, ord)
+           where jsonb_typeof(x.el) = 'object' and jsonb_typeof(x.el -> 'date') = 'string'
+             and x.el ->> 'date' = d.ph ->> 'date';
+        end if;
+        if s = 0 then mri := ri; else ori := ri; end if;
+      end loop;
+      if mri is null or ori is null then continue; end if;
+      if jsonb_typeof(mm -> 'readings' -> mri -> 'values') is distinct from 'array' then continue; end if;
+      cur := mm -> 'readings' -> mri -> 'values' -> loc;
+      theirs := case when jsonb_typeof(om -> 'readings' -> ori -> 'values') = 'array'
+                     then om -> 'readings' -> ori -> 'values' -> loc end;
+      select bool_or(t.same) filter (where t.k = 0), bool_or(t.same) filter (where t.k = 1)
+        into same_cur, same_theirs
+        from (
+          select c.k,
+                 case when c.x is null then false
+                      when c.x = '' or c.y = '' then c.x = c.y
+                      when c.x ~ '^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]{1,2})?$'
+                       and c.y ~ '^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]{1,2})?$'
+                       and length(c.x) <= 40 and length(c.y) <= 40
+                        then c.x::float8 = c.y::float8
+                      else c.x = c.y
+                 end as same
+            from (
+              select v.k,
+                     regexp_replace(regexp_replace(
+                       case when v.val is null or jsonb_typeof(v.val) = 'null' then ''
+                            when jsonb_typeof(v.val) = 'string' then v.val #>> '{}' end,
+                       ',', '.'), '^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$', '', 'g') as x,
+                     regexp_replace(regexp_replace(d.filled, ',', '.'), '^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$', '', 'g') as y
+                from (values (0, cur), (1, theirs)) as v(k, val)
+            ) c
+        ) t;
+      if same_cur and not same_theirs then
+        merged := jsonb_set(merged, array['moistureMaps', mi::text, 'readings', mri::text, 'values', loc::text],
+                            case when theirs is null or jsonb_typeof(theirs) = 'null' then '""'::jsonb else theirs end,
+                            false);
+      end if;
+    end loop;
+  end if;
+
   return merged;
 end;
 $$;
@@ -318,12 +449,25 @@ ALTER FUNCTION "public"."_mf_sweep_tombstones"("blob" "jsonb") OWNER TO "postgre
 
 
 -- ---------------------------------------------------------------------------
--- Assertion. Structural, so it binds on the CI replay too: both server lists
--- carry the meter photos (and still carry the scan log).
+-- The build floor: 211 or more (THE PHONE CHECK above). Raised, never
+-- lowered; read the way _sync_guard reads it.
+-- ---------------------------------------------------------------------------
+insert into public.app_settings (key, value) values ('min_field_build', to_jsonb(211))
+on conflict (key) do update set value = excluded.value, updated_at = now()
+ where not (jsonb_typeof(public.app_settings.value) = 'number'
+            and (public.app_settings.value)::text::numeric >= 211);
+
+
+-- ---------------------------------------------------------------------------
+-- Assertions. Structural, so they bind on the CI replay too: both server lists
+-- carry the meter photos (and still carry the scan log), and the floor holds.
 -- ---------------------------------------------------------------------------
 do $$
 declare f text; k text;
 begin
+  if coalesce((select (value)::text::int from public.app_settings where key = 'min_field_build'), 0) < 211 then
+    raise exception '0024: min_field_build is below 211';
+  end if;
   foreach f in array array['public.merge_project_blobs(jsonb, jsonb)', 'public._mf_sweep_tombstones(jsonb)'] loop
     foreach k in array array['equipmentScans', 'meterPhotos'] loop
       if position('''' || k || '''' in (select p.prosrc from pg_proc p where p.oid = f::regprocedure)) = 0 then

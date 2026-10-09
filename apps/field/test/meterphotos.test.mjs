@@ -8,6 +8,7 @@ import {
   addMeterPhoto, photoAt, mapIndex, rowFor, needsRead, pendingReads, applyMeterRead, cellState, noteTyped,
   confirmMeterPhoto, useMeterRead, removeMeterPhotos, dropsPrefill, rowPhotoIds, locPhotoIds, mapPhotoIds,
   mapPhotoEntries, finalReadingPhotos, uncheckedFills, sweepDeletedMapPhotos, sameReading, rowKeyOf, FILL_MIN, METER_KEY,
+  unreadOnEmpty, certSigned, drawnLocs,
 } from "../js/meterphotos.js";
 import { ID_COLLECTIONS, mergeProjects, tombstoneItems } from "../js/merge.js";
 import { blankReadingRow } from "../js/model.js";
@@ -276,6 +277,67 @@ test("the merge keeps a photo's read and check even when the copy without them i
   assert.equal(mergeProjects(t, c).merged.meterPhotos[0].fixed, "16");
 });
 
+test("a deleted photo's unchecked number stays out when a newer copy of the map still has it", () => {
+  const cell = (merged) => merged.moistureMaps[0].readings[0].values[0];
+  for (const retake of [false, true]) {
+    const a = job(), m = a.moistureMaps[0];
+    const ph = addMeterPhoto(a, m, m.readings[0], 0, JPEG, "d");
+    applyMeterRead(a, ph, read("17.4"));
+    const b = JSON.parse(JSON.stringify(a));            // another phone pulled the prefill
+    if (retake) addMeterPhoto(a, m, m.readings[0], 0, JPEG, "d");
+    else removeMeterPhotos(a, [ph.id]);
+    assert.equal(m.readings[0].values[0], "");
+    b.moistureMaps[0].readings[1].values[2] = "9";       // and saved later: the newer copy of the map
+    b.updatedAt = "2026-10-09T15:00:00.000Z";
+    for (const [x, y] of [[a, b], [b, a]]) {
+      const { merged, notes } = mergeProjects(x, y);
+      assert.equal(cell(merged), "", `${retake ? "retake" : "delete"}: the number went with its photo`);
+      assert.equal(merged.moistureMaps[0].readings[1].values[2], "9", "the rest of the newer map stands");
+      assert.ok(!merged.meterPhotos.some((e) => e.id === ph.id));
+      assert.ok(notes.includes("meter number taken out"));
+    }
+    // the deleting phone typed a number of its own there: that number stands
+    a.moistureMaps[0].readings[0].values[0] = "18";
+    assert.equal(cell(mergeProjects(a, b).merged), "18");
+    // or typed the same number: it stays, now typed
+    a.moistureMaps[0].readings[0].values[0] = "17.40";
+    assert.equal(cell(mergeProjects(a, b).merged), "17.4");
+  }
+  // the newer copy is the deleting one: nothing to undo
+  const a = job(), m = a.moistureMaps[0];
+  const ph = addMeterPhoto(a, m, m.readings[0], 0, JPEG, "d");
+  applyMeterRead(a, ph, read("17.4"));
+  const b = JSON.parse(JSON.stringify(a));
+  removeMeterPhotos(b, [ph.id]);
+  b.updatedAt = "2026-10-09T15:00:00.000Z";
+  assert.equal(cell(mergeProjects(a, b).merged), "");
+});
+
+test("a checked number, or one typed on the newer copy, stays when its photo is deleted elsewhere", () => {
+  const cell = (merged) => merged.moistureMaps[0].readings[0].values[0];
+  // checked on the newer copy before the other phone deleted the photo
+  const a = job(), m = a.moistureMaps[0];
+  const ph = addMeterPhoto(a, m, m.readings[0], 0, JPEG, "d");
+  applyMeterRead(a, ph, read("17.4"));
+  const b = JSON.parse(JSON.stringify(a));
+  confirmMeterPhoto(b.meterPhotos[0], "ok-at");
+  b.updatedAt = "2026-10-09T15:00:00.000Z";
+  removeMeterPhotos(a, [ph.id]);
+  assert.equal(a.moistureMaps[0].readings[0].values[0], "", "unchecked on the deleting phone");
+  assert.equal(cell(mergeProjects(a, b).merged), "17.4");
+  // typed differently on the newer copy: not the photo's number, so it stays
+  const c = JSON.parse(JSON.stringify(b));
+  c.meterPhotos[0].ok = "";
+  c.moistureMaps[0].readings[0].values[0] = "16";
+  assert.equal(cell(mergeProjects(a, c).merged), "16");
+  // the deleting phone's copy lost the row (no rk, two rows with that date): leave it
+  const d = JSON.parse(JSON.stringify(a));
+  d.moistureMaps[0].readings = [row(ph.date), row(ph.date)];
+  const e = JSON.parse(JSON.stringify(c));
+  e.moistureMaps[0].readings[0].values[0] = "17.4";
+  assert.equal(cell(mergeProjects(d, e).merged), "17.4");
+});
+
 test("photos on a map deleted on another device are swept, with their own tombstones", () => {
   const p = job(), m = p.moistureMaps[0];
   const ph = addMeterPhoto(p, m, m.readings[0], 0, JPEG);
@@ -285,6 +347,71 @@ test("photos on a map deleted on another device are swept, with their own tombst
   assert.equal(sweepDeletedMapPhotos(p), 1);
   assert.equal(p.meterPhotos.length, 0);
   assert.ok(p.deletedIds[ph.id]);
+});
+
+test("once the certificate is signed, a read is kept on its photo but fills nothing", () => {
+  for (const sig of [{ sigTech: "data:image/png;base64,AA" }, { sigOwner: "x" }, { portalSignedAt: "2026-10-09T18:00:00Z" },
+    { uploadedPages: ["data:image/jpeg;base64,AA"] }, { uploadedDoc: "data:application/pdf;base64,AA" }]) {
+    const p = job(), m = p.moistureMaps[0], r = m.readings[1];
+    p.certDrying = { mode: "sign", sigTech: "", sigOwner: "", sigAdjuster: "", uploadedDoc: "", uploadedPages: [], ...sig };
+    assert.equal(certSigned(p.certDrying), true, JSON.stringify(sig));
+    const ph = addMeterPhoto(p, m, r, 0, JPEG);
+    assert.equal(applyMeterRead(p, ph, read("21")).filled, false);
+    assert.equal(r.values[0], "", "the signed certificate never shows an AI number nobody checked");
+    assert.equal(ph.read.value, "21", "the read is still recorded on the photo");
+    assert.equal(uncheckedFills(p).length, 0);
+    assert.equal(cellState(ph, r.values[0]), "photo");
+  }
+  assert.equal(certSigned({ mode: "upload", sigTech: "", uploadedPages: [] }), false);
+  assert.equal(certSigned(undefined), false);
+});
+
+test("an older photo hidden under a newer one on the same cell never counts as an amber ?, and a retake keeps the typed number", () => {
+  const p = job(), m = p.moistureMaps[0], r = m.readings[1];
+  const a = addMeterPhoto(p, m, r, 2, JPEG);
+  a.ts = "2026-10-09T10:00:00.000Z";
+  applyMeterRead(p, a, read("18"));                  // phone A's unchecked prefill
+  const b = { ...a, id: "photo-b", ts: "2026-10-09T11:00:00.000Z", read: null, filled: "", ok: "" };
+  p.meterPhotos.push(b);                             // phone B's later photo of the same cell, after the merge
+  assert.equal(photoAt(p, m, r, 2), b);
+  assert.equal(uncheckedFills(p).length, 0, "no ? the tech could tap is asked for");
+  const entries = mapPhotoEntries(p, m);
+  assert.deepEqual(entries.map((e) => [e.ph.id, e.shown, e.unchecked]), [[a.id, false, false], ["photo-b", true, false]]);
+  const c = addMeterPhoto(p, m, r, 2, JPEG);         // retake the cell
+  assert.equal(r.values[2], "18", "a superseded photo's prefill never blanks the number on the cell");
+  assert.deepEqual(p.meterPhotos.map((x) => x.id), [c.id]);
+  assert.ok(p.deletedIds[a.id] && p.deletedIds["photo-b"]);
+});
+
+test("a prefill on a location the grid no longer draws never blocks the certificate", () => {
+  const p = job(), m = p.moistureMaps[0], r = m.readings[1];
+  m.locCount = 26;
+  r.values = [...r.values, ...Array(13).fill("")];
+  assert.equal(drawnLocs(m), 26);
+  const ph = addMeterPhoto(p, m, r, 14, JPEG);
+  applyMeterRead(p, ph, read("19"));
+  assert.equal(uncheckedFills(p).length, 1);
+  m.locCount = 13;                                   // another device removed locations 14-26
+  for (const row of m.readings) row.values = row.values.slice(0, 13);
+  assert.equal(drawnLocs(m), 13);
+  assert.equal(uncheckedFills(p).length, 0);
+  assert.equal(drawnLocs({ readings: [{ values: Array(14).fill("") }] }), 26);
+  assert.equal(drawnLocs({}), 13);
+});
+
+test("a photo still waiting for its read on an empty cell is listed until it is read, typed over or deleted", () => {
+  const p = job(), m = p.moistureMaps[0], r = m.readings[1];
+  const ph = addMeterPhoto(p, m, r, 4, JPEG);
+  assert.deepEqual(unreadOnEmpty(p).map((e) => e.loc), [4]);
+  r.values[4] = "12";
+  assert.equal(unreadOnEmpty(p).length, 0, "typed");
+  r.values[4] = "";
+  applyMeterRead(p, ph, { ...read("12"), fill: false });
+  assert.equal(unreadOnEmpty(p).length, 0, "read (check mode fills nothing, and nothing can land later)");
+  const q = job(), qm = q.moistureMaps[0];
+  const qp = addMeterPhoto(q, qm, qm.readings[0], 1, JPEG);
+  removeMeterPhotos(q, [qp.id]);
+  assert.equal(unreadOnEmpty(q).length, 0, "deleted");
 });
 
 test("sameReading compares numbers, not spellings", () => {

@@ -238,6 +238,7 @@ table.grid td.mp-td input.mc { display: block; width: 100%; }
 table.grid td.mp-fill input.mc { background: #fff4cc !important; color: #7a5a00 !important; font-weight: 700; }
 .mp-banner { background: #fff4cc; border: 1px solid #f0d8a8; border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; color: #7a5a1a; margin: 4px 0 8px; }
 .mp-banner[hidden] { display: none; }
+@media screen { .sig-locked { opacity: .45; } }
 .mpsheet { position: fixed; inset: 0; z-index: 210; background: rgba(8, 14, 24, .88); display: flex; align-items: center; justify-content: center; padding: 12px; }
 .mpsheet__panel { background: #fff; border-radius: var(--radius); width: min(560px, 100%); max-height: 100%; overflow: auto; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); }
 .mpsheet__top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }

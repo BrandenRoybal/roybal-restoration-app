@@ -145,7 +145,9 @@ function onScreen(projectId, paint) {
 function repaintJob(projectId) {
   const s = painters.get(projectId);
   if (!s) return;
-  for (const p of [...s]) if (p() === false) s.delete(p);   // a cell that left the page says so
+  const states = new Set();
+  for (const p of [...s]) if (p(states) === false) s.delete(p);   // a cell that left the page says so
+  for (const f of states) f();     // the map's banner and printed photos once, not once per cell
 }
 
 /* ---------- the reader run ---------- */
@@ -158,6 +160,13 @@ let trouble = 0;                 // server errors this session (an outage at the
 const running = new Map();       // job id → the run in flight
 /* no signal, the 40 s timeout, an expired login: not the photo's fault */
 const noSignal = (e) => e instanceof TypeError || (e && e.name === "AbortError") || (e && e.status === 401);
+/* The photo's own fault: a picture the AI can't take, or can't make sense
+   of. roybal-ai-office answers 400 for every error it throws, an AI
+   provider outage (llm_failed (529)) or a missing key included, so only
+   these messages count against the photo; anything else is the server's
+   trouble. */
+const photoFault = (e) => !!e && e.status === 400 &&
+  /^(Couldn't read that photo|llm_failed \((400|413)\)|llm_truncated|extraction_failed)/.test(e.message || "");
 
 /** Read every photo on this job that this install took and hasn't had
     read, one at a time. Stops on no signal (the next sync resumes), on a
@@ -188,11 +197,14 @@ export function readPendingMeters(project) {
         });
       } catch (e) {
         if (noSignal(e)) break;              // the next sync tries again
-        if (e && e.status >= 500) {          // the server's trouble, not the photo's: never counted against it
-          if (++trouble >= 3) halted = "trouble";
-          break;
+        if (photoFault(e)) {                 // refused (a bad image, say): given up after GIVE_UP
+          bumpTries(phId);
+          continue;
         }
-        bumpTries(phId);                     // refused (a bad image, say): given up after GIVE_UP
+        // the server's trouble, never counted against the photo; the next
+        // photo still gets its turn, and after 3 the reader rests until the
+        // app reloads (an outage costs 3 calls a session, not one per photo)
+        if (++trouble >= 3) { halted = "trouble"; break; }
         continue;
       }
       if (!reply || reply.off || reply.capped || reply.missing) {
@@ -300,7 +312,12 @@ export function meterCell(project, map, row, loc, td, input, { open = true, onVa
     sup.textContent = state === "check" ? "P?" : "P";
     return true;
   }
-  const repaint = () => { const on = paint(); if (on && onState) onState(); return on; };
+  // repaintJob passes a set to run the map's onState once for all its cells
+  const repaint = (states) => {
+    const on = paint();
+    if (on && onState) { if (states) states.add(onState); else onState(); }
+    return on;
+  };
   onScreen(project.id, repaint);
   function typed() {
     const ph = photoAt(project, map, liveRow() || row, loc);
@@ -377,9 +394,26 @@ export function openMeterSheet(project, map, row, loc, { input, retake, after, o
   if (!ph) return;
   const prevOverflow = document.body.style.overflow;
   document.body.style.overflow = "hidden";
-  const close = () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; ov.remove(); if (after) after(); };
+  let isOpen = true;
+  // closes on Escape, and on any route change (the Android back button), like
+  // scanner.js: the sheet must never sit over another page
+  const close = () => {
+    if (!isOpen) return;
+    isOpen = false;
+    window.removeEventListener("keydown", onKey);
+    window.removeEventListener("hashchange", close);
+    document.body.style.overflow = prevOverflow;
+    ov.remove();
+    if (after) after();
+  };
   const onKey = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
-  const btn = (label, cls, fn) => h("button", { type: "button", class: `btn ${cls} btn--sm`, onclick: fn }, label);
+  // the page no longer shows this copy of the job (a sync swapped it):
+  // a change made to it here would be saved over the newer one
+  const stale = () => { const live = liveOf(project.id); return !!live && live !== project; };
+  const btn = (label, cls, fn, changes = true) => h("button", {
+    type: "button", class: `btn ${cls} btn--sm`,
+    onclick: () => { if (changes && stale()) { close(); return; } fn(); },
+  }, label);
   const value = String(row.values[loc] ?? "");
   const state = cellState(ph, value);
   const useIt = (label) => btn(label, "btn--primary", () => {
@@ -387,9 +421,9 @@ export function openMeterSheet(project, map, row, loc, { input, retake, after, o
     if (input) input.value = String(row.values[loc] ?? "");
     commit(); close(); if (onValue) onValue();
   });
-  const typeIt = () => btn("Type it instead", "btn--ghost", () => { close(); if (input) { input.focus(); input.select(); } });
+  const typeIt = () => btn("Type it instead", "btn--ghost", () => { close(); if (input) { input.focus(); input.select(); } }, false);
   const acts = [];
-  if (view) acts.push(btn("Close", "btn--ghost", () => close()));
+  if (view) acts.push(btn("Close", "btn--ghost", () => close(), false));
   else if (state === "check" && value === "") acts.push(useIt(`Use ${ph.filled}`), typeIt());
   else if (state === "check") {
     acts.push(btn(`✓ ${ph.filled} is right`, "btn--primary", () => { confirmMeterPhoto(ph); commit(); close(); }), typeIt());
@@ -397,7 +431,8 @@ export function openMeterSheet(project, map, row, loc, { input, retake, after, o
     acts.push(useIt(`Use ${ph.read.value}`));
     acts.push(btn(`Keep ${value}`, "btn--ghost", () => { confirmMeterPhoto(ph); commit(); close(); }));
   }
-  if (retake && !view) acts.push(btn("📷 Retake", "btn--ghost", () => { close(); retake(); }));
+  // the camera is asked for first, inside the tap; the repaint on close can wait
+  if (retake && !view) acts.push(btn("📷 Retake", "btn--ghost", () => { retake(); close(); }));
   if (!view) acts.push(btn("Delete photo", "btn--danger", () => {
     const drops = dropsPrefill(project, ph);
     if (!confirm(drops
@@ -418,6 +453,7 @@ export function openMeterSheet(project, map, row, loc, { input, retake, after, o
       h("p", { class: "mpsheet__meta" }, [stamp(ph.ts), login(ph.by)].filter(Boolean).join(" · "))));
   ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
   window.addEventListener("keydown", onKey);
+  window.addEventListener("hashchange", close);
   document.body.append(ov);
   if (!view && !halted && needsRead(ph, deviceTag()) && meterDeps.ready()) readPendingMeters(project);
 }
@@ -427,7 +463,7 @@ export function meterCheckBanner(project, map) {
   const el = h("p", { class: "mp-banner app-only", hidden: true });
   function paint() {
     let n = 0;
-    for (const e of mapPhotoEntries(project, map)) if (e.row && e.state === "check") n++;
+    for (const e of mapPhotoEntries(project, map)) if (e.unchecked) n++;
     el.hidden = !n;
     el.textContent = n === 1
       ? "1 number was read from a meter photo. Tap the ? under it and check it against the photo."
@@ -463,7 +499,7 @@ export function meterAppendix(project, map) {
     const entries = mapPhotoEntries(project, map);
     el.replaceChildren();
     if (!entries.length) return;
-    const unchecked = entries.some((e) => e.state === "check");
+    const unchecked = entries.some((e) => e.unchecked);
     el.append(
       h("div", { class: "mp-print__legend" },
         h("div", {}, h("sup", {}, "P"), " = this reading has a photo of the meter screen, below. Times are the phone's clock when the photo was taken."),
@@ -471,7 +507,7 @@ export function meterAppendix(project, map) {
       h("div", { class: "mp-print__title" }, "Meter photos"),
       h("div", { class: "mp-print__grid" }, ...entries.map((e) => figure(e.ph.src, [
         `Loc ${e.loc + 1}`, dateLabel(e.date), e.value || "", stamp(e.ph.ts),
-        e.orphan ? "reading date removed" : "", e.state === "check" ? "not checked" : "",
+        e.orphan ? "reading date removed" : "", e.unchecked ? "not checked" : "",
       ].filter(Boolean).join(" · ")))));
   }
   paint();

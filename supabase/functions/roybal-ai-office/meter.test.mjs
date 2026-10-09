@@ -42,13 +42,14 @@ test("normalize: a clean read passes through and is fillable", () => {
 test("normalize: comma decimals, a trailing % and leading zeros become a plain decimal", () => {
   assert.equal(normalizeMeterRead({ device: "moisture_meter", readable: true, value: "17,4", confidence: 1 }).value, "17.4");
   assert.equal(normalizeMeterRead({ device: "moisture_meter", readable: true, value: "17.4 %", confidence: 1 }).value, "17.4");
+  assert.equal(normalizeMeterRead({ device: "moisture_meter", readable: true, value: " 17.4% ", confidence: 1 }).value, "17.4");
   assert.equal(normalizeMeterRead({ device: "moisture_meter", readable: true, value: "07.5", confidence: 1 }).value, "7.5");
   assert.equal(normalizeMeterRead({ device: "moisture_meter", readable: true, value: "0.8", confidence: 1 }).value, "0.8");
   assert.equal(normalizeMeterRead({ device: "moisture_meter", readable: true, value: "112", confidence: 1 }).value, "112");
 });
 
 test("normalize: anything that is not a plain number is not readable and offers no value", () => {
-  for (const value of ["1?.4", "17.4.2", "abc", "1234", "", "-3", "17.", ".5", "≤ 16"]) {
+  for (const value of ["1?.4", "17.4.2", "abc", "1234", "", "-3", "17.", ".5", "≤ 16", "17 4", "1 74", "17\t4", "17. 4"]) {
     const r = normalizeMeterRead({ device: "moisture_meter", readable: true, value, unit: "%", confidence: 0.9 });
     assert.equal(r.value, "", value);
     assert.equal(r.readable, false, value);

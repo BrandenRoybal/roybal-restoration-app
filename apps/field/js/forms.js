@@ -41,7 +41,7 @@ import { techName } from "./tech.js";
 import { applyScans, voidPlacement, scanRecord, releaseTypedScans, settleTypedRow, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
 import { meterCell, meterCheckBanner, meterAppendix, meterCertSection, meterGateNote, rowOpenForPhotos } from "./meterui.js";
-import { rowPhotoIds, locPhotoIds, removeMeterPhotos, uncheckedFills } from "./meterphotos.js";
+import { rowPhotoIds, locPhotoIds, removeMeterPhotos, uncheckedFills, unreadOnEmpty, certSigned } from "./meterphotos.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
@@ -1753,13 +1753,28 @@ export function certDrying(project, c) {
     h("div", { class: "certstmt" },
       h("p", {}, "The undersigned, an IICRC-certified water restoration technician, hereby certifies that the water damage mitigation and structural drying services described herein were performed at the above property in accordance with the IICRC S500 Standard for Professional Water Damage Restoration. Final moisture-meter readings confirm that affected materials have achieved the documented dry standard by comparison to unaffected reference materials and/or manufacturer specifications. The structure is considered dry per IICRC S500 criteria as of the Drying Completion Date stated above.")),
     sectionTitle("Signatures"),
-    signOrUpload(c, () => [
+    ...certSignLock(project, c, signOrUpload(c, () => [
       sigBlock(c, "sigTech", "sigTechName", "sigTechDate", "IICRC Certified Technician — Roybal Construction, LLC"),
       h("hr", { class: "divider" }),
       sigBlock(c, "sigOwner", "sigOwnerName", "sigOwnerDate", "Property Owner / Insured"),
       h("hr", { class: "divider" }),
       sigBlock(c, "sigAdjuster", "sigAdjusterName", "sigAdjusterDate", "Adjuster / Carrier (if witness required)"),
-    ]));
+    ])));
+}
+
+/* The certificate is signed over its final readings. While a number the app
+   read from a meter photo waits unchecked, and nothing is signed yet, the
+   pads and the upload are locked (on screen; the paper copy still prints
+   its signature lines), with what to do instead. Once signed, no read fills
+   a cell again (meterphotos.js applyMeterRead). */
+function certSignLock(project, c, signEl) {
+  const n = certSigned(c) ? 0 : uncheckedFills(project).length;
+  if (!n) return [signEl];
+  signEl.setAttribute("inert", "");
+  signEl.classList.add("sig-locked");
+  return [h("p", { class: "mp-banner app-only" }, n === 1
+    ? "Signing waits: a moisture reading the app read from a meter photo hasn't been checked. Open the Moisture Map and tap the amber ? first."
+    : `Signing waits: ${n} moisture readings the app read from meter photos haven't been checked. Open the Moisture Map and tap each amber ? first.`), signEl];
 }
 
 /* ============================================================
@@ -4472,6 +4487,10 @@ export function portalShareForm(project) {
     // a final reading the app read from a meter photo is a person's number only once checked
     if (doc.key === "certDrying" && uncheckedFills(project).length)
       throw new Error("a moisture reading the app read from a meter photo hasn't been checked yet. Open the Moisture Map and tap each amber ? first.");
+    // a photo still waiting for its read on an empty cell could fill a number after the customer has seen this copy
+    const unread = doc.key === "certDrying" ? unreadOnEmpty(project) : [];
+    if (unread.length)
+      throw new Error(`the meter photo at location ${unread[0].loc + 1} (${fmtDate(unread[0].date)}) hasn't been read yet and its cell is empty. Type that reading on the Moisture Map, or wait until the phone that took it has signal.`);
     const sheetEl = doc.key === "packBack" ? packBackReceipt(project) : RENDERERS[doc.key](project, doc.inst);
     const { html, media } = await buildPacketHtml(project, [sheetEl], `${doc.title} — ${project.customer || "Roybal Construction"}`);
     for (const m of media) await ensureUploaded(m.hash, m.text);

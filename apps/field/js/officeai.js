@@ -386,6 +386,9 @@ export async function readMeter(project, photo, hint = {}) {
       photo, meter: hint.meter || "", material: hint.material || "",
       photoId: hint.photoId || "", mapId: hint.mapId || "", rowKey: hint.rowKey || "", loc: Number.isInteger(hint.loc) ? hint.loc : null,
     }, { signal: ctl ? ctl.signal : undefined });
+    // a 200 whose body never arrived (signal lost mid-answer) is no answer at all:
+    // thrown as no signal, so the photo waits rather than keeping an empty read
+    if (b.off !== true && (!b.meter || typeof b.meter !== "object")) throw new TypeError("meterRead: no answer");
     return { meter: b.meter || null, fill: b.fill === true, off: b.off === true };
   } catch (e) {
     if (e && e.capped) return { capped: true };

@@ -33,6 +33,7 @@ const resp = (status, body) => ({ ok: status < 400, status, json: async () => js
 const mediaStore = new Map();   // field-media bucket: hash -> text
 let mediaGets = 0;              // GETs that actually went to the "network"
 let failUploads = false;        // test hook: make the bucket refuse writes
+let onMediaGet = null;          // test hook: runs while a pull is downloading media
 
 globalThis.fetch = async (url, opts = {}) => {
   const u = new URL(url);
@@ -44,6 +45,7 @@ globalThis.fetch = async (url, opts = {}) => {
       mediaStore.set(hash, opts.body); return resp(200, {});
     }
     mediaGets++;   // counted so a test can prove a pull downloaded NOTHING
+    if (onMediaGet) { const f = onMediaGet; onMediaGet = null; await f(); }   // a save lands mid-download
     if (mediaStore.has(hash)) return { ok: true, status: 200, json: async () => ({}), text: async () => mediaStore.get(hash) };
     return resp(404, {});
   }
@@ -940,6 +942,57 @@ const { tombstoneItems } = await import("../js/merge.js");
     failUploads = false;
     await syncNow(); await settle();
     ok(thumbCount() === base + 9, "…and the next cycle RETRIES it instead of giving up forever");
+  }
+
+  /* ---------- a save that lands while a pull downloads media is kept ----------
+     A clean row's pull downloads the office's new photo, and the meter reader
+     (or an autosave) saves the job in the meantime. Writing the server's copy
+     over it would drop the save and mark the row clean, so nothing ever pushed
+     it: the pull's write is conditional, and the push merges both. */
+  {
+    const Q = "data:image/jpeg;base64," + "Q".repeat(70_000);
+    await Store.put({ id: "race", customer: "Race", meterPhotos: [{ id: "rm1", src: Q, read: null, filled: "", ok: "" }] });
+    await syncNow();
+    const NEW = "data:image/jpeg;base64," + "R".repeat(70_000);
+    const h = "ab".repeat(32);
+    mediaStore.set(h, NEW);
+    const srv = JSON.parse(JSON.stringify(serverRows.get("race").data));
+    srv.notes = "office edit";
+    srv.photos = [{ id: "rph2", src: `media:${h}:${NEW.length}` }];
+    srv.updatedAt = new Date(Date.now() + 32e5).toISOString();
+    srv.rev = (Number(srv.rev) || 0) + 1;
+    serverRows.set("race", { id: "race", data: srv, deleted: false, updated_at: nowIso() });
+    onMediaGet = async () => {
+      const cur = await Store.get("race");
+      cur.meterPhotos[0].read = { value: "17" };
+      await Store.put(cur);
+    };
+    await syncNow(); await syncNow();
+    ok(onMediaGet === null, "precondition: the save landed during the pull's download");
+    const after = await Store.get("race");
+    ok(after.notes === "office edit" && after.photos.length === 1, "the office's edit still arrives");
+    ok(after.meterPhotos[0].read && after.meterPhotos[0].read.value === "17", "a save that landed during the pull's download is kept on the device");
+    ok(serverRows.get("race").data.meterPhotos[0].read?.value === "17", "…and reaches the server");
+  }
+
+  /* ---------- once per install: a dirty row an older build merged goes up from base 0 ----------
+     A build before v211 merged meterPhotos as one value, so a row it merged
+     and left dirty can lack another phone's photo while holding the server's
+     current rev. The first cycle on this build re-bases it, so the server
+     merges it instead of writing it over its copy. */
+  {
+    await Store.put({ id: "reb", customer: "Rebase", meterPhotos: [{ id: "P1" }] });
+    await syncNow();
+    serverRows.get("reb").data.meterPhotos.push({ id: "P2" });   // the photo the older build's merge left out here
+    const cur = await Store.get("reb");
+    cur.notes = "typed after";
+    await Store.put(cur);                                        // dirty, on the server's current rev
+    localStorage.removeItem("roybal-sync-rebased-v211");          // this install's first cycle on v211
+    await syncNow();
+    const d = serverRows.get("reb").data;
+    ok(d.notes === "typed after" && d.meterPhotos.map((x) => x.id).sort().join() === "P1,P2",
+      "a dirty row from an older build is merged on the server, not written over it");
+    ok(localStorage.getItem("roybal-sync-rebased-v211") === "1", "…and only on the first cycle");
   }
 
   console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC CHECKS PASSED"));

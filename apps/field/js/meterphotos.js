@@ -149,7 +149,14 @@ export function addMeterPhoto(project, map, row, loc, src, dev = "") {
   const list = ensureList(project);
   const rowKey = rowKeyOf(row);
   const old = list.filter((p) => p && p.mapId === map.id && p.loc === loc && rowFor(map, p) === row).map((p) => p.id);
-  if (old.length) removeMeterPhotos(project, old);
+  if (old.length) {
+    // Only the photo the cell shows may take its number out with it. An
+    // older photo on the cell (two phones, offline) was superseded: the
+    // number there now is someone else's, typed or read from the newer one.
+    const shown = photoAt(project, map, row, loc);
+    for (const p of list) if (p && p !== shown && old.includes(p.id)) p.filled = "";
+    removeMeterPhotos(project, old);
+  }
   const ph = { id: uid(), by: author(), ts: nowIso(), dev: String(dev || ""), mapId: map.id, rowKey, loc, date: row.date || "", src, read: null, filled: "", ok: "" };
   list.push(ph);
   return ph;
@@ -177,6 +184,9 @@ export function applyMeterRead(project, ph, reply, at = nowIso()) {
     confidence: Number(m.confidence) || 0, note: String(m.note || ""),
   };
   if (!fill || m.fillable !== true || !(ph.read.confidence >= FILL_MIN) || !ph.read.value) return { filled: false };
+  // a signed certificate never picks up a number nobody checked: the read is
+  // kept on the photo, and the tech types the reading
+  if (certSigned(project.certDrying)) return { filled: false };
   const { row } = findRow(project, ph);
   if (!row || !Array.isArray(row.values)) return { filled: false };
   if (!blank(row.values[ph.loc])) return { filled: false };
@@ -275,33 +285,69 @@ export function sweepDeletedMapPhotos(project) {
   return ids.length ? removeMeterPhotos(project, ids) : 0;
 }
 
+const LOC_BLOCK = 13;
+/** How many locations the Moisture Map draws: whole blocks of 13, enough
+    for every reading's values (forms.js moistureMap locCount). */
+export function drawnLocs(map) {
+  const widths = ((map && map.readings) || []).map((r) => (r && Array.isArray(r.values) ? r.values.length : 0));
+  return Math.ceil(Math.max(LOC_BLOCK, Number(map && map.locCount) || 0, ...widths) / LOC_BLOCK) * LOC_BLOCK;
+}
+
 /** Every photo on a map in grid order (date rows top to bottom, then
     location), for the printed appendix. A photo whose row is gone (merged
-    away on another device) is still listed, by the date it was taken. */
+    away on another device) is still listed, by the date it was taken.
+    `shown`: the grid shows it (the newest photo on a cell it draws), and
+    `unchecked`: it is an amber ? there, a number the reader filled that
+    nobody has checked. An older photo on the same cell is never one. */
 export function mapPhotoEntries(project, map) {
   const rows = map.readings || [];
   const order = new Map(rows.map((r, i) => [r, i]));
+  const { byRow } = mapIndex(project, map);
+  const width = drawnLocs(map);
   return meterList(project)
     .filter((p) => p && p.mapId === map.id)
     .map((p) => {
       const row = rowFor(map, p);
       const i = row ? order.get(row) : -1;
       const value = row ? String(row.values?.[p.loc] ?? "") : "";
+      const state = row ? cellState(p, value) : "photo";
+      const shown = !!row && p.loc < width && byRow.get(row)?.get(p.loc) === p;
       return { ph: p, row, loc: p.loc, date: (row && row.date) || p.date || "", value, orphan: !row, i,
-        state: row ? cellState(p, value) : "photo" };
+        state, shown, unchecked: shown && state === "check" };
     })
     .sort((a, b) => (a.orphan - b.orphan) || (a.i - b.i) || String(a.date).localeCompare(String(b.date)) || (a.loc - b.loc) || String(a.ph.ts).localeCompare(String(b.ph.ts)));
 }
 
-/** Numbers the reader filled in that nobody has checked yet, on every map.
-    The Certificate of Drying can't go out for signature while any wait. */
+/** Numbers the reader filled in that nobody has checked yet, on every map:
+    the amber ?s the grid shows. The Certificate of Drying can't be signed
+    or go out for signature while any wait. */
 export function uncheckedFills(project) {
   const out = [];
   for (const map of project.moistureMaps || []) {
     if (!map) continue;
-    for (const e of mapPhotoEntries(project, map)) if (e.row && e.state === "check") out.push({ map, ...e });
+    for (const e of mapPhotoEntries(project, map)) if (e.unchecked) out.push({ map, ...e });
   }
   return out;
+}
+
+/** Photos the reader hasn't answered yet on an EMPTY cell: in fill mode
+    their number could still land there. The certificate doesn't go out for
+    signature until each is read, typed or deleted. */
+export function unreadOnEmpty(project) {
+  const out = [];
+  for (const map of project.moistureMaps || []) {
+    if (!map) continue;
+    for (const e of mapPhotoEntries(project, map)) if (e.row && !e.ph.read && blank(e.value)) out.push({ map, ...e });
+  }
+  return out;
+}
+
+/** A Certificate of Drying (project.certDrying) carries a signature: drawn
+    on the device, made in the portal, or an uploaded signed copy. */
+export function certSigned(c) {
+  if (!c || typeof c !== "object") return false;
+  return !!(c.sigTech || c.sigOwner || c.sigAdjuster || c.portalSignedAt || c.uploadedDoc ||
+    (Array.isArray(c.uploadedPages) && c.uploadedPages.length));
 }
 
 /** For the Certificate of Drying: each location's FINAL reading (the last

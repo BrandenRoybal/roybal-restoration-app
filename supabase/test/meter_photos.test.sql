@@ -27,6 +27,11 @@
 --   6. Through push_project as a crew login: a stale push from another
 --      device keeps both phones' photos and the reader's number, and a late
 --      check from the first phone lands on the newer stored copy. Rolled back.
+--   7. A photo deleted (or retaken) while the reader's number in its cell was
+--      unchecked takes the number out of a newer copy of the map that still
+--      has it; a checked number, or one either phone typed, stays.
+--      (The twin of merge.js; meterphotos.test.mjs.)
+--   8. The migration raised app_settings min_field_build to 211 or more.
 -- ============================================================================
 
 \set ON_ERROR_STOP on
@@ -57,6 +62,10 @@ begin
   end if;
   if not has_function_privilege('authenticated', 'public._mf_sweep_tombstones(jsonb)', 'EXECUTE') then
     problems := problems || 'crew logins can no longer call _mf_sweep_tombstones (the phones'' meter photo check needs it)'::text;
+  end if;
+  if coalesce((select case when jsonb_typeof(value) = 'number' then (value)::text::numeric end
+                 from public.app_settings where key = 'min_field_build'), 0) < 211 then
+    problems := problems || 'min_field_build is below 211: phones before v211 can still drop meter photos'::text;
   end if;
   if array_length(problems, 1) > 0 then
     raise exception 'meter photos merge: %', array_to_string(problems, '; ');
@@ -162,6 +171,57 @@ begin
     '{"updatedAt": "2026-10-09T19:00:00.000Z", "meterPhotos": [{"id": "mp1", "read": null}], "deletedIds": {"mp1": "2026-10-09T18:30:00.000Z"}}');
   if jsonb_array_length(m -> 'meterPhotos') is distinct from 0 then
     raise exception 'a tombstoned meter photo came back with its read: %', m -> 'meterPhotos';
+  end if;
+end
+$$;
+
+-- 7. a deleted photo's unchecked number goes with it, whichever copy is newer
+do $$
+declare
+  m jsonb;
+  a jsonb := '{"updatedAt": "2026-10-09T18:00:00.000Z",
+    "moistureMaps": [{"id": "map-1", "readings": [{"rk": "r1", "date": "2026-10-09", "values": ["", "12"]}]}],
+    "meterPhotos": [], "deletedIds": {"mp1": "2026-10-09T17:59:00.000Z"}}';
+  b jsonb := '{"updatedAt": "2026-10-09T19:00:00.000Z",
+    "moistureMaps": [{"id": "map-1", "readings": [{"rk": "r1", "date": "2026-10-09", "values": ["17.40", "14"]}]}],
+    "meterPhotos": [{"id": "mp1", "mapId": "map-1", "rowKey": "r1", "date": "2026-10-09", "loc": 0, "read": {"value": "17.4"}, "filled": "17,4", "ok": ""}]}';
+begin
+  -- phone A deleted the photo (and its prefill); phone B's copy is newer
+  m := public.merge_project_blobs(a, b);
+  if m #> '{moistureMaps,0,readings,0,values}' is distinct from '["", "14"]'::jsonb then
+    raise exception 'a deleted photo''s unchecked number came back with a newer map: %', m -> 'moistureMaps';
+  end if;
+  if jsonb_array_length(m -> 'meterPhotos') is distinct from 0 then
+    raise exception 'the deleted meter photo came back: %', m -> 'meterPhotos';
+  end if;
+  -- argument order does not matter
+  if public.merge_project_blobs(b, a) is distinct from m then
+    raise exception 'the merge depends on argument order: %', public.merge_project_blobs(b, a);
+  end if;
+  -- phone A typed its own number after the delete: that number stands
+  m := public.merge_project_blobs(jsonb_set(a, '{moistureMaps,0,readings,0,values,0}', '"18"'), b);
+  if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '18' then
+    raise exception 'the deleting phone''s typed number was lost: %', m -> 'moistureMaps';
+  end if;
+  -- the number was checked on phone B: it stays
+  m := public.merge_project_blobs(a, jsonb_set(b, '{meterPhotos,0,ok}', '"2026-10-09T18:30:00.000Z"'));
+  if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '17.40' then
+    raise exception 'a checked number was taken out with its photo: %', m -> 'moistureMaps';
+  end if;
+  -- phone B typed a different number there: not the photo's, so it stays
+  m := public.merge_project_blobs(a, jsonb_set(b, '{moistureMaps,0,readings,0,values,0}', '"16"'));
+  if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '16' then
+    raise exception 'a typed number was taken out with a photo: %', m -> 'moistureMaps';
+  end if;
+  -- the deleting copy is the newer one: its empty cell already wins
+  m := public.merge_project_blobs(jsonb_set(a, '{updatedAt}', '"2026-10-09T20:00:00.000Z"'), b);
+  if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '' then
+    raise exception 'the newer deleting copy lost its empty cell: %', m -> 'moistureMaps';
+  end if;
+  -- a row found by date when the newer copy's row has no rk
+  m := public.merge_project_blobs(a, jsonb_set(b, '{moistureMaps,0,readings,0}', '{"date": "2026-10-09", "values": ["17.4", "14"]}'));
+  if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '' then
+    raise exception 'the rule missed a row found by date: %', m -> 'moistureMaps';
   end if;
 end
 $$;

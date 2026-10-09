@@ -52,6 +52,7 @@ const K_DELETES = "roybal-sync-deletes";   // [ids pending delete on server ]
 const K_MEDIA = "roybal-media-pushed";     // [sha256 hashes known to be in the bucket]
 const K_THUMBS = "roybal-thumbs-done";     // [sha256 hashes whose thumbnail is settled]
 const K_SWEPT = "roybal-thumbs-swept";     // { projectId: updatedAt of the last COMPLETE sweep }
+const K_REBASED = "roybal-sync-rebased-v211";   // "1" once this install's dirty rows were re-based (below)
 const MAX_ROW = 5_000_000;                 // slimmed rows are ~KBs; this is a last-ditch backstop
 const STALL_CYCLES = 3;                    // media-missing retries before the status light goes red
 
@@ -482,6 +483,22 @@ async function uploadNewMedia(media) {
   }
 }
 
+/* ---------- once per install: rows an older build left dirty ----------
+   v211 is the first build that merges meterPhotos as a collection. A build
+   before it merged a job's meter photos as one value (its own list whole),
+   so a row it merged and left dirty can lack another phone's photos, reads
+   and checks — and pushed on the rev it adopted, push_project would write
+   that copy over the server's as is. So the first cycle on this build sends
+   every dirty row from base 0: the server merges it (0024 unions the photos)
+   instead. Clean rows are untouched. */
+async function rebaseDirtyOnce() {
+  if (localStorage.getItem(K_REBASED)) return;
+  let n = 0;
+  for (const p of await Store.all()) if (pushed[p.id] !== p.updatedAt) { revs[p.id] = 0; n++; }
+  if (n) saveRevs();
+  localStorage.setItem(K_REBASED, "1");
+}
+
 /* ---------- push local changes (rev-guarded) ---------- */
 async function push() {
   const all = await Store.all();
@@ -744,11 +761,17 @@ async function pull() {
       if (local) await Store.backup(local); // safety net: the outgoing copy stays restorable on-device
       delete full.rev;                      // revs live in sync bookkeeping, not the blob
       settleMerged(full);                   // the server's copy may hold a union its merge built
-      await Store.put(full, { quiet: true, bump: false });
-      revs[row.id] = Number(remote.rev) || 0; saveRevs();
-      pushed[row.id] = remote.updatedAt;             // local now matches server
-      mediaWait.delete(row.id);
-      rowChanged(row.id);
+      /* only over the copy read above: a save that landed during the media
+         download (a meter read, an autosave, Magicplan) leaves the row dirty
+         on its old rev, and this cycle's push merges both on the server */
+      if (await Store.putIf(full, local ? local.updatedAt : undefined)) {
+        revs[row.id] = Number(remote.rev) || 0; saveRevs();
+        pushed[row.id] = remote.updatedAt;             // local now matches server
+        mediaWait.delete(row.id);
+        rowChanged(row.id);
+      } else {
+        needsAnotherPass = true;
+      }
     }
     bump(row.updated_at);
   }
@@ -782,6 +805,7 @@ export async function syncNow(opts = {}) {
     // still pushing unguarded rows gets merged here instead of overwritten by
     // our next guarded push. (Trade-off: a just-deleted job can transiently
     // reappear locally for one cycle; the next pull removes it.)
+    await rebaseDirtyOnce();
     await pull();
     await push();
     // both of these mean DATA NOT BACKED UP — show red, not a quiet counter

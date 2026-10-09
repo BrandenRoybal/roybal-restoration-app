@@ -74,8 +74,9 @@ export function normalizeMeterRead(input: unknown): MeterRead {
   let c = Number(o.confidence);
   if (!Number.isFinite(c)) c = 0;
   const confidence = Math.round(Math.min(1, Math.max(0, c)) * 100) / 100;
-  // "17,4" → "17.4", "17.4 %" → "17.4", "07.5" → "7.5"; anything else is not a number we offer
-  let value = str(o.value, 20).replace(/\s+/g, "").replace(",", ".").replace(/%$/, "");
+  // "17,4" → "17.4", "17.4 %" → "17.4", "07.5" → "7.5"; anything else is not a number we
+  // offer. A space inside the digits ("17 4") is a misread, never joined into 174.
+  let value = str(o.value, 20).replace(",", ".").replace(/\s*%$/, "");
   value = value.replace(/^0+(?=\d)/, "");
   let readable = o.readable === true;
   if (!VALUE_RE.test(value)) { value = ""; readable = false; }
