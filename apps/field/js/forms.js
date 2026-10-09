@@ -40,7 +40,7 @@ import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
 import { applyScans, voidPlacement, scanRecord, releaseTypedScans, settleTypedRow, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
-import { meterCell, meterCheckBanner, meterAppendix, meterCertSection, meterGateNote, rowOpenForPhotos } from "./meterui.js";
+import { meterCell, meterCheckBanner, meterAppendix, meterCertSection, meterGateNote, rowOpenForPhotos, onMeterChange } from "./meterui.js";
 import { rowPhotoIds, locPhotoIds, removeMeterPhotos, uncheckedFills, unreadOnEmpty, certSigned } from "./meterphotos.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
@@ -1695,6 +1695,7 @@ export function laborLog(project, l) {
    ============================================================ */
 export function certDrying(project, c) {
   const vbody = h("tbody");
+  const certPhotos = h("div", {}, meterCertSection(project));   // redrawn by certSignLock
   function vrow(r, i) {
     const tr = h("tr");
     const mk = (key, w, type = "text") => {
@@ -1741,7 +1742,7 @@ export function certDrying(project, c) {
         h("thead", {}, h("tr", {}, ...["Material / Location", "Meter / Setting", "Goal %", "Final %", "Ref %", "✓ Dry"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
         vbody)),
     addRow,
-    meterCertSection(project),
+    certPhotos,
     sectionTitle("Equipment Deployment Summary"),
     h("div", { class: "grid2" },
       field("Dehumidifiers (# × days)", inp(c, "dehuDays")),
@@ -1752,7 +1753,7 @@ export function certDrying(project, c) {
     h("div", { class: "certstmt" },
       h("p", {}, "The undersigned, an IICRC-certified water restoration technician, hereby certifies that the water damage mitigation and structural drying services described herein were performed at the above property in accordance with the IICRC S500 Standard for Professional Water Damage Restoration. Final moisture-meter readings confirm that affected materials have achieved the documented dry standard by comparison to unaffected reference materials and/or manufacturer specifications. The structure is considered dry per IICRC S500 criteria as of the Drying Completion Date stated above.")),
     sectionTitle("Signatures"),
-    ...certSignLock(project, c, signOrUpload(c, () => [
+    ...certSignLock(project, c, certPhotos, signOrUpload(c, () => [
       sigBlock(c, "sigTech", "sigTechName", "sigTechDate", "IICRC Certified Technician — Roybal Construction, LLC"),
       h("hr", { class: "divider" }),
       sigBlock(c, "sigOwner", "sigOwnerName", "sigOwnerDate", "Property Owner / Insured"),
@@ -1761,19 +1762,45 @@ export function certDrying(project, c) {
     ])));
 }
 
-/* The certificate is signed over its final readings. While a number the app
-   read from a meter photo waits unchecked, and nothing is signed yet, the
-   pads and the upload are locked (on screen; the paper copy still prints
-   its signature lines), with what to do instead. Once signed, no read fills
-   a cell again (meterphotos.js applyMeterRead). */
-function certSignLock(project, c, signEl) {
-  const n = certSigned(c) ? 0 : uncheckedFills(project).length;
-  if (!n) return [signEl];
-  signEl.setAttribute("inert", "");
-  signEl.classList.add("sig-locked");
-  return [h("p", { class: "mp-banner app-only" }, n === 1
-    ? "Signing waits: a moisture reading the app read from a meter photo hasn't been checked. Open the Moisture Map and tap the amber ? first."
-    : `Signing waits: ${n} moisture readings the app read from meter photos haven't been checked. Open the Moisture Map and tap each amber ? first.`), signEl];
+/* The certificate is signed over its final readings. Until it carries a
+   signature, the pads and the upload are locked (on screen; the paper copy
+   still prints its signature lines), with what to do instead, while a
+   number the app read from a meter photo waits unchecked, or a photo on an
+   empty cell still waits for its read (its number could land after the
+   signature). The lock, and the final readings above it, follow a read
+   landing or a sync while the page is open. Once signed, this phone fills
+   no cell again (meterphotos.js applyMeterRead). */
+function certSignLock(project, c, certPhotos, signEl) {
+  const note = h("p", { class: "mp-banner app-only", hidden: true });
+  let painted = false;
+  function paint() {
+    if (painted && !signEl.isConnected) return false;
+    const first = !painted;
+    painted = true;
+    if (!first) certPhotos.replaceChildren(...[meterCertSection(project)].filter(Boolean));
+    const checks = certSigned(c) ? 0 : uncheckedFills(project).length;
+    const unread = certSigned(c) || checks ? [] : unreadOnEmpty(project);
+    const locked = checks > 0 || unread.length > 0;
+    signEl.toggleAttribute("inert", locked);
+    signEl.classList.toggle("sig-locked", locked);
+    note.hidden = !locked;
+    note.textContent = checks === 1
+      ? "Signing waits: a moisture reading the app read from a meter photo hasn't been checked. Open the Moisture Map and tap the amber ? first."
+      : checks > 1
+        ? `Signing waits: ${checks} moisture readings the app read from meter photos haven't been checked. Open the Moisture Map and tap each amber ? first.`
+        : unread.length
+          ? `Signing waits: the meter photo at location ${unread[0].loc + 1} (${fmtDate(unread[0].date)}) hasn't been read yet and its cell is empty. Type that reading on the Moisture Map, or wait until the phone that took it has signal.`
+          : "";
+    return true;
+  }
+  paint();
+  onMeterChange(project.id, paint);
+  function onGrafted(e) {
+    if (painted && !signEl.isConnected) { document.removeEventListener("roybal:grafted", onGrafted); return; }
+    if (e.detail && e.detail.id === project.id) paint();
+  }
+  document.addEventListener("roybal:grafted", onGrafted);
+  return [note, signEl];
 }
 
 /* ============================================================

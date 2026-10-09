@@ -125,6 +125,28 @@ export function photoAt(project, map, row, loc) {
   return (cells && cells.get(loc)) || null;
 }
 
+/* Which photo on one cell carries its amber ?: the cell's own (newest)
+   photo when cellState says "check"; else, while no photo on the cell has
+   been checked, an older photo whose unchecked prefill the cell still holds
+   (two phones photographed the same point between syncs, and nobody has
+   checked the number the first one's read put there). `on` is every photo
+   on the cell, `shown` the newest. */
+function checkOf(on, shown, value) {
+  if (!shown) return null;
+  if (cellState(shown, value) === "check") return shown;
+  if (blank(value) || on.some((p) => p.ok)) return null;
+  return on.find((p) => p !== shown && p.filled && sameReading(value, p.filled)) || null;
+}
+const photosOn = (project, map, row, loc) =>
+  meterList(project).filter((p) => p && p.mapId === map.id && p.loc === loc && rowFor(map, p) === row);
+
+/** The photo whose number on this cell waits to be checked (the amber ?),
+    or null. The sheet opens on it, and checking it clears the cell's ?. */
+export function cellCheck(project, map, row, loc) {
+  if (!map || !row) return null;
+  return checkOf(photosOn(project, map, row, loc), photoAt(project, map, row, loc), row.values?.[loc]);
+}
+
 function findRow(project, ph) {
   const map = (project.moistureMaps || []).find((m) => m && m.id === ph.mapId);
   return { map, row: map ? rowFor(map, ph) : null };
@@ -150,11 +172,10 @@ export function addMeterPhoto(project, map, row, loc, src, dev = "") {
   const rowKey = rowKeyOf(row);
   const old = list.filter((p) => p && p.mapId === map.id && p.loc === loc && rowFor(map, p) === row).map((p) => p.id);
   if (old.length) {
-    // Only the photo the cell shows may take its number out with it. An
-    // older photo on the cell (two phones, offline) was superseded: the
-    // number there now is someone else's, typed or read from the newer one.
-    const shown = photoAt(project, map, row, loc);
-    for (const p of list) if (p && p !== shown && old.includes(p.id)) p.filled = "";
+    // The cell's number goes with the old photos only when it is the amber ?
+    // they take along (cellCheck); a number checked or typed stays.
+    const chk = cellCheck(project, map, row, loc);
+    for (const p of list) if (p && p !== chk && old.includes(p.id)) p.filled = "";
     removeMeterPhotos(project, old);
   }
   const ph = { id: uid(), by: author(), ts: nowIso(), dev: String(dev || ""), mapId: map.id, rowKey, loc, date: row.date || "", src, read: null, filled: "", ok: "" };
@@ -187,8 +208,11 @@ export function applyMeterRead(project, ph, reply, at = nowIso()) {
   // a signed certificate never picks up a number nobody checked: the read is
   // kept on the photo, and the tech types the reading
   if (certSigned(project.certDrying)) return { filled: false };
-  const { row } = findRow(project, ph);
+  const { map, row } = findRow(project, ph);
   if (!row || !Array.isArray(row.values)) return { filled: false };
+  // a newer photo on the cell (another phone's) is the one it shows: an
+  // older photo's read is kept on it and fills nothing
+  if (photoAt(project, map, row, ph.loc) !== ph) return { filled: false };
   if (!blank(row.values[ph.loc])) return { filled: false };
   row.values[ph.loc] = ph.read.value;
   ph.filled = ph.read.value;
@@ -297,23 +321,36 @@ export function drawnLocs(map) {
     location), for the printed appendix. A photo whose row is gone (merged
     away on another device) is still listed, by the date it was taken.
     `shown`: the grid shows it (the newest photo on a cell it draws), and
-    `unchecked`: it is an amber ? there, a number the reader filled that
-    nobody has checked. An older photo on the same cell is never one. */
+    `unchecked`: it carries the amber ? on a cell the grid draws, a number
+    the reader filled that nobody has checked (cellCheck). */
 export function mapPhotoEntries(project, map) {
   const rows = map.readings || [];
   const order = new Map(rows.map((r, i) => [r, i]));
   const { byRow } = mapIndex(project, map);
   const width = drawnLocs(map);
-  return meterList(project)
-    .filter((p) => p && p.mapId === map.id)
-    .map((p) => {
-      const row = rowFor(map, p);
+  const mine = meterList(project).filter((p) => p && p.mapId === map.id);
+  const cells = new Map();                 // row → loc → every photo on that cell
+  const withRow = mine.map((p) => {
+    const row = rowFor(map, p);
+    if (row) {
+      let locs = cells.get(row);
+      if (!locs) cells.set(row, (locs = new Map()));
+      if (!locs.has(p.loc)) locs.set(p.loc, []);
+      locs.get(p.loc).push(p);
+    }
+    return { p, row };
+  });
+  return withRow
+    .map(({ p, row }) => {
       const i = row ? order.get(row) : -1;
       const value = row ? String(row.values?.[p.loc] ?? "") : "";
       const state = row ? cellState(p, value) : "photo";
-      const shown = !!row && p.loc < width && byRow.get(row)?.get(p.loc) === p;
+      const top = row ? byRow.get(row)?.get(p.loc) : null;
+      const drawn = !!row && p.loc < width;
+      const shown = drawn && top === p;
+      const unchecked = drawn && checkOf(cells.get(row).get(p.loc), top, value) === p;
       return { ph: p, row, loc: p.loc, date: (row && row.date) || p.date || "", value, orphan: !row, i,
-        state, shown, unchecked: shown && state === "check" };
+        state, shown, unchecked };
     })
     .sort((a, b) => (a.orphan - b.orphan) || (a.i - b.i) || String(a.date).localeCompare(String(b.date)) || (a.loc - b.loc) || String(a.ph.ts).localeCompare(String(b.ph.ts)));
 }
@@ -368,7 +405,7 @@ export function finalReadingPhotos(project) {
       const ph = last ? byRow.get(last)?.get(loc) : null;
       if (ph) {
         const value = String(last.values[loc]);
-        out.push({ map, ph, row: last, loc, date: last.date || "", value, unchecked: cellState(ph, value) === "check" });
+        out.push({ map, ph, row: last, loc, date: last.date || "", value, unchecked: !!cellCheck(project, map, last, loc) });
       }
     }
   }

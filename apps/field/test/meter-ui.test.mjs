@@ -450,6 +450,32 @@ await test("readMeter: a capped month and an older function come back as answers
   fetcher = async () => { throw new TypeError("network down"); };
 });
 
+await test("the certificate's signing lock follows a read landing while it is open", async () => {
+  const { confirmMeterPhoto } = await import("../js/meterphotos.js");
+  const q = job();
+  q.certDrying = newCertDrying();
+  const sheet = await render(q);
+  online = false;
+  await tap(badge(sheet, 2, 0));                      // the final reading's photo, cell left empty
+  const cert = certDrying(q, q.certDrying);
+  view.replaceChildren(cert);
+  const lock = () => cert.querySelector(".sig-locked");
+  assert.ok(lock() && lock().hasAttribute("inert"), "a number could still land: locked");
+  assert.match(cert.textContent, /Signing waits: the meter photo at location 1 .* hasn't been read yet and its cell is empty/);
+  online = true;
+  replies = [fillReply("21")];
+  await readPendingMeters(q);                         // signal back: the read lands on the job on screen
+  await settle();
+  assert.equal(q.moistureMaps[0].readings[2].values[0], "21");
+  assert.ok(lock() && lock().hasAttribute("inert"), "still locked: now it waits to be checked");
+  assert.match(cert.textContent, /Signing waits: a moisture reading the app read from a meter photo hasn't been checked/);
+  assert.match(cert.querySelector(".mp-cert figcaption").textContent, /· 21 · not checked$/, "the final readings above follow too");
+  confirmMeterPhoto(q.meterPhotos[0], "ok-at");
+  document.dispatchEvent(new CustomEvent("roybal:grafted", { detail: { id: q.id } }));
+  assert.equal(lock(), null, "checked: the pads open");
+  assert.ok(!cert.querySelector("[inert]"));
+});
+
 await test("a capped month stops the reader for the session: nothing more is asked, the photos wait", async () => {
   const p = job();
   const sheet = await render(p);
@@ -487,22 +513,59 @@ async function freshReader(tag) {
   return r;
 }
 
-await test("an AI outage (the function's 400 llm_failed (529)) never counts against a photo; after a reload they're read", async () => {
+await test("an AI outage (the function's 400 llm_failed (529)) never counts against a photo; the reader rests, then reads them", async () => {
   const { p, ids } = await savedJobWithPhotos(3);
   current = null;
   let calls = 0;
   fetcher = async () => { calls++; return new Response(JSON.stringify({ ok: false, error: "llm_failed (529): overloaded" }), { status: 400 }); };
   const a = await freshReader("outage");
   for (let run = 0; run < 6; run++) { await a.readPendingMeters(await Store.get(p.id)); a.readAllWaitingMeters(); await settle(); }
-  assert.equal(calls, 3, "three tries of the server, then the reader rests until the app reloads");
+  assert.equal(calls, 3, "three tries of the server, then the reader rests");
   for (const id of ids) assert.equal(tries()[id], undefined, "nothing counted against the photos");
   assert.ok(waiting().includes(p.id), "the job still waits to be read");
   fetcher = async () => new Response(JSON.stringify({ ok: true, fill: false, meter: fillReply("12").meter }), { status: 200 });
-  const b = await freshReader("reload");
-  assert.equal(await b.readPendingMeters(await Store.get(p.id)), 3);
+  a.readAllWaitingMeters();
+  await settle();
+  assert.equal(calls, 3, "still resting");
+  const realNow = Date.now;
+  Date.now = () => realNow() + 11 * 60e3;              // ten minutes on, the next sync reads them
+  try { assert.equal(await a.readPendingMeters(await Store.get(p.id)), 3); }
+  finally { Date.now = realNow; }
   const saved = await Store.get(p.id);
   assert.deepEqual(saved.meterPhotos.map((x) => x.read && x.read.value), ["12", "12", "12"]);
   assert.ok(!waiting().includes(p.id));
+  fetcher = async () => { throw new TypeError("network down"); };
+});
+
+await test("only trouble in a row rests the reader, and the AI account's own 400s (credit, limits) are trouble, not the photo's", async () => {
+  const { p, ids } = await savedJobWithPhotos(5);
+  current = null;
+  const credit = 'llm_failed (400): {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}';
+  const answers = ["llm_failed (529): overloaded", null, credit, null, "llm_failed (529): overloaded"];
+  let calls = 0;
+  fetcher = async () => {
+    const err = answers[calls++];
+    return err ? new Response(JSON.stringify({ ok: false, error: err }), { status: 400 })
+      : new Response(JSON.stringify({ ok: true, fill: false, meter: fillReply("7").meter }), { status: 200 });
+  };
+  const r = await freshReader("hiccups");
+  assert.equal(await r.readPendingMeters(await Store.get(p.id)), 2);
+  assert.equal(calls, 5, "three separate hiccups never rest the reader");
+  for (const id of ids) assert.equal(tries()[id], undefined, "and none counts against a photo");
+  // the account out of credit, for every photo: trouble, three calls, then rest
+  calls = 0;
+  fetcher = async () => { calls++; return new Response(JSON.stringify({ ok: false, error: credit }), { status: 400 }); };
+  const q = await freshReader("credit");
+  for (let run = 0; run < 4; run++) await q.readPendingMeters(await Store.get(p.id));
+  assert.equal(calls, 3);
+  for (const id of ids) assert.equal(tries()[id], undefined);
+  // an image the AI service refuses is the photo's fault
+  calls = 0;
+  fetcher = async () => { calls++; return new Response(JSON.stringify({ ok: false, error: 'llm_failed (400): {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.0.image.source.base64: image exceeds 5 MB maximum"}}' }), { status: 400 }); };
+  const w = await freshReader("bigimage");
+  await w.readPendingMeters(await Store.get(p.id));
+  assert.equal(calls, 3, "each waiting photo was tried");
+  assert.equal(Object.keys(tries()).filter((id) => ids.includes(id)).length, 3);
   fetcher = async () => { throw new TypeError("network down"); };
 });
 
@@ -548,6 +611,22 @@ await test("the sheet closes when the page changes, and never changes a copy of 
   await tap(badge(sheet, 1, 0));
   await tap(btn(sheetEl(), /is right/));
   assert.ok(p.meterPhotos[0].ok, "on the copy the page shows, the check lands");
+});
+
+await test("two phones photographed one point: the older photo's unchecked number gets the cell's ?, and checking it there clears it", async () => {
+  const { applyMeterRead } = await import("../js/meterphotos.js");
+  const p = job(), m = p.moistureMaps[0];
+  const a = addMeterPhoto(p, m, m.readings[1], 3, JPEG, "other-phone");
+  a.ts = "2026-10-09T10:00:00.000Z";
+  applyMeterRead(p, a, fillReply("18"));
+  p.meterPhotos.push({ ...a, id: "newer-photo", ts: "2026-10-09T11:00:00.000Z", read: null, filled: "", ok: "" });
+  const sheet = await render(p);
+  assert.equal(badge(sheet, 1, 3).textContent, "?");
+  assert.ok(cell(sheet, 1, 3).classList.contains("mp-fill"));
+  await tap(badge(sheet, 1, 3));
+  await tap(btn(sheetEl(), /18 is right/));
+  assert.ok(a.ok, "the check lands on the photo whose number it was");
+  assert.notEqual(badge(sheet, 1, 3).textContent, "?");
 });
 
 await flushPending();

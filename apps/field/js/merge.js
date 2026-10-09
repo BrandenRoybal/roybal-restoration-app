@@ -296,21 +296,25 @@ export function mergeProjects(a, b) {
   // unchecked, takes that number out of its cell (meterphotos.js
   // dropPrefill). A moisture map merges whole, so a newer copy of the map
   // saved before the delete would put the number back, looking typed. So for
-  // a photo the tombstones drop here that carries an unchecked `filled` (no
-  // copy of it has `ok`): when the merged map's cell still holds that number
-  // and the other copy of the map has something else there, the merged cell
-  // takes the other copy's value. Twin: 0024's merge_project_blobs.
+  // a photo the OLDER copy deleted (its tombstone is there, not in the newer
+  // copy) while the newer copy still holds it with an unchecked `filled`
+  // (no `ok`): when the merged map's cell still holds that number and the
+  // older copy's cell has something else, the merged cell takes the older
+  // copy's value. A delete the newer copy made is already in its own cell,
+  // and whatever is there now was put there after it. Twin: 0024's
+  // merge_project_blobs.
+  const marksOf = (side) => (isObj(side[DELETED_IDS]) ? side[DELETED_IDS] : {});
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   if (gone.size && Array.isArray(merged.moistureMaps)) {
     const isSet = (v) => typeof v === "string" && v !== "";
+    const oMarks = marksOf(older), nMarks = marksOf(newer);
     const drops = new Map();                       // photo id → { ph, filled, ok }
-    for (const side of [newer, older]) {
-      for (const el of Array.isArray(side.meterPhotos) ? side.meterPhotos : []) {
-        if (!isObj(el) || !isSet(el.id) || !gone.has(el.id)) continue;
-        let d = drops.get(el.id);
-        if (!d) drops.set(el.id, (d = { ph: el, filled: "", ok: false }));
-        if (!d.filled && isSet(el.filled)) d.filled = el.filled;
-        if (isSet(el.ok)) d.ok = true;
-      }
+    for (const el of Array.isArray(newer.meterPhotos) ? newer.meterPhotos : []) {
+      if (!isObj(el) || !isSet(el.id) || !gone.has(el.id) || !has(oMarks, el.id) || has(nMarks, el.id)) continue;
+      let d = drops.get(el.id);
+      if (!d) drops.set(el.id, (d = { ph: el, filled: "", ok: false }));
+      if (!d.filled && isSet(el.filled)) d.filled = el.filled;
+      if (isSet(el.ok)) d.ok = true;
     }
     const mapOf = (list, id) => (Array.isArray(list) ? list.find((m) => isObj(m) && m.id === id) : null) || null;
     for (const { ph, filled, ok } of drops.values()) {

@@ -33,7 +33,7 @@ import { wallTime } from "./scans.js";
 import { SYNC_ENABLED } from "./config.js";
 import {
   METER_MAX_DIM, METER_QUALITY, meterList, addMeterPhoto, photoAt, cellState, needsRead, pendingReads,
-  applyMeterRead, noteTyped, confirmMeterPhoto, useMeterRead, removeMeterPhotos, dropsPrefill, mapPhotoEntries,
+  applyMeterRead, noteTyped, confirmMeterPhoto, useMeterRead, removeMeterPhotos, dropsPrefill, mapPhotoEntries, cellCheck,
   finalReadingPhotos, isLocalImage,
 } from "./meterphotos.js";
 
@@ -142,6 +142,10 @@ function onScreen(projectId, paint) {
   if (!s) painters.set(projectId, (s = new Set()));
   s.add(paint);
 }
+/** paint() runs whenever this job's meter photos change on screen (a
+    capture, a read landing, a sheet closing); it returns false once its
+    element has left the page. The Certificate of Drying's signing lock. */
+export function onMeterChange(projectId, paint) { onScreen(projectId, paint); }
 function repaintJob(projectId) {
   const s = painters.get(projectId);
   if (!s) return;
@@ -155,18 +159,27 @@ let liveOf = () => null;
 /** app.js: the job object the page on screen is bound to, by id (or null). */
 export function onMeterLive(fn) { liveOf = typeof fn === "function" ? fn : () => null; }
 
-let halted = "";                 // "off" | "capped" | "missing" | "trouble": asked no more until the app reloads
-let trouble = 0;                 // server errors this session (an outage at the AI provider, say)
+let halted = "";                 // "off" | "capped" | "missing": asked no more until the app reloads
+let trouble = 0;                 // server errors in a row (an outage at the AI provider, say)
+let restUntil = 0;               // after 3 in a row the reader rests until then (ms)
+const REST_MS = 10 * 60e3;
+const stopped = () => !!halted || Date.now() < restUntil;
 const running = new Map();       // job id → the run in flight
 /* no signal, the 40 s timeout, an expired login: not the photo's fault */
 const noSignal = (e) => e instanceof TypeError || (e && e.name === "AbortError") || (e && e.status === 401);
 /* The photo's own fault: a picture the AI can't take, or can't make sense
    of. roybal-ai-office answers 400 for every error it throws, an AI
    provider outage (llm_failed (529)) or a missing key included, so only
-   these messages count against the photo; anything else is the server's
+   these count against the photo. The AI service's own 400 is the photo's
+   only when it is about the image: its credit-balance, usage-limit and
+   request-shape refusals are 400s too. Anything else is the server's
    trouble. */
-const photoFault = (e) => !!e && e.status === 400 &&
-  /^(Couldn't read that photo|llm_failed \((400|413)\)|llm_truncated|extraction_failed)/.test(e.message || "");
+function photoFault(e) {
+  if (!e || e.status !== 400) return false;
+  const m = e.message || "";
+  if (/^(Couldn't read that photo|llm_failed \(413\)|llm_truncated|extraction_failed)/.test(m)) return true;
+  return /^llm_failed \(400\)/.test(m) && /\bimage\b/i.test(m);
+}
 
 /** Read every photo on this job that this install took and hasn't had
     read, one at a time. Stops on no signal (the next sync resumes), on a
@@ -183,7 +196,7 @@ export function readPendingMeters(project) {
     let n = 0;
     const ids = pendingReads(await current(), dev).map((p) => p.id);
     for (const phId of ids) {
-      if (halted || !meterDeps.ready()) break;
+      if (stopped() || !meterDeps.ready()) break;
       if (triesOf(phId) >= GIVE_UP) continue;
       const p = await current();
       const ph = meterList(p).find((x) => x.id === phId);
@@ -198,19 +211,21 @@ export function readPendingMeters(project) {
       } catch (e) {
         if (noSignal(e)) break;              // the next sync tries again
         if (photoFault(e)) {                 // refused (a bad image, say): given up after GIVE_UP
+          trouble = 0;                       // the server and the AI answered
           bumpTries(phId);
           continue;
         }
         // the server's trouble, never counted against the photo; the next
-        // photo still gets its turn, and after 3 the reader rests until the
-        // app reloads (an outage costs 3 calls a session, not one per photo)
-        if (++trouble >= 3) { halted = "trouble"; break; }
+        // photo still gets its turn, and after 3 in a row the reader rests
+        // for 10 minutes (an outage costs 3 calls, not one per photo)
+        if (++trouble >= 3) { trouble = 0; restUntil = Date.now() + REST_MS; break; }
         continue;
       }
       if (!reply || reply.off || reply.capped || reply.missing) {
         halted = reply && reply.capped ? "capped" : reply && reply.missing ? "missing" : "off";
         break;
       }
+      trouble = 0;                           // only trouble in a row rests the reader
       rememberFill(!!reply.fill);
       if (await land(id, phId, reply)) n++;
     }
@@ -241,13 +256,13 @@ async function land(projectId, phId, reply) {
 
 /** The Moisture Map opened: read this job's waiting photos if we can. */
 export function readWaitingMeters(project) {
-  if (!project || halted || !meterDeps.ready()) return;
+  if (!project || stopped() || !meterDeps.ready()) return;
   if (pendingReads(project, deviceTag()).length) readPendingMeters(project);
 }
 
 /** A sync completed: read the waiting photos of every job that has some. */
 export function readAllWaitingMeters() {
-  if (halted || !meterDeps.ready()) return;
+  if (stopped() || !meterDeps.ready()) return;
   for (const id of waitingJobs()) {
     if (running.has(id)) continue;
     Store.get(id).then((p) => {
@@ -301,7 +316,8 @@ export function meterCell(project, map, row, loc, td, input, { open = true, onVa
     const value = String(r.values[loc] ?? "");
     if (document.activeElement !== input && input.value !== value) { input.value = value; if (onValue) onValue(); }
     const ph = photoAt(project, map, r, loc);
-    const state = ph ? shownState(ph, value) : "none";
+    // an amber ? can belong to an older photo on the cell (cellCheck)
+    const state = !ph ? "none" : cellCheck(project, map, r, loc) ? "check" : shownState(ph, value);
     badge.className = `mp-btn app-only mp-${state}`;
     badge.textContent = BADGE[state];
     badge.title = BADGE_TITLE[state];
@@ -320,7 +336,8 @@ export function meterCell(project, map, row, loc, td, input, { open = true, onVa
   };
   onScreen(project.id, repaint);
   function typed() {
-    const ph = photoAt(project, map, liveRow() || row, loc);
+    const r = liveRow() || row;
+    const ph = cellCheck(project, map, r, loc) || photoAt(project, map, r, loc);
     if (!ph) return;
     noteTyped(ph, input.value);              // typing over a prefill confirms it: the typed value is the reading
     repaint();
@@ -343,7 +360,7 @@ export function meterCell(project, map, row, loc, td, input, { open = true, onVa
       commit(); await flushPending();        // on this device before anything else
       markJob(project.id, true);
       repaintJob(project.id);
-      const reading = meterDeps.ready() && !halted;
+      const reading = meterDeps.ready() && !stopped();
       toast(lastFill() && !reading
         ? "Meter photo saved. The number fills in when you're back online."
         : "Meter photo saved with this reading.", 2500);
@@ -390,7 +407,8 @@ function sheetStatus(ph, value) {
 }
 
 export function openMeterSheet(project, map, row, loc, { input, retake, after, onValue, view = false } = {}) {
-  const ph = photoAt(project, map, row, loc);
+  // the photo whose number waits to be checked, when there is one; else the cell's photo
+  const ph = cellCheck(project, map, row, loc) || photoAt(project, map, row, loc);
   if (!ph) return;
   const prevOverflow = document.body.style.overflow;
   document.body.style.overflow = "hidden";
@@ -455,7 +473,7 @@ export function openMeterSheet(project, map, row, loc, { input, retake, after, o
   window.addEventListener("keydown", onKey);
   window.addEventListener("hashchange", close);
   document.body.append(ov);
-  if (!view && !halted && needsRead(ph, deviceTag()) && meterDeps.ready()) readPendingMeters(project);
+  if (!view && !stopped() && needsRead(ph, deviceTag()) && meterDeps.ready()) readPendingMeters(project);
 }
 
 /* ---------- the line over the grid while a prefill waits for a person ---------- */

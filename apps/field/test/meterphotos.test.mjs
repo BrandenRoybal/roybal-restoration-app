@@ -8,7 +8,7 @@ import {
   addMeterPhoto, photoAt, mapIndex, rowFor, needsRead, pendingReads, applyMeterRead, cellState, noteTyped,
   confirmMeterPhoto, useMeterRead, removeMeterPhotos, dropsPrefill, rowPhotoIds, locPhotoIds, mapPhotoIds,
   mapPhotoEntries, finalReadingPhotos, uncheckedFills, sweepDeletedMapPhotos, sameReading, rowKeyOf, FILL_MIN, METER_KEY,
-  unreadOnEmpty, certSigned, drawnLocs,
+  unreadOnEmpty, certSigned, drawnLocs, cellCheck,
 } from "../js/meterphotos.js";
 import { ID_COLLECTIONS, mergeProjects, tombstoneItems } from "../js/merge.js";
 import { blankReadingRow } from "../js/model.js";
@@ -313,6 +313,33 @@ test("a deleted photo's unchecked number stays out when a newer copy of the map 
   assert.equal(cell(mergeProjects(a, b).merged), "");
 });
 
+test("a delete the newer copy made stands: a number put back after it is never taken out", () => {
+  const cell = (merged) => merged.moistureMaps[0].readings[0].values[0];
+  // the office's copy: another copy of the map dropped the fill, so an amber ? sits on an empty cell
+  const o = job(), m = o.moistureMaps[0];
+  const ph = addMeterPhoto(o, m, m.readings[0], 0, JPEG, "d");
+  applyMeterRead(o, ph, read("17"));
+  m.readings[0].values[0] = "";
+  o.updatedAt = "2026-10-09T10:30:00.000Z";
+  for (const variant of ["retake, then check the new read", "use it, then delete the photo", "delete, then type it"]) {
+    const a = JSON.parse(JSON.stringify(o)), am = a.moistureMaps[0], ar = am.readings[0], aph = a.meterPhotos[0];
+    if (variant.startsWith("retake")) {
+      const p2 = addMeterPhoto(a, am, ar, 0, JPEG, "d");
+      applyMeterRead(a, p2, read("17"));
+      confirmMeterPhoto(p2, "ok-at");
+    } else if (variant.startsWith("use")) {
+      useMeterRead(a, aph, "ok-at");
+      removeMeterPhotos(a, [aph.id]);
+    } else {
+      removeMeterPhotos(a, [aph.id]);
+      ar.values[0] = "17";
+    }
+    a.updatedAt = "2026-10-09T11:00:00.000Z";
+    assert.equal(cell(a), "17");
+    for (const [x, y] of [[a, o], [o, a]]) assert.equal(cell(mergeProjects(x, y).merged), "17", variant);
+  }
+});
+
 test("a checked number, or one typed on the newer copy, stays when its photo is deleted elsewhere", () => {
   const cell = (merged) => merged.moistureMaps[0].readings[0].values[0];
   // checked on the newer copy before the other phone deleted the photo
@@ -366,21 +393,54 @@ test("once the certificate is signed, a read is kept on its photo but fills noth
   assert.equal(certSigned(undefined), false);
 });
 
-test("an older photo hidden under a newer one on the same cell never counts as an amber ?, and a retake keeps the typed number", () => {
-  const p = job(), m = p.moistureMaps[0], r = m.readings[1];
-  const a = addMeterPhoto(p, m, r, 2, JPEG);
-  a.ts = "2026-10-09T10:00:00.000Z";
-  applyMeterRead(p, a, read("18"));                  // phone A's unchecked prefill
-  const b = { ...a, id: "photo-b", ts: "2026-10-09T11:00:00.000Z", read: null, filled: "", ok: "" };
-  p.meterPhotos.push(b);                             // phone B's later photo of the same cell, after the merge
+test("two phones on one cell: an older photo's unchecked number gets the cell's ?, and checking it clears it", () => {
+  const setup = () => {
+    const p = job(), m = p.moistureMaps[0], r = m.readings[1];
+    const a = addMeterPhoto(p, m, r, 2, JPEG);
+    a.ts = "2026-10-09T10:00:00.000Z";
+    applyMeterRead(p, a, read("18"));                // phone A's unchecked prefill
+    const b = { ...a, id: "photo-b", ts: "2026-10-09T11:00:00.000Z", read: null, filled: "", ok: "" };
+    p.meterPhotos.push(b);                           // phone B's later photo of the same cell, after the merge
+    return { p, m, r, a, b };
+  };
+  let { p, m, r, a, b } = setup();
   assert.equal(photoAt(p, m, r, 2), b);
-  assert.equal(uncheckedFills(p).length, 0, "no ? the tech could tap is asked for");
-  const entries = mapPhotoEntries(p, m);
-  assert.deepEqual(entries.map((e) => [e.ph.id, e.shown, e.unchecked]), [[a.id, false, false], ["photo-b", true, false]]);
-  const c = addMeterPhoto(p, m, r, 2, JPEG);         // retake the cell
-  assert.equal(r.values[2], "18", "a superseded photo's prefill never blanks the number on the cell");
+  assert.equal(cellCheck(p, m, r, 2), a, "the ? on the cell is A's number");
+  assert.deepEqual(uncheckedFills(p).map((e) => e.ph.id), [a.id]);
+  assert.deepEqual(mapPhotoEntries(p, m).map((e) => [e.ph.id, e.shown, e.unchecked]), [[a.id, false, true], ["photo-b", true, false]]);
+  assert.equal(finalReadingPhotos(p).find((f) => f.loc === 2).unchecked, true, "the certificate marks it not checked");
+  // B's read lands later: it is the cell's photo, but the cell isn't empty, so it fills nothing
+  assert.equal(applyMeterRead(p, b, read("18")).filled, false);
+  assert.equal(cellCheck(p, m, r, 2), a);
+  confirmMeterPhoto(a, "ok-at");                     // "✓ 18 is right" on the ?
+  assert.equal(cellCheck(p, m, r, 2), null);
+  assert.equal(uncheckedFills(p).length, 0);
+  addMeterPhoto(p, m, r, 2, JPEG);                   // a retake keeps a checked number
+  assert.equal(r.values[2], "18");
+  // unchecked, a retake takes A's number out with the old photos, like any amber ?
+  ({ p, m, r, a, b } = setup());
+  const c = addMeterPhoto(p, m, r, 2, JPEG);
+  assert.equal(r.values[2], "");
   assert.deepEqual(p.meterPhotos.map((x) => x.id), [c.id]);
   assert.ok(p.deletedIds[a.id] && p.deletedIds["photo-b"]);
+  // B's own check of the cell is a check of its number: no ?
+  ({ p, m, r, a, b } = setup());
+  b.ok = "b-ok";
+  assert.equal(cellCheck(p, m, r, 2), null);
+  assert.equal(uncheckedFills(p).length, 0);
+  addMeterPhoto(p, m, r, 2, JPEG);
+  assert.equal(r.values[2], "18", "a checked number stays through a retake");
+});
+
+test("an older photo's read never fills the cell a newer photo now shows", () => {
+  const p = job(), m = p.moistureMaps[0], r = m.readings[1];
+  const a = addMeterPhoto(p, m, r, 5, JPEG);
+  a.ts = "2026-10-09T10:00:00.000Z";
+  p.meterPhotos.push({ ...a, id: "photo-b", ts: "2026-10-09T11:00:00.000Z" });
+  assert.equal(applyMeterRead(p, a, read("21")).filled, false);
+  assert.equal(r.values[5], "");
+  assert.equal(a.read.value, "21", "the read is kept on the older photo");
+  assert.equal(uncheckedFills(p).length, 0);
 });
 
 test("a prefill on a location the grid no longer draws never blocks the certificate", () => {

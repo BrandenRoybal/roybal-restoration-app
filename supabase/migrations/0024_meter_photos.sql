@@ -303,11 +303,13 @@ begin
   -- or retaking a meter photo whose number the reader filled in, unchecked,
   -- takes the number out of its cell on the phone. A moisture map merges
   -- whole, so a newer copy of the map saved before the delete would put it
-  -- back, looking typed. For each photo the marks drop that carries an
-  -- unchecked `filled` (the first non-empty one, newer copy first; no copy
-  -- has `ok`), when the newer copy has its map: if the merged cell still
-  -- holds that number and the older copy's cell does not, the merged cell
-  -- takes the older copy's value ("" for none). The row is the one with the
+  -- back, looking typed. For each photo the OLDER copy deleted (its mark is
+  -- in the older copy's deletedIds, not the newer's) that the newer copy
+  -- still holds with an unchecked `filled` (the first non-empty one; none of
+  -- the newer copy's elements for it has `ok`), when the newer copy has its
+  -- map: if the merged cell still holds that number and the older copy's
+  -- cell does not, the merged cell takes the older copy's value ("" for
+  -- none). A delete the newer copy made is already in its own cell. The row is the one with the
   -- photo's rowKey, else the one row with its date. A cell matches when both
   -- are the same string, or both are short numbers (40 characters, a 2-digit
   -- exponent at most) equal as float8, after the first comma becomes a point
@@ -315,22 +317,25 @@ begin
   -- matches. Photos go in the order merge.js meets them.
   if any_gone and jsonb_typeof(merged -> 'moistureMaps') = 'array' then
     for d in
-      with sides as (
-        select sd.side, e.el, e.ord
-          from (values (0, newer -> 'meterPhotos'), (1, older -> 'meterPhotos')) as sd(side, list)
-          cross join lateral jsonb_array_elements(
-            case when jsonb_typeof(sd.list) = 'array' then sd.list else '[]'::jsonb end) with ordinality as e(el, ord)
+      with held as (
+        select e.el, e.ord
+          from jsonb_array_elements(
+            case when jsonb_typeof(newer -> 'meterPhotos') = 'array' then newer -> 'meterPhotos' else '[]'::jsonb end)
+            with ordinality as e(el, ord)
          where jsonb_typeof(e.el) = 'object'
            and jsonb_typeof(e.el -> 'id') = 'string' and e.el ->> 'id' <> ''
            and jsonb_exists(marks, e.el ->> 'id')
+           and jsonb_typeof(older -> 'deletedIds') = 'object' and jsonb_exists(older -> 'deletedIds', e.el ->> 'id')
+           and not coalesce(jsonb_typeof(newer -> 'deletedIds') = 'object'
+                            and jsonb_exists(newer -> 'deletedIds', e.el ->> 'id'), false)
       )
-      select (array_agg(el order by side, ord))[1] as ph,
-             (array_agg(el ->> 'filled' order by side, ord)
+      select (array_agg(el order by ord))[1] as ph,
+             (array_agg(el ->> 'filled' order by ord)
                 filter (where jsonb_typeof(el -> 'filled') = 'string' and el ->> 'filled' <> ''))[1] as filled,
              bool_or(jsonb_typeof(el -> 'ok') = 'string' and el ->> 'ok' <> '') as ok
-        from sides
+        from held
        group by el ->> 'id'
-       order by min(side::bigint * 4294967296 + ord)
+       order by min(ord)
     loop
       if d.filled is null or d.ok then continue; end if;
       if jsonb_typeof(d.ph -> 'mapId') is distinct from 'string' or d.ph ->> 'mapId' = '' then continue; end if;

@@ -218,6 +218,19 @@ begin
   if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '' then
     raise exception 'the newer deleting copy lost its empty cell: %', m -> 'moistureMaps';
   end if;
+  -- the NEWER copy deleted the photo and has a number there again (typed, or a
+  -- retake checked): it stands, though the older copy still has the photo
+  m := public.merge_project_blobs(
+    '{"updatedAt": "2026-10-09T18:00:00.000Z",
+      "moistureMaps": [{"id": "map-1", "readings": [{"rk": "r1", "date": "2026-10-09", "values": ["", "12"]}]}],
+      "meterPhotos": [{"id": "mp1", "mapId": "map-1", "rowKey": "r1", "date": "2026-10-09", "loc": 0, "read": {"value": "17.4"}, "filled": "17.4", "ok": ""}]}',
+    '{"updatedAt": "2026-10-09T19:00:00.000Z",
+      "moistureMaps": [{"id": "map-1", "readings": [{"rk": "r1", "date": "2026-10-09", "values": ["17.4", "12"]}]}],
+      "meterPhotos": [{"id": "mp2", "mapId": "map-1", "rowKey": "r1", "date": "2026-10-09", "loc": 0, "read": {"value": "17.4"}, "filled": "17.4", "ok": "2026-10-09T18:50:00.000Z"}],
+      "deletedIds": {"mp1": "2026-10-09T18:40:00.000Z"}}');
+  if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '17.4' then
+    raise exception 'a number put back after the newer copy''s own delete was taken out: %', m -> 'moistureMaps';
+  end if;
   -- a row found by date when the newer copy's row has no rk
   m := public.merge_project_blobs(a, jsonb_set(b, '{moistureMaps,0,readings,0}', '{"date": "2026-10-09", "values": ["17.4", "14"]}'));
   if m #>> '{moistureMaps,0,readings,0,values,0}' is distinct from '' then
