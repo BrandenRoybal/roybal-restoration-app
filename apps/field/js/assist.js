@@ -29,7 +29,7 @@ import { narrativeFacts, constructionFacts } from "./narrative.js";
 import { jobType } from "./model.js";
 import { aiAvailable, fieldAssist } from "./officeai.js";
 import { rest } from "./supa.js";
-import { normalizePhone, smsHref, logSms, companySendEnabled, sendViaCompany } from "./sms.js";
+import { normalizePhone, smsHref, logSms, sendViaCompany } from "./sms.js";
 import { capturedBy } from "./tech.js";
 import { getUnifiedJobId } from "./spine.js";
 import { portalShareLink } from "./portal.js";
@@ -238,9 +238,9 @@ async function auditExecution(entry, a, r) {
 }
 
 /* The field app's executor — sendText only (form write-backs stay on the
-   voice-capture chip path). Company lane when enabled, Messages fallback;
-   quiet_hours failures NEVER fall back to the device link — that would
-   sidestep the server's guard the user just hit. */
+   voice-capture chip path). Company lane, Messages fallback; quiet_hours
+   failures NEVER fall back to the device link — that would sidestep the
+   server's guard the user just hit. */
 function runFieldAction(project, a) {
   if (a.type !== "sendText") return { ok: false, detail: "not available in the field app" };
   const p = a.params || {};
@@ -250,10 +250,6 @@ function runFieldAction(project, a) {
   const kind = p.audience === "crew" ? "assistCrew" : "assist";
   const entry = logSms(project, { kind, to, body: message, by: capturedBy() });
   Store.put(project);
-  if (!companySendEnabled()) {
-    location.href = smsHref(to, message);            // synchronous in the tap window
-    return { ok: true, detail: "opened Messages — review and hit send" };
-  }
   return sendViaCompany({ to, body: message, kind, by: capturedBy(), unifiedJobId: getUnifiedJobId(project.id) })
     .then((r) => {
       entry.via = "company"; entry.status = r.status || "sent"; entry.sid = r.sid || "";
