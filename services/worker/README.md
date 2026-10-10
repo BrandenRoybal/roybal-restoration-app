@@ -551,11 +551,16 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
      first card.
   4. The worker, as in the billing check's step 3. `fly secrets list -a roybal-worker`
      first: a `QUEUE_KINDS` set on the app replaces the default and must add
-     `receipts.qbo_match`
-     (`fly secrets set -a roybal-worker QUEUE_KINDS=proposal.execute,billing.reconcile,receipts.qbo_match`,
-     or `fly secrets unset -a roybal-worker QUEUE_KINDS`), and an
-     `OUTBOX_CHANNELS` set there must add `qbo`, or approved changes wait
-     `pending` and the door answers `qbo_lane_off`. Check: `worker.start` in
+     `receipts.qbo_match`, and an `OUTBOX_CHANNELS` set there must add
+     `qbo`, or approved changes wait `pending` and the door answers
+     `qbo_lane_off`. Stage the change before the deploy so it goes live
+     with the new image
+     (`fly secrets set --stage -a roybal-worker QUEUE_KINDS=proposal.execute,billing.reconcile,receipts.qbo_match`),
+     or set it after the deploy: a plain `fly secrets set` restarts the
+     image already on Fly, which would claim the nightly rows with no
+     handler and leave them `dead` (and the owner a false "gave up" text).
+     `fly secrets unset -a roybal-worker QUEUE_KINDS` before the deploy is
+     harmless: the old default does not name the new kind. Check: `worker.start` in
      `fly logs -a roybal-worker` (and `/healthz`) shows `receipts.qbo_match`
      among the `"kinds"` and `qbo` among the `"channels"`.
   Until the worker is deployed the nightly rows wait `queued`; the new
@@ -623,12 +628,13 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   number anyone can quote); `unchecked_fills` (a meter reading the app read
   from a photo that nobody has checked); `unread_meter_photos` (a meter
   photo on an empty reading not read yet); `lookback` (a job with no packet
-  row yet whose newest date is more than `PACKET_LOOKBACK_DAYS` before today
-  in Alaska; the dates are the certificate's dry-complete, technician
-  signature, issue and portal-signed dates, each log's dry-out finish, the
-  last equipment removal, the last moisture reading row and each ready
-  invoice's date, so a job invoiced weeks after drying still gets its
-  packet); `settle` (edited
+  row and no hold yet whose newest date is more than `PACKET_LOOKBACK_DAYS`
+  before today in Alaska; the dates are the certificate's dry-complete,
+  technician signature, issue and portal-signed dates, each log's dry-out
+  finish, the last equipment removal, the last moisture reading row and
+  each ready invoice's date, so a job invoiced weeks after drying still gets
+  its packet, and a job held with a text, waiting on a numbered invoice say,
+  is built once it qualifies whatever its age); `settle` (edited
   less than `PACKET_SETTLE_MIN` minutes ago); `cert_sign_pending` (the
   customer's portal signature of the certificate is on its way: pending with
   a document, or approved and not yet copied back into the job, for up to 72
@@ -701,12 +707,13 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   filed to the job on its claim number, else the newest one that is not the
   customer's, else the job's Adjuster field; bounce and no-reply senders and
   the connected account are skipped). The office app sends the To and Cc the
-  owner confirmed with the approval, and `op_exec_packet_send` refuses an approval
-  that carries anything else ("Reload Approvals and confirm the
-  recipient."), so an old cached page can never send to the suggestion
-  unseen. It also refuses, with nothing sent, a deleted or archived job, a
-  card that is no longer the packet's, a packet with a newer version, and a
-  PDF no longer stored. Then it writes ONE outbox row, key
+  owner confirmed with the approval (Approve stays off while either holds an
+  angle bracket), and `op_exec_packet_send` refuses an approval that
+  carries anything else ("Reload Approvals and confirm the recipient."), so
+  an old cached page can never send to the suggestion unseen; it checks the
+  Cc as well as the To. It also refuses, with nothing sent, a deleted or
+  archived job, a card that is no longer the packet's, a packet with a newer
+  version, and a PDF no longer stored. Then it writes ONE outbox row, key
   `outbox:packet.send:<packet id>:<offer>`.
 - **The bucket.** `carrier-packets`, private, created by the worker on first
   use (`POST /storage/v1/bucket`, a 25 MB file limit, PDFs only; a 409 means
@@ -716,10 +723,16 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   stored at `<job id>/<number>-v<version>-b<seq>.pdf`, and the card links it
   with a signed URL good for 15 days (the card itself expires in 14). A run
   that can neither create nor find the bucket ends
-  `{"skipped":"bucket_missing"}`. Every run ends with the cleanup: the PDFs
-  of superseded and failed rows no outbox row points at, and of ready rows
-  whose card was declined more than 14 days ago, are deleted
-  (`pdf_removed_at`). A sent or undelivered PDF is never deleted.
+  `{"skipped":"bucket_missing"}`. Every run ends with the cleanup, 20 PDFs
+  at most, each deleted and its row stamped `pdf_removed_at`: superseded
+  and failed rows no outbox row points at; ready rows whose card was
+  declined more than 14 days ago, or that stopped at `offer_cap` and whose
+  last card ended more than 14 days ago; and sent versions more than 90
+  days after `sent_at` (Gmail's Sent folder keeps every copy that went
+  out). A sent row keeps its status, `sent_at` and `sent_to`; only
+  `pdf_removed_at` is stamped. Never an undelivered row, and never a PDF an
+  outbox row could still send. So the bucket holds about the last 90 days
+  of sends, plus what is on offer or undelivered.
 - **Size.** Before anything is downloaded, the stored sizes give an estimate:
   every image that is not a job photo, plus 60 KB, plus every photo at full
   size. At or under `PACKET_FULL_KB` the packet is `full` (two photos a
@@ -740,7 +753,8 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
     else, leaves the lane and the `packet` channel on.
   - `PACKET_LOOKBACK_DAYS` 14 (1 to 90): how recent a job's newest drying,
     certificate or invoice date must be for its first packet. A job that
-    already has a packet row is looked at whatever its age.
+    already has a packet row, or a hold from an earlier run, is looked at
+    whatever its age.
   - `PACKET_SETTLE_MIN` 120 (0 to 1440): minutes a job must go unedited
     before it is built.
   - `PACKET_MAX_BUILDS` 3 (1 to 10): builds per run; re-offers do not count
@@ -761,9 +775,12 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
     the office app. No reply needed."
   - a hold, once per job and reason: waiting on a numbered invoice; N meter
     readings to check on the Moisture Map; a meter photo on an empty reading
-    not read yet; couldn't be built after 3 tries; too large to email even
-    with smaller photos (untick some photos on the job's packet page);
-  - once for the lane: packet storage full.
+    not read yet; couldn't be built after 3 tries (or "something in the job
+    stops it", for one failed for good); too large to email even with
+    smaller photos (untick some photos on the job's packet page);
+  - once for the lane: packet storage full, nothing new is built until there
+    is room, sent copies older than 90 days clear on their own, or raise
+    `PACKET_STORAGE_MB` (**Packet storage full**, below).
   Without `OWNER_CELL`, or with `PACKET_TEXTS=off`, nothing is texted. A
   text that fails is logged and its hold is not marked texted, so the next
   run tries again.
@@ -824,6 +841,26 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   about it. A job's hold is deleted when its next build starts, and so is
   the lane's `storage_full` hold (a build means the bucket had room again),
   so the next time it fills the owner is texted again.
+- **Packet storage full.** What the bucket holds plus a job's estimate is
+  over `PACKET_STORAGE_MB`. The owner gets one text for the lane: packet
+  storage is full (`N MB of 300 MB used`), nothing new is built until there
+  is room, sent copies older than 90 days clear on their own, or raise
+  `PACKET_STORAGE_MB`. The run summary counts `storage_full`, the hold is
+  the nil uuid's (above), and only builds wait: open cards, re-offers and
+  sends go on. It clears itself: the cleanup deletes each sent copy 90
+  days after it went out, and the first build with room again deletes the
+  hold. To see what fills the bucket, oldest first (`order by bytes desc`
+  for the biggest):
+  ```sql
+  select id, status, sent_at, bytes, path from public.carrier_packets
+   where pdf_removed_at is null and path is not null
+   order by coalesce(sent_at, created_at) limit 20;
+  ```
+  To build again sooner, raise the cap:
+  `fly secrets set -a roybal-worker PACKET_STORAGE_MB=500` (50 to 900; Fly
+  restarts the worker with it). Production Storage is 1 GB in all, shared
+  with the job photos and documents in `field-media`, so leave them room:
+  the Supabase dashboard's Storage page shows what each bucket uses.
 - **First run**: water jobs whose newest date is in the last 14 days get
   cards (at most `PACKET_MAX_BUILDS` an hour). Any the owner already sent by
   hand, he declines; a declined card stays declined until the job changes.
@@ -866,11 +903,15 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
      carries the field modules the packet imports, so build from the repo
      root as always). `fly secrets list -a roybal-worker` first: a
      `QUEUE_KINDS` set on the app replaces the default and must add
-     `packet.build`
-     (`fly secrets set -a roybal-worker QUEUE_KINDS=proposal.execute,billing.reconcile,receipts.qbo_match,packet.build`,
-     or `fly secrets unset -a roybal-worker QUEUE_KINDS`), and an
-     `OUTBOX_CHANNELS` set there must add `packet`, or every run answers
-     `lane_off` and nothing is filed.
+     `packet.build`, and an `OUTBOX_CHANNELS` set there must add `packet`,
+     or every run answers `lane_off` and nothing is filed. Stage the change
+     before the deploy so it goes live with the new image
+     (`fly secrets set --stage -a roybal-worker QUEUE_KINDS=proposal.execute,billing.reconcile,receipts.qbo_match,packet.build`),
+     or set it after the deploy: a plain `fly secrets set` restarts the
+     image already on Fly, which would claim the hourly rows with no handler
+     and leave them `dead` (and the owner a false "gave up" text).
+     `fly secrets unset -a roybal-worker QUEUE_KINDS` before the deploy is
+     harmless: the old default does not name `packet.build`.
   The office card ships with the field build (v213) on merge and stays quiet
   until cards exist. No edge function deploy.
   **Check after the redeploy**: the heartbeat's `meta.kinds` lists

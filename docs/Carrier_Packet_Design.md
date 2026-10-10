@@ -95,7 +95,7 @@ certSignPending: bool }`. Checks, in order (the first failure is the reason):
 | 6 | `no_invoice` | no ready invoice (below) |
 | 7 | `unchecked_fills` | `uncheckedFills(p)` non-empty |
 | 8 | `unread_meter_photos` | `unreadOnEmpty(p)` non-empty |
-| 9 | `lookback` | skipped when `hasRow`; else the anchor date is more than `lookbackDays` before `today` |
+| 9 | `lookback` | skipped when `hasRow` (the job has a packet row, or a hold from an earlier run, so a job held with a text is built once it qualifies whatever its age); else the anchor date is more than `lookbackDays` before `today` |
 | 10 | `settle` | `updatedAt` is less than `settleMin` minutes before `now` |
 | 11 | `cert_sign_pending` | `certSignPending` (the lane's portal check, below) |
 
@@ -312,7 +312,7 @@ container clock (UTC).
 | `bucket`, `path`, `sha256`, `bytes`, `pages`, `mode` | the stored PDF (`mode` `full`/`compact`) |
 | `proposal_id` uuid, `offer` int | the current card and how many re-offers it took |
 | `outbox_id` uuid, `sent_at`, `sent_to` | set by the executor and the outbox trigger |
-| `pdf_removed_at` | the PDF was deleted (never for a row an outbox row references) |
+| `pdf_removed_at` | the PDF was deleted (never for an undelivered row, nor one an outbox row could still send); a sent row keeps its status, `sent_at` and `sent_to` |
 | `created_at`, `updated_at` | |
 
 Partial unique indexes: one `building` row per job, one `ready` row per job,
@@ -439,10 +439,14 @@ row).
 - `carrier_packet_state(p_job_id)` → `{photo_nums, last_sent}`: the latest
   row's `photo_nums` and S's `{version, sent_at, sent_to, section_hashes}`.
 - `carrier_packet_pdfs_to_remove(p_limit)` → `setof (id, bucket, path)`:
-  `superseded` and `failed` rows with a path, no `outbox_id` and no
-  `pdf_removed_at`, plus `ready` rows whose card was declined more than 14
-  days ago. Never a `sent` or `undelivered` row.
-  `carrier_packet_pdfs_removed(p_ids uuid[])` stamps `pdf_removed_at`.
+  rows with a path and no `pdf_removed_at`: `superseded` and `failed` rows
+  no outbox row references; `ready` rows whose card was declined more than
+  14 days ago, or that stopped at `offer_cap` and whose last card ended more
+  than 14 days ago; and `sent` rows more than 90 days after `sent_at`
+  (Gmail's Sent folder keeps every copy that went out). Never an
+  `undelivered` row, nor one an outbox row could still send.
+  `carrier_packet_pdfs_removed(p_ids uuid[])` re-checks the same rules and
+  stamps `pdf_removed_at`; a sent row keeps its status and record.
 - `carrier_packet_storage_bytes()` → bigint, and
   `carrier_packet_media_sizes(p_names text[])` → `setof (name, bytes)`:
   sizes from `storage.objects.metadata->>'size'` for the `carrier-packets`
@@ -480,7 +484,8 @@ to service_role`.
   params.
 - `p_proposal.edited_params` must contain `to` and only the keys `to` and
   `cc`, else it raises "Reload Approvals and confirm the recipient." (an old
-  cached card that cannot send a To can never send the suggested one).
+  cached card that cannot send a To can never send the suggested one). It
+  checks the `cc` addresses as well as the `to`.
 - The job exists, is not deleted and not archived.
 - The row is `ready`, its `proposal_id` is this proposal, no `ready`, `sent`
   or `undelivered` row of the job has a higher seq, and its PDF is present
@@ -591,7 +596,14 @@ not know packets never claims one (it would send the email without the PDF).
   room) still happen; only a `no_build` answer for lack of room holds the
   lane (`storage_full`, one text), and nothing more is built that run.
 - Cleanup each run: `carrier_packet_pdfs_to_remove(20)` → remove →
-  `carrier_packet_pdfs_removed`.
+  `carrier_packet_pdfs_removed` (the rules in §7: dead superseded and
+  failed rows, ready rows declined or stopped at `offer_cap` more than 14
+  days ago, and sent versions 90 days after they went out). So the bucket
+  holds about the last 90 days of sends plus what is on offer or
+  undelivered, and a full bucket clears on its own as sent copies pass 90
+  days; the first build with room deletes the lane's hold. The
+  `storage_full` text says so, and that raising `PACKET_STORAGE_MB` makes
+  room sooner (the worker README's "Packet storage full").
 
 ## 11. The lane: `packet.build`
 
@@ -674,9 +686,12 @@ junk senders.
     Smith (claim 12345) is ready. Review and send it from Approvals in the
     office app. No reply needed."
   - holds, once per job and reason: waiting on a numbered invoice; N meter
-    readings to check; couldn't be built after 3 tries; too large to email
-    even with smaller photos (untick some photos on the job's packet page);
-    packet storage full (once for the lane).
+    readings to check; couldn't be built after 3 tries (or "something in the
+    job stops it", for one failed for good); too large to email even with
+    smaller photos (untick some photos on the job's packet page); packet
+    storage full (once for the lane: nothing new is built until there is
+    room, sent copies older than 90 days clear on their own, or raise
+    `PACKET_STORAGE_MB`).
 
 ## 14. The card (Approvals)
 
@@ -692,7 +707,12 @@ junk senders.
   field module's `decisionRequest`, so a stale cached field module cannot
   drop the To). A card whose operation starts with `packet.send@` is treated
   as a packet card even when the field module maps it to `other`.
-- Approve stays disabled until the To is one valid address.
+- Approve stays disabled until the To is one valid address and the Cc holds
+  only valid ones; an angle bracket anywhere in either keeps it disabled.
+- Recently decided says why a card closed on its own: "Withdrawn: " and the
+  gate's reason (§4); "Withdrawn: the carrier already has this version"
+  (§7 step 8); "No longer needed: this packet was sent" (an earlier send of
+  the same packet went out, §8 `outbox_packet_result`).
 - Field build v213 (`config.js` BUILD and `sw.js` CACHE together).
 
 ## 15. Modules
@@ -732,4 +752,6 @@ then the worker redeploy on his Mac. The office card ships with the field
 build on merge and stays quiet until cards exist. No edge function deploy.
 After the redeploy, the heartbeat's `kinds` must list `packet.build` and its
 `channels` must list `packet` (a `QUEUE_KINDS` Fly secret would override the
-default).
+default; stage a change to it, `fly secrets set --stage`, so it goes live
+with the new image, or make it after the deploy: a plain set before it
+restarts the old image).
