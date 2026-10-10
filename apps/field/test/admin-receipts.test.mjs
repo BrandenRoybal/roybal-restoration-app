@@ -551,7 +551,7 @@ await test("0025 in the office's words: a bill, a receipt in parts, a refused ch
   assert.equal(st({ state: "conflict", qbo_txn_type: "Bill", qbo_txn_id: "10625", parts: null, detail: { reason: "bill_untagged", ...BILL_DETAIL } }).text,
     "Check in QuickBooks: booked as a bill without a job: tag it in QuickBooks");
   const notEntered = st({ state: "unmatched", detail: { reason: "bill_not_entered" } });
-  assert.deepEqual([notEntered.text, notEntered.tone], ["No QuickBooks bill with this ticket's number yet", "disp-x"]);
+  assert.deepEqual([notEntered.text, notEntered.tone], ["No matching QuickBooks bill yet", "disp-x"]);
   assert.equal(st({ state: "unmatched", detail: { reason: "bill_not_checked" } }).text, "Booked as a bill: not checked", "the bills couldn't be read that night");
   assert.equal(st({ state: "unmatched", qbo_txn_type: "Bill", qbo_txn_id: "10625", detail: { reason: "needs_job_link" } }).text, "Link the job to QuickBooks");
   // a receipt paid in two card charges: both named, in and done alike
@@ -581,7 +581,8 @@ await test("0025 in the office's words: a bill, a receipt in parts, a refused ch
   "Check in QuickBooks: more than one set of charges adds up to it");
   // the office cancelled it: its own words, neutral, never "QuickBooks refused"
   for (const [error, text] of [["cancelled: marked dead by hand", "Cancelled: marked dead by hand"],
-    ["cancelled: Branden: wrong job, tagged by hand", "Cancelled: Branden: wrong job, tagged by hand"], ["cancelled:", "Cancelled"]]) {
+    ["cancelled: Branden: wrong job, tagged by hand", "Cancelled: Branden: wrong job, tagged by hand"], ["cancelled:", "Cancelled"],
+    ["Cancelled: wrong job", "Cancelled: wrong job"], ["cancelled", "Cancelled"]]) {
     const c = st({ state: "failed", qbo_txn_id: "10577", detail: { error } });
     assert.deepEqual([c.text, c.tone, c.title], [text, "disp-x", "QuickBooks expense 10577 · " + error], error);
   }
@@ -607,6 +608,12 @@ await test("0025 in the office's words: a bill, a receipt in parts, a refused ch
   }
   assert.equal(st({ ...twice, detail: { ...twice.detail, refiled_proposal_id: CARD_OPEN } }, "proposed").text,
     "Couldn't update QuickBooks: QuickBooks 503: Service Unavailable · On a new card in Approvals", "the open card is the news");
+  // stamped with a later card this login can't read (owner-only), or one that
+  // expired: its next try exists, so it is not "tried twice"
+  for (const card of ["", "expired", "superseded", undefined]) {
+    assert.equal(st({ ...twice, detail: { ...twice.detail, refiled_proposal_id: CARD_OPEN } }, card).text,
+      "Couldn't update QuickBooks: QuickBooks 503: Service Unavailable", String(card));
+  }
   // a row from before 0025 (no parts key, no type) reads exactly as it did, and so does parts: null
   for (const [row, text] of [
     [{ state: "in_qbo", qbo_txn_id: "10577", detail: { qbo_account_name: "3176 - Citi" } }, "In QuickBooks ✓ #10577"],

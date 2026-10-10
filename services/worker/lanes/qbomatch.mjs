@@ -160,7 +160,8 @@ const cents = (n) => Math.round(Math.abs(Number(n)) * 100);
 const digitsOf = (v) => str(v).replace(/\D/g, "");
 const clip = (v, n) => str(v).slice(0, n);
 /** The refusal code a failed row's error starts with ("tagged_other: …"). */
-export const codeOf = (err) => (/^([a-z_]+):/.exec(str(err).trim()) || [])[1] || "";
+export const codeOf = (err) => (/^cancell?ed\b/i.test(str(err).trim()) ? "cancelled"
+  : (/^([a-z_]+):/.exec(str(err).trim()) || [])[1] || "");
 const txnKey = (type, id) => `${str(type) || "Purchase"}:${str(id)}`;
 const isObject = (v) => v != null && typeof v === "object" && !Array.isArray(v);
 const detailOf = (l) => (isObject(l?.detail) ? l.detail : {});
@@ -549,12 +550,30 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     // never a new set (a person may have split the charge on purpose)
     const failedParts = (r) => (Array.isArray(r.failedLink?.parts) ? r.failedLink.parts.map((x) => str(x?.qbo_txn_id)).sort(byText) : null);
     const looking = eligible.filter((r) => !r.cands.length && (!r.failedLink || failedParts(r)));
-    for (const r of looking) r.splitSets = splitSets(r, txns, today, (p) => {
+    const free = (r) => (p) => {
       const k = txnKey(p.txnType, p.id);
       if (taken.has(k) || candOf.has(k)) return false;
       const holder = claimedBy.get(k);
       return !holder || holder === r.id;
-    });
+    };
+    for (const r of looking) {
+      const own = failedParts(r);
+      if (own) {
+        // its own recorded charges as they are now (a charge written before
+        // the failure carries the job's tag or our photo, so it is no longer
+        // "untouched"); step 2 sorts out tagged elsewhere, partly tagged,
+        // nothing left to do, or a second try for what is missing
+        const got = r.failedLink.parts.map((x) => txns.find((p) => p.txnType === "Purchase" && str(p.id) === str(x?.qbo_txn_id)));
+        const sum = got.reduce((a, p) => a + (p ? cents(p.total) : 0), 0);
+        r.splitSets = got.length >= 2 && got.every((p) => p && (p.credit === true) === (Number(r.amount) < 0) && free(r)(p))
+          && sum === cents(r.amount) ? [got] : [];
+        continue;
+      }
+      // every receipt's sets, a young one's too: a receipt younger than
+      // SPLIT_MIN_AGE is never given a split (its own closing charge may not
+      // have posted), but the charges it could be are no one else's
+      r.splitSets = splitSets(r, txns, today, free(r), true);
+    }
     // a charge in two receipts' sets is neither's
     const usedBy = new Map();
     for (const r of looking) {
@@ -564,6 +583,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     for (const r of looking) {
       const sets = r.splitSets;
       if (sets === null || (Array.isArray(sets) && !sets.length)) continue;
+      if (daysFrom(str(r.receipt_date), today) < SPLIT_MIN_AGE) continue;
       const only = Array.isArray(sets) && sets.length === 1 ? sets[0] : null;
       const own = failedParts(r);
       if (own && !(only && only.map((p) => str(p.id)).sort(byText).join(",") === own.join(","))) continue;
@@ -588,6 +608,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     const jobName = clip(str(job.title).trim() || str(job.address).trim() || str(job.customer).trim(), 160);
     const project = jobProject(job, rs, projectById, projectRefs);
     const items = [];
+    const declinedDrops = new Map();   // declined card id → {card, items dropped because it held them}
 
     for (const r of rs) {
       stats.receipts += 1;
@@ -622,6 +643,12 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
           if (card && ANSWERED.has(str(card.status)) && Array.isArray(card.items)
               && card.items.some((x) => str(x?.receipt_id) === it.receipt_id && canonical(x) === canonical(it))) {
             stats.owned.failed += 1;
+            if (str(card.status) === "declined") {
+              const k = lc(d.refiled_proposal_id);
+              const got = declinedDrops.get(k) ?? { card, items: [] };
+              got.items.push(it);
+              declinedDrops.set(k, got);
+            }
             return;
           }
         }
@@ -741,6 +768,20 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       stats.unmatched += 1;
     }
 
+    // A declined card that held a second try beside other lines: when
+    // tonight's card would be that same card again (the other lines
+    // unchanged too), it is filed unchanged, so the filing door finds the
+    // owner's answer and stays quiet. Filing it without the declined try
+    // would ask him again about the rest.
+    for (const { card, items: dropped } of declinedDrops.values()) {
+      if (!items.length) break;
+      const all = [...items, ...dropped];
+      const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+      if (same(all.map(canonical).sort(), card.items.map(canonical).sort())) {
+        items.splice(0, items.length, ...all);
+        break;
+      }
+    }
     if (!items.length) continue;
     items.sort((a, b) => byText(a.date, b.date) || byText(a.receipt_id, b.receipt_id));
     const kept = items.slice(0, MAX_ITEMS);   // the rest wait for the next card
@@ -901,14 +942,15 @@ function refileOf(f, code) {
     is the closing charge, dated a day before the receipt to 3 days after.
     Together they add up to the receipt to the cent. [] when there are none;
     "capped" when the pool is too big to be sure; null when the receipt is
-    not one to look for. */
-export function splitSets(r, txns, today, ok) {
+    not one to look for. anyAge: look on a younger receipt too (the matcher
+    counts its sets against others', and never splits it). */
+export function splitSets(r, txns, today, ok, anyAge = false) {
   const last4 = str(r.card_last4).trim();
   const fam = vendorFamily(r.vendor);
   const abs = cents(r.amount);
   const date = str(r.receipt_date);
   if (lc(r.category) !== "equipment" || lc(r.paid_with) !== "card" || !/^\d{4}$/.test(last4) || !fam || !abs
-      || !validDate(date) || daysFrom(date, today) < SPLIT_MIN_AGE) return null;
+      || !validDate(date) || (!anyAge && daysFrom(date, today) < SPLIT_MIN_AGE)) return null;
   const credit = Number(r.amount) < 0;
   const lo = addDays(date, -SPLIT_DAYS), hi = addDays(date, 3), closeLo = addDays(date, -1);
   const untouched = (p) => !(p.lines ?? []).some((l) => str(l.customerId)) && !hasDocument(p)

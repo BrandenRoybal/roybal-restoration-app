@@ -503,13 +503,19 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
      (do 1 or 2 as well, or every run records each job as a 42501 error);
   4. open cards: decline them in the inbox, or let them expire (14 days);
   5. an approved change nobody should send: mark its outbox row dead, with
-     who and why as the error
-     (`update public.outbox set status = 'dead', error = 'cancelled: <who and why>' where id = …`;
-     the receipt then shows failed, and a row marked dead with no error
-     reads `cancelled: marked dead by hand`). `cancelled` is on the keep
+     who and why as the error, only while it waits
+     (`update public.outbox set status = 'dead', error = 'cancelled: <who and why>' where id = … and status in ('pending', 'failed')`).
+     It must answer UPDATE 1. UPDATE 0 means the worker is sending it right
+     now or already sent it: wait, read the receipt again, and fix the
+     expense in QuickBooks if it was written (a sent row marked dead
+     afterwards stays done). The receipt then shows failed `cancelled: …`
+     (any death the worker did not make reads as a cancel, with no error
+     too: `cancelled: marked dead by hand`). `cancelled` is on the keep
      list, so the match never offers that change again unless the receipt
-     or its expense moves. A tag or photo already written stays in
-     QuickBooks, where the office edits it like any other.
+     or its expense moves. A change cancelled after a failed try may be
+     partly in QuickBooks already (a tag written before the photo failed,
+     or a first charge): it stays there, where the office edits it like
+     any other.
   To stop only the v2 behaviour, run the worker build before it: on a
   database with 0025 it notes nothing in parts, never notes over a failed
   row, and its notes keep a row's parts. Removing 0025 itself is in the

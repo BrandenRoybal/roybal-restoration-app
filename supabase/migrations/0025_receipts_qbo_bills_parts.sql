@@ -807,9 +807,12 @@ revoke all on function public.op_exec_receipts_qbo_link(public.proposals, jsonb,
 --    - a card whose approval failed with "deadlock detected" (two approvals
 --      or a delivery meeting over the same transactions) is offered again,
 --      like one that failed a filing-time check: nothing was written;
---    - THE SECOND-TRY STAMP: after the outcome, each failed row of the job
---      whose receipt is on this filing as a second try (item.refile naming
---      the failed row's own proposal) names the card that holds that try
+--    - THE SECOND-TRY STAMP: after the outcome, each failed row whose
+--      receipt is on this filing as a second try (item.refile naming the
+--      failed row's own proposal; the row may still carry the job the
+--      receipt was on when it failed, since the receipt can have moved since:
+--      the moved check above proves every item's receipt is live on this
+--      job, and a receipt is live on one job only) names the card that holds that try
 --      (detail.refiled_proposal_id): the new card, the one still open, or
 --      the one that already answered these items (declined, executed with
 --      this receipt edited out). The worker reads that card's status, so a
@@ -974,8 +977,7 @@ begin
     update public.receipt_qbo_links l
        set detail = l.detail || jsonb_build_object('refiled_proposal_id', v_card)
       from jsonb_array_elements(v_items) e
-     where l.job_id = p_job_id
-       and l.state = 'failed'
+     where l.state = 'failed'
        and l.receipt_id = e ->> 'receipt_id'
        and jsonb_typeof(e -> 'refile') = 'object'
        and lower(e #>> '{refile,proposal_id}') = l.proposal_id::text
@@ -1297,11 +1299,18 @@ grant execute on function public.receipt_qbo_links_note(uuid[], jsonb) to servic
 --      provider_status): the receipt is done and holds every charge, and the
 --      office reads which one was refused;
 --    - txn_held_by read from receipt_qbo_claims;
---    - THE CANCEL: a row marked dead by hand carries no error (the worker
---      always writes one), and its receipt now reads "cancelled: marked dead
---      by hand", a code the matcher never retries on its own. The way to
---      cancel a queued QuickBooks change is: update outbox set status =
---      'dead', error = 'cancelled: <who and why>' where id = <the row>.
+--    - THE CANCEL: the worker marks a row dead only from 'sending', always
+--      with an error; a row a person marked dead from 'pending' or 'failed'
+--      (waiting for its next try) reads "cancelled: <their words>", or
+--      "cancelled: marked dead by hand" without words, a code the matcher
+--      never retries on its own. A row marked dead after it was sent stays
+--      done. The way to cancel a queued QuickBooks change is:
+--        update public.outbox set status = 'dead', error = 'cancelled: <who and why>'
+--         where id = <the row> and status in ('pending', 'failed');
+--      UPDATE 0 means it is being sent right now or already went: check the
+--      receipt again, and fix the expense in QuickBooks if it was written.
+--      A change cancelled after a failed try may be partly in QuickBooks
+--      already (a tag written before the photo failed, or a first charge).
 -- The whole body still never fails the outbox update (0023).
 -- ---------------------------------------------------------------------------
 create or replace function public.outbox_qbo_link_result() returns trigger
@@ -1359,11 +1368,22 @@ begin
     exception when others then
       raise warning 'outbox_qbo_link_result: the charges of receipt % kept their old SyncTokens: %', v_rid, sqlerrm;
     end;
-  else
+  elsif old.status is distinct from 'sent' then
+    -- the worker marks a row dead only while sending it (outbox_failed, or
+    -- the lease sweep), always with an error; any other death is a person's
+    -- cancel, read as one however it was typed ("Cancelled: …", no error,
+    -- or the last retry's error left in place). A row already sent is in
+    -- QuickBooks: marking it dead afterwards changes nothing here.
     update public.receipt_qbo_links
        set state      = 'failed',
            detail     = (detail - 'refiled_proposal_id')
-                        || jsonb_build_object('error', coalesce(new.error, 'cancelled: marked dead by hand'), 'failed_at', now()),
+                        || jsonb_build_object('error',
+                             case when old.status = 'sending' then coalesce(new.error, 'cancelled: marked dead by hand')
+                                  else 'cancelled: ' || left(coalesce(nullif(btrim(regexp_replace(
+                                         case when new.error is distinct from old.error then coalesce(new.error, '') else '' end,
+                                         '^\s*cancell?ed\s*:?\s*', '', 'i')), ''), 'marked dead by hand'), 500)
+                             end,
+                             'failed_at', now()),
            updated_at = now()
      where receipt_id = v_rid and outbox_id = new.id;
   end if;
@@ -1376,7 +1396,7 @@ $$;
 
 alter function public.outbox_qbo_link_result() owner to postgres;
 comment on function public.outbox_qbo_link_result() is
-  'AFTER UPDATE OF status on outbox, channel qbo, status now sent or dead: marks the receipt_qbo_links row that wrote that outbox row done (provider id Purchase:<id>:<token>, sync token, and each charge''s new token from provider_status parts=) or failed (the error; cancelled: marked dead by hand when a person marked it dead without one). Exception-guarded: it never fails the outbox update, and the charges'' tokens never undo the state (0023, 0025).';
+  'AFTER UPDATE OF status on outbox, channel qbo, status now sent or dead: marks the receipt_qbo_links row that wrote that outbox row done (provider id Purchase:<id>:<token>, sync token, and each charge''s new token from provider_status parts=) or failed (the worker''s error from sending; cancelled: <words> when a person marked a waiting row dead; a sent row stays done). Exception-guarded: it never fails the outbox update, and the charges'' tokens never undo the state (0023, 0025).';
 revoke all on function public.outbox_qbo_link_result() from public, anon, authenticated, service_role;
 
 

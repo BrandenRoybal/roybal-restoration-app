@@ -1219,7 +1219,10 @@ begin
 end
 $$;
 reset role;
-update public.receipt_qbo_links set detail = detail - 'refiled_proposal_id' where receipt_id = 'v2-sw';
+-- and the failed row still names the job the receipt was on when it failed
+-- (the crew moved the receipt since): the stamp finds it all the same
+update public.receipt_qbo_links set detail = detail - 'refiled_proposal_id', job_id = '00000000-0000-0000-0000-0000000025a1'
+ where receipt_id = 'v2-sw';
 set local role service_role;
 set local request.jwt.claims = '{"role": "service_role"}';
 do $$
@@ -1234,6 +1237,8 @@ begin
   end if;
 end
 $$;
+reset role;
+update public.receipt_qbo_links set job_id = '00000000-0000-0000-0000-0000000025a2' where receipt_id = 'v2-sw';
 release savepoint s;
 reset role;
 
@@ -1383,6 +1388,65 @@ begin
      or l.detail ->> 'failed_at' is null or l.detail -> 'refile' ->> 'error' is distinct from 'qbo_unavailable'
      or l.detail ? 'refiled_proposal_id' or pg_temp.rq2_claims('v2-sw') is distinct from '[]' then
     raise exception 'a row marked dead with an error left v2-sw as %', to_jsonb(l);
+  end if;
+end
+$$;
+rollback to savepoint s;
+release savepoint s;
+-- a cancel typed another way ("Cancelled: …") reads as one, lowercased
+savepoint s;
+update public.outbox set status = 'dead', error = 'Cancelled: Branden, wrong job'
+ where id = (select outbox_id from public.receipt_qbo_links where receipt_id = 'v2-sw');
+do $$
+begin
+  if (select detail ->> 'error' from public.receipt_qbo_links where receipt_id = 'v2-sw') is distinct from 'cancelled: Branden, wrong job' then
+    raise exception 'a typed "Cancelled:" read as %', (select detail ->> 'error' from public.receipt_qbo_links where receipt_id = 'v2-sw');
+  end if;
+end
+$$;
+rollback to savepoint s;
+release savepoint s;
+-- marked dead between retries (status failed, the last try's error still on
+-- the row) with no new error: a cancel, not that error again
+savepoint s;
+update public.outbox set status = 'failed', error = 'qbo_unavailable: QuickBooks answered 503', attempts = 1
+ where id = (select outbox_id from public.receipt_qbo_links where receipt_id = 'v2-sw');
+update public.outbox set status = 'dead'
+ where id = (select outbox_id from public.receipt_qbo_links where receipt_id = 'v2-sw');
+do $$
+begin
+  if (select detail ->> 'error' from public.receipt_qbo_links where receipt_id = 'v2-sw') is distinct from 'cancelled: marked dead by hand' then
+    raise exception 'a row marked dead between retries read as %', (select detail ->> 'error' from public.receipt_qbo_links where receipt_id = 'v2-sw');
+  end if;
+end
+$$;
+rollback to savepoint s;
+release savepoint s;
+-- the worker's own death (from sending) keeps the worker's error
+savepoint s;
+update public.outbox set status = 'sending', locked_by = 'w-test', lease_until = now() + interval '5 minutes'
+ where id = (select outbox_id from public.receipt_qbo_links where receipt_id = 'v2-sw');
+update public.outbox set status = 'dead', error = 'qbo_refused: QuickBooks said no', locked_by = null, lease_until = null
+ where id = (select outbox_id from public.receipt_qbo_links where receipt_id = 'v2-sw');
+do $$
+begin
+  if (select detail ->> 'error' from public.receipt_qbo_links where receipt_id = 'v2-sw') is distinct from 'qbo_refused: QuickBooks said no' then
+    raise exception 'the worker''s death read as %', (select detail ->> 'error' from public.receipt_qbo_links where receipt_id = 'v2-sw');
+  end if;
+end
+$$;
+rollback to savepoint s;
+release savepoint s;
+-- a row already sent is in QuickBooks: marked dead afterwards, it stays done
+savepoint s;
+update public.outbox set status = 'sent', provider_id = 'Purchase:10577:4', provider_status = 'tagged=done;attached=1', sent_at = now()
+ where id = (select outbox_id from public.receipt_qbo_links where receipt_id = 'v2-sw');
+update public.outbox set status = 'dead', error = 'cancelled: too late'
+ where id = (select outbox_id from public.receipt_qbo_links where receipt_id = 'v2-sw');
+do $$
+begin
+  if (select state from public.receipt_qbo_links where receipt_id = 'v2-sw') is distinct from 'done' then
+    raise exception 'a sent row marked dead left v2-sw %', (select to_jsonb(l) from public.receipt_qbo_links l where receipt_id = 'v2-sw');
   end if;
 end
 $$;

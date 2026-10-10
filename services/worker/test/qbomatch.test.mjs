@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { matchReceipts, purchaseWindow, vendorFamily, docAgrees, scoreOf, contradicts, canonical, MATCHER, EQUIPMENT_EXPENSE_ACCOUNT,
-  PAYMENT_CLEARING_ACCOUNT, KEEP_FAILED } from "../lanes/qbomatch.mjs";
+  PAYMENT_CLEARING_ACCOUNT, KEEP_FAILED, codeOf } from "../lanes/qbomatch.mjs";
 import * as oct7 from "./qbo-oct7.fixture.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -1383,6 +1383,69 @@ test("a receipt in parts only when every guard holds: equipment, by card, 3 days
   assert.equal(outcome({ bills: null, splits: true }), "10615+10661");      // only listBills failed: the lane keeps splits on
   assert.equal(noteOf(run({ receipts: [rental()], purchases: [p10615(), p10661()], jobs: [chena()], today: RENTAL_TODAY }), "995d2795").detail.reason,
     "waiting_feed");
+});
+
+test("a younger rental's charges are no one else's: a twin rental at the same price, a day older, never takes them", () => {
+  // Oct 9: 995d2795 (Oct 7, Chena) is 2 days old and its closing charge 10661
+  // is in; a twin (same tool, same price, same card, Oct 6, on Alston) is 3
+  // days old and its own charge has not posted
+  const twin = rental({ id: "rz-twin", job_id: ALSTON, receipt_date: "2026-10-06" });
+  const res = rentalRun({ receipts: [rental(), twin], jobs: [chena(), job({ link: LINK })], today: "2026-10-09" });
+  assert.deepEqual(res.cards, []);
+  assert.equal(noteOf(res, "995d2795").detail.reason, "waiting_feed");
+  assert.deepEqual([noteOf(res, "rz-twin").detail.reason, noteOf(res, "rz-twin").detail.candidates], ["ambiguous_split", ["10615", "10661"]]);
+  // alone, the twin takes nothing either way once the young one is gone, and the young one splits at 3 days
+  assert.equal(noteOf(rentalRun({ today: "2026-10-09" }), "995d2795").detail.reason, "waiting_feed");
+  assert.deepEqual(itemsOf(rentalRun(), OTHER).map((i) => i.parts.map((x) => x.qbo_txn_id)), [["10615", "10661"]]);
+});
+
+test("a failed receipt in parts is read against its own charges as they are now: a second try for what is missing, in QuickBooks when finished, a conflict when tagged elsewhere", () => {
+  const PARTS = [{ qbo_txn_id: "10615", qbo_sync_token: "0", qbo_total: 126.9, qbo_date: "2026-10-02" },
+    { qbo_txn_id: "10661", qbo_sync_token: "0", qbo_total: 224.1, qbo_date: "2026-10-07" }];
+  const failed = { receipt_id: "995d2795", job_id: OTHER, state: "failed", qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0",
+    qbo_customer_id: "502", amount: 351, receipt_date: "2026-10-07", parts: PARTS, proposal_id: PROP1,
+    detail: { error: "qbo_unavailable: part 2 of 2 (expense 10661): QuickBooks 503", read_photo_ref: photo(5), failed_at: "2026-10-09T16:00:00Z" } };
+  const done = (p) => p({ syncToken: "1", lines: [line({ amount: p().total, accountId: EQUIPMENT_EXPENSE_ACCOUNT, customerId: "502", projectRef: "807760362" })],
+    attachments: ["Rental Zone p1 [r:995d2795].jpg"], hasAttachment: true });
+  const night = (purchases) => rentalRun({ links: [failed], purchases, today: "2026-10-12" });
+  // the first charge went in before QuickBooks went down: a second try for the second only
+  let res = night([done(p10615), p10661()]);
+  assert.deepEqual(itemsOf(res, OTHER).map((i) => [i.qbo_txn_id, i.parts.map((x) => [x.qbo_txn_id, x.qbo_sync_token, x.changes.join("+")]), i.refile]),
+    [["10615", [["10615", "1", ""], ["10661", "0", "tag+attach"]], { proposal_id: PROP1, error: "qbo_unavailable", why: "part 2 of 2 (expense 10661): QuickBooks 503" }]]);
+  // both finished (by hand, or by the try): in QuickBooks
+  res = night([done(p10615), done(p10661)]);
+  assert.deepEqual(res.cards, []);
+  assert.deepEqual([noteOf(res, "995d2795").state, noteOf(res, "995d2795").parts.map((x) => x.qbo_sync_token)], ["in_qbo", ["1", "1"]]);
+  // the second tagged to another job meanwhile: a conflict, not a write
+  res = night([done(p10615), p10661({ lines: [line({ amount: 224.1, customerId: "517", customerName: "292 Beechwood St. - Stevens" })] })]);
+  assert.deepEqual(res.cards, []);
+  assert.equal(noteOf(res, "995d2795").detail.reason, "tagged_other");
+  // a charge gone from QuickBooks: kept for a person
+  res = night([done(p10615)]);
+  assert.deepEqual([res.cards, noteOf(res, "995d2795"), res.stats.owned.failed], [[], undefined, 1]);
+});
+
+test("a declined card that held a second try beside another line comes back unchanged while nothing moved, so the door finds the owner's no", () => {
+  const f = failedRow({ error: "qbo_throttled: QuickBooks asked us to slow down", refiled_proposal_id: PROP2 });
+  const sib = hd({ id: "r9", receipt_date: "2026-10-01", amount: 27.9, receipt_no: "1303 00001 52447" });
+  const p9 = p10577({ id: "10584", txnDate: "2026-10-01", total: 27.9, lines: [line({ amount: 27.9 })] });
+  const night = (answered, purchases = [p10577(), p9]) => again([f], { receipts: [hd(), sib], purchases, answered });
+  const items = itemsOf(night(new Map()));
+  assert.deepEqual(items.map((i) => i.receipt_id), ["r1", "r9"]);
+  const declined = new Map([[PROP2, { status: "declined", items: JSON.parse(JSON.stringify(items)) }]]);
+  assert.deepEqual(itemsOf(night(declined)).map(canonical), items.map(canonical));
+  // the other line moved since: a new card with it alone, the declined try left out
+  assert.deepEqual(itemsOf(night(declined, [p10577(), { ...p9, syncToken: "3" }])).map((i) => [i.receipt_id, i.qbo_sync_token]), [["r9", "3"]]);
+  // a card approved without the try is no "no" to the rest: the try alone stays out
+  const executed = new Map([[PROP2, { status: "executed", items: JSON.parse(JSON.stringify(items)) }]]);
+  assert.deepEqual(itemsOf(night(executed)).map((i) => i.receipt_id), ["r9"]);
+});
+
+test("a cancel is read however it was typed", () => {
+  for (const e of ["cancelled: Branden", "Cancelled: wrong job", "cancelled", "CANCELED by hand"]) assert.equal(codeOf(e), "cancelled", e);
+  for (const [e, code] of [["qbo_unavailable: x", "qbo_unavailable"], ["cancelling: x", "cancelling"], ["", ""], ["lease expired", ""]]) {
+    assert.equal(codeOf(e), code, e);
+  }
 });
 
 test("a second try: a KEEP_FAILED refusal keeps the failed row while nothing moved; anything moved goes on a new card, marked refile", () => {

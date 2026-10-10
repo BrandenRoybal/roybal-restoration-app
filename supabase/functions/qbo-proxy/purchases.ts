@@ -911,7 +911,19 @@ async function completeParts(r: CompleteRequest, parts: Part[], io: CompleteIO, 
       }
     } catch (e) { throw named(i, part, e); }
   }
-  if (parts.some((x) => x.changes.includes("attach"))) await fetchPhotoPages(r, io, files, r.photoRefs.map((_, i) => i + 1));
+  // the photo gate, as completeOne's: only the pages some charge will upload
+  // (a charge that already carries a document, the bookkeeper's or ours,
+  // needs none), so a photo gone from storage refuses only a receipt that
+  // still needs it
+  const pages = new Set<number>();
+  for (const [i, part] of parts.entries()) {
+    if (!part.changes.includes("attach")) continue;
+    try {
+      const plan = attachPlan(rowsOf(await io.query(purchaseAttachablesQuery(part.txnId)), "Attachable"), r.receiptId, r.photoRefs.length);
+      if (plan.action === "upload") for (const n of plan.pages) pages.add(n);
+    } catch (e) { throw named(i, part, e); }
+  }
+  await fetchPhotoPages(r, io, files, [...pages].sort((a, b) => a - b));
 
   const replies: PartReply[] = [];
   const adopted = { create: false, tag: false, attach: 0 };

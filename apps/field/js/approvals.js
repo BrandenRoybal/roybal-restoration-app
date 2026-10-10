@@ -738,12 +738,16 @@ const clip120 = (s) => (s.length > 120 ? s.slice(0, 119) + "…" : s);
    error that doesn't start with a known code (the worker couldn't reach
    qbo-proxy) shows as written, clipped. "cancelled: <who and why>" is the
    office cancelling the queued change by hand (0025): its own verb, with
-   the words after the code ("" when there are none). */
+   the words after the code ("" when there are none), however it was typed
+   ("Cancelled", no colon). A dead row with no error is one too: the worker
+   always writes one, so only a person leaves it empty. */
 function qboWhy(error) {
   const e = typeof error === "string" ? error.trim() : "", code = (/^([a-z_]+):/.exec(e) || [])[1] || "";
   if (own(QBO_REFUSED, code)) return ["refused", own(QBO_REFUSED, code)];
   if (own(QBO_FAILED, code)) return ["failed", own(QBO_FAILED, code)];
-  if (code === "cancelled") return ["cancelled", clip120(e.slice(code.length + 1).replace(/\s+/g, " ").trim())];
+  const cancel = /^cancell?ed\b\s*:?/i.exec(e);
+  if (cancel) return ["cancelled", clip120(e.slice(cancel[0].length).replace(/\s+/g, " ").trim())];
+  if (error == null || error === "" || (typeof error === "string" && !e)) return ["cancelled", "marked dead by hand"];
   return ["failed", e ? clip120(e) : "no reason given"];
 }
 /* A second try's card line: why the last update didn't go (item.refile:
@@ -817,8 +821,9 @@ function qboOutcome(c) {
   if (!dead.length && !done) return { text: off ? QBO_OFF_QUEUED : n === 1 ? "Queued for QuickBooks" : `${n} queued for QuickBooks`, tone: "wait" };
   const whys = dead.map((o) => qboWhy(o.error));
   if (n === 1 && dead.length) {
-    // the office cancelled it by hand: a decision, not a trouble
-    if (whys[0][0] === "cancelled") return { text: "Not updated in QuickBooks: cancelled" + (whys[0][1] ? ` (${whys[0][1]})` : ""), tone: "no" };
+    // the office cancelled it by hand: a decision, not a trouble (an earlier
+    // try may have written part of it, so it never says nothing went in)
+    if (whys[0][0] === "cancelled") return { text: "Cancelled" + (whys[0][1] ? ` (${whys[0][1]})` : ""), tone: "no" };
     return { text: "Not updated in QuickBooks: " + whys[0][1], tone: "bad" };
   }
   const parts = [done ? `${done} of ${n} updated in QuickBooks` : `None of ${n} updated in QuickBooks`];

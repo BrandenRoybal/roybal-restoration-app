@@ -394,7 +394,7 @@ const UNMATCHED = {
   bill_not_checked: ["Booked as a bill: not checked", "disp-b"],
   // the bills were read and none carries this ticket's number yet (the
   // office enters them about a week late)
-  bill_not_entered: ["No QuickBooks bill with this ticket's number yet", "disp-x"],
+  bill_not_entered: ["No matching QuickBooks bill yet", "disp-x"],
   needs_job_link: ["Link the job to QuickBooks", "disp-b"],   // found, but the job has no project to tag
   not_found: ["No QuickBooks match", "disp-x"],
 };
@@ -426,7 +426,8 @@ function refusalWords(err) {
 export const QBO_REFUSED_CODES = ["tagged_other", "partly_tagged", "untaggable", "untaggable_line", "changed_in_qbo",
   "purchase_missing", "photo_missing", "photo_type", "photo_unreadable", "photo_too_big", "upload_refused", "qbo_refused",
   "bad_request", "relinked"];
-const codeOf = (err) => (/^([a-z_]+):/.exec(String(err || "").trim()) || [])[1] || "";
+const codeOf = (err) => (/^cancell?ed\b/i.test(String(err || "").trim()) ? "cancelled"
+  : (/^([a-z_]+):/.exec(String(err || "").trim()) || [])[1] || "");
 // The photo QuickBooks refused after the tag (or the new entry) went in: the
 // worker marks the sent row attach_error=<code>, and the row is done
 const PHOTO_WORDS = {
@@ -510,12 +511,16 @@ export function qboStatus(row, cardStatus = "") {
       // the office cancelled the queued change (0025: the outbox row marked
       // dead by hand): a decision, not a refusal or a trouble
       if (code === "cancelled") {
-        const words = String(d.error).replace(/^[a-z_]+:\s*/, "").replace(/\s+/g, " ").trim();
+        const words = String(d.error).trim().replace(/^cancell?ed\b\s*:?\s*/i, "").replace(/\s+/g, " ").trim();
         return out((words ? "Cancelled: " + clip(words, 140) : "Cancelled") + then, "disp-x", full);
       }
       // this failure was itself the second try, and died the same way: the
-      // matcher won't offer it a third time
-      const again = !card && d.refile && typeof d.refile === "object" && String(d.refile.error || "") === (code || "failed");
+      // matcher won't offer it a third time. A row stamped with a later card
+      // already has its next try (the trigger takes the stamp off when that
+      // try fails): never "tried twice" just because this login can't read
+      // that card, or it expired
+      const again = !card && !d.refiled_proposal_id && d.refile && typeof d.refile === "object"
+        && String(d.refile.error || "") === (code || "failed");
       // the badge clips a long refusal; hovering shows all of it
       return out((QBO_REFUSED_CODES.includes(code) ? "QuickBooks refused: " : "Couldn't update QuickBooks: ")
         + refusalWords(d.error) + then + (again ? " · Tried twice; needs a fix" : ""), "disp-r", full);

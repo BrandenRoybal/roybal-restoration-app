@@ -1285,10 +1285,11 @@ test("QuickBooks receipts: what came of it is counted from its outbox rows, refu
   for (const [code, said] of Object.entries(words)) {
     assert.deepEqual(one(`${code}: what qbo-proxy said`), { text: "Not updated in QuickBooks: " + said, tone: "bad" }, code);
   }
-  // an error that isn't a code: as written, clipped; none at all says so
+  // an error that isn't a code: as written, clipped; none at all is a
+  // person's cancel (the worker always writes one), as the receipt reads it
   assert.equal(one("qbo-proxy unreachable: fetch failed").text, "Not updated in QuickBooks: qbo-proxy unreachable: fetch failed");
   assert.equal(one("x".repeat(300)).text, "Not updated in QuickBooks: " + "x".repeat(119) + "…");
-  assert.equal(one(null).text, "Not updated in QuickBooks: no reason given");
+  assert.equal(one(null).text, "Cancelled (marked dead by hand)");
   assert.equal(one("constructor: nope").text, "Not updated in QuickBooks: constructor: nope", "a prototype name is no code");
   // one receipt, done
   assert.deepEqual(outcome(fromProposal({ ...executed, result: { queued: 1 }, input: { ...qboInput, items: [hd] } },
@@ -1519,10 +1520,10 @@ test("QuickBooks receipts (0025): a charge refused after another was tagged is u
     { text: "1 of 3 updated in QuickBooks; 1 with a charge refused: changed in QuickBooks since the card was filed; 1 waiting; 1 refused: tagged to another job", tone: "bad" });
   // the office cancelled the queued change (outbox row marked dead, error 'cancelled: <who and why>'): its own verb, not a trouble
   assert.deepEqual(at([row("dead", null, "cancelled: marked dead by hand")], alone),
-    { text: "Not updated in QuickBooks: cancelled (marked dead by hand)", tone: "no" });
+    { text: "Cancelled (marked dead by hand)", tone: "no" });
   assert.deepEqual(at([row("dead", null, "cancelled: Branden, wrong job; tagged it by hand")], alone),
-    { text: "Not updated in QuickBooks: cancelled (Branden, wrong job; tagged it by hand)", tone: "no" });
-  assert.deepEqual(at([row("dead", null, "cancelled:")], alone), { text: "Not updated in QuickBooks: cancelled", tone: "no" });
+    { text: "Cancelled (Branden, wrong job; tagged it by hand)", tone: "no" });
+  assert.deepEqual(at([row("dead", null, "cancelled:")], alone), { text: "Cancelled", tone: "no" });
   assert.deepEqual(at([row("sent", SENT), row("sent", SENT), row("dead", null, "cancelled: marked dead by hand")]),
     { text: "2 of 3 updated in QuickBooks; 1 cancelled: marked dead by hand", tone: "no" });
   assert.deepEqual(at([row("sent", SENT), row("pending"), row("dead", null, "cancelled: Branden")]),
@@ -1530,8 +1531,11 @@ test("QuickBooks receipts (0025): a charge refused after another was tagged is u
   assert.deepEqual(at([row("dead", null, "cancelled:"), row("dead", null, "qbo_unavailable: QuickBooks 503"),
     row("dead", null, "tagged_other: expense 10584 is already tagged to Bemis Ct in QuickBooks")]),
   { text: "None of 3 updated in QuickBooks; 1 refused: tagged to another job; 1 failed: QuickBooks was down; 1 cancelled", tone: "bad" });
-  // a dead row with no error at all is still "no reason given", as before
-  assert.deepEqual(at([row("dead", null, null)], alone), { text: "Not updated in QuickBooks: no reason given", tone: "bad" });
+  // a dead row with no error at all is a person's cancel too (the worker
+  // always writes one), as the receipt reads it; and however it was typed
+  assert.deepEqual(at([row("dead", null, null)], alone), { text: "Cancelled (marked dead by hand)", tone: "no" });
+  assert.deepEqual(at([row("dead", null, "Cancelled: wrong job")], alone), { text: "Cancelled (wrong job)", tone: "no" });
+  assert.deepEqual(at([row("dead", null, "cancelled")], alone), { text: "Cancelled", tone: "no" });
   for (const rows of [[row("sent", PART)], [row("dead", null, "cancelled:")]]) {
     for (const t of qboTexts(fromProposal({ ...executed, ...alone }, qboLook({ outbox: rows })))) assert.ok(!JUNK.test(t), t);
   }

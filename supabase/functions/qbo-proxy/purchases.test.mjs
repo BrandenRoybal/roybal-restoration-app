@@ -1178,7 +1178,7 @@ test("two charges: each read and checked first, then each tagged and given the s
     { purchaseId: "10615", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
     { purchaseId: "10661", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
   ]);
-  assert.deepEqual(w.calls, ["get:10615", "get:10661", "photo",
+  assert.deepEqual(w.calls, ["get:10615", "get:10661", "query", "query", "photo",
     "get:10615", "query", "update:10615", "upload", "get:10661", "query", "update:10661", "upload"], "the photo is read once");
   for (const id of ["10615", "10661"]) {
     const line = w.purchases.get(id).Line[0];
@@ -1279,6 +1279,22 @@ const refuseUpdateOf = (w, id, f = new QboError(400, fault("6000", "A business v
 };
 const REFUSED_6000 = "QuickBooks refused the change (400 / 6000): A business validation error has occurred";
 
+test("two charges that already carry the bookkeeper's documents: tagged without reading the photo, which may be gone", async () => {
+  const doc = (id) => ({ Id: "9" + id, FileName: `AER invoice ${id}.pdf`, ContentType: "application/pdf",
+    AttachableRef: [{ EntityRef: { type: "Purchase", value: id } }] });
+  const w = qbo({ purchases: [P10615, P10661], attachables: [doc("10615"), doc("10661")], photos: {}, links: { [RZ_JOB]: "502" } });
+  const r = await completePurchase(partsPayload(), w.io);
+  assert.equal(r.ok, true);
+  assert.equal(r.tagged, "done");
+  assert.equal(r.attached, 0);
+  assert.ok(!w.calls.includes("photo"), "no page is read");
+  assert.equal(w.uploads.length, 0);
+  // one without a document still needs the photo, and a missing one refuses the receipt before any write
+  const w2 = qbo({ purchases: [P10615, P10661], attachables: [doc("10615")], photos: {}, links: { [RZ_JOB]: "502" } });
+  await fails(completePurchase(partsPayload(), w2.io), (e) => assert.equal(e.code, "photo_missing"));
+  assert.equal(w2.posts.length, 0);
+});
+
 test("two charges: the second refused for good after the first was tagged and given the photo: ok, with part_error", async () => {
   const w = qbo({ purchases: [P10615, P10661], links: { [RZ_JOB]: "502" } });
   refuseUpdateOf(w, "10661");
@@ -1295,7 +1311,7 @@ test("two charges: the second refused for good after the first was tagged and gi
     part_error: { code: "qbo_refused", message: `part 2 of 2 (expense 10661): ${REFUSED_6000}` },
   });
   // nothing more was written for the second charge: refused at its tag, before its photo
-  assert.deepEqual(w.calls, ["get:10615", "get:10661", "photo",
+  assert.deepEqual(w.calls, ["get:10615", "get:10661", "query", "query", "photo",
     "get:10615", "query", "update:10615", "upload", "get:10661", "query", "refused:10661"]);
   assert.equal(w.posts.length, 1);
   assert.deepEqual(w.uploads.map((u) => u.meta.AttachableRef[0].EntityRef.value), ["10615"]);
@@ -1372,7 +1388,7 @@ test("two charges: QuickBooks down on the second after the first was written: re
     { purchaseId: "10661", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
   ]);
   assert.deepEqual(r.adopted, { create: false, tag: true, attach: 1 });
-  assert.deepEqual(w.calls, ["get:10615", "get:10661", "photo",
+  assert.deepEqual(w.calls, ["get:10615", "get:10661", "query", "query", "photo",
     "get:10615", "query", "get:10661", "query", "update:10661", "upload"], "nothing written twice to the first charge");
   assert.equal(w.posts.filter((x) => x.body.Id === "10615").length, 1);
   assert.deepEqual(w.uploads.map((u) => u.meta.AttachableRef[0].EntityRef.value), ["10615", "10661"]);
