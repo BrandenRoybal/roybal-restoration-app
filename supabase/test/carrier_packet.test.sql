@@ -2114,7 +2114,10 @@ alter table public.field_projects disable trigger trg_field_projects_touch;
 -- an open card; k6 changed since its packet; k7 not changed since; k8
 -- certified and deleted; k9 a certificate of the wrong shapes; k10 has an open
 -- card and no job row at all. k11 and k12 hold cards declined 15 and 13 days
--- ago (no job rows; they are not in the candidate checks).
+-- ago (no job rows; they are not in the candidate checks). k13, k14 and k15
+-- were last changed 25 days ago, before their packet rows: an undelivered
+-- row offered once (k13), one offered 3 times (k14), and one with a later
+-- sent row (k15).
 insert into public.field_projects (id, data, deleted, updated_at)
 select j.id, jsonb_build_object('id', j.id, 'title', 'Jane Sample - ' || j.n) || j.extra, j.deleted, now() - j.age
   from (values
@@ -2126,8 +2129,26 @@ select j.id, jsonb_build_object('id', j.id, 'title', 'Jane Sample - ' || j.n) ||
     ('00000000-0000-0000-0000-00000000c3a6'::uuid, 'k6', '{}'::jsonb, false, interval '30 days'),
     ('00000000-0000-0000-0000-00000000c3a7'::uuid, 'k7', '{}'::jsonb, false, interval '30 days'),
     ('00000000-0000-0000-0000-00000000c3a8'::uuid, 'k8', '{"certDrying": {"sigTech": "data:image/png;base64,AAAA"}}'::jsonb, true, interval '0'),
-    ('00000000-0000-0000-0000-00000000c3a9'::uuid, 'k9', '{"certDrying": {"sigTech": 5, "uploadedPages": "media:p1", "uploadedDoc": {}}}'::jsonb, false, interval '0')
+    ('00000000-0000-0000-0000-00000000c3a9'::uuid, 'k9', '{"certDrying": {"sigTech": 5, "uploadedPages": "media:p1", "uploadedDoc": {}}}'::jsonb, false, interval '0'),
+    ('00000000-0000-0000-0000-00000000c3ad'::uuid, 'k13', '{}'::jsonb, false, interval '25 days'),
+    ('00000000-0000-0000-0000-00000000c3ae'::uuid, 'k14', '{}'::jsonb, false, interval '25 days'),
+    ('00000000-0000-0000-0000-00000000c3af'::uuid, 'k15', '{}'::jsonb, false, interval '25 days')
   ) as j(id, n, extra, deleted, age);
+
+-- k13-k15's rows, all made after the job last changed
+insert into public.carrier_packets (id, job_id, number, version, seq, model_hash, status, offer,
+                                    bucket, path, sha256, bytes, pages, mode, sent_at, sent_to, error, created_at)
+select p.id, p.job, 'PKT-2098-' || p.n, p.version, p.seq, repeat('9e', 32), p.status, p.offer,
+       'carrier-packets', p.job::text || '/PKT-2098-' || p.n || '-v' || p.version || '-b' || p.seq || '.pdf',
+       repeat('9f', 32), 10, 1, 'full',
+       case when p.status = 'sent' then now() - p.age end, case when p.status = 'sent' then 'adjuster@example.com' end,
+       case when p.status = 'undelivered' then 'Gmail 550: mailbox unavailable' end, now() - p.age
+  from (values
+    ('00000000-0000-0000-0000-00000000c3e1'::uuid, '00000000-0000-0000-0000-00000000c3ad'::uuid, '0913', 1, 1, 'undelivered', 1, interval '24 days'),
+    ('00000000-0000-0000-0000-00000000c3e2'::uuid, '00000000-0000-0000-0000-00000000c3ae'::uuid, '0914', 1, 1, 'undelivered', 3, interval '24 days'),
+    ('00000000-0000-0000-0000-00000000c3e4'::uuid, '00000000-0000-0000-0000-00000000c3af'::uuid, '0915', 1, 1, 'undelivered', 0, interval '24 days'),
+    ('00000000-0000-0000-0000-00000000c3e8'::uuid, '00000000-0000-0000-0000-00000000c3af'::uuid, '0915', 1, 2, 'sent',        1, interval '23 days')
+  ) as p(id, job, n, version, seq, status, offer, age);
 
 -- cards declined 15 and 13 days ago, as their last update left them (an
 -- insert does not fire proposals' updated_at trigger)
@@ -2220,7 +2241,9 @@ declare
                                 '00000000-0000-0000-0000-00000000c3a3', '00000000-0000-0000-0000-00000000c3a4',
                                 '00000000-0000-0000-0000-00000000c3a5', '00000000-0000-0000-0000-00000000c3a6',
                                 '00000000-0000-0000-0000-00000000c3a7', '00000000-0000-0000-0000-00000000c3a8',
-                                '00000000-0000-0000-0000-00000000c3a9', '00000000-0000-0000-0000-00000000c3b0']::uuid[];
+                                '00000000-0000-0000-0000-00000000c3a9', '00000000-0000-0000-0000-00000000c3b0',
+                                '00000000-0000-0000-0000-00000000c3ad', '00000000-0000-0000-0000-00000000c3ae',
+                                '00000000-0000-0000-0000-00000000c3af']::uuid[];
   got  jsonb;
   want jsonb;
   removable uuid[];
@@ -2230,8 +2253,10 @@ begin
     into got
     from public.carrier_packet_candidates(14, 2000) with ordinality as c(job_id, updated_at, has_row, open_row, ord)
    where c.job_id = any (mine);
-  -- oldest first: k10 (no job row), k5 (40 days), k6 (30 days), k1 (3 days), k3 (now)
-  want := '[["c3b0", true, true], ["c3a5", true, true], ["c3a6", true, false], ["c3a1", false, false], ["c3a3", false, false]]';
+  -- oldest first: k10 (no job row), k5 (40 days), k6 (30 days), k13 (25
+  -- days: its undelivered row comes back however old), k1 (3 days), k3 (now);
+  -- not k14 (offered 3 times) or k15 (sent since)
+  want := '[["c3b0", true, true], ["c3a5", true, true], ["c3a6", true, false], ["c3ad", true, false], ["c3a1", false, false], ["c3a3", false, false]]';
   if got is distinct from want then
     raise exception 'candidates (14 days) are %, not %', got, want;
   end if;
@@ -2239,14 +2264,14 @@ begin
   select jsonb_agg(right(c.job_id::text, 4) order by c.ord) into got
     from public.carrier_packet_candidates(30, 2000) with ordinality as c(job_id, updated_at, has_row, open_row, ord)
    where c.job_id = any (mine);
-  if got is distinct from '["c3b0", "c3a5", "c3a6", "c3a2", "c3a1", "c3a3"]' then
+  if got is distinct from '["c3b0", "c3a5", "c3a6", "c3ad", "c3a2", "c3a1", "c3a3"]' then
     raise exception 'candidates (30 days) are %', got;
   end if;
 
   select jsonb_agg(right(c.job_id::text, 4) order by c.ord) into got
     from public.carrier_packet_candidates(0, 2000) with ordinality as c(job_id, updated_at, has_row, open_row, ord)
    where c.job_id = any (mine);
-  if got is distinct from '["c3b0", "c3a5", "c3a6", "c3a3"]' then
+  if got is distinct from '["c3b0", "c3a5", "c3a6", "c3ad", "c3a3"]' then
     raise exception 'candidates (0 days, a 2-day window) are %', got;
   end if;
   if (select count(*) from public.carrier_packet_candidates(14, 1)) <> 1 then
@@ -2260,7 +2285,7 @@ begin
     into got
     from public.carrier_packet_candidates(14, 2000) with ordinality as c(job_id, updated_at, has_row, open_row, ord)
    where c.job_id = any (mine);
-  want := '[["c3b0", true, true], ["c3a5", true, true], ["c3a6", true, false], ["c3a1", true, false], ["c3a3", false, false]]';
+  want := '[["c3b0", true, true], ["c3a5", true, true], ["c3a6", true, false], ["c3ad", true, false], ["c3a1", true, false], ["c3a3", false, false]]';
   if got is distinct from want then
     raise exception 'candidates with k1 held are %, not %', got, want;
   end if;

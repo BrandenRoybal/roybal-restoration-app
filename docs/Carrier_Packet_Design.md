@@ -19,8 +19,9 @@ has a numbered invoice, the worker assembles **one PDF**, in this order:
    changed.
 2. **Certificate of Drying**: the signed form drawn from its fields (with its
    "Final readings with meter photos"), or the signed copy he uploaded.
-3. **Work authorization**: the signed form with its terms, or the uploaded
-   signed copy.
+3. **Work authorization**: the form with its terms (signed by the owner, or
+   awaiting the owner's signature, which the email and contents then do not
+   call signed), or the uploaded signed copy.
 4. **Floor plan**: every uploaded plan page, full page.
 5. **Moisture maps**, one per map: header (material, meter, dry goal,
    technician, ambient), the sketch, the reading grid with dry cells marked
@@ -164,7 +165,8 @@ It returns:
   },
   sections: [Section, ...],               // print order, included sections only
   media: { "<key>": MediaRef, ... },      // every image the sections reference
-  photoNums: { "<photo id>": 7, ... },    // the numbering this model used (stored on the row)
+  photoNums: { "<photo id>": 7, "m:<image hash>": 8, ... },  // the numbering this model used (stored on the row);
+                                          // "m:" keys a photo with no id, or a second photo with the same id
   counts: { maps, readings, meterPhotos, logs, equipment, scans, photos,
             invoices, invoiceTotal },
   unitsOut: ["AM-014 (Kitchen)", ...],    // equipment with no pull time, for the card
@@ -246,7 +248,7 @@ for job photos: the archived 480 px copy when the photo is archived
   worksheet (`equipCalc` figures against what was placed, and each
   `calcDeviation` note) when present, the equipment table (tag/asset, type,
   location, set, pulled, hours, notes; scanned times marked `S`; a unit with
-  no pull time prints "still out" and no hours), the psychrometric table, and
+  a set time and no pull time prints "still out" and no hours), the psychrometric table, and
   the scan record from `scanRecord(copy, placeIds, log.id)` (time, tag, type,
   action, room, read by, tech). Times are Alaska wall time `MM/DD HH:MM`. A
   typed row prints its stored `hours`. "Read by" and "Tech" show the scan's
@@ -342,8 +344,9 @@ Under the lock, after `op_expire_proposals()`:
 1. `outbox_channel_ready('packet')` false → `{action:"skip", reason:"lane_off"}`.
    The owner's switches: `packet.send@1` deprecated in `operation_catalog`,
    or `op_agent_permits(agent:documents, 'packet.send', 'comms', 'propose')`
-   false (the grant revoked) → skip `not_permitted`, so revoking the grant
-   stops builds and texts at once and restoring it picks the jobs up again.
+   false (the grant revoked, or agent:documents disabled in `agents`) → skip
+   `not_permitted`, so revoking the grant stops builds and texts at once and
+   restoring it picks the jobs up again.
 2. A `building` row older than 30 minutes becomes `failed` with error
    `abandoned` (not permanent; it keeps its planned `bucket`/`path`, so the
    cleanup removes anything it uploaded); a fresh one → skip `building`.
@@ -374,10 +377,10 @@ Under the lock, after `op_expire_proposals()`:
 8. S has this hash (a change was undone) → skip `sent`. What is on offer
    above S is withdrawn first: R's card is locked `SKIP LOCKED`; not
    lockable, or approved/executing/executed → skip `in_flight`; `proposed` →
-   superseded (`superseded_reason: withdrawn`, with a `proposal.superseded`
-   event as agent:documents); R → `superseded` with error `withdrawn: the
-   carrier already has this version`; `undelivered` rows above S →
-   `superseded`.
+   superseded (`superseded_reason: withdrawn`, `reason: already_sent`, with a
+   `proposal.superseded` event as agent:documents; the card reads "Withdrawn:
+   the carrier already has this version"); R → `superseded` with error
+   `withdrawn: already_sent`; `undelivered` rows above S → `superseded`.
 9. Otherwise, with `p_build` false → skip `no_build`; else **build**: insert a `building` row with seq = max + 1, version =
    (S.version or 0) + 1, the job's number (allocated on the first row),
    a new `build_token`; delete the job's hold.
@@ -434,8 +437,10 @@ row).
   (`sigTech`, `uploadedPages` or `uploadedDoc` non-empty) and
   `updated_at > now() - (lookback + 2 days)`; plus jobs with packet rows whose
   `updated_at` is later than their newest row's `created_at`; plus jobs with
-  a `ready` row (to withdraw when they leave scope). Oldest `updated_at`
-  first.
+  a `ready` row (to withdraw when they leave scope); plus live jobs with an
+  `undelivered` row above their newest `sent` one and `offer < 3` (to offer
+  it again, however old the job's last change). Oldest `updated_at` first;
+  `has_row` counts a hold as a row.
 - `carrier_packet_state(p_job_id)` → `{photo_nums, last_sent}`: the latest
   row's `photo_nums` and S's `{version, sent_at, sent_to, section_hashes}`.
 - `carrier_packet_pdfs_to_remove(p_limit)` → `setof (id, bucket, path)`:

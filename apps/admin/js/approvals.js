@@ -115,8 +115,8 @@ const PACKET_OP = /^packet\.send(?:@|$)/;
    words, inlined rather than imported: this page imports only field names
    that existed before it was written (the rule above), and checkAddress
    came later. admin-approvals.test.mjs holds the two to the same answers.
-   One rule more: any angle bracket is refused, not only a <name> pair, as
-   the worker refuses a stray one for good (rfc822.mjs validAddresses). */
+   Any angle bracket is refused, not only a <name> pair, as the worker
+   refuses a stray one for good (rfc822.mjs validAddresses). */
 const SPINE_TO = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 function checkTo(v) {
   const to = (v == null ? "" : String(v)).trim();

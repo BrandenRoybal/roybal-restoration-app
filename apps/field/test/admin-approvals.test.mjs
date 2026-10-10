@@ -1550,7 +1550,7 @@ await test("Approve stays off until the To is one good address, saying what's wr
   await go();
   const approveOff = () => btn(card(PKT), "Approve and send").disabled;
   const wrong = () => card(PKT).querySelector(".ap-addr--bad");
-  for (const v of ["", "   ", "a@example.com, b@example.com", "a@example.com; b@example.com", "Jane Sample <jane@example.com>", "jane",
+  for (const v of ["", "   ", "a@example.com, b@example.com", "a@example.com; b@example.com", "Jane Sample <jane@example.com>", "a@example.com>", "<a@example.com", "jane",
     "jane@example", "jane@@example.com", "jane sample@example.com", "x".repeat(320) + "@example.com", "kelly.o'brien@example.com",
     "  claims@example.com  ", "CLAIMS@EXAMPLE.COM"]) {
     typeIn(toOf(PKT), v);

@@ -530,8 +530,10 @@ async function build(run, job, r) {
     run.storageUsed = (run.storageUsed ?? 0) + bytes;
 
     const recipient = await recipientFor(run, job);
-    // every image that did not load, or would not embed (a HEIC, a TIFF), prints
-    // "Image not available": the card says how many
+    // the card says how many images print "Image not available": the
+    // renderer's count (one that did not load, or would not embed: a HEIC, a
+    // TIFF); `lost`, the downloads that came back empty, is only the fallback
+    // for a renderer that does not count
     const lost = plan.load.filter((x) => isObj(x) && x.key != null && images.get(String(x.key)) == null).length;
     const words = wordsFor(run, job, label, recipient, { bytes, pages: pdf.pages, mode: plan.mode, lost, unavailable: pdf.unavailable });
     const url = await linkTo(run, path);

@@ -633,7 +633,7 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   technician signature, issue and portal-signed dates, each log's dry-out
   finish, the last equipment removal, the last moisture reading row and
   each ready invoice's date, so a job invoiced weeks after drying still gets
-  its packet, and a job held with a text, waiting on a numbered invoice say,
+  its packet, and a job that was held, waiting on a numbered invoice say,
   is built once it qualifies whatever its age); `settle` (edited
   less than `PACKET_SETTLE_MIN` minutes ago); `cert_sign_pending` (the
   customer's portal signature of the certificate is on its way: pending with
@@ -662,8 +662,8 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
 - **What the reserve answers** (`carrier_packet_reserve`, under the job's
   lock). A skip, by reason: `lane_off` (no worker heartbeating the `packet`
   channel), `not_permitted` (agent:documents' `packet.send` propose grant is
-  revoked, or the operation is deprecated: the owner's switches, so nothing
-  is built or texted), `building` (a build of this job is under way; one still building
+  revoked, the operation is deprecated, or the agent is disabled: the
+  owner's switches, so nothing is built or texted), `building` (a build of this job is under way; one still building
   after 30 minutes is failed as `abandoned`), `failed_cap` (this same
   document failed 3 times, or once for good; the job is held with the last
   error and the owner texted once, every run re-holding it so a text that
@@ -849,7 +849,7 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   the nil uuid's (above), and only builds wait: open cards, re-offers and
   sends go on. It clears itself: the cleanup deletes each sent copy 90
   days after it went out, and the first build with room again deletes the
-  hold. To see what fills the bucket, oldest first (`order by bytes desc`
+  hold. To see what fills the bucket, oldest first (`order by bytes desc nulls last`
   for the biggest):
   ```sql
   select id, status, sent_at, bytes, path from public.carrier_packets
@@ -911,7 +911,10 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
      image already on Fly, which would claim the hourly rows with no handler
      and leave them `dead` (and the owner a false "gave up" text).
      `fly secrets unset -a roybal-worker QUEUE_KINDS` before the deploy is
-     harmless: the old default does not name `packet.build`.
+     harmless: the old default does not name `packet.build`. If the deploy
+     fails after a staged set, stage the old value back (or
+     `fly secrets unset --stage -a roybal-worker QUEUE_KINDS`) so no later
+     deploy of the old image claims `packet.build`.
   The office card ships with the field build (v213) on merge and stays quiet
   until cards exist. No edge function deploy.
   **Check after the redeploy**: the heartbeat's `meta.kinds` lists

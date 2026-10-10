@@ -1380,6 +1380,9 @@ grant execute on function public.carrier_packet_hold_texted(uuid, text) to servi
 --     the window (the gate skips the lookback for a job with rows)
 --   * jobs with a ready row, deleted ones included, so a job that left scope
 --     has its card withdrawn
+--   * live jobs with an undelivered row above their newest sent one and under
+--     the offer cap (3), whatever the window, so a packet Gmail refused comes
+--     back on a fresh card at the next run
 -- has_row: the job has any packet row, or a hold (the owner was texted that
 -- it waits, on a numbered invoice say, so it is built once it qualifies,
 -- however long ago its dates); open_row: it has a ready row.
@@ -1415,6 +1418,13 @@ as $$
      where not fp.deleted and fp.updated_at > b.last_created
     union
     select b.id from built b where b.ready
+    union
+    select u.job_id
+      from public.carrier_packets u
+      join public.field_projects fp on fp.id = u.job_id and not fp.deleted
+     where u.status = 'undelivered' and u.offer < 3
+       and not exists (select 1 from public.carrier_packets s
+                        where s.job_id = u.job_id and s.status = 'sent' and s.seq > u.seq)
   )
   select p.id, fp.updated_at,
          b.id is not null or exists (select 1 from public.carrier_packet_holds h where h.job_id = p.id),
@@ -1428,7 +1438,7 @@ $$;
 
 alter function public.carrier_packet_candidates(integer, integer) owner to postgres;
 comment on function public.carrier_packet_candidates(integer, integer) is
-  'The jobs a packet.build run looks at, oldest updated_at first: live jobs with a certificate changed in the last lookback + 2 days, live jobs changed since their newest packet row, and every job with a ready row (to withdraw). Columns job_id, updated_at, has_row (a packet row or a hold), open_row. service_role only (0026).';
+  'The jobs a packet.build run looks at, oldest updated_at first: live jobs with a certificate changed in the last lookback + 2 days, live jobs changed since their newest packet row, every job with a ready row (to withdraw), and live jobs with an undelivered row above the last sent one under the offer cap (to offer again). Columns job_id, updated_at, has_row (a packet row or a hold), open_row. service_role only (0026).';
 revoke all on function public.carrier_packet_candidates(integer, integer) from public, anon, authenticated;
 grant execute on function public.carrier_packet_candidates(integer, integer) to service_role;
 
