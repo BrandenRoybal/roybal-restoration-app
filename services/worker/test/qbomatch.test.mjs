@@ -105,7 +105,7 @@ function executorProblems(input) {
     // the filing door's: the photo the worker read, a string or null, never left out
     if (!("read_photo_ref" in it) || !["string", "null"].includes(jsonType(it.read_photo_ref))) p.push(`item ${i} read_photo_ref`);
     // qbo-proxy's completePurchase on top: its receipt id shape, and a photo to attach
-    if (!/^[\w.:-]{1,64}$/.test(it.receipt_id)) p.push(`item ${i} receipt_id for qbo-proxy`);
+    if (!/^[\w.:~-]{1,64}$/.test(it.receipt_id)) p.push(`item ${i} receipt_id for qbo-proxy`);
     if (ch.includes("attach") && !(it.photo_refs?.length >= 1)) p.push(`item ${i} attach with no photo`);
   });
   const link = input.link;
@@ -272,8 +272,16 @@ test("vendorFamily reads a receipt's printed vendor, an expense's vendor name an
     ["AMZN Mktp US", "amazon"], ["Amazon.com", "amazon"],
     ["C & R Pipe and Steel, Inc.", "c&r pipe"], ["Fairbanks Block & Building Materials", "fairbanks block"],
     ["FS&G Aggregate Inc.", "fs&g"], ["Alaska Industrial Hardware", "aih"], ["Fred Meyer #0071", "fred meyer"], ["Wal-Mart", "walmart"],
+    // QuickBooks' own names for the same stores (Oct 10)
+    ["Pipe and Steel", "c&r pipe"], ["Pipe & Steel", "c&r pipe"],
+    ["Browns Electrical Supply", "browns electric"], ["Brown Electric", "browns electric"], ["BROWN'S ELECTRICAL SUPPLY FAIRBANKS AK", "browns electric"],
+    ["TESCO - FAIRBANKS (2346)", "tesco"], ["Tesco", "tesco"],
+    ["The Rental Zone (A Division of Airport Equipment Rentals)", "airport equipment"], ["Airport Equipment Rental, Inc", "airport equipment"],
+    ["AIRPORT EQUIPMENT RENTAL FAIRBANKS    AK - RULE", "airport equipment"],
   ]) assert.equal(vendorFamily(text), fam, text);
-  for (const text of ["", null, undefined, "Joe's Plumbing", "Tesoro 2Go", "Depotted Plants"]) assert.equal(vendorFamily(text), null, String(text));
+  for (const text of ["", null, undefined, "Joe's Plumbing", "Tesoro 2Go", "Depotted Plants", "Steel Pipe and Steel Supply", "Charlie Brown Plumbing"]) {
+    assert.equal(vendorFamily(text), null, String(text));
+  }
 });
 
 test("docAgrees: equal digits, or the receipt's digits starting a longer DocNumber (Sherwin), never under 5 digits", () => {
@@ -322,15 +330,97 @@ test("contradicts: another store, another card, a payment, or a store-account re
   assert.equal(contradicts(swPaid, bought("10570")), true);
   assert.equal(contradicts(sbsPaid, bought("10565")), true);
   assert.equal(contradicts(hd({ paid_with: "card" }), p10577({ lines: [line({ accountId: PAYMENT_CLEARING_ACCOUNT })] })), true);
-  assert.equal(contradicts(sbs(), p10563({ paymentType: "Check" })), true);
+  assert.equal(contradicts(sbs({ receipt_no: "" }), p10563({ paymentType: "Check", docNumber: "" })), true);
+  assert.equal(contradicts(sbs({ receipt_no: "700624818" }), p10563({ paymentType: "Check" })), true);   // another invoice's number
   assert.equal(contradicts(hd({ paid_with: "card" }), p10577({ paymentType: "Cash", accountName: "ATM Cash Clearing" })), false);
+});
+
+test("an invoice the slip reader marked \"account\" but the bank paid is a candidate when the expense names it: its invoice number, or the bank account the receipt says paid it", () => {
+  // FS&G 209998, stamped PAID and charged to debit card 4558 on Oct 6: QuickBooks 10621, DocNumber 209998
+  const fsg = sbs({ id: "fsg", vendor: "FS&G Aggregate Inc.", receipt_date: "2026-10-03", amount: 100.98, receipt_no: "209998" });
+  const p10621 = p10577({ id: "10621", syncToken: "2", txnDate: "2026-10-06", total: 100.98, paymentType: "Cash", accountId: "9",
+    accountName: "8992-MMB- Checking", vendorName: "FS&G Aggregate, Inc", docNumber: "209998",
+    note: "4558 VSA PUR F S G AGGREGATE INC FAIRBANKS AK - RULE", lines: [line({ amount: 100.98, customerId: "502", projectRef: "807760362" })],
+    attachments: ["IMG_9702.jpg"], hasAttachment: true });
+  assert.equal(contradicts(fsg, p10621), false);
+  assert.equal(scoreOf(fsg, p10621), 3 + 2);
+  // FBX Electric invoice 1065, paid by ACH from ****8992: QuickBooks 10662 on 8992 checking, under another payee's name
+  const fbx = sbs({ id: "fbx", vendor: "FBX Electric LLC", receipt_date: "2026-10-09", amount: 784, card_last4: "8992", receipt_no: "1065" });
+  const p10662 = p10577({ id: "10662", txnDate: "2026-10-09", total: 784, paymentType: "Cash", accountId: "9", accountName: "8992-MMB- Checking",
+    vendorName: "Vinny Fanelli", docNumber: "", note: "", lines: [line({ amount: 784, customerId: "502", projectRef: "807760362" })],
+    attachments: ["Invoice 1065.pdf"], hasAttachment: true });
+  assert.equal(contradicts(fbx, p10662), false);
+  assert.equal(scoreOf(fbx, p10662), 1 + 1);
+  // neither: still a store receipt paid from the bank, which it is not
+  assert.equal(contradicts({ ...fbx, card_last4: "" }, p10662), true);
+  assert.equal(contradicts({ ...fbx, card_last4: "4558" }, p10662), true);
+  assert.equal(contradicts({ ...fsg, receipt_no: "209999" }, p10621), true);
+
+  const chena = job({ id: OTHER, address: "1885 Chena Landings Lp." });
+  const res = run({ receipts: [{ ...fsg, job_id: OTHER }, { ...fbx, job_id: OTHER }], purchases: [p10621, p10662], jobs: [chena],
+    today: "2026-10-10" });
+  assert.deepEqual(res.notes.map((n) => [n.receipt_id, n.state, n.qbo_txn_id, n.qbo_customer_id]),
+    [["fbx", "in_qbo", "10662", "502"], ["fsg", "in_qbo", "10621", "502"]]);
+  assert.deepEqual(res.cards, []);
+});
+
+test("a store invoice QuickBooks dates up to two weeks off is still the receipt's when its DocNumber carries the receipt number and the store agrees", () => {
+  // Spenard 700653391: the receipt reads Oct 5, the bookkeeper entered the invoice dated Oct 2 (10630, tagged 517)
+  const beech = job({ id: OTHER, address: "292 Beechwood St." });
+  const r = sbs({ id: "sbs-0391", job_id: OTHER, receipt_date: "2026-10-05", amount: 87.77, receipt_no: "700653391" });
+  const p10630 = p10563({ id: "10630", syncToken: "1", txnDate: "2026-10-02", total: 87.77, docNumber: "700653391",
+    lines: [line({ amount: 87.77, customerId: "517", customerName: "292 Beechwood St. - Stevens", projectRef: "815364056" })] });
+  const state = (p, over = {}) => {
+    const n = noteOf(run({ receipts: [{ ...r, ...over }], purchases: [p], jobs: [beech] }), "sbs-0391");
+    return n.state === "in_qbo" ? `in_qbo ${n.qbo_txn_id}` : n.detail.reason;
+  };
+  assert.equal(state(p10630), "in_qbo 10630");
+  assert.equal(state({ ...p10630, txnDate: "2026-09-21" }), "in_qbo 10630");             // 14 days before
+  assert.equal(state({ ...p10630, txnDate: "2026-10-19" }), "in_qbo 10630");             // 14 days after (the lane never reads past today)
+  assert.equal(state({ ...p10630, txnDate: "2026-09-20" }), "store_not_entered");        // 15 days: too far
+  assert.equal(state({ ...p10630, txnDate: "2026-10-20" }), "store_not_entered");
+  assert.equal(state({ ...p10630, docNumber: "700653392" }), "store_not_entered");      // another invoice
+  assert.equal(state({ ...p10630, docNumber: "" }), "store_not_entered");               // no invoice number to go by
+  // the receipt number must name a store: a receipt with no vendor family gets no slack
+  assert.equal(state(p10630, { vendor: "Joe's Lumber" }), "store_not_entered");
+  // inside the usual -1..+3 days nothing changed: the same expense with no DocNumber still matches on store + date
+  assert.equal(state({ ...p10630, txnDate: "2026-10-05", docNumber: "" }), "in_qbo 10630");
+  // and the window QuickBooks is asked for reaches back that far
+  assert.deepEqual(purchaseWindow([r], TODAY), { from: "2026-09-21", to: TODAY });
+});
+
+test("C & R Pipe and Steel is \"Pipe and Steel\" in QuickBooks: its debit-card charge matches, and a job with no project waits for its link", () => {
+  const brighton = job({ id: OTHER, address: "330 Brighton" });
+  const r = hd({ id: "cr-1006", job_id: OTHER, vendor: "C & R Pipe and Steel, Inc.", receipt_date: "2026-10-06", amount: 622,
+    card_last4: "0442", receipt_no: "1044131" });
+  // 10646: Cash from 8992 checking (card 0442 is a debit card there), tagged by hand to customer 514, which is not a project
+  const p10646 = p10577({ id: "10646", txnDate: "2026-10-06", total: 622, paymentType: "Cash", accountId: "9", accountName: "8992-MMB- Checking",
+    vendorName: "Pipe and Steel", docNumber: "ZZ35725D8WZ2", note: "Pipe and steel", lines: [line({ amount: 622, customerId: "514",
+      customerName: "330 Brighton - Kertzmann" })], attachments: ["IMG_9690.jpg"], hasAttachment: true });
+  assert.equal(scoreOf(r, p10646), 2 + 1);
+  assert.equal(contradicts(r, p10646), false);
+  const res = run({ receipts: [r], purchases: [p10646], jobs: [brighton] });
+  assert.deepEqual(noteOf(res, "cr-1006"), { receipt_id: "cr-1006", job_id: OTHER, amount: 622, receipt_date: "2026-10-06",
+    state: "unmatched", qbo_txn_type: "Purchase", qbo_txn_id: "10646", qbo_sync_token: "0", qbo_customer_id: "514",
+    detail: { reason: "needs_job_link", qbo_doc_number: "ZZ35725D8WZ2", qbo_account_name: "8992-MMB- Checking", qbo_total: 622 } });
+  assert.deepEqual(res.cards, []);
+});
+
+test("a return slip (\"<receipt id>~ret\") gets its row like any receipt, and matches the store's credit", () => {
+  const ret = sbs({ id: "1e676fb6-0000-4000-8000-000000000001~ret", receipt_date: "2026-10-07", amount: -1146.75, receipt_no: "700665392" });
+  let res = run({ receipts: [ret], jobs: [job({ link: LINK })] });
+  assert.equal(noteOf(res, ret.id).detail.reason, "store_not_entered");
+  const credit = p10563({ id: "10700", txnDate: "2026-10-09", total: 1146.75, credit: true, docNumber: "700665392",
+    lines: [line({ amount: 1146.75 })], attachments: [], hasAttachment: false });
+  res = run({ receipts: [ret], purchases: [credit], jobs: [job({ link: LINK })] });
+  assert.deepEqual(itemsOf(res).map((i) => [i.receipt_id, i.qbo_txn_id, i.changes.join("+")]), [[ret.id, "10700", "tag+attach"]]);
 });
 
 test("a contradicted expense is no match: the receipt stays unmatched instead of tagging and photographing someone else's expense", () => {
   const bought = (id) => oct7.PURCHASES.find((p) => p.id === id);
   let res = run({ receipts: [hd({ card_last4: "0442" })], purchases: [p10577()], jobs: [job({ link: LINK })] });
   assert.deepEqual(res.cards, []);
-  assert.equal(noteOf(res, "r1").detail.reason, "not_found");
+  assert.equal(noteOf(res, "r1").detail.reason, "waiting_feed");
   res = run({ receipts: [sw({ receipt_date: "2026-09-30", amount: 632.92, receipt_no: "" }),
     sbs({ receipt_date: "2026-09-29", amount: 1136.54, receipt_no: "" })],
   purchases: [bought("10570"), bought("10565")], jobs: [job({ link: LINK })] });
@@ -343,14 +433,14 @@ test("a contradicted expense is no match: the receipt stays unmatched instead of
   assert.deepEqual(res.cards, []);
 });
 
-test("purchaseWindow asks QuickBooks from the day before the oldest receipt it will match to today, and not at all when there is none", () => {
+test("purchaseWindow asks QuickBooks from 14 days before the oldest receipt it will match to today, and not at all when there is none", () => {
   assert.equal(purchaseWindow([], TODAY), null);
   assert.equal(purchaseWindow([hd({ amount: 0 }), hd({ deleted_at: "2026-10-01T00:00:00Z" }), hd({ receipt_date: "2026-07-01" }),
     hd({ receipt_date: "2026-10-09" }), hd({ receipt_date: null })], TODAY), null);
-  assert.deepEqual(purchaseWindow([hd(), sbs(), hd({ receipt_date: "2026-07-01" })], TODAY), { from: "2026-09-27", to: TODAY });
-  assert.deepEqual(purchaseWindow([hd({ receipt_date: "2026-08-09" })], TODAY), { from: "2026-08-08", to: TODAY });   // 60 days back
+  assert.deepEqual(purchaseWindow([hd(), sbs(), hd({ receipt_date: "2026-07-01" })], TODAY), { from: "2026-09-14", to: TODAY });
+  assert.deepEqual(purchaseWindow([hd({ receipt_date: "2026-08-09" })], TODAY), { from: "2026-07-26", to: TODAY });   // 60 days back
   assert.equal(purchaseWindow([hd({ receipt_date: "2026-08-08" })], TODAY), null);
-  assert.deepEqual(purchaseWindow(oct7.RECEIPTS, oct7.TODAY), { from: "2026-09-17", to: "2026-10-08" });
+  assert.deepEqual(purchaseWindow(oct7.RECEIPTS, oct7.TODAY), { from: "2026-09-04", to: "2026-10-08" });
 });
 
 test("matchReceipts needs today as a date", () => {
@@ -428,15 +518,15 @@ test("an amount collision is decided by the vendor: a Spenard expense at $67.88 
   assert.equal(noteOf(res, "r04").qbo_txn_id, "10560");
 });
 
-test("unmatched reasons: a card charge waits a week for the bank feed, an account receipt is a store invoice not entered (a dump ticket a bill not checked), the rest are not found", () => {
+test("unmatched reasons: a card charge waits two weeks for the bank feed, an account receipt is a store invoice not entered (a dump ticket a bill not checked), the rest are not found", () => {
   const res = run({
     receipts: [
       hd({ id: "hd-0805", receipt_date: "2026-10-05", amount: 8.8, receipt_no: "1303 00001 59293" }),
       hd({ id: "cr-1006", vendor: "C & R Pipe and Steel, Inc.", receipt_date: "2026-10-06", amount: 622, card_last4: "0442", receipt_no: "1044131" }),
       hd({ id: "fnsb", vendor: "FNSB Solid Waste Division #001", receipt_date: "2026-10-01", amount: 34.04, category: "dump",
         paid_with: "account", card_last4: "", receipt_no: "01286734" }),
-      hd({ id: "card-7d", receipt_date: "2026-10-01", amount: 11 }),
-      hd({ id: "card-8d", receipt_date: "2026-09-30", amount: 12 }),
+      hd({ id: "card-14d", receipt_date: "2026-09-24", amount: 11 }),
+      hd({ id: "card-15d", receipt_date: "2026-09-23", amount: 12 }),
       hd({ id: "cash", paid_with: "cash", amount: 13 }),
       hd({ id: "personal", paid_with: "personal", amount: 14 }),
       hd({ id: "blank", paid_with: "", amount: 15 }),
@@ -446,7 +536,7 @@ test("unmatched reasons: a card charge waits a week for the bank feed, an accoun
   });
   assert.deepEqual(reasons(res), {
     "hd-0805": "waiting_feed", "cr-1006": "waiting_feed", fnsb: "bill_not_checked",
-    "card-7d": "waiting_feed", "card-8d": "not_found", cash: "not_found", personal: "not_found", blank: "not_found",
+    "card-14d": "waiting_feed", "card-15d": "not_found", cash: "not_found", personal: "not_found", blank: "not_found",
   });
   assert.deepEqual(noteOf(res, "hd-0805"), {
     receipt_id: "hd-0805", job_id: ALSTON, amount: 8.8, receipt_date: "2026-10-05", state: "unmatched",
@@ -541,7 +631,7 @@ test("a candidate needs the exact cents, the receipt's sign, and a date from a d
   for (const [over, matches] of cases) {
     const res = run({ receipts: [hd()], purchases: [p10577(over)], jobs: [job({ link: LINK })] });
     assert.equal(itemsOf(res).length, matches ? 1 : 0, JSON.stringify(over));
-    if (!matches) assert.equal(noteOf(res, "r1").detail.reason, "not_found", JSON.stringify(over));
+    if (!matches) assert.equal(noteOf(res, "r1").detail.reason, "waiting_feed", JSON.stringify(over));
   }
 });
 
@@ -559,7 +649,7 @@ test("a return (negative receipt) matches only a credit, and a credit never matc
 test("a score under 2 is no match: the amount and the date alone prove nothing", () => {
   const stranger = hd({ vendor: "Joe's Plumbing", card_last4: "", receipt_no: "" });
   let res = run({ receipts: [stranger], purchases: [p10577()], jobs: [job({ link: LINK })] });
-  assert.equal(noteOf(res, "r1").detail.reason, "not_found");
+  assert.equal(noteOf(res, "r1").detail.reason, "waiting_feed");
   // the card's last four and the same day make 2
   res = run({ receipts: [{ ...stranger, card_last4: "3176" }], purchases: [p10577()], jobs: [job({ link: LINK })] });
   assert.equal(itemsOf(res).length, 1);
@@ -575,11 +665,11 @@ test("an expense another live receipt holds in_qbo, or one approved (queued, don
   // r1 would win the tie by id; r9's in_qbo row keeps the expense with r9
   let res = run({ receipts: [hd(), r9], purchases: [done10577], links: [holds("in_qbo")], jobs });
   assert.equal(noteOf(res, "r9").state, "in_qbo");
-  assert.equal(noteOf(res, "r1").detail.reason, "not_found");
+  assert.equal(noteOf(res, "r1").detail.reason, "waiting_feed");
   // without the row, the earlier id takes it
   res = run({ receipts: [hd(), r9], purchases: [done10577], jobs });
   assert.equal(noteOf(res, "r1").state, "in_qbo");
-  assert.equal(noteOf(res, "r9").detail.reason, "not_found");
+  assert.equal(noteOf(res, "r9").detail.reason, "waiting_feed");
 
   // an in_qbo row whose receipt is gone holds nothing (tonight's note removes it); a failed one never held
   for (const state of ["in_qbo", "failed"]) {
@@ -589,7 +679,7 @@ test("an expense another live receipt holds in_qbo, or one approved (queued, don
   // an approved one holds it even when its receipt is gone: QuickBooks already has, or is getting, that write
   for (const state of ["queued", "done"]) {
     res = run({ receipts: [hd()], purchases: [p10577()], links: [holds(state, "gone")], jobs });
-    assert.equal(noteOf(res, "r1").detail.reason, "not_found", state);
+    assert.equal(noteOf(res, "r1").detail.reason, "waiting_feed", state);
   }
 });
 
@@ -599,11 +689,11 @@ test("one expense goes to one receipt: the surest receipt chooses first, then th
   const strong = hd({ id: "r5" });
   let res = run({ receipts: [weak, strong], purchases: [p10577()], jobs: [job({ link: LINK })] });
   assert.deepEqual(itemsOf(res).map((i) => i.receipt_id), ["r5"]);
-  assert.equal(noteOf(res, "r0").detail.reason, "not_found");
+  assert.equal(noteOf(res, "r0").detail.reason, "waiting_feed");
   // two equal receipts, one expense: the earlier id, the same every night
   res = run({ receipts: [hd({ id: "r7" }), hd({ id: "r6" })], purchases: [p10577()], jobs: [job({ link: LINK })] });
   assert.deepEqual(itemsOf(res).map((i) => i.receipt_id), ["r6"]);
-  assert.equal(noteOf(res, "r7").detail.reason, "not_found");
+  assert.equal(noteOf(res, "r7").detail.reason, "waiting_feed");
 });
 
 /* ---- what is never written ---- */
@@ -850,7 +940,7 @@ test("scope: every receipt is matched, so an expense goes where a full run would
   const res = matchReceipts({ receipts: [strong, weak], purchases: [p10577()], jobs, projects: oct7.PROJECTS, today: TODAY, scope: [OTHER.toUpperCase()] });
   check(res, [OTHER]);
   assert.deepEqual(res.cards, []);
-  assert.deepEqual(res.notes.map((n) => [n.receipt_id, n.detail.reason]), [["r0", "not_found"]]);
+  assert.deepEqual(res.notes.map((n) => [n.receipt_id, n.detail.reason]), [["r0", "waiting_feed"]]);
   assert.deepEqual(res.stats.jobs, [OTHER]);
 });
 

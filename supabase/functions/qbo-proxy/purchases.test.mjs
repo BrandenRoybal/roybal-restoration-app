@@ -322,6 +322,11 @@ test("parseCompleteRequest: a store entry reads as written", () => {
   assert.equal(parseCompleteRequest(createPayload({ expect_total: null })).expectTotal, null);
 });
 
+test("parseCompleteRequest: a return slip's receipt id (\"<receipt id>~ret\") reads as written", () => {
+  const id = "1e676fb6-0000-4000-8000-000000000001~ret";
+  assert.equal(parseCompleteRequest(payload({ receipt_id: id })).receiptId, id);
+});
+
 test("parseCompleteRequest: an attach-only item needs no job (no link is checked); a 5-digit store number is enough", () => {
   assert.equal(parseCompleteRequest(payload({ changes: ["attach"], customer_id: "", job_id: "" })).jobId, "");
   assert.equal(parseCompleteRequest(createPayload({ create: { ...CREATE, doc_number: "80669" } })).create.doc_number, "80669");

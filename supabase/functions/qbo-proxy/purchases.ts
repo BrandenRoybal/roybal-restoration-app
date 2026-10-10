@@ -316,7 +316,7 @@ export type CompleteRequest = {
 };
 
 export const MARKER_RE = /^media:([0-9a-f]{64}):(\d+)$/;
-const RECEIPT_ID = /^[\w.:-]{1,64}$/;
+const RECEIPT_ID = /^[\w.:~-]{1,64}$/;   // a return slip is "<receipt id>~ret"
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHANGES = ["tag", "attach", "create"];
 

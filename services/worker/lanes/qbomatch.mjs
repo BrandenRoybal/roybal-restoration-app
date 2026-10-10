@@ -36,7 +36,15 @@
 
 export const MATCHER = "receipts.qbo_match@1";
 export const WINDOW_DAYS = 60;       // receipts older than this are not matched again (their state is kept)
-export const FEED_WAIT_DAYS = 7;     // a card charge younger than this is "waiting for the bank feed"
+// a card charge younger than this is "waiting for the bank feed": the Citi
+// Home Depot card arrives in 2 or 3 days, the US Bank card and the store
+// invoices typed in by hand up to 11 (Oct 2026)
+export const FEED_WAIT_DAYS = 14;
+// how far a store invoice's QuickBooks date may sit from the receipt's when
+// its DocNumber carries the receipt number and the store is the same: the
+// bookkeeper dates it by the invoice, the crew's slip may be the pick-up day
+// (Spenard 700653391: receipt Oct 5, QuickBooks Oct 2)
+export const DOC_DATE_SLACK = 14;
 export const MIN_SCORE = 2;
 // expense account for store entries of equipment receipts (rentals), instead of the store's own
 export const EQUIPMENT_EXPENSE_ACCOUNT = "1150040005";
@@ -51,8 +59,9 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const MEDIA = /^media:[0-9a-f]{64}:[0-9]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The receipt ids both doors and qbo-proxy accept. job_receipts.id is free
-// text (the app's uid()), and one odd id must not fail the whole night's note.
-const RECEIPT_ID = /^[\w.:-]{1,64}$/;
+// text (the app's uid(); a return slip is "<receipt id>~ret"), and one odd id
+// must not fail the whole night's note.
+const RECEIPT_ID = /^[\w.:~-]{1,64}$/;
 const MAX_ITEMS = 50;                 // the executor's limit per card
 
 /* Vendor families: a receipt and an expense "agree on the vendor" when both
@@ -82,9 +91,12 @@ export const FAMILIES = [
   ["fred meyer", /fred\s*meyer/],
   ["walmart", /wal-?\s*mart/],
   ["florcraft", /florcraft/],
-  ["c&r pipe", /\bc\s*&\s*r\s+pipe/],
+  ["c&r pipe", /\bc\s*&\s*r\s+pipe|^pipe\s+(and|&)\s+steel\b/],   // QuickBooks names the vendor "Pipe and Steel"
   ["fairbanks block", /fairbanks\s+block/],
   ["fs&g", /\bfs\s*&\s*g\b/],
+  ["browns electric", /\bbrown'?s?\s+electric/],              // "Browns Electrical Supply"; QuickBooks: "Brown Electric"
+  ["tesco", /\btesco\b/],
+  ["airport equipment", /airport\s+equipment|rental\s+zone/],  // The Rental Zone is its division
 ];
 
 const str = (v) => (v == null ? "" : String(v));
@@ -140,9 +152,14 @@ export function scoreOf(r, p) {
     account's name carries a card number; a checking account's name is the
     bank's number, not the debit card's, so it never counts), a payment
     (every line on the payment clearing account), or, for a receipt charged
-    to a store account, money paid from the bank (Cash or Check). Missing a
-    true match only leaves the receipt unmatched; matching a wrong one tags
-    and photographs someone else's expense. */
+    to a store account, money paid from the bank (Cash or Check) unless the
+    expense names this very invoice (its DocNumber carries the receipt
+    number) or the bank account the receipt says paid it (its last four in
+    the account's name): the slip reader calls any invoice with no card on
+    it "account", so an invoice paid by debit card or ACH reads that way too
+    (FS&G 209998, FBX Electric 1065). Missing a true match only leaves the
+    receipt unmatched; matching a wrong one tags and photographs someone
+    else's expense. */
 export function contradicts(r, p) {
   const fam = vendorFamily(r.vendor);
   const theirs = [vendorFamily(p.vendorName), vendorFamily(p.note)].filter(Boolean);
@@ -152,21 +169,33 @@ export function contradicts(r, p) {
       && !str(p.accountName).includes(last4) && !str(p.note).includes(last4)) return true;
   const lines = Array.isArray(p.lines) ? p.lines : [];
   if (lines.length && lines.every((l) => str(l.accountId) === PAYMENT_CLEARING_ACCOUNT)) return true;
-  if (lc(r.paid_with) === "account" && (p.paymentType === "Cash" || p.paymentType === "Check")) return true;
+  if (lc(r.paid_with) === "account" && (p.paymentType === "Cash" || p.paymentType === "Check")
+      && !docAgrees(r.receipt_no, p.docNumber)
+      && !(/^\d{4}$/.test(last4) && str(p.accountName).includes(last4))) return true;
   return false;
+}
+
+/** The expense names this invoice: its DocNumber carries the receipt number
+    and both are the same store. What lets an expense dated up to
+    DOC_DATE_SLACK days away be this receipt's. */
+export function sameInvoice(r, p) {
+  const fam = vendorFamily(r.vendor);
+  return !!fam && docAgrees(r.receipt_no, p.docNumber)
+    && (vendorFamily(p.vendorName) === fam || vendorFamily(p.note) === fam);
 }
 
 /** The receipts the matcher will look at tonight (live, a total, dated in
     the last WINDOW_DAYS), and the expense window listPurchases needs for
-    them: from a day before the oldest, to today. Null when there are none,
-    so the lane need not ask QuickBooks at all. */
+    them: from DOC_DATE_SLACK days before the oldest (a store invoice may be
+    dated that early), to today. Null when there are none, so the lane need
+    not ask QuickBooks at all. */
 export function purchaseWindow(receipts, today) {
   let from = null;
   for (const r of receipts ?? []) {
     if (!inWindow(r, today)) continue;
     if (from === null || r.receipt_date < from) from = r.receipt_date;
   }
-  return from === null ? null : { from: addDays(from, -1), to: today };
+  return from === null ? null : { from: addDays(from, -DOC_DATE_SLACK), to: today };
 }
 
 function inWindow(r, today) {
@@ -301,11 +330,13 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
     const abs = cents(r.amount);
     const credit = Number(r.amount) < 0;
     const lo = addDays(r.receipt_date, -1), hi = addDays(r.receipt_date, 3);
+    const wideLo = addDays(r.receipt_date, -DOC_DATE_SLACK), wideHi = addDays(r.receipt_date, DOC_DATE_SLACK);
     r.cands = [];
     for (const p of purchases) {
       if (!DIGITS.test(str(p.id)) || !DIGITS.test(str(p.syncToken))) continue;
       if (cents(p.total) !== abs || (p.credit === true) !== credit) continue;
-      if (!(str(p.txnDate) >= lo && str(p.txnDate) <= hi)) continue;
+      const d = str(p.txnDate);
+      if (!(d >= lo && d <= hi) && !(d >= wideLo && d <= wideHi && sameInvoice(r, p))) continue;
       const holder = claimedBy.get(`Purchase:${p.id}`);
       if (holder && holder !== r.id) continue;
       if (contradicts(r, p)) continue;

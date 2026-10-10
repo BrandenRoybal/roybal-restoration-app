@@ -126,10 +126,10 @@ test("the nightly run on the Oct 7 rows: one read of each table, two qbo-proxy r
   assert.equal(selects(supa, "receipt_qbo_links").length, 1);   // empty: one read says so
   assert.equal(selects(supa, "job_qbo_links").length, 1);
 
-  // qbo-proxy, under the service key: the projects, then the expenses from the day before the oldest receipt
+  // qbo-proxy, under the service key: the projects, then the expenses from 14 days before the oldest receipt
   assert.deepEqual(fetch.calls.map((c) => [c.url, c.init.method, c.body]), [
     [PROXY, "POST", { action: "listProjects" }],
-    [PROXY, "POST", { from: "2026-09-17", to: "2026-10-08", action: "listPurchases" }],
+    [PROXY, "POST", { from: "2026-09-04", to: "2026-10-08", action: "listPurchases" }],
   ]);
   for (const c of fetch.calls) {
     assert.equal(c.init.headers.apikey, ctx.cfg.serviceKey);

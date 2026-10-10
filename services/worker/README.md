@@ -290,7 +290,7 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   receipt_qbo_links   where each receipt stands; job_qbo_links: each job's QuickBooks project
   field_projects      title, address, customer, qbJobcodeName and deleted of the jobs with receipts
   app_settings        receipts.qbo_store_accounts (store entry, below; unset = off)
-  qbo-proxy           listProjects; listPurchases from a day before the oldest receipt to today
+  qbo-proxy           listProjects; listPurchases from 14 days before the oldest receipt to today
   → receipt_qbo_links_note(job ids, rows)                         in_qbo / unmatched / conflict, one call
   → receipts_qbo_link_file(job, input | null, rationale, evidence) per job: its card, or none
 ```
@@ -303,7 +303,9 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
 - **What a match is.** QuickBooks is the books: a wrong tag moves a cost to
   someone else's job, so a match is conservative. The same cents; the
   receipt's sign (a return matches only a credit); a QuickBooks date from a
-  day before the receipt to three days after; and a score of at least 2:
+  day before the receipt to three days after (up to 14 days either side for
+  the same store's expense whose DocNumber carries the receipt number: the
+  bookkeeper dates a store invoice by the invoice); and a score of at least 2:
   +3 the receipt number in the DocNumber (Sherwin's `8066-9` is DocNumber
   `80669163000926`), +2 the same store (the vendor's name, or the memo a
   bank rule writes), +1 the same day, +1 the card's last four in the payment
@@ -311,7 +313,10 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   candidate: another known store, another card (a card account whose name
   carries a different number), a payment (every line on the clearing
   account 1150040008), or, for a receipt charged to a store account, money
-  paid from the bank. The surest receipt chooses first, one expense goes to
+  paid from the bank, unless the expense carries the receipt number or the
+  bank account the receipt names (the slip reader marks any invoice with no
+  card on it "account", debit and ACH payments included). A return slip's
+  id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
   one receipt, and two equally good expenses are left to a person. Receipts
   dated in the last 60 days are matched; an older one keeps the row it had.
 - **What each receipt gets.** A line on its job's card when the expense needs
@@ -319,8 +324,8 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   `receipt_qbo_links`:
   - `in_qbo`: tagged to the job, and a document attached or no photo to add
     (a receipt with no photo yet). Nothing to do.
-  - `unmatched`, `detail.reason`: `waiting_feed` (a card charge a week old or
-    less; the bank feed lags), `store_not_entered` (a receipt on a store
+  - `unmatched`, `detail.reason`: `waiting_feed` (a card charge two weeks old
+    or less; the bank feed lags, up to 11 days on the US Bank card), `store_not_entered` (a receipt on a store
     account, Spenard or Sherwin, whose invoice is not in QuickBooks yet; they
     are entered by hand about nine days late), `bill_not_checked` (a dump
     ticket: the office books those as Bills, which the match does not read),
