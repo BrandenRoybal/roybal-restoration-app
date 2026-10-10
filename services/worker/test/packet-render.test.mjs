@@ -390,6 +390,39 @@ test("render: when the parts will not fit on the cover they fold into a count be
   assert.equal(pdf.outline.find((o) => o.title === "Moisture Maps").children.length, 14, "the bookmarks keep every part");
 });
 
+/* the cover's link rectangles [x1, y1, x2, y2], bottom first */
+const linkRects = (pdf) => (pdf.pages[0].body.match(/\/Annots \[([^\]]*)\]/)[1].match(/\d+(?= 0 R)/g) || [])
+  .map((n) => /\/Rect \[([^\]]*)\]/.exec(pdf.objs.get(Number(n)).body)[1].split(" ").map(Number))
+  .sort((a, b) => a[1] - b[1]);
+const noOverlap = (rects, what) => {
+  for (let i = 1; i < rects.length; i++) assert.ok(rects[i][1] >= rects[i - 1][3] - 0.01, `${what}: link ${i + 1} from the bottom overlaps the one under it`);
+};
+
+test("render: a crowded cover keeps every contents row above its foot, and no two rows' links overlap", () => {
+  // version 2 in compact mode, with the free-text facts long enough to take two lines each
+  const m = richModel();
+  Object.assign(m.cover, {
+    customer: "Jane Sample and John Sample, Trustees of the Sample Family Living Trust dated 2019",
+    address: "12345 Example Ridge Road, Unit 4B, Building C (enter from the alley), Fairbanks, AK 99709",
+    carrier: "Sample Mutual Fire and Casualty Company c/o Example Claims Services (TPA)",
+    adjuster: "Alex Adjuster, Senior Field Adjuster, Example Claims Services (alex.adjuster@claims.example.com)",
+    lossCause: "Supply line failure under the kitchen sink; water ran overnight through the subfloor into the basement",
+  });
+  m.cover.facts.push(["Drying system", "Closed"], ["Air scrubber days", "1 × 4"]);
+  const label = { ...LABEL, version: 2, mode: "compact", replaces: { version: 1, sentAt: "2026-10-06T02:30:00Z" },
+    changed: ["Job and claim details", "Certificate of Drying", "Moisture Maps", "Drying Logs", "Job Photos", "Supporting Documents", "Invoices"] };
+  const pdf = readPdf(render(m, { label, mode: "compact" }).bytes);
+  const cover = pdf.pages[0];
+  const footRule = Number(/0\.8 w 0\.059 0\.106 0\.176 RG 36 ([\d.]+) m/.exec(cover.ops)[1]);
+  const rows = m.sections.map((s) => cover.texts.find((t) => t.text === s.title && t.font === "bold" && t.size === 9.5));
+  rows.forEach((t, i) => assert.ok(t && t.y > footRule + 3, `"${m.sections[i].title}" (at ${t && t.y}) prints above the foot rule (${footRule})`));
+  for (let i = 1; i < rows.length; i++) assert.ok(rows[i - 1].y - rows[i].y >= 12 - 0.01, `a 12 pt row pitch above "${m.sections[i].title}"`);
+  assert.equal(linkRects(pdf).length, m.sections.length);
+  noOverlap(linkRects(pdf), "crowded cover");
+  // the usual cover, with part rows under their sections
+  noOverlap(linkRects(rich().pdf), "usual cover");
+});
+
 test("render: every page after the cover has the running header and the footer with Page N of M", () => {
   const { r, pdf } = rich();
   const sections = new Set(richModel().sections.map((s) => s.title));
@@ -481,9 +514,18 @@ test("render: a JPEG is embedded byte for byte, once, however many keys and sect
 });
 
 test("render: a missing or unreadable image prints the gray Image not available box", () => {
-  const { pdf } = rich();
+  const { r, pdf } = rich();
   const n = pdf.pages.reduce((k, pg) => k + pg.texts.filter((t) => t.text === "Image not available").length, 0);
   assert.equal(n, MISSING_KEYS.length);
+  assert.equal(r.unavailable, MISSING_KEYS.length, "the renderer counts each key it printed as the box");
+  // bytes that downloaded but this writer cannot embed (a HEIC, a TIFF) are boxes too, and counted
+  const images = richImages();
+  images.set("photo-2", new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63, 0, 0, 0, 0]));
+  images.set("page-landscape", new Uint8Array([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0, 0, 0, 0, 0]));
+  const odd = render(richModel(), { images });
+  const boxes = readPdf(odd.bytes).pages.reduce((k, pg) => k + pg.texts.filter((t) => t.text === "Image not available").length, 0);
+  assert.equal(boxes, MISSING_KEYS.length + 2);
+  assert.equal(odd.unavailable, MISSING_KEYS.length + 2);
   const none = readPdf(renderPacket(richModel(), { label: LABEL, mode: "full", images: new Map() }).bytes);
   assert.ok(none.pages.reduce((k, pg) => k + pg.texts.filter((t) => t.text === "Image not available").length, 0) >= 20, "with no images at all, every image is a box");
   assert.equal([...none.objs.values()].filter((o) => o.dict && /\/Subtype \/Image/.test(o.dict)).length, 0);
@@ -545,6 +587,29 @@ test("render: nothing runs outside the margins — long captions, long URLs and 
   const all = pdf.pages.map((pg) => pg.text).join(" ");
   assert.ok(all.includes("refrigerator alcove"), "a long caption wraps rather than being cut at once");
   assert.ok(all.includes("meter-photo-location-3-full-resolution.jpg") || all.includes("full-resolution.jpg"), "the tail of a long URL prints");
+});
+
+test("render: a long part title wraps inside its band, letter spacing and all", () => {
+  const m = richModel();
+  m.sections.find((s) => s.key === "docs").parts[0].title = "Supporting Document — Plumber's leak report and invoice from Acme Plumbing & Heating dated 10/02/2026";
+  m.sections.find((s) => s.key === "maps").parts[0].title = "Moisture Map — Kitchen, dining room and hallway subfloor along the north exterior wall";
+  const pdf = readPdf(render(m).bytes);
+  const heads = pdf.pages.slice(1).flatMap((pg) => pg.texts.filter((t) => t.font === "bold" && t.size === 10 && t.x === M.l + 9));
+  for (const t of heads) assert.ok(t.x + t.w <= PAGE.w - M.r - 2, `"${t.text}" ends at ${(t.x + t.w).toFixed(1)}, inside the band`);
+  const words = heads.map((t) => t.text).join(" ");
+  assert.ok(words.includes("SUPPORTING DOCUMENT — PLUMBER'S LEAK REPORT") && words.includes("HEATING DATED 10/02/2026"), "the whole title prints across its two lines");
+  assert.ok(words.includes("NORTH EXTERIOR WALL"));
+});
+
+test("render: a name or a place with a letter WinAnsi lacks prints that letter without its accent", () => {
+  const m = richModel();
+  m.cover.customer = "Michał Sample";
+  m.cover.address = "123 Example St, Utqiaġvik, AK 99723";
+  const pdf = readPdf(render(m).bytes);
+  assert.ok(pdf.pages[0].texts.some((t) => t.text === "Michal Sample"), "the insured on the cover");
+  assert.ok(pdf.pages[0].texts.some((t) => t.text === "123 Example St, Utqiagvik, AK 99723"), "the property on the cover");
+  assert.ok(pdf.pages[1].texts.some((t) => t.text === "PKT-2026-0007 · v1 · Claim DEMO-12345 · Michal Sample"), "the running header");
+  assert.equal(pdf.info.Title, `${PACKET_TITLE} - Michał Sample - PKT-2026-0007 v1`, "the /Title (UTF-16) keeps the spelling");
 });
 
 test("render: the symbols the model emits print in WinAnsi", () => {

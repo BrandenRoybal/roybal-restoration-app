@@ -55,9 +55,10 @@ export function bareAddress(v) {
 }
 
 /* Senders that never answer: a bounce, a postmaster, an automated notice.
-   Matched on the local part, so "no-reply.claims@…" counts and
+   Matched on the local part, words joined or split by "-", "_" or ".",
+   so "no-reply.claims@…", "do_not_reply@…" and "bounces+x@…" count and
    "noreen@…" does not. */
-const JUNK = /^(?:mailer-?daemon|postmaster|no-?reply|do-?not-?reply)(?![a-z0-9])/i;
+const JUNK = /^(?:mailer[-_.]?daemon|postmaster|bounces?|no[-_.]?reply|do[-_.]?not[-_.]?reply)(?![a-z0-9])/i;
 export const isJunkSender = (address) => JUNK.test(str(address).split("@")[0]);
 
 /* the connected mailbox, given as an address or as {email} / {address} */

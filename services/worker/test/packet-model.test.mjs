@@ -388,6 +388,16 @@ test("model: drying log — typed and scanned rows, still out, sizing, psychrome
   assert.equal(psy.rows[0][15], "pat", "a login typed as the tech prints without its domain");
 });
 
+test("model: a drying-log row with no Set time is not still out (scans.js rowOutAt)", () => {
+  const p = demoProject();
+  p.dryingLogs[0].equipment.push({ asset: "DH-005", type: "Dehumidifier", location: "Kitchen", placed: "", removed: "", hours: "", notes: "Delivered, not set up" });
+  const m = build(p);
+  const row = tableWith(m, "logs", "Tag / asset").rows.find((r) => r[0] === "DH-005");
+  assert.equal(row[4], "", "no pull time, and not \"still out\"");
+  assert.deepEqual(row[5], { text: "", align: "right" });
+  assert.deepEqual(m.unitsOut, ["AM-014 (Kitchen)"], "not listed as a unit on site");
+});
+
 test("model: scan record — Alaska times, actions, no email addresses", () => {
   const m = build();
   const rec = tableWith(m, "logs", "Read by");
@@ -479,6 +489,23 @@ test("model: photo numbers stay put across a delete and an append", () => {
   assert.equal(v4.photoNums["ph-01"], 1);
   assert.equal(v4.photoNums["ph-02"], 2);
   assert.equal(new Set(Object.values(v4.photoNums)).size, Object.keys(v4.photoNums).length);
+});
+
+test("model: a duplicated photo id and a photo with no id keep their numbers build after build", () => {
+  const p = demoProject();
+  p.photos.unshift({ by: "crew1@example.com", src: `media:${"d".repeat(64)}:1234`, caption: "A photo with no id", room: "Kitchen", stage: "during" });
+  p.photos.push({ ...p.photos.find((ph) => ph.id === "ph-01"), caption: "A merged copy of the first photo" });
+  const captions = (m) => blocksOf(m, "photos")[0].items.map((i) => i.caption);
+  let m = build(p);
+  const first = { hash: modelHash(m), photoNums: m.photoNums, captions: captions(m) };
+  assert.equal(Object.keys(first.photoNums).length, 14, "each photo keeps its number under a key of its own");
+  for (let n = 2; n <= 4; n++) {
+    // fed its own last numbering, as the lane does
+    m = build(p, { prevPhotoNums: m.photoNums });
+    assert.equal(modelHash(m), first.hash, `build ${n}: the same hash, so no new version`);
+    assert.deepEqual(m.photoNums, first.photoNums, `build ${n}: the same numbering`);
+    assert.deepEqual(captions(m), first.captions, `build ${n}: the same photo numbers`);
+  }
 });
 
 test("model: media references for photos, archived photos and lost objects", () => {
@@ -720,6 +747,21 @@ test("emailText: subject, body and file name", () => {
   assert.ok(e3.filename.length <= 200);
 });
 
+test("emailText: the work authorization is called signed only once the owner signed it", () => {
+  const listed = (p) => emailText(build(p), LABEL).body.split("\n").filter((l) => l.startsWith("- Work authorization"));
+  assert.deepEqual(listed(demoProject()), ["- Work authorization, signed"]);
+  // only our rep has signed: the form still prints, but is not called signed
+  const p = demoProject();
+  p.workAuth.ownerSig = "";
+  assert.ok(sec(build(p), "workAuth"), "the form is still in the packet");
+  assert.deepEqual(listed(p), ["- Work authorization"]);
+  p.workAuth.portalSignedAt = "2026-10-02T03:00:00Z";
+  assert.deepEqual(listed(p), ["- Work authorization, signed"], "signed in the customer portal");
+  const up = demoProject();
+  up.workAuth = { ...up.workAuth, mode: "upload", ownerSig: "", repSig: "", uploadedPages: [markerOf(signaturePng(5))] };
+  assert.deepEqual(listed(up), ["- Work authorization (signed copy)"]);
+});
+
 test("rationaleText: one fact a line", () => {
   const m = build();
   const r = rationaleText(m, LABEL, { recipient: { to: "adjuster@example.com", source: "claim" }, bytes: 3.3 * 1048576, pages: 41, mode: "full", missing: 0, changed: [] });
@@ -752,12 +794,17 @@ test("readyText, holdText and suggestedFrom", () => {
     storage_full: holdText("storage_full", null, ""),
     other: holdText("something_new", m, "a detail"),
   };
+  // no promise of the next hourly run: the settle window and the lookback decide when
+  assert.equal(texts.no_invoice, "Carrier packet for Jane Sample (claim DEMO-12345) is waiting on a numbered invoice. It is built on its own once the invoice has a number. No reply needed.");
   assert.equal(texts.unchecked_fills, "Carrier packet for Jane Sample (claim DEMO-12345) is waiting: 3 meter readings to check on the Moisture Map (tap each amber ?). No reply needed.");
   assert.ok(texts.unread_meter_photos.includes("Jane Sample (claim DEMO-12345) is waiting: 1 meter photo on an empty reading"), "a job blob works in place of a model");
   assert.ok(texts.failed.includes("couldn't be built after 3 tries"));
   assert.equal(texts.permanent, "Carrier packet for Jane Sample (claim DEMO-12345) couldn't be built: something in the job stops it. It is not tried again until the job changes. No reply needed.");
   assert.ok(texts.storage_full.startsWith("Carrier packets are on hold: packet storage is full"));
   assert.equal(holdText("anything", null, ""), texts.storage_full);
+  // what happens next, not a cleanup nobody does
+  texts.storage_detail = holdText("storage_full", null, "299.5 MB of 300 MB used");
+  assert.equal(texts.storage_detail, "Carrier packets are on hold: packet storage is full (299.5 MB of 300 MB used). No new packet is built until there is room again; old sent copies are cleared on their own after 90 days, or raise PACKET_STORAGE_MB. No reply needed.");
   for (const t of Object.values(texts)) {
     assert.ok(t.endsWith("No reply needed."), t);
     assert.ok(!/\bYES\b/.test(t), t);

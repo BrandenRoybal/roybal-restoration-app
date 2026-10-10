@@ -88,8 +88,20 @@ test("bounce and no-reply senders are skipped", () => {
   assert.equal(field.prefillTo(job(), emails).to, "mailer-daemon@example.net");
   assert.ok(isJunkSender("noreply@example.com"));
   assert.ok(isJunkSender("no-reply.claims@example.com"));
+  // the words split by "_" or "." too, and bounce senders
+  for (const a of ["do_not_reply@carrier.example", "no_reply@example.com", "no.reply@example.com", "do.not.reply@example.com",
+    "DoNotReply@example.com", "mailer_daemon@example.net", "bounces+abc123@mail.example.com", "bounce@example.com"]) {
+    assert.ok(isJunkSender(a), a);
+  }
   assert.ok(!isJunkSender("noreen@example.com"));
   assert.ok(!isJunkSender("replies@example.com"));
+  assert.ok(!isJunkSender("bouncer@example.com"));
+  // a claims system's notice newer than the adjuster's email
+  const notice = [
+    mail("Alex Adjuster <adjuster@example.com>", "claim", "2026-10-03T18:00:00Z"),
+    mail("Claims System <do_not_reply@carrier.example>", "claim", "2026-10-08T18:00:00Z"),
+  ];
+  assert.deepEqual(pickRecipient({ project: job(), emails: notice }), { to: "adjuster@example.com", source: "claim" });
 });
 
 test("a copy of our own email filed to the job is skipped", () => {

@@ -471,9 +471,12 @@ async function recipientFor(run, job) {
 function wordsFor(run, job, label, recipient, facts) {
   const { deps } = run;
   const email = deps.emailText(job.model, label);
+  // the renderer's own count when there is one (it already holds the model's
+  // missing images and the empty downloads); a re-offer has only those two
+  const missing = Number.isSafeInteger(facts.unavailable) ? facts.unavailable
+    : (Number(job.model.missing) || 0) + (Number(facts.lost) || 0);
   const rationale = deps.rationaleText(job.model, label, {
-    recipient, bytes: facts.bytes, pages: facts.pages, mode: facts.mode,
-    missing: (Number(job.model.missing) || 0) + (Number(facts.lost) || 0), changed: label.changed,
+    recipient, bytes: facts.bytes, pages: facts.pages, mode: facts.mode, missing, changed: label.changed,
   });
   return {
     input: {
@@ -527,9 +530,10 @@ async function build(run, job, r) {
     run.storageUsed = (run.storageUsed ?? 0) + bytes;
 
     const recipient = await recipientFor(run, job);
-    // every image that did not load prints "Image not available": the card says how many
+    // every image that did not load, or would not embed (a HEIC, a TIFF), prints
+    // "Image not available": the card says how many
     const lost = plan.load.filter((x) => isObj(x) && x.key != null && images.get(String(x.key)) == null).length;
-    const words = wordsFor(run, job, label, recipient, { bytes, pages: pdf.pages, mode: plan.mode, lost });
+    const words = wordsFor(run, job, label, recipient, { bytes, pages: pdf.pages, mode: plan.mode, lost, unavailable: pdf.unavailable });
     const url = await linkTo(run, path);
     const out = await ctx.supa.rpc("carrier_packet_file", {
       p_packet_id: r.packet_id,

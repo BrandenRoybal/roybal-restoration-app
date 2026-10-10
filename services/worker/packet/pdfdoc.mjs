@@ -53,10 +53,15 @@ const SPELL = [
   [/[✕✖]/g, "x"], [/↔/g, "<->"], [/℉/g, "°F"], [/℃/g, "°C"], [/№/g, "No."],
   [/＋/g, "+"], [/－/g, "-"], [/Δ/g, "Delta "], [/[①-⑳]/g, (c) => `(${c.codePointAt(0) - 0x245f})`],
 ];
+/* A letter WinAnsi lacks loses only its accent (Utqiaġvik, Nguyễn, Jiří
+   print as Utqiagvik, Nguyen, Jirí), never the whole letter; these few
+   have no accent to take off. What WinAnsi prints is left as it is. */
+const FOLD = { ł: "l", Ł: "L", đ: "d", Đ: "D", ı: "i", ħ: "h", Ħ: "H" };
+const fold = (ch) => (winAnsi(ch).length ? ch : FOLD[ch] ?? ch.normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
 export const norm = (str) => {
   let s = String(str == null ? "" : str).normalize("NFC");
   for (const [re, to] of SPELL) s = s.replace(re, to);
-  return s;
+  return s.replace(/[^\u0000-\u00ff]/gu, fold);
 };
 export const textWidth = (str, size, font = "reg") => tw(norm(str), size, font === "bold");
 export const wrapText = (str, size, font, width, opts) => wrap(norm(str), size, font === "bold", width, opts);

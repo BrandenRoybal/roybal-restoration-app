@@ -601,9 +601,9 @@ function logParts(b) {
     const eq = arr(log.equipment).filter((r) => isObj(r) && (r.scanId || EQ_KEYS.some((k) => filled(r[k]))));
     let anyS = false;
     const rows = eq.map((r) => {
-      // out, by scans.js rowOutAt's rule: no Removed, not ended by a scan, not a run typed in Hours
+      // out, by scans.js rowOutAt's rule: a Set time, no Removed, not ended by a scan, not a run typed in Hours
       const ended = !!r.scanId && isObj(r.scan) && (!!r.scan.removeId || !!r.scan.endedTyped);
-      const out = !filled(r.removed) && !ended && !(r._manualHrs === true && num(r.hours) > 0);
+      const out = filled(r.placed) && !filled(r.removed) && !ended && !(r._manualHrs === true && num(r.hours) > 0);
       if (out) unitsOut.push(`${line(r.asset) || line(r.type) || "Unit"}${(rowRoom(r) || line(r.location)) ? ` (${rowRoom(r) || line(r.location)})` : ""}`);
       const t = (key) => {
         const s = shortWall(r[key]);
@@ -670,7 +670,27 @@ function logParts(b) {
    with src or cloud (the photo log, ZIP and portal numbering). Later builds
    keep every number they were given, give new photos the next numbers in
    photo-log order, and never hand a deleted photo's number to another:
-   the numbering carries every number ever given. */
+   the numbering carries every number ever given.
+
+   Each photo's number is kept under its own key: its id, or for a second
+   photo with the same id (a merge that kept both copies) and for a photo
+   with no id, "m:" and its image's hash (":2", ":3" on a repeat). One key
+   per photo is what keeps a number where it was build after build. */
+function photoKeys(photos) {
+  const taken = new Set();
+  return photos.map((ph) => {
+    const id = str(ph.id);
+    if (id && !taken.has(id)) { taken.add(id); return id; }
+    const cloud = line(ph.cloud).toLowerCase();
+    const src = sourceOf(ph.src);
+    // an inline image and the object it is uploaded as share this hash (media.js)
+    const base = "m:" + (HEX64.test(cloud) ? cloud : src ? src.hash || sha(src.inline) : sha(str(ph.src || ph.cloud)));
+    let k = base;
+    for (let n = 2; taken.has(k); n++) k = `${base}:${n}`;
+    taken.add(k);
+    return k;
+  });
+}
 function numberPhotos(photos, prev) {
   const given = {};
   const used = new Set();
@@ -683,19 +703,21 @@ function numberPhotos(photos, prev) {
     }
   }
   const fresh = !Object.keys(given).length;
+  const keys = photoKeys(photos);
   const nums = new Map();
   photos.forEach((ph, i) => {
-    const id = str(ph.id);
     if (fresh) { nums.set(ph, i + 1); return; }
-    if (id && has(given, id) && !used.has(given[id])) { nums.set(ph, given[id]); used.add(given[id]); }
+    const k = keys[i];
+    if (has(given, k) && !used.has(given[k])) { nums.set(ph, given[k]); used.add(given[k]); }
   });
-  for (const ph of photos) {
-    if (nums.has(ph)) continue;
+  // a new photo, or one whose stored number another photo holds (a numbering with a duplicate)
+  photos.forEach((ph, i) => {
+    if (nums.has(ph)) return;
     const n = ++max;
     nums.set(ph, n);
-    if (str(ph.id)) given[str(ph.id)] = n;
-  }
-  if (fresh) for (const ph of photos) if (str(ph.id)) given[str(ph.id)] = nums.get(ph);
+    given[keys[i]] = n;
+  });
+  if (fresh) photos.forEach((ph, i) => { given[keys[i]] = nums.get(ph); });
   return { nums, photoNums: given };
 }
 const STAGE_RANK = { before: 0, during: 1, after: 2 };
@@ -999,6 +1021,10 @@ const sentDay = (iso) => mdy(akDay(iso) || isoDay(iso));
 const findSection = (model, key) => arr(model && model.sections).find((s) => s.key === key) || null;
 const pagesIn = (sec) => arr(sec && sec.parts).flatMap((pt) => arr(pt.blocks)).filter((bl) => bl.t === "pages")
   .reduce((n, bl) => n + arr(bl.items).length, 0);
+/* the owner's signature is on the form (drawn, or made in the portal): only
+   ours on it is a form still out for signing, never "signed" */
+const ownerSigned = (sec) => arr(sec && sec.parts).flatMap((pt) => arr(pt.blocks)).filter((bl) => bl.t === "signatures")
+  .some((bl) => arr(bl.items).some((it) => it.label === OWNER_SIG_LABEL && (it.media != null || it.electronic === true)));
 
 /* the packet's contents, one line each, for the email */
 function contentsLines(model) {
@@ -1011,7 +1037,7 @@ function contentsLines(model) {
       out.push(pages ? `Certificate of Drying (signed copy, ${plural(pages, "page")})`
         : `Certificate of Drying${facts.get("Certificate dated") ? `, dated ${facts.get("Certificate dated")}` : ""}`);
     } else if (s.key === "workAuth") {
-      out.push(pagesIn(s) ? "Work authorization (signed copy)" : "Work authorization, signed");
+      out.push(pagesIn(s) ? "Work authorization (signed copy)" : ownerSigned(s) ? "Work authorization, signed" : "Work authorization");
     } else if (s.key === "floorPlan") {
       out.push(`Floor plan (${plural(pagesIn(s), "page")})`);
     } else if (s.key === "maps") {
@@ -1118,14 +1144,14 @@ export function readyText(model, label) {
 export function holdText(reason, model, detail, { permanent = false } = {}) {
   const d = line(detail);
   if (!model || reason === "storage_full") {
-    return `Carrier packets are on hold: packet storage is full${d ? ` (${d})` : ""}. No new packet is built until old packet PDFs are cleared. No reply needed.`;
+    return `Carrier packets are on hold: packet storage is full${d ? ` (${d})` : ""}. No new packet is built until there is room again; old sent copies are cleared on their own after 90 days, or raise PACKET_STORAGE_MB. No reply needed.`;
   }
   const who = jobName(model);
   const n = Number(/^\d+/.exec(d)?.[0]);
   const count = (one, many) => (Number.isFinite(n) && n > 0 ? plural(n, one, many) : many);
   switch (reason) {
     case "no_invoice":
-      return `Carrier packet for ${who} is waiting on a numbered invoice. Once the invoice has a number, the packet is built on the next hourly run. No reply needed.`;
+      return `Carrier packet for ${who} is waiting on a numbered invoice. It is built on its own once the invoice has a number. No reply needed.`;
     case "unchecked_fills":
       return `Carrier packet for ${who} is waiting: ${count("meter reading", "meter readings")} to check on the Moisture Map (tap each amber ?). No reply needed.`;
     case "unread_meter_photos":

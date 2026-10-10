@@ -260,6 +260,20 @@ test("pdfdoc: text survives WinAnsi — symbols are spelled out, × ° · — pr
   assert.ok(textWidth("≤ 16%", 9) > textWidth("16%", 9), "the spelled-out form is what is measured");
 });
 
+test("pdfdoc: a letter WinAnsi lacks prints without its accent, never dropped; what WinAnsi has is left alone", () => {
+  const shown = (s) => String.fromCharCode(...winAnsi(norm(s)));
+  assert.equal(shown("123 Example St, Utqiaġvik, AK 99723"), "123 Example St, Utqiagvik, AK 99723");
+  assert.equal(shown("Michał Sample"), "Michal Sample");
+  assert.equal(shown("Jiří Sample"), "Jir\xed Sample");
+  assert.equal(shown("Nguyễn Văn Sample"), "Nguyen Van Sample");
+  assert.equal(shown("Şükrü Ağa Sample"), "S\xfckr\xfc Aga Sample");
+  assert.equal(norm("Łódź Đặng ı ħ Ħ"), "Lódz Dang i h H");
+  const kept = "José Muñoz · Zoë Ångström — “quoted” ‘x’ 2 × 5 at 70°F, Œuvre, Šimon, Žofie, €5 …";
+  assert.equal(norm(kept), kept);
+  assert.equal(winAnsi(norm(kept)).length, [...kept].length, "every character of it prints");
+  assert.ok(textWidth("Michał", 9) > textWidth("Micha", 9), "the folded form is what is measured");
+});
+
 test("pdfdoc: bookmark titles and /Info values are UTF-16 when they are not ASCII", () => {
   assert.equal(textString("Floor Plan"), "(Floor Plan)");
   assert.equal(textString("a (b) \\ c"), "(a \\(b\\) \\\\ c)");

@@ -131,21 +131,27 @@ export class Flow {
     return p;
   }
 
+  /* a part head's lines, wrapped narrower than the band so its 0.5 pt
+     letter spacing (which wrapText does not count) still fits */
+  #partLines(title) {
+    return wrapText(upper(title), 10, "bold", (CONTENT_W - 16) / 1.1, { maxLines: 2 });
+  }
+
   partHeight(title) {
-    return wrapText(upper(title), 10, "bold", CONTENT_W - 16, { maxLines: 2 }).length * PART_LEAD + PART_PAD + PART_AFTER;
+    return this.#partLines(title).length * PART_LEAD + PART_PAD + PART_AFTER;
   }
 
   /* a part of a section (one moisture map, one log, one invoice): the
      print.css h2 — uppercase navy on a light band, orange left bar */
   part(title, { newPage = false, bookmark = title, keep = 0 } = {}) {
-    const lines = wrapText(upper(title), 10, "bold", CONTENT_W - 16, { maxLines: 2 });
+    const lines = this.#partLines(title);
     const h = lines.length * PART_LEAD + PART_PAD;
     if (newPage || !this.page) this.newPage();
     else this.ensure(h + PART_AFTER + keep);
     const p = this.page;
     p.rect(M.l, this.y - h, CONTENT_W, h, { fill: C.band });
     p.rect(M.l, this.y - h, 3, h, { fill: C.orange });
-    lines.forEach((ln, i) => p.text(M.l + 9, this.y - 12.4 - i * PART_LEAD, ln, { size: 10, font: "bold", color: C.navy, spacing: 0.5 }));
+    lines.forEach((ln, i) => p.text(M.l + 9, this.y - 12.4 - i * PART_LEAD, ln, { size: 10, font: "bold", color: C.navy, spacing: 0.5, maxWidth: CONTENT_W - 12 }));
     this.y -= h + PART_AFTER;
     this.#mark(bookmark, true);
     return p;
@@ -256,6 +262,12 @@ export class Flow {
   fieldsHeight(pairs, { cols = 2, size = 9, maxLines = 8 } = {}) {
     const { rows } = this.#fieldRows(pairs, Math.max(1, cols), size, maxLines);
     return rows.length ? rows[0].h + 5 : 0;
+  }
+
+  /* the whole grid, `after` included: how far fields() moves the cursor */
+  fieldsTotalHeight(pairs, { cols = 2, size = 9, maxLines = 8, after = 6 } = {}) {
+    const { rows } = this.#fieldRows(pairs, Math.max(1, cols), size, maxLines);
+    return rows.length ? rows.reduce((n, r) => n + r.h + 5, 0) + after : 0;
   }
 
   fields(pairs, { cols = 2, size = 9, maxLines = 8, after = 6 } = {}) {

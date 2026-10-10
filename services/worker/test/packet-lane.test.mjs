@@ -792,6 +792,21 @@ test("media downloads run at most PACKET_DOWNLOADS at a time, and what is missin
   assert.equal(peak, 1);
 });
 
+test("the card counts what the renderer printed as not available, each image once", async () => {
+  // one image the model knew was missing, one download that came back empty, and one that
+  // downloaded but would not embed: the renderer printed three boxes and says so
+  const w = world({
+    deps: {
+      buildModel: (p) => ({ ...stubModel(p), missing: 1 }),
+      renderPacket: () => ({ bytes: new Uint8Array(PDF_BYTES), pages: 12, sha256: sha(PDF_BYTES), unavailable: 3 }),
+    },
+    storage: { async getText(b, n) { return n === H1 ? null : JPEG_URL; } },
+  });
+  const r = await w.run();
+  assert.equal(r.built, 1);
+  assert.equal(w.deps.calls.rationaleText[0][2].missing, 3, "the renderer's count, never added to the model's and the downloads'");
+});
+
 test("a portal signature on its way holds the packet: the approval is read and handed to the gate", async () => {
   const portalId = uuid(900);
   const approvals = [{ id: "certDrying", status: "pending", doc: { html: "media:abc" }, updatedAt: "2026-10-10T08:00:00Z" }];

@@ -1,15 +1,16 @@
 /* The carrier packet's renderer: the document model (packet/model.mjs,
    docs/Carrier_Packet_Design.md §5) in, one PDF out (§15).
 
-   renderPacket(model, { label, mode, images, now }) → { bytes, pages, sha256 }
+   renderPacket(model, { label, mode, images, now }) → { bytes, pages, sha256, unavailable }
 
    - label: { number, version, replaces: { version, sentAt } | null,
      changed: [section titles], built: Date, mode } — what the lane decided
      at build time (none of it is in the model, so none of it moves the hash);
    - mode: "full" (one photo across, two a page) or "compact" (two by two);
    - images: Map(media key → Uint8Array of the decoded JPEG or PNG | null).
-     A key with no bytes, or bytes this writer cannot embed, prints a gray
-     "Image not available" box; the card counts those from the model.
+     A key with no bytes, or bytes this writer cannot embed (a HEIC, a
+     TIFF), prints a gray "Image not available" box; `unavailable` is how
+     many keys did, and the card counts those.
 
    The model decides what prints; this file decides only where. The cover
    is page 1: the field app's letterhead, the packet number and version, a
@@ -232,7 +233,7 @@ function coverFlow(doc, page, y) {
 
 /* everything on the cover that is known before the sections are laid out;
    returns where the contents go and where the page count goes */
-function drawCover(doc, p, { cover, number, version, built, mode, replaces, changed }) {
+function drawCover(doc, p, { cover, number, version, built, mode, replaces, changed, sections }) {
   let y = PAGE.h - M.t;
 
   // the letterhead (formkit.js letterhead, print.css .sheet-head)
@@ -299,19 +300,6 @@ function drawCover(doc, p, { cover, number, version, built, mode, replaces, chan
     y -= h + 10;
   }
 
-  // the job and claim facts
-  const f = coverFlow(doc, p, y);
-  f.part("Job and claim details", { bookmark: null });
-  f.fields([
-    ["Insured", cover.customer], ["Property", cover.address],
-    ["Claim #", cover.claimNo], ["Carrier", cover.carrier],
-    ["Adjuster", cover.adjuster], ["Date of loss", cover.dateOfLoss],
-    ["Cause of loss", cover.lossCause], ["Work order #", cover.workOrderNo],
-    ["Water category / class", catClass(cover)],
-    ...arr(cover.facts).filter(Array.isArray).map(([l, v]) => [str(l), str(v)]),
-  ].map(([l, v]) => [l, str(v)]), { cols: 2, maxLines: 2, after: 2 });
-  y = f.y;
-
   // the foot of the cover: the S500 line, licenses, who prepared it
   const foot = [
     ...wrapText(S500_LINE, 8, "bold", CONTENT_W).map((t) => ({ t, size: 8, font: "bold", color: C.navy })),
@@ -322,6 +310,23 @@ function drawCover(doc, p, { cover, number, version, built, mode, replaces, chan
   const footTop = BODY_BOTTOM + footH;
   p.line(M.l, footTop, RIGHT, footTop, { width: 0.8, color: C.navy });
   foot.forEach((ln, j) => p.text(M.l, footTop - 6 - ln.size * 0.9 - j * 10.5, ln.t, { size: ln.size, font: ln.font, color: ln.color }));
+
+  // the job and claim facts, two lines each unless that would leave the
+  // contents less than a 12 pt row a section: then one line each
+  const facts = [
+    ["Insured", cover.customer], ["Property", cover.address],
+    ["Claim #", cover.claimNo], ["Carrier", cover.carrier],
+    ["Adjuster", cover.adjuster], ["Date of loss", cover.dateOfLoss],
+    ["Cause of loss", cover.lossCause], ["Work order #", cover.workOrderNo],
+    ["Water category / class", catClass(cover)],
+    ...arr(cover.facts).filter(Array.isArray).map(([l, v]) => [str(l), str(v)]),
+  ].map(([l, v]) => [l, str(v)]);
+  const f = coverFlow(doc, p, y);
+  f.part("Job and claim details", { bookmark: null });
+  const need = f.partHeight("Contents") + Math.max(1, sections) * 12;
+  const left = f.y - f.fieldsTotalHeight(facts, { cols: 2, maxLines: 2, after: 2 }) - 4 - (footTop + 8);
+  f.fields(facts, { cols: 2, maxLines: left >= need ? 2 : 1, after: 2 });
+  y = f.y;
 
   return { contentsTop: y - 4, contentsBottom: footTop + 8, pagesAt };
 }
@@ -351,7 +356,7 @@ function drawContents(doc, p, at, contents, counts) {
     if (!withParts && s.parts.length > 1) { const n = PART_NOUN[s.key] || ["part", "parts"]; return `${s.parts.length} ${n[1]}`; }
     return "";
   };
-  const row = (title, page, { size, font, indent, sub = "" }) => {
+  const row = (title, page, { size, font, indent, sub = "", pitch }) => {
     const pn = String(page + 1);
     const pw = textWidth(pn, size, "bold");
     const x = M.l + indent;
@@ -360,13 +365,14 @@ function drawContents(doc, p, at, contents, counts) {
     if (sub) end += 6 + p.text(end + 6, y - size, sub, { size: size - 1.5, color: C.sub, maxWidth: Math.max(0, RIGHT - pw - 24 - end - 6) });
     if (RIGHT - pw - 6 > end + 8) p.line(end + 4, y - size + 1, RIGHT - pw - 4, y - size + 1, { width: 0.7, color: C.gray, dash: [0.8, 2.2] });
     p.text(RIGHT, y - size, pn, { size, font: "bold", color: C.navy, align: "right" });
-    p.link(M.l, y - size - 3, CONTENT_W, size + 5, { page });
+    // no taller than the row's pitch, so two rows' links never overlap
+    p.link(M.l, y - size - 3, CONTENT_W, Math.min(size + 5, pitch), { page });
   };
   for (const s of contents) {
-    row(s.title, s.page, { size: 9.5, font: "bold", indent: 0, sub: detail(s) });
+    row(s.title, s.page, { size: 9.5, font: "bold", indent: 0, sub: detail(s), pitch: lead });
     y -= lead;
     if (!withParts || !partsOf(s).length) continue;
-    for (const pt of partsOf(s)) { row(pt.title, pt.page, { size: 8.5, font: "reg", indent: 14 }); y -= PART; }
+    for (const pt of partsOf(s)) { row(pt.title, pt.page, { size: 8.5, font: "reg", indent: 14, pitch: PART }); y -= PART; }
     y -= GAP;
   }
   if (!contents.length) p.text(M.l, y - 9, "No sections are included in this packet.", { size: 9, font: "ital", color: C.sub });
@@ -376,7 +382,7 @@ function drawContents(doc, p, at, contents, counts) {
    The packet
    ============================================================ */
 
-/** renderPacket(model, { label, mode, images, now }) → { bytes, pages, sha256 } */
+/** renderPacket(model, { label, mode, images, now }) → { bytes, pages, sha256, unavailable } */
 export function renderPacket(model, { label = {}, mode, images, now } = {}) {
   const m = isObj(model) ? model : {};
   const lb = isObj(label) ? label : {};
@@ -405,7 +411,8 @@ export function renderPacket(model, { label = {}, mode, images, now } = {}) {
   const sectionOf = (i) => { let t = ""; for (const s of ctx.sectionStarts) if (s.page <= i) t = s.title; return t; };
 
   const coverPage = doc.addPage();
-  const at = drawCover(doc, coverPage, { cover, number, version, built, mode: photoMode, replaces, changed: lb.changed });
+  const at = drawCover(doc, coverPage, { cover, number, version, built, mode: photoMode, replaces, changed: lb.changed,
+    sections: arr(m.sections).filter(isObj).length });
 
   const flow = new Flow(doc, {
     header: (p, i) => runningHeader(p, headText, sectionOf(i)),
@@ -434,5 +441,7 @@ export function renderPacket(model, { label = {}, mode, images, now } = {}) {
     timeZone: ZONE,
     custom: { PacketNumber: number, PacketVersion: String(version), ModelHash: hash },
   });
-  return { bytes, pages: total, sha256: createHash("sha256").update(bytes).digest("hex") };
+  // every image key that printed as the gray box, each once
+  const unavailable = [...seen.values()].filter((img) => img == null).length;
+  return { bytes, pages: total, sha256: createHash("sha256").update(bytes).digest("hex"), unavailable };
 }
