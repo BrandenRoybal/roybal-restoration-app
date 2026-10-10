@@ -599,6 +599,19 @@ test("a re-offer files the stored PDF on a fresh card: no render, no upload, a n
   assert.equal(w.deps.calls.emailText[0][1].mode, "compact");
   assert.deepEqual(w.deps.calls.rationaleText[0][2].bytes, 123456);
   assert.deepEqual(texts(w.fetch).map((t) => t.body), ["Carrier packet PKT-2026-0001 v1 for Jane Sample is ready."]);
+  assert.equal(w.deps.calls.rationaleText[0][2].missing, 0);
+
+  // an image the bucket no longer lists is counted on the fresh card too
+  const gone = world({
+    rpc: {
+      carrier_packet_reserve: (a) => ({ ...reserveBuild(a.p_job_id), action: "reoffer", build_token: null, path: stored,
+        sha256: sha(PDF_BYTES), bytes: 123456, pages: 9, mode: "compact" }),
+      carrier_packet_reoffer: { status: "filed", proposal_id: uuid(301), offer: 1, superseded: [] },
+      carrier_packet_media_sizes: (a) => a.p_names.filter((n) => n !== H1).map((name) => ({ name, bytes: 2000 })),
+    },
+  });
+  await gone.run();
+  assert.equal(gone.deps.calls.rationaleText[0][2].missing, 1);
 
   const lost = world({ rpc: {
     carrier_packet_reserve: (a) => ({ ...reserveBuild(a.p_job_id), action: "reoffer", path: stored, mode: "full" }),
@@ -697,6 +710,7 @@ test("media downloads run at most PACKET_DOWNLOADS at a time, and what is missin
   assert.equal(images.get(names[1]), null);
   assert.deepEqual(Buffer.from(images.get(names[2])), JPEG);
   assert.deepEqual(Buffer.from(images.get(inline)), JPEG, "an inline image is decoded without a download");
+  assert.equal(w.deps.calls.rationaleText[0][2].missing, 2, "the card counts both images that print as not available");
 
   const one = world({ cfg: { packetDownloads: 1 }, projects: [project(J1, { _media: media })],
     storage: { async getText() { active += 1; peak = Math.max(peak, active); await new Promise((res) => setTimeout(res, 1)); active -= 1; return JPEG_URL; } } });

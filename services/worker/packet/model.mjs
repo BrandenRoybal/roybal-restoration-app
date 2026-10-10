@@ -425,7 +425,8 @@ function workAuthParts(b) {
   // the form prints in the packet once it is signed (an unsigned one is a completeness gap, not a document)
   if (!filled(wa.ownerSig) && !filled(wa.repSig) && !filled(wa.portalSignedAt)) return [];
   const scope = isObj(wa.scope) ? wa.scope : {};
-  const items = SCOPE_ITEMS.map((t, i) => (scope[i] === true || scope[String(i)] === true ? `${i + 1}. ${t}` : "")).filter(Boolean);
+  // only the checked items, as bullets: a number beside a bullet read as a gap where an item was left unchecked
+  const items = SCOPE_ITEMS.filter((t, i) => scope[i] === true || scope[String(i)] === true);
   const blocks = [
     { t: "fields", cols: 3, pairs: [["Date", mdy(wa.date)], ["Work order #", line(p.workOrderNo)], ["Claim #", line(p.claimNo)]] },
     { t: "fields", cols: 2, pairs: [

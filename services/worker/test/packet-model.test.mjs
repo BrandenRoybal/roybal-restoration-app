@@ -12,6 +12,7 @@ import {
   changedSections, mediaNames, planMedia, emailText, rationaleText, readyText, holdText, suggestedFrom,
   CERT_STATEMENT, SCAN_FOOT, SCAN_LEGEND, SECTION_TITLES,
 } from "../packet/model.mjs";
+import { SCOPE_ITEMS } from "../../../apps/field/js/model.js";
 import { TERMS, SMS_CONSENT, SMS_LINKS, SIGN_LEAD, OWNER_SIG_LABEL, REP_SIG_LABEL } from "../packet/workauth.mjs";
 import {
   demoProject, demoProjectUpload, demoMediaStore, demoMediaSizes, demoImages, markerOf, hashOf, signaturePng,
@@ -283,8 +284,8 @@ test("model: work authorization words are the form's, verbatim", () => {
   assert.ok(paras.includes(`Owner opted in: Yes. [X] ${SMS_CONSENT}`));
   const scope = bl.find((b) => b.t === "bullets").items;
   assert.equal(scope.length, 6);
-  assert.ok(!scope.some((s) => s.startsWith("5. ")), "the unchecked scope item is left out");
-  assert.ok(scope[0].startsWith("1. Emergency water extraction"));
+  assert.deepEqual(scope, SCOPE_ITEMS.filter((t, i) => i !== 4), "only the checked items, unnumbered; the unchecked fifth is left out");
+  assert.ok(scope[0].startsWith("Emergency water extraction"));
   const sigs = bl.find((b) => b.t === "signatures").items;
   assert.deepEqual(sigs.map((s) => [s.label, s.name, s.date, s.electronic]), [
     [OWNER_SIG_LABEL, "Jane Sample", "10/01/2026", false], [REP_SIG_LABEL, "Pat Sample", "10/01/2026", false]]);

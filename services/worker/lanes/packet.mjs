@@ -324,10 +324,13 @@ async function planFor(run, model) {
     }
   }
   const plan = deps.planMedia(model, sizes, { fullKb: cfg.packetFullKb });
+  const load = arr(plan?.load);
   return {
     mode: plan?.mode === "compact" ? "compact" : "full",
     estimateBytes: Number(plan?.estimateBytes) || 0,
-    load: arr(plan?.load),
+    load,
+    // stored images the bucket does not list: they print "Image not available"
+    absent: load.filter((x) => isObj(x?.source) && typeof x.source.hash === "string" && !sizes.has(x.source.hash)).length,
   };
 }
 
@@ -442,7 +445,7 @@ function wordsFor(run, job, label, recipient, facts) {
   const email = deps.emailText(job.model, label);
   const rationale = deps.rationaleText(job.model, label, {
     recipient, bytes: facts.bytes, pages: facts.pages, mode: facts.mode,
-    missing: Number(job.model.missing) || 0, changed: label.changed,
+    missing: (Number(job.model.missing) || 0) + (Number(facts.lost) || 0), changed: label.changed,
   });
   return {
     input: {
@@ -496,7 +499,9 @@ async function build(run, job, r) {
     run.storageUsed = (run.storageUsed ?? 0) + bytes;
 
     const recipient = await recipientFor(run, job);
-    const words = wordsFor(run, job, label, recipient, { bytes, pages: pdf.pages, mode: plan.mode });
+    // every image that did not load prints "Image not available": the card says how many
+    const lost = plan.load.filter((x) => isObj(x) && x.key != null && images.get(String(x.key)) == null).length;
+    const words = wordsFor(run, job, label, recipient, { bytes, pages: pdf.pages, mode: plan.mode, lost });
     const url = await linkTo(run, path);
     const out = await ctx.supa.rpc("carrier_packet_file", {
       p_packet_id: r.packet_id,
@@ -551,7 +556,9 @@ async function reoffer(run, job, r) {
   const mode = r.mode === "compact" ? "compact" : "full";
   const label = labelFor(run, job, r, mode);
   const recipient = await recipientFor(run, job);
-  const words = wordsFor(run, job, label, recipient, { bytes: Number(r.bytes) || 0, pages: Number(r.pages) || 0, mode });
+  const words = wordsFor(run, job, label, recipient, {
+    bytes: Number(r.bytes) || 0, pages: Number(r.pages) || 0, mode, lost: Number(job.plan?.absent) || 0,
+  });
   const url = await linkTo(run, String(r.path ?? ""));
   const out = await ctx.supa.rpc("carrier_packet_reoffer", {
     p_packet_id: r.packet_id,

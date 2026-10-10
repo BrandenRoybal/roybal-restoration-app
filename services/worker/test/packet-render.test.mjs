@@ -159,7 +159,7 @@ function richModel() {
       { key: "workAuth", title: "Work Authorization", parts: [{ title: null, newPage: false, blocks: [
         { t: "fields", cols: 2, pairs: [["Property address", "123 Example St, Fairbanks, AK 99701"], ["Owner name", "Jane Sample"], ["Portal link", LONG_URL], ["Email", "jane.sample@example.com"]] },
         { t: "subhead", text: "Scope of authorized work", right: "" },
-        { t: "bullets", items: ["1. Emergency water extraction and surface drying.", "2. Moisture mapping, readings, and documentation per IICRC S500 standard.", "3. " + LONG_CAPTION] },
+        { t: "bullets", items: ["Emergency water extraction and surface drying.", "Moisture mapping, readings, and documentation per IICRC S500 standard.", LONG_CAPTION] },
         { t: "subhead", text: "Terms & conditions", right: "" },
         ...Array.from({ length: 6 }, (_, i) => ({ t: "para", text: `Term ${i + 1}: The owner authorizes the contractor to perform the mitigation described above. ` + "Payment is due upon completion or receipt of insurance proceeds. ".repeat(3), size: 8.5, font: "reg", color: "black" })),
         { t: "para", text: `See ${LONG_URL} for the signed copy.`, size: 8, font: "reg", color: "sub" },
