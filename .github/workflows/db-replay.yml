@@ -41,11 +41,12 @@ env:
   # Census of production public schema, read from pg_catalog 2026-09-07.
   # If a migration legitimately changes one of these, change it here in the
   # same PR — that is the point: the number is a decision, not a reading.
-  EXPECT_TABLES: 74   # +9: the contract tables (migration 0004); +1: magicplan_exports (0010);
+  EXPECT_TABLES: 77   # +9: the contract tables (migration 0004); +1: magicplan_exports (0010);
                       # +2: xact_ref_prices and xact_ref_lines (0011); +1: job_receipts (0015);
                       # +1: worker_heartbeats (0016); +2: receipt_vendors and receipt_return_reviews (0018);
                       # +2: equipment_units and equipment_scans (0022)
                       # +2: job_qbo_links and receipt_qbo_links (0023)
+                      # +3: document_sequences, carrier_packets and carrier_packet_holds (0026)
   EXPECT_POLICIES: 137   # +12: read-only policies on the contract tables (0004);
                          # +1: magicplan_exports owner/office read (0010);
                          # +0: the xact_ref_* tables have none on purpose (0011);
@@ -57,16 +58,19 @@ env:
                          # +2: equipment_units read by owner/office/crew lead/crew, equipment_scans
                          #     by owner/office/crew lead (0022)
                          # +2: job_qbo_links and receipt_qbo_links owner/office read (0023)
-  EXPECT_TRIGGERS: 47   # +10: 6 touch_updated_at, the proposals input guard, and the three
+                         # +0: the 0026 tables are read by the service role alone, on purpose
+  EXPECT_TRIGGERS: 48   # +10: 6 touch_updated_at, the proposals input guard, and the three
                         #      append-only guards on events (0004); +1: project_job_receipts
                         #      on field_projects (0015); +1: proposals_sms_code_skip_text, a new
                         #      proposal steps over codes pending text asks hold (0019);
                         #      +1: project_equipment_scans on field_projects (0022)
                         #      +1: outbox_qbo_link_result, a 'qbo' outbox row sent or dead marks
                         #      its receipt done or failed (0023)
+                        #      +1: outbox_packet_result, a 'packet' outbox row sent or dead marks
+                        #      its carrier packet sent or undelivered (0026)
   EXPECT_VIEWS: 5
   EXPECT_ENUMS: 6   # -1: user_role dropped, profiles.role is text + check (0012)
-  EXPECT_FUNCTIONS: 108  # +1: contact_same_value (0001); +5: current_org, current_principal,
+  EXPECT_FUNCTIONS: 125  # +1: contact_same_value (0001); +5: current_org, current_principal,
                          #     current_role_name, and the two trigger functions (0004);
                          #     +1: role_is (0006); +2: xact_ref_prices_for and
                          #     xact_ref_reload (0011); +15: the op spine — emit_event,
@@ -94,14 +98,22 @@ env:
                          #     the executor op_exec_receipts_qbo_link, the filing door
                          #     receipts_qbo_link_file, the note door receipt_qbo_links_note,
                          #     the picker job_qbo_link_set, the outbox_qbo_link_result
-                         #     trigger function and qbo_service_ping (0023)
-  EXPECT_PKUNIQUE: 99   # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010);
+                         #     trigger function and qbo_service_ping (0023); +17: document_next_number,
+                         #     the card helper carrier_packet_offer_card, the executor
+                         #     op_exec_packet_send, the outbox_packet_result trigger function, and
+                         #     the thirteen carrier_packet_* doors: reserve, file, reoffer, fail,
+                         #     withdraw, hold, hold_texted, candidates, state, pdfs_to_remove,
+                         #     pdfs_removed, storage_bytes and media_sizes (0026)
+  EXPECT_PKUNIQUE: 103  # +14: 9 primary keys and 5 unique constraints (0004); +1: magicplan_exports pkey (0010);
                         # +2: the xact_ref_prices and xact_ref_lines pkeys (0011); +1: job_receipts pkey (0015);
                         # +1: worker_heartbeats pkey (0016); +2: receipt_vendors and receipt_return_reviews pkeys (0018);
                         # +3: the equipment_units and equipment_scans pkeys and equipment_units'
                         #     (org_id, tag_key) unique constraint (0022)
                         # +2: job_qbo_links and receipt_qbo_links pkeys (0023; one expense per receipt is a
                         #     partial unique index, not a constraint, so it is not counted here)
+                        # +4: the document_sequences, carrier_packets and carrier_packet_holds pkeys and
+                        #     carrier_packets' (job_id, seq) unique constraint (0026; one building, one
+                        #     ready and one sent row per version are partial unique indexes, not counted)
 
 jobs:
   replay:

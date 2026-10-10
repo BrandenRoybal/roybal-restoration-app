@@ -26,7 +26,7 @@
 # GitHub's main exactly (git fetch, then HEAD = origin/main: a main older
 # than the last worker deploy from GitHub would roll that deploy back), with
 # no local changes, untracked files included, in what the image is built
-# from (IMAGE_PATHS: services/worker and the five apps/field/js modules the
+# from (IMAGE_PATHS: services/worker and the apps/field/js modules the
 # Dockerfile copies, and .dockerignore, which picks the build context), and
 # with staleEmailReason (adapters/email.mjs):
 # an image without it would send an approved email days late and file its
@@ -76,7 +76,7 @@ DOCKERFILE=services/worker/Dockerfile
 # What the image is built from: every COPY source in the Dockerfile, and the
 # .dockerignore that picks the build context (test/supa.test.mjs holds this
 # list to the Dockerfile's COPY lines).
-IMAGE_PATHS='services/worker apps/field/js/reconcile.js apps/field/js/dryingcalc.js apps/field/js/model.js apps/field/js/core.js apps/field/js/scans.js .dockerignore'
+IMAGE_PATHS='services/worker apps/field/js/reconcile.js apps/field/js/dryingcalc.js apps/field/js/model.js apps/field/js/core.js apps/field/js/scans.js apps/field/js/dryingwatch.js apps/field/js/meterphotos.js apps/field/js/merge.js apps/field/js/thumbs.js apps/field/js/media.js apps/field/js/fincalc.js apps/field/js/completeness.js apps/field/js/photopdf.js .dockerignore'
 UPDATE='cd ~/roybal-restoration-app && git checkout main && git pull'
 RERUN='cd ~/roybal-restoration-app && sh services/worker/set-gmail-secret.sh'
 
@@ -272,9 +272,10 @@ STAGED=
 say ""
 say "Done. What to expect:"
 say "- Fly now runs this checkout's worker with email on. To see it took: fly logs -a $APP"
-say "  shows a new worker.start line with \"email\":true and \"channels\":[\"sms\",\"email\",\"qbo\"],"
+say "  shows a new worker.start line with \"email\":true and \"channels\":[\"sms\",\"email\",\"qbo\",\"packet\"],"
 say "  and no email.disabled line after it. Or open https://$APP.fly.dev/healthz and look for"
-say "  \"channels\":[\"sms\",\"email\",\"qbo\"] (no \"qbo\" while RECEIPTS_QBO=off). The worker's"
+say "  \"channels\":[\"sms\",\"email\",\"qbo\",\"packet\"] (no \"qbo\" while RECEIPTS_QBO=off, no \"packet\""
+say "  while CARRIER_PACKET=off). The worker's"
 say "  heartbeat reports the same channels within 30 seconds, which is how the apps learn email is on."
 say "- Approved emails waiting in line go out now. Any that waited more than EMAIL_MAX_AGE_HOURS"
 say "  (48 by default) are marked dead instead of going out late; the dead-letter text counts them."

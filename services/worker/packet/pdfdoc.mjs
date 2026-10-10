@@ -5,20 +5,25 @@
    file borrows its Helvetica metrics, WinAnsi mapping, word wrap and JPEG
    header reader from), grown to what a multi-section document needs:
 
-   - images are objects of the DOCUMENT, keyed by the caller (a media hash),
-     so a meter photo printed on its moisture map and again on the
-     Certificate of Drying is stored once;
+   - images are objects of the DOCUMENT, keyed by the caller (a media hash)
+     and by their bytes, so a meter photo printed on its moisture map and
+     again on the Certificate of Drying is stored once;
    - JPEGs pass through untouched (/DCTDecode); PNGs (signatures, which are
      transparent canvas exports) are decoded, flattened onto white and
-     re-deflated (/FlateDecode) — node:zlib, nothing to install;
+     re-deflated with the PNG row predictors (/FlateDecode) — node:zlib,
+     nothing to install;
    - three fonts: Helvetica, Helvetica-Bold, Helvetica-Oblique (the oblique
      shares the regular widths);
-   - page links to a URL or to another page, a flat-or-nested outline
-     (bookmarks), and custom /Info keys (the packet number, version and
-     model hash) plus a trailer /ID derived from the bytes.
+   - page links to a URL or to another page, a nested outline (bookmarks),
+     and custom /Info keys (the packet number, version and model hash) plus
+     a trailer /ID derived from the bytes. Bookmark titles and /Info values
+     are written as UTF-16 when they are not plain ASCII: those strings are
+     PDFDocEncoding, not WinAnsi, and an em dash in WinAnsi reads there as
+     a different letter.
 
    Output is deterministic: the same calls give the same bytes. Nothing reads
-   the clock; the caller passes the creation date. */
+   the clock; the caller passes the creation date and the zone it is shown
+   in (the worker runs on UTC, the packet is dated on the Alaska clock). */
 
 import { deflateSync, inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
@@ -33,16 +38,23 @@ export const C = {
   rule: "0.769 0.800 0.847", band: "0.933 0.949 0.969", link: "0.110 0.373 0.690",
   box: "0.957 0.961 0.969", green: "0.086 0.459 0.255", red: "0.706 0.137 0.098",
   dryFill: "0.886 0.957 0.914", wetFill: "0.996 0.925 0.906", gray: "0.600 0.620 0.660",
+  placeholder: "0.898 0.906 0.922",
 };
 
 /* ---------- text ---------- */
 const FONTS = { reg: "F1", bold: "F2", ital: "F3" };
-/* characters a form holds that Helvetica's WinAnsi set lacks, spelled out
-   (photopdf.js drops what it cannot map; a dry goal of "≤ 16%" must not
-   print as " 16%") */
-const SPELL = [[/\u2264/g, "<="], [/\u2265/g, ">="], [/[\u2713\u2714]/g, "Yes"], [/[\u2717\u2718]/g, "No"], [/\u2248/g, "~"]];
+/* Characters a form or a tech's keyboard produces that Helvetica's WinAnsi
+   set lacks, spelled out. photopdf.js drops what it cannot map, and a dry
+   goal of "≤ 16%" must not print as " 16%". (× and ° are Latin-1 and print
+   as themselves.) */
+const SPELL = [
+  [/≤/g, "<="], [/≥/g, ">="], [/≠/g, "!="], [/≈/g, "~"],
+  [/[✓✔✅☑]/g, "Yes"], [/[✗✘❌☒]/g, "No"], [/☐/g, "[ ]"],
+  [/[✕✖]/g, "x"], [/↔/g, "<->"], [/℉/g, "°F"], [/℃/g, "°C"], [/№/g, "No."],
+  [/＋/g, "+"], [/－/g, "-"], [/Δ/g, "Delta "], [/[①-⑳]/g, (c) => `(${c.codePointAt(0) - 0x245f})`],
+];
 export const norm = (str) => {
-  let s = String(str == null ? "" : str);
+  let s = String(str == null ? "" : str).normalize("NFC");
   for (const [re, to] of SPELL) s = s.replace(re, to);
   return s;
 };
@@ -61,7 +73,17 @@ const pdfStr = (bytes) => {
   }
   return s + ")";
 };
+/* a string shown on the page (WinAnsi, the fonts' encoding) */
 export const lit = (str) => pdfStr(winAnsi(norm(str)));
+/* a "text string" (bookmark titles, /Info): ASCII as itself, anything
+   else as UTF-16BE with its byte-order mark */
+export const textString = (str) => {
+  const s = String(str == null ? "" : str).normalize("NFC").replace(/[\u0000-\u001f\u007f]/g, " ");
+  if (/^[\x20-\x7e]*$/.test(s)) return pdfStr(latin1(s));
+  let hex = "<FEFF";
+  for (let i = 0; i < s.length; i++) hex += s.charCodeAt(i).toString(16).toUpperCase().padStart(4, "0");
+  return hex + ">";
+};
 export const n2 = (v) => {
   const r = Math.round(v * 100) / 100;
   return (Object.is(r, -0) ? 0 : r).toString();
@@ -69,11 +91,33 @@ export const n2 = (v) => {
 /* a PDF name from a free key: letters and digits only */
 const pdfName = (k) => "/" + (String(k).replace(/[^A-Za-z0-9]/g, "") || "X");
 
+/* A Date as a PDF date on the wall clock of `timeZone`, with that zone's
+   offset at that instant: D:20261010120000-08'00' in Alaska summer time,
+   -09'00' in winter. Intl does the zone arithmetic, so the result is the
+   same on a UTC container as on an Alaska laptop. "" for a bad date. */
+export function pdfDate(d, timeZone = "UTC") {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) return "";
+  let parts;
+  try {
+    parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+      timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).formatToParts(d).map((x) => [x.type, x.value]));
+  } catch { return pdfDate(d, "UTC"); }
+  const p2 = (n) => String(n).padStart(2, "0");
+  const Y = Number(parts.year), Mo = Number(parts.month), D = Number(parts.day);
+  const h = Number(parts.hour) % 24, mi = Number(parts.minute), s = Number(parts.second);
+  const wall = Date.UTC(Y, Mo - 1, D, h, mi, s);
+  const off = Math.round((wall - Math.floor(d.getTime() / 1000) * 1000) / 60000);   // minutes east of UTC
+  const zone = off === 0 ? "Z" : `${off < 0 ? "-" : "+"}${p2(Math.floor(Math.abs(off) / 60))}'${p2(Math.abs(off) % 60)}'`;
+  return `D:${String(Y).padStart(4, "0")}${p2(Mo)}${p2(D)}${p2(h)}${p2(mi)}${p2(s)}${zone}`;
+}
+
 /* ---------- PNG → flattened RGB ---------- */
-/* Decode an 8-bit (or 16-bit, taking the high byte), non-interlaced PNG of
-   any colour type, composite any alpha onto white, and return
-   { width, height, rgb: Uint8Array } — or null when it is not a PNG this
-   can read (interlaced, corrupt, bit depths below 8 other than palette). */
+/* Decode a non-interlaced PNG of any colour type (8 or 16 bits, taking the
+   high byte of 16; 1, 2 or 4 bits for palette and grey), composite any
+   alpha onto white, and return { width, height, rgb: Uint8Array } — or null
+   when it is not a PNG this can read (interlaced, corrupt, unknown type). */
 export function decodePng(bytes) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
   const SIG = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -84,8 +128,8 @@ export function decodePng(bytes) {
   const idat = [];
   while (o + 8 <= b.length) {
     const len = be32(o), type = String.fromCharCode(b[o + 4], b[o + 5], b[o + 6], b[o + 7]);
-    const data = b.subarray(o + 8, o + 8 + len);
     if (o + 12 + len > b.length) return null;
+    const data = b.subarray(o + 8, o + 8 + len);
     if (type === "IHDR") {
       width = be32(o + 8); height = be32(o + 12); depth = b[o + 16]; ctype = b[o + 17]; interlace = b[o + 20];
     } else if (type === "PLTE") palette = data;
@@ -97,7 +141,8 @@ export function decodePng(bytes) {
   if (!width || !height || interlace !== 0 || !idat.length) return null;
   const chans = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[ctype];
   if (!chans) return null;
-  if (ctype === 3 ? ![1, 2, 4, 8].includes(depth) : ![8, 16].includes(depth)) return null;
+  const depths = ctype === 3 ? [1, 2, 4, 8] : ctype === 0 ? [1, 2, 4, 8, 16] : [8, 16];
+  if (!depths.includes(depth)) return null;
   if (width * height > 40_000_000) return null;                // a page-sized scan at most
   let raw;
   try { raw = inflateSync(Buffer.concat(idat.map((d) => Buffer.from(d)))); } catch { return null; }
@@ -131,23 +176,25 @@ export function decodePng(bytes) {
     }
   }
   const rgb = new Uint8Array(width * height * 3);
-  const sample = (row, i) => {                                 // i-th sample of a row, 8-bit
+  const sample = (row, i) => {                                 // i-th sample of a row, as stored
     if (depth === 16) return px[row * stride + i * 2];
     if (depth === 8) return px[row * stride + i];
     const per = 8 / depth, byte = px[row * stride + Math.floor(i / per)];
     const shift = 8 - depth * ((i % per) + 1);
     return (byte >> shift) & ((1 << depth) - 1);
   };
-  const tr16 = (k) => (trns && trns.length >= k * 2 + 2 ? trns[k * 2] : -1);   // tRNS high byte
+  const greyScale = depth < 8 ? 255 / ((1 << depth) - 1) : 1; // a 1-bit grey sample is 0 or 255
+  const tr16 = (k) => (trns && trns.length >= k * 2 + 2 ? (depth === 16 ? trns[k * 2] : trns[k * 2 + 1]) : -1);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       let r, g, bl, al = 255;
       if (ctype === 0) {
-        r = g = bl = sample(y, x);
-        if (trns && depth === 8 && trns.length >= 2 && r === trns[1]) al = 0;
+        const v = sample(y, x);
+        if (trns && v === tr16(0)) al = 0;
+        r = g = bl = Math.round(v * greyScale);
       } else if (ctype === 2) {
         r = sample(y, x * 3); g = sample(y, x * 3 + 1); bl = sample(y, x * 3 + 2);
-        if (trns && depth === 8 && r === tr16(0) && g === tr16(1) && bl === tr16(2)) al = 0;
+        if (trns && r === tr16(0) && g === tr16(1) && bl === tr16(2)) al = 0;
       } else if (ctype === 3) {
         const k = sample(y, x);
         if (!palette || palette.length < k * 3 + 3) return null;
@@ -166,6 +213,35 @@ export function decodePng(bytes) {
     }
   }
   return { width, height, rgb };
+}
+
+/* Rows of samples with a PNG predictor in front of each (the filter with the
+   smallest sum of absolute values, the usual heuristic): deflate shrinks a
+   flattened signature or a scanned page several times better this way than
+   as bare samples. /DecodeParms /Predictor 15 tells the reader. */
+function predictRows(px, width, height, chans) {
+  const stride = width * chans;
+  const out = new Uint8Array((stride + 1) * height);
+  const cand = Array.from({ length: 5 }, () => new Uint8Array(stride));
+  for (let y = 0; y < height; y++) {
+    const row = y * stride, up = row - stride;
+    const sums = [0, 0, 0, 0, 0];
+    for (let x = 0; x < stride; x++) {
+      const v = px[row + x];
+      const a = x >= chans ? px[row + x - chans] : 0;
+      const u = y ? px[up + x] : 0;
+      const c = y && x >= chans ? px[up + x - chans] : 0;
+      const p = a + u - c, pa = Math.abs(p - a), pb = Math.abs(p - u), pc = Math.abs(p - c);
+      const pred = pa <= pb && pa <= pc ? a : pb <= pc ? u : c;
+      const f = [v, (v - a) & 0xff, (v - u) & 0xff, (v - ((a + u) >> 1)) & 0xff, (v - pred) & 0xff];
+      for (let k = 0; k < 5; k++) { cand[k][x] = f[k]; sums[k] += f[k] < 128 ? f[k] : 256 - f[k]; }
+    }
+    let best = 0;
+    for (let k = 1; k < 5; k++) if (sums[k] < sums[best]) best = k;
+    out[y * (stride + 1)] = best;
+    out.set(cand[best], y * (stride + 1) + 1);
+  }
+  return out;
 }
 
 /* the image kind from its first bytes */
@@ -187,14 +263,18 @@ class Page {
   }
   raw(op) { this.ops.push(op); }
 
-  /* text at a baseline; returns its width. maxWidth trims (no ellipsis). */
-  text(x, y, str, { size = 9, font = "reg", color = C.black, align = "left", maxWidth = 0 } = {}) {
+  /* Text at a baseline; returns its width. maxWidth trims (no ellipsis);
+     spacing is extra space between letters (print.css letter-spacing). */
+  text(x, y, str, { size = 9, font = "reg", color = C.black, align = "left", maxWidth = 0, spacing = 0 } = {}) {
     let s = norm(str);
-    if (maxWidth) while (s && textWidth(s, size, font) > maxWidth) s = s.slice(0, -1);
+    const width = (t) => textWidth(t, size, font) + (spacing && t.length > 1 ? spacing * (t.length - 1) : 0);
+    if (maxWidth) while (s && width(s) > maxWidth) s = s.slice(0, -1);
     if (!s) return 0;
-    const w = textWidth(s, size, font);
+    const w = width(s);
     const tx = align === "right" ? x - w : align === "center" ? x - w / 2 : x;
-    this.ops.push(`BT /${FONTS[font] || "F1"} ${n2(size)} Tf ${color} rg ${n2(tx)} ${n2(y)} Td ${lit(s)} Tj ET`);
+    const op = `BT /${FONTS[font] || "F1"} ${n2(size)} Tf ${spacing ? `${n2(spacing)} Tc ` : ""}${color} rg ${n2(tx)} ${n2(y)} Td ${lit(s)} Tj ET`;
+    // character spacing is graphics state and outlives ET: keep it to this text
+    this.ops.push(spacing ? `q ${op} Q` : op);
     return w;
   }
 
@@ -206,7 +286,7 @@ class Page {
   /* x, y = bottom-left */
   rect(x, y, w, h, { fill = null, stroke = null, width = 0.5 } = {}) {
     if (fill) this.ops.push(`${fill} rg ${n2(x)} ${n2(y)} ${n2(w)} ${n2(h)} re f`);
-    if (stroke) this.ops.push(`${n2(width)} w ${stroke} RG ${n2(x)} ${n2(y)} ${n2(w)} ${n2(h)} re S`);
+    if (stroke) this.ops.push(`q ${n2(width)} w ${stroke} RG ${n2(x)} ${n2(y)} ${n2(w)} ${n2(h)} re S Q`);
   }
 
   circle(cx, cy, r, { fill = null, stroke = null, width = 0.5 } = {}) {
@@ -227,12 +307,15 @@ class Page {
     this.ops.push(`q ${n2(w)} 0 0 ${n2(h)} ${n2(x)} ${n2(y)} cm /${img.name} Do Q`);
   }
 
-  /* object-fit: contain, centred in the box; returns the drawn rect */
-  imageFit(img, x, y, w, h) {
+  /* object-fit: contain in the box; returns the drawn rect. align "center"
+     (default) or "left" (a signature sits at the start of its line);
+     valign "middle" (default) or "top" (a document page under its caption). */
+  imageFit(img, x, y, w, h, { align = "center", valign = "middle", maxScale = Infinity } = {}) {
     if (!img || !img.width || !img.height) return null;
-    const s = Math.min(w / img.width, h / img.height);
+    const s = Math.min(w / img.width, h / img.height, maxScale);
     const dw = img.width * s, dh = img.height * s;
-    const dx = x + (w - dw) / 2, dy = y + (h - dh) / 2;
+    const dx = align === "left" ? x : x + (w - dw) / 2;
+    const dy = valign === "top" ? y + h - dh : y + (h - dh) / 2;
     this.image(img, dx, dy, dw, dh);
     return { x: dx, y: dy, w: dw, h: dh };
   }
@@ -247,9 +330,13 @@ class Page {
 
 /* ---------- the document ---------- */
 export class PdfDoc {
-  constructor() {
+  /* compress: deflate the page content streams (a table-heavy packet's
+     text operators are several times its fonts and structure) */
+  constructor({ compress = true } = {}) {
+    this.compress = compress;
     this.pages = [];
     this.images = new Map();                                   // key → image
+    this.byBytes = new Map();                                  // sha256 of the bytes → image
     this.outlineItems = [];
   }
 
@@ -259,33 +346,51 @@ export class PdfDoc {
     return p;
   }
 
-  /* An image for these bytes, stored once per key. JPEG passes through;
-     PNG is flattened. Returns { name, width, height, kind } or null when
-     the bytes are not an image this writer can embed. */
+  /* An image for these bytes, stored once per key and once per content.
+     JPEG passes through; PNG is flattened. Returns { name, width, height,
+     kind } or null when the bytes are not an image this writer can embed. */
   image(bytes, key) {
     const k = String(key || "");
     if (k && this.images.has(k)) return this.images.get(k);
-    const kind = imageKind(bytes);
+    if (!bytes || !bytes.length) return null;
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const digest = createHash("sha256").update(u8).digest("hex");
+    if (this.byBytes.has(digest)) {
+      const same = this.byBytes.get(digest);
+      if (k) this.images.set(k, same);
+      return same;
+    }
+    const kind = imageKind(u8);
     let img = null;
     if (kind === "jpeg") {
-      const info = jpegInfo(bytes);
+      const info = jpegInfo(u8);
       if (info && [1, 3, 4].includes(info.components)) {
-        img = { kind, width: info.width, height: info.height, components: info.components, data: bytes };
+        img = { kind, width: info.width, height: info.height, components: info.components, data: u8 };
       }
     } else if (kind === "png") {
-      const px = decodePng(bytes);
-      if (px) img = { kind, width: px.width, height: px.height, components: 3, data: deflateSync(px.rgb, { level: 9 }) };
+      const px = decodePng(u8);
+      if (px) {
+        // a grey image (a scanned page) keeps one channel
+        let grey = true;
+        for (let i = 0; i < px.rgb.length && grey; i += 3) grey = px.rgb[i] === px.rgb[i + 1] && px.rgb[i] === px.rgb[i + 2];
+        const chans = grey ? 1 : 3;
+        let samples = px.rgb;
+        if (grey) { samples = new Uint8Array(px.width * px.height); for (let i = 0; i < samples.length; i++) samples[i] = px.rgb[i * 3]; }
+        img = { kind, width: px.width, height: px.height, components: chans, data: deflateSync(predictRows(samples, px.width, px.height, chans), { level: 9 }) };
+      }
     }
     if (!img) return null;
-    img.name = "Im" + (this.images.size + 1);
+    img.name = "Im" + (this.byBytes.size + 1);
+    this.byBytes.set(digest, img);
     this.images.set(k || img.name, img);
     return img;
   }
 
-  /* bookmarks: [{ title, page, children?: [{ title, page }] }], page 0-based */
+  /* bookmarks: [{ title, page, children?: [...] }], page 0-based; shown open */
   outline(items) { this.outlineItems = Array.isArray(items) ? items : []; }
 
-  /* info: { title, subject, author, keywords, creator, producer, created: Date, custom: { Key: "value" } } */
+  /* info: { title, subject, author, keywords, creator, producer,
+             created: Date, timeZone, custom: { Key: "value" } } */
   finish(info = {}) {
     const objs = [];
     const reserve = () => { objs.push(null); return objs.length; };
@@ -301,19 +406,23 @@ export class PdfDoc {
     };
     // images in the order they were first added (deterministic)
     const imgObj = new Map();
-    for (const img of this.images.values()) {
+    for (const img of this.byBytes.values()) {
+      const cs = img.components === 1 ? "/DeviceGray" : img.components === 4 ? "/DeviceCMYK" : "/DeviceRGB";
       if (img.kind === "jpeg") {
-        const cs = img.components === 1 ? "/DeviceGray" : img.components === 4 ? "/DeviceCMYK" : "/DeviceRGB";
-        const decode = img.components === 4 ? " /Decode [1 0 1 0 1 0 1 0]" : "";
+        const decode = img.components === 4 ? " /Decode [1 0 1 0 1 0 1 0]" : "";   // Adobe CMYK JPEGs are inverted
         imgObj.set(img.name, add(...stream(`/Type /XObject /Subtype /Image /Width ${img.width} /Height ${img.height} /ColorSpace ${cs} /BitsPerComponent 8 /Filter /DCTDecode${decode}`, img.data)));
       } else {
-        imgObj.set(img.name, add(...stream(`/Type /XObject /Subtype /Image /Width ${img.width} /Height ${img.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode`, img.data)));
+        imgObj.set(img.name, add(...stream(`/Type /XObject /Subtype /Image /Width ${img.width} /Height ${img.height} /ColorSpace ${cs} /BitsPerComponent 8 /Filter /FlateDecode` +
+          ` /DecodeParms << /Predictor 15 /Colors ${img.components} /BitsPerComponent 8 /Columns ${img.width} >>`, img.data)));
       }
     }
     const pageObjs = this.pages.map(() => reserve());
     const fontRes = `/Font << ${Object.entries(fonts).map(([k, n]) => `/${k} ${n} 0 R`).join(" ")} >>`;
     this.pages.forEach((p, i) => {
-      const content = add(...stream("", latin1(p.ops.join("\n"))));
+      const ops = latin1(p.ops.join("\n"));
+      const content = this.compress
+        ? add(...stream("/Filter /FlateDecode", deflateSync(ops, { level: 6 })))
+        : add(...stream("", ops));
       const annots = p.annots.map((a) => {
         const rect = `/Rect [${a.rect.map(n2).join(" ")}] /Border [0 0 0]`;
         if (a.url) return add(`<< /Type /Annot /Subtype /Link ${rect} /A << /S /URI /URI ${pdfStr(latin1(a.url))} >> >>`);
@@ -327,45 +436,41 @@ export class PdfDoc {
     });
     set(pagesObj, `<< /Type /Pages /Kids [${pageObjs.map((n) => n + " 0 R").join(" ")}] /Count ${pageObjs.length} >>`);
 
-    // outline
+    // outline, every level open: /Count is the number of visible descendants
     let outlines = 0;
-    const items = this.outlineItems.filter((it) => it && it.title && pageObjs[it.page]);
+    const valid = (list) => (list || []).filter((it) => it && String(it.title || "").trim() && pageObjs[it.page]);
+    const items = valid(this.outlineItems);
     if (items.length) {
       outlines = reserve();
       const build = (list, parent) => {
         const nums = list.map(() => reserve());
         let total = 0;
         list.forEach((it, i) => {
-          const kids = (it.children || []).filter((c) => c && c.title && pageObjs[c.page]);
+          const kids = valid(it.children);
           const sub = kids.length ? build(kids, nums[i]) : null;
           total += 1 + (sub ? sub.total : 0);
-          set(nums[i], `<< /Title ${lit(it.title)} /Parent ${parent} 0 R` +
+          set(nums[i], `<< /Title ${textString(String(it.title).trim())} /Parent ${parent} 0 R` +
             (i ? ` /Prev ${nums[i - 1]} 0 R` : "") + (i < list.length - 1 ? ` /Next ${nums[i + 1]} 0 R` : "") +
-            (sub ? ` /First ${sub.first} 0 R /Last ${sub.last} 0 R /Count ${-sub.count}` : "") +
-            ` /Dest [${pageObjs[it.page]} 0 R /Fit] >>`);
+            (sub ? ` /First ${sub.first} 0 R /Last ${sub.last} 0 R /Count ${sub.total}` : "") +
+            ` /Dest [${pageObjs[it.page]} 0 R /XYZ null null null] >>`);
         });
-        return { first: nums[0], last: nums[nums.length - 1], count: list.length, total };
+        return { first: nums[0], last: nums[nums.length - 1], total };
       };
       const top = build(items, outlines);
       set(outlines, `<< /Type /Outlines /First ${top.first} 0 R /Last ${top.last} 0 R /Count ${top.total} >>`);
     }
     set(catalog, `<< /Type /Catalog /Pages ${pagesObj} 0 R` + (outlines ? ` /Outlines ${outlines} 0 R /PageMode /UseOutlines` : "") + " >>");
 
-    const stamp = (d) => {
-      if (!(d instanceof Date) || Number.isNaN(d.getTime())) return "";
-      const p = (n) => String(n).padStart(2, "0");
-      return `D:${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
-    };
     const kv = [];
-    if (info.title) kv.push(`/Title ${lit(info.title)}`);
-    if (info.subject) kv.push(`/Subject ${lit(info.subject)}`);
-    if (info.author) kv.push(`/Author ${lit(info.author)}`);
-    if (info.keywords) kv.push(`/Keywords ${lit(info.keywords)}`);
-    kv.push(`/Creator ${lit(info.creator || "Roybal Field Forms")}`);
-    kv.push(`/Producer ${lit(info.producer || "Roybal Field Forms")}`);
-    const created = stamp(info.created);
+    if (info.title) kv.push(`/Title ${textString(info.title)}`);
+    if (info.subject) kv.push(`/Subject ${textString(info.subject)}`);
+    if (info.author) kv.push(`/Author ${textString(info.author)}`);
+    if (info.keywords) kv.push(`/Keywords ${textString(info.keywords)}`);
+    kv.push(`/Creator ${textString(info.creator || "Roybal Field Forms")}`);
+    kv.push(`/Producer ${textString(info.producer || "Roybal Field Forms")}`);
+    const created = pdfDate(info.created, info.timeZone || "UTC");
     if (created) kv.push(`/CreationDate (${created})`, `/ModDate (${created})`);
-    for (const [k, v] of Object.entries(info.custom || {})) if (v != null && v !== "") kv.push(`${pdfName(k)} ${lit(v)}`);
+    for (const [k, v] of Object.entries(info.custom || {})) if (v != null && v !== "") kv.push(`${pdfName(k)} ${textString(v)}`);
     const infoObj = add(`<< ${kv.join(" ")} >>`);
 
     // serialise
@@ -392,4 +497,4 @@ export class PdfDoc {
   }
 }
 
-export const createPdf = () => new PdfDoc();
+export const createPdf = (opts) => new PdfDoc(opts);

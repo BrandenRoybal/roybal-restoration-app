@@ -9,8 +9,21 @@
    nightly QuickBooks match answers {skipped:"off"} and the 'qbo' outbox
    channel is not served, so approved QuickBooks changes wait as pending and
    no new card is filed; anything else, or unset, leaves both on),
-   QBO_PROXY_URL (default: the project's qbo-proxy). Numbers are clamped so
-   a typo cannot make the worker spin or go silent. */
+   QBO_PROXY_URL (default: the project's qbo-proxy). The carrier packet
+   (docs/Carrier_Packet_Design.md §11): CARRIER_PACKET (`off` = the hourly
+   packet.build answers {skipped:"off"} and the 'packet' outbox channel is
+   not served, so no packet card is filed and an approved one waits as
+   pending; 'packet' is also never served without Gmail, since it is the
+   email adapter that sends it), PACKET_LOOKBACK_DAYS (default 14, 1..90: how
+   recent a job's drying or invoice date must be for its first packet),
+   PACKET_SETTLE_MIN (120, 0..1440: minutes a job must sit unedited before a
+   build), PACKET_MAX_BUILDS (3, 1..10 per run), PACKET_DOWNLOADS (4, 1..8
+   media downloads at a time), PACKET_FULL_KB (9500, 1000..17000: the media
+   budget for full-size photos, above which a packet goes compact),
+   PACKET_HARD_KB (17000, 2000..18000: a rendered PDF over this is refused as
+   too large to email), PACKET_STORAGE_MB (300, 50..900: the carrier-packets
+   bucket's cap), PACKET_TEXTS (`off` stops the packet texts only). Numbers
+   are clamped so a typo cannot make the worker spin or go silent. */
 import os from "node:os";
 
 export const OUTBOX_AGENT_ID = "0a7ac824-5042-4bb5-ab0d-8569cea209b1"; // agents seed, migration 0004
@@ -75,12 +88,20 @@ export function loadConfig(env = process.env) {
   const gmailClientSecret = String(env.GMAIL_CLIENT_SECRET ?? "").trim();
   const emailEnabled = Boolean(gmailClientId && gmailClientSecret);
   const receiptsQbo = String(env.RECEIPTS_QBO ?? "").trim().toLowerCase() !== "off";
+  const carrierPacket = String(env.CARRIER_PACKET ?? "").trim().toLowerCase() !== "off";
   // The heartbeat reports these channels, and a channel listed there is
   // what the database's filing doors take as "someone delivers this"
   // (outbox_channel_ready): with RECEIPTS_QBO=off, 'qbo' is not served, so
-  // receipts_qbo_link_file files no card either.
-  const channels = list("OUTBOX_CHANNELS", "sms,email,qbo")
-    .filter((c) => (c !== "email" || emailEnabled) && (c !== "qbo" || receiptsQbo));
+  // receipts_qbo_link_file files no card either. 'packet' the same way for
+  // carrier_packet_reserve, and it needs Gmail: a packet card filed while
+  // nothing can send it would only wait out its age limit and go dead.
+  const channels = list("OUTBOX_CHANNELS", "sms,email,qbo,packet")
+    .filter((c) => (c !== "email" || emailEnabled) && (c !== "qbo" || receiptsQbo)
+      && (c !== "packet" || (emailEnabled && carrierPacket)));
+  // A full-photo budget above the hard ceiling would pick full mode for a
+  // packet that is then refused as too large, never trying compact.
+  const packetHardKb = num("PACKET_HARD_KB", 17000, 2000, 18000);
+  const packetFullKb = Math.min(num("PACKET_FULL_KB", 9500, 1000, 17000), packetHardKb);
 
   return {
     supabaseUrl: url,
@@ -102,15 +123,28 @@ export function loadConfig(env = process.env) {
     outboxBatch: num("OUTBOX_BATCH", 10, 1, 100),
     channels,
     // An unlisted kind waits `queued` forever, so a QUEUE_KINDS set on the
-    // app (fly.toml [env] or a secret) must name billing.reconcile and
-    // receipts.qbo_match too.
-    queueKinds: list("QUEUE_KINDS", "proposal.execute,billing.reconcile,receipts.qbo_match"),
+    // app (fly.toml [env] or a secret) must name billing.reconcile,
+    // receipts.qbo_match and packet.build too.
+    queueKinds: list("QUEUE_KINDS", "proposal.execute,billing.reconcile,receipts.qbo_match,packet.build"),
     // The billing check's kill switch (README, Day-2 ops): the queue row is
     // still claimed and finished, done with {skipped:"off"}.
     billingReconcile: String(env.BILLING_RECONCILE ?? "").trim().toLowerCase() !== "off",
     // The QuickBooks link's kill switch: the nightly match finishes done with
     // {skipped:"off"} and the 'qbo' channel is dropped above.
     receiptsQbo,
+    // The carrier packet's kill switch: packet.build finishes done with
+    // {skipped:"off"} and the 'packet' channel is dropped above. The rest
+    // are the lane's knobs (§10, §11); PACKET_TEXTS=off silences its texts
+    // and nothing else.
+    carrierPacket,
+    packetLookbackDays: num("PACKET_LOOKBACK_DAYS", 14, 1, 90),
+    packetSettleMin: num("PACKET_SETTLE_MIN", 120, 0, 1440),
+    packetMaxBuilds: num("PACKET_MAX_BUILDS", 3, 1, 10),
+    packetDownloads: num("PACKET_DOWNLOADS", 4, 1, 8),
+    packetFullKb,
+    packetHardKb,
+    packetStorageMb: num("PACKET_STORAGE_MB", 300, 50, 900),
+    packetTexts: String(env.PACKET_TEXTS ?? "").trim().toLowerCase() !== "off",
     emailEnabled,
     gmailClientId,
     gmailClientSecret,

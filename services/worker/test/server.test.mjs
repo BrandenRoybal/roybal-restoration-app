@@ -103,3 +103,27 @@ test("a database outage does not take /healthz down", async () => {
   assert.ok(log.events().includes("outbox.loop_error"));
   await w.stop("test");
 });
+
+test("the packet adapter (the email adapter in packet mode) is registered only while the packet channel is served", async () => {
+  let cfg = testConfig({ port: 0, ownerCell: "", channels: ["sms", "email", "packet"], queueKinds: ["packet.build"] });
+  let w = createWorker({ cfg, log: recordingLog(), fetchImpl: stubRest(cfg) });
+  await w.start();
+  assert.equal(w.ctx.adapters.packet?.channel, "packet");
+  assert.equal(w.ctx.adapters.packet?.connection, "gmail");
+  assert.equal(w.ctx.adapters.email?.channel, "email", "plain email keeps its own adapter");
+  assert.notEqual(w.ctx.adapters.packet, w.ctx.adapters.email);
+  const port = w.server.address().port;
+  const body = await (await globalThis.fetch(`http://127.0.0.1:${port}/healthz`)).json();
+  assert.deepEqual(body.channels, ["sms", "email", "packet"]);
+  assert.deepEqual(body.kinds, ["packet.build"]);
+  await w.stop("test");
+
+  // CARRIER_PACKET=off (or no Gmail) leaves 'packet' out of the channels: no adapter.
+  for (const over of [{ channels: ["sms", "email"], carrierPacket: false }, { channels: ["sms"], emailEnabled: false }]) {
+    cfg = testConfig({ port: 0, ownerCell: "", ...over });
+    w = createWorker({ cfg, log: recordingLog(), fetchImpl: stubRest(cfg) });
+    await w.start();
+    assert.equal(w.ctx.adapters.packet, undefined, JSON.stringify(over));
+    await w.stop("test");
+  }
+});

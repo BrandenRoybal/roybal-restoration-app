@@ -22,7 +22,9 @@
 --      invoice.review_gaps), is held to the same shape beside it (2b); the
 --      rest of 0021 is billing_review_gaps.test.sql. So is the third, 0023's
 --      (agent:integrations may PROPOSE receipts.qbo_link, 2c); the rest of
---      0023 is receipts_qbo_link.test.sql.
+--      0023 is receipts_qbo_link.test.sql. And the fourth, 0026's
+--      (agent:documents may PROPOSE packet.send, 2d); the rest of 0026 is
+--      carrier_packet.test.sql.
 --   3. current_agent_id is the agents row a machine login acts as, and null
 --      for a human, a disabled agent, a human login wrongly linked to an
 --      agents row, and a caller with no identity.
@@ -259,6 +261,59 @@ begin
   end if;
   if public.op_agent_permits(billing, 'receipts.qbo_link', 'money', 'propose') then
     raise exception 'agent:billing may propose receipts.qbo_link with no grant of its own';
+  end if;
+end
+$$;
+
+-- 2d. agent:documents' grant (0026), the same way
+do $$
+declare
+  docs  constant uuid := 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65';
+  brief constant uuid := '1af33481-7f1c-4485-87f5-7b0ec5e27554';
+  integ constant uuid := '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10';
+begin
+  if (select count(*) from public.agent_authority
+       where agent_id = docs and operation = 'packet.send' and capability = 'propose'
+         and revoked_at is null) <> 1 then
+    raise exception 'agent:documents does not hold exactly one live packet.send propose grant';
+  end if;
+  if (select count(*) from public.agent_authority where agent_id = docs and revoked_at is null) <> 1 then
+    raise exception 'agent:documents holds a live grant beside packet.send propose';
+  end if;
+  if not exists (select 1 from public.agent_authority g
+                   join public.events e on e.aggregate_type = 'agent_authority' and e.aggregate_id = g.id
+                  where g.agent_id = docs and g.operation = 'packet.send'
+                    and e.kind = 'agent_authority.granted' and e.principal_kind = 'system'
+                    and e.idempotency_key = 'agent_authority.granted:' || g.id
+                    and e.data ->> 'operation' = 'packet.send' and e.data ->> 'capability' = 'propose'
+                    and e.data ->> 'agent' = 'agent:documents') then
+    raise exception 'the agent:documents grant has no agent_authority.granted event naming it';
+  end if;
+  if (select reason from public.agent_authority
+       where agent_id = docs and operation = 'packet.send' and revoked_at is null) !~ '0026.*2026-10-10' then
+    raise exception 'the agent:documents grant does not say it is 0026 on the owner''s go of 2026-10-10';
+  end if;
+
+  if not public.op_agent_permits(docs, 'packet.send', 'comms', 'propose') then
+    raise exception 'agent:documents may not propose packet.send';
+  end if;
+  if public.op_agent_permits(docs, 'packet.send', 'comms', 'execute') then
+    raise exception 'agent:documents may execute packet.send; 0026 grants propose only';
+  end if;
+  if public.op_agent_permits(docs, 'packet.send', 'comms', 'approve') then
+    raise exception 'agent:documents may approve';
+  end if;
+  if public.op_agent_permits(docs, 'email.send', 'comms', 'propose') then
+    raise exception 'agent:documents may propose email.send';
+  end if;
+  if public.op_agent_permits(docs, 'receipts.qbo_link', 'money', 'propose') then
+    raise exception 'agent:documents may propose receipts.qbo_link';
+  end if;
+  if public.op_agent_permits(brief, 'packet.send', 'comms', 'propose') then
+    raise exception 'agent:brief may propose packet.send with no grant of its own';
+  end if;
+  if public.op_agent_permits(integ, 'packet.send', 'comms', 'propose') then
+    raise exception 'agent:integrations may propose packet.send with no grant of its own';
   end if;
 end
 $$;

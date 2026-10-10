@@ -1,8 +1,8 @@
 # Roybal worker — the operations spine's hands (Fly app `roybal-worker`)
 
 The always-on Node process that turns an approved proposal into a sent text,
-an email or a QuickBooks change, and runs the nightly billing check and the
-nightly QuickBooks match. The spine (migrations
+an email or a QuickBooks change, and runs the nightly billing check, the
+nightly QuickBooks match and the hourly carrier packet. The spine (migrations
 0013–0017) decides *what* may happen and records that it did; this process is
 the only thing that *does* it. It is its own Fly app, never co-hosted with the
 phone agent: a stalled send must never touch a live call, and the dead-worker
@@ -10,14 +10,15 @@ alarm assumes this app is the only writer of `worker_heartbeats`.
 
 ```
 owner approves (admin app / YES by text)
-  → op_proposal_approve → executor writes outbox rows (email.send, sms.send, receipts.qbo_link)
+  → op_proposal_approve → executor writes outbox rows (email.send, sms.send, receipts.qbo_link, packet.send)
                         → or enqueues a jobs_queue row (worker-runtime ops; none yet)
 pg_cron 14:45 UTC → enqueues a billing.reconcile row (the nightly billing check, below)
 pg_cron 14:50 UTC → enqueues a receipts.qbo_match row (the nightly QuickBooks match, below)
+pg_cron :25 every hour → enqueues a packet.build row (the carrier packet, below)
                                       ↓ polled every 5 s
 THIS WORKER (Fly, one machine)
-  outbox lane   outbox_claim → Twilio via roybal-notify | Gmail API | qbo-proxy → outbox_sent / outbox_failed
-  queue lane    claim_job → op_execute | billing check | QuickBooks match → finish_job
+  outbox lane   outbox_claim → Twilio via roybal-notify | Gmail API (email, packet) | qbo-proxy → outbox_sent / outbox_failed
+  queue lane    claim_job → op_execute | billing check | QuickBooks match | carrier packet → finish_job
   heartbeat     worker_heartbeat every 30 s; dead-letter text to the owner
                                       ↓
 pg_cron (in the database, every 5 min)   worker_liveness_check: 10 min of silence
@@ -118,12 +119,21 @@ few milliseconds inside one request.
   The provider id `Purchase:<id>:<SyncToken>` is what the 0023 trigger reads
   back into the receipt's row. Served only while `qbo` is in
   `OUTBOX_CHANNELS` (the default); `RECEIPTS_QBO=off` takes it out.
+- **Carrier packets** (`packet` rows: one per approved `packet.send` card)
+  are an email with one PDF attached, sent by the email adapter in packet
+  mode over the same Gmail connection. They are a channel of their own, not
+  `email`, so a worker that does not know packets (it claims by channel)
+  never takes one and sends the email without the PDF; plain `email` rows
+  are built and sent exactly as before. Served only while email is on and
+  `CARRIER_PACKET` is not `off` (the carrier packet, below).
 - **`portal` outbox rows are not touched** (no adapter yet); they wait as
   `pending` until a later phase.
 - **Queue kinds**: `proposal.execute` (runs `op_execute` as the approver; a
   proposal whose executor fails is recorded on the proposal, and the job is
   done with that outcome), `billing.reconcile` (the nightly billing check,
-  below) and `receipts.qbo_match` (the nightly QuickBooks match, below).
+  below), `receipts.qbo_match` (the nightly QuickBooks match, below) and
+  `packet.build` (the hourly carrier packet, below; loaded on its first run,
+  so a file missing from the image fails that kind only, never the boot).
   Only the kinds in `QUEUE_KINDS` are claimed; a row of any other
   kind waits as `queued` until a worker that knows it is deployed. A kind
   that is listed but has no handler is dead on arrival.
@@ -457,6 +467,293 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   worker runs yesterday's and today's. To see a first result without waiting
   for the morning, enqueue a manual run (above).
 
+## The hourly carrier packet (`packet.build`, migration 0026)
+
+When a water job is dry (its Certificate of Drying is signed) and has a
+numbered invoice, this lane draws the job's certificate, work authorization,
+floor plan, moisture maps, drying logs, photos, documents and invoices into
+ONE numbered PDF (`PKT-2026-0001 v1`), stores it in the private
+`carrier-packets` bucket, and files ONE `packet.send` card in the Approvals
+inbox: the adjuster email with that PDF attached. Approving the card queues
+one `packet` outbox row, which the email adapter sends once from the
+connected Gmail, and if what prints changes afterwards the next run builds
+version 2 under the same number. The contract is
+`docs/Carrier_Packet_Design.md`; the email, the card's Why and the texts are
+fixed templates, and no AI is used anywhere.
+
+```
+pg_cron minute 25 of every hour, carrier-packet-hourly
+  → enqueue('packet.build', {run_hour: <Alaska YYYY-MM-DDTHH>}, key packet.build:<Alaska hour>, priority -10, agent:documents)
+THIS WORKER  lanes/packet.mjs; the document in packet/model.mjs (pure), drawn by packet/render.mjs
+  carrier_packet_candidates   the jobs to look at, oldest updated_at first
+  field_projects              the job blob; portal_jobs: the customer's certificate signature, when one is on its way
+  packetGate → buildModel     in scope or not; then what prints, and its hash (which decides a version)
+  carrier_packet_media_sizes  the size budget, full or compact photos, before anything is downloaded
+  → carrier_packet_reserve(job, hash, …)          skip, offer the stored PDF again, or build
+  field-media                 the images, PACKET_DOWNLOADS at a time → render → upload to carrier-packets
+  email_messages, gmail_tokens  the suggested To (the connected account's address only, never a token)
+  → carrier_packet_file / carrier_packet_reoffer   the card, with no text code; then the "ready" text
+owner approves in the inbox → op_exec_packet_send → ONE outbox row, channel packet
+THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PDF attached
+  → outbox_packet_result: the packet row becomes sent (sent_at, sent_to) or undelivered
+```
+
+- **Which jobs get a card** (`packetGate`, design §4). Checked in this
+  order, and the first that fails is the reason the summary counts:
+  `deleted`; `archived`; `not_water` (a restoration job with water among its
+  loss types); `excluded` (Cert. of Drying or Construction Invoice unticked
+  on the job's packet page); `not_certified` (no technician signature, or in
+  upload mode no signed copy); `no_invoice` (no ready invoice: one that is
+  not void, not a held billing-check draft, not a rebuild invoice made from
+  an estimate, and has a printed number; a QuickBooks id alone is not a
+  number anyone can quote); `unchecked_fills` (a meter reading the app read
+  from a photo that nobody has checked); `unread_meter_photos` (a meter
+  photo on an empty reading not read yet); `lookback` (a job with no packet
+  row yet whose newest date is more than `PACKET_LOOKBACK_DAYS` before today
+  in Alaska; the dates are the certificate's dry-complete, technician
+  signature, issue and portal-signed dates, each log's dry-out finish, the
+  last equipment removal, the last moisture reading row and each ready
+  invoice's date, so a job invoiced weeks after drying still gets its
+  packet); `settle` (edited
+  less than `PACKET_SETTLE_MIN` minutes ago); `cert_sign_pending` (the
+  customer's portal signature of the certificate is on its way: pending with
+  a document, or approved and not yet copied back into the job, for up to 72
+  hours from that approval's last change, so a customer who never signs
+  cannot hold the packet forever).
+- **What a "no" does.** `deleted` through `unread_meter_photos` withdraw the
+  job's open card if it has one (`carrier_packet_withdraw`: the card is
+  superseded and its row reads `superseded`, error `withdrawn: <reason>`),
+  so a voided invoice or a cleared certificate never leaves an approvable PDF
+  behind; a card the owner is approving at that moment is left alone.
+  `no_invoice`, `unchecked_fills` and `unread_meter_photos` also hold the job
+  (`carrier_packet_holds`) with one text per job and reason. `lookback`,
+  `settle` and `cert_sign_pending` do nothing: the next hour looks again.
+- **Number and version.** One number per job, `PKT-YYYY-NNNN` from
+  `document_sequences` (the Alaska year), allocated with the job's first row
+  and never reused. The printed version is 1 + the highest version actually
+  sent, so an adjuster never gets version 2 without version 1: a build that
+  replaces a card nobody answered, or one declined, keeps that card's
+  version. Whether anything changed is decided by a hash of what prints
+  (`modelHash`), never by `updatedAt` or `rev`: payments, balances, invoice
+  status, archived photos and the passing of time never make a version 2.
+  Photo numbers stay as they were across versions (`photo_nums` on the
+  row). Version 2 and later say on the cover, the card and the email which
+  version they replace and what changed.
+- **What the reserve answers** (`carrier_packet_reserve`, under the job's
+  lock). A skip, by reason: `lane_off` (no worker heartbeating the `packet`
+  channel), `building` (a build of this job is under way; one still building
+  after 30 minutes is failed as `abandoned`), `failed_cap` (this same
+  document failed 3 times, or once for good), `in_flight` (an approved card
+  is being sent), `open` (its card is waiting), `declined` (the owner
+  declined this same document; it stays declined until the job changes),
+  `offer_cap` (the same PDF was offered four times: the first card and three
+  re-offers), `too_large` (Gmail refused this same PDF as too large), `sent`
+  (this document is what the carrier already has). A re-offer: a card for the same document that
+  expired, was superseded or failed, or a send that went undelivered, is
+  filed again with the PDF already stored (`carrier_packet_reoffer`, up to
+  three times). Anything else is a build.
+- **The `packet` channel, and why it is not `email`.** A worker that does
+  not know packets claims by channel, so on `email` it would take a packet
+  row and send the email without the PDF; the outbox `channel` check gains
+  `packet` instead. The channel is served only while email is (the Gmail
+  pair is set) and `CARRIER_PACKET` is not `off`; the heartbeat reports it,
+  and `outbox_channel_ready('packet')` is the first thing every reserve
+  reads, so no card is filed while nothing could send it. A packet send
+  checks the To and Cc and the same `EMAIL_MAX_AGE_HOURS` limit as an email,
+  takes exactly one attachment from `carrier-packets`, downloads it with the
+  service key (60 s) and checks its size and sha256 against the card's (a
+  mismatch is dead at once), builds `multipart/mixed` with a fixed
+  `Message-ID: <outbox-<outbox id>@roybalconstruction.com>`, and uploads it
+  to Gmail's media endpoint (120 s). The adopt check is the `email_messages`
+  tag, then a Gmail search for that Message-ID, so an upload that timed out
+  after Gmail took it is never sent twice. Gmail's 413, or an answer saying
+  the message is too large, is dead at once. The sent copy lands in
+  `email_messages` under the job, so it shows in the job's email history.
+- **The To is never filed.** The card carries a suggestion (`suggested_to`:
+  the address the last sent version went to, else the newest inbound email
+  filed to the job on its claim number, else the newest one that is not the
+  customer's, else the job's Adjuster field; bounce and no-reply senders and
+  the connected account are skipped). The office app sends the To and Cc the
+  owner confirmed with the approval, and `op_exec_packet_send` refuses an approval
+  that carries anything else ("Reload Approvals and confirm the
+  recipient."), so an old cached page can never send to the suggestion
+  unseen. It also refuses, with nothing sent, a deleted or archived job, a
+  card that is no longer the packet's, a packet with a newer version, and a
+  PDF no longer stored. Then it writes ONE outbox row, key
+  `outbox:packet.send:<packet id>:<offer>`.
+- **The bucket.** `carrier-packets`, private, created by the worker on first
+  use (`POST /storage/v1/bucket`, a 25 MB file limit, PDFs only; a 409 means
+  it is there), never in SQL, since db-replay has no storage-api. It has no
+  storage policies: only the service role reads or writes it, so a crew
+  login (which can write `field-media`) cannot touch a sent PDF. A PDF is
+  stored at `<job id>/<number>-v<version>-b<seq>.pdf`, and the card links it
+  with a signed URL good for 15 days (the card itself expires in 14). A run
+  that can neither create nor find the bucket ends
+  `{"skipped":"bucket_missing"}`. Every run ends with the cleanup: the PDFs
+  of superseded and failed rows no outbox row points at, and of ready rows
+  whose card was declined more than 14 days ago, are deleted
+  (`pdf_removed_at`). A sent or undelivered PDF is never deleted.
+- **Size.** Before anything is downloaded, the stored sizes give an estimate:
+  every image that is not a job photo, plus 60 KB, plus every photo at full
+  size. At or under `PACKET_FULL_KB` the packet is `full` (two photos a
+  page); over it, `compact` (each photo's small copy where there is one,
+  the archived 480 px copy or its thumbnail, four a page), and the email says full-size photos are available on
+  request. A rendered PDF over `PACKET_HARD_KB` (about 23 MB once
+  base64-encoded, under Gmail's ~25 MB) is failed for good as `too_large`
+  and the job is held with a text; the card warns above 10 MB. Before a
+  build, what the bucket holds plus the estimate over `PACKET_STORAGE_MB`
+  holds the whole lane (`storage_full`, one text, under the nil uuid) and
+  nothing more is built that run.
+- **Knobs** (fly.toml `[env]` or secrets, restart to apply; a number is
+  clamped to its range, and a blank or a non-number keeps the default):
+  - `CARRIER_PACKET`: `off` is the kill switch (below); unset, or anything
+    else, leaves the lane and the `packet` channel on.
+  - `PACKET_LOOKBACK_DAYS` 14 (1 to 90): how recent a job's newest drying,
+    certificate or invoice date must be for its first packet. A job that
+    already has a packet row is looked at whatever its age.
+  - `PACKET_SETTLE_MIN` 120 (0 to 1440): minutes a job must go unedited
+    before it is built.
+  - `PACKET_MAX_BUILDS` 3 (1 to 10): builds per run; re-offers do not count,
+    and the rest wait for the next hour.
+  - `PACKET_DOWNLOADS` 4 (1 to 8): media downloads at a time; jobs go one
+    after another.
+  - `PACKET_FULL_KB` 9500 (1000 to 17000, and never above `PACKET_HARD_KB`):
+    the full-size photo budget.
+  - `PACKET_HARD_KB` 17000 (2000 to 18000): the largest PDF the lane files.
+  - `PACKET_STORAGE_MB` 300 (50 to 900): the `carrier-packets` bucket's cap.
+  - `PACKET_TEXTS`: `off` stops the lane's texts and nothing else (cards are
+    still filed); unset, or anything else, leaves them on.
+- **The texts** go to `OWNER_CELL` through roybal-notify (`sendSms`, kind
+  `brief`, as the dead-letter text does, so they are not held to quiet
+  hours), never with a YES code, and no reply is read:
+  - a card filed or offered again: "Carrier packet PKT-2026-0001 v1 for Jane
+    Sample (claim DEMO-12345) is ready. Review and send it from Approvals in
+    the office app. No reply needed."
+  - a hold, once per job and reason: waiting on a numbered invoice; N meter
+    readings to check on the Moisture Map; a meter photo on an empty reading
+    not read yet; couldn't be built after 3 tries; too large to email even
+    with smaller photos (untick some photos on the job's packet page);
+  - once for the lane: packet storage full.
+  Without `OWNER_CELL`, or with `PACKET_TEXTS=off`, nothing is texted. A
+  text that fails is logged and its hold is not marked texted, so the next
+  run tries again.
+- **The summary** is the job's result, in the `job.done` event:
+  `{seen, in_scope, built, reoffered, withdrawn, held, skipped: {reason: count},
+  failed: [job id, …]}`, job ids only: never a name, an address, a claim
+  number or an email. `skipped` counts every job that got no new card this
+  run, by reason, the gate's and the reserve's above among them. One job's
+  error is listed in `failed` and the run goes on; the
+  job is looked at again next hour. The last runs:
+  `select at, data -> 'result' as summary from public.events where kind = 'job.done' and operation = 'packet.build' order by at desc limit 5`.
+  `fly logs` shows one `packet.run` line per run (counts only), a
+  `packet.filed` or `packet.reoffered` per card, and `packet.withdrawn`,
+  `packet.held`, `packet.too_large`, `packet.job_failed` and
+  `packet.text_failed` as they happen.
+- **A missed hour is not caught up**: a row claimed more than 2 hours after
+  its `run_after` finishes done with `{"skipped":"stale"}`; the next hour
+  covers it.
+- **Run it now** (Supabase SQL editor; a fresh key, so it does not collide
+  with this hour's row). A run always looks at every candidate:
+  ```sql
+  select public.enqueue('packet.build',
+    jsonb_build_object('run_hour', to_char(now() at time zone 'America/Anchorage', 'YYYY-MM-DD"T"HH24')),
+    'packet.build:manual:' || gen_random_uuid(), now(), -10, 'agent',
+    'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65'::uuid);
+  ```
+- **A packet that is stuck.** Start from the job's rows, newest first, and
+  its hold (the nil uuid is the lane's):
+  ```sql
+  select seq, number, version, status, error, permanent, offer, mode, pages, bytes,
+         proposal_id, outbox_id, sent_at, sent_to, created_at, updated_at
+    from public.carrier_packets where job_id = '<field job id>' order by seq desc;
+  select job_id, reason, detail, since, texted_reason, texted_at from public.carrier_packet_holds
+   where job_id in ('<field job id>', '00000000-0000-0000-0000-000000000000');
+  ```
+  - `building`: a run is drawing it now. Still building after 30 minutes
+    (a deploy mid-build), the next reserve fails it as `abandoned`.
+  - `failed`: `error` says why. `relabel` means the version moved while it
+    was drawn (not a try; the next run draws it again with the right label);
+    `abandoned` is above; `too_large: <size>` is for good. Three failed
+    tries of the same document, or one for good, stop it (`failed_cap`) with
+    a hold and a text until the job changes.
+  - `ready`: its card is in the inbox. The card:
+    `select status, expires_at, approved_at, decline_reason, error from public.proposals where id = '<proposal_id>'`.
+  - `superseded`: a newer build replaced it, or the job left scope
+    (`withdrawn: <reason>`).
+  - `sent`: delivered, with `sent_at` and `sent_to`.
+  - `undelivered`: its outbox row went dead (`error` is the provider's last
+    word; the row itself:
+    `select status, attempts, error from public.outbox where id = '<outbox_id>'`).
+    The next run offers the same PDF on a fresh card, unless Gmail refused
+    it as too large, which needs a smaller packet (untick photos on the
+    job's packet page), or the stored PDF was missing or changed, which
+    builds it afresh.
+  A hold's `reason` is a gate reason, `failed_cap`, `too_large` or
+  `storage_full`, and `texted_reason` says whether the owner has heard
+  about it. A job's hold is deleted when its next build starts, and so is
+  the lane's `storage_full` hold (a build means the bucket had room again),
+  so the next time it fills the owner is texted again.
+- **First run**: water jobs whose newest date is in the last 14 days get
+  cards (at most `PACKET_MAX_BUILDS` an hour). Any the owner already sent by
+  hand, he declines; a declined card stays declined until the job changes.
+- **Kill switch**: `fly secrets set -a roybal-worker CARRIER_PACKET=off` (Fly
+  restarts the worker with it). The hourly row finishes done with
+  `{"skipped":"off"}` and nothing is read or built, and the worker stops
+  serving the `packet` channel, so no card is filed and an approved packet
+  waits as `pending` and is not sent (past `EMAIL_MAX_AGE_HOURS` it goes
+  dead instead, as an email does). Undo:
+  `fly secrets unset -a roybal-worker CARRIER_PACKET`.
+- **Rollback.** Steps 1 and 2 each stop new cards on their own:
+  1. the kill switch above;
+  2. stop the schedule: `select cron.unschedule('carrier-packet-hourly')`
+     (to schedule it again, run the `cron.schedule` statement in migration
+     0026, section 15);
+  3. stop filing for good: `update public.agent_authority set revoked_at = now() where agent_id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65' and operation = 'packet.send' and revoked_at is null`
+     (do 1 or 2 as well, or every build is refused at filing with a 42501
+     and, after 3 tries, the job is held with a "couldn't be built" text);
+  4. open cards: decline them in the inbox, or let them expire (14 days).
+     Nothing reaches a carrier until the owner approves a card;
+  5. optional: `update public.operation_catalog set deprecated_at = now() where name = 'packet.send' and version = 1`
+     (open cards can then only be declined);
+  6. an approved packet nobody should send: mark its outbox row dead
+     (`update public.outbox set status = 'dead' where id = …`; the packet
+     then reads `undelivered`, and the next run offers it again on a fresh
+     card, which the owner can decline).
+  Taking `packet.build` out of `QUEUE_KINDS` is NOT a rollback: the hourly
+  rows would wait `queued` forever.
+- **Deploy order** (design §16), each step on the owner's word:
+  1. 0025 (PR #276) is on each database before 0026: the DB push has no
+     `--include-all`, so a database holding 0026 refuses a later 0025. Merge
+     #276 first, then this PR (merging main into it and re-basing the
+     census numbers).
+  2. Migration 0026 ("staging", then "production"): the tables, the number
+     sequence, agent:documents and its propose grant, `packet.send@1` and
+     its executor, the doors, the outbox trigger, the `packet` channel and
+     the hourly cron row. Until the new worker runs, the hourly rows wait
+     `queued` and nothing is filed.
+  3. The worker, on the Mac, as in the billing check's step 3 (the image now
+     carries the field modules the packet imports, so build from the repo
+     root as always). `fly secrets list -a roybal-worker` first: a
+     `QUEUE_KINDS` set on the app replaces the default and must add
+     `packet.build`
+     (`fly secrets set -a roybal-worker QUEUE_KINDS=proposal.execute,billing.reconcile,receipts.qbo_match,packet.build`,
+     or `fly secrets unset -a roybal-worker QUEUE_KINDS`), and an
+     `OUTBOX_CHANNELS` set there must add `packet`, or every run answers
+     `lane_off` and nothing is filed.
+  The office card ships with the field build (v213) on merge and stays quiet
+  until cards exist. No edge function deploy.
+  **Check after the redeploy**: the heartbeat's `meta.kinds` lists
+  `packet.build` and its `meta.channels` lists `packet`:
+  `select worker_id, at, meta -> 'kinds' as kinds, meta -> 'channels' as channels from public.worker_heartbeats order by at desc limit 1`
+  (the same lists are on `worker.start` in `fly logs -a roybal-worker` and on
+  `/healthz`). No `packet` there means the Gmail pair is not set,
+  `CARRIER_PACKET=off`, or an `OUTBOX_CHANNELS` secret without it; no
+  `packet.build` means a `QUEUE_KINDS` secret without it. Until the worker
+  is deployed the hourly rows wait `queued`, and the new worker finishes
+  those more than 2 hours old `{"skipped":"stale"}`. The first cards come
+  with the next run at minute 25; to see one sooner, enqueue a manual run
+  (above).
+
 ## Two alarms, both to the owner's cell
 
 - **The worker is down** (no heartbeat for 10 minutes): the DATABASE notices
@@ -476,7 +773,9 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   until the first text, so a restart hides nothing) and texts the owner once
   per 24 h, saying where to look: an approved email that gave up shows in
   the admin app's Approvals tab, under Recently decided, as "Couldn't send"
-  with the reason. QuickBooks rows are counted apart (qbo-proxy refuses one
+  with the reason, and so does a carrier packet (its row then reads
+  `undelivered`, and the next hourly run offers the same PDF again on a
+  fresh card). QuickBooks rows are counted apart (qbo-proxy refuses one
   for good on its first try, so it did not give up "after retries"): "N
   QuickBooks receipt changes weren't made", and the receipts card under
   Recently decided says why. Needs `OWNER_CELL` on the Fly app.
@@ -543,7 +842,7 @@ Order matters: the database first, then the edge function, then the app.
      run from anything the deploy must not build: not the repo root, not on
      main, not GitHub's latest main (it runs `git fetch origin main` and
      compares: an older checkout would roll back a worker fix deployed from
-     GitHub since), local changes in `services/worker`, the five
+     GitHub since), local changes in `services/worker`, the
      `apps/field/js` modules the image copies or `.dockerignore` (untracked
      files too: the image would take them), or a worker without
      the 48-hour email limit (`staleEmailReason`). Each time it says to run
@@ -578,7 +877,8 @@ Order matters: the database first, then the edge function, then the app.
      without `--stage`) is refused before the secret is asked for
      (`brew upgrade flyctl`). To see it took, `fly logs -a roybal-worker`
      shows a new `worker.start` line with `"email":true` and
-     `"channels":["sms","email","qbo"]` (no `"qbo"` while `RECEIPTS_QBO=off`)
+     `"channels":["sms","email","qbo","packet"]` (no `"qbo"` while
+     `RECEIPTS_QBO=off`, no `"packet"` while `CARRIER_PACKET=off`)
      and no `email.disabled` after it;
      `/healthz` and the heartbeat show the
      same channels, which is how the apps learn email sending is on. A
@@ -615,7 +915,10 @@ Order matters: the database first, then the edge function, then the app.
 
 `fly.toml` asks for 1 GB. The process idles far below that; the number is a
 floor against a Node heap spike during a big email with a long body, and Fly
-bills by the second. To save, change `memory = "1gb"` in `fly.toml` (a PR)
+bills by the second. The carrier packet draws its PDF in this process (no
+Chromium), holding one job's images and the finished PDF in memory at a
+time; the PDF is capped at `PACKET_HARD_KB`, and the packet email carries it
+base64-encoded, about a third larger. To save, change `memory = "1gb"` in `fly.toml` (a PR)
 and redeploy: a one-off `fly scale memory 512` is undone by the next deploy,
 which re-applies `fly.toml`.
 
@@ -636,6 +939,15 @@ which re-applies `fly.toml`.
 - **A project nobody runs a worker on** (staging after a rehearsal, a laptop
   run): its database keeps alarming on the stale heartbeat it was left with.
   Disarm it there: `delete from public.worker_heartbeats; delete from public.app_settings where key in ('edge.base_url', 'worker.liveness_alert', 'worker.alert_texted')`.
+- **After every redeploy**: the heartbeat names what this worker claims.
+  `select worker_id, at, meta -> 'kinds' as kinds, meta -> 'channels' as channels from public.worker_heartbeats order by at desc limit 1`
+  must list `proposal.execute`, `billing.reconcile`, `receipts.qbo_match`
+  and `packet.build` among the kinds, and `sms`, `email`, `qbo` and `packet`
+  among the channels (less only on purpose: no Gmail pair, `RECEIPTS_QBO=off`,
+  `CARRIER_PACKET=off`). One missing: `fly secrets list -a roybal-worker`. A
+  `QUEUE_KINDS` or `OUTBOX_CHANNELS` secret replaces the default list
+  whole, so a value set before a lane existed hides that lane; unset it
+  (`fly secrets unset -a roybal-worker QUEUE_KINDS`) or set the full list.
 - **What is waiting**: `select channel, status, count(*) from public.outbox group by 1, 2`;
   dead rows carry the provider's last word in `error`. To retry a dead row
   after fixing the cause: `update public.outbox set status = 'failed', attempts = 0, next_attempt_at = now() where id = …`
@@ -648,17 +960,21 @@ which re-applies `fly.toml`.
   the edge function reads it live.
 - **Env knobs** (fly.toml `[env]` or secrets, restart to apply):
   `WORKER_POLL_MS` 5000, `WORKER_HEARTBEAT_MS` 30000, `QUEUE_LEASE_S` 300,
-  `OUTBOX_LEASE_S` 120, `OUTBOX_BATCH` 10, `OUTBOX_CHANNELS` `sms,email,qbo`
-  (email drops out without the Gmail pair, qbo with `RECEIPTS_QBO=off`),
-  `QUEUE_KINDS` `proposal.execute,billing.reconcile,receipts.qbo_match` (a
-  value set on the app replaces the whole list, so it must name all three),
+  `OUTBOX_LEASE_S` 120, `OUTBOX_BATCH` 10, `OUTBOX_CHANNELS`
+  `sms,email,qbo,packet` (email drops out without the Gmail pair, qbo with
+  `RECEIPTS_QBO=off`, packet with either no Gmail pair or
+  `CARRIER_PACKET=off`), `QUEUE_KINDS`
+  `proposal.execute,billing.reconcile,receipts.qbo_match,packet.build` (a
+  value set on the app replaces the whole list, so it must name all four),
   `SHUTDOWN_GRACE_MS` 25000,
   `EMAIL_MAX_AGE_HOURS` 48 (1 to 720; a value that is not a number, or a
   blank one, keeps 48, so a typo can neither switch the limit off nor stop
   the worker booting), `BILLING_RECONCILE` (`off` stops the billing check;
   unset, or anything else, leaves it on), `RECEIPTS_QBO` (`off` stops the
   QuickBooks match and the `qbo` channel; unset, or anything else, leaves
-  them on), `QBO_PROXY_URL` (default `<SUPABASE_URL>/functions/v1/qbo-proxy`).
+  them on), `QBO_PROXY_URL` (default `<SUPABASE_URL>/functions/v1/qbo-proxy`),
+  and the carrier packet's `CARRIER_PACKET` and `PACKET_*` knobs (its
+  section above lists each with its default and range).
 
 ## Tests
 
@@ -688,14 +1004,27 @@ migration 0023, the executor's item checks and the note door's row checks,
 the nightly match lane against an in-memory PostgREST and a stubbed qbo-proxy
 (the `(job_id, id)` keyset past a row cap, the 404 skip, one job's error, a
 manual run's scope, the stale and off skips, the summary), the QuickBooks
-adapter (its verdicts, and the provider id the 0023 trigger parses), that `set-gmail-secret.sh` checks
+adapter (its verdicts, and the provider id the 0023 trigger parses), the
+carrier packet (the gate, each section the document prints, the hash that
+decides a version, photo numbers, Alaska times, the media budget and the
+fixed words, over a made-up water job in `test/packet-demo.fixture.mjs`;
+the PDF writer and the renderer on every block type; the work
+authorization terms checked word for word against `apps/field/js/forms.js`;
+the suggested To held to the field app's adjuster-email rules; the lane's
+decisions and calls against a stubbed database, Storage and roybal-notify;
+the Storage calls and their retries; the knobs and the `packet` channel;
+and the packet email in the email adapter and the RFC 822 builder), that
+the image holds every file the worker can import (`test/packaging.test.mjs`
+walks the imports against the Dockerfile and `.dockerignore`), that `set-gmail-secret.sh` checks
 every path the Dockerfile copies, the heartbeat (which
 leases it names, and that the final one names none) and dead-letter text
 with its 24 h guard, and the real HTTP server booting, answering `/healthz`
 through an outage, and stopping clean. The database
 half is `supabase/test/worker_spine.test.sql` (and, for the billing check's
 door and executor, `supabase/test/billing_review_gaps.test.sql`; for the
-QuickBooks link's, `supabase/test/receipts_qbo_link.test.sql`), run by the
+QuickBooks link's, `supabase/test/receipts_qbo_link.test.sql`; for the
+carrier packet's doors, executor and trigger,
+`supabase/test/carrier_packet.test.sql`), run by the
 DB replay workflow against a database rebuilt from the migrations. The
 detector's own rules are `apps/field/test/reconcile.test.mjs` (root
 `npm run field:test`). The alert function's rules

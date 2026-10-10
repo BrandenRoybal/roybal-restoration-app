@@ -39,7 +39,17 @@
    card read and counted ("2 of 3 updated in QuickBooks; 1 refused: …"),
    and "Approve all QuickBooks cards (N)": one confirm, then each card
    through the same call its own Approve makes, stopping at the first that
-   doesn't go through, then a fresh read.
+   doesn't go through, then a fresh read. Then carrier packets
+   (packet.send): the To filled with the worker's suggestion and where it
+   came from, a Cc, the subject, the email behind "Show the email", the PDF
+   link, and no YES number; Approve off until the To is one good address
+   (held to adjustersend.js checkAddress's answers) and the Cc a list of
+   them; what he typed kept across repaints, and no timed repaint while he
+   types; Approve sending op_proposal_approve with p_edited_params {to, cc}
+   built on the page, then the outbox row's "Sent from Gmail" or "Couldn't
+   send: …"; the packet channel's lane line; decline as on any spine card;
+   and a tab that drew an older cached field module (kind "other") still
+   giving the card all of that.
    Run: node apps/field/test/admin-approvals.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -50,14 +60,24 @@ import "fake-indexeddb/auto";
 // the office admin imports field modules as "../../js/x.js" (one origin, two
 // folders on the server); on disk they live in apps/field/js. A second copy
 // of the tab (approvals.js?as=crew) keeps its own once-per-page owner check,
-// so it starts over for the other login.
+// so it starts over for the other login. A copy loaded as approvals.js?field=old
+// is a tab that drew an older cached field module: approvals.js?old, the same
+// file with packet.send unmapped, so a carrier packet is a plain card (kind other).
 register("data:text/javascript," + encodeURIComponent(`
+import { readFileSync } from "node:fs";
 export async function resolve(spec, ctx, next) {
   if (ctx.parentURL && ctx.parentURL.includes("/apps/admin/js/") && spec.startsWith("../../js/")) {
-    return next(new URL(spec.replace("../../js/", "../../field/js/"), ctx.parentURL).href, ctx);
+    const url = new URL(spec.replace("../../js/", "../../field/js/"), ctx.parentURL);
+    if (spec === "../../js/approvals.js" && new URL(ctx.parentURL).searchParams.has("field")) url.search = "?old";
+    return next(url.href, ctx);
   }
   const r = await next(spec, ctx);
   return r.url.includes("/apps/admin/js/") ? { ...r, format: "module" } : r;   // no package.json there
+}
+export async function load(url, ctx, next) {
+  if (!url.endsWith("/apps/field/js/approvals.js?old")) return next(url, ctx);
+  const src = readFileSync(new URL(url.slice(0, -"?old".length)), "utf8");
+  return { format: "module", shortCircuit: true, source: src.split('"packet.send": "packet"').join('"packet.send (not yet)": "packet"') };
 }`));
 
 const dom = new JSDOM(`<!DOCTYPE html><html><body>
@@ -88,6 +108,8 @@ const AGENT = "1af33481-7f1c-4485-87f5-7b0ec5e27554";
 const BILLING = "193d7dd0-74f9-407d-9891-8cb7aab22f82";          // agent:billing
 const INTEGRATIONS = "5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10";     // agent:integrations (0023)
 const ALSTON = "a628eea5-5c1e-4b7a-9d2f-3e8c1b0a7f42";           // a field job, "2156 Alston rd."
+const DOCUMENTS = "b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65";        // agent:documents (0026)
+const SAMPLE = "c0ffee00-1111-4222-8333-444455556666";           // a field job, "123 Example St" (carrier packets)
 const id = (lane, n) => (lane === "text" ? "aaaaaaaa" : "bbbbbbbb") + `-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
 const reminder = { id: id("text", 1), code: 12, kind: "emailSend", proposed_by: "morning-brief", status: "pending",
@@ -113,7 +135,8 @@ let PA = [reminder, phase, sent, failed, lapsed, swept];
 let PR = [email, delivered, declined, stale];
 const CATALOG = [{ name: "email.send", version: 1, description: "Send one email. Execution writes one outbox row; the worker delivers it through Gmail." },
   { name: "invoice.review_gaps", version: 1, description: "Add the lines the nightly billing check found documented but not billed. Execution appends one new draft invoice to the job." },
-  { name: "receipts.qbo_link", version: 1, description: "Update QuickBooks for this job's receipts. Execution queues one QuickBooks change per receipt: tag the matching expense to the job's QuickBooks project and attach the receipt photo; it never edits a tag already set and it refuses if the receipts changed since the card was filed." }];
+  { name: "receipts.qbo_link", version: 1, description: "Update QuickBooks for this job's receipts. Execution queues one QuickBooks change per receipt: tag the matching expense to the job's QuickBooks project and attach the receipt photo; it never edits a tag already set and it refuses if the receipts changed since the card was filed." },
+  { name: "packet.send", version: 1, description: "Email the carrier packet to the adjuster. Execution writes one outbox row on the packet channel carrying the stored PDF; the worker sends it once through Gmail, to the address confirmed on the card, and the packet is recorded as sent." }];
 let OUTBOX = [{ proposal_id: delivered.id, status: "delivered", next_attempt_at: iso(-5), error: null, created_at: iso(-5) }];
 /* the newest worker heartbeat, as of the page's clock: sending email unless a test says otherwise */
 const beatAt = (minsAgo, channels) => () => json(200, [{ at: new Date(Date.now() - minsAgo * 60e3).toISOString(),
@@ -166,12 +189,13 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (u.includes("/rest/v1/operation_catalog?select=name,version,description")) return json(200, CATALOG);
   if (u.includes("/rest/v1/agents?select=id,name&")) {
-    return json(200, [{ id: AGENT, name: "agent:brief" }, { id: BILLING, name: "agent:billing" }, { id: INTEGRATIONS, name: "agent:integrations" }]
-      .filter((a) => ids(u, "id").includes(a.id)));
+    return json(200, [{ id: AGENT, name: "agent:brief" }, { id: BILLING, name: "agent:billing" }, { id: INTEGRATIONS, name: "agent:integrations" },
+      { id: DOCUMENTS, name: "agent:documents" }].filter((a) => ids(u, "id").includes(a.id)));
   }
   if (u.includes("/rest/v1/field_projects?select=id,title:data->>title,customer:data->>customer,address:data->>address&")) {
     return json(200, [{ id: FIELD1, title: null, customer: "Pollen", address: "1192 Bemis Ct" },
-      { id: ALSTON, title: "2156 Alston rd.", customer: "Pollen Apartments", address: "2156 Alston Rd" }].filter((j) => ids(u, "id").includes(j.id)));
+      { id: ALSTON, title: "2156 Alston rd.", customer: "Pollen Apartments", address: "2156 Alston Rd" },
+      { id: SAMPLE, title: null, customer: "Jane Sample", address: "123 Example St, Fairbanks, AK 99701" }].filter((j) => ids(u, "id").includes(j.id)));
   }
   if (u.includes("/rest/v1/coordination_jobs?select=id,title:data->>title,customer:data->>customer,address:data->>address&")) {
     return json(200, ids(u, "id").includes(BOARD1) ? [{ id: BOARD1, title: "Smith remodel", customer: "Smith", address: null }] : []);
@@ -1440,6 +1464,320 @@ await test("Approve all stops at the first card that doesn't go through: a refus
   assert.equal(bulkBtn().disabled, false);
   assert.equal(document.getElementById("toast").textContent, "Stopped after 0 of 3: one didn't go through, and the rest are still waiting.");
   assert.ok(calls.slice(before).some((x) => x.u.includes("/rest/v1/proposals?select=")), "a fresh read");
+  noJunk(view);
+  reset5();
+});
+
+/* ---------- carrier packets: packet.send ---------- */
+const PDF_URL = `https://demo.supabase.co/storage/v1/object/sign/carrier-packets/${SAMPLE}/PKT-2026-0007-v1-b1.pdf?token=demo`;
+const PKT_BODY = "Hello,\n\nAttached is the water mitigation documentation for this claim, as one PDF: carrier packet PKT-2026-0007, version 1.\n\n" +
+  "Insured: Jane Sample\nProperty: 123 Example St, Fairbanks, AK 99701\nClaim: DEMO-12345\nCarrier: Sample Mutual\n\nPlease reply to confirm you received it.";
+const PKT_SUBJECT = "Claim DEMO-12345 - Jane Sample - water mitigation documentation (PKT-2026-0007 v1)";
+const PKT_FILE = "PKT-2026-0007 v1 - Claim DEMO-12345 - Sample.pdf";
+const PKT_FROM = "the newest email filed to this job on its claim number";
+const PKT_WHY = "Carrier packet PKT-2026-0007 v1 for Jane Sample, 123 Example St, Fairbanks, AK 99701.\n" +
+  "Suggested To: adjuster@example.com, from the newest email filed to this job on its claim number.\n38 pages, 6.1 MB.";
+/* what carrier_packet_file files: the suggestion, never a to or cc; no SMS code */
+const pktRow = { id: id("spine", 60), operation: "packet.send@1", sms_code: null, status: "proposed", edited_params: null,
+  input: { packet_version_id: "dddddddd-0000-4000-8000-000000000001", offer: 0, subject: PKT_SUBJECT, body: PKT_BODY, filename: PKT_FILE,
+    suggested_to: "adjuster@example.com", suggested_from: PKT_FROM },
+  proposed_by_kind: "agent", proposed_by_id: DOCUMENTS, rationale: PKT_WHY,
+  evidence_refs: [{ kind: "pdf", label: "Carrier packet PKT-2026-0007 v1 (PDF)", url: PDF_URL }],
+  job_id: SAMPLE, created_at: iso(-1), expires_at: iso(14 * 24 - 1), approved_at: null, updated_at: iso(-1), decline_reason: null, result: null, error: null };
+const PKT_HEAD = "Carrier packetEmail the carrier packet to the adjuster: PKT-2026-0007 v1 - Claim DEMO-12345 - Sample";
+/* op_proposal_approve on a packet card: runtime sql, so the row comes back executed with the edit it was given */
+const pktApproved = (body) => answered({ ...pktRow, status: "executed", edited_params: body.p_edited_params, approved_at: new Date().toISOString(),
+  approved_via: "inbox", updated_at: new Date().toISOString(),
+  result: { outbox_id: "eeeeeeee-0000-4000-8000-000000000001", packet_version_id: pktRow.input.packet_version_id, to: body.p_edited_params.to } });
+const pktOut = (status, o = {}) => ({ proposal_id: pktRow.id, status, next_attempt_at: iso(-1), error: null, created_at: iso(-1), updated_at: iso(-0.9), ...o });
+const typeIn = (el, v) => { el.value = v; el.dispatchEvent(new window.Event("input", { bubbles: true })); };
+const toOf = (key) => card(key).querySelector("input.ap-to");
+const ccOf = (key) => card(key).querySelector("input.ap-cc");
+const PKT = "spine:" + pktRow.id;
+
+await test("a carrier packet card: the To filled with the worker's suggestion and where it came from, a Cc, the subject, the email behind Show the email, the PDF link, and no YES number", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [{ ...pktRow, sms_code: 31 }];                   // a number on the row is still never offered
+  const before = since0();
+  await go();
+  const c = card(PKT);
+  assert.equal(c.querySelector(".ap-head").textContent, PKT_HEAD);
+  assert.equal(c.querySelector(".ap-head .badge").className, "badge disp-b", "an email to the adjuster: the email's tone");
+  assert.match(c.querySelector(".ap-meta").textContent, /^Jane Sample, 123 Example St, Fairbanks, AK 99701 · from Documents agent · asked .+ · expires in 1[34] days$/);
+  const to = toOf(PKT), cc = ccOf(PKT);
+  assert.deepEqual([to.type, to.value, cc.value], ["email", "adjuster@example.com", ""]);
+  assert.equal(c.querySelector(`label[for="${to.id}"]`).textContent, "To");
+  assert.equal(c.querySelector(`label[for="${cc.id}"]`).textContent, "Cc");
+  assert.equal(row(c, "To").querySelector(".ap-addr").textContent, "From " + PKT_FROM + ".");
+  assert.equal(c.querySelector(".ap-addr--bad").hidden, true, "a good address: nothing wrong to say");
+  assert.equal(row(c, "Subject").textContent, PKT_SUBJECT);
+  // the email: collapsed, whole once shown, and collapsed again
+  const mail = c.querySelector(".ap-mail"), toggle = btn(c, "Show the email");
+  assert.deepEqual([mail.hidden, toggle.getAttribute("aria-expanded")], [true, "false"]);
+  toggle.click();
+  assert.deepEqual([mail.hidden, mail.textContent, toggle.textContent, toggle.getAttribute("aria-expanded")], [false, PKT_BODY, "Hide the email", "true"]);
+  toggle.click();
+  assert.deepEqual([mail.hidden, toggle.textContent], [true, "Show the email"]);
+  // the PDF: its own row, the host it really opens first, a new tab with no opener
+  const pdf = row(c, "PDF");
+  assert.equal(pdf.textContent, "opens demo.supabase.co — Open the PDF · " + PKT_FILE);
+  const a = pdf.querySelector("a");
+  assert.deepEqual([a.getAttribute("href"), a.getAttribute("target"), a.textContent], [PDF_URL, "_blank", "Open the PDF"]);
+  assert.match(a.getAttribute("rel"), /\bnoopener\b/);
+  assert.equal(row(c, "Why").textContent, PKT_WHY);
+  assert.deepEqual(kvKeys(c), ["To", "Cc", "Subject", "Email", "PDF", "Why"], "the PDF link isn't listed again under Evidence");
+  assert.equal(c.querySelector(".ap-yes"), null, "inbox only: no YES number");
+  assert.equal(c.querySelector(".ap-lane"), null, "the worker is serving packets: nothing about it");
+  assert.equal(btn(c, "Approve and send").disabled, false);
+  // the reads: the field job only, the documents agent's name, and the heartbeat (is the packet channel served)
+  const reads = calls.slice(before);
+  assert.ok(reads.some((x) => x.u.includes("/field_projects?") && ids(x.u, "id").includes(SAMPLE)));
+  assert.ok(!reads.some((x) => x.u.includes("/coordination_jobs?")), "a packet is on a field job");
+  assert.ok(reads.some((x) => x.u.includes("/agents?") && ids(x.u, "id").includes(DOCUMENTS)));
+  assert.equal(beats(before), 1);
+  noJunk(view);
+  reset5();
+});
+
+await test("Approve stays off until the To is one good address, saying what's wrong in the adjuster email's words; a bad Cc too; what he typed survives a repaint", async () => {
+  const { checkAddress } = await import("../js/adjustersend.js");
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [pktRow];
+  await go();
+  const approveOff = () => btn(card(PKT), "Approve and send").disabled;
+  const wrong = () => card(PKT).querySelector(".ap-addr--bad");
+  for (const v of ["", "   ", "a@example.com, b@example.com", "a@example.com; b@example.com", "Jane Sample <jane@example.com>", "jane",
+    "jane@example", "jane@@example.com", "jane sample@example.com", "x".repeat(320) + "@example.com", "kelly.o'brien@example.com",
+    "  claims@example.com  ", "CLAIMS@EXAMPLE.COM"]) {
+    typeIn(toOf(PKT), v);
+    const want = checkAddress(v);
+    assert.equal(approveOff(), !want.ok, JSON.stringify(v));
+    assert.equal(wrong().hidden, want.ok, JSON.stringify(v));
+    assert.equal(wrong().textContent, want.ok ? "" : want.error, JSON.stringify(v));
+  }
+  // a changed To says what was suggested; the suggestion again (any case) says where it came from
+  typeIn(toOf(PKT), "claims@example.com");
+  assert.equal(row(card(PKT), "To").querySelector(".ap-addr").textContent, `Suggested: adjuster@example.com, from ${PKT_FROM}.`);
+  typeIn(toOf(PKT), "Adjuster@Example.com");
+  assert.equal(row(card(PKT), "To").querySelector(".ap-addr").textContent, `From ${PKT_FROM}.`);
+  typeIn(toOf(PKT), "claims@example.com");
+  for (const [v, error] of [["office@example.com", ""], [" office@example.com , second@example.com ", ""], ["office@example.com; second@example.com", ""],
+    ["office", "Cc: “office” doesn't look like an email address."], ["office@example.com second@example.com", "Cc: “office@example.com second@example.com” doesn't look like an email address."],
+    ["Office <office@example.com>", "Cc: just the addresses, without the names."],
+    [Array.from({ length: 60 }, (_, i) => `person${i}@example.com`).join(", "), "Cc: that's too many addresses."], ["", ""]]) {
+    typeIn(ccOf(PKT), v);
+    assert.equal(approveOff(), !!error, v);
+    assert.equal(wrong().textContent, error, v);
+  }
+  // a repaint (Refresh, the 45 s timer, another card's answer) keeps what he typed and the open email
+  typeIn(ccOf(PKT), "office@example.com");
+  btn(card(PKT), "Show the email").click();
+  btn(view, "↻ Refresh").click();
+  await settle();
+  assert.deepEqual([toOf(PKT).value, ccOf(PKT).value], ["claims@example.com", "office@example.com"]);
+  assert.equal(card(PKT).querySelector(".ap-mail").hidden, false);
+  assert.equal(row(card(PKT), "To").querySelector(".ap-addr").textContent, `Suggested: adjuster@example.com, from ${PKT_FROM}.`);
+  // and a bad one stays bad after the repaint, Approve off
+  typeIn(toOf(PKT), "claims");
+  btn(view, "↻ Refresh").click();
+  await settle();
+  assert.equal(approveOff(), true);
+  assert.equal(wrong().textContent, "That doesn't look like an email address.");
+  reset5();
+});
+
+await test("the 45 s refresh waits while he's typing in a packet's To or Cc, and goes once he isn't", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [reminder];
+  PR = [pktRow];
+  const tick = await onTimer();
+  for (const field of [toOf, ccOf]) {
+    field(PKT).focus();
+    assert.equal(document.activeElement, field(PKT));
+    let before = since0();
+    tick();
+    await settle();
+    assert.equal(listReads(before), 0, "no repaint under his hands");
+    field(PKT).blur();
+    before = since0();
+    tick();
+    await settle();
+    assert.equal(listReads(before), 1);
+  }
+  reset5();
+});
+
+await test("Approve and send: one confirm naming the To and Cc, then op_proposal_approve with p_edited_params {to, cc} built on this page; the card then reads its outbox row", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [pktRow];
+  OUTBOX = [];
+  await go();
+  typeIn(toOf(PKT), "  claims@example.com ");
+  typeIn(ccOf(PKT), "office@example.com; second@example.com");
+  // a cancelled confirm sends nothing
+  asked.length = 0;
+  confirmAnswer = false;
+  let before = since0();
+  btn(card(PKT), "Approve and send").click();
+  await settle();
+  assert.deepEqual(asked, ["Send the carrier packet to claims@example.com, Cc office@example.com, second@example.com?"]);
+  assert.equal(calls.slice(before).filter((x) => x.u.includes("/rpc/op_proposal_")).length, 0);
+  confirmAnswer = true;
+  // yes: the To and Cc as checked, in the one request, the fields held still while it's out
+  let release;
+  spine = (fn, body) => new Promise((res) => { release = () => res(pktApproved(body)); });
+  asked.length = 0;
+  before = since0();
+  btn(card(PKT), "Approve and send").click();
+  await settle(10);
+  assert.equal(asked.length, 1);
+  const rpc = calls.slice(before).filter((x) => x.u.includes("/rpc/op_proposal_"));
+  assert.equal(rpc.length, 1);
+  assert.match(rpc[0].u, /\/rest\/v1\/rpc\/op_proposal_approve$/);
+  assert.deepEqual(rpc[0].body, { p_proposal_id: pktRow.id, p_via: "inbox",
+    p_edited_params: { to: "claims@example.com", cc: "office@example.com, second@example.com" } });
+  assert.deepEqual([toOf(PKT).readOnly, ccOf(PKT).readOnly], [true, true]);
+  assert.equal(btn(card(PKT), "Working…").disabled, true);
+  release();
+  await settle();
+  const out = () => card(PKT).querySelector(".ap-out");
+  assert.equal(card(PKT).classList.contains("ap-card--done"), true);
+  assert.deepEqual([out().textContent, out().className], ["Queued to send", "ap-out ap-out--wait"]);
+  assert.equal(document.getElementById("toast").textContent, "Queued to send");
+  // the worker sent it: the next read finds its outbox row
+  OUTBOX = [pktOut("sent")];
+  before = since0();
+  await go();
+  assert.deepEqual([out().textContent, out().className], ["Sent from Gmail", "ap-out ap-out--ok"]);
+  assert.ok(calls.slice(before).some((x) => x.u.includes("/outbox?select=") && ids(x.u, "proposal_id").includes(pktRow.id)), "its outbox row is read");
+  OUTBOX = [pktOut("dead", { error: "Gmail refused the message: it is too large" })];
+  await go();
+  assert.deepEqual([out().textContent, out().className], ["Couldn't send: Gmail refused the message: it is too large", "ap-out ap-out--bad"]);
+  // a blank Cc goes as ""
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [pktRow];
+  await go();
+  asked.length = 0;
+  spine = (fn, body) => pktApproved(body);
+  before = since0();
+  btn(card(PKT), "Approve and send").click();
+  await settle();
+  assert.deepEqual(asked, ["Send the carrier packet to adjuster@example.com?"]);
+  assert.deepEqual(calls.slice(before).find((x) => x.u.includes("/rpc/op_proposal_")).body.p_edited_params, { to: "adjuster@example.com", cc: "" });
+  noJunk(view);
+  reset5();
+});
+
+await test("a packet refusal keeps the card, its To and Cc as typed; an executor that refused says why; decline is as on any spine card", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [pktRow];
+  await go();
+  typeIn(toOf(PKT), "claims@example.com");
+  spine = () => json(400, { code: "22023", message: "op spine: edited input is invalid: to: does not match the pattern" });
+  btn(card(PKT), "Approve and send").click();
+  await settle();
+  assert.equal(errText(PKT), "The server refused this as invalid: edited input is invalid: to: does not match the pattern. Nothing changed.");
+  assert.equal(card(PKT).classList.contains("ap-card--done"), false, "still waiting");
+  assert.deepEqual([toOf(PKT).value, toOf(PKT).readOnly, btn(card(PKT), "Approve and send").disabled], ["claims@example.com", false, false]);
+  // the executor said no (the packet changed under the card): the approval stands, the card failed, with why
+  const NEWER = "packet.send: a newer version of this packet exists, so nothing was sent";
+  spine = (fn, body) => answered({ ...pktRow, status: "failed", edited_params: body.p_edited_params,
+    approved_at: new Date().toISOString(), updated_at: new Date().toISOString(), error: NEWER });
+  btn(card(PKT), "Approve and send").click();
+  await settle();
+  assert.equal(card(PKT).querySelector(".ap-out").textContent, "Failed: " + NEWER);
+  // decline: a prompt for the reason, op_proposal_decline as for any spine card, with no To in it
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [pktRow];
+  await go();
+  asked.length = 0;
+  promptAnswer = "Sent it by hand";
+  spine = (fn, body) => answered({ ...pktRow, status: "declined", decline_reason: body.p_reason, updated_at: new Date().toISOString() });
+  const before = since0();
+  btn(card(PKT), "Decline").click();
+  await settle();
+  assert.match(asked[0], /^Decline "Email the carrier packet to the adjuster: PKT-2026-0007 v1 - Claim DEMO-12345 - Sample"\?\n\nA reason/);
+  const rpc = calls.slice(before).find((x) => x.u.includes("/rpc/op_proposal_"));
+  assert.match(rpc.u, /op_proposal_decline$/);
+  assert.deepEqual(rpc.body, { p_proposal_id: pktRow.id, p_reason: "Sent it by hand" });
+  assert.equal(card(PKT).querySelector(".ap-out").textContent, "Declined: Sent it by hand");
+  promptAnswer = "";
+  reset5();
+});
+
+await test("the worker not serving the packet channel: the waiting packet says approving queues it, an approved one says it waits; the email card reads email's own", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email"]);                 // CARRIER_PACKET=off
+  const queuedPkt = { ...pktRow, id: id("spine", 61), status: "executed", edited_params: { to: "claims@example.com", cc: "" },
+    approved_at: iso(-2), updated_at: iso(-2), result: { outbox_id: "eeeeeeee-0000-4000-8000-000000000002" } };
+  PA = [];
+  PR = [email, pktRow, queuedPkt];
+  OUTBOX = [{ ...pktOut("pending"), proposal_id: queuedPkt.id }];
+  await go();
+  const lane = card(PKT).querySelector(".ap-lane");
+  assert.equal(lane.textContent, OFF_WAITING);
+  assert.ok(lane.compareDocumentPosition(card(PKT).querySelector(".ap-actions")) & window.Node.DOCUMENT_POSITION_FOLLOWING, "read before the buttons");
+  assert.equal(card("spine:" + email.id).querySelector(".ap-lane"), null, "email itself is on");
+  assert.equal(card("spine:" + queuedPkt.id).querySelector(".ap-out").textContent, OFF_QUEUED);
+  assert.equal(btn(card(PKT), "Approve and send").disabled, false, "still answerable");
+  reset5();
+});
+
+await test("a packet card from an older cached field module (kind other) still gets the packet branch: To and Cc, the email, the PDF, no YES number, and an Approve that carries the To", async () => {
+  const OLD = await import("../js/approvals.js?old");
+  assert.equal(OLD.fromProposal(pktRow).kind, "other", "that module doesn't know packets");
+  assert.equal(OLD.fromProposal({ ...pktRow, sms_code: 31 }).yesHint, "or text YES 31", "and would offer the row's number");
+  assert.deepEqual(OLD.decisionRequest(OLD.fromProposal(pktRow), "approve").body, { p_proposal_id: pktRow.id, p_via: "inbox" },
+    "its request has no To: the page must not use it");
+  const S = await import("../../admin/js/approvals.js?field=old");
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [{ ...pktRow, sms_code: 31 }];
+  OUTBOX = [];
+  await go(S);
+  const c = card(PKT);
+  assert.equal(c.querySelector(".ap-head").textContent, "Carrier packetEmail the carrier packet to the adjuster", "the chip is the page's");
+  assert.equal(c.querySelector(".ap-head .badge").className, "badge disp-b");
+  assert.deepEqual([toOf(PKT).value, ccOf(PKT).value], ["adjuster@example.com", ""], "the suggestion, from the row");
+  assert.equal(row(c, "To").querySelector(".ap-addr").textContent, "From " + PKT_FROM + ".");
+  assert.equal(row(c, "Subject").textContent, PKT_SUBJECT);
+  btn(c, "Show the email").click();
+  assert.equal(c.querySelector(".ap-mail").textContent, PKT_BODY, "the body, from the row");
+  assert.equal(row(c, "PDF").querySelector("a").getAttribute("href"), PDF_URL);
+  assert.equal(row(c, "PDF").textContent, "opens demo.supabase.co — Open the PDF · " + PKT_FILE);
+  assert.deepEqual(kvKeys(c), ["To", "Cc", "Subject", "Email", "PDF", "Why"]);
+  assert.equal(c.querySelector(".ap-yes"), null, "no YES number, whatever that module offers");
+  typeIn(toOf(PKT), "Jane <jane@example.com>");
+  assert.equal(btn(c, "Approve and send").disabled, true);
+  typeIn(toOf(PKT), "claims@example.com");
+  assert.equal(btn(c, "Approve and send").disabled, false);
+  asked.length = 0;
+  spine = (fn, body) => pktApproved(body);
+  const before = since0();
+  btn(c, "Approve and send").click();
+  await settle();
+  assert.deepEqual(asked, ["Send the carrier packet to claims@example.com?"]);
+  assert.deepEqual(calls.slice(before).find((x) => x.u.includes("/rpc/op_proposal_")).body,
+    { p_proposal_id: pktRow.id, p_via: "inbox", p_edited_params: { to: "claims@example.com", cc: "" } });
+  // that module reads no outbox row for it and would say "Done": the page says it was queued, and where to look
+  const STALE = "Queued to send. Reload the page to see how it went.";
+  assert.equal(card(PKT).querySelector(".ap-out").textContent, STALE);
+  assert.equal(document.getElementById("toast").textContent, STALE);
+  assert.equal(card(PKT).querySelector(".ap-head").textContent, "Carrier packetEmail the carrier packet to the adjuster");
   noJunk(view);
   reset5();
 });

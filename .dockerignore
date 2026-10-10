@@ -7,13 +7,23 @@
 **/node_modules
 # NOTE: do not ignore apps/board — the phone agent's Dockerfile copies apps/board/js/schedule.js
 apps/field
-# ...except the five modules the worker's billing check imports
-# (services/worker/Dockerfile copies them; the exceptions must follow apps/field)
+# ...except the modules the worker imports: the billing check's five, and the
+# carrier packet's (services/worker/Dockerfile copies them, and
+# services/worker/test/packaging.test.mjs checks this list against the
+# worker's imports; the exceptions must follow apps/field)
 !apps/field/js/reconcile.js
 !apps/field/js/dryingcalc.js
 !apps/field/js/model.js
 !apps/field/js/core.js
 !apps/field/js/scans.js
+!apps/field/js/dryingwatch.js
+!apps/field/js/meterphotos.js
+!apps/field/js/merge.js
+!apps/field/js/thumbs.js
+!apps/field/js/media.js
+!apps/field/js/fincalc.js
+!apps/field/js/completeness.js
+!apps/field/js/photopdf.js
 apps/admin
 apps/site
 apps/portal

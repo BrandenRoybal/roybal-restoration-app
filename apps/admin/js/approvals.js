@@ -55,6 +55,19 @@
    48 hours with a proposal older than the 7-day read (diedLate) are
    plain reads here, no new call: their proposal rows join the rest
    before inbox runs.
+
+   A carrier packet card (packet.send, the worker's packet lane) is the
+   one card with inputs: the To he confirms, prefilled with the worker's
+   suggestion and where it came from, and an optional Cc. The To is never
+   filed, so the approval carries it: this page builds that request
+   itself (op_proposal_approve with p_edited_params {to, cc}), never
+   through the field module's decisionRequest, so a stale cached copy
+   can't send it without the To (the executor refuses one that tries:
+   "Reload Approvals and confirm the recipient."). The page knows a packet
+   card by its proposal row's operation, not only by the card's kind, so
+   with an older field module that makes it a plain card it still gets
+   the To and Cc, the email and the PDF link (read from the row), no YES
+   number, and a line saying it was queued rather than "Done".
    ============================================================ */
 import { h, clear, toast, likelyOffline } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
@@ -65,8 +78,9 @@ const HASH = "#/approvals";
 const REFRESH_MS = 45000;
 const enc = encodeURIComponent;
 /* the shared .badge tones: the chip by kind, the outcome line by how it went
-   (invoice gaps and QuickBooks receipts, money asks, get admin.css's own) */
-const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", gaps: "ap-money", qbo: "ap-qbo", other: "disp-x" };
+   (invoice gaps and QuickBooks receipts, money asks, get admin.css's own; a
+   carrier packet is an email to the adjuster, so it takes the email's) */
+const TONE = { email: "disp-b", text: "disp-g", phase: "cat2", stage: "disp-x", gaps: "ap-money", qbo: "ap-qbo", packet: "disp-b", other: "disp-x" };
 const tone = (kind) => (Object.prototype.hasOwnProperty.call(TONE, kind) ? TONE[kind] : TONE.other);   // not Object.hasOwn: Safari < 15.4
 
 const TEXT_COLS = "id,code,kind,label,params,job_id,proposed_by,status,result,created_at,expires_at,executed_at";
@@ -93,6 +107,98 @@ const laneWarn = (r, what) => (r.status === "fulfilled" ? null
 let catalog = null;                    // operation_catalog (five rows today), read once per page load
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/* ---------- carrier packets: the To and Cc ---------- */
+const PACKET_OP = /^packet\.send(?:@|$)/;
+/* packet.send@1's `to` (0026) is the adjuster email's: ONE bare address
+   (SPINE_TO). This is adjustersend.js checkAddress with the same rules and
+   words, inlined rather than imported: this page imports only field names
+   that existed before it was written (the rule above), and checkAddress
+   came later. admin-approvals.test.mjs holds the two to the same answers. */
+const SPINE_TO = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+function checkTo(v) {
+  const to = (v == null ? "" : String(v)).trim();
+  if (!to) return { ok: false, error: "Type the adjuster's email address." };
+  if ((to.match(/@/g) || []).length > 1 || /[,;]/.test(to)) return { ok: false, error: "One address only: this sends to a single adjuster." };
+  if (/<[^<>]*>/.test(to)) return { ok: false, error: "Just the address, without the name." };
+  if (!SPINE_TO.test(to)) return { ok: false, error: "That doesn't look like an email address." };
+  if (to.length > 320) return { ok: false, error: "That address is too long." };
+  return { ok: true, to };
+}
+/* The Cc: any number of bare addresses, each held to the same rule, apart
+   by commas (a semicolon counts as one) and sent as "a@x.com, b@y.com":
+   the worker refuses any other list for good (rfc822.mjs validAddresses),
+   and the schema caps it at 1000 characters. Blank is no Cc. */
+function checkCc(v) {
+  const list = (v == null ? "" : String(v)).split(/[,;]/).map((a) => a.trim()).filter(Boolean);
+  for (const a of list) {
+    if (/<[^<>]*>/.test(a)) return { ok: false, error: "Cc: just the addresses, without the names." };
+    if (!SPINE_TO.test(a)) return { ok: false, error: `Cc: “${a}” doesn't look like an email address.` };
+  }
+  const cc = list.join(", ");
+  return cc.length > 1000 ? { ok: false, error: "Cc: that's too many addresses." } : { ok: true, cc };
+}
+function checkPacket(to, cc) {
+  const t = checkTo(to);
+  if (!t.ok) return t;
+  const c = checkCc(cc);
+  return c.ok ? { ok: true, to: t.to, cc: c.cc, error: "" } : c;
+}
+
+/* A card is a carrier packet by its proposal row's operation as well as by
+   the field module's kind: an older cached field module makes it a plain
+   card (kind "other") that carries no suggestion and no email body, so
+   those come from the row then. → null, or what the packet branch shows. */
+function packetOf(c, raw) {
+  if (!c || c.lane !== "spine") return null;
+  const r = raw instanceof Map ? raw.get(c.id) : null;
+  const known = c.kind === "packet";
+  if (!known && !(r && typeof r.operation === "string" && PACKET_OP.test(r.operation))) return null;
+  const e = c.evidence || {};
+  const input = r && r.input && typeof r.input === "object" && !Array.isArray(r.input) ? r.input : {};
+  const text = (v) => (typeof v === "string" ? v.trim() : "");
+  const refs = Array.isArray(e.refs) ? e.refs : [];
+  // an older module has only the evidence links: the packet's is the .pdf one, else the first
+  const pdf = known ? (e.pdf ? { url: e.pdf, host: e.pdfHost } : null)
+    : refs.find((x) => x.url && /\.pdf(?:[?#]|$)/i.test(x.url)) || refs.find((x) => x.url) || null;
+  return {
+    stale: !known,
+    suggested: text(known ? e.suggestedTo : input.suggested_to),
+    from: text(known ? e.suggestedFrom : input.suggested_from),
+    subject: text(e.subject),
+    body: text(known ? e.body : input.body),
+    filename: text(known ? e.filename : input.filename),
+    pdf,
+  };
+}
+/* Under the To: where the worker's suggestion came from while the To is that
+   suggestion; once he changes it, what it suggested, so he can go back to it. */
+function fromLine(p, typed) {
+  if (!p.suggested) return "";
+  const whence = p.from ? "from " + p.from.replace(/\.+$/, "") : "";
+  if (String(typed).trim().toLowerCase() === p.suggested.toLowerCase()) return whence ? "F" + whence.slice(1) + "." : "";
+  return `Suggested: ${p.suggested}${whence ? ", " + whence : ""}.`;
+}
+/* The one confirm() before a packet's Approve, naming where it goes: the
+   field module's approveConfirm can't, since the To is typed here. */
+const packetConfirm = (addr) => `Send the carrier packet to ${addr.to}${addr.cc ? `, Cc ${addr.cc}` : ""}?`;
+/* card key → {to, cc} as typed on a waiting packet card, and the cards whose
+   email is open: a repaint (the 45 s refresh, another card's answer) builds
+   the card again from these, so nothing he typed or opened is lost */
+const drafts = new Map();
+const opened = new Set();
+const draftOf = (c, p) => drafts.get(c.key) || { to: p.suggested, cc: "" };
+/* he's typing in a packet's To or Cc: the timed refresh waits, since a
+   repaint would take the field from under his hands */
+const typing = () => { const a = document.activeElement; return !!(a && a.matches && a.matches(".ap-to, .ap-cc")); };
+/* An older field module calls an approved packet "Done": it reads no outbox
+   row for a kind it doesn't know. For that one load the card says it was
+   queued and where to look instead. */
+const STALE_QUEUED = "Queued to send. Reload the page to see how it went.";
+function said(c, p, now, seenAt) {
+  if (p && p.stale && c.status === "executed") return { text: STALE_QUEUED, tone: "wait" };
+  return A.outcome(c, now, seenAt);
+}
 
 /* The sends the worker gave up on in the last 48 hours (outbox rows gone
    'dead' since then: the row's last update) whose proposals the 7-day read
@@ -139,11 +245,11 @@ async function load(now) {
   const later = A.needs(Array.isArray(bare.older) ? bare.older : []);
   const need = {};
   for (const k of ["field", "board", "agents", "people", "outbox"]) need[k] = [...new Set([...(shown[k] || []), ...(later[k] || [])])];
-  // only when a spine email or a QuickBooks receipts card is on the page (an
-  // older field module never asks); a read that fails is null, "can't
-  // tell", never "sending is off". An older send that comes back has died,
-  // and a dead row waits on nothing.
-  const beat = Array.isArray(shown.lanes) && (shown.lanes.includes("email") || shown.lanes.includes("qbo"));
+  // only when a spine email, a QuickBooks receipts card or a carrier packet
+  // is on the page (an older field module never asks); a read that fails is
+  // null, "can't tell", never "sending is off". An older send that comes
+  // back has died, and a dead row waits on nothing.
+  const beat = Array.isArray(shown.lanes) && ["email", "qbo", "packet"].some((l) => shown.lanes.includes(l));
   const [ops, field, board, agents, profiles, outbox, heartbeats] = await Promise.all([
     pr.length && !catalog ? rows("operation_catalog?select=name,version,description&limit=100").catch(() => null) : catalog,
     lookup(need.field, `field_projects?select=${JOB_COLS}&id=${inList(need.field)}&limit=100`),
@@ -158,7 +264,10 @@ async function load(now) {
   ]);
   if (ops) catalog = ops;
   const look = A.lookFrom({ catalog: catalog || [], agents, profiles, jobs: [...field, ...board], outbox, heartbeats, now });
-  return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2, textOk: text.status === "fulfilled", readAt: now };
+  // the proposal rows by id, as read: what tells a carrier packet card apart whatever the field module knew (packetOf)
+  const raw = new Map();
+  for (const r of Array.isArray(pr) ? pr : []) if (r && typeof r === "object" && typeof r.id === "string") raw.set(r.id.trim(), r);
+  return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2, textOk: text.status === "fulfilled", readAt: now, raw };
 }
 
 /* ---------- is this the owner? ----------
@@ -299,7 +408,7 @@ export async function renderApprovals(view) {
   clearInterval(timer);
   timer = setInterval(() => {
     if (!live()) { clearInterval(timer); timer = null; return; }
-    if (document.visibilityState === "visible") refresh();
+    if (document.visibilityState === "visible" && !typing()) refresh();
   }, REFRESH_MS);
 
   function show() {
@@ -307,6 +416,8 @@ export async function renderApprovals(view) {
     // the server still lists as open gives the buttons back
     const open = new Set(state.box.waiting.map((c) => c.key));
     for (const [k, n] of notes) if (!open.has(k) || n.gone) notes.delete(k);
+    for (const k of [...drafts.keys()]) if (!open.has(k)) drafts.delete(k);
+    for (const k of [...opened]) if (!open.has(k)) opened.delete(k);
     // a text queue that didn't load says nothing about which rows are still 'approved'
     if (state.textOk) {
       A.sawApproved(seenApproved, state.box.recent, state.readAt, lastTextRead);
@@ -340,42 +451,88 @@ export async function renderApprovals(view) {
     const gone = A.expiredLine(box.expired);
     if (gone) kids.push(h("p", { class: "ap-expired" }, gone));
     kids.push(h("h2", {}, "Recently decided"));
-    if (box.recent.length) kids.push(...box.recent.map((c) => recentCard(c, now)));
+    if (box.recent.length) kids.push(...box.recent.map((c) => recentCard(c, now, packetOf(c, state.raw))));
     else kids.push(h("p", { class: "muted ap-none" }, "Nothing answered in the last 48 hours."));
     page.replaceChildren(...kids);
   }
 
   function waitingCard(c, now) {
     const note = notes.get(c.key);
-    const approve = h("button", { type: "button", class: "btn btn--primary btn--sm" }, c.approveLabel);
+    const p = packetOf(c, state.raw);
+    // a packet sends on Approve whatever an older field module calls the button
+    const label = p ? "Approve and send" : c.approveLabel;
+    const approve = h("button", { type: "button", class: "btn btn--primary btn--sm" }, label);
     const decline = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "Decline");
     const err = h("div", { class: "warn ap-err", role: "alert", hidden: !note }, note ? note.text : "");
+    const form = p ? packetForm(c, p) : null;
     const ui = {
-      // its answer is out: both off, the pressed one says so
+      // its answer is out: both off, the pressed one says so (and a packet's To and Cc stay as sent)
       working: (decision) => {
         approve.disabled = decline.disabled = true;
         (decision === "approve" ? approve : decline).textContent = "Working…";
+        if (form) form.lock(true);
       },
-      // settled: the labels back; both off if the ask is gone, Approve alone if only Decline can answer it
+      // settled: the labels back; both off if the ask is gone, Approve alone if only Decline can
+      // answer it, or while a packet's To isn't one good address
       idle: (n) => {
-        approve.textContent = c.approveLabel; decline.textContent = "Decline";
-        approve.disabled = !!(n && (n.gone || n.declineOnly)); decline.disabled = !!(n && n.gone);
+        approve.textContent = label; decline.textContent = "Decline";
+        approve.disabled = !!(n && (n.gone || n.declineOnly)) || !!(form && !form.check().ok);
+        decline.disabled = !!(n && n.gone);
+        if (form) form.lock(!!(n && n.gone));
       },
       note: (t) => { err.textContent = t; err.hidden = !t; },
     };
     uis.set(c.key, ui);
+    if (form) form.changed = () => { if (!inflight.has(c.key)) ui.idle(notes.get(c.key)); };
     if (inflight.has(c.key)) ui.working(inflight.get(c.key));
     else ui.idle(note);
     approve.addEventListener("click", () => decide(c, "approve"));
     decline.addEventListener("click", () => decide(c, "decline"));
     return h("div", { class: "card ap-card", dataset: { key: c.key } },
-      head(c),
+      head(c, p),
       meta(c.job, c.by && "from " + c.by, "asked " + A.akTime(c.createdAt, now), A.expiresIn(c.expiresAt, now)),
-      evidence(c),
+      evidence(c, p, form),
       // what approving does while the worker isn't sending email, read before the tap
       c.laneHint ? h("div", { class: "ap-lane", role: "note" }, c.laneHint) : null,
-      h("div", { class: "ap-actions" }, approve, decline, c.yesHint ? h("span", { class: "ap-yes" }, c.yesHint) : null),
+      // a packet never offers a YES number: a text can't carry the To he confirms here
+      h("div", { class: "ap-actions" }, approve, decline, c.yesHint && !p ? h("span", { class: "ap-yes" }, c.yesHint) : null),
       err);
+  }
+
+  /* A packet's To (the worker's suggestion, and where it came from, under
+     it) and Cc, kept in drafts as he types; Approve follows the check. */
+  function packetForm(c, p) {
+    const d = draftOf(c, p);
+    const attrs = { autocomplete: "off", autocapitalize: "off", spellcheck: "false" };
+    const to = h("input", { type: "email", class: "ap-to", id: "ap-to-" + c.id, value: d.to, placeholder: "adjuster@example.com", ...attrs });
+    const cc = h("input", { type: "text", inputmode: "email", class: "ap-cc", id: "ap-cc-" + c.id, value: d.cc, placeholder: "optional", ...attrs });
+    const whence = h("div", { class: "ap-addr" });
+    const wrong = h("div", { class: "ap-addr ap-addr--bad", role: "status" });
+    const form = {
+      changed: null,
+      check: () => checkPacket(to.value, cc.value),
+      lock: (on) => { to.readOnly = cc.readOnly = on; },
+      rows: [
+        h("div", { class: "ap-kv" }, h("label", { class: "ap-k", for: to.id }, "To"), h("div", { class: "ap-v" }, to, whence)),
+        h("div", { class: "ap-kv" }, h("label", { class: "ap-k", for: cc.id }, "Cc"), h("div", { class: "ap-v" }, cc, wrong)),
+      ],
+    };
+    const say = () => {
+      const chk = form.check();
+      whence.textContent = fromLine(p, to.value);
+      whence.hidden = !whence.textContent;
+      wrong.textContent = chk.ok ? "" : chk.error;
+      wrong.hidden = chk.ok;
+    };
+    for (const el of [to, cc]) {
+      el.addEventListener("input", () => {
+        drafts.set(c.key, { to: to.value, cc: cc.value });
+        say();
+        if (form.changed) form.changed();
+      });
+    }
+    say();
+    return form;
   }
 
   /* "Approve all QuickBooks cards (N)": one confirm for all of them, then
@@ -428,7 +585,12 @@ export async function renderApprovals(view) {
   async function decide(c, decision, asked = false) {
     if (inflight.has(c.key)) return null;
     let reason = "";
-    if (decision === "approve") { if (!asked && !confirm(A.approveConfirm(c))) return null; }
+    // a carrier packet's Approve sends the To and Cc typed on its card: checked, confirmed by name
+    const p = decision === "approve" ? packetOf(c, state.raw) : null;
+    const typed = p ? draftOf(c, p) : null;
+    const addr = typed ? checkPacket(typed.to, typed.cc) : null;
+    if (addr && !addr.ok) return null;                   // Approve is off until it is; a click that raced the check sends nothing
+    if (decision === "approve") { if (!asked && !confirm(addr ? packetConfirm(addr) : A.approveConfirm(c))) return null; }
     else if (c.lane === "text") { if (!confirm(A.declineConfirm(c))) return null; }
     else {
       const r = prompt(A.declinePrompt(c), "");
@@ -439,7 +601,9 @@ export async function renderApprovals(view) {
     notes.delete(c.key);
     const ui0 = uis.get(c.key);
     if (ui0) { ui0.working(decision); ui0.note(""); }
-    const req = A.decisionRequest(c, decision, reason);
+    // built here, never by the field module's decisionRequest: a stale cached copy must not drop the To
+    const req = addr ? { rpc: "op_proposal_approve", body: { p_proposal_id: c.id, p_via: "inbox", p_edited_params: { to: addr.to, cc: addr.cc } } }
+      : A.decisionRequest(c, decision, reason);
     let res = null, b = null;
     try {
       res = req.fn ? await callFunction(req.fn, req.body)
@@ -455,7 +619,8 @@ export async function renderApprovals(view) {
       const done = c.lane === "text" ? A.decidedText(c, ans) : A.fromProposal(ans.row, state.look);
       if (c.lane === "text" && done.status !== "approved") heard.set(c.key, done);
       state = { ...state, box: A.settle(state.box, c, done) };
-      toast(A.outcome(done).text);
+      drafts.delete(c.key); opened.delete(c.key);
+      toast(said(done, packetOf(done, state.raw)).text);
       landed = done.status !== "failed";
     } else {
       notes.set(c.key, { text: ans.error, gone: !!ans.gone, declineOnly: !!ans.declineOnly });
@@ -471,8 +636,9 @@ export async function renderApprovals(view) {
 
 /* ---------- card parts ---------- */
 const meta = (...parts) => h("div", { class: "ap-meta" }, parts.filter(Boolean).join(" · "));
-const head = (c) => h("div", { class: "ap-head" },
-  h("span", { class: "badge " + tone(c.kind) }, c.chip),
+/* p: packetOf's answer; a packet's chip whatever an older field module calls it */
+const head = (c, p = null) => h("div", { class: "ap-head" },
+  h("span", { class: "badge " + (p ? TONE.packet : tone(c.kind)) }, p && p.stale ? "Carrier packet" : c.chip),
   h("strong", { class: "ap-title" }, c.title));
 const kv = (k, v) => (v ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, k), h("span", { class: "ap-v" }, v)) : null);
 
@@ -486,11 +652,36 @@ const refList = (refs, cls = "ap-refs") => (Array.isArray(refs) && refs.length ?
 
 /* what would happen, in full: the whole email, the whole text, the phase,
    every invoice line (the body is never clamped, so nothing he approves is
-   out of sight) */
-function evidence(c) {
+   out of sight). A carrier packet's email is the fixed template around the
+   PDF, so it waits behind "Show the email" (whole when shown), and the PDF
+   link under it is the thing to check; p and form are packetOf's answer
+   and the waiting card's To and Cc (packetForm). */
+function evidence(c, p = null, form = null) {
   const e = c.evidence;
   const parts = [];
-  if (c.kind === "email") {
+  if (p) {
+    parts.push(...(form ? form.rows : []), kv("Subject", p.subject));
+    if (p.body) {
+      const mail = h("div", { class: "ap-mail", hidden: !opened.has(c.key) }, p.body);
+      const toggle = h("button", { type: "button", class: "btn btn--ghost btn--sm ap-show" });
+      const set = (on) => {
+        mail.hidden = !on;
+        toggle.textContent = on ? "Hide the email" : "Show the email";
+        toggle.setAttribute("aria-expanded", String(on));
+        if (on) opened.add(c.key); else opened.delete(c.key);
+      };
+      toggle.addEventListener("click", () => set(mail.hidden));
+      set(!mail.hidden);
+      parts.push(h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Email"), h("div", { class: "ap-v" }, toggle, mail)));
+    }
+    // the link the worker signed for this card: its real host first, as every evidence link shows it
+    parts.push(p.pdf
+      ? h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "PDF"), h("span", { class: "ap-v" },
+        h("span", { class: "ap-host" }, "opens " + p.pdf.host), " — ",
+        h("a", { href: p.pdf.url, target: "_blank", rel: "noopener noreferrer" }, "Open the PDF"),
+        p.filename ? " · " + p.filename : ""))
+      : kv("PDF", "No link to the PDF on this card"));
+  } else if (c.kind === "email") {
     parts.push(kv("To", e.to), kv("Cc", e.cc), kv("Subject", e.subject),
       e.body ? h("div", { class: "ap-mail" }, e.body) : null);
   } else if (c.kind === "text") {
@@ -527,23 +718,25 @@ function evidence(c) {
         h("ol", { class: "ap-v ap-lines" }, ...receipts.map((x) => h("li", { class: "ap-line" }, x.text)))) : null);
   }
   parts.push(kv("Why", e.rationale));
-  if (e.refs.length) {
-    parts.push(h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Evidence"), refList(e.refs, "ap-v ap-refs")));
+  // a packet's PDF link is on its own row above, so it isn't listed twice
+  const refs = p && p.pdf ? e.refs.filter((r) => r.url !== p.pdf.url) : e.refs;
+  if (refs.length) {
+    parts.push(h("div", { class: "ap-kv" }, h("span", { class: "ap-k" }, "Evidence"), refList(refs, "ap-v ap-refs")));
   }
   const shown = parts.filter(Boolean);
   return shown.length ? h("div", { class: "ap-ev" }, ...shown) : null;
 }
 
-function recentCard(c, now) {
+function recentCard(c, now, p = null) {
   // a row this tab's own answer is still out on (the office came back to the
   // tab mid-answer) is running, not stuck
   // and one whose answer this tab heard reads as that answer, not as the stale row
   const mine = c.status === "approved" && heard.get(c.key);
   const shown = mine ? { ...c, status: mine.status, result: mine.result, error: mine.error, answeredHere: true }
     : inflight.has(c.key) ? { ...c, answeredHere: true } : c;
-  const o = A.outcome(shown, now, seenApproved.get(c.key));
+  const o = said(shown, p, now, seenApproved.get(c.key));
   return h("div", { class: "card ap-card ap-card--done", dataset: { key: c.key } },
-    head(c),
+    head(c, p),
     h("div", { class: "ap-out ap-out--" + o.tone }, o.text),
     meta(c.job, c.by && "from " + c.by,
       c.answeredAt ? "answered " + A.akTime(c.answeredAt, now) : "asked " + A.akTime(c.createdAt, now)));

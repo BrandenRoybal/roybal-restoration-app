@@ -476,6 +476,7 @@
         <li><span class="ui">⬇ Save packet as PDF</span> for one carrier-ready file, or <span class="ui">🔗 Insurance packet link</span> for a private link to the whole packet.</li>
       </ol>
       <p>Field Reports, the Client Portal and Receipts are never included. An uploaded signed copy of the work authorization or certificate of drying replaces the generated form.</p>
+      <p>The same ticks decide what goes into the numbered carrier packet the app emails to the adjuster from Approvals (<a href="#s-cpacket">Carrier packets</a>).</p>
       <p><b>📝 Construction Narrative</b> (restoration) writes the packet cover letter from the job's facts. It stays locked until the required documents are complete; <span class="ui">⚠️ Override — unlock anyway</span> skips the lock. <span class="ui">✉️ Adjuster email</span> drafts the email with the packet link. <b>📝 Progress Update</b> (construction) drafts a where-things-stand note for the owner, adjuster or lender.</p>
     </div>
   </div>
@@ -533,7 +534,7 @@
 
   <h2 class="sec" id="s-approvals">Approvals</h2>
   <figure class="wide"><div class="frame" style="height:4.2in"><img src="shots/admin-approvals.jpg"></div><figcaption><b>✅ Approvals</b>: everything waiting on the owner's yes.</figcaption></figure>
-  <p>Anything the automated helpers want to send or change waits here for the owner: overdue-invoice reminder emails from the morning brief, adjuster emails sent for approval from a job's narrative page, phases suggested from QuickBooks Time, customer texts, job stage moves, and invoice gaps from the nightly billing check. Only the owner's login sees this tab's contents.</p>
+  <p>Anything the automated helpers want to send or change waits here for the owner: overdue-invoice reminder emails from the morning brief, adjuster emails sent for approval from a job's narrative page, phases suggested from QuickBooks Time, customer texts, job stage moves, invoice gaps from the nightly billing check, and carrier packets for the adjuster when a water job is dry and invoiced. Only the owner's login sees this tab's contents.</p>
   <ol class="steps">
     <li>Read the card: who it goes to, the full message, why it was proposed, and links to the evidence.</li>
     <li>Tap <span class="ui">Approve and send</span> (or <i>Approve and add phase</i>, <i>Approve and move job</i>, <i>Approve and add lines</i>) and confirm. Or tap <span class="ui">Decline</span>, optionally with a reason.</li>
@@ -555,6 +556,35 @@
     <li>The office opens the draft and fills in the quantity and price on every line the card showed as <b>no rate</b>. Those lines carry a red <b>Billing check · no rate on this job: price it</b> note in the invoice editor until a price is typed, and <span class="ui">⬆️ Push to QuickBooks</span> refuses the invoice until they are priced. The draft has no number or status and isn't in QuickBooks, and the <span class="ui">📄 Full job packet (PDF)</span> leaves it out until the office gives it an invoice number or pushes it to QuickBooks.</li>
   </ol>
   <div class="note"><b>Approvals tab only</b>Invoice-gap cards have no "or text YES" line, and a YES text never approves one. If the job's invoice lines change before you approve (an edited, added or voided invoice; a payment or sending one doesn't count), approving fails and says so, and nothing is added; the next night's check files a fresh card if anything is still unbilled and the job is still one it checks (not archived, and not every invoice paid). A card waits 14 days; a gap still there after its card expires is offered again, while one you declined stays quiet until the job's records or invoice lines change.</div>
+
+  <h3 id="s-cpacket">Carrier packets</h3>
+  <p>When a water job is dry (its Cert. of Drying is signed) and has an invoice with a number on it, the app puts the job's paperwork into one PDF for the adjuster and files a <span class="ui">Carrier packet</span> card here: the email to the adjuster, with the PDF attached. The app looks every hour, and waits until nobody has edited the job for two hours, so a packet is never built while someone is still typing. Nothing goes to the carrier until you approve it.</p>
+  <p>The PDF carries a number and a version, such as <b>PKT-2026-0001 v1</b>, on every page. In order:</p>
+  <ul>
+    <li><b>Cover</b>: letterhead and licenses, the insured, property, claim #, carrier, adjuster, date of loss and cause, water category and class, mitigation start and finish, drying days and equipment days, and a contents list with page numbers.</li>
+    <li><b>Certificate of Drying</b> with its final readings and meter photos, and the <b>work authorization</b> with its terms. An uploaded signed copy takes the place of either form.</li>
+    <li><b>Floor plan</b> pages, then each <b>moisture map</b>: the sketch, the reading grid with dry readings marked and a P beside readings that have a meter photo, the equipment placement and the meter photos.</li>
+    <li>Each <b>drying log</b>: dry-out dates, the equipment sizing worksheet and any notes on why the setup differs from it, every unit with its set and pulled times (scanned times marked S), the temperature and humidity readings, and the scan record.</li>
+    <li>Every <b>job photo</b>, numbered, two to a page; then each <b>supporting document</b>; then each <b>invoice</b> as billed, with its attachments.</li>
+  </ul>
+  <ol class="steps">
+    <li>Check the <b>To</b>. The app fills it in from the job's records: the address the last version went to, else the newest email filed to this job by its claim #, else the newest one filed to it that isn't from the customer, else the job's Adjuster field. The card says where the address came from. Change it if it's wrong, and add a <b>Cc</b> if you want one. <span class="ui">Approve and send</span> stays greyed out until the To is one email address.</li>
+    <li>Tap <span class="ui">Open the PDF</span> and look through it before it goes; <span class="ui">Show the email</span> shows the message that goes with it. The card's notes give the page count and size and flag anything to look at: units still out on the drying log, items the completeness panel says are missing, and images that couldn't be found (they print as "Image not available").</li>
+    <li>Tap <span class="ui">Approve and send</span> and confirm. The app emails it once, from the company Gmail, and the email shows in the job's email history. Recently decided reads <b>Sent from Gmail</b>, or <b>Couldn't send</b> with the reason.</li>
+  </ol>
+  <p><b>A new version.</b> If the job changes after a packet is sent (a new photo, a corrected reading, an edited invoice), the next check builds <b>version 2 with the same number</b> and files a new card. The cover, the email and the card say which version it replaces and what changed. A payment or a change of invoice status doesn't make a new version. A card you haven't sent yet is simply replaced by the newer PDF under the same version, so the adjuster never gets a version 2 without a version 1.</p>
+  <p><b>Leaving things out.</b> The carrier packet follows the job's <span class="ui">📄 Full job packet (PDF)</span> page: anything unticked under <b>Include in this packet</b> is left out of it too (<a href="#s-packet">The job packet and narrative</a>). Unticking ✅ Cert. of Drying or 🧾 Construction Invoice there stops the carrier packet for that job altogether and takes back a card that's waiting.</p>
+  <p><b>Big packets.</b> When full-size photos would make the email too big for carrier mailboxes, the packet uses smaller copies, four to a page, and the email says full-size photos are available on request.</p>
+  <p><b>Texts.</b> You get a text when a card is waiting ("Carrier packet PKT-2026-0001 v1 for Jane Sample (claim DEMO-12345) is ready. Review and send it from Approvals in the office app."), and one text for each reason a job's packet is held back:</p>
+  <ul>
+    <li><b>Waiting on a numbered invoice.</b> Once the invoice has a number, the packet is built on the next hourly check.</li>
+    <li><b>Meter readings to check.</b> Open the Moisture Map and tap each amber ? to check it against its photo. For a meter photo whose reading hasn't been read yet, type the reading, or let the phone that took it sync.</li>
+    <li><b>Too large to email</b>, even with smaller photos. Untick a large supporting document, or the photos, on the job's packet page, and it's built again.</li>
+    <li><b>Couldn't be built after 3 tries.</b> It isn't tried again until the job changes.</li>
+    <li><b>Packet storage is full.</b> No new packet is built until old ones are cleared.</li>
+  </ul>
+  <p>None of these texts needs a reply.</p>
+  <div class="note"><b>Approvals tab only</b>Carrier packet cards have no "or text YES" line, and a YES text never approves one: look at the PDF before it goes to a carrier. A card waits 14 days; one nobody answers is offered again, up to three more times, while one you declined stays quiet until the job changes. When this first switches on, water jobs dried or invoiced in the last two weeks get cards; decline any you already sent by hand.</div>
 
   <h2 class="sec" id="s-leads">Leads</h2>
   <figure class="wide"><div class="frame" style="height:3.6in"><img src="shots/admin-leads.jpg"></div><figcaption><b>Leads</b>: open leads, newest first, with the next move on each.</figcaption></figure>
@@ -794,6 +824,7 @@
     <tr><td>🧾 Invoice gaps (nightly billing check)</td><td>Live</td><td>Each night, water jobs are checked for drying-log equipment days, QuickBooks Time hours (hourly invoices only) and recorded Cat 3 work that no invoice bills. Gaps arrive as cards in Approvals; approving adds them once as a new draft invoice for the office to price. Approvals tab only, never by text.</td></tr>
     <tr><td>📷 Equipment scan in and out</td><td>Waiting</td><td>Field build v208. A QR label on every unit; the crew scans units in, between rooms and out from the Drying Log, and Office Admin → Equipment shows where every unit is, keeps the fleet list and prints the labels. Scanning, the fleet list and labels switch on once this feature's database update is applied; Branden writes "require v208" before the crew starts scanning. Out now works from the jobs right away.</td></tr>
     <tr><td>📷 Meter photos on moisture readings</td><td>Waiting</td><td>Field build v211. A 📷 under each of today's readings on the Moisture Map photographs the meter screen; the photo prints with the map and beside the final reading on the Cert. of Drying. The 📷 switches on once this feature's database update is applied. The app filling the number in from the photo stays off until it reads the crews' first 50 or so meter photos correctly; until then every number is typed.</td></tr>
+    <tr><td>📄 Carrier packets</td><td>Waiting</td><td>Field build v213. When a water job is dry and has a numbered invoice, the app builds one numbered PDF for the adjuster (PKT-2026-0001 v1) and files it as a card in Approvals; approving emails it once from the company Gmail, and a later change makes version 2 with the same number. Approvals tab only, never by text. Cards start once this feature's database update is applied and the app's sending service is updated.</td></tr>
     <tr><td>Receipts matched to QuickBooks</td><td>Planned</td><td>Nightly match to bank-feed charges, then "tag + attach" approvals; materials onto T&amp;M invoices; cost vs estimate.</td></tr>
     <tr><td>Magicplan quantities into the estimate</td><td>Planned</td><td>Room measurements flowing straight into estimate line items.</td></tr>
     <tr><td>📅 My Week</td><td>Parked</td><td>Hidden until the board schedule feeds it reliably, so crews never see wrong days.</td></tr>
@@ -830,6 +861,9 @@
     <tr><td>Scanner says "Camera didn't start."</td><td>Tap 📷 Photo of the label or ⌨ Type the tag. On an iPhone or iPad, check Settings → Safari → Camera isn't set to Deny.</td></tr>
     <tr><td>A label won't scan</td><td>Wipe it, turn on 🔦, hold the camera 6 to 10 in. away. Still nothing: ⌨ Type tag in the scanner, and tell the office the label needs replacing.</td></tr>
     <tr><td>Start bid greyed out</td><td>A job for that customer or claim # already exists. Open that job.</td></tr>
+    <tr><td>A water job is dry and invoiced, but no carrier packet card came</td><td>Check that the invoice has a number, every amber ? on the Moisture Map is checked, and ✅ Cert. of Drying and 🧾 Construction Invoice are ticked on the job's packet page. The app waits until the job has gone two hours without an edit, and up to three days while the customer is signing the Cert. of Drying in the portal, then looks again every hour. A job with no packet yet whose drying and invoice dates are all more than two weeks old gets none on its own: use 📄 Full job packet (PDF).</td></tr>
+    <tr><td>A carrier packet card's Approve and send is greyed out</td><td>Type one email address in To: just the address, without a name.</td></tr>
+    <tr><td>Approving a carrier packet says "Reload Approvals and confirm the recipient."</td><td>Reload the page, check the To and approve again. Nothing was sent.</td></tr>
     <tr><td>Office connection shows ▲ Needs reconnect</td><td>Office Admin → ⚙ Settings → reconnect that panel.</td></tr>
   </table>
 
@@ -837,6 +871,7 @@
   <table>
     <tr><td style="width:24%"><b>Asset tag</b></td><td>The number on a drying unit's label, such as AM-014: AM air mover, DH dehumidifier, AF air scrubber, HT heater, then the unit's number. The label's QR code carries the same tag. The fleet list in Office Admin → Equipment is the master list of tags.</td></tr>
     <tr><td><b>Bid file</b></td><td>The Field Forms job created by 📐 Start bid. It becomes the job when the lead is won.</td></tr>
+    <tr><td><b>Carrier packet</b></td><td>The numbered PDF (PKT-2026-0001 v1) the app builds for the adjuster when a water job is dry and invoiced, sent from Approvals. A later change makes version 2 with the same number.</td></tr>
     <tr><td><b>Category / Class</b></td><td>IICRC water category (1 clean, 2 gray, 3 black) and class of water (evaporation load 1 to 4).</td></tr>
     <tr><td><b>Completeness panel</b></td><td>The list on each job of what is still missing before it can be billed.</td></tr>
     <tr><td><b>Confirm chip</b></td><td>An action the assistant proposes; nothing happens until someone taps it.</td></tr>

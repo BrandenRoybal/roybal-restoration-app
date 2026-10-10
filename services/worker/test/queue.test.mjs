@@ -126,7 +126,7 @@ test("an outage on finish_job is retried per configured delay, then logged as fi
 test("billing.reconcile is claimed by default and dispatched to the billing check, which finishes done with its summary", async () => {
   const env = { SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k" };
   const kinds = loadConfig(env).queueKinds;
-  assert.deepEqual(kinds, ["proposal.execute", "billing.reconcile", "receipts.qbo_match"]);
+  assert.deepEqual(kinds, ["proposal.execute", "billing.reconcile", "receipts.qbo_match", "packet.build"]);
   assert.deepEqual(loadConfig({ ...env, QUEUE_KINDS: "proposal.execute" }).queueKinds, ["proposal.execute"],
     "a QUEUE_KINDS set on the app still wins, so it must name the new kind");
   assert.equal(handlers["billing.reconcile"].name, "billingReconcile");
@@ -135,7 +135,7 @@ test("billing.reconcile is claimed by default and dispatched to the billing chec
   const supa = fakeSupa({ rpc: { claim_job: [job], finish_job: (a) => ({ status: a.p_ok ? "done" : "failed" }) } });
   const ctx = ctxWith(supa, { cfg: testConfig({ queueKinds: kinds }), now: () => new Date("2026-10-07T20:00:00Z") });
   assert.equal(await runQueueOnce(ctx), 1);
-  assert.deepEqual(supa.rpcs("claim_job")[0].p_kinds, ["proposal.execute", "billing.reconcile", "receipts.qbo_match"]);
+  assert.deepEqual(supa.rpcs("claim_job")[0].p_kinds, ["proposal.execute", "billing.reconcile", "receipts.qbo_match", "packet.build"]);
   assert.equal(supa.rpcs("op_execute").length, 0);
   assert.deepEqual(supa.calls.select.map((c) => c.table), ["coordination_jobs", "field_projects"]);
   const fin = supa.rpcs("finish_job")[0];
@@ -152,4 +152,30 @@ test("billing.reconcile is claimed by default and dispatched to the billing chec
   assert.equal(await runQueueOnce(ctxOff), 1);
   assert.deepEqual(off.rpcs("finish_job")[0].p_result, { skipped: "off" });
   assert.equal(off.calls.select.length, 0);
+});
+
+test("packet.build is claimed by default and loads the packet lane on its first run, which finishes done with its answer", async () => {
+  const env = { SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "sb_secret_k" };
+  const kinds = loadConfig(env).queueKinds;
+  assert.ok(kinds.includes("packet.build"));
+  assert.equal(typeof handlers["packet.build"], "function");
+  const job = jobRow({ kind: "packet.build", payload: {}, principal_kind: "system", principal_id: null,
+    run_after: "2026-10-10T17:25:00Z", created_at: "2026-10-10T17:25:00Z" });
+
+  // the kill switch: done, nothing read, nothing written
+  const off = fakeSupa({ rpc: { claim_job: [job], finish_job: { status: "done" } } });
+  const ctxOff = ctxWith(off, { cfg: testConfig({ queueKinds: kinds, carrierPacket: false }), now: () => new Date("2026-10-10T17:30:00Z") });
+  assert.equal(await runQueueOnce(ctxOff), 1);
+  const fin = off.rpcs("finish_job")[0];
+  assert.equal(fin.p_ok, true);
+  assert.deepEqual(fin.p_result, { skipped: "off" });
+  assert.equal(off.calls.select.length, 0);
+  assert.deepEqual(off.calls.rpc.map((c) => c.fn), ["claim_job", "finish_job"]);
+  assert.equal(ctxOff.active.jobs.size, 0);
+
+  // an hour's run picked up more than two hours late is done as stale
+  const late = fakeSupa({ rpc: { finish_job: { status: "done" } } });
+  await runJob(ctxWith(late, { cfg: testConfig({ queueKinds: kinds, channels: ["sms", "email", "packet"] }),
+    now: () => new Date("2026-10-10T19:26:00Z") }), job);
+  assert.deepEqual(late.rpcs("finish_job")[0].p_result, { skipped: "stale" });
 });
