@@ -18,8 +18,9 @@
 -- The rules it holds 0026 to:
 --   1. packet.send@1 is comms, runtime sql, owner-approved, with the template,
 --      emits and schema the worker, the office app and the executor read (the
---      To is email.send's pattern); packet.build is a queue kind, never an
---      operation; every proposable operation has an executor.
+--      To is the worker's address rule, rfc822.mjs EMAIL); packet.build is a
+--      queue kind, never an operation; every proposable operation has an
+--      executor.
 --   2. The seventeen functions are owned by postgres, SECURITY DEFINER, with a
 --      pinned search_path; the number allocator, the card helper, the
 --      executor and the trigger function are callable by nobody; every door
@@ -53,7 +54,9 @@
 --      fails as relabel, keeping the PDF's path, when the card it replaces is
 --      in flight or a send moved the version.
 --   8. Office cannot approve. The owner's approval needs the To: without it,
---      with any other edit, or with a bad address, nothing is queued. With it,
+--      with any other edit, or with a To or Cc the worker would refuse for
+--      good (a bracket, a comma, a semicolon, a name), nothing is queued; a
+--      Cc of bare addresses apart by commas goes through. With it,
 --      ONE outbox row on 'packet' carries exactly the payload the adapter
 --      reads; approving again writes nothing. The executor refuses a deleted,
 --      archived or missing job, a card that is no longer the packet's, a newer
@@ -68,13 +71,16 @@
 --      supersedes an open card and leaves an approved one alone; holds text
 --      once per reason; state reads the photo numbers and the last send.
 --  12. The cleanup lists superseded and failed PDFs and long-declined ready
---      ones, never a sent, undelivered or outbox-referenced one, and the stamp
---      re-checks the same rules.
+--      ones no outbox row references, sent ones sent over 90 days ago and
+--      offer-capped ready ones whose card died over 14 days ago while no
+--      packet email naming them is going out, never an undelivered one or a
+--      sent one 30 days old; the stamp re-checks the same rules, and a sent
+--      row stays sent.
 --  13. The storage helpers answer 0 and no rows without storage.objects, and
 --      read sizes from it when it is there.
 --  14. Candidates: live jobs with a certificate inside lookback + 2 days, live
 --      jobs changed since their newest packet row, and every job with a ready
---      row, oldest first, with has_row and open_row.
+--      row, oldest first, with has_row (a packet row or a hold) and open_row.
 -- ============================================================================
 
 \set ON_ERROR_STOP on
@@ -124,11 +130,11 @@ begin
      or c.input_schema #>> '{properties,packet_version_id,pattern}' is null then
     raise exception 'packet.send@1 field limits are wrong: %', c.input_schema -> 'properties';
   end if;
-  -- one bare address, exactly as email.send checks it
-  if c.input_schema #> '{properties,to,pattern}'
-     is distinct from (select e.input_schema #> '{properties,to,pattern}' from public.operation_catalog e
-                        where e.name = 'email.send' and e.version = 1) then
-    raise exception 'packet.send@1''s To pattern is not email.send''s';
+  -- one bare address, as the worker's rfc822.mjs EMAIL takes it: no space,
+  -- @, <, >, comma or semicolon in either part
+  if c.input_schema #>> '{properties,to,pattern}'
+     is distinct from '^[^@[:space:]<>,;]+@[^@[:space:]<>,;]+\.[^@[:space:]<>,;]+$' then
+    raise exception 'packet.send@1''s To pattern is %, not the worker''s address rule', c.input_schema #>> '{properties,to,pattern}';
   end if;
   if exists (select 1 from public.operation_catalog where name = 'packet.build') then
     raise exception 'packet.build is catalogued; it is a queue kind, and a catalogued name is proposable';
@@ -703,14 +709,24 @@ set local role authenticated;
 set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000c261", "role": "authenticated", "aud": "authenticated"}';
 do $$
 declare
-  pa constant uuid := (select v::uuid from cp_state where k = 'a_c1');
-  p  public.proposals;
+  pa  constant uuid := (select v::uuid from cp_state where k = 'a_c1');
+  p   public.proposals;
+  bad text;
 begin
   begin
     perform public.op_proposal_approve(pa, 'inbox', null, '{"to": "adjuster at example"}');
     raise exception 'the approval took a To that is not an address';
   exception when invalid_parameter_value then null;
   end;
+  -- a To the worker would refuse for good is refused before the card runs
+  foreach bad in array array['adjuster@example.com>', '<adjuster@example.com', 'adj<uster@example.com',
+                             'adjuster@example.com;', 'adjuster@example.com,'] loop
+    begin
+      perform public.op_proposal_approve(pa, 'inbox', null, jsonb_build_object('to', bad));
+      raise exception 'the approval took the To %', bad;
+    exception when invalid_parameter_value then null;
+    end;
+  end loop;
   begin
     perform public.op_proposal_approve(pa, 'inbox', null, '{"to": "adjuster@example.com", "bcc": "x@example.com"}');
     raise exception 'the approval took a field the schema does not have';
@@ -1680,9 +1696,20 @@ declare
 begin
   select * into base from public.proposals where id = (select v::uuid from cp_state where k = 'e_c1');
 
-  -- the recipient the owner confirmed, and nothing else
+  -- the recipient the owner confirmed, and nothing else; a To or Cc the
+  -- worker refuses for good (rfc822.mjs validAddresses), or one with a name
   foreach edit in array array[null, '{}', '[]', '{"cc": "desk@example.com"}', '{"to": "adjuster@example.com", "subject": "x"}',
-                              '{"to": 5}', '{"to": "adjuster"}', '{"to": "adjuster@example.com", "cc": 5}']::jsonb[] loop
+                              '{"to": 5}', '{"to": "adjuster"}', '{"to": "adjuster@example.com", "cc": 5}',
+                              '{"to": "adjuster@example.com>"}', '{"to": "<adjuster@example.com"}', '{"to": "adjuster@example.com;"}',
+                              '{"to": "adjuster@example.com, desk@example.com"}',
+                              '{"to": "adjuster@example.com", "cc": "desk@example.com>"}',
+                              '{"to": "adjuster@example.com", "cc": "<desk@example.com"}',
+                              '{"to": "adjuster@example.com", "cc": "desk@example.com, <office@example.com"}',
+                              '{"to": "adjuster@example.com", "cc": "Jane Sample <desk@example.com>"}',
+                              '{"to": "adjuster@example.com", "cc": "desk@example.com; office@example.com"}',
+                              '{"to": "adjuster@example.com", "cc": "desk@example.com office@example.com"}',
+                              '{"to": "adjuster@example.com", "cc": "desk"}',
+                              '{"to": "adjuster@example.com", "cc": " , "}']::jsonb[] loop
     p := base;
     p.edited_params := edit;
     begin
@@ -1694,6 +1721,18 @@ begin
       end if;
     end;
   end loop;
+  -- a Cc the worker takes: bare addresses apart by commas, blanks dropped
+  -- (undone by its block)
+  begin
+    p := base;
+    p.edited_params := '{"to": "adjuster@example.com", "cc": " desk@example.com,office@example.com , "}';
+    if public.op_exec_packet_send(p, p.input || p.edited_params, 'human', owner) ->> 'outbox_id' is null then
+      raise exception 'a Cc of two bare addresses queued nothing';
+    end if;
+    raise sqlstate 'CP017';
+  exception when sqlstate 'CP017' then
+    null;
+  end;
 
   -- what must still be true under the lock; each change is undone by its block
   p := base;
@@ -1945,8 +1984,8 @@ begin
     raise exception 'a_p6 did not keep its planned path: %',
       (select row(bucket, path)::text from public.carrier_packets where id = (select v::uuid from cp_state where k = 'a_p6'));
   end if;
-  -- sent (a_p1, a_p4, g_p1), named by an outbox row (c_p2, d_p1), on an
-  -- open card (e_p1)
+  -- sent today (a_p1, a_p4, g_p1), named by an outbox row (c_p2, d_p1), on
+  -- a card the run offers again (e_p1)
   foreach nm in array array['a_p1', 'a_p4', 'g_p1', 'c_p2', 'd_p1', 'e_p1'] loop
     if (select v::uuid from cp_state where k = nm) = any (listed) then
       raise exception 'the PDF of % is up for removal', nm;
@@ -2060,8 +2099,8 @@ release savepoint st;
 rollback;
 
 
--- 19. candidates and the declined-card cleanup, with jobs and cards dated in
---     the past. Its own transaction: the updated_at trigger on field_projects
+-- 19. candidates and the cleanup of declined, sent and offered-out PDFs, with
+--     jobs, cards and emails dated in the past. Its own transaction: the updated_at trigger on field_projects
 --     is off for its length, and both come back with the rollback.
 begin;
 
@@ -2119,6 +2158,59 @@ select p.id, p.job, 'PKT-2098-' || p.n, 1, 1, repeat('9a', 32), p.status, p.card
     ('00000000-0000-0000-0000-00000000c3ec'::uuid, '00000000-0000-0000-0000-00000000c3ac'::uuid, '0912', 'ready',      '00000000-0000-0000-0000-00000000c3d2'::uuid, interval '14 days')
   ) as p(id, job, n, status, card, age);
 
+-- Sent and offered-out rows for the cleanup (no job rows; not in the
+-- candidate checks): f1 sent 91 days ago; f2 sent 30 days ago; f3 sent 91
+-- days ago with an old dead email of it set going again (failed, to be
+-- retried); f4 undelivered 200 days ago; f5, f6 and f8 offered 3 times, the
+-- last card expired 15, 13 and 15 days ago (f5's first send went dead, f8's
+-- dead send is set going again); f7 offered twice, expired 15 days ago.
+insert into public.proposals (id, operation, action_type, input, proposed_by_kind, proposed_by_id, proposed_via,
+                              job_id, assigned_role, status, expires_at, idempotency_key, created_at, updated_at)
+select c.id, 'packet.send@1', 'comms', '{}', 'agent', 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65', 'agent',
+       c.job, 'owner', 'expired', now() - c.age, 'cp-test:' || c.id, now() - c.age - interval '14 days', now() - c.age
+  from (values
+    ('00000000-0000-0000-0000-00000000c3d6'::uuid, '00000000-0000-0000-0000-00000000c3c5'::uuid, interval '15 days'),
+    ('00000000-0000-0000-0000-00000000c3d7'::uuid, '00000000-0000-0000-0000-00000000c3c6'::uuid, interval '13 days'),
+    ('00000000-0000-0000-0000-00000000c3d8'::uuid, '00000000-0000-0000-0000-00000000c3c7'::uuid, interval '15 days'),
+    ('00000000-0000-0000-0000-00000000c3d9'::uuid, '00000000-0000-0000-0000-00000000c3c8'::uuid, interval '15 days')
+  ) as c(id, job, age);
+
+insert into public.carrier_packets (id, job_id, number, version, seq, model_hash, status, proposal_id, offer,
+                                    bucket, path, sha256, bytes, pages, mode, outbox_id, sent_at, sent_to, error,
+                                    created_at, updated_at)
+select p.id, p.job, 'PKT-2098-' || p.n, 1, 1, repeat('9c', 32), p.status, p.card, p.offer,
+       'carrier-packets', p.job::text || '/PKT-2098-' || p.n || '-v1-b1.pdf', repeat('9d', 32), 10, 1, 'full',
+       p.outbox, case when p.status = 'sent' then now() - p.age end,
+       case when p.status = 'sent' then 'adjuster@example.com' end,
+       case when p.status = 'undelivered' then 'Gmail 550: mailbox unavailable' end,
+       now() - p.age - interval '1 day', now() - p.age
+  from (values
+    ('00000000-0000-0000-0000-00000000c3f1'::uuid, '00000000-0000-0000-0000-00000000c3c1'::uuid, '0921', 'sent',        null::uuid, 0, '00000000-0000-0000-0000-00000000c3b1'::uuid, interval '91 days'),
+    ('00000000-0000-0000-0000-00000000c3f2'::uuid, '00000000-0000-0000-0000-00000000c3c2'::uuid, '0922', 'sent',        null::uuid, 0, '00000000-0000-0000-0000-00000000c3b2'::uuid, interval '30 days'),
+    ('00000000-0000-0000-0000-00000000c3f3'::uuid, '00000000-0000-0000-0000-00000000c3c3'::uuid, '0923', 'sent',        null::uuid, 0, '00000000-0000-0000-0000-00000000c3b3'::uuid, interval '91 days'),
+    ('00000000-0000-0000-0000-00000000c3f4'::uuid, '00000000-0000-0000-0000-00000000c3c4'::uuid, '0924', 'undelivered', null::uuid, 0, '00000000-0000-0000-0000-00000000c3b4'::uuid, interval '200 days'),
+    ('00000000-0000-0000-0000-00000000c3f5'::uuid, '00000000-0000-0000-0000-00000000c3c5'::uuid, '0925', 'ready', '00000000-0000-0000-0000-00000000c3d6'::uuid, 3, null::uuid, interval '15 days'),
+    ('00000000-0000-0000-0000-00000000c3f6'::uuid, '00000000-0000-0000-0000-00000000c3c6'::uuid, '0926', 'ready', '00000000-0000-0000-0000-00000000c3d7'::uuid, 3, null::uuid, interval '13 days'),
+    ('00000000-0000-0000-0000-00000000c3f7'::uuid, '00000000-0000-0000-0000-00000000c3c7'::uuid, '0927', 'ready', '00000000-0000-0000-0000-00000000c3d8'::uuid, 2, null::uuid, interval '15 days'),
+    ('00000000-0000-0000-0000-00000000c3f8'::uuid, '00000000-0000-0000-0000-00000000c3c8'::uuid, '0928', 'ready', '00000000-0000-0000-0000-00000000c3d9'::uuid, 3, null::uuid, interval '15 days')
+  ) as p(id, job, n, status, card, offer, outbox, age);
+
+-- the emails: each sent row's own (sent or delivered), the undelivered row's
+-- (dead), and the earlier sends of f3, f5 and f8 that name them by payload
+insert into public.outbox (id, channel, operation, payload, idempotency_key, status, sent_at, error, job_id, created_at)
+select o.id, 'packet', 'packet.send@1', jsonb_build_object('to', 'adjuster@example.com', 'packet_version_id', o.pkt),
+       'cp-test:outbox:' || o.id, o.status, case when o.status in ('sent', 'delivered') then now() - o.age end,
+       case when o.status in ('dead', 'failed') then 'Gmail upload timed out' end, o.job, now() - o.age
+  from (values
+    ('00000000-0000-0000-0000-00000000c3b1'::uuid, '00000000-0000-0000-0000-00000000c3f1'::uuid, '00000000-0000-0000-0000-00000000c3c1'::uuid, 'sent',      interval '91 days'),
+    ('00000000-0000-0000-0000-00000000c3b2'::uuid, '00000000-0000-0000-0000-00000000c3f2'::uuid, '00000000-0000-0000-0000-00000000c3c2'::uuid, 'sent',      interval '30 days'),
+    ('00000000-0000-0000-0000-00000000c3b3'::uuid, '00000000-0000-0000-0000-00000000c3f3'::uuid, '00000000-0000-0000-0000-00000000c3c3'::uuid, 'delivered', interval '91 days'),
+    ('00000000-0000-0000-0000-00000000c3e3'::uuid, '00000000-0000-0000-0000-00000000c3f3'::uuid, '00000000-0000-0000-0000-00000000c3c3'::uuid, 'failed',    interval '92 days'),
+    ('00000000-0000-0000-0000-00000000c3b4'::uuid, '00000000-0000-0000-0000-00000000c3f4'::uuid, '00000000-0000-0000-0000-00000000c3c4'::uuid, 'dead',      interval '200 days'),
+    ('00000000-0000-0000-0000-00000000c3b5'::uuid, '00000000-0000-0000-0000-00000000c3f5'::uuid, '00000000-0000-0000-0000-00000000c3c5'::uuid, 'dead',      interval '60 days'),
+    ('00000000-0000-0000-0000-00000000c3b8'::uuid, '00000000-0000-0000-0000-00000000c3f8'::uuid, '00000000-0000-0000-0000-00000000c3c8'::uuid, 'pending',   interval '60 days')
+  ) as o(id, pkt, job, status, age);
+
 savepoint s;
 set local role service_role;
 set local request.jwt.claims = '{"role": "service_role"}';
@@ -2161,6 +2253,18 @@ begin
     raise exception 'candidates ignored its limit';
   end if;
 
+  -- k1 held (the owner was texted it waits on a numbered invoice): it counts
+  -- as having a row, so the gate skips the lookback once it qualifies
+  perform public.carrier_packet_hold('00000000-0000-0000-0000-00000000c3a1', 'no_invoice', 'Waiting on a numbered invoice');
+  select jsonb_agg(jsonb_build_array(right(c.job_id::text, 4), c.has_row, c.open_row) order by c.ord)
+    into got
+    from public.carrier_packet_candidates(14, 2000) with ordinality as c(job_id, updated_at, has_row, open_row, ord)
+   where c.job_id = any (mine);
+  want := '[["c3b0", true, true], ["c3a5", true, true], ["c3a6", true, false], ["c3a1", true, false], ["c3a3", false, false]]';
+  if got is distinct from want then
+    raise exception 'candidates with k1 held are %, not %', got, want;
+  end if;
+
   -- declined 15 days ago: removable; 13 days ago: kept
   removable := array(select x.id from public.carrier_packet_pdfs_to_remove(100) x);
   if not ('00000000-0000-0000-0000-00000000c3eb'::uuid = any (removable))
@@ -2172,6 +2276,38 @@ begin
                                               '00000000-0000-0000-0000-00000000c3e5']::uuid[]) <> 1 then
     raise exception 'the stamp took an open card''s PDF, or not the long-declined one';
   end if;
+
+  -- sent 91 days ago (f1): removable, Gmail's Sent folder has the copy; sent
+  -- 30 days ago (f2), with an email of it going out again (f3), or
+  -- undelivered (f4): kept. Offered 3 times, the card expired 15 days ago
+  -- (f5, a dead email naming it): removable; 13 days ago (f6), below the cap
+  -- (f7), or with its dead email set going again (f8): kept
+  if not ('00000000-0000-0000-0000-00000000c3f1'::uuid = any (removable))
+     or not ('00000000-0000-0000-0000-00000000c3f5'::uuid = any (removable))
+     or removable && array['00000000-0000-0000-0000-00000000c3f2', '00000000-0000-0000-0000-00000000c3f3',
+                           '00000000-0000-0000-0000-00000000c3f4', '00000000-0000-0000-0000-00000000c3f6',
+                           '00000000-0000-0000-0000-00000000c3f7', '00000000-0000-0000-0000-00000000c3f8']::uuid[] then
+    raise exception 'the sent and offered-out cleanup listed %', removable;
+  end if;
+  if public.carrier_packet_pdfs_removed(array['00000000-0000-0000-0000-00000000c3f1', '00000000-0000-0000-0000-00000000c3f2',
+                                              '00000000-0000-0000-0000-00000000c3f3', '00000000-0000-0000-0000-00000000c3f4',
+                                              '00000000-0000-0000-0000-00000000c3f5', '00000000-0000-0000-0000-00000000c3f6',
+                                              '00000000-0000-0000-0000-00000000c3f7', '00000000-0000-0000-0000-00000000c3f8']::uuid[]) <> 2
+     or exists (select 1 from public.carrier_packets
+                 where id in ('00000000-0000-0000-0000-00000000c3f2', '00000000-0000-0000-0000-00000000c3f3',
+                              '00000000-0000-0000-0000-00000000c3f4', '00000000-0000-0000-0000-00000000c3f6',
+                              '00000000-0000-0000-0000-00000000c3f7', '00000000-0000-0000-0000-00000000c3f8')
+                   and pdf_removed_at is not null) then
+    raise exception 'the stamp did not take exactly f1 and f5';
+  end if;
+  -- the sent row is still the record of the send: only the stamp is new
+  if (select row(status, version, sent_at < now() - interval '90 days', sent_to, outbox_id, path, sha256, pdf_removed_at is not null)::text
+        from public.carrier_packets where id = '00000000-0000-0000-0000-00000000c3f1')
+     is distinct from row('sent', 1, true, 'adjuster@example.com', '00000000-0000-0000-0000-00000000c3b1'::uuid,
+                          '00000000-0000-0000-0000-00000000c3c1/PKT-2098-0921-v1-b1.pdf', repeat('9d', 32), true)::text then
+    raise exception 'the sent row whose PDF was removed is %',
+      (select to_jsonb(x) from public.carrier_packets x where id = '00000000-0000-0000-0000-00000000c3f1');
+  end if;
 end
 $$;
 release savepoint s;
@@ -2181,7 +2317,8 @@ rollback;
 
 
 -- 20. what an independent review found, held: nobody files packet.send by
---     hand; revoking the grant or deprecating the operation stops reserving;
+--     hand; revoking the grant, deprecating the operation or disabling
+--     agent:documents stops reserving;
 --     a send going out (a dead row someone set going again) blocks a build, a
 --     re-offer and a second approval, and its send is recorded on the packet
 --     even after a re-offer cleared outbox_id, superseding the fresh card;
@@ -2316,6 +2453,28 @@ release savepoint s;
 reset role;
 update public.operation_catalog set deprecated_at = null where name = 'packet.send' and version = 1;
 
+-- agent:documents disabled: op_resolve_caller would refuse its card, so
+-- nothing is built (and no failed tries are counted); enabled again, h builds
+-- (20c)
+update public.agents set enabled = false where id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65';
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+begin
+  if public.carrier_packet_reserve('00000000-0000-0000-0000-00000000c4a0', repeat('d1', 32), '{}', '{}', '{}', 2099)
+     is distinct from '{"action": "skip", "reason": "not_permitted"}' then
+    raise exception 'with agent:documents disabled, reserve did not skip';
+  end if;
+  if exists (select 1 from public.carrier_packets where job_id = '00000000-0000-0000-0000-00000000c4a0') then
+    raise exception 'a disabled agent:documents still reserved a row';
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+update public.agents set enabled = true where id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65';
+
 -- 20c. h: version 1 is sent; a change is offered as version 2; the change
 --      is undone, so the carrier already has this document
 savepoint s;
@@ -2329,7 +2488,7 @@ declare
   f   jsonb;
 begin
   r := public.carrier_packet_reserve(h, repeat('d1', 32), '{"cert": "1"}', '{}', '{}', 2099);
-  if r ->> 'action' is distinct from 'build' then raise exception 'with the grant back, h''s reserve answered %', r; end if;
+  if r ->> 'action' is distinct from 'build' then raise exception 'with the switches back on, h''s reserve answered %', r; end if;
   f := public.carrier_packet_file((r ->> 'packet_id')::uuid, (r ->> 'build_token')::uuid,
          jsonb_build_object('bucket', 'carrier-packets', 'path', r ->> 'path', 'sha256', repeat('d1', 32), 'bytes', 1000, 'pages', 3, 'mode', 'full'),
          inp, 'h v1', '[]');
@@ -2384,12 +2543,13 @@ begin
   if r is distinct from '{"action": "skip", "reason": "sent"}' then
     raise exception 'undoing the change answered %', r;
   end if;
+  -- a reason code, as the gate's are: the office app words it
   if (select row(status, error)::text from public.carrier_packets where id = p2)
-     is distinct from row('superseded', 'withdrawn: the carrier already has this version')::text then
+     is distinct from row('superseded', 'withdrawn: already_sent')::text then
     raise exception 'the undone version 2 is %', (select row(status, error)::text from public.carrier_packets where id = p2);
   end if;
   if (select row(status, result)::text from public.proposals where id = c2)
-     is distinct from row('superseded', '{"superseded_reason": "withdrawn", "reason": "the carrier already has this version"}'::jsonb)::text then
+     is distinct from row('superseded', '{"superseded_reason": "withdrawn", "reason": "already_sent"}'::jsonb)::text then
     raise exception 'the undone version 2''s card is %', (select row(status, result)::text from public.proposals where id = c2);
   end if;
   if not exists (select 1 from public.events where kind = 'proposal.superseded' and aggregate_id = c2

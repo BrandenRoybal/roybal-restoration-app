@@ -40,7 +40,8 @@
 --   carrier_packet_candidates   the jobs a run looks at
 --   carrier_packet_state        the photo numbers and the last sent version
 --   carrier_packet_pdfs_to_remove,
---   carrier_packet_pdfs_removed the cleanup of PDFs nobody can send any more
+--   carrier_packet_pdfs_removed the cleanup of PDFs nobody can send any more,
+--                               sent ones included after 90 days
 --   carrier_packet_storage_bytes,
 --   carrier_packet_media_sizes  object sizes from storage.objects, for the
 --                               size budget and the storage cap
@@ -288,7 +289,7 @@ comment on column public.carrier_packets.error is
 comment on column public.carrier_packets.offer is
   'How many re-offers the current card took: 0 for the first card, + 1 for each carrier_packet_reoffer(); the idempotency key carries it.';
 comment on column public.carrier_packets.pdf_removed_at is
-  'The PDF was deleted from storage. Never set for a sent or undelivered row, or for one an outbox row references.';
+  'The PDF was deleted from storage. Never set for an undelivered row or one a packet email still going out names; set for a sent row 90 days after it went (Gmail''s Sent folder keeps the copy), which stays sent.';
 
 create unique index if not exists carrier_packets_one_building
   on public.carrier_packets (job_id) where status = 'building';
@@ -358,8 +359,10 @@ alter table public.outbox add constraint outbox_channel_check
 -- and offer are stamped by the filing doors, never sent by the worker. to and
 -- cc are in the schema only so the owner's approval can add them: the doors
 -- refuse an input that carries either, and the executor refuses an approval
--- that does not name the To or edits anything else. No amount field: comms
--- has no money threshold.
+-- that does not name the To or edits anything else. The To's pattern is the
+-- worker's (rfc822.mjs EMAIL: no space, @, <, >, comma or semicolon in either
+-- part), so an address the email would be refused for is refused here. No
+-- amount field: comms has no money threshold.
 -- ---------------------------------------------------------------------------
 insert into public.operation_catalog
   (name, version, action_type, description, input_schema, runtime, approval_default,
@@ -380,7 +383,7 @@ select c.name, 1, 'comms', c.description, c.input_schema::jsonb, 'sql', 'owner',
          "filename":          {"type": "string", "maxLength": 200},
          "suggested_to":      {"type": "string", "maxLength": 320},
          "suggested_from":    {"type": "string", "maxLength": 200},
-         "to":                {"type": "string", "maxLength": 320, "pattern": "^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$"},
+         "to":                {"type": "string", "maxLength": 320, "pattern": "^[^@[:space:]<>,;]+@[^@[:space:]<>,;]+\\.[^@[:space:]<>,;]+$"},
          "cc":                {"type": "string", "maxLength": 1000}}}',
      'packet.send:{packet_version_id}:{offer}')
   ) as c(name, description, input_schema, idempotency_template)
@@ -392,13 +395,16 @@ on conflict (name, version) do nothing;
 --    inside the owner's approval, as postgres.
 --
 -- The packet comes from the proposal's own input, never from the edit; the
--- edit may carry the To and the Cc and nothing else, and must carry the To.
--- Under the job's lock the packet row must still be this card's, the job's
--- newest live row (no ready, sent or undelivered row above it), with its PDF
--- still stored, and the job must still exist, live and unarchived. Any of
--- these failing raises, which op_execute records as the card's failure with
--- nothing written; the next hourly run offers the same PDF again on a fresh
--- card when the job is still in scope.
+-- edit may carry the To and the Cc and nothing else, and must carry the To,
+-- each held to the worker's rule (rfc822.mjs validAddresses): the To one
+-- bare address, the Cc blank or bare addresses apart by commas, so no
+-- approval queues an email the worker refuses for good. Under the job's
+-- lock the packet row must still be this card's, the job's newest live row
+-- (no ready, sent or undelivered row above it), with its PDF still stored,
+-- and the job must still exist, live and unarchived. Any of these failing
+-- raises, which op_execute records as the card's failure with nothing
+-- written; the next hourly run offers the same PDF again on a fresh card
+-- when the job is still in scope.
 --
 -- Writes ONE outbox row (channel packet, key outbox:<proposal key>), records
 -- it on the packet row, and emits packet.queued. Returns {outbox_id,
@@ -427,12 +433,20 @@ begin
   if v_edit is null or jsonb_typeof(v_edit) <> 'object' or not (v_edit ? 'to')
      or exists (select 1 from jsonb_object_keys(v_edit) k where k not in ('to', 'cc'))
      or jsonb_typeof(v_edit -> 'to') is distinct from 'string'
-     or btrim(v_edit ->> 'to') !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
+     or btrim(v_edit ->> 'to') !~ '^[^@[:space:]<>,;]+@[^@[:space:]<>,;]+\.[^@[:space:]<>,;]+$'
      or coalesce(jsonb_typeof(v_edit -> 'cc'), 'null') not in ('string', 'null') then
     raise exception 'Reload Approvals and confirm the recipient.';
   end if;
   v_to := btrim(v_edit ->> 'to');
   v_cc := btrim(coalesce(v_edit ->> 'cc', ''));
+  -- the Cc as validAddresses reads it: split at commas, blanks dropped, at
+  -- least one address left and every one bare
+  if v_cc <> '' and (select count(*) = 0
+                            or bool_or(a !~ '^[[:space:]]*[^@[:space:]<>,;]+@[^@[:space:]<>,;]+\.[^@[:space:]<>,;]+[[:space:]]*$')
+                       from regexp_split_to_table(v_cc, ',') a
+                      where a ~ '[^[:space:]]') then
+    raise exception 'Reload Approvals and confirm the recipient.';
+  end if;
 
   -- 2. the packet the card was filed for
   begin
@@ -526,7 +540,7 @@ $$;
 
 alter function public.op_exec_packet_send(public.proposals, jsonb, text, uuid) owner to postgres;
 comment on function public.op_exec_packet_send(public.proposals, jsonb, text, uuid) is
-  'Executor for packet.send@1: refuses an approval whose edited_params is not {to[, cc]} with a valid To ("Reload Approvals and confirm the recipient."); under the job''s carrier_packet lock checks the job is live and unarchived and the packet row is ready, this card''s, the job''s newest live row, with its PDF stored; writes one outbox row on channel packet (key outbox:<proposal key>) with the To, Cc, subject, body and the PDF attachment, records outbox_id on the row and emits packet.queued (0026).';
+  'Executor for packet.send@1: refuses an approval whose edited_params is not {to[, cc]} with one bare To and a blank or comma-separated bare Cc, as the worker''s rfc822.mjs validAddresses takes them ("Reload Approvals and confirm the recipient."); under the job''s carrier_packet lock checks the job is live and unarchived and the packet row is ready, this card''s, the job''s newest live row, with its PDF stored; writes one outbox row on channel packet (key outbox:<proposal key>) with the To, Cc, subject, body and the PDF attachment, records outbox_id on the row and emits packet.queued (0026).';
 revoke all on function public.op_exec_packet_send(public.proposals, jsonb, text, uuid) from public, anon, authenticated, service_role;
 
 
@@ -590,8 +604,9 @@ revoke all on function public.carrier_packet_offer_card(public.carrier_packets, 
 -- means, under the job's lock, after op_expire_proposals (so a card past its
 -- expiry reads expired, not open). In order (design §7):
 --   1. no worker heartbeating the 'packet' channel     → skip lane_off
---      agent:documents holds no live packet.send grant, or the catalog row
---      is deprecated (the owner switched filing off)   → skip not_permitted
+--      agent:documents holds no live packet.send grant or is not an enabled
+--      agents row, or the catalog row is deprecated (filing is switched
+--      off: op_propose would refuse the card)          → skip not_permitted
 --   2. a building row: under 30 minutes old            → skip building
 --      older, it failed (abandoned, not permanent, its PDF's path kept so
 --      the cleanup removes an upload) and the run goes on
@@ -617,7 +632,8 @@ revoke all on function public.carrier_packet_offer_card(public.carrier_packets, 
 --   8. S has this hash: the carrier already has this document. A newer
 --      ready row (its card locked SKIP LOCKED; locked or approved → skip
 --      in_flight) and undelivered rows above S are superseded, an open card
---      with them (withdrawn), and → skip sent
+--      with them (withdrawn, reason already_sent: a code, as the gate's
+--      reasons are, which the office app words), and → skip sent
 --   9. p_build false (the worker has no room or no builds left this run)
 --                                                      → skip no_build
 --      build: a building row, seq max + 1, version S.version + 1 (1 with no
@@ -686,9 +702,12 @@ begin
   if not public.outbox_channel_ready('packet') then
     return jsonb_build_object('action', 'skip', 'reason', 'lane_off');
   end if;
-  -- the owner's switches (the header): nothing is built that could not be filed
+  -- the owner's switches (the header), and agent:documents disabled, which
+  -- op_resolve_caller refuses: nothing is built that could not be filed
   if not exists (select 1 from public.operation_catalog c
                   where c.name = 'packet.send' and c.version = 1 and c.deprecated_at is null)
+     or not exists (select 1 from public.agents a
+                     where a.id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65' and a.enabled and a.org_id = public.current_org())
      or not public.op_agent_permits('b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65', 'packet.send', 'comms', 'propose') then
     return jsonb_build_object('action', 'skip', 'reason', 'not_permitted');
   end if;
@@ -815,8 +834,7 @@ begin
         if v_card = 'proposed' then
           update public.proposals p
              set status = 'superseded',
-                 result = jsonb_build_object('superseded_reason', 'withdrawn',
-                                             'reason', 'the carrier already has this version')
+                 result = jsonb_build_object('superseded_reason', 'withdrawn', 'reason', 'already_sent')
            where p.id = v_ready.proposal_id and p.status = 'proposed'
           returning p.id, p.operation, p.job_id, p.claim_id, p.result into r;
           if found then
@@ -826,7 +844,7 @@ begin
           end if;
         end if;
         update public.carrier_packets
-           set status = 'superseded', error = 'withdrawn: the carrier already has this version', updated_at = now()
+           set status = 'superseded', error = 'withdrawn: already_sent', updated_at = now()
          where id = v_ready.id;
       end if;
       update public.carrier_packets
@@ -1362,7 +1380,9 @@ grant execute on function public.carrier_packet_hold_texted(uuid, text) to servi
 --     the window (the gate skips the lookback for a job with rows)
 --   * jobs with a ready row, deleted ones included, so a job that left scope
 --     has its card withdrawn
--- has_row: the job has any packet row; open_row: it has a ready row.
+-- has_row: the job has any packet row, or a hold (the owner was texted that
+-- it waits, on a numbered invoice say, so it is built once it qualifies,
+-- however long ago its dates); open_row: it has a ready row.
 create or replace function public.carrier_packet_candidates(p_lookback_days integer, p_limit integer)
   returns table (job_id uuid, updated_at timestamptz, has_row boolean, open_row boolean)
   language sql
@@ -1396,7 +1416,9 @@ as $$
     union
     select b.id from built b where b.ready
   )
-  select p.id, fp.updated_at, b.id is not null, coalesce(b.ready, false)
+  select p.id, fp.updated_at,
+         b.id is not null or exists (select 1 from public.carrier_packet_holds h where h.job_id = p.id),
+         coalesce(b.ready, false)
     from picked p
     left join public.field_projects fp on fp.id = p.id
     left join built b on b.id = p.id
@@ -1406,7 +1428,7 @@ $$;
 
 alter function public.carrier_packet_candidates(integer, integer) owner to postgres;
 comment on function public.carrier_packet_candidates(integer, integer) is
-  'The jobs a packet.build run looks at, oldest updated_at first: live jobs with a certificate changed in the last lookback + 2 days, live jobs changed since their newest packet row, and every job with a ready row (to withdraw). Columns job_id, updated_at, has_row, open_row. service_role only (0026).';
+  'The jobs a packet.build run looks at, oldest updated_at first: live jobs with a certificate changed in the last lookback + 2 days, live jobs changed since their newest packet row, and every job with a ready row (to withdraw). Columns job_id, updated_at, has_row (a packet row or a hold), open_row. service_role only (0026).';
 revoke all on function public.carrier_packet_candidates(integer, integer) from public, anon, authenticated;
 grant execute on function public.carrier_packet_candidates(integer, integer) to service_role;
 
@@ -1438,14 +1460,20 @@ grant execute on function public.carrier_packet_state(uuid) to service_role;
 
 
 -- carrier_packet_pdfs_to_remove / carrier_packet_pdfs_removed: the PDFs nobody
--- can send any more. Superseded and failed rows with a stored PDF, and ready
+-- can send any more, so the bucket stops growing and its cap never stops the
+-- lane for good. Superseded and failed rows with a stored PDF, and ready
 -- rows whose card was declined more than 14 days ago (the declining update is
--- the card's last), never a sent or undelivered row, and never a row an
--- outbox row references (by outbox_id, or by the packet_version_id a dead
--- outbox row still carries after a re-offer): those PDFs are the record of
--- what went to the carrier, or tried to. The worker deletes each object,
--- then stamps the rows; the stamp re-checks the same rules and returns how
--- many rows it stamped.
+-- the card's last), that no outbox row references (by outbox_id, or by the
+-- packet_version_id a dead outbox row still carries after a re-offer): those
+-- are the record of what tried to go to the carrier. Then two kinds whose
+-- emails are settled: sent rows sent more than 90 days ago (Gmail's Sent
+-- folder keeps the copy that went out; the row stays sent, only
+-- pdf_removed_at is stamped), and ready rows at the offer cap whose last card
+-- expired, was superseded or failed more than 14 days ago; neither while a
+-- packet outbox row naming it is pending, sending or failed (to be retried).
+-- Never an undelivered row. The worker deletes each object, then stamps the
+-- rows; the stamp re-checks the same rules and returns how many rows it
+-- stamped.
 create or replace function public.carrier_packet_pdfs_to_remove(p_limit integer)
   returns table (id uuid, bucket text, path text)
   language sql
@@ -1458,18 +1486,24 @@ as $$
     left join public.proposals p on p.id = cp.proposal_id
    where cp.path is not null
      and cp.pdf_removed_at is null
-     and cp.outbox_id is null
-     and (cp.status in ('superseded', 'failed')
-          or (cp.status = 'ready' and p.status = 'declined' and p.updated_at < now() - interval '14 days'))
-     and not exists (select 1 from public.outbox o
-                      where o.channel = 'packet' and o.payload ->> 'packet_version_id' = cp.id::text)
+     and (((cp.status in ('superseded', 'failed')
+            or (cp.status = 'ready' and p.status = 'declined' and p.updated_at < now() - interval '14 days'))
+           and cp.outbox_id is null
+           and not exists (select 1 from public.outbox o
+                            where o.channel = 'packet' and o.payload ->> 'packet_version_id' = cp.id::text))
+          or ((cp.status = 'sent' and cp.sent_at < now() - interval '90 days'
+               or (cp.status = 'ready' and cp.offer >= 3 and p.status in ('expired', 'superseded', 'failed')
+                   and p.updated_at < now() - interval '14 days'))
+              and not exists (select 1 from public.outbox o
+                               where o.channel = 'packet' and o.status in ('pending', 'sending', 'failed')
+                                 and (o.id = cp.outbox_id or o.payload ->> 'packet_version_id' = cp.id::text))))
    order by cp.updated_at, cp.id
    limit greatest(1, least(coalesce(p_limit, 20), 100));
 $$;
 
 alter function public.carrier_packet_pdfs_to_remove(integer) owner to postgres;
 comment on function public.carrier_packet_pdfs_to_remove(integer) is
-  'Carrier packet PDFs the worker may delete: superseded and failed rows with a path, and ready rows whose card was declined over 14 days ago; never sent or undelivered rows, never one an outbox row references, never one already removed. Columns id, bucket, path; at most 100. service_role only (0026).';
+  'Carrier packet PDFs the worker may delete: superseded and failed rows with a path and ready rows whose card was declined over 14 days ago, that no outbox row references; sent rows sent over 90 days ago, and ready rows at the offer cap (3) whose card expired, was superseded or failed over 14 days ago, that no pending, sending or failed packet outbox row names. Never undelivered rows, never one already removed. Columns id, bucket, path; at most 100. service_role only (0026).';
 revoke all on function public.carrier_packet_pdfs_to_remove(integer) from public, anon, authenticated;
 grant execute on function public.carrier_packet_pdfs_to_remove(integer) to service_role;
 
@@ -1485,14 +1519,22 @@ as $$
      where cp.id = any (coalesce(p_ids[1:1000], '{}'::uuid[]))
        and cp.path is not null
        and cp.pdf_removed_at is null
-       and cp.outbox_id is null
-       and (cp.status in ('superseded', 'failed')
-            or (cp.status = 'ready'
-                and exists (select 1 from public.proposals p
-                             where p.id = cp.proposal_id and p.status = 'declined'
-                               and p.updated_at < now() - interval '14 days')))
-       and not exists (select 1 from public.outbox o
-                        where o.channel = 'packet' and o.payload ->> 'packet_version_id' = cp.id::text)
+       and (((cp.status in ('superseded', 'failed')
+              or (cp.status = 'ready'
+                  and exists (select 1 from public.proposals p
+                               where p.id = cp.proposal_id and p.status = 'declined'
+                                 and p.updated_at < now() - interval '14 days')))
+             and cp.outbox_id is null
+             and not exists (select 1 from public.outbox o
+                              where o.channel = 'packet' and o.payload ->> 'packet_version_id' = cp.id::text))
+            or ((cp.status = 'sent' and cp.sent_at < now() - interval '90 days'
+                 or (cp.status = 'ready' and cp.offer >= 3
+                     and exists (select 1 from public.proposals p
+                                  where p.id = cp.proposal_id and p.status in ('expired', 'superseded', 'failed')
+                                    and p.updated_at < now() - interval '14 days')))
+                and not exists (select 1 from public.outbox o
+                                 where o.channel = 'packet' and o.status in ('pending', 'sending', 'failed')
+                                   and (o.id = cp.outbox_id or o.payload ->> 'packet_version_id' = cp.id::text))))
     returning 1
   )
   select count(*)::integer from stamped;
@@ -1500,7 +1542,7 @@ $$;
 
 alter function public.carrier_packet_pdfs_removed(uuid[]) owner to postgres;
 comment on function public.carrier_packet_pdfs_removed(uuid[]) is
-  'Stamps pdf_removed_at on carrier packet rows whose PDF the worker deleted, re-checking carrier_packet_pdfs_to_remove''s rules (never sent, undelivered or outbox-referenced rows); at most 1000 ids. Returns how many rows it stamped. service_role only (0026).';
+  'Stamps pdf_removed_at on carrier packet rows whose PDF the worker deleted, re-checking carrier_packet_pdfs_to_remove''s rules (never an undelivered row, an outbox-referenced superseded, failed or declined one, a sent row under 90 days old, or a row a packet email still going out names); a sent row stays sent. At most 1000 ids. Returns how many rows it stamped. service_role only (0026).';
 revoke all on function public.carrier_packet_pdfs_removed(uuid[]) from public, anon, authenticated;
 grant execute on function public.carrier_packet_pdfs_removed(uuid[]) to service_role;
 
