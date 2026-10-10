@@ -904,8 +904,11 @@ function qboOutcome(c) {
 
 /* Why the packet lane withdrew a card: the gate's reasons
    (docs/Carrier_Packet_Design.md §4) that take an approvable PDF away, so a
-   voided invoice or a cleared certificate never leaves one behind. */
+   voided invoice or a cleared certificate never leaves one behind; and
+   carrier_packet_reserve's already_sent, a change undone back to the
+   version the carrier was sent. */
 const WITHDRAWN = {
+  already_sent: "the carrier already has this version",
   deleted: "the job was deleted", archived: "the job was archived",
   not_water: "the job isn't a water mitigation job now",
   excluded: "the certificate or the invoices were unticked on the job's packet page",
@@ -954,13 +957,16 @@ export function outcome(c, now = Date.now(), seenAt = now) {
       // the night's findings no longer match this card's (findings_changed);
       // receipts_qbo_link_file's: QuickBooks needs nothing more for the job
       // (nothing_to_do), or the owner answered tonight's items on another
-      // card (items_changed); carrier_packet_withdraw's: the job no longer
-      // gets a packet (withdrawn, and the gate's reason why)
+      // card (items_changed); carrier_packet_withdraw's and
+      // carrier_packet_reserve's: the card's packet is withdrawn (withdrawn,
+      // and why); outbox_packet_result's: an earlier send of the same packet
+      // went out (sent)
       const why = c.result.superseded_reason;
       return { text: why === "no_gaps" ? "No longer needed: the invoice covers it"
         : why === "findings_changed" ? "Closed: the nightly check's findings changed"
         : why === "nothing_to_do" ? "No longer needed: QuickBooks has what it needs"
         : why === "items_changed" ? "Closed: the nightly QuickBooks match's findings changed"
+        : why === "sent" ? "No longer needed: this packet was sent"
         : why === "withdrawn" ? "Withdrawn: " + (own(WITHDRAWN, str(c.result.reason)) || "the job no longer gets a carrier packet")
         : "Replaced by a newer ask", tone: "no" };
     }

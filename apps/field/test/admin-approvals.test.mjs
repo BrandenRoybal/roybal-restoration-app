@@ -1590,6 +1590,47 @@ await test("Approve stays off until the To is one good address, saying what's wr
   reset5();
 });
 
+await test("a stray angle bracket in the To or a Cc keeps Approve off; whatever Approve can send, the worker's address check takes", async () => {
+  const { validAddresses } = await import("../../../services/worker/rfc822.mjs");
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [pktRow];
+  await go();
+  const approveOff = () => btn(card(PKT), "Approve and send").disabled;
+  const wrong = () => card(PKT).querySelector(".ap-addr--bad");
+  // half a pasted "Name <address>": the worker would refuse it for good
+  for (const v of ["adjuster@example.com>", "<adjuster@example.com", "adj<uster@example.com", "adjuster@exam>ple.com"]) {
+    assert.equal(validAddresses(v), false, v);
+    typeIn(toOf(PKT), v);
+    assert.equal(approveOff(), true, v);
+    assert.equal(wrong().textContent, "Just the address, without the name.", v);
+  }
+  typeIn(toOf(PKT), "claims@example.com");
+  for (const v of ["office@example.com>", "<office@example.com", "office@example.com, <second@example.com", "office@example.com; second@example.com>"]) {
+    assert.equal(validAddresses(v.replace(/;/g, ",")), false, v);
+    typeIn(ccOf(PKT), v);
+    assert.equal(approveOff(), true, v);
+    assert.equal(wrong().textContent, "Cc: just the addresses, without the names.", v);
+  }
+  // every To and Cc Approve is on for goes through the worker's check as sent
+  let on = 0;
+  for (const to of ["claims@example.com", "  claims@example.com ", "kelly.o'brien@example.com", "<claims@example.com>", "claims@example.com>",
+    "Jane Sample <claims@example.com>", "claims@exa,mple.com", "claims@example.com;"]) {
+    for (const cc of ["", "office@example.com", " office@example.com , second@example.com ", "office@example.com; second@example.com",
+      "<office@example.com>", "office@example.com>", "Office <office@example.com>", "office@example.com;; ,second@example.com"]) {
+      typeIn(toOf(PKT), to);
+      typeIn(ccOf(PKT), cc);
+      if (approveOff()) continue;
+      on++;
+      assert.ok(validAddresses(to), JSON.stringify([to, cc]));
+      assert.ok(!cc.trim() || validAddresses(cc.replace(/;/g, ",")), JSON.stringify([to, cc]));
+    }
+  }
+  assert.equal(on, 3 * 5, "the bare addresses, and only those, are approvable");
+  reset5();
+});
+
 await test("the 45 s refresh waits while he's typing in a packet's To or Cc, and goes once he isn't", async () => {
   reset5();
   heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
@@ -1609,6 +1650,67 @@ await test("the 45 s refresh waits while he's typing in a packet's To or Cc, and
     await settle();
     assert.equal(listReads(before), 1);
   }
+  reset5();
+});
+
+await test("a refresh whose proposals read failed keeps the To and Cc he typed and the open email: the next good read shows them, and Approve sends them", async () => {
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [reminder];
+  PR = [];                    // a good read without the card: nothing typed or opened on it before is kept
+  await go();
+  PR = [pktRow];
+  OUTBOX = [];
+  await go();
+  assert.deepEqual([toOf(PKT).value, ccOf(PKT).value, card(PKT).querySelector(".ap-mail").hidden], ["adjuster@example.com", "", true]);
+  typeIn(toOf(PKT), "claims@example.com");
+  typeIn(ccOf(PKT), "office@example.com");
+  btn(card(PKT), "Show the email").click();
+  const real = globalThis.fetch;
+  const reads = [
+    // a 5xx on the proposals read: the text queue still shows, the packet card doesn't
+    [async (url, opts) => (String(url).includes("/rest/v1/proposals?") && !(opts.headers || {}).Range ? json(503, { message: "upstream" }) : real(url, opts)),
+      ["The new approvals queue didn't load (503)."]],
+    // no connection at all (a laptop waking): both queues down
+    [async (url, opts) => { if (/\/rest\/v1\/(proposals|pending_actions)\?/.test(String(url))) throw new TypeError("Failed to fetch"); return real(url, opts); },
+      ["The text queue didn't load: no connection.", "The new approvals queue didn't load: no connection."]],
+  ];
+  for (const [down, warns] of reads) {
+    globalThis.fetch = down;
+    btn(view, "↻ Refresh").click();
+    await settle();
+    globalThis.fetch = real;
+    assert.deepEqual([...view.querySelectorAll(".warn:not(.ap-err)")].map((w) => w.textContent), warns);
+    assert.equal(card(PKT), null, "its queue didn't load");
+    btn(view, "↻ Refresh").click();
+    await settle();
+    assert.deepEqual([toOf(PKT).value, ccOf(PKT).value], ["claims@example.com", "office@example.com"], warns[0]);
+    assert.equal(row(card(PKT), "To").querySelector(".ap-addr").textContent, `Suggested: adjuster@example.com, from ${PKT_FROM}.`);
+    assert.equal(card(PKT).querySelector(".ap-mail").hidden, false, "the email he opened stays open");
+  }
+  asked.length = 0;
+  spine = (fn, body) => pktApproved(body);
+  const before = since0();
+  btn(card(PKT), "Approve and send").click();
+  await settle();
+  assert.deepEqual(asked, ["Send the carrier packet to claims@example.com, Cc office@example.com?"]);
+  assert.deepEqual(calls.slice(before).find((x) => x.u.includes("/rpc/op_proposal_")).body.p_edited_params,
+    { to: "claims@example.com", cc: "office@example.com" });
+  // a read that loaded without the card (answered elsewhere) lets what he typed go
+  reset5();
+  heartbeat = beatAt(0.5, ["sms", "email", "packet"]);
+  PA = [];
+  PR = [pktRow];
+  await go();
+  typeIn(toOf(PKT), "claims@example.com");
+  PR = [];
+  btn(view, "↻ Refresh").click();
+  await settle();
+  assert.equal(card(PKT), null);
+  PR = [pktRow];
+  btn(view, "↻ Refresh").click();
+  await settle();
+  assert.deepEqual([toOf(PKT).value, ccOf(PKT).value], ["adjuster@example.com", ""]);
   reset5();
 });
 

@@ -114,13 +114,15 @@ const PACKET_OP = /^packet\.send(?:@|$)/;
    (SPINE_TO). This is adjustersend.js checkAddress with the same rules and
    words, inlined rather than imported: this page imports only field names
    that existed before it was written (the rule above), and checkAddress
-   came later. admin-approvals.test.mjs holds the two to the same answers. */
+   came later. admin-approvals.test.mjs holds the two to the same answers.
+   One rule more: any angle bracket is refused, not only a <name> pair, as
+   the worker refuses a stray one for good (rfc822.mjs validAddresses). */
 const SPINE_TO = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 function checkTo(v) {
   const to = (v == null ? "" : String(v)).trim();
   if (!to) return { ok: false, error: "Type the adjuster's email address." };
   if ((to.match(/@/g) || []).length > 1 || /[,;]/.test(to)) return { ok: false, error: "One address only: this sends to a single adjuster." };
-  if (/<[^<>]*>/.test(to)) return { ok: false, error: "Just the address, without the name." };
+  if (/[<>]/.test(to)) return { ok: false, error: "Just the address, without the name." };
   if (!SPINE_TO.test(to)) return { ok: false, error: "That doesn't look like an email address." };
   if (to.length > 320) return { ok: false, error: "That address is too long." };
   return { ok: true, to };
@@ -132,7 +134,7 @@ function checkTo(v) {
 function checkCc(v) {
   const list = (v == null ? "" : String(v)).split(/[,;]/).map((a) => a.trim()).filter(Boolean);
   for (const a of list) {
-    if (/<[^<>]*>/.test(a)) return { ok: false, error: "Cc: just the addresses, without the names." };
+    if (/[<>]/.test(a)) return { ok: false, error: "Cc: just the addresses, without the names." };
     if (!SPINE_TO.test(a)) return { ok: false, error: `Cc: “${a}” doesn't look like an email address.` };
   }
   const cc = list.join(", ");
@@ -267,7 +269,8 @@ async function load(now) {
   // the proposal rows by id, as read: what tells a carrier packet card apart whatever the field module knew (packetOf)
   const raw = new Map();
   for (const r of Array.isArray(pr) ? pr : []) if (r && typeof r === "object" && typeof r.id === "string") raw.set(r.id.trim(), r);
-  return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2, textOk: text.status === "fulfilled", readAt: now, raw };
+  return { box: A.inbox(pa, pr, look, now), look, warn, failed: warn.length === 2, textOk: text.status === "fulfilled",
+    spineOk: spine.status === "fulfilled" && Array.isArray(spine.value), readAt: now, raw };
 }
 
 /* ---------- is this the owner? ----------
@@ -390,7 +393,7 @@ export async function renderApprovals(view) {
   body.append(h("p", { class: "ap-intro" },
     "Everything waiting on your yes. A card that says “or text YES 12” can also be answered by text; the first answer counts."), page);
   let state = await load(Date.now()).catch(() => ({ box: { waiting: [], recent: [], expired: 0, skipped: { text: 0, spine: 0 } },
-    look: {}, warn: ["Approvals didn't load. Try again in a minute."], failed: true, textOk: false }));
+    look: {}, warn: ["Approvals didn't load. Try again in a minute."], failed: true, textOk: false, spineOk: false }));
   if (!live()) return;
   show();
 
@@ -416,8 +419,12 @@ export async function renderApprovals(view) {
     // the server still lists as open gives the buttons back
     const open = new Set(state.box.waiting.map((c) => c.key));
     for (const [k, n] of notes) if (!open.has(k) || n.gone) notes.delete(k);
-    for (const k of [...drafts.keys()]) if (!open.has(k)) drafts.delete(k);
-    for (const k of [...opened]) if (!open.has(k)) opened.delete(k);
+    // a spine queue that didn't load says nothing about which packet cards are
+    // still open: what he typed on one, and its open email, wait for a read that did
+    if (state.spineOk) {
+      for (const k of [...drafts.keys()]) if (!open.has(k)) drafts.delete(k);
+      for (const k of [...opened]) if (!open.has(k)) opened.delete(k);
+    }
     // a text queue that didn't load says nothing about which rows are still 'approved'
     if (state.textOk) {
       A.sawApproved(seenApproved, state.box.recent, state.readAt, lastTextRead);

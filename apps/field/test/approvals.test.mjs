@@ -29,7 +29,9 @@
    and where it came from, and the PDF link; no YES number even when the
    row carries one; its outbox row read once approved, and its lane line
    from the worker's "packet" channel; "Sent from Gmail" or "Couldn't send:
-   …" from that row, and a withdrawn card in words; and the field module
+   …" from that row, and a withdrawn card in words (the carrier already
+   having its version among them), or one closed because an earlier send
+   of the packet went out; and the field module
    never putting the suggested To in a request.
    Run: node --test test/approvals.test.mjs */
 import test from "node:test";
@@ -1682,6 +1684,16 @@ test("carrier packet: what came of it is its one outbox row, Sent from Gmail or 
   assert.deepEqual(at("superseded", { result: { superseded_reason: "withdrawn", reason: "constructor" } }),
     { text: "Withdrawn: the job no longer gets a carrier packet", tone: "no" }, "an unknown reason, even a prototype-named one");
   assert.deepEqual(at("superseded", { result: { superseded_by: "bbbbbbbb-0000-4000-8000-0000000000d2" } }), { text: "Replaced by a newer ask", tone: "no" });
+});
+
+test("carrier packet: a card withdrawn because the carrier already has its version, or closed because an earlier send of it went out, says so", () => {
+  const at = (result) => outcome(fromProposal({ ...pktCard, status: "superseded", updated_at: iso(-1), result }, PKT_LOOK), NOW);
+  // carrier_packet_reserve: a change undone back to the version that was sent
+  assert.deepEqual(at({ superseded_reason: "withdrawn", reason: "already_sent" }),
+    { text: "Withdrawn: the carrier already has this version", tone: "no" });
+  // outbox_packet_result: a revived send of the same packet went out
+  assert.deepEqual(at({ superseded_reason: "sent", outbox_id: "eeeeeeee-0000-4000-8000-000000000003" }),
+    { text: "No longer needed: this packet was sent", tone: "no" });
 });
 
 test("carrier packet: the PDF is the ref marked pdf, else a .pdf link, else the first https link; never a link that isn't https", () => {
