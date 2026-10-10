@@ -597,7 +597,10 @@ revoke all on function public.carrier_packet_offer_card(public.carrier_packets, 
 --      the cleanup removes an upload) and the run goes on
 --   3. this hash failed permanently, or 3 times not counting relabel
 --                                                      → skip failed_cap,
---      with the last try's error (the worker holds the job and texts once)
+--      with the last try's error and whether it stopped short of 3 tries
+--      (permanent); when that error is the PDF being too large to email
+--                                                      → skip too_large
+--      (the worker holds the job and texts once, by that reason)
 --      a packet outbox row of the job is pending, sending or failed (to be
 --      retried)                                        → skip in_flight
 --   4. S = the newest sent row; R = the ready row (locked) and its card
@@ -606,14 +609,18 @@ revoke all on function public.carrier_packet_offer_card(public.carrier_packets, 
 --      expired, superseded or failed → reoffer R while R.offer < 3, else
 --      skip offer_cap
 --   7. no R; U = the newest undelivered row above S, with this hash: its
---      error is about size → skip too_large; its stored PDF is missing or
---      does not match → build (9); else reoffer U while U.offer < 3, else
---      skip offer_cap
+--      error is about size → skip too_large (with that error); its stored
+--      PDF is missing or does not match → build (9); else reoffer U while
+--      U.offer < 3, else skip offer_cap
+--      A reoffer whose PDF is no longer stored (pdf_removed_at, or no such
+--      object in storage.objects: removed by hand) is built afresh instead.
 --   8. S has this hash: the carrier already has this document. A newer
 --      ready row (its card locked SKIP LOCKED; locked or approved → skip
 --      in_flight) and undelivered rows above S are superseded, an open card
 --      with them (withdrawn), and → skip sent
---   9. build: a building row, seq max + 1, version S.version + 1 (1 with no
+--   9. p_build false (the worker has no room or no builds left this run)
+--                                                      → skip no_build
+--      build: a building row, seq max + 1, version S.version + 1 (1 with no
 --      S), the job's number (allocated on its first row), a new build token;
 --      the job's hold is deleted, and so is the lane-wide storage_full hold
 -- Returns {action: "skip", reason} or {action: "build" | "reoffer",
@@ -629,7 +636,8 @@ create or replace function public.carrier_packet_reserve(
   p_section_hashes jsonb,
   p_photo_nums     jsonb,
   p_meta           jsonb,
-  p_year           integer
+  p_year           integer,
+  p_build          boolean default true
 ) returns jsonb
   language plpgsql
   security definer
@@ -648,6 +656,7 @@ declare
   v_number text;
   v_seq    integer;
   v_err    text;
+  v_gone   boolean;
   r        record;
 begin
   if p_job_id is null then
@@ -711,7 +720,12 @@ begin
      where c.job_id = p_job_id and c.status = 'failed' and c.model_hash = p_model_hash
        and coalesce(c.error, '') <> 'relabel'
      order by c.seq desc limit 1;
-    return jsonb_build_object('action', 'skip', 'reason', 'failed_cap', 'error', left(v_err, 300));
+    -- a PDF too large to email is held as that, not as a failed build
+    if coalesce(v_err, '') ~ '^too_large' then
+      return jsonb_build_object('action', 'skip', 'reason', 'too_large', 'error', left(v_err, 300));
+    end if;
+    return jsonb_build_object('action', 'skip', 'reason', 'failed_cap', 'error', left(v_err, 300),
+                              'permanent', v_tries < 3);
   end if;
 
   -- a send of this job's packet is going out: an approved card's, or a dead
@@ -755,7 +769,7 @@ begin
       -- Gmail refused it for its size (413, "too large"): the same PDF would
       -- be refused again
       if coalesce(v_und.error, '') ~* '(too[ _-]?large|\m413\M)' then
-        return jsonb_build_object('action', 'skip', 'reason', 'too_large');
+        return jsonb_build_object('action', 'skip', 'reason', 'too_large', 'error', left(v_und.error, 300));
       end if;
       -- its stored PDF is gone or no longer matches (the packet adapter's
       -- permanent errors): offering it again would fail the same way, so it
@@ -767,6 +781,20 @@ begin
         v_pick := v_und;
         v_action := 'reoffer';
       end if;
+    end if;
+  end if;
+
+  -- a PDF no longer stored (removed by hand from the bucket) cannot be
+  -- offered again: it is built afresh, and filing supersedes the old row
+  if v_action = 'reoffer' then
+    v_gone := v_pick.path is null or v_pick.pdf_removed_at is not null;
+    if not v_gone and to_regclass('storage.objects') is not null then
+      execute 'select not exists (select 1 from storage.objects o where o.bucket_id = $1 and o.name = $2)'
+         into v_gone using coalesce(v_pick.bucket, 'carrier-packets'), v_pick.path;
+    end if;
+    if v_gone then
+      v_pick := null;
+      v_action := null;
     end if;
   end if;
 
@@ -805,7 +833,10 @@ begin
     end if;
 
     -- 9. build: the job's one number, the next seq, the version after the
-    --    last one sent
+    --    last one sent; none while the worker has no room or builds left
+    if not coalesce(p_build, true) then
+      return jsonb_build_object('action', 'skip', 'reason', 'no_build');
+    end if;
     select c.number into v_number from public.carrier_packets c
      where c.job_id = p_job_id order by c.seq limit 1;
     if v_number is null then
@@ -851,11 +882,11 @@ begin
 end;
 $$;
 
-alter function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer) owner to postgres;
-comment on function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer) is
-  'The carrier packet lane''s first door per job (design §7): under the job''s lock, after op_expire_proposals, skips (lane_off, building, failed_cap, in_flight, open, declined, offer_cap, too_large, sent), returns a reoffer of the ready or undelivered row holding this model hash, or reserves a building row (seq max + 1, version 1 + the highest sent, the job''s PKT number, a new build token) and deletes the job''s hold. Returns {action, reason} or {action, packet_id, number, version, seq, build_token, path, sha256, bytes, pages, mode, replaces}. service_role only (0026).';
-revoke all on function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer) from public, anon, authenticated;
-grant execute on function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer) to service_role;
+alter function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer, boolean) owner to postgres;
+comment on function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer, boolean) is
+  'The carrier packet lane''s first door per job (design §7): under the job''s lock, after op_expire_proposals, skips (lane_off, not_permitted, building, failed_cap, too_large, in_flight, open, declined, offer_cap, sent, no_build when p_build is false), returns a reoffer of the ready or undelivered row holding this model hash while its PDF is stored, or reserves a building row (seq max + 1, version 1 + the highest sent, the job''s PKT number, a new build token) and deletes the job''s hold. Returns {action, reason} or {action, packet_id, number, version, seq, build_token, path, sha256, bytes, pages, mode, replaces}. service_role only (0026).';
+revoke all on function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer, boolean) from public, anon, authenticated;
+grant execute on function public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer, boolean) to service_role;
 
 
 -- ---------------------------------------------------------------------------

@@ -226,10 +226,12 @@ async function packetOne(run, cand, id) {
   const hash = deps.modelHash(model);
   const sections = deps.sectionHashes(model);
 
-  if (run.builds >= (cfg.packetMaxBuilds ?? 3)) return run.skip("max_builds");
-  if (run.storageFull) return run.skip("storage_full");
+  // Past the build cap, or with no room for this estimate, the reserve may
+  // still answer a skip or a re-offer (neither needs room); it only may not
+  // build. So a job that would not build never holds the lane.
   const plan = await planFor(run, model);
-  if (await overStorageCap(run, plan.estimateBytes)) return run.skip("storage_full");
+  const capped = run.builds >= (cfg.packetMaxBuilds ?? 3);
+  const room = !capped && !run.storageFull && (await storageRoom(run, plan.estimateBytes));
 
   const r = await ctx.supa.rpc("carrier_packet_reserve", {
     p_job_id: id,
@@ -238,6 +240,7 @@ async function packetOne(run, cand, id) {
     p_photo_nums: isObj(model.photoNums) ? model.photoNums : {},
     p_meta: metaOf(model, gate),
     p_year: run.year,
+    p_build: room,
   });
   const job = { id, project, state, model, hash, sections, plan };
   if (r?.action === "build") {
@@ -246,11 +249,23 @@ async function packetOne(run, cand, id) {
   }
   if (r?.action === "reoffer") return reoffer(run, job, r);
   if (r?.action === "skip") {
-    // the reserve itself can spend the last try (a third build abandoned
-    // mid-run): the owner hears once, as from a failed build
+    if (r.reason === "no_build") {
+      if (capped) return run.skip("max_builds");
+      // the first job this run that needs a build and has no room holds
+      // the lane; nothing more is built this run
+      if (!run.storageFull) await storageFullHold(run);
+      return run.skip("storage_full");
+    }
+    // Every run re-reads these, so a text that failed, or was off, goes on
+    // the next run, and a cap the reserve itself reached (a third build
+    // abandoned mid-run) is heard of too. The hold texts once per reason.
     if (r.reason === "failed_cap") {
       const detail = String(r.error ?? "").slice(0, 200) || "3 tries";
-      await hold(run, id, "failed_cap", detail, () => deps.holdText("failed_cap", model, detail));
+      const opts = { permanent: r.permanent === true };
+      await hold(run, id, "failed_cap", detail, () => deps.holdText("failed_cap", model, detail, opts));
+    } else if (r.reason === "too_large") {
+      const detail = String(r.error ?? "").replace(/^too_large:\s*/, "").slice(0, 200);
+      await hold(run, id, "too_large", detail, () => deps.holdText("too_large", model, detail));
     }
     return run.skip(r.reason || "skip");
   }
@@ -342,16 +357,21 @@ async function planFor(run, model) {
   };
 }
 
-/* The storage cap: what the bucket holds plus this estimate. Over it, the
-   lane is held once (nil uuid) and nothing more is built this run. */
-async function overStorageCap(run, estimate) {
-  const { ctx, cfg, deps } = run;
+/* The storage cap: whether what the bucket holds plus this estimate fits.
+   Read once a run; each build adds its PDF. */
+async function storageRoom(run, estimate) {
+  const { ctx, cfg } = run;
   if (run.storageUsed == null) run.storageUsed = Number(await ctx.supa.rpc("carrier_packet_storage_bytes", {})) || 0;
-  if (run.storageUsed + estimate <= (cfg.packetStorageMb ?? 300) * 1_048_576) return false;
+  return run.storageUsed + estimate <= (cfg.packetStorageMb ?? 300) * 1_048_576;
+}
+
+/* A build with no room: the lane is held once (nil uuid) and nothing more
+   is built this run. */
+async function storageFullHold(run) {
+  const { cfg, deps } = run;
   run.storageFull = true;
-  const detail = `${mb(run.storageUsed)} of ${cfg.packetStorageMb ?? 300} MB used`;
+  const detail = `${mb(run.storageUsed ?? 0)} of ${cfg.packetStorageMb ?? 300} MB used`;
   await hold(run, LANE_HOLD, "storage_full", detail, () => deps.holdText("storage_full", null, detail));
-  return true;
 }
 
 /* what the card shows beside the packet, kept on the row */
@@ -552,7 +572,8 @@ async function build(run, job, r) {
     if (uploaded && failed?.status === "failed") await removeQuietly(run, [{ bucket: BUCKET, path }]);
     if (failed?.capped === true) {
       const detail = errText(e, 200);
-      await hold(run, id, "failed_cap", detail, () => deps.holdText("failed_cap", model, detail));
+      const opts = { permanent: isBadData(e) };
+      await hold(run, id, "failed_cap", detail, () => deps.holdText("failed_cap", model, detail, opts));
     }
     throw e;
   }

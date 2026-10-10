@@ -157,7 +157,7 @@ declare
     'public.op_exec_packet_send(public.proposals, jsonb, text, uuid)',
     'public.outbox_packet_result()'];
   doors constant text[] := array[
-    'public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer)',
+    'public.carrier_packet_reserve(uuid, text, jsonb, jsonb, jsonb, integer, boolean)',
     'public.carrier_packet_file(uuid, uuid, jsonb, jsonb, text, jsonb)',
     'public.carrier_packet_reoffer(uuid, jsonb, text, jsonb)',
     'public.carrier_packet_fail(uuid, uuid, text, boolean)',
@@ -1166,7 +1166,7 @@ begin
   end if;
   r := public.carrier_packet_reserve(b, repeat('b1', 32), '{}', '{}', '{}', 2098);
   -- with the last try's error, cut to 300, for the hold the worker records
-  if r - 'error' is distinct from '{"action": "skip", "reason": "failed_cap"}' or r ->> 'error' is distinct from repeat('e', 300) then
+  if r - 'error' is distinct from '{"action": "skip", "reason": "failed_cap", "permanent": false}' or r ->> 'error' is distinct from repeat('e', 300) then
     raise exception 'reserve after three failures answered %', r;
   end if;
 
@@ -1176,9 +1176,10 @@ begin
      is distinct from '{"status": "failed", "capped": true}' then
     raise exception 'a permanent failure is not capped';
   end if;
+  -- a PDF too large to email is held as that, never as a failed build
   r := public.carrier_packet_reserve(b, repeat('b2', 32), '{}', '{}', '{}', 2098);
-  if r is distinct from '{"action": "skip", "reason": "failed_cap", "error": "too_large"}' then
-    raise exception 'reserve after a permanent failure answered %', r;
+  if r is distinct from '{"action": "skip", "reason": "too_large", "error": "too_large"}' then
+    raise exception 'reserve after a too-large PDF answered %', r;
   end if;
 
   r := public.carrier_packet_reserve(b, repeat('b3', 32), '{}', '{}', '{}', 2098);
@@ -1547,7 +1548,7 @@ begin
     raise exception 'd''s dead email moved c''s packet';
   end if;
   r := public.carrier_packet_reserve(d, repeat('d1', 32), '{}', '{}', '{}', 2098);
-  if r is distinct from '{"action": "skip", "reason": "too_large"}' then
+  if r is distinct from '{"action": "skip", "reason": "too_large", "error": "Gmail 413: Request Entity Too Large"}' then
     raise exception 'reserve after Gmail refused the size answered %', r;
   end if;
   insert into cp_state values ('d_r', r::text);
@@ -1567,7 +1568,7 @@ begin
   foreach e in array array['message too_large', 'The message is too large to send', 'HTTP 413'] loop
     update public.carrier_packets set error = e where id = p1;
     r := public.carrier_packet_reserve(d, repeat('d1', 32), '{}', '{}', '{}', 2098);
-    if r is distinct from '{"action": "skip", "reason": "too_large"}' then
+    if r is distinct from jsonb_build_object('action', 'skip', 'reason', 'too_large', 'error', e) then
       raise exception 'the error "%" is not read as too large: %', e, r;
     end if;
   end loop;
@@ -2546,6 +2547,161 @@ begin
   if public.carrier_packet_reserve('00000000-0000-0000-0000-00000000c4b0', repeat('e5', 32), '{}', '{}', '{}', 2099)
      is distinct from '{"action": "skip", "reason": "sent"}' then
     raise exception 'after the old row went out, reserve did not answer sent';
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+
+rollback;
+
+
+-- 21. the build lane's review: a reserve the worker says may not build (no
+--     room, or no builds left this run) still answers skips and re-offers
+--     but reserves nothing; a re-offer whose PDF is no longer stored is
+--     built afresh; a permanent failure says it stopped short of 3 tries.
+--     Its own transaction, rolled back.
+begin;
+
+set local request.jwt.claims = '{"role": "service_role"}';
+insert into public.field_projects (id, data, deleted)
+select j.id,
+       jsonb_build_object('id', j.id, 'rev', 3, 'updatedAt', '2099-10-01T10:00:00.000Z',
+                          'title', j.title, 'customerName', 'Jane Sample',
+                          'claimNumber', 'DEMO-12345', 'certDrying', jsonb_build_object('sigTech', 'data:image/png;base64,AAAA')),
+       false
+  from (values
+    ('00000000-0000-0000-0000-00000000c5a0'::uuid, 'Jane Sample - water (k)'),
+    ('00000000-0000-0000-0000-00000000c5b0'::uuid, 'Jane Sample - water (l)')
+  ) as j(id, title);
+insert into public.worker_heartbeats (worker_id, at, meta)
+values ('cp5-test-worker', now(), '{"channels": ["sms", "email", "packet"]}');
+
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  k   constant uuid := '00000000-0000-0000-0000-00000000c5a0';
+  inp constant jsonb := jsonb_build_object(
+    'subject', 'Carrier packet - Claim DEMO-12345 - Jane Sample', 'body', 'Attached is the drying packet.',
+    'filename', 'Claim DEMO-12345 - Sample.pdf', 'suggested_to', 'adjuster@example.com');
+  n   bigint := (select count(*) from public.document_sequences);
+  r   jsonb;
+  f   jsonb;
+  p1  uuid;
+begin
+  -- 21a. no room: nothing is reserved, no number is taken
+  r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099, false);
+  if r is distinct from '{"action": "skip", "reason": "no_build"}' then
+    raise exception 'a reserve that may not build answered %', r;
+  end if;
+  if exists (select 1 from public.carrier_packets where job_id = k) then
+    raise exception 'a reserve that may not build left a row';
+  end if;
+  if (select count(*) from public.document_sequences) <> n
+     or exists (select 1 from public.document_sequences where kind = 'PKT' and year = 2099) then
+    raise exception 'a reserve that may not build took a number';
+  end if;
+
+  -- 21b. version 1 filed; its card expires unanswered
+  r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099);
+  if r ->> 'action' is distinct from 'build' then raise exception 'k''s first reserve answered %', r; end if;
+  p1 := (r ->> 'packet_id')::uuid;
+  f := public.carrier_packet_file(p1, (r ->> 'build_token')::uuid,
+         jsonb_build_object('bucket', 'carrier-packets', 'path', r ->> 'path', 'sha256', repeat('f1', 32), 'bytes', 1000, 'pages', 3, 'mode', 'full'),
+         inp, 'k v1', '[]');
+  if f ->> 'status' is distinct from 'filed' then raise exception 'k''s filing answered %', f; end if;
+  update public.proposals set expires_at = now() - interval '1 minute' where id = (f ->> 'proposal_id')::uuid;
+
+  -- a re-offer needs no room, so it is answered while the worker may not build
+  r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099, false);
+  if r ->> 'action' is distinct from 'reoffer' or (r ->> 'packet_id')::uuid is distinct from p1 then
+    raise exception 'an expired card with no room answered %', r;
+  end if;
+
+  -- 21c. l: a permanent failure other than size is failed_cap, short of 3 tries
+  r := public.carrier_packet_reserve('00000000-0000-0000-0000-00000000c5b0', repeat('f2', 32), '{}', '{}', '{}', 2099);
+  perform public.carrier_packet_fail((r ->> 'packet_id')::uuid, (r ->> 'build_token')::uuid, 'render: bad data', true);
+  r := public.carrier_packet_reserve('00000000-0000-0000-0000-00000000c5b0', repeat('f2', 32), '{}', '{}', '{}', 2099);
+  if r is distinct from '{"action": "skip", "reason": "failed_cap", "error": "render: bad data", "permanent": true}' then
+    raise exception 'reserve after a permanent failure answered %', r;
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+
+-- its PDF stamped removed: built afresh (the new row is still version 1),
+-- then undone
+do $$
+declare
+  k  constant uuid := '00000000-0000-0000-0000-00000000c5a0';
+  p1 constant uuid := (select id from public.carrier_packets where job_id = '00000000-0000-0000-0000-00000000c5a0' and seq = 1);
+  r  jsonb;
+begin
+  begin
+    update public.carrier_packets set pdf_removed_at = now() where id = p1;
+    r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099);
+    if r ->> 'action' is distinct from 'build' or (r ->> 'version')::int is distinct from 1 or (r ->> 'seq')::int is distinct from 2 then
+      raise exception 'a re-offer whose PDF was removed answered %', r;
+    end if;
+    raise exception 'cp5-undo';
+  exception when raise_exception then
+    if sqlerrm <> 'cp5-undo' then raise; end if;
+  end;
+  if (select pdf_removed_at from public.carrier_packets where id = p1) is not null
+     or exists (select 1 from public.carrier_packets where job_id = k and seq = 2) then
+    raise exception 'the undo did not undo';
+  end if;
+
+end
+$$;
+
+-- with Storage present: the stored PDF is offered again; once it is gone
+-- from the bucket (removed by hand), it is built afresh
+do $$
+begin
+  if to_regclass('storage.objects') is null then
+    create schema if not exists storage;
+    create table storage.objects (bucket_id text, name text, metadata jsonb);
+  end if;
+end
+$$;
+insert into storage.objects (bucket_id, name)
+select 'carrier-packets', path from public.carrier_packets where job_id = '00000000-0000-0000-0000-00000000c5a0';
+
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  k  constant uuid := '00000000-0000-0000-0000-00000000c5a0';
+  p1 constant uuid := (select id from public.carrier_packets where job_id = '00000000-0000-0000-0000-00000000c5a0' and seq = 1);
+  r  jsonb;
+begin
+  r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099);
+  if r ->> 'action' is distinct from 'reoffer' or (r ->> 'packet_id')::uuid is distinct from p1 then
+    raise exception 'a stored PDF was not offered again: %', r;
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+
+delete from storage.objects where bucket_id = 'carrier-packets' and name like '00000000-0000-0000-0000-00000000c5a0/%';
+
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  k  constant uuid := '00000000-0000-0000-0000-00000000c5a0';
+  r  jsonb;
+begin
+  r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099);
+  if r ->> 'action' is distinct from 'build' or (r ->> 'seq')::int is distinct from 2 then
+    raise exception 'a PDF gone from the bucket was offered again: %', r;
   end if;
 end
 $$;

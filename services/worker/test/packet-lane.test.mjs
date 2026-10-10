@@ -117,6 +117,8 @@ function world({ candidates = [cand(J1)], projects = [project(J1)], rpc = {}, se
   notify, now = NOW } = {}) {
   const trail = [];
   const rows = new Map(projects.map((p) => [p.id, p.__row ?? fieldRow(p)]));
+  // the reserve's contract: told it may not build, a build is a no_build skip
+  const reserve = rpc.carrier_packet_reserve ?? ((a) => reserveBuild(a.p_job_id));
   const supa = fakeSupa({
     rpc: {
       carrier_packet_candidates: candidates,
@@ -132,6 +134,10 @@ function world({ candidates = [cand(J1)], projects = [project(J1)], rpc = {}, se
       carrier_packet_pdfs_to_remove: [],
       carrier_packet_pdfs_removed: (a) => a.p_ids.length,
       ...rpc,
+      carrier_packet_reserve: async (a) => {
+        const r = typeof reserve === "function" ? await reserve(a) : reserve;
+        return a.p_build === false && r?.action === "build" ? { action: "skip", reason: "no_build" } : r;
+      },
     },
     select: {
       field_projects: (q) => { const id = /id=eq\.([0-9a-f-]+)/.exec(q)?.[1]; return rows.has(id) ? [rows.get(id)] : []; },
@@ -327,6 +333,7 @@ test("a build: reserve, download, render, upload, recipient, sign, file, the rea
     p_photo_nums: { ph1: 1 },
     p_meta: { counts: { photos: 1 }, missing: 0, units_out: [], hard_gaps: [], anchor: "2026-10-06" },
     p_year: 2026,
+    p_build: true,
   });
   assert.deepEqual(w.supa.rpcs("carrier_packet_media_sizes"), [{ p_names: [H1, H2] }]);
   const [planModel, sizes, planOpts] = w.deps.calls.planMedia[0];
@@ -400,7 +407,7 @@ test("a version 2 build is labelled with the version it replaces and what change
   assert.equal(w.supa.rpcs("carrier_packet_file")[0].p_input.suggested_to, "claims@example.com");
 });
 
-test("at most PACKET_MAX_BUILDS builds a run; re-offers do not count, and nothing is reserved past the cap", async () => {
+test("at most PACKET_MAX_BUILDS builds a run; re-offers do not count, and past the cap the reserve may not build", async () => {
   const answers = { [J1]: "reoffer", [J2]: "build", [J3]: "build", [J4]: "build", [J5]: "build" };
   const w = world({
     cfg: { packetMaxBuilds: 2 },
@@ -414,7 +421,8 @@ test("at most PACKET_MAX_BUILDS builds a run; re-offers do not count, and nothin
     },
   });
   const r = await w.run();
-  assert.deepEqual(w.supa.rpcs("carrier_packet_reserve").map((a) => a.p_job_id), [J1, J2, J3]);
+  assert.deepEqual(w.supa.rpcs("carrier_packet_reserve").map((a) => [a.p_job_id, a.p_build]),
+    [[J1, true], [J2, true], [J3, true], [J4, false], [J5, false]]);
   assert.equal(w.deps.calls.renderPacket.length, 2);
   assert.equal(r.built, 2);
   assert.equal(r.reoffered, 1);
@@ -422,7 +430,7 @@ test("at most PACKET_MAX_BUILDS builds a run; re-offers do not count, and nothin
   assert.deepEqual(r.skipped, { max_builds: 2 });
 });
 
-test("over the storage cap: one lane-wide hold and one text, and nothing more is reserved this run", async () => {
+test("over the storage cap: one lane-wide hold and one text, and nothing more is built this run", async () => {
   const cap = 300 * 1_048_576;
   const w = world({
     candidates: [cand(J1), cand(J2)],
@@ -430,7 +438,7 @@ test("over the storage cap: one lane-wide hold and one text, and nothing more is
     rpc: { carrier_packet_storage_bytes: cap - 1000 },
   });
   const r = await w.run();
-  assert.equal(w.supa.rpcs("carrier_packet_reserve").length, 0, "no row is reserved, so no try is spent");
+  assert.deepEqual(w.supa.rpcs("carrier_packet_reserve").map((a) => a.p_build), [false, false], "no row is reserved, so no try is spent");
   assert.deepEqual(w.supa.rpcs("carrier_packet_hold"), [{ p_job_id: NIL, p_reason: "storage_full", p_detail: "300.0 MB of 300 MB used" }]);
   assert.deepEqual(w.supa.rpcs("carrier_packet_hold_texted"), [{ p_job_id: NIL, p_reason: "storage_full" }]);
   assert.equal(texts(w.fetch).length, 1);
@@ -449,8 +457,34 @@ test("over the storage cap: one lane-wide hold and one text, and nothing more is
   });
   const r2 = await tight.run();
   assert.equal(r2.built, 1);
-  assert.deepEqual(tight.supa.rpcs("carrier_packet_reserve").map((a) => a.p_job_id), [J1]);
+  assert.deepEqual(tight.supa.rpcs("carrier_packet_reserve").map((a) => [a.p_job_id, a.p_build]), [[J1, true], [J2, false]]);
   assert.deepEqual(r2.skipped, { storage_full: 1 });
+});
+
+test("a job that would not build never holds the lane: its skip or re-offer is answered, and a build that fits goes on", async () => {
+  const cap = 300 * 1_048_576;
+  let plans = 0;
+  const w = world({
+    candidates: [cand(J1), cand(J2), cand(J3)],
+    projects: [project(J1), project(J2), project(J3)],
+    rpc: {
+      carrier_packet_storage_bytes: cap - 10 * 1_048_576,
+      carrier_packet_reserve: (a) => (a.p_job_id === J1 ? { action: "skip", reason: "open" }
+        : a.p_job_id === J2 ? { ...reserveBuild(J2), action: "reoffer", path: `${J2}/PKT-2026-0002-v1-b1.pdf`, bytes: 900, pages: 3, mode: "full" }
+          : reserveBuild(a.p_job_id)),
+      carrier_packet_reoffer: { status: "filed", proposal_id: uuid(301), offer: 1, superseded: [] },
+    },
+    // J1 and J2 would not fit; J3's small build does
+    deps: { planMedia: () => ({ mode: "full", estimateBytes: [15 * 1_048_576, 15 * 1_048_576, 1][plans++], load: [] }) },
+  });
+  const r = await w.run();
+  assert.deepEqual(w.supa.rpcs("carrier_packet_reserve").map((a) => a.p_job_id), [J1, J2, J3]);
+  assert.deepEqual(w.supa.rpcs("carrier_packet_reserve").map((a) => a.p_build), [false, false, true]);
+  assert.equal(r.reoffered, 1);
+  assert.equal(r.built, 1);
+  assert.deepEqual(r.skipped, { open: 1 });
+  assert.equal(w.supa.rpcs("carrier_packet_hold").length, 0, "the bucket was never too full for a build");
+  assert.equal(texts(w.fetch).filter((t) => /storage/.test(t.body)).length, 0);
 });
 
 test("a PDF too large to email fails permanent, is never uploaded, and holds the job with a text", async () => {
@@ -538,6 +572,7 @@ test("one job's error is recorded and the next job still runs; an error after th
   assert.match(fail.p_error, /^render: cannot read properties/);
   assert.deepEqual(broken.supa.rpcs("carrier_packet_hold").map((h) => [h.p_job_id, h.p_reason]), [[J1, "failed_cap"]]);
   assert.deepEqual(broken.deps.calls.holdText[0].slice(0, 1), ["failed_cap"]);
+  assert.deepEqual(broken.deps.calls.holdText[0][3], { permanent: true }, "one bad-data try is not \"after 3 tries\"");
   assert.equal(texts(broken.fetch).length, 2, "the hold's text and J2's ready text");
 
   // an outage while downloading is a try, not bad data; nothing was uploaded
@@ -647,11 +682,28 @@ test("a reserve that answers failed_cap holds the job with the last error and te
   assert.deepEqual(w.supa.rpcs("carrier_packet_hold_texted"), [{ p_job_id: J1, p_reason: "failed_cap" }]);
   assert.equal(w.storage.calls.filter((c) => c[0] !== "ensureBucket").length, 0, "nothing is built");
 
+  assert.deepEqual(w.deps.calls.holdText[0][3], { permanent: false });
+
   // already texted: the hold is kept, nobody hears twice; no error still names the tries
   const again = world({ rpc: { carrier_packet_reserve: { action: "skip", reason: "failed_cap" }, carrier_packet_hold: { text_due: false } } });
   await again.run();
   assert.deepEqual(again.supa.rpcs("carrier_packet_hold").map((h) => h.p_detail), ["3 tries"]);
   assert.equal(texts(again.fetch).length, 0);
+
+  // stopped short of 3 tries: the words say so
+  const once = world({ rpc: { carrier_packet_reserve: { action: "skip", reason: "failed_cap", error: "render: x", permanent: true } } });
+  await once.run();
+  assert.deepEqual(once.deps.calls.holdText[0][3], { permanent: true });
+});
+
+test("a reserve that answers too_large keeps the job's too-large hold (never a failed-build hold), every run", async () => {
+  for (const [error, detail] of [["too_large: 1.4 MB", "1.4 MB"], ["Gmail 413: Request Entity Too Large", "Gmail 413: Request Entity Too Large"]]) {
+    const w = world({ rpc: { carrier_packet_reserve: { action: "skip", reason: "too_large", error }, carrier_packet_hold: { text_due: false } } });
+    const r = await w.run();
+    assert.deepEqual(r.skipped, { too_large: 1 });
+    assert.deepEqual(w.supa.rpcs("carrier_packet_hold"), [{ p_job_id: J1, p_reason: "too_large", p_detail: detail }]);
+    assert.equal(texts(w.fetch).length, 0, "the build already texted it");
+  }
 });
 
 test("the cleanup deletes the PDFs nobody can send, then stamps those rows; a failed delete stamps nothing", async () => {

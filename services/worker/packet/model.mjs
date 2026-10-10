@@ -1113,8 +1113,9 @@ export function readyText(model, label) {
 
 /** The heads-up text for a hold, once per job and reason. `model` may be
     the job blob (a gate hold has no model); null is the lane-wide
-    storage_full hold. */
-export function holdText(reason, model, detail) {
+    storage_full hold. `permanent`: a failed build stopped short of 3 tries
+    (the job's data stops it), so the text does not say "after 3 tries". */
+export function holdText(reason, model, detail, { permanent = false } = {}) {
   const d = line(detail);
   if (!model || reason === "storage_full") {
     return `Carrier packets are on hold: packet storage is full${d ? ` (${d})` : ""}. No new packet is built until old packet PDFs are cleared. No reply needed.`;
@@ -1132,7 +1133,9 @@ export function holdText(reason, model, detail) {
     case "failed":
     case "failed_cap":
     case "build_failed":
-      return `Carrier packet for ${who} couldn't be built after 3 tries. It is not tried again until the job changes. No reply needed.`;
+      return permanent
+        ? `Carrier packet for ${who} couldn't be built: something in the job stops it. It is not tried again until the job changes. No reply needed.`
+        : `Carrier packet for ${who} couldn't be built after 3 tries. It is not tried again until the job changes. No reply needed.`;
     case "too_large":
       return `Carrier packet for ${who} is too large to email even with smaller photos. Untick photos or a large document on the job's packet page and it is built again. No reply needed.`;
     default:

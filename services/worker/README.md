@@ -545,19 +545,24 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   revoked, or the operation is deprecated: the owner's switches, so nothing
   is built or texted), `building` (a build of this job is under way; one still building
   after 30 minutes is failed as `abandoned`), `failed_cap` (this same
-  document failed 3 times, or once for good; the owner is held and texted
-  once, with the last error), `in_flight` (a packet email of this job is
+  document failed 3 times, or once for good; the job is held with the last
+  error and the owner texted once, every run re-holding it so a text that
+  failed goes on the next run), `in_flight` (a packet email of this job is
   pending, sending or retrying in the outbox: an approved card, or a dead row
   someone revived), `open` (its card is waiting), `declined` (the owner
   declined this same document; it stays declined until the job changes),
   `offer_cap` (the same PDF was offered four times: the first card and three
-  re-offers), `too_large` (Gmail refused this same PDF as too large), `sent`
+  re-offers), `too_large` (this same PDF is too large to email, or Gmail
+  refused it as too large; the job keeps its too-large hold), `no_build`
+  (it needs a build and the worker said there is no room or no builds left
+  this run), `sent`
   (this document is what the carrier already has; a card for a change that
   was then undone is withdrawn, so a version 2 identical to version 1 is
   never offered). A re-offer: a card for the same document that
   expired, was superseded or failed, or a send that went undelivered, is
   filed again with the PDF already stored (`carrier_packet_reoffer`, up to
-  three times). Anything else is a build.
+  three times); if that PDF is no longer in the bucket (removed by hand), it
+  is built afresh instead. Anything else is a build.
 - **The `packet` channel, and why it is not `email`.** A worker that does
   not know packets claims by channel, so on `email` it would take a packet
   row and send the email without the PDF; the outbox `channel` check gains
@@ -608,10 +613,13 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   the archived 480 px copy or its thumbnail, four a page), and the email says full-size photos are available on
   request. A rendered PDF over `PACKET_HARD_KB` (about 23 MB once
   base64-encoded, under Gmail's ~25 MB) is failed for good as `too_large`
-  and the job is held with a text; the card warns above 10 MB. Before a
-  build, what the bucket holds plus the estimate over `PACKET_STORAGE_MB`
-  holds the whole lane (`storage_full`, one text, under the nil uuid) and
-  nothing more is built that run.
+  and the job is held with a text; the card warns above 10 MB. The reserve
+  is told whether this job may build (`p_build`): not when what the bucket
+  holds plus its estimate is over `PACKET_STORAGE_MB`, nor past
+  `PACKET_MAX_BUILDS`. It still answers skips and re-offers (they need no
+  room), and only a job that actually needs a build with no room holds the
+  whole lane (`storage_full`, one text, under the nil uuid); nothing more is
+  built that run.
 - **Knobs** (fly.toml `[env]` or secrets, restart to apply; a number is
   clamped to its range, and a blank or a non-number keeps the default):
   - `CARRIER_PACKET`: `off` is the kill switch (below); unset, or anything
@@ -621,8 +629,8 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
     already has a packet row is looked at whatever its age.
   - `PACKET_SETTLE_MIN` 120 (0 to 1440): minutes a job must go unedited
     before it is built.
-  - `PACKET_MAX_BUILDS` 3 (1 to 10): builds per run; re-offers do not count,
-    and the rest wait for the next hour.
+  - `PACKET_MAX_BUILDS` 3 (1 to 10): builds per run; re-offers do not count
+    and still go out, and the rest wait for the next hour.
   - `PACKET_DOWNLOADS` 4 (1 to 8): media downloads at a time; jobs go one
     after another.
   - `PACKET_FULL_KB` 9500 (1000 to 17000, and never above `PACKET_HARD_KB`):
@@ -683,7 +691,8 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
     was drawn (not a try; the next run draws it again with the right label);
     `abandoned` is above; `too_large: <size>` is for good. Three failed
     tries of the same document, or one for good, stop it (`failed_cap`) with
-    a hold and a text until the job changes.
+    a hold and a text until the job changes ("couldn't be built after 3
+    tries", or "something in the job stops it" for one for good).
   - `ready`: its card is in the inbox. The card:
     `select status, expires_at, approved_at, decline_reason, error from public.proposals where id = '<proposal_id>'`.
   - `superseded`: a newer build replaced it, or the job left scope

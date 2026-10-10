@@ -747,6 +747,7 @@ test("readyText, holdText and suggestedFrom", () => {
     unchecked_fills: holdText("unchecked_fills", m, "3 meter readings to check"),
     unread_meter_photos: holdText("unread_meter_photos", demoProject(), "1 meter photo on an empty reading not read yet"),
     failed: holdText("failed", m, "renderer error"),
+    permanent: holdText("failed_cap", m, "render: x", { permanent: true }),
     too_large: holdText("too_large", m, ""),
     storage_full: holdText("storage_full", null, ""),
     other: holdText("something_new", m, "a detail"),
@@ -754,6 +755,7 @@ test("readyText, holdText and suggestedFrom", () => {
   assert.equal(texts.unchecked_fills, "Carrier packet for Jane Sample (claim DEMO-12345) is waiting: 3 meter readings to check on the Moisture Map (tap each amber ?). No reply needed.");
   assert.ok(texts.unread_meter_photos.includes("Jane Sample (claim DEMO-12345) is waiting: 1 meter photo on an empty reading"), "a job blob works in place of a model");
   assert.ok(texts.failed.includes("couldn't be built after 3 tries"));
+  assert.equal(texts.permanent, "Carrier packet for Jane Sample (claim DEMO-12345) couldn't be built: something in the job stops it. It is not tried again until the job changes. No reply needed.");
   assert.ok(texts.storage_full.startsWith("Carrier packets are on hold: packet storage is full"));
   assert.equal(holdText("anything", null, ""), texts.storage_full);
   for (const t of Object.values(texts)) {

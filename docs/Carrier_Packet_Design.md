@@ -335,7 +335,7 @@ then row locks. A proposal row is never waited on while holding that lock:
 superseding a card uses `FOR UPDATE SKIP LOCKED`, and a card that cannot be
 locked means the owner is approving it right now.
 
-### `carrier_packet_reserve(p_job_id, p_model_hash, p_section_hashes, p_photo_nums, p_meta, p_year)` → jsonb
+### `carrier_packet_reserve(p_job_id, p_model_hash, p_section_hashes, p_photo_nums, p_meta, p_year, p_build default true)` → jsonb
 
 Under the lock, after `op_expire_proposals()`:
 
@@ -349,8 +349,11 @@ Under the lock, after `op_expire_proposals()`:
    cleanup removes anything it uploaded); a fresh one → skip `building`.
 3. Tries: the job's `failed` rows with this hash, excluding `relabel`. Any
    `permanent`, or 3 or more → skip `failed_cap` with `error` = the last
-   counted failure's error (300 characters). The lane holds the job on it
-   and texts once, as for a build that failed for the third time.
+   counted failure's error (300 characters) and `permanent` (it stopped
+   short of 3 tries); when that error is `too_large…`, skip `too_large`
+   instead. The lane holds the job on either, every run (so a text that
+   failed goes next run), and texts once per reason: "after 3 tries", or
+   "something in the job stops it" when permanent.
    Then: any outbox row of channel `packet` for this job that is `pending`,
    `sending` or `failed` → skip `in_flight`. That covers an approved card
    and a dead row someone revived after its version was offered afresh; a
@@ -363,8 +366,11 @@ Under the lock, after `op_expire_proposals()`:
    `declined`; `expired`, `superseded` or `failed` → **reoffer R** when
    `R.offer < 3`, else skip `offer_cap`.
 7. No R; U = the highest-seq `undelivered` row with seq above S. U has this
-   hash: its error is about size → skip `too_large`; else **reoffer U** when
+   hash: its error is about size → skip `too_large` (with the error); its
+   PDF is missing or does not match → build; else **reoffer U** when
    `U.offer < 3`, else skip `offer_cap`.
+   A reoffer (R or U) whose PDF is no longer stored (`pdf_removed_at`, or no
+   object in `storage.objects`: removed by hand) is built instead.
 8. S has this hash (a change was undone) → skip `sent`. What is on offer
    above S is withdrawn first: R's card is locked `SKIP LOCKED`; not
    lockable, or approved/executing/executed → skip `in_flight`; `proposed` →
@@ -372,7 +378,7 @@ Under the lock, after `op_expire_proposals()`:
    event as agent:documents); R → `superseded` with error `withdrawn: the
    carrier already has this version`; `undelivered` rows above S →
    `superseded`.
-9. Otherwise **build**: insert a `building` row with seq = max + 1, version =
+9. Otherwise, with `p_build` false → skip `no_build`; else **build**: insert a `building` row with seq = max + 1, version =
    (S.version or 0) + 1, the job's number (allocated on the first row),
    a new `build_token`; delete the job's hold.
 
@@ -579,9 +585,11 @@ not know packets never claims one (it would send the email without the PDF).
   - after rendering, a PDF over `PACKET_HARD_KB` (17000; about 23 MB once
     base64-encoded, under Gmail's ~25 MB limit) fails permanent
     `too_large` and holds the job with a text.
-- Storage cap: before a build, `carrier_packet_storage_bytes()` + the
-  estimate over `PACKET_STORAGE_MB` (300) → the lane-wide hold
-  `storage_full` with one text, and nothing is built.
+- Storage cap: `carrier_packet_storage_bytes()` + the job's estimate over
+  `PACKET_STORAGE_MB` (300), or `PACKET_MAX_BUILDS` reached, → the reserve
+  is called with `p_build = false`, so skips and re-offers (which need no
+  room) still happen; only a `no_build` answer for lack of room holds the
+  lane (`storage_full`, one text), and nothing more is built that run.
 - Cleanup each run: `carrier_packet_pdfs_to_remove(20)` → remove →
   `carrier_packet_pdfs_removed`.
 
