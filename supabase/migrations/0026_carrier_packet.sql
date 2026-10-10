@@ -785,11 +785,14 @@ begin
   end if;
 
   -- a PDF no longer stored (removed by hand from the bucket) cannot be
-  -- offered again: it is built afresh, and filing supersedes the old row
+  -- offered again: it is built afresh, and filing supersedes the old row.
+  -- Storage answers only where its bucket exists (the worker never reserves
+  -- without it; db-replay has no Storage at all)
   if v_action = 'reoffer' then
     v_gone := v_pick.path is null or v_pick.pdf_removed_at is not null;
-    if not v_gone and to_regclass('storage.objects') is not null then
-      execute 'select not exists (select 1 from storage.objects o where o.bucket_id = $1 and o.name = $2)'
+    if not v_gone and to_regclass('storage.objects') is not null and to_regclass('storage.buckets') is not null then
+      execute 'select exists (select 1 from storage.buckets b where b.id = $1)
+                  and not exists (select 1 from storage.objects o where o.bucket_id = $1 and o.name = $2)'
          into v_gone using coalesce(v_pick.bucket, 'carrier-packets'), v_pick.path;
     end if;
     if v_gone then

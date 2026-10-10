@@ -2658,54 +2658,42 @@ begin
 end
 $$;
 
--- with Storage present: the stored PDF is offered again; once it is gone
--- from the bucket (removed by hand), it is built afresh
-do $$
-begin
-  if to_regclass('storage.objects') is null then
-    create schema if not exists storage;
-    create table storage.objects (bucket_id text, name text, metadata jsonb);
-  end if;
-end
-$$;
-insert into storage.objects (bucket_id, name)
-select 'carrier-packets', path from public.carrier_packets where job_id = '00000000-0000-0000-0000-00000000c5a0';
-
-savepoint s;
-set local role service_role;
-set local request.jwt.claims = '{"role": "service_role"}';
+-- with Storage: the stored PDF is offered again; once it is gone from its
+-- bucket (removed by hand), it is built afresh. Asserted against stand-in
+-- storage tables, so only where Storage is not installed (db-replay); a
+-- local stack's real bucket is left alone.
 do $$
 declare
   k  constant uuid := '00000000-0000-0000-0000-00000000c5a0';
   p1 constant uuid := (select id from public.carrier_packets where job_id = '00000000-0000-0000-0000-00000000c5a0' and seq = 1);
   r  jsonb;
 begin
+  if to_regclass('storage.objects') is not null then
+    raise notice 'Storage is installed here; the stored-PDF check is asserted in db-replay only';
+    return;
+  end if;
+  create schema storage;
+  create table storage.buckets (id text primary key);
+  create table storage.objects (bucket_id text, name text, metadata jsonb);
+  insert into storage.objects (bucket_id, name)
+  select 'carrier-packets', path from public.carrier_packets where job_id = k;
+
+  -- no bucket: Storage cannot say, so the row's own fields decide
+  r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099);
+  if r ->> 'action' is distinct from 'reoffer' then raise exception 'with no bucket, reserve answered %', r; end if;
+
+  insert into storage.buckets values ('carrier-packets');
   r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099);
   if r ->> 'action' is distinct from 'reoffer' or (r ->> 'packet_id')::uuid is distinct from p1 then
     raise exception 'a stored PDF was not offered again: %', r;
   end if;
-end
-$$;
-release savepoint s;
-reset role;
 
-delete from storage.objects where bucket_id = 'carrier-packets' and name like '00000000-0000-0000-0000-00000000c5a0/%';
-
-savepoint s;
-set local role service_role;
-set local request.jwt.claims = '{"role": "service_role"}';
-do $$
-declare
-  k  constant uuid := '00000000-0000-0000-0000-00000000c5a0';
-  r  jsonb;
-begin
+  delete from storage.objects where bucket_id = 'carrier-packets';
   r := public.carrier_packet_reserve(k, repeat('f1', 32), '{}', '{}', '{}', 2099);
   if r ->> 'action' is distinct from 'build' or (r ->> 'seq')::int is distinct from 2 then
     raise exception 'a PDF gone from the bucket was offered again: %', r;
   end if;
 end
 $$;
-release savepoint s;
-reset role;
 
 rollback;
