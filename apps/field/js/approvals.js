@@ -378,7 +378,14 @@ function dayOf(v) {
    so the content always comes from the input). A card that also links the
    job to a QuickBooks project (the job had none; approving is the pick)
    says so and why. Every figure is formatted here, so the page prints no
-   null, NaN or undefined. */
+   null, NaN or undefined.
+   Since 0025 a receipt paid in two or three card charges (a rental: the
+   deposit at checkout, the balance at return) is one line naming each
+   charge (item.parts; its top-level id and total are the first's): "Rental
+   Zone · Oct 7 · $351.00 → 2 QuickBooks charges, 10615 ($126.90, Oct 2) +
+   10661 ($224.10, Oct 7) (…): tag to …"; and a receipt whose last update
+   failed, offered again (item.refile), ends " · Trying again: last time
+   QuickBooks was down". */
 function qboOf(r) {
   const input = obj(r.input);
   const pick = obj(r.edited_params).items;
@@ -398,16 +405,27 @@ function qboOf(r) {
     // vendor that isn't the receipt's shows before approving), or the one
     // approving enters
     const about = [vendor, doc && "ref " + doc, account].filter(Boolean).join(", ");
+    // a receipt paid in parts: every charge, "10615 ($126.90, Oct 2)"
+    const parts = Array.isArray(i.parts) && i.parts.length > 1 && !create ? i.parts.map(obj) : null;
+    const charges = parts ? parts.map((p) => {
+      const total = num(p.qbo_total);
+      const said = [total == null ? "" : USD.format(cents(decimal(total))), dayOf(p.qbo_date)].filter(Boolean).join(", ");
+      return (str(p.qbo_txn_id) || "a charge") + (said ? ` (${said})` : "");
+    }).join(" + ") : "";
     const target = create
       ? "a new QuickBooks expense" + (account ? ` on ${account}` : "") + (doc ? ` (ref ${doc})` : "")
-      : "QuickBooks expense" + (txn ? " " + txn : "") + (about ? ` (${about})` : "");
+      : parts ? `${parts.length} QuickBooks charges, ${charges}` + (about ? ` (${about})` : "")
+        : "QuickBooks expense" + (txn ? " " + txn : "") + (about ? ` (${about})` : "");
     // what it gets: entering a store invoice tags its one line as it goes
     const photos = arr(i.photo_refs).length;
     const what = [
       create ? `enter it, tagged to ${project}` : changes.includes("tag") ? `tag to ${project}` : "",
       changes.includes("attach") ? (photos > 1 ? `attach the ${photos} photos` : "attach the photo") : "",
     ].filter(Boolean).join(", ") || "no change listed";
-    return { id: str(i.receipt_id), text: `${head} → ${target}: ${what}` };
+    // a second try: the receipt's last update failed (0025: item.refile)
+    const refile = i.refile && typeof i.refile === "object" && !Array.isArray(i.refile) ? i.refile : null;
+    const again = refile ? ` · Trying again: last time ${lastTime(refile)}` : "";
+    return { id: str(i.receipt_id), text: `${head} → ${target}: ${what}${again}` };
   });
   const linking = str(link.qbo_customer_id) || str(link.qbo_name);
   const why = str(link.why);
@@ -715,14 +733,32 @@ const QBO_FAILED = {
   storage_unavailable: "couldn't read the photo from storage", create_unclear: "QuickBooks didn't confirm the new expense",
   upload_unclear: "QuickBooks didn't confirm the photo", link_unreadable: "couldn't read the job's QuickBooks link",
 };
-/* A dead row's error → ["refused" | "failed", words]. An error that doesn't
-   start with a known code (the worker couldn't reach qbo-proxy, a row
-   cancelled by hand) shows as written, clipped. */
+const clip120 = (s) => (s.length > 120 ? s.slice(0, 119) + "…" : s);
+/* A dead row's error → ["refused" | "failed" | "cancelled", words]. An
+   error that doesn't start with a known code (the worker couldn't reach
+   qbo-proxy) shows as written, clipped. "cancelled: <who and why>" is the
+   office cancelling the queued change by hand (0025): its own verb, with
+   the words after the code ("" when there are none), however it was typed
+   ("Cancelled", no colon). A dead row with no error is one too: the worker
+   always writes one, so only a person leaves it empty. */
 function qboWhy(error) {
   const e = typeof error === "string" ? error.trim() : "", code = (/^([a-z_]+):/.exec(e) || [])[1] || "";
   if (own(QBO_REFUSED, code)) return ["refused", own(QBO_REFUSED, code)];
   if (own(QBO_FAILED, code)) return ["failed", own(QBO_FAILED, code)];
-  return ["failed", e ? (e.length > 120 ? e.slice(0, 119) + "…" : e) : "no reason given"];
+  const cancel = /^cancell?ed\b\s*:?/i.exec(e);
+  if (cancel) return ["cancelled", clip120(e.slice(cancel[0].length).replace(/\s+/g, " ").trim())];
+  if (error == null || error === "" || (typeof error === "string" && !e)) return ["cancelled", "marked dead by hand"];
+  return ["failed", e ? clip120(e) : "no reason given"];
+}
+/* A second try's card line: why the last update didn't go (item.refile:
+   the failed row's code, and its words without the code). */
+function lastTime(refile) {
+  const code = str(refile.error);
+  if (code === "cancelled") return "it was cancelled";
+  const known = own(QBO_REFUSED, code) || own(QBO_FAILED, code);
+  if (known) return known;
+  const why = str(refile.why).replace(/\s+/g, " ");
+  return why ? clip120(why) : "it didn't go through";
 }
 /* A sent row whose photo QuickBooks refused after the tag (or the new
    store entry) went in: the worker marks it attach_error=<code> in its
@@ -734,11 +770,22 @@ function photoRefused(o) {
   if (code === "qbo_refused") return "QuickBooks refused the photo";
   return own(QBO_REFUSED, code) || own(QBO_FAILED, code) || code.replace(/_/g, " ");
 }
+/* A sent row of a receipt paid in parts (0025) whose later charge
+   QuickBooks refused after an earlier one was tagged: the worker marks it
+   part_error=<code>. The receipt is in the books; one charge isn't tagged.
+   "" when every charge went. */
+function partRefused(o) {
+  const code = (/(?:^|;)part_error=([a-z_]+)/.exec(str(o.provider_status)) || [])[1] || "";
+  if (!code) return "";
+  return own(QBO_REFUSED, code) || own(QBO_FAILED, code) || code.replace(/_/g, " ");
+}
 /* An executed QuickBooks receipts card → how its outbox rows went: "All 3
    updated in QuickBooks", "1 of 3 updated in QuickBooks; 2 waiting", "2 of 3
    updated in QuickBooks; 1 refused: tagged to another job", "Tagged in
-   QuickBooks; photo not attached: …". Before its rows are read (just
-   approved here) it counts what the executor queued. */
+   QuickBooks; photo not attached: …", "Tagged in QuickBooks; one charge
+   refused: …" (a receipt in parts, 0025), "1 cancelled: …" (the office
+   cancelled it by hand, 0025). Before its rows are read (just approved
+   here) it counts what the executor queued. */
 function qboOutcome(c) {
   const rows = arr(c.outboxes).map(obj);
   const queued = Number(c.result.queued), skipped = Number(c.result.skipped);
@@ -755,23 +802,42 @@ function qboOutcome(c) {
   const unattached = sent.map(photoRefused).filter(Boolean);
   const noPhoto = unattached.length
     ? `${unattached.length === 1 ? "1 photo" : `${unattached.length} photos`} not attached: ${[...new Set(unattached)].join(", ")}` : "";
+  // a receipt in parts tagged, one of its charges refused (0025): updated, but said
+  const chargeRefused = sent.map(partRefused).filter(Boolean);
+  const oneCharge = chargeRefused.length
+    ? `${chargeRefused.length} with a charge refused: ${[...new Set(chargeRefused)].join(", ")}` : "";
+  if (done === n && n === 1 && oneCharge) {
+    return { text: "Tagged in QuickBooks; one charge refused: " + chargeRefused[0]
+      + (unattached.length ? "; photo not attached: " + unattached[0] : ""), tone: "bad" };
+  }
   if (done === n && n === 1 && noPhoto) return { text: "Tagged in QuickBooks; photo not attached: " + unattached[0], tone: "bad" };
   if (done === n) {
     const all = n === 1 ? "Updated in QuickBooks" : `All ${n} updated in QuickBooks`;
-    return noPhoto ? { text: `${all}; ${noPhoto}`, tone: "bad" } : { text: all, tone: "ok" };
+    const more = [noPhoto, oneCharge].filter(Boolean);
+    return more.length ? { text: [all, ...more].join("; "), tone: "bad" } : { text: all, tone: "ok" };
   }
   // still in line (or between retries) while the worker isn't serving "qbo": it waits for that
   const off = c.qboLane === false;
   if (!dead.length && !done) return { text: off ? QBO_OFF_QUEUED : n === 1 ? "Queued for QuickBooks" : `${n} queued for QuickBooks`, tone: "wait" };
-  if (n === 1 && dead.length) return { text: "Not updated in QuickBooks: " + qboWhy(dead[0].error)[1], tone: "bad" };
+  const whys = dead.map((o) => qboWhy(o.error));
+  if (n === 1 && dead.length) {
+    // the office cancelled it by hand: a decision, not a trouble (an earlier
+    // try may have written part of it, so it never says nothing went in)
+    if (whys[0][0] === "cancelled") return { text: "Cancelled" + (whys[0][1] ? ` (${whys[0][1]})` : ""), tone: "no" };
+    return { text: "Not updated in QuickBooks: " + whys[0][1], tone: "bad" };
+  }
   const parts = [done ? `${done} of ${n} updated in QuickBooks` : `None of ${n} updated in QuickBooks`];
   if (noPhoto) parts.push(noPhoto);
+  if (oneCharge) parts.push(oneCharge);
   if (waiting > 0) parts.push(`${waiting} waiting` + (off ? " (QuickBooks updates are off on the worker)" : ""));
-  for (const verb of ["refused", "failed"]) {
-    const why = dead.map((o) => qboWhy(o.error)).filter(([v]) => v === verb).map(([, w]) => w);
-    if (why.length) parts.push(`${why.length} ${verb}: ${[...new Set(why)].join(", ")}`);
+  for (const verb of ["refused", "failed", "cancelled"]) {
+    const said = whys.filter(([v]) => v === verb);
+    const why = [...new Set(said.map(([, w]) => w).filter(Boolean))];
+    if (said.length) parts.push(`${said.length} ${verb}` + (why.length ? `: ${why.join(", ")}` : ""));
   }
-  return { text: parts.join("; "), tone: dead.length || noPhoto ? "bad" : "wait" };
+  const trouble = whys.some(([v]) => v !== "cancelled") || noPhoto || oneCharge;
+  // nothing went wrong: still waiting, or settled with only cancellations
+  return { text: parts.join("; "), tone: trouble ? "bad" : waiting > 0 ? "wait" : "no" };
 }
 
 /* A text-queue row goes pending → approved → executed / failed inside the one

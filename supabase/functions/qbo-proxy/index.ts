@@ -33,11 +33,18 @@
  *   listPurchases    — the worker's nightly read: every expense (Purchase)
  *                      dated in {from, to}, cut down to what the matcher
  *                      needs, with the file names attached to each.
+ *   listBills        — the same read for bills (a vendor's invoice entered
+ *                      to pay later: the FNSB dump tickets), so a receipt
+ *                      booked as a bill is matched and noted instead of
+ *                      reported as "not checked". Bills are only read:
+ *                      nothing here writes to Accounts Payable.
  *   completePurchase — the worker's qbo outbox adapter, after the owner
- *                      approved a receipts.qbo_link card: tag one expense to
- *                      the job's QuickBooks project and attach the receipt
- *                      photo (or enter a store invoice first, when that
- *                      switch is on). Every decision lives in ./purchases.ts
+ *                      approved a receipts.qbo_link card: tag one expense
+ *                      (or the two or three card charges one receipt was
+ *                      paid in) to the job's QuickBooks project and attach
+ *                      the receipt photo (or enter a store invoice first,
+ *                      when that switch is on). A bill is refused unread.
+ *                      Every decision lives in ./purchases.ts
  *                      (pure + unit-tested); it never writes a second
  *                      expense, never overwrites a job tag, and adopts its
  *                      own earlier work on a retry.
@@ -61,7 +68,7 @@
  *     disconnect    admin|office JWT
  *     pullPayments  the cron secret ONLY (unchanged)
  *     listProjects  admin|office JWT, or the service role (the worker)
- *     listPurchases / completePurchase   the service role ONLY
+ *     listPurchases / listBills / completePurchase   the service role ONLY
  *
  *   The 'service' kind is the worker. Its key is an `sb_secret_…` key, not a
  *   JWT, so userJwt refuses it by shape and it never gets a user identity.
@@ -88,8 +95,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { applyBalanceToInvoice, trackedInvoices, type Inv } from "./payments.ts";
 import {
   QboError, ProvenKeys, bearerOf, sameKey, sha256Hex, completePurchase, toCompleteError, retryLater,
-  pagedRows, projectsQuery, purchasesQuery, attachablesSinceQuery, attachableSince, attachmentsByPurchase,
-  compactPurchase, compactProject, parseWindow, storageMissing, type CompleteIO,
+  pagedRows, projectsQuery, purchasesQuery, billsQuery, attachablesSinceQuery, attachableSince, attachmentsByPurchase,
+  compactPurchase, compactBill, compactProject, parseWindow, storageMissing, type CompleteIO,
 } from "./purchases.ts";
 
 const CORS = {
@@ -314,6 +321,7 @@ const ACTION_AUTH: Record<string, AuthKind[]> = {
   pullPayments: ["cron"],
   listProjects: ["office", "service"],   // the admin's project picker, and the worker's matcher
   listPurchases: ["service"],            // every expense in a date window: the worker only
+  listBills: ["service"],                // every bill in a date window: the worker only
   completePurchase: ["service"],         // writes QuickBooks after an owner approval: the worker only
 };
 
@@ -700,9 +708,28 @@ serve(async (req) => {
       return both({ purchases: purchases.map((p) => compactPurchase(p, files.get(String(p.Id)) ?? [])) });
     }
 
+    // ── listBills (the worker) ────────────────────────────────────────────
+    // The same read for bills, read only: the matcher notes a matched bill
+    // and completePurchase never writes one. A bill is usually entered days
+    // after its date, so its documents are newer still: the attachable
+    // window is the same one, which reaches back further than any bill in
+    // the window.
+    if (action === "listBills") {
+      const w = parseWindow(body);
+      if ("error" in w) return err(w.error);
+      const { accessToken, realmId } = await getConnection(supabase);
+      const run = (q: string) => qboQuery(realmId, accessToken, q);
+      const bills = await pagedRows(run, "Bill", (start) => billsQuery(w.from, w.to, start));
+      const files = attachmentsByPurchase(
+        await pagedRows(run, "Attachable", (start) => attachablesSinceQuery(attachableSince(w.from), start)), "Bill");
+      return both({ bills: bills.map((b) => compactBill(b, files.get(String(b.Id)) ?? [])) });
+    }
+
     // ── completePurchase (the worker's qbo outbox adapter) ────────────────
-    // Body = one outbox payload. Replies {ok:true, purchaseId, syncToken,
-    // tagged, attached, already_attached, adopted, attach_error?}, or
+    // Body = one outbox payload (an expense; a bill is refused 409
+    // bad_request before QuickBooks is read). Replies {ok:true, purchaseId,
+    // syncToken, tagged, attached, already_attached, adopted, parts?,
+    // attach_error?, part_error?}, or
     // {ok:false, error, code, permanent}: HTTP 409 when retrying cannot help
     // (the outbox row goes dead and the inbox shows why), 502/503 when it
     // can. A tag is refused (relinked) when job_qbo_links no longer names

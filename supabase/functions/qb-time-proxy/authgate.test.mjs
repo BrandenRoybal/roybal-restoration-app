@@ -42,6 +42,7 @@ const EXPECTED = {
     pullPayments: ["cron"],
     listProjects: ["office", "service"],  // receipts phase 3: the admin's project picker + the worker's matcher
     listPurchases: ["service"],           // every expense in a window: the worker only
+    listBills: ["service"],               // every bill in a window: the worker only
     completePurchase: ["service"],        // writes QuickBooks after an owner approval: the worker only
   },
   "qb-time-proxy": {

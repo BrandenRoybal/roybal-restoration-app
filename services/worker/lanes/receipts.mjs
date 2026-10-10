@@ -4,16 +4,18 @@
    pg_cron enqueues {run_date} for the Alaska date at 14:50 UTC, after the
    QuickBooks payment pull has refreshed the token; a manual run is
    {job_ids: [uuid, …]} (README). The lane reads every live receipt, asks
-   qbo-proxy for the QuickBooks projects and for the expenses (Purchases)
-   dated from a day before the oldest receipt it will match to today, and
-   hands it all to the pure matcher (lanes/qbomatch.mjs). It then writes
-   what the matcher found through the two 0023 doors and nothing else:
+   qbo-proxy for the QuickBooks projects, the expenses (Purchases) and the
+   bills dated from DOC_DATE_SLACK days before the oldest receipt it will
+   match to today, and hands it all to the pure matcher (lanes/qbomatch.mjs).
+   It then writes what the matcher found through the two 0023 doors (as
+   0025 replaced them) and nothing else:
 
      receipt_qbo_links_note   the states that need no approval (in_qbo,
                               unmatched, conflict), one call for every job in
                               scope; it never touches a receipt the approval
-                              path holds (queued, done, failed) and drops the
-                              rows of receipts that left the job
+                              path holds (queued, done; a failed one only
+                              when this run sends its row, 0025) and drops
+                              the rows of receipts that left the job
      receipts_qbo_link_file   per job: the job's card (one receipts.qbo_link
                               proposal listing each expense to tag or attach
                               to), or no input, which supersedes the job's
@@ -30,14 +32,26 @@
    reads, paged by (job_id, id)), receipt_qbo_links, job_qbo_links,
    field_projects (id, deleted, title, address, customer, qbJobcodeName of
    the jobs with receipts), app_settings receipts.qbo_store_accounts (the
-   store-entry switch; unset = off). Through qbo-proxy under the service
-   key: listProjects, listPurchases.
+   store-entry switch; unset = off), and from 0025 receipt_qbo_claims (one
+   row, the probe below) and proposals (id, status, input of the cards
+   failed rows name in detail.refiled_proposal_id). Through qbo-proxy under
+   the service key: listProjects, listPurchases, and from 0025 listBills.
 
    One job's filing error is recorded and the run goes on. A read, a
    qbo-proxy answer or the note write that fails throws, and the queue
    retries the whole run: both doors are idempotent. qbo-proxy answering 404
    (an older build without these actions) ends the run with
    {skipped: "qbo_proxy_not_updated"} before anything is written.
+
+   Bills, receipts in parts and second tries need migration 0025 (v2): the
+   run first asks for receipt_qbo_claims, the table 0025 adds, and on a
+   database without it matches as 0023 did. A qbo-proxy that answers 404 to
+   listBills alone (older than this change) means no bills and no receipts
+   in parts, since it could not deliver them; second tries still go. Any
+   other listBills failure leaves only the bills unread that night (logged
+   receipts.bills_not_read): dump tickets read "not checked", a receipt
+   already matched to a bill keeps its row, and the run goes on. Bills are
+   only read: a matched bill is noted, never put on a card.
 
    RECEIPTS_QBO=off (config.receiptsQbo false) answers {skipped: "off"}
    without reading anything; a run_date older than yesterday (Alaska)
@@ -52,7 +66,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MAX_MANUAL_IDS = 100;
 const MAX_ERRORS = 20;
-const PAGE = { receipts: 1000, links: 1000, jobLinks: 1000, jobs: 100 };
+const PAGE = { receipts: 1000, links: 1000, jobLinks: 1000, jobs: 100, proposals: 100 };
 // receipt_qbo_links_note takes at most 1000 jobs and 5000 rows per call
 const NOTE_MAX_JOBS = 500;
 const NOTE_MAX_ROWS = 5000;
@@ -63,6 +77,9 @@ export const STORE_ACCOUNTS_KEY = "receipts.qbo_store_accounts";
 
 const RECEIPT_COLS = "job_id,id,vendor,receipt_date,amount,category,paid_with,card_last4,receipt_no,photo_ref";
 const LINK_COLS = "receipt_id,job_id,state,qbo_txn_type,qbo_txn_id,qbo_sync_token,qbo_customer_id,amount,receipt_date,detail";
+// 0025 on: the charges of a receipt in parts, and the proposal a failed
+// update came from (a second try's card names it)
+const LINK_COLS_V2 = `${LINK_COLS},parts,proposal_id`;
 const JOB_LINK_COLS = "job_id,qbo_customer_id,qbo_project_ref,qbo_name,source";
 const JOB_COLS = "id,deleted,title:data->>title,address:data->>address,customer:data->>customer,qbJobcodeName:data->>qbJobcodeName";
 
@@ -118,7 +135,36 @@ async function readStoreAccounts(supa) {
   return rows[0]?.value ?? null;
 }
 
+/** The cards that hold a failed receipt's second try (the filing door
+    stamps the failed row's detail.refiled_proposal_id), with their status
+    and items, 100 ids to a request: a second try the owner declined stays
+    declined while it is the same item (lanes/qbomatch.mjs). */
+async function readAnswered(supa, links) {
+  const ids = [...new Set(links.filter((l) => l.state === "failed")
+    .map((l) => lc(l.detail?.refiled_proposal_id)).filter((id) => UUID_RE.test(id)))].sort();
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += PAGE.proposals) {
+    const rows = await pagedBy(supa, "proposals", `select=id,status,input&id=in.(${ids.slice(i, i + PAGE.proposals).join(",")})`,
+      "id", PAGE.proposals);
+    for (const p of rows) out.set(lc(p.id), { status: String(p.status ?? ""), items: Array.isArray(p.input?.items) ? p.input.items : [] });
+  }
+  return out;
+}
+
 class ProxyMissing extends Error {}
+
+/** Has the database migration 0025 (v2)? Its receipt_qbo_claims table
+    answers; on an older database PostgREST answers 404 (no such table,
+    PGRST205) or 42P01. Anything else is a real error and the run retries. */
+async function hasV2(supa) {
+  try {
+    await supa.select("receipt_qbo_claims", "select=receipt_id&limit=1");
+    return true;
+  } catch (e) {
+    if (e?.status === 404 || e?.code === "PGRST205" || e?.code === "42P01") return false;
+    throw e;
+  }
+}
 
 /** One qbo-proxy action under the service key; its reply body. A 404 is an
     older qbo-proxy (Unknown action) or none at all. */
@@ -195,10 +241,13 @@ export async function receiptsQboMatch(ctx, job) {
   if (run.stale) return { skipped: "stale", run_date: run.stale };
   const { supa } = ctx;
 
+  const v2 = await hasV2(supa);
   const receipts = await readReceipts(supa);
   const window = purchaseWindow(receipts, today);
   let projects = [];
   let purchases = [];
+  let bills = v2 ? [] : null;
+  let splits = v2;
   if (window) {
     try {
       projects = listOf(await callProxy(ctx, "listProjects"), "projects");
@@ -209,9 +258,23 @@ export async function receiptsQboMatch(ctx, job) {
       return { skipped: "qbo_proxy_not_updated", run_date: run.runDate };
     }
     if (!projects || !purchases) throw new Error("qbo-proxy answered without projects or purchases");
+    if (v2) {
+      // Bills are only read, and a night without them loses little, so a
+      // failure here never fails the run. A 404 is a qbo-proxy older than
+      // this change, which cannot deliver a receipt in parts either.
+      try {
+        bills = listOf(await callProxy(ctx, "listBills", window), "bills");
+        if (!bills) throw new Error("qbo-proxy listBills answered without bills");
+      } catch (e) {
+        bills = null;
+        if (e instanceof ProxyMissing) splits = false;
+        ctx.log("receipts.bills_not_read", { run_date: run.runDate, error: errText(e, 300) });
+      }
+    }
   }
 
-  const links = await pagedBy(supa, "receipt_qbo_links", `select=${LINK_COLS}`, "receipt_id", PAGE.links);
+  const links = await pagedBy(supa, "receipt_qbo_links", `select=${v2 ? LINK_COLS_V2 : LINK_COLS}`, "receipt_id", PAGE.links);
+  const answered = v2 ? await readAnswered(supa, links) : new Map();
   const jobLinks = new Map((await pagedBy(supa, "job_qbo_links", `select=${JOB_LINK_COLS}`, "job_id", PAGE.jobLinks))
     .map((l) => [lc(l.job_id), l]));
   const storeAccounts = await readStoreAccounts(supa);
@@ -221,7 +284,8 @@ export async function receiptsQboMatch(ctx, job) {
     qbJobcodeName: j.qbJobcodeName ?? "", link: jobLinks.get(lc(j.id)) ?? null,
   }));
 
-  const out = matchReceipts({ receipts, purchases, links, jobs, projects, storeAccounts, today, scope: run.manual ? run.ids : null });
+  const out = matchReceipts({ receipts, purchases, bills, links, jobs, projects, storeAccounts, today,
+    scope: run.manual ? run.ids : null, v2, splits, answered });
 
   const summary = {
     run_date: run.runDate, receipts: out.stats.receipts, matched: out.stats.matched, in_qbo: out.stats.in_qbo,
@@ -272,7 +336,8 @@ export async function receiptsQboMatch(ctx, job) {
   ctx.log("receipts.run", {
     run_date: summary.run_date, manual: run.manual, receipts: summary.receipts, matched: summary.matched,
     in_qbo: summary.in_qbo, unmatched: summary.unmatched, conflicts: summary.conflicts, cards: out.cards.length,
-    cards_filed: summary.cards_filed, purchases: purchases.length, notes_written: noted.written,
+    cards_filed: summary.cards_filed, purchases: purchases.length, bills: bills ? bills.length : null, v2,
+    notes_written: noted.written,
     notes_removed: noted.removed, errors: summary.errors.length,
   });
   return summary;

@@ -36,7 +36,10 @@
    linked to its QuickBooks project (job_qbo_links, written here through
    job_qbo_link_set, from the list qbo-proxy listProjects gives). Before
    0023 is applied both reads answer 404 and every QuickBooks control
-   stays off the page.
+   stays off the page. Since 0025 a row may name a Bill (only ever
+   noted), a receipt paid in two or three card charges (`parts`), and a
+   failed receipt's second try on a new card (whose status is read from
+   proposals); the badge reads a row from before 0025 exactly as it did.
 
    admin.js loads this file by dynamic import. It imports only names
    that existed in the field modules before it was written: the office
@@ -366,11 +369,14 @@ const inList = (ids) => "in.(" + ids.map((id) => '"' + String(id).replace(/["\\]
 
 /** receipt_qbo_links for these ids into `known` (id -> row, null for none).
     The page shows 60 rows at a time, so a paint is one select. False when
-    the table can't be read. */
+    the table can't be read. Every column (select=*), never a list: 0025
+    adds `parts`, and naming it would make a database without 0025 answer
+    400 and blank every badge; PostgREST returns whichever columns exist,
+    and a row without parts reads as it did. */
 async function readReceiptStates(ids, known) {
   for (let i = 0; i < ids.length; i += 100) {
     const part = ids.slice(i, i + 100);
-    const res = await rest(`receipt_qbo_links?select=receipt_id,state,qbo_txn_id,detail&receipt_id=${enc(inList(part))}`, { method: "GET" });
+    const res = await rest(`receipt_qbo_links?select=*&receipt_id=${enc(inList(part))}`, { method: "GET" });
     if (!res.ok) return false;
     const rows = await res.json();
     for (const id of part) known.set(id, null);
@@ -382,9 +388,13 @@ async function readReceiptStates(ids, known) {
 const UNMATCHED = {
   waiting_feed: ["Waiting for the bank feed", "disp-x"],      // a card charge under two weeks old
   store_not_entered: ["Not in QuickBooks yet", "disp-x"],     // a store-account invoice not entered yet
-  // a dump ticket: the office books those as Bills, which the match doesn't
-  // read, so finding no expense says nothing about whether it's entered
+  // a dump ticket: the office books those as Bills (DocNumber = the ticket
+  // number), which the match reads since 0025; the bills couldn't be read
+  // that night, so finding none says nothing about whether it's entered
   bill_not_checked: ["Booked as a bill: not checked", "disp-b"],
+  // the bills were read and none carries this ticket's number yet (the
+  // office enters them about a week late)
+  bill_not_entered: ["No matching QuickBooks bill yet", "disp-x"],
   needs_job_link: ["Link the job to QuickBooks", "disp-b"],   // found, but the job has no project to tag
   not_found: ["No QuickBooks match", "disp-x"],
 };
@@ -395,6 +405,10 @@ function conflictWords(d) {
   if (d.reason === "ambiguous") return "more than one expense matches";
   // the note door's own reason: an approval gave the expense to another receipt first
   if (d.reason === "claimed_by_other") return "another receipt has this expense";
+  // a bill is only read, never written: the office tags it by hand (0025)
+  if (d.reason === "bill_untagged") return "booked as a bill without a job: tag it in QuickBooks";
+  // a rental paid in parts, where two sets of charges each add up (0025: detail.candidates)
+  if (d.reason === "ambiguous_split") return "more than one set of charges adds up to it";
   return String(d.reason || "").replace(/_/g, " ").trim() || "the expense needs a look";
 }
 // qbo-proxy's error starts with its code ("tagged_other: expense 10566 is
@@ -405,13 +419,15 @@ function refusalWords(err) {
 }
 // The codes qbo-proxy refuses with for good: QuickBooks, or the card, said
 // no. Any other failed row outlasted the worker's retries without QuickBooks
-// answering (QuickBooks down or not connected, qbo-proxy out of reach, a
-// row cancelled by hand), so it isn't called a refusal. The same codes as
-// QBO_REFUSED in apps/field/js/approvals.js (a test holds them equal).
+// answering (QuickBooks down or not connected, qbo-proxy out of reach), so
+// it isn't called a refusal; nor is one the office cancelled (code
+// "cancelled", its own case below). The same codes as QBO_REFUSED in
+// apps/field/js/approvals.js (a test holds them equal).
 export const QBO_REFUSED_CODES = ["tagged_other", "partly_tagged", "untaggable", "untaggable_line", "changed_in_qbo",
   "purchase_missing", "photo_missing", "photo_type", "photo_unreadable", "photo_too_big", "upload_refused", "qbo_refused",
   "bad_request", "relinked"];
-const codeOf = (err) => (/^([a-z_]+):/.exec(String(err || "").trim()) || [])[1] || "";
+const codeOf = (err) => (/^cancell?ed\b/i.test(String(err || "").trim()) ? "cancelled"
+  : (/^([a-z_]+):/.exec(String(err || "").trim()) || [])[1] || "");
 // The photo QuickBooks refused after the tag (or the new entry) went in: the
 // worker marks the sent row attach_error=<code>, and the row is done
 const PHOTO_WORDS = {
@@ -419,35 +435,119 @@ const PHOTO_WORDS = {
   photo_unreadable: "the photo couldn't be read", photo_too_big: "the photo is over 20 MB",
   upload_refused: "QuickBooks refused it", qbo_refused: "QuickBooks refused it",
 };
+const ownWord = (map, code) => (Object.prototype.hasOwnProperty.call(map, code) ? map[code] : "");
 function photoNotAttached(d) {
   const code = (/(?:^|;)attach_error=([a-z_]+)/.exec(typeof d.provider_status === "string" ? d.provider_status : "") || [])[1];
   if (!code) return "";
-  return Object.prototype.hasOwnProperty.call(PHOTO_WORDS, code) ? PHOTO_WORDS[code] : code.replace(/_/g, " ");
+  return ownWord(PHOTO_WORDS, code) || code.replace(/_/g, " ");
 }
+// A receipt paid in parts (0025) whose later charge QuickBooks refused after
+// an earlier one was tagged: the row is done (the tag is real) and the
+// worker marks it part_error=<code>. qbo-proxy never refuses the first
+// charge that way (it comes before any write), so the refused one is a
+// later one; the code is all that comes back, not which.
+const PART_WORDS = {
+  tagged_other: "tagged to another job", partly_tagged: "only partly tagged to a job",
+  untaggable: "it has no lines to tag", untaggable_line: "a line QuickBooks can't tag to a job",
+  changed_in_qbo: "changed in QuickBooks since the card was filed", purchase_missing: "it's gone from QuickBooks",
+  qbo_refused: "QuickBooks refused it", bad_request: "the app sent QuickBooks a bad request",
+  relinked: "the job's QuickBooks project changed",
+};
+function partRefused(d) {
+  const code = (/(?:^|;)part_error=([a-z_]+)/.exec(typeof d.provider_status === "string" ? d.provider_status : "") || [])[1];
+  if (!code) return "";
+  return ownWord(PART_WORDS, code) || ownWord(PHOTO_WORDS, code) || code.replace(/_/g, " ");
+}
+// The QuickBooks ids a row names: its own, or each charge of a receipt paid
+// in parts (0025's `parts`; a row read from a database without 0025 has no
+// such key and reads as one id)
+function txnIds(row) {
+  const own = QBO_ID.test(String(row.qbo_txn_id || "")) ? String(row.qbo_txn_id) : "";
+  const parts = Array.isArray(row.parts)
+    ? row.parts.map((p) => String((p && typeof p === "object" && p.qbo_txn_id) || "")).filter((x) => QBO_ID.test(x)) : [];
+  return parts.length > 1 ? parts : own ? [own] : [];
+}
+// A failed row the matcher put on a new card as a second try names that card
+// (0025: detail.refiled_proposal_id); the page reads its status
+const REFILED = { proposed: "On a new card in Approvals", declined: "Second try declined in Approvals",
+  executed: "Second try declined in Approvals" };   // executed without it: an edit dropped this receipt
 
-/** A receipt_qbo_links row → its badge { text, tone, title }, or null. */
-export function qboStatus(row) {
+/** A receipt_qbo_links row → its badge { text, tone, title }, or null.
+    cardStatus: the status of the card its failed row names as the second
+    try (detail.refiled_proposal_id), when the page could read it. */
+export function qboStatus(row, cardStatus = "") {
   if (!row || typeof row !== "object") return null;
   const d = row.detail && typeof row.detail === "object" ? row.detail : {};
-  const txn = QBO_ID.test(String(row.qbo_txn_id || "")) ? String(row.qbo_txn_id) : "";
-  const title = [txn ? "QuickBooks expense " + txn : "", d.qbo_account_name, d.qbo_doc_number ? "doc # " + d.qbo_doc_number : ""]
+  const ids = txnIds(row);
+  const bill = row.qbo_txn_type === "Bill";
+  const what = bill ? "QuickBooks bill " : ids.length > 1 ? "QuickBooks expenses " : "QuickBooks expense ";
+  const title = [ids.length ? what + ids.join(" + ") : "", d.qbo_account_name, d.qbo_doc_number ? "doc # " + d.qbo_doc_number : ""]
     .filter((x) => x && typeof x === "string").join(" · ");
   const out = (text, tone, more = "") => ({ text, tone, title: [title, more].filter(Boolean).join(" · ") });
+  // " #10577", " #10615 + #10661", " bill #10625"
+  const refs = ids.length ? (bill ? " bill " : " ") + ids.map((x) => "#" + x).join(" + ") : "";
   switch (row.state) {
     case "done": {
       const why = photoNotAttached(d);
-      if (why) return out("Tagged in QuickBooks" + (txn ? " #" + txn : "") + "; photo not attached: " + why, "disp-b");
-      return out("In QuickBooks ✓" + (txn ? " #" + txn : ""), "disp-g");
+      const part = partRefused(d);
+      if (part) {
+        const [first, ...later] = ids;
+        return out((first ? `Tagged #${first} in QuickBooks; ` : "Tagged in QuickBooks; ")
+          + (later.length ? later.map((x) => "#" + x).join(" or ") : "a charge") + " refused: " + part
+          + (why ? "; photo not attached: " + why : ""), "disp-b");
+      }
+      if (why) return out("Tagged in QuickBooks" + refs + "; photo not attached: " + why, "disp-b");
+      return out("In QuickBooks ✓" + refs, "disp-g");
     }
-    case "in_qbo": return out("In QuickBooks ✓" + (txn ? " #" + txn : ""), "disp-g");
+    case "in_qbo": return out("In QuickBooks ✓" + refs, "disp-g");
     case "queued": return out("Waiting on QuickBooks", "disp-b");
-    case "unmatched": return out(...(Object.prototype.hasOwnProperty.call(UNMATCHED, d.reason) ? UNMATCHED[d.reason] : UNMATCHED.not_found));
+    case "unmatched": return out(...(ownWord(UNMATCHED, d.reason) || UNMATCHED.not_found));
     case "conflict": return out("Check in QuickBooks: " + conflictWords(d), "disp-r");
-    // the badge clips a long refusal; hovering shows all of it
-    case "failed": return out((QBO_REFUSED_CODES.includes(codeOf(d.error)) ? "QuickBooks refused: " : "Couldn't update QuickBooks: ")
-      + refusalWords(d.error), "disp-r", typeof d.error === "string" ? clip(d.error, 600) : "");
+    case "failed": {
+      const code = codeOf(d.error);
+      const full = typeof d.error === "string" ? clip(d.error, 600) : "";
+      const card = typeof cardStatus === "string" ? ownWord(REFILED, cardStatus) : "";
+      const then = card ? " · " + card : "";
+      // the office cancelled the queued change (0025: the outbox row marked
+      // dead by hand): a decision, not a refusal or a trouble
+      if (code === "cancelled") {
+        const words = String(d.error).trim().replace(/^cancell?ed\b\s*:?\s*/i, "").replace(/\s+/g, " ").trim();
+        return out((words ? "Cancelled: " + clip(words, 140) : "Cancelled") + then, "disp-x", full);
+      }
+      // this failure was itself the second try, and died the same way: the
+      // matcher won't offer it a third time. A row stamped with a later card
+      // already has its next try (the trigger takes the stamp off when that
+      // try fails): never "tried twice" just because this login can't read
+      // that card, or it expired
+      const again = !card && !d.refiled_proposal_id && d.refile && typeof d.refile === "object"
+        && String(d.refile.error || "") === (code || "failed");
+      // the badge clips a long refusal; hovering shows all of it
+      return out((QBO_REFUSED_CODES.includes(code) ? "QuickBooks refused: " : "Couldn't update QuickBooks: ")
+        + refusalWords(d.error) + then + (again ? " · Tried twice; needs a fix" : ""), "disp-r", full);
+    }
     default: return null;
   }
+}
+
+/** The status of each card a failed row names as its second try, into
+    `cards` (id -> status, "" when unreadable): one select of the ids not
+    read yet. The owner reads proposals; anyone else gets none back, and
+    the badge simply says nothing more. Never throws. */
+async function readRefiledCards(rows, cards) {
+  const want = [...new Set(rows.filter((r) => r && r.state === "failed" && r.detail && typeof r.detail === "object")
+    .map((r) => String(r.detail.refiled_proposal_id || "").toLowerCase())
+    .filter((id) => UUID.test(id) && !cards.has(id)))].slice(0, 100);
+  if (!want.length) return;
+  for (const id of want) cards.set(id, "");
+  try {
+    const res = await rest(`proposals?select=id,status&id=${enc(inList(want))}`, { method: "GET" });
+    if (!res.ok) return;
+    const got = await res.json();
+    for (const p of Array.isArray(got) ? got : []) {
+      const id = String((p && p.id) || "").toLowerCase();
+      if (cards.has(id) && typeof p.status === "string") cards.set(id, p.status);
+    }
+  } catch { /* offline, or no read: no card line */ }
 }
 
 /* One page's QuickBooks badges. Each row paints at once with a hidden slot;
@@ -457,6 +557,7 @@ export function qboStatus(row) {
    the same id twice. */
 function qboBadges(ready, live) {
   const known = new Map();
+  const cards = new Map();             // a second try's card id -> its status (0025)
   let slots = new Map();               // receipt id -> [slot], this paint's
   let chain = Promise.resolve();
   return {
@@ -472,9 +573,13 @@ function qboBadges(ready, live) {
         if (!(await ready).on) return;
         const want = [...mine.keys()].filter((id) => !known.has(id));
         if (want.length && !(await readReceiptStates(want, known))) return;
+        await readRefiledCards([...mine.keys()].map((id) => known.get(id)), cards);
         if (!live()) return;
         for (const [id, list] of mine) {
-          const st = qboStatus(known.get(id));
+          const row = known.get(id);
+          const card = row && row.detail && typeof row.detail === "object"
+            ? cards.get(String(row.detail.refiled_proposal_id || "").toLowerCase()) : "";
+          const st = qboStatus(row, card || "");
           if (!st) continue;
           for (const s of list) {
             const line = s.parentElement;

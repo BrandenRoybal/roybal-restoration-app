@@ -11,10 +11,33 @@
                 on the job's receipts.qbo_link card, for the owner to approve
      unmatched  no expense found (a note, with the reason the office reads:
                 still waiting for the bank feed, a store invoice not entered
-                yet, a dump ticket booked as a bill the matcher does not read,
-                the job needs its QuickBooks project, or not found)
+                yet, a dump ticket whose bill is not entered yet, the job
+                needs its QuickBooks project, or not found)
      conflict   an expense was found but we will not write to it: two equally
                 good matches, or it is tagged to another job (a note)
+
+   An "expense" here is a QuickBooks Purchase (a card charge, or a store
+   invoice entered against the store's account) or, from migration 0025, a
+   Bill (a vendor's invoice entered to pay later: the FNSB dump tickets).
+   A bill is only ever noted, never put on a card: every FNSB bill so far
+   was entered tagged to the job with the ticket's photo, and nothing here
+   writes to Accounts Payable. Tagged to the job it is in_qbo (a document or
+   not); untagged it is a conflict (bill_untagged) the office tags by hand.
+   Also from 0025 (v2):
+     two or three charges  an equipment receipt paid by card with no single
+                expense of its total is matched to the 2 or 3 untouched
+                charges of the same card and store that add up to it to the
+                cent (a rental: charged at checkout, the balance at return),
+                when exactly one such set exists, its last charge is the
+                receipt's day, and no other receipt could use those charges
+                (splitSets)
+     a second try  a receipt whose QuickBooks update failed is matched again,
+                to the same expense or charges only: a note replaces the
+                failed row, and an item goes on a new card (carrying refile)
+                unless the failure would come back the same (a refusal on
+                the KEEP_FAILED list, or the very failure the last second try
+                died of) and nothing it depends on moved, or the owner
+                already declined this same second try
 
    Why it is conservative: QuickBooks is the books. A wrong tag moves a cost
    to someone else's job and a second expense double counts it, so a match
@@ -37,13 +60,15 @@
 export const MATCHER = "receipts.qbo_match@1";
 export const WINDOW_DAYS = 60;       // receipts older than this are not matched again (their state is kept)
 // a card charge younger than this is "waiting for the bank feed": the Citi
-// Home Depot card arrives in 2 or 3 days, the US Bank card and the store
-// invoices typed in by hand up to 11 (Oct 2026)
+// Home Depot card arrives in 2 or 3 days, the US Bank card up to 11 and
+// checking up to 9 (Oct 2026)
 export const FEED_WAIT_DAYS = 14;
 // how far a store invoice's QuickBooks date may sit from the receipt's when
 // its DocNumber carries the receipt number and the store is the same: the
 // bookkeeper dates it by the invoice, the crew's slip may be the pick-up day
-// (Spenard 700653391: receipt Oct 5, QuickBooks Oct 2)
+// (Spenard 700653391: receipt Oct 5, QuickBooks Oct 2). Only for a receipt
+// charged to an account: a card charge's date comes from the bank, and a
+// rental agreement's number repeats on each week's charge (Home Depot 193615)
 export const DOC_DATE_SLACK = 14;
 export const MIN_SCORE = 2;
 // expense account for store entries of equipment receipts (rentals), instead of the store's own
@@ -52,7 +77,36 @@ export const EQUIPMENT_EXPENSE_ACCOUNT = "1150040005";
 // a row pays for purchases, it is not one
 export const PAYMENT_CLEARING_ACCOUNT = "1150040008";
 
-const OWNED = new Set(["queued", "done", "failed"]);          // the approval path's rows: never touched here
+// The approval path's rows: never touched here. Before 0025 a failed row is
+// held too; with 0025 (v2) a failed receipt is matched again (refile).
+const OWNED = new Set(["queued", "done", "failed"]);
+const OWNED_V2 = new Set(["queued", "done"]);
+// A refusal that would come back the same if nothing it depends on moved:
+// the receipt stays failed until the expense, the job's project, the
+// receipt or its photo changes. "cancelled" is a change a person marked
+// dead by hand (0025: error 'cancelled: <who and why>'). Every other
+// failure (a relinked job, a bad request a qbo-proxy fix answers, trouble
+// that outlasted the retries) goes on a new card at once, once per code: a
+// second try that dies of the same code is kept too. Either way only to the
+// same expense or charges.
+export const KEEP_FAILED = new Set(["tagged_other", "partly_tagged", "untaggable", "untaggable_line", "purchase_missing",
+  "changed_in_qbo", "photo_missing", "photo_type", "photo_unreadable", "photo_too_big", "upload_refused", "qbo_refused",
+  "cancelled"]);
+// Refusals about the photo: a row queued before 0025 did not record the
+// photo the card read, so whether it moved since cannot be told, and it is
+// tried once more (the 0025 executor records it on the new row)
+const PHOTO_CODES = new Set(["photo_missing", "photo_type", "photo_unreadable", "photo_too_big", "upload_refused"]);
+// A card that holds a second try and was answered: what it held is the
+// owner's word on that try
+const ANSWERED = new Set(["declined", "executed"]);
+// Two or three charges that add up to one receipt: at most this many
+// charges are looked at per receipt (more is too many to be sure of), and
+// a charge may be dated up to SPLIT_DAYS before the receipt (a rental's
+// first charge is at checkout, the receipt at return)
+export const MAX_PARTS = 3;
+export const SPLIT_POOL = 40;
+export const SPLIT_DAYS = 14;
+export const SPLIT_MIN_AGE = 3;
 const NOTE_STATES = new Set(["in_qbo", "unmatched", "conflict"]);
 const DIGITS = /^[0-9]{1,20}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -105,6 +159,15 @@ const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const cents = (n) => Math.round(Math.abs(Number(n)) * 100);
 const digitsOf = (v) => str(v).replace(/\D/g, "");
 const clip = (v, n) => str(v).slice(0, n);
+/** The refusal code a failed row's error starts with ("tagged_other: …"). */
+export const codeOf = (err) => (/^cancell?ed\b/i.test(str(err).trim()) ? "cancelled"
+  : (/^([a-z_]+):/.exec(str(err).trim()) || [])[1] || "");
+const txnKey = (type, id) => `${str(type) || "Purchase"}:${str(id)}`;
+const isObject = (v) => v != null && typeof v === "object" && !Array.isArray(v);
+const detailOf = (l) => (isObject(l?.detail) ? l.detail : {});
+/** JSON with every object's keys in order: two items compare by what they say. */
+export const canonical = (v) => JSON.stringify(v, (_, x) => (isObject(x)
+  ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
 const idOrNull = (v) => (DIGITS.test(str(v)) ? str(v) : null);
 const validDate = (s) => {
   const t = DATE.test(str(s)) ? Date.parse(`${s}T00:00:00Z`) : NaN;
@@ -127,26 +190,71 @@ export function vendorFamily(text) {
     numbers). At least 5 digits, so a check number or a short ticket never
     counts. */
 export function docAgrees(receiptNo, docNumber) {
-  const d = digitsOf(receiptNo);
-  const D = digitsOf(docNumber);
+  const d = docDigits(receiptNo);
+  const D = docDigits(docNumber);
   return d.length >= 5 && D.length >= d.length && D.startsWith(d);
+}
+
+/** A number's digits without leading zeros: an FNSB ticket prints
+    "01286734", and a zero dropped on either side is the same ticket. */
+const docDigits = (v) => digitsOf(v).replace(/^0+/, "");
+
+/** A dump ticket: the crew's category, or the borough's transfer station. */
+const dumpTicket = (r) => lc(r.category) === "dump" || vendorFamily(r.vendor) === "fnsb";
+
+/** The expense's DocNumber is another invoice's: both it and the receipt
+    carry a number of 5 digits or more, they disagree, and the DocNumber is
+    the store's own numbering: typed in from an invoice on an account, a
+    bill, or as long as the receipt's number (another rental agreement,
+    another ticket). Only a DocNumber that is a number (a bank's reference
+    like "ZZ35725D8WZ2" is not one). A card charge's DocNumber may be the
+    bank's reference instead: Citi fills the Home Depot charges with 7
+    digits ("5020046") beside the 14 of the receipt ("1303 00002 79356"),
+    which says nothing about which purchase it is. */
+function otherInvoice(r, p) {
+  const doc = str(p.docNumber).trim();
+  if (!/^[0-9][0-9 -]*$/.test(doc)) return false;
+  const mine = docDigits(r.receipt_no), theirs = docDigits(doc);
+  if (mine.length < 5 || theirs.length < 5 || docAgrees(r.receipt_no, doc)) return false;
+  return lc(r.paid_with) === "account" || p.txnType === "Bill" || mine.length === theirs.length;
 }
 
 /** How strongly one expense looks like one receipt: +3 the receipt number,
     +2 the vendor family, +1 the same date, +1 the card's last four in the
-    payment account's name or the memo. */
-export function scoreOf(r, p) {
+    card account's name or the memo. A checking account's name carries the
+    bank account's number, which every expense paid from it shares: it tells
+    one checking expense from another not at all, so it scores nothing (a
+    check or ACH receipt "paid from ****8992" would otherwise match any
+    checking expense of its amount on its day), except on an expense the
+    office already finished for this receipt's job: every line tagged to the
+    job's linked QuickBooks customer (jobCustomer) and a document attached.
+    That match only ever notes it in QuickBooks, and writes nothing (FBX
+    Electric invoice 1065: QuickBooks 10662, $784 by ACH under the owner's
+    name, tagged to 1885 Chena Landings with "Invoice 1065.pdf"). */
+export function scoreOf(r, p, jobCustomer = "") {
   let s = 0;
   if (docAgrees(r.receipt_no, p.docNumber)) s += 3;
   const fam = vendorFamily(r.vendor);
   if (fam && (vendorFamily(p.vendorName) === fam || vendorFamily(p.note) === fam)) s += 2;
   if (str(p.txnDate) === str(r.receipt_date)) s += 1;
   const last4 = str(r.card_last4).trim();
-  if (/^\d{4}$/.test(last4) && (str(p.accountName).includes(last4) || str(p.note).includes(last4))) s += 1;
+  if (/^\d{4}$/.test(last4)
+      && ((p.paymentType === "CreditCard" && str(p.accountName).includes(last4)) || str(p.note).includes(last4)
+        || (str(p.accountName).includes(last4) && finishedFor(p, jobCustomer)))) s += 1;
   return s;
 }
 
-/** The expense says it is not this receipt's: another store (both vendor
+/** Every line tagged to this customer, and a document attached: nothing
+    left for a card to do on the expense. */
+function finishedFor(p, customerId) {
+  const lines = Array.isArray(p.lines) ? p.lines : [];
+  return DIGITS.test(str(customerId)) && lines.length > 0 && lines.every((l) => str(l.customerId) === str(customerId))
+    && hasDocument(p);
+}
+
+/** The expense says it is not this receipt's: a bill for a receipt paid at
+    the counter, a bill for a dump ticket whose ticket number it does not
+    carry, a DocNumber that is another invoice's number, another store (both vendor
     families known, and none of the expense's is the receipt's), another
     card (the receipt's last four is nowhere on the expense, whose card
     account's name carries a card number; a checking account's name is the
@@ -161,6 +269,15 @@ export function scoreOf(r, p) {
     receipt unmatched; matching a wrong one tags and photographs someone
     else's expense. */
 export function contradicts(r, p) {
+  // a bill is paid later: a receipt paid at the counter (by card, in cash,
+  // or on someone's own card) is never one
+  if (p.txnType === "Bill" && ["card", "cash", "personal"].includes(lc(r.paid_with))) return true;
+  // a dump ticket's bill always carries the ticket number, and the borough
+  // charges by the 20 lb, so another ticket of the same amount the same day
+  // is common: only the ticket's own number makes a bill its ticket's
+  if (p.txnType === "Bill" && dumpTicket(r) && !docAgrees(r.receipt_no, p.docNumber)) return true;
+  // the expense names another invoice (or ticket, or rental agreement)
+  if (otherInvoice(r, p)) return true;
   const fam = vendorFamily(r.vendor);
   const theirs = [vendorFamily(p.vendorName), vendorFamily(p.note)].filter(Boolean);
   if (fam && theirs.length && !theirs.includes(fam)) return true;
@@ -255,6 +372,16 @@ const hasDocument = (p) => p.hasAttachment === true || (Array.isArray(p.attachme
  *                  older one keeps the state it had (re-noted as is), so the note door does not
  *                  take it away
  *   purchases      qbo-proxy listPurchases rows
+ *   bills          qbo-proxy listBills rows, or null when they were not read (v1, an older
+ *                  qbo-proxy, or listBills failing tonight): no bill is matched, a dump ticket
+ *                  reads bill_not_checked, and a receipt whose row names a bill (in_qbo or
+ *                  conflict) keeps that row as it is
+ *   splits         look for receipts paid in two or three charges (v2 only; default: the
+ *                  bills were read). The lane turns it off only for a qbo-proxy older than
+ *                  parts, which could not deliver them
+ *   answered       Map(lowercase proposal id → {status, items}): the cards failed rows name
+ *                  in detail.refiled_proposal_id; a declined or executed one that held this
+ *                  very second try keeps the failed row (v2)
  *   links          receipt_qbo_links rows
  *   jobs           {id, title, address, customer, qbJobcodeName, deleted, link (job_qbo_links row | null)}
  *   projects       qbo-proxy listProjects rows
@@ -262,13 +389,29 @@ const hasDocument = (p) => p.hasAttachment === true || (Array.isArray(p.attachme
  *   today          "YYYY-MM-DD" in Alaska
  *   scope          optional list of job ids: match every receipt (so one expense goes to the
  *                  same receipt as on a full run) but answer for these jobs only
+ *   v2             the database has migration 0025 (bills, receipts in parts, re-filing);
+ *                  false gives exactly the 0023 answers
  * → { notes: [rows for receipt_qbo_links_note], cards: [{job_id, job_name, input, rationale,
  *     evidence_refs}], stats: {receipts, matched, in_qbo, unmatched, conflicts, items,
  *     carried, owned: {queued, done, failed}, jobs: [job ids whose receipts were matched]} }
  */
-export function matchReceipts({ receipts = [], purchases = [], links = [], jobs = [], projects = [],
-  storeAccounts = null, today, scope = null } = {}) {
+export function matchReceipts({ receipts = [], purchases = [], bills = null, links = [], jobs = [], projects = [],
+  storeAccounts = null, today, scope = null, v2 = false, splits = Array.isArray(bills) && v2 === true,
+  answered = new Map() } = {}) {
   if (!validDate(today)) throw new Error("matchReceipts: today must be YYYY-MM-DD");
+  const billsRead = v2 === true && Array.isArray(bills);
+  const splitsOn = v2 === true && splits === true;
+  const cardsAnswered = answered instanceof Map ? answered : new Map();
+  const owned = v2 === true ? OWNED_V2 : OWNED;
+  // v2: a note naming one transaction says it has no parts, so a row that
+  // was a receipt in parts drops them (the 0025 door keeps a row's parts
+  // when the key is left out); v1 knows nothing of parts
+  const noParts = v2 === true ? { parts: null } : {};
+  // every transaction a receipt may be: the expenses, and the bills when read
+  const txns = [
+    ...purchases.map((p) => ({ ...p, txnType: "Purchase" })),
+    ...(billsRead ? bills.map((b) => ({ ...b, txnType: "Bill", credit: false, paymentType: "" })) : []),
+  ];
   const inScope = scope ? new Set(scope.map(lc)) : null;
   const wanted = (jobId) => !inScope || inScope.has(lc(jobId));
 
@@ -276,7 +419,7 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
   const linkOf = new Map(links.map((l) => [str(l.receipt_id), l]));
   const projectById = new Map(projects.map((p) => [str(p.id), p]));
   const stores = readStoreAccounts(storeAccounts);
-  const projectRefs = learnProjectRefs(purchases);
+  const projectRefs = learnProjectRefs(txns);
   const accountNames = new Map();
   for (const p of purchases) if (p.accountId && p.accountName && !accountNames.has(p.accountId)) accountNames.set(p.accountId, p.accountName);
 
@@ -295,13 +438,18 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
 
   // An expense another receipt holds: approved (queued, done), or noted in
   // QuickBooks for a receipt that is still live (one whose receipt is gone
-  // is removed by tonight's note, so it holds nothing).
+  // is removed by tonight's note, so it holds nothing). A receipt in parts
+  // holds every one of its charges.
+  // From 0025 a failed receipt that is still live holds its transactions
+  // too: it is matched again tonight and may need them back, and no other
+  // receipt takes a charge whose update was refused.
   const claimedBy = new Map();
   for (const l of links) {
-    const txn = str(l.qbo_txn_id);
-    if (!txn) continue;
-    if (l.state === "queued" || l.state === "done" || (l.state === "in_qbo" && liveIds.has(str(l.receipt_id)))) {
-      claimedBy.set(`${str(l.qbo_txn_type) || "Purchase"}:${txn}`, str(l.receipt_id));
+    const live = liveIds.has(str(l.receipt_id));
+    if (!(l.state === "queued" || l.state === "done" || (l.state === "in_qbo" && live) || (v2 === true && l.state === "failed" && live))) continue;
+    if (str(l.qbo_txn_id)) claimedBy.set(txnKey(l.qbo_txn_type, l.qbo_txn_id), str(l.receipt_id));
+    for (const part of Array.isArray(l.parts) ? l.parts : []) {
+      if (str(part?.qbo_txn_id)) claimedBy.set(txnKey(l.qbo_txn_type, part.qbo_txn_id), str(l.receipt_id));
     }
   }
 
@@ -312,35 +460,63 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
   for (const r of live) {
     const link = linkOf.get(r.id);
     const job = jobById.get(r.job_id);
-    if (link && OWNED.has(link.state)) {
+    if (link && owned.has(link.state)) {
       if (wanted(r.job_id)) stats.owned[link.state] += 1;
       continue;
     }
-    if (!job || job.deleted === true || !UUID.test(r.job_id)) continue;
-    if (inWindow(r, today)) { eligible.push(r); continue; }
+    const failed = link?.state === "failed";      // v2 only: v1 holds it above
+    if (!job || job.deleted === true || !UUID.test(r.job_id)) {
+      if (failed && wanted(r.job_id)) stats.owned.failed += 1;
+      continue;
+    }
+    if (inWindow(r, today)) {
+      // The bills were not read tonight: a receipt matched to a bill keeps
+      // that row as it is (one bad night never drops a matched ticket), and
+      // takes no expense meanwhile
+      if (v2 === true && !billsRead && link && str(link.qbo_txn_type) === "Bill"
+          && (link.state === "in_qbo" || link.state === "conflict")) {
+        if (wanted(r.job_id)) {
+          notes.push(carry(link, r.job_id, v2));
+          stats.carried += 1;
+        }
+        continue;
+      }
+      if (failed) r.failedLink = link;
+      eligible.push(r);
+      continue;
+    }
+    if (failed) {
+      if (wanted(r.job_id)) stats.owned.failed += 1;
+      continue;
+    }
     // Older (or dated ahead, or no total): keep what it was, unchanged.
     if (link && NOTE_STATES.has(link.state) && Number(r.amount) !== 0 && wanted(r.job_id)) {
-      notes.push(carry(link, r.job_id));
+      notes.push(carry(link, r.job_id, v2));
       stats.carried += 1;
     }
   }
 
   // ---- 1. which expense each receipt is ----
   for (const r of eligible) {
+    // the job's linked QuickBooks customer (a picked or approved link only:
+    // a suggestion is made from the matches, after them)
+    const link = jobById.get(r.job_id)?.link;
+    const jobCustomer = link && DIGITS.test(str(link.qbo_customer_id)) ? str(link.qbo_customer_id) : "";
     const abs = cents(r.amount);
     const credit = Number(r.amount) < 0;
     const lo = addDays(r.receipt_date, -1), hi = addDays(r.receipt_date, 3);
     const wideLo = addDays(r.receipt_date, -DOC_DATE_SLACK), wideHi = addDays(r.receipt_date, DOC_DATE_SLACK);
+    const slack = lc(r.paid_with) === "account";     // DOC_DATE_SLACK: an invoice on an account only
     r.cands = [];
-    for (const p of purchases) {
+    for (const p of txns) {
       if (!DIGITS.test(str(p.id)) || !DIGITS.test(str(p.syncToken))) continue;
       if (cents(p.total) !== abs || (p.credit === true) !== credit) continue;
       const d = str(p.txnDate);
-      if (!(d >= lo && d <= hi) && !(d >= wideLo && d <= wideHi && sameInvoice(r, p))) continue;
-      const holder = claimedBy.get(`Purchase:${p.id}`);
+      if (!(d >= lo && d <= hi) && !(slack && d >= wideLo && d <= wideHi && sameInvoice(r, p))) continue;
+      const holder = claimedBy.get(txnKey(p.txnType, p.id));
       if (holder && holder !== r.id) continue;
       if (contradicts(r, p)) continue;
-      const score = scoreOf(r, p);
+      const score = scoreOf(r, p, jobCustomer);
       if (score >= MIN_SCORE) r.cands.push({ p, score });
     }
     r.best = r.cands.reduce((m, c) => Math.max(m, c.score), 0);
@@ -350,7 +526,7 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
   // every night).
   const taken = new Set();
   for (const r of [...eligible].sort((a, b) => b.best - a.best || byText(a.receipt_date, b.receipt_date) || byText(a.id, b.id))) {
-    const left = r.cands.filter((c) => !taken.has(c.p.id));
+    const left = r.cands.filter((c) => !taken.has(txnKey(c.p.txnType, c.p.id)));
     if (!left.length) continue;
     const top = Math.max(...left.map((c) => c.score));
     const tops = left.filter((c) => c.score === top);
@@ -359,7 +535,66 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
       continue;
     }
     r.match = tops[0].p;
-    taken.add(r.match.id);
+    taken.add(txnKey(r.match.txnType, r.match.id));
+  }
+
+  // ---- 1b. a card receipt paid in two or three charges (v2, splits on) ----
+  // Only a receipt no single expense could be, and only charges no receipt
+  // matched or could match tonight: a charge one receipt might be is never
+  // used to make up another's total. Never a bill (splitSets reads
+  // Purchases only).
+  if (splitsOn) {
+    const candOf = new Set();
+    for (const r of eligible) for (const c of r.cands) candOf.add(txnKey(c.p.txnType, c.p.id));
+    // a receipt whose last update failed is offered its own charges again,
+    // never a new set (a person may have split the charge on purpose)
+    const failedParts = (r) => (Array.isArray(r.failedLink?.parts) ? r.failedLink.parts.map((x) => str(x?.qbo_txn_id)).sort(byText) : null);
+    const looking = eligible.filter((r) => !r.cands.length && (!r.failedLink || failedParts(r)));
+    const free = (r) => (p) => {
+      const k = txnKey(p.txnType, p.id);
+      if (taken.has(k) || candOf.has(k)) return false;
+      const holder = claimedBy.get(k);
+      return !holder || holder === r.id;
+    };
+    for (const r of looking) {
+      const own = failedParts(r);
+      if (own) {
+        // its own recorded charges as they are now (a charge written before
+        // the failure carries the job's tag or our photo, so it is no longer
+        // "untouched"); step 2 sorts out tagged elsewhere, partly tagged,
+        // nothing left to do, or a second try for what is missing
+        const got = r.failedLink.parts.map((x) => txns.find((p) => p.txnType === "Purchase" && str(p.id) === str(x?.qbo_txn_id)));
+        const sum = got.reduce((a, p) => a + (p ? cents(p.total) : 0), 0);
+        r.splitSets = got.length >= 2 && got.every((p) => p && (p.credit === true) === (Number(r.amount) < 0) && free(r)(p))
+          && sum === cents(r.amount) ? [got] : [];
+        continue;
+      }
+      // every receipt's sets, a young one's too: a receipt younger than
+      // SPLIT_MIN_AGE is never given a split (its own closing charge may not
+      // have posted), but the charges it could be are no one else's
+      r.splitSets = splitSets(r, txns, today, free(r), true);
+    }
+    // a charge in two receipts' sets is neither's
+    const usedBy = new Map();
+    for (const r of looking) {
+      if (!Array.isArray(r.splitSets)) continue;
+      for (const k of new Set(r.splitSets.flat().map((p) => txnKey(p.txnType, p.id)))) usedBy.set(k, (usedBy.get(k) ?? 0) + 1);
+    }
+    for (const r of looking) {
+      const sets = r.splitSets;
+      if (sets === null || (Array.isArray(sets) && !sets.length)) continue;
+      if (daysFrom(str(r.receipt_date), today) < SPLIT_MIN_AGE) continue;
+      const only = Array.isArray(sets) && sets.length === 1 ? sets[0] : null;
+      const own = failedParts(r);
+      if (own && !(only && only.map((p) => str(p.id)).sort(byText).join(",") === own.join(","))) continue;
+      if (only && only.every((p) => usedBy.get(txnKey(p.txnType, p.id)) === 1)) {
+        r.split = only;
+        for (const p of only) taken.add(txnKey(p.txnType, p.id));
+      } else {
+        const ids = sets === "capped" ? [] : [...new Set(sets.flat().map((p) => p.id))].sort(byText);
+        r.ambiguousSplit = ids;
+      }
+    }
   }
 
   // ---- 2. per job: its QuickBooks project, then each receipt's state ----
@@ -373,28 +608,76 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
     const jobName = clip(str(job.title).trim() || str(job.address).trim() || str(job.customer).trim(), 160);
     const project = jobProject(job, rs, projectById, projectRefs);
     const items = [];
+    const declinedDrops = new Map();   // declined card id → {card, items dropped because it held them}
 
     for (const r of rs) {
       stats.receipts += 1;
       const photo = MEDIA.test(str(r.photo_ref)) ? [str(r.photo_ref)] : [];
       const base = { receipt_id: r.id, job_id: jobId, amount: round2(r.amount), receipt_date: r.receipt_date };
+      // A receipt whose last update named a transaction is matched again only
+      // to that same transaction (or those same charges): anything else (a
+      // new expense, a new set, none found) keeps the failed row for a person,
+      // since someone may have changed the books on purpose.
+      const f = r.failedLink;
+      if (f && str(f.qbo_txn_id)) {
+        const had = txnsOf(f);
+        const now = r.match ? [txnKey(r.match.txnType, r.match.id)] : r.split ? r.split.map((x) => txnKey(x.txnType, x.id)) : [];
+        if ([...new Set(now)].sort(byText).join(",") !== had.join(",")) { stats.owned.failed += 1; continue; }
+      }
+      // An item for a receipt whose last update failed is a second try on a
+      // new card (it carries refile), unless the failed row is kept for a
+      // person: the failure would come back the same (a KEEP_FAILED refusal,
+      // or the very code the last second try died of: one automatic retry
+      // per code) and nothing it depends on moved; or the card that held
+      // this try was declined, or executed without it, and tonight's item
+      // is that one exactly (anything moved makes it another item).
+      const pushItem = (it) => {
+        const f = r.failedLink;
+        if (f) {
+          const d = detailOf(f);
+          const code = codeOf(d.error);
+          const again = isObject(d.refile) && str(d.refile.error) === errorCode(code);
+          if ((KEEP_FAILED.has(code) || again) && !movedSince(f, it, project.id, code)) { stats.owned.failed += 1; return; }
+          it.refile = refileOf(f, code);
+          const card = cardsAnswered.get(lc(d.refiled_proposal_id));
+          if (card && ANSWERED.has(str(card.status)) && Array.isArray(card.items)
+              && card.items.some((x) => str(x?.receipt_id) === it.receipt_id && canonical(x) === canonical(it))) {
+            stats.owned.failed += 1;
+            if (str(card.status) === "declined") {
+              const k = lc(d.refiled_proposal_id);
+              const got = declinedDrops.get(k) ?? { card, items: [] };
+              got.items.push(it);
+              declinedDrops.set(k, got);
+            }
+            return;
+          }
+        }
+        items.push(it);
+      };
 
-      if (r.ambiguous) {
+      if (r.ambiguous || r.ambiguousSplit) {
+        const reason = r.ambiguous ? "ambiguous" : "ambiguous_split";
         notes.push({ ...base, state: "conflict", qbo_txn_type: null, qbo_txn_id: null, qbo_sync_token: null,
-          qbo_customer_id: null, detail: { reason: "ambiguous", candidates: r.ambiguous.slice(0, 5) } });
+          qbo_customer_id: null, detail: { reason, candidates: (r.ambiguous ?? r.ambiguousSplit).slice(0, 5) } });
         stats.conflicts += 1;
         continue;
       }
 
-      if (r.match) {
+      if (r.match || r.split) {
         stats.matched += 1;
-        const m = r.match;
-        const lines = Array.isArray(m.lines) ? m.lines : [];
-        const tagged = lines.filter((l) => str(l.customerId));
-        const other = project.id ? tagged.find((l) => str(l.customerId) !== project.id) : null;
-        const txn = { qbo_txn_type: "Purchase", qbo_txn_id: m.id, qbo_sync_token: m.syncToken };
-        const qboDetail = compact({ qbo_doc_number: str(m.docNumber), qbo_account_name: str(m.accountName), qbo_total: round2(m.total) });
-        const needAttach = !hasDocument(m) && photo.length > 0;
+        // one expense (or bill), or the charges of a receipt in parts: the
+        // first part stands for the receipt where one transaction is shown
+        const ms = r.match ? [r.match] : r.split;
+        const m = ms[0];
+        const linesOf = (x) => (Array.isArray(x.lines) ? x.lines : []);
+        const taggedOf = (x) => linesOf(x).filter((l) => str(l.customerId));
+        const other = project.id ? ms.flatMap(taggedOf).find((l) => str(l.customerId) !== project.id) : null;
+        const partly = ms.find((x) => taggedOf(x).length && taggedOf(x).length < linesOf(x).length);
+        const anyTagged = ms.flatMap(taggedOf);
+        const txn = { qbo_txn_type: m.txnType, qbo_txn_id: m.id, qbo_sync_token: m.syncToken,
+          ...(r.split ? { parts: r.split.map(partOf) } : noParts) };
+        const qboDetail = compact({ qbo_doc_number: str(m.docNumber), qbo_account_name: str(m.accountName),
+          qbo_total: round2(ms.reduce((a, x) => a + Number(x.total), 0)) });
 
         if (other) {
           notes.push({ ...base, state: "conflict", ...txn, qbo_customer_id: idOrNull(other.customerId),
@@ -402,8 +685,8 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
           stats.conflicts += 1;
           continue;
         }
-        if (tagged.length && tagged.length < lines.length) {
-          notes.push({ ...base, state: "conflict", ...txn, qbo_customer_id: idOrNull(tagged[0].customerId),
+        if (partly) {
+          notes.push({ ...base, state: "conflict", ...txn, qbo_customer_id: idOrNull(taggedOf(partly)[0].customerId),
             detail: { reason: "partly_tagged", ...qboDetail } });
           stats.conflicts += 1;
           continue;
@@ -415,18 +698,37 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
         // the tag would never be offered once the job is linked (nor would
         // a tag the books give another job ever show as a conflict).
         if (!project.id) {
-          notes.push({ ...base, state: "unmatched", ...txn, qbo_customer_id: tagged.length ? idOrNull(tagged[0].customerId) : null,
+          notes.push({ ...base, state: "unmatched", ...txn, qbo_customer_id: anyTagged.length ? idOrNull(anyTagged[0].customerId) : null,
             detail: { reason: "needs_job_link", ...qboDetail } });
           stats.unmatched += 1;
           continue;
         }
-        const changes = [...(tagged.length ? [] : ["tag"]), ...(needAttach ? ["attach"] : [])];
+        // A bill is only read: tagged to the job it is in QuickBooks, with a
+        // document or not (the office enters each FNSB bill with its ticket);
+        // untagged, the office tags it by hand. Nothing here writes to
+        // Accounts Payable, so a bill never goes on a card.
+        if (m.txnType === "Bill") {
+          if (taggedOf(m).length) {
+            notes.push({ ...base, state: "in_qbo", ...txn, qbo_customer_id: project.id, detail: qboDetail });
+            stats.in_qbo += 1;
+          } else {
+            notes.push({ ...base, state: "conflict", ...txn, qbo_customer_id: null, detail: { reason: "bill_untagged", ...qboDetail } });
+            stats.conflicts += 1;
+          }
+          continue;
+        }
+        const changesOf = (x) => [...(taggedOf(x).length ? [] : ["tag"]), ...(!hasDocument(x) && photo.length ? ["attach"] : [])];
+        const changes = ["tag", "attach"].filter((c) => ms.some((x) => changesOf(x).includes(c)));
         if (!changes.length) {
           notes.push({ ...base, state: "in_qbo", ...txn, qbo_customer_id: project.id, detail: qboDetail });
           stats.in_qbo += 1;
           continue;
         }
-        items.push(item(r, m, changes, photo, changes.includes("tag") ? project.ref : null));
+        const it = item(r, m, changes, photo, changes.includes("tag") ? project.ref : null);
+        // every charge is listed (the receipt holds them all); one already
+        // tagged to the job with a document has no changes and is only checked
+        if (r.split) it.parts = r.split.map((x) => ({ ...partOf(x), changes: changesOf(x) }));
+        pushItem(it);
         continue;
       }
 
@@ -437,11 +739,18 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
       if (pw === "card") {
         reason = age <= FEED_WAIT_DAYS ? "waiting_feed" : "not_found";
       } else if (pw === "account") {
-        // The office books dump tickets as Bills, which listPurchases does
-        // not read: not finding one says nothing about whether it is entered
-        reason = lc(r.category) === "dump" || vendorFamily(r.vendor) === "fnsb" ? "bill_not_checked" : "store_not_entered";
+        // The office books dump tickets as Bills, about a week late: with the
+        // bills read, none found means not entered yet; without them (an
+        // older qbo-proxy) not finding one says nothing either way
+        const dump = lc(r.category) === "dump" || vendorFamily(r.vendor) === "fnsb";
+        reason = dump ? (billsRead ? "bill_not_entered" : "bill_not_checked") : "store_not_entered";
         const store = stores.get(vendorFamily(r.vendor) ?? "");
-        if (store && lc(r.category) !== "dump") {
+        // the office may have booked the invoice as a bill under another
+        // number: never enter one beside a bill from the store at its amount
+        const billed = txns.some((b) => b.txnType === "Bill" && cents(b.total) === cents(r.amount)
+          && (vendorFamily(b.vendorName) ?? "") === (vendorFamily(r.vendor) ?? "-")
+          && Math.abs(daysFrom(str(r.receipt_date), str(b.txnDate))) <= DOC_DATE_SLACK);
+        if (store && lc(r.category) !== "dump" && !billed) {
           const doc = digitsOf(r.receipt_no);
           if (!project.id) {
             reason = "needs_job_link";
@@ -449,7 +758,7 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
             // at least 5 digits, docAgrees' floor: qbo-proxy finds the
             // bookkeeper's own entry by this number's prefix, and a shorter
             // one starts other invoices' numbers too
-            items.push(createItem(r, store, doc, photo, project.ref, accountNames.get(store.account_id) ?? ""));
+            pushItem(createItem(r, store, doc, photo, project.ref, accountNames.get(store.account_id) ?? ""));
             continue;
           }
         }
@@ -459,6 +768,20 @@ export function matchReceipts({ receipts = [], purchases = [], links = [], jobs 
       stats.unmatched += 1;
     }
 
+    // A declined card that held a second try beside other lines: when
+    // tonight's card would be that same card again (the other lines
+    // unchanged too), it is filed unchanged, so the filing door finds the
+    // owner's answer and stays quiet. Filing it without the declined try
+    // would ask him again about the rest.
+    for (const { card, items: dropped } of declinedDrops.values()) {
+      if (!items.length) break;
+      const all = [...items, ...dropped];
+      const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+      if (same(all.map(canonical).sort(), card.items.map(canonical).sort())) {
+        items.splice(0, items.length, ...all);
+        break;
+      }
+    }
     if (!items.length) continue;
     items.sort((a, b) => byText(a.date, b.date) || byText(a.receipt_id, b.receipt_id));
     const kept = items.slice(0, MAX_ITEMS);   // the rest wait for the next card
@@ -494,9 +817,10 @@ function jobProject(job, rs, projectById, projectRefs) {
   }
   const tagged = new Map();     // customer id → [count of matched expenses, a line's customer name]
   for (const r of rs) {
-    if (!r.match) continue;
+    const ms = r.match ? [r.match] : r.split ?? [];
+    if (!ms.length) continue;
     const ids = new Set();
-    for (const l of r.match.lines ?? []) {
+    for (const l of ms.flatMap((m) => m.lines ?? [])) {
       if (!str(l.customerId)) continue;
       ids.add(str(l.customerId));
       if (!tagged.has(str(l.customerId))) tagged.set(str(l.customerId), [0, str(l.customerName)]);
@@ -542,7 +866,7 @@ function item(r, m, changes, photo, projectRef) {
     date: r.receipt_date,
     amount: round2(r.amount),
     receipt_no: clip(r.receipt_no, 200),
-    qbo_txn_type: "Purchase",
+    qbo_txn_type: "Purchase",       // a bill is only ever noted
     qbo_txn_id: m.id,
     qbo_sync_token: m.syncToken,
     qbo_doc_number: clip(m.docNumber, 200),
@@ -554,6 +878,109 @@ function item(r, m, changes, photo, projectRef) {
     project_ref: projectRef,
     read_photo_ref: readPhoto(r),
   };
+}
+
+/** Every transaction a link row names (its id and its parts), as keys. */
+function txnsOf(l) {
+  const keys = [txnKey(l.qbo_txn_type, l.qbo_txn_id)];
+  for (const p of Array.isArray(l.parts) ? l.parts : []) keys.push(txnKey(l.qbo_txn_type, p?.qbo_txn_id));
+  return [...new Set(keys)].sort(byText);
+}
+
+/** One charge of a receipt in parts, as the card, the note and the link row
+    keep it. */
+function partOf(p) {
+  return { qbo_txn_id: str(p.id), qbo_sync_token: str(p.syncToken), qbo_total: round2(p.total), qbo_date: str(p.txnDate) };
+}
+
+/** Did anything a failed update depended on move since? The transaction
+    (or every charge) and its SyncToken, the job's project, the receipt's
+    total and date, and its photo: as the row recorded it (0025 on), or, on
+    a row queued before 0025, always for a refusal about the photo (code). */
+function movedSince(f, it, projectId, code) {
+  const parts = (x) => (Array.isArray(x) ? x.map((p) => `${str(p?.qbo_txn_id)}:${str(p?.qbo_sync_token)}`).sort().join(",") : "");
+  if (str(f.qbo_txn_type || "Purchase") !== str(it.qbo_txn_type)) return true;
+  if (str(f.qbo_txn_id) !== str(it.qbo_txn_id) || str(f.qbo_sync_token) !== str(it.qbo_sync_token)) return true;
+  if (parts(f.parts) !== parts(it.parts)) return true;
+  // the project only matters to a tag (an attach-only card names none)
+  if ((it.changes.includes("tag") || it.changes.includes("create")) && str(f.qbo_customer_id) !== str(projectId)) return true;
+  if (f.amount == null || Math.abs(Number(f.amount) - Number(it.amount)) > 0.005) return true;
+  if (str(f.receipt_date) !== str(it.date)) return true;
+  const d = detailOf(f);
+  if (Object.hasOwn(d, "read_photo_ref")) return (d.read_photo_ref ?? null) !== (it.read_photo_ref ?? null);
+  return PHOTO_CODES.has(code);
+}
+
+/** The code a second try is marked with (the executor takes 60 characters). */
+const errorCode = (code) => (code || "failed").slice(0, 60);
+
+/** A second try's marker: the failed row's card, its code, and its words
+    without the code (whitespace collapsed, at most 120 characters; left out
+    when there are none). The executor keeps it on the queued row
+    (detail.refile), so the next failure knows it was a second try. */
+function refileOf(f, code) {
+  const err = str(detailOf(f).error).trim();
+  const why = Array.from((code ? err.slice(code.length + 1) : err).replace(/\s+/g, " ").trim()).slice(0, 120).join("");
+  return {
+    proposal_id: UUID.test(str(f.proposal_id)) ? str(f.proposal_id).toLowerCase() : null,
+    error: errorCode(code),
+    ...(why ? { why } : {}),
+  };
+}
+
+/** The sets of 2 to MAX_PARTS card charges one rental receipt may have
+    been paid in (charged at checkout, the balance at return). Looked for
+    only on an equipment receipt paid by card, with its last four and a
+    known store, SPLIT_MIN_AGE days old or more (by then its closing charge
+    has posted, so a look-alike set shows as a second set, not the only
+    one). Every charge: a Purchase the same sign as the receipt and smaller
+    than it, from the receipt's store (vendor family) on the receipt's card
+    (its last four on the card account's name or the memo), on one and the
+    same account, dated from SPLIT_DAYS before the receipt to 3 days after,
+    untouched by anyone (no job tag on any line, no document, no DocNumber
+    or the receipt's own number), not contradicted and free (ok). The latest
+    is the closing charge, dated a day before the receipt to 3 days after.
+    Together they add up to the receipt to the cent. [] when there are none;
+    "capped" when the pool is too big to be sure; null when the receipt is
+    not one to look for. anyAge: look on a younger receipt too (the matcher
+    counts its sets against others', and never splits it). */
+export function splitSets(r, txns, today, ok, anyAge = false) {
+  const last4 = str(r.card_last4).trim();
+  const fam = vendorFamily(r.vendor);
+  const abs = cents(r.amount);
+  const date = str(r.receipt_date);
+  if (lc(r.category) !== "equipment" || lc(r.paid_with) !== "card" || !/^\d{4}$/.test(last4) || !fam || !abs
+      || !validDate(date) || (!anyAge && daysFrom(date, today) < SPLIT_MIN_AGE)) return null;
+  const credit = Number(r.amount) < 0;
+  const lo = addDays(date, -SPLIT_DAYS), hi = addDays(date, 3), closeLo = addDays(date, -1);
+  const untouched = (p) => !(p.lines ?? []).some((l) => str(l.customerId)) && !hasDocument(p)
+    && (!str(p.docNumber).trim() || docAgrees(r.receipt_no, p.docNumber));
+  const pool = txns.filter((p) => p.txnType === "Purchase" && DIGITS.test(str(p.id)) && DIGITS.test(str(p.syncToken))
+    && (p.credit === true) === credit && cents(p.total) > 0 && cents(p.total) < abs
+    && str(p.txnDate) >= lo && str(p.txnDate) <= hi
+    && (vendorFamily(p.vendorName) === fam || vendorFamily(p.note) === fam)
+    && ((p.paymentType === "CreditCard" && str(p.accountName).includes(last4)) || str(p.note).includes(last4))
+    && untouched(p) && !contradicts(r, p) && ok(p))
+    .sort((a, b) => byText(str(a.txnDate), str(b.txnDate)) || byText(str(a.id), str(b.id)));
+  if (pool.length > SPLIT_POOL) return "capped";
+  const sets = [];
+  const walk = (start, chosen, sum) => {
+    // sorted by date: the last one chosen is the closing charge
+    if (chosen.length >= 2 && sum === abs) {
+      if (str(chosen[chosen.length - 1].txnDate) >= closeLo) sets.push([...chosen]);
+      return;
+    }
+    if (chosen.length === MAX_PARTS || sum >= abs) return;
+    for (let i = start; i < pool.length; i++) {
+      const p = pool[i];
+      if (chosen.length && str(p.accountId) !== str(chosen[0].accountId)) continue;
+      chosen.push(p);
+      walk(i + 1, chosen, sum + cents(p.total));
+      chosen.pop();
+    }
+  };
+  walk(0, [], 0);
+  return sets;
 }
 
 /** The receipt's photo_ref as read: the filing door files the card only
@@ -599,8 +1026,10 @@ function createItem(r, store, doc, photo, projectRef, accountName) {
   };
 }
 
-/** An older receipt's row, written back as it is (only the job it is on now). */
-function carry(link, jobId) {
+/** A row written back as it is (only the job it is on now): an older
+    receipt's, or one matched to a bill on a night the bills were not read.
+    v2: a row naming a transaction says its parts, null for one. */
+function carry(link, jobId, v2) {
   return {
     receipt_id: str(link.receipt_id),
     job_id: jobId,
@@ -612,6 +1041,7 @@ function carry(link, jobId) {
     amount: link.amount == null ? null : Number(link.amount),
     receipt_date: link.receipt_date ?? null,
     detail: link.detail && typeof link.detail === "object" ? link.detail : {},
+    ...(v2 === true && str(link.qbo_txn_id) ? { parts: Array.isArray(link.parts) ? link.parts : null } : {}),
   };
 }
 
@@ -620,6 +1050,7 @@ function rationaleOf(jobName, items) {
   const on = jobName || "this job";
   const creates = items.filter((i) => i.changes.includes("create")).length;
   const fixes = items.length - creates;
+  const again = items.filter((i) => i.refile).length;
   const parts = [];
   if (fixes) {
     parts.push(fixes === 1
@@ -632,6 +1063,7 @@ function rationaleOf(jobName, items) {
       ? `1 store invoice${lead} is not in QuickBooks yet`
       : `${creates} store invoices${lead} are not in QuickBooks yet`);
   }
+  if (again) parts.push(again === 1 ? "1 is a second try after the last update failed" : `${again} are second tries after the last update failed`);
   return `${parts.join("; ")}.`;
 }
 
