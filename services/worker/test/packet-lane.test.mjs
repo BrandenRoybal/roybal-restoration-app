@@ -633,6 +633,27 @@ test("a reserve that skips is counted by its reason, and nothing is built", asyn
   assert.equal(w.storage.calls.filter((c) => c[0] !== "ensureBucket").length, 0);
 });
 
+test("a reserve that answers failed_cap holds the job with the last error and texts once", async () => {
+  const w = world({
+    rpc: {
+      carrier_packet_reserve: { action: "skip", reason: "failed_cap", error: "render: out of memory" },
+      carrier_packet_hold: { text_due: true },
+    },
+  });
+  const r = await w.run();
+  assert.deepEqual(r.skipped, { failed_cap: 1 });
+  assert.deepEqual(w.supa.rpcs("carrier_packet_hold"), [{ p_job_id: J1, p_reason: "failed_cap", p_detail: "render: out of memory" }]);
+  assert.equal(texts(w.fetch).length, 1);
+  assert.deepEqual(w.supa.rpcs("carrier_packet_hold_texted"), [{ p_job_id: J1, p_reason: "failed_cap" }]);
+  assert.equal(w.storage.calls.filter((c) => c[0] !== "ensureBucket").length, 0, "nothing is built");
+
+  // already texted: the hold is kept, nobody hears twice; no error still names the tries
+  const again = world({ rpc: { carrier_packet_reserve: { action: "skip", reason: "failed_cap" }, carrier_packet_hold: { text_due: false } } });
+  await again.run();
+  assert.deepEqual(again.supa.rpcs("carrier_packet_hold").map((h) => h.p_detail), ["3 tries"]);
+  assert.equal(texts(again.fetch).length, 0);
+});
+
 test("the cleanup deletes the PDFs nobody can send, then stamps those rows; a failed delete stamps nothing", async () => {
   const rows = [
     { id: uuid(401), bucket: BUCKET, path: `${J1}/PKT-2026-0001-v1-b1.pdf` },

@@ -1165,7 +1165,8 @@ begin
     raise exception 'a long error was not cut to 2000 characters';
   end if;
   r := public.carrier_packet_reserve(b, repeat('b1', 32), '{}', '{}', '{}', 2098);
-  if r is distinct from '{"action": "skip", "reason": "failed_cap"}' then
+  -- with the last try's error, cut to 300, for the hold the worker records
+  if r - 'error' is distinct from '{"action": "skip", "reason": "failed_cap"}' or r ->> 'error' is distinct from repeat('e', 300) then
     raise exception 'reserve after three failures answered %', r;
   end if;
 
@@ -1176,7 +1177,7 @@ begin
     raise exception 'a permanent failure is not capped';
   end if;
   r := public.carrier_packet_reserve(b, repeat('b2', 32), '{}', '{}', '{}', 2098);
-  if r is distinct from '{"action": "skip", "reason": "failed_cap"}' then
+  if r is distinct from '{"action": "skip", "reason": "failed_cap", "error": "too_large"}' then
     raise exception 'reserve after a permanent failure answered %', r;
   end if;
 
@@ -1203,10 +1204,11 @@ begin
   if r ->> 'action' is distinct from 'build' or (r ->> 'seq')::int <> 6 then
     raise exception 'reserve past an abandoned build answered %', r;
   end if;
-  if (select row(status, error, permanent)::text from public.carrier_packets where id = (select v::uuid from cp_state where k = 'b_p5'))
-     is distinct from row('failed', 'abandoned', false)::text then
+  -- it keeps the path it was to be stored at, so the cleanup removes an upload
+  if (select row(status, error, permanent, bucket, path)::text from public.carrier_packets where id = (select v::uuid from cp_state where k = 'b_p5'))
+     is distinct from row('failed', 'abandoned', false, 'carrier-packets', b::text || '/PKT-2098-0002-v1-b5.pdf')::text then
     raise exception 'the abandoned build is %',
-      (select row(status, error, permanent)::text from public.carrier_packets where id = (select v::uuid from cp_state where k = 'b_p5'));
+      (select row(status, error, permanent, bucket, path)::text from public.carrier_packets where id = (select v::uuid from cp_state where k = 'b_p5'));
   end if;
   if public.carrier_packet_file((select v::uuid from cp_state where k = 'b_p5'), (select v::uuid from cp_state where k = 'b_t5'),
                                 jsonb_build_object('bucket', 'carrier-packets', 'path', b::text || '/late.pdf', 'sha256', repeat('6f', 32),
@@ -1930,14 +1932,21 @@ declare
   nm     text;
   n      int;
 begin
-  foreach nm in array array['a_p2', 'a_p3', 'a_p5', 'c_p1', 'g_p2'] loop
+  -- a_p6 failed before it was filed: it keeps the path it was to be stored
+  -- at, so an upload the worker could not delete is still cleaned up
+  foreach nm in array array['a_p2', 'a_p3', 'a_p5', 'c_p1', 'g_p2', 'a_p6'] loop
     if not ((select v::uuid from cp_state where k = nm) = any (listed)) then
       raise exception 'the PDF of % is not up for removal', nm;
     end if;
   end loop;
+  if (select row(bucket, path)::text from public.carrier_packets where id = (select v::uuid from cp_state where k = 'a_p6'))
+     is distinct from row('carrier-packets', '00000000-0000-0000-0000-00000000c2a0/PKT-2098-0001-v3-b6.pdf')::text then
+    raise exception 'a_p6 did not keep its planned path: %',
+      (select row(bucket, path)::text from public.carrier_packets where id = (select v::uuid from cp_state where k = 'a_p6'));
+  end if;
   -- sent (a_p1, a_p4, g_p1), named by an outbox row (c_p2, d_p1), on an
-  -- open card (e_p1), and a failure with no PDF (a_p6)
-  foreach nm in array array['a_p1', 'a_p4', 'g_p1', 'c_p2', 'd_p1', 'e_p1', 'a_p6'] loop
+  -- open card (e_p1)
+  foreach nm in array array['a_p1', 'a_p4', 'g_p1', 'c_p2', 'd_p1', 'e_p1'] loop
     if (select v::uuid from cp_state where k = nm) = any (listed) then
       raise exception 'the PDF of % is up for removal', nm;
     end if;
@@ -2161,6 +2170,382 @@ begin
   if public.carrier_packet_pdfs_removed(array['00000000-0000-0000-0000-00000000c3eb', '00000000-0000-0000-0000-00000000c3ec',
                                               '00000000-0000-0000-0000-00000000c3e5']::uuid[]) <> 1 then
     raise exception 'the stamp took an open card''s PDF, or not the long-declined one';
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+
+rollback;
+
+
+-- 20. what an independent review found, held: nobody files packet.send by
+--     hand; revoking the grant or deprecating the operation stops reserving;
+--     a send going out (a dead row someone set going again) blocks a build, a
+--     re-offer and a second approval, and its send is recorded on the packet
+--     even after a re-offer cleared outbox_id, superseding the fresh card;
+--     undoing a change while a newer card is open withdraws the card instead
+--     of building a "version 2" identical to what the carrier has. Its own
+--     transaction, rolled back.
+begin;
+
+insert into auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_app_meta_data, raw_user_meta_data)
+values
+  ('00000000-0000-0000-0000-00000000c461', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-cp4-owner@example.invalid', '', now(), now(), now(), '{}', '{}'),
+  ('00000000-0000-0000-0000-00000000c463', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'test-cp4-lead@example.invalid',  '', now(), now(), now(), '{}', '{}')
+on conflict (id) do nothing;
+insert into public.profiles (id, full_name, role) values
+  ('00000000-0000-0000-0000-00000000c461', 'cp4 test owner', 'owner'),
+  ('00000000-0000-0000-0000-00000000c463', 'cp4 test lead',  'crew_lead')
+on conflict (id) do update set role = excluded.role, full_name = excluded.full_name;
+
+set local request.jwt.claims = '{"role": "service_role"}';
+insert into public.field_projects (id, data, deleted)
+select j.id,
+       jsonb_build_object('id', j.id, 'rev', 3, 'updatedAt', '2099-10-01T10:00:00.000Z', 'title', j.title,
+                          'customerName', 'Jane Sample', 'address', '123 Example St, Fairbanks, AK 99701',
+                          'claimNumber', 'DEMO-12345', 'carrier', 'Sample Mutual',
+                          'certDrying', jsonb_build_object('sigTech', 'data:image/png;base64,AAAA')),
+       false
+  from (values
+    ('00000000-0000-0000-0000-00000000c4a0'::uuid, 'Jane Sample - water (h)'),
+    ('00000000-0000-0000-0000-00000000c4b0'::uuid, 'Jane Sample - water (i)')
+  ) as j(id, title);
+
+insert into public.worker_heartbeats (worker_id, at, meta)
+values ('cp4-test-worker', now(), '{"channels": ["sms", "email", "packet"]}');
+
+create temp table cp4 (k text primary key, v text);
+grant all on cp4 to anon, authenticated, service_role;
+insert into cp4 values ('input', jsonb_build_object(
+  'subject', 'Carrier packet - Claim DEMO-12345 - Jane Sample', 'body', 'Attached is the drying packet.',
+  'filename', 'Claim DEMO-12345 - Sample.pdf', 'suggested_to', 'adjuster@example.com')::text);
+
+-- 20a. a crew lead, and the owner himself, cannot file a packet.send card
+savepoint s;
+set local role authenticated;
+set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000c463", "role": "authenticated", "aud": "authenticated"}';
+do $$
+begin
+  perform public.op_propose('packet.send',
+    jsonb_build_object('packet_version_id', gen_random_uuid(), 'offer', 1, 'subject', 's', 'body', 'b', 'filename', 'f.pdf',
+                       'suggested_to', 'someone@example.com'),
+    '00000000-0000-0000-0000-00000000c4a0', null, 'by hand', '[]', 'ui', null, interval '30 days');
+  raise exception 'a crew lead filed a packet.send card';
+exception when insufficient_privilege then
+  null;
+end
+$$;
+release savepoint s;
+reset role;
+
+savepoint s;
+set local role authenticated;
+set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000c461", "role": "authenticated", "aud": "authenticated"}';
+do $$
+begin
+  perform public.op_propose('packet.send',
+    jsonb_build_object('packet_version_id', gen_random_uuid(), 'offer', 1, 'subject', 's', 'body', 'b', 'filename', 'f.pdf'),
+    '00000000-0000-0000-0000-00000000c4a0', null, 'by hand', '[]', 'ui', null, interval '30 days');
+  raise exception 'the owner filed a packet.send card by hand';
+exception when insufficient_privilege then
+  null;
+end
+$$;
+release savepoint s;
+reset role;
+
+do $$
+begin
+  if not public.op_role_permits('owner', 'packet.send', 'comms', 'approve') then
+    raise exception 'the deny rows took away the owner''s approval';
+  end if;
+  if public.op_role_permits('office', 'packet.send', 'comms', 'propose')
+     or public.op_role_permits('crew', 'packet.send', 'comms', 'propose')
+     or public.op_role_permits('viewer', 'packet.send', 'comms', 'propose') then
+    raise exception 'a human role may still propose packet.send';
+  end if;
+  if not public.op_agent_permits('b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65', 'packet.send', 'comms', 'propose') then
+    raise exception 'agent:documents lost its propose';
+  end if;
+end
+$$;
+
+-- 20b. the owner's switches stop the reserve before anything is built
+update public.agent_authority set revoked_at = now()
+ where agent_id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65' and operation = 'packet.send' and revoked_at is null;
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  h constant uuid := '00000000-0000-0000-0000-00000000c4a0';
+  r jsonb;
+begin
+  r := public.carrier_packet_reserve(h, repeat('d1', 32), '{}', '{}', '{}', 2099);
+  if r is distinct from '{"action": "skip", "reason": "not_permitted"}' then
+    raise exception 'with the grant revoked, reserve answered %', r;
+  end if;
+  if exists (select 1 from public.carrier_packets where job_id = h) then
+    raise exception 'a revoked grant still reserved a row';
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+update public.agent_authority set revoked_at = null
+ where agent_id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65' and operation = 'packet.send'
+   and id = (select id from public.agent_authority
+              where agent_id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65' and operation = 'packet.send'
+              order by revoked_at desc nulls last limit 1);
+
+update public.operation_catalog set deprecated_at = now() where name = 'packet.send' and version = 1;
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+begin
+  if public.carrier_packet_reserve('00000000-0000-0000-0000-00000000c4a0', repeat('d1', 32), '{}', '{}', '{}', 2099)
+     is distinct from '{"action": "skip", "reason": "not_permitted"}' then
+    raise exception 'with packet.send deprecated, reserve did not skip';
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+update public.operation_catalog set deprecated_at = null where name = 'packet.send' and version = 1;
+
+-- 20c. h: version 1 is sent; a change is offered as version 2; the change
+--      is undone, so the carrier already has this document
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  h   constant uuid := '00000000-0000-0000-0000-00000000c4a0';
+  inp constant jsonb := (select v::jsonb from cp4 where k = 'input');
+  r   jsonb;
+  f   jsonb;
+begin
+  r := public.carrier_packet_reserve(h, repeat('d1', 32), '{"cert": "1"}', '{}', '{}', 2099);
+  if r ->> 'action' is distinct from 'build' then raise exception 'with the grant back, h''s reserve answered %', r; end if;
+  f := public.carrier_packet_file((r ->> 'packet_id')::uuid, (r ->> 'build_token')::uuid,
+         jsonb_build_object('bucket', 'carrier-packets', 'path', r ->> 'path', 'sha256', repeat('d1', 32), 'bytes', 1000, 'pages', 3, 'mode', 'full'),
+         inp, 'h v1', '[]');
+  insert into cp4 values ('h_p1', r ->> 'packet_id'), ('h_c1', f ->> 'proposal_id');
+end
+$$;
+release savepoint s;
+reset role;
+
+savepoint s;
+set local role authenticated;
+set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000c461", "role": "authenticated", "aud": "authenticated"}';
+do $$
+declare
+  p public.proposals;
+begin
+  p := public.op_proposal_approve((select v::uuid from cp4 where k = 'h_c1'), 'inbox', null, '{"to": "adjuster@example.com"}');
+  if p.status is distinct from 'executed' then raise exception 'h''s approval is % (%)', p.status, p.error; end if;
+  insert into cp4 values ('h_o1', p.result ->> 'outbox_id');
+end
+$$;
+release savepoint s;
+reset role;
+update public.outbox set status = 'sent', sent_at = now() where id = (select v::uuid from cp4 where k = 'h_o1');
+
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  h    constant uuid := '00000000-0000-0000-0000-00000000c4a0';
+  docs constant uuid := 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65';
+  inp  constant jsonb := (select v::jsonb from cp4 where k = 'input');
+  r    jsonb;
+  f    jsonb;
+  p2   uuid;
+  c2   uuid;
+begin
+  if (select status from public.carrier_packets where id = (select v::uuid from cp4 where k = 'h_p1')) is distinct from 'sent' then
+    raise exception 'h''s version 1 is not sent';
+  end if;
+  r := public.carrier_packet_reserve(h, repeat('d2', 32), '{"cert": "2"}', '{}', '{}', 2099);
+  if r ->> 'action' is distinct from 'build' or (r ->> 'version')::int <> 2 then raise exception 'h''s change answered %', r; end if;
+  p2 := (r ->> 'packet_id')::uuid;
+  f := public.carrier_packet_file(p2, (r ->> 'build_token')::uuid,
+         jsonb_build_object('bucket', 'carrier-packets', 'path', r ->> 'path', 'sha256', repeat('d2', 32), 'bytes', 1000, 'pages', 3, 'mode', 'full'),
+         inp, 'h v2', '[]');
+  c2 := (f ->> 'proposal_id')::uuid;
+
+  -- undone: the model is version 1's again
+  r := public.carrier_packet_reserve(h, repeat('d1', 32), '{"cert": "1"}', '{}', '{}', 2099);
+  if r is distinct from '{"action": "skip", "reason": "sent"}' then
+    raise exception 'undoing the change answered %', r;
+  end if;
+  if (select row(status, error)::text from public.carrier_packets where id = p2)
+     is distinct from row('superseded', 'withdrawn: the carrier already has this version')::text then
+    raise exception 'the undone version 2 is %', (select row(status, error)::text from public.carrier_packets where id = p2);
+  end if;
+  if (select row(status, result)::text from public.proposals where id = c2)
+     is distinct from row('superseded', '{"superseded_reason": "withdrawn", "reason": "the carrier already has this version"}'::jsonb)::text then
+    raise exception 'the undone version 2''s card is %', (select row(status, result)::text from public.proposals where id = c2);
+  end if;
+  if not exists (select 1 from public.events where kind = 'proposal.superseded' and aggregate_id = c2
+                    and principal_kind = 'agent' and principal_id = docs) then
+    raise exception 'withdrawing the undone card emitted no event';
+  end if;
+  if public.carrier_packet_reserve(h, repeat('d1', 32), '{"cert": "1"}', '{}', '{}', 2099) is distinct from '{"action": "skip", "reason": "sent"}'
+     or (select count(*) from public.carrier_packets where job_id = h) <> 2 then
+    raise exception 'h built again after the undo';
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+
+-- 20d. i: version 1 is approved and its send goes dead
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  i   constant uuid := '00000000-0000-0000-0000-00000000c4b0';
+  inp constant jsonb := (select v::jsonb from cp4 where k = 'input');
+  r   jsonb;
+  f   jsonb;
+begin
+  r := public.carrier_packet_reserve(i, repeat('e5', 32), '{}', '{}', '{}', 2099);
+  f := public.carrier_packet_file((r ->> 'packet_id')::uuid, (r ->> 'build_token')::uuid,
+         jsonb_build_object('bucket', 'carrier-packets', 'path', r ->> 'path', 'sha256', repeat('e5', 32), 'bytes', 1000, 'pages', 3, 'mode', 'full'),
+         inp, 'i v1', '[]');
+  insert into cp4 values ('i_p1', r ->> 'packet_id'), ('i_c1', f ->> 'proposal_id');
+end
+$$;
+release savepoint s;
+reset role;
+
+savepoint s;
+set local role authenticated;
+set local request.jwt.claims = '{"sub": "00000000-0000-0000-0000-00000000c461", "role": "authenticated", "aud": "authenticated"}';
+do $$
+declare
+  p public.proposals;
+begin
+  p := public.op_proposal_approve((select v::uuid from cp4 where k = 'i_c1'), 'inbox', null, '{"to": "adjuster@example.com"}');
+  insert into cp4 values ('i_o1', p.result ->> 'outbox_id');
+end
+$$;
+release savepoint s;
+reset role;
+update public.outbox set status = 'dead', error = 'Gmail upload timed out' where id = (select v::uuid from cp4 where k = 'i_o1');
+-- someone sets the dead row going again (the dead-letter retry)
+update public.outbox set status = 'failed', attempts = 0, next_attempt_at = now() where id = (select v::uuid from cp4 where k = 'i_o1');
+
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  i   constant uuid := '00000000-0000-0000-0000-00000000c4b0';
+  pk  constant uuid := (select v::uuid from cp4 where k = 'i_p1');
+  inp constant jsonb := (select v::jsonb from cp4 where k = 'input');
+  r   jsonb;
+begin
+  if (select status from public.carrier_packets where id = pk) is distinct from 'undelivered' then
+    raise exception 'i''s dead send did not make it undelivered';
+  end if;
+  -- while it is going again: no card, no build, nothing the carrier could get twice
+  r := public.carrier_packet_reserve(i, repeat('e5', 32), '{}', '{}', '{}', 2099);
+  if r is distinct from '{"action": "skip", "reason": "in_flight"}' then
+    raise exception 'reserve with the dead row going again answered %', r;
+  end if;
+  r := public.carrier_packet_reserve(i, repeat('e6', 32), '{}', '{}', '{}', 2099);
+  if r is distinct from '{"action": "skip", "reason": "in_flight"}' then
+    raise exception 'reserve for a changed job with a send going out answered %', r;
+  end if;
+  r := public.carrier_packet_reoffer(pk, inp, 'again', '[]');
+  if r is distinct from '{"status": "lost", "reason": "in_flight"}' then
+    raise exception 'reoffer with the dead row going again answered %', r;
+  end if;
+end
+$$;
+release savepoint s;
+reset role;
+
+-- it dies again, and the lane offers the same PDF on a fresh card
+update public.outbox set status = 'dead', error = 'Gmail upload timed out' where id = (select v::uuid from cp4 where k = 'i_o1');
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+declare
+  i   constant uuid := '00000000-0000-0000-0000-00000000c4b0';
+  pk  constant uuid := (select v::uuid from cp4 where k = 'i_p1');
+  inp constant jsonb := (select v::jsonb from cp4 where k = 'input');
+  r   jsonb;
+begin
+  r := public.carrier_packet_reserve(i, repeat('e5', 32), '{}', '{}', '{}', 2099);
+  if r ->> 'action' is distinct from 'reoffer' then raise exception 'the dead send was not re-offered: %', r; end if;
+  r := public.carrier_packet_reoffer(pk, inp, 'again', '[]');
+  if r ->> 'status' is distinct from 'filed' then raise exception 'the re-offer answered %', r; end if;
+  insert into cp4 values ('i_c2', r ->> 'proposal_id');
+end
+$$;
+release savepoint s;
+reset role;
+
+-- and someone sets the old row going again after all
+update public.outbox set status = 'pending', attempts = 0, next_attempt_at = now() where id = (select v::uuid from cp4 where k = 'i_o1');
+do $$
+declare
+  owner constant uuid := '00000000-0000-0000-0000-00000000c461';
+  p     public.proposals;
+begin
+  select * into p from public.proposals where id = (select v::uuid from cp4 where k = 'i_c2');
+  p.edited_params := '{"to": "adjuster@example.com"}';
+  begin
+    perform public.op_exec_packet_send(p, p.input || p.edited_params, 'human', owner);
+    raise exception 'accepted';
+  exception when others then
+    if sqlerrm is distinct from 'packet.send: an earlier send of this packet is still going out, so nothing was sent' then
+      raise exception 'approving the fresh card with the old send going out was answered: %', sqlerrm;
+    end if;
+  end;
+end
+$$;
+
+-- the old row goes out: the packet is sent, and the fresh card goes
+update public.outbox set status = 'sent', sent_at = now() where id = (select v::uuid from cp4 where k = 'i_o1');
+do $$
+declare
+  pk constant uuid := (select v::uuid from cp4 where k = 'i_p1');
+  o1 constant uuid := (select v::uuid from cp4 where k = 'i_o1');
+  c2 constant uuid := (select v::uuid from cp4 where k = 'i_c2');
+  c  public.carrier_packets;
+begin
+  select * into c from public.carrier_packets where id = pk;
+  if c.status is distinct from 'sent' or c.outbox_id is distinct from o1 or c.sent_to is distinct from 'adjuster@example.com'
+     or c.sent_at is null then
+    raise exception 'the old row''s send was not recorded: %', to_jsonb(c);
+  end if;
+  if (select row(status, result)::text from public.proposals where id = c2)
+     is distinct from row('superseded', jsonb_build_object('superseded_reason', 'sent', 'outbox_id', o1))::text then
+    raise exception 'the fresh card is %', (select row(status, result)::text from public.proposals where id = c2);
+  end if;
+  if not exists (select 1 from public.events where kind = 'proposal.superseded' and aggregate_id = c2) then
+    raise exception 'superseding the fresh card emitted no event';
+  end if;
+end
+$$;
+savepoint s;
+set local role service_role;
+set local request.jwt.claims = '{"role": "service_role"}';
+do $$
+begin
+  if public.carrier_packet_reserve('00000000-0000-0000-0000-00000000c4b0', repeat('e5', 32), '{}', '{}', '{}', 2099)
+     is distinct from '{"action": "skip", "reason": "sent"}' then
+    raise exception 'after the old row went out, reserve did not answer sent';
   end if;
 end
 $$;

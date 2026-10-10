@@ -30,10 +30,13 @@
    approved; anything else is refused for good rather than sent. The message
    goes to Gmail's upload endpoint as raw message/rfc822 bytes (a JSON `raw`
    would be a third larger and capped lower), under a fixed Message-ID,
-   <outbox-<outbox id>@roybalconstruction.com>. That id is the second adopt
-   key: a 17 MB upload that times out may still have been accepted, and then
-   no email_messages row exists, so findPrior also searches the mailbox for
-   the Message-ID before anything is sent again. Plain `email` rows never
+   <packet-<packet version id>@roybalconstruction.com>: one per PDF, not per
+   outbox row, so a card re-offered after a dead send (whose last attempt
+   may have reached Gmail) sends under the same id. That id is the second
+   adopt key: a 17 MB upload that times out may still have been accepted,
+   and then no email_messages row exists, so findPrior also looks for the
+   Message-ID, in email_messages and then in the mailbox, before anything is
+   sent again. Plain `email` rows never
    take this path; they are built and sent exactly as before. */
 
 import { createHash } from "node:crypto";
@@ -55,9 +58,17 @@ export const PACKET_DOWNLOAD_MS = 60_000;
 export const PACKET_SEND_MS = 120_000;
 export const PACKET_LOOKUP_MS = 30_000;
 
-/** The packet email's Message-ID: fixed per outbox row, so every attempt
-    sends the same one and a retry can find an earlier attempt by it. */
-export const packetMessageId = (row) => `<outbox-${row.id}@roybalconstruction.com>`;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** The packet email's Message-ID: fixed per packet version (the PDF the
+    owner approved), so every attempt of every outbox row carrying that PDF
+    sends the same one, and an attempt can find a copy Gmail took on an
+    earlier row: the send of a card re-offered after a dead row whose last
+    upload timed out after Gmail accepted it is adopted, never sent twice.
+    A row naming no packet (never written by the executor) keys on itself. */
+export const packetMessageId = (row) => {
+  const pid = String(row?.payload?.packet_version_id ?? "").toLowerCase();
+  return UUID_RE.test(pid) ? `<packet-${pid}@roybalconstruction.com>` : `<outbox-${row.id}@roybalconstruction.com>`;
+};
 
 export function classifyGmailError(status, text) {
   const t = String(text ?? "").slice(0, 400);
@@ -342,6 +353,12 @@ export function emailAdapter(ctx, { packet = false } = {}) {
       async findPrior(row) {
         const tagged = await findTagged(row);
         if (tagged) return tagged;
+        // an earlier outbox row's send of the same PDF (a re-offered card)
+        const same = await supa.select(
+          "email_messages",
+          `select=id,gmail_id&direction=eq.out&message_id_header=eq.${encodeURIComponent(packetMessageId(row))}&limit=1`,
+        );
+        if (same.length) return { providerId: same[0].gmail_id || "", providerStatus: "sent" };
         const { accessToken, account } = await getConnection();
         const q = `rfc822msgid:${packetMessageId(row)}`;
         let res;

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { emailAdapter, classifyGmailError, classifyPacketError, staleEmailReason } from "../adapters/email.mjs";
+import { emailAdapter, classifyGmailError, classifyPacketError, staleEmailReason, packetMessageId } from "../adapters/email.mjs";
 import { deliverOne } from "../lanes/outbox.mjs";
 import { fakeSupa, testConfig, recordingLog, fakeFetch, outboxRow } from "./helpers.mjs";
 
@@ -211,7 +211,7 @@ const packetRow = (over = {}, att = {}) => outboxRow({
   created_at: new Date(Date.now() - 5 * 60_000).toISOString(),
   ...over,
 });
-const MSGID = "<outbox-66666666-6666-4666-8666-666666666666@roybalconstruction.com>";
+const MSGID = "<packet-77777777-7777-4777-8777-777777777777@roybalconstruction.com>";
 
 /** A fetch stub that can answer with bytes (the storage download), unlike
     helpers' JSON-only one. routes: { url → (init) → Response | Error to throw }. */
@@ -438,7 +438,7 @@ test("packet findPrior: no tag → the mailbox is searched for the Message-ID; a
   assert.deepEqual(timeouts, [30_000]);
   assert.equal(fetch.calls.length, 1);
   assert.equal(fetch.calls[0].url, want);
-  assert.match(fetch.calls[0].url, /\?q=rfc822msgid%3A%3Coutbox-66666666-6666-4666-8666-666666666666%40roybalconstruction\.com%3E&/);
+  assert.match(fetch.calls[0].url, /\?q=rfc822msgid%3A%3Cpacket-77777777-7777-4777-8777-777777777777%40roybalconstruction\.com%3E&/);
   assert.equal(fetch.calls[0].init.method, "GET");
   assert.equal(fetch.calls[0].init.headers.Authorization, "Bearer at-1");
   const rec = ctx.supa.calls.insert.find((c) => c.table === "email_messages").rows[0];
@@ -499,6 +499,55 @@ test("through the lane: an upload that timed out after Gmail took it is adopted 
   assert.equal(fetch.calls.filter((c) => c.url === UPLOAD).length, 1, "one upload in all");
   const run = ctx.supa.calls.insert.filter((c) => c.table === "integration_runs").map((c) => c.rows[0]);
   assert.deepEqual(run.map((r) => [r.connection, r.ok]), [["gmail", false], ["gmail", true]]);
+});
+
+test("the packet Message-ID is the packet version's, the same for every outbox row carrying that PDF", () => {
+  const a = packetRow();
+  const b = packetRow({ id: "88888888-8888-4888-8888-888888888888" });   // a re-offered card's row
+  assert.equal(packetMessageId(a), MSGID);
+  assert.equal(packetMessageId(b), MSGID);
+  assert.equal(packetMessageId(packetRow({ payload: { ...a.payload, packet_version_id: "77777777-7777-4777-8777-777777777777".toUpperCase() } })), MSGID);
+  // no usable packet id: the row keys on itself, so it can still find its own earlier attempt
+  for (const pid of [undefined, "", "not-a-uuid", "77777777-7777-4777-8777-777777777777>\r\nBcc: x@example.com"]) {
+    assert.equal(packetMessageId(packetRow({ payload: { ...a.payload, packet_version_id: pid } })),
+      "<outbox-66666666-6666-4666-8666-666666666666@roybalconstruction.com>", String(pid));
+  }
+});
+
+test("packet findPrior: an earlier row's send of the same PDF in email_messages is adopted, with no Gmail call", async () => {
+  const supa = fakeSupa({ select: {
+    gmail_tokens: [freshToken],
+    email_messages: (q) => (/message_id_header=eq\./.test(q) ? [{ id: "em-1", gmail_id: "gm-earlier" }] : []),
+  } });
+  const fetch = packetFetch({});
+  const prior = await packetAdapter(packetCtx(fetch, { supa })).findPrior(packetRow({ id: "88888888-8888-4888-8888-888888888888" }));
+  assert.deepEqual(prior, { providerId: "gm-earlier", providerStatus: "sent" });
+  assert.match(supa.calls.select[0].query, /sent_by=eq\.outbox%3A88888888/);
+  assert.equal(supa.calls.select[1].query,
+    `select=id,gmail_id&direction=eq.out&message_id_header=eq.${encodeURIComponent(MSGID)}&limit=1`);
+  assert.equal(fetch.calls.length, 0);
+});
+
+test("through the lane: a dead row whose last upload Gmail took, then a re-offered card's new row, sends once in all", async () => {
+  const want = `${LIST}?q=${encodeURIComponent(`rfc822msgid:${MSGID}`)}&includeSpamTrash=true`;
+  let accepted = false;
+  const fetch = packetFetch({
+    [STORAGE]: pdfOk(),
+    [UPLOAD]: () => { accepted = true; return timeoutError(); },   // Gmail kept it; the row then went dead
+    [want]: () => json(accepted ? { messages: [{ id: "gm-kept", threadId: "th-kept" }] } : { resultSizeEstimate: 0 }),
+  });
+  const ctx = packetCtx(fetch);
+  ctx.adapters = { packet: packetAdapter(ctx) };
+
+  await deliverOne(ctx, packetRow({ attempts: 6 }));
+  assert.equal(ctx.supa.rpcs("outbox_failed").length, 1);
+  // the owner approves the fresh card: a new outbox row, the same PDF
+  await deliverOne(ctx, packetRow({ id: "88888888-8888-4888-8888-888888888888", attempts: 1 }));
+  const [sent] = ctx.supa.rpcs("outbox_sent");
+  assert.equal(sent.p_outbox_id, "88888888-8888-4888-8888-888888888888");
+  assert.equal(sent.p_adopted, true);
+  assert.equal(sent.p_provider_id, "gm-kept");
+  assert.equal(fetch.calls.filter((c) => c.url === UPLOAD).length, 1, "one upload in all");
 });
 
 test("through the lane: a Gmail outage on the search fails the attempt transiently and uploads nothing", async () => {

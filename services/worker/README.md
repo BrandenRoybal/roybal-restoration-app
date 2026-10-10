@@ -541,14 +541,20 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   version they replace and what changed.
 - **What the reserve answers** (`carrier_packet_reserve`, under the job's
   lock). A skip, by reason: `lane_off` (no worker heartbeating the `packet`
-  channel), `building` (a build of this job is under way; one still building
+  channel), `not_permitted` (agent:documents' `packet.send` propose grant is
+  revoked, or the operation is deprecated: the owner's switches, so nothing
+  is built or texted), `building` (a build of this job is under way; one still building
   after 30 minutes is failed as `abandoned`), `failed_cap` (this same
-  document failed 3 times, or once for good), `in_flight` (an approved card
-  is being sent), `open` (its card is waiting), `declined` (the owner
+  document failed 3 times, or once for good; the owner is held and texted
+  once, with the last error), `in_flight` (a packet email of this job is
+  pending, sending or retrying in the outbox: an approved card, or a dead row
+  someone revived), `open` (its card is waiting), `declined` (the owner
   declined this same document; it stays declined until the job changes),
   `offer_cap` (the same PDF was offered four times: the first card and three
   re-offers), `too_large` (Gmail refused this same PDF as too large), `sent`
-  (this document is what the carrier already has). A re-offer: a card for the same document that
+  (this document is what the carrier already has; a card for a change that
+  was then undone is withdrawn, so a version 2 identical to version 1 is
+  never offered). A re-offer: a card for the same document that
   expired, was superseded or failed, or a send that went undelivered, is
   filed again with the PDF already stored (`carrier_packet_reoffer`, up to
   three times). Anything else is a build.
@@ -563,10 +569,12 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
   takes exactly one attachment from `carrier-packets`, downloads it with the
   service key (60 s) and checks its size and sha256 against the card's (a
   mismatch is dead at once), builds `multipart/mixed` with a fixed
-  `Message-ID: <outbox-<outbox id>@roybalconstruction.com>`, and uploads it
-  to Gmail's media endpoint (120 s). The adopt check is the `email_messages`
-  tag, then a Gmail search for that Message-ID, so an upload that timed out
-  after Gmail took it is never sent twice. Gmail's 413, or an answer saying
+  `Message-ID: <packet-<packet version id>@roybalconstruction.com>` (one per
+  packet version, whichever outbox row carries it), and uploads it to
+  Gmail's media endpoint (120 s). The adopt check is the `email_messages`
+  tag, then that Message-ID in `email_messages`, then a Gmail search for it,
+  so an upload that timed out after Gmail took it is never sent twice, even
+  when the version is re-offered on a fresh card and approved again. Gmail's 413, or an answer saying
   the message is too large, is dead at once. The sent copy lands in
   `email_messages` under the job, so it shows in the job's email history.
 - **The To is never filed.** The card carries a suggestion (`suggested_to`:
@@ -709,8 +717,8 @@ THIS WORKER  outbox lane → adapters/email.mjs in packet mode → Gmail, the PD
      (to schedule it again, run the `cron.schedule` statement in migration
      0026, section 15);
   3. stop filing for good: `update public.agent_authority set revoked_at = now() where agent_id = 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65' and operation = 'packet.send' and revoked_at is null`
-     (do 1 or 2 as well, or every build is refused at filing with a 42501
-     and, after 3 tries, the job is held with a "couldn't be built" text);
+     (from then on every reserve skips as `not_permitted`: nothing is built,
+     filed or texted; restoring the grant picks the jobs up again);
   4. open cards: decline them in the inbox, or let them expire (14 days).
      Nothing reaches a carrier until the owner approves a card;
   5. optional: `update public.operation_catalog set deprecated_at = now() where name = 'packet.send' and version = 1`
@@ -952,7 +960,10 @@ which re-applies `fly.toml`.
   dead rows carry the provider's last word in `error`. To retry a dead row
   after fixing the cause: `update public.outbox set status = 'failed', attempts = 0, next_attempt_at = now() where id = …`
   (the adopt check runs on every attempt, so a text the dead row's last try
-  did deliver is adopted, not resent). An email row older than
+  did deliver is adopted, not resent). A revived `packet` row holds its job:
+  the reserve, a re-offer and the send of any newer card of that job wait
+  (`in_flight`) until it settles, and when it goes out the packet reads
+  `sent` and any fresh card for the same version is superseded. An email row older than
   `EMAIL_MAX_AGE_HOURS` goes straight back to dead, on purpose; if it
   should still go, send a fresh one from the app instead.
 - **Rotate the alert secret** in place, so there is never a moment without one:

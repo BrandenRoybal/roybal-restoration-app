@@ -245,7 +245,15 @@ async function packetOne(run, cand, id) {
     return build(run, job, r);
   }
   if (r?.action === "reoffer") return reoffer(run, job, r);
-  if (r?.action === "skip") return run.skip(r.reason || "skip");
+  if (r?.action === "skip") {
+    // the reserve itself can spend the last try (a third build abandoned
+    // mid-run): the owner hears once, as from a failed build
+    if (r.reason === "failed_cap") {
+      const detail = String(r.error ?? "").slice(0, 200) || "3 tries";
+      await hold(run, id, "failed_cap", detail, () => deps.holdText("failed_cap", model, detail));
+    }
+    return run.skip(r.reason || "skip");
+  }
   throw new Error(`carrier_packet_reserve answered ${JSON.stringify(r) ?? "nothing"}`.slice(0, 300));
 }
 

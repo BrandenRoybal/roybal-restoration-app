@@ -340,10 +340,21 @@ locked means the owner is approving it right now.
 Under the lock, after `op_expire_proposals()`:
 
 1. `outbox_channel_ready('packet')` false → `{action:"skip", reason:"lane_off"}`.
+   The owner's switches: `packet.send@1` deprecated in `operation_catalog`,
+   or `op_agent_permits(agent:documents, 'packet.send', 'comms', 'propose')`
+   false (the grant revoked) → skip `not_permitted`, so revoking the grant
+   stops builds and texts at once and restoring it picks the jobs up again.
 2. A `building` row older than 30 minutes becomes `failed` with error
-   `abandoned` (not permanent); a fresh one → skip `building`.
+   `abandoned` (not permanent; it keeps its planned `bucket`/`path`, so the
+   cleanup removes anything it uploaded); a fresh one → skip `building`.
 3. Tries: the job's `failed` rows with this hash, excluding `relabel`. Any
-   `permanent`, or 3 or more → skip `failed_cap`.
+   `permanent`, or 3 or more → skip `failed_cap` with `error` = the last
+   counted failure's error (300 characters). The lane holds the job on it
+   and texts once, as for a build that failed for the third time.
+   Then: any outbox row of channel `packet` for this job that is `pending`,
+   `sending` or `failed` → skip `in_flight`. That covers an approved card
+   and a dead row someone revived after its version was offered afresh; a
+   card or a build now could send the carrier two.
 4. S = the highest-seq `sent` row. R = the `ready` row, locked. Its card
    status is read from `proposals`.
 5. R exists and its card is `approved`, `executing` or `executed` → skip
@@ -354,7 +365,13 @@ Under the lock, after `op_expire_proposals()`:
 7. No R; U = the highest-seq `undelivered` row with seq above S. U has this
    hash: its error is about size → skip `too_large`; else **reoffer U** when
    `U.offer < 3`, else skip `offer_cap`.
-8. S has this hash and nothing newer is live → skip `sent`.
+8. S has this hash (a change was undone) → skip `sent`. What is on offer
+   above S is withdrawn first: R's card is locked `SKIP LOCKED`; not
+   lockable, or approved/executing/executed → skip `in_flight`; `proposed` →
+   superseded (`superseded_reason: withdrawn`, with a `proposal.superseded`
+   event as agent:documents); R → `superseded` with error `withdrawn: the
+   carrier already has this version`; `undelivered` rows above S →
+   `superseded`.
 9. Otherwise **build**: insert a `building` row with seq = max + 1, version =
    (S.version or 0) + 1, the job's number (allocated on the first row),
    a new `build_token`; delete the job's hold.
@@ -393,11 +410,13 @@ row).
 
 - `carrier_packet_reoffer(p_packet_id, p_input, p_rationale, p_evidence_refs)`:
   the row is `ready` with a dead card or `undelivered`, is still the job's
-  latest live row, and `offer < 3`. Files a new card (offer + 1) exactly as
+  latest live row, `offer < 3`, and no `packet` outbox row of the job is
+  `pending`, `sending` or `failed` (else `{status:"lost", reason:"in_flight"}`). Files a new card (offer + 1) exactly as
   above, sets the row `ready` with the new `proposal_id`, clears `outbox_id`
   and `error`.
 - `carrier_packet_fail(p_packet_id, p_build_token, p_error, p_permanent)` →
-  `{status, capped}`: compare-and-set `building` → `failed`.
+  `{status, capped}`: compare-and-set `building` → `failed`, keeping the
+  planned `bucket`/`path` so the cleanup can remove an upload.
 - `carrier_packet_withdraw(p_job_id, p_reason)` → `{withdrawn, pdf}`:
   supersedes the open card (skip locked; a locked card is left alone) and
   sets its row `superseded` with error `withdrawn: <reason>`.
@@ -441,6 +460,10 @@ to service_role`.
 - Idempotency template `packet.send:{packet_version_id}:{offer}`.
 - Proposer: a new agent `agent:documents` (fixed uuid), kind `automation`,
   with a `propose` grant for `packet.send` and the events its siblings got.
+- Nobody else proposes it: explicit deny rows in `role_permissions` for
+  `packet.send` / `propose` for owner, office, crew_lead, crew and viewer
+  (an exact-operation deny beats the `comms:*` wildcard), so a hand-made
+  card from the app can never point a send at a packet row.
 - **The To is never filed.** The card shows `suggested_to` in a To field; the
   office app sends `p_edited_params: {to, cc}` with the approval, and
   op_proposal_approve validates `input || edited_params` against the schema.
@@ -456,6 +479,9 @@ to service_role`.
 - The row is `ready`, its `proposal_id` is this proposal, no `ready`, `sent`
   or `undelivered` row of the job has a higher seq, and its PDF is present
   (`path` set, `pdf_removed_at` null).
+- No other `packet` outbox row of the job is `pending`, `sending` or
+  `failed`; else it raises "an earlier send of this packet is still going
+  out, so nothing was sent".
 - Inserts ONE outbox row: channel `packet`, operation `packet.send@1`, key
   `'outbox:' || p_proposal.idempotency_key` (on conflict do nothing),
   `proposal_id`, `job_id`, and the payload below; stores `outbox_id` on the
@@ -478,9 +504,13 @@ to service_role`.
 
 `outbox_packet_result`: AFTER UPDATE OF status ON outbox, for rows with
 `channel = 'packet'` whose status changed to `sent`, `delivered` or `dead`.
-It updates only the packet row with `outbox_id = new.id`: `sent`/`delivered`
-→ status `sent`, `sent_at`, `sent_to = new.payload->>'to'`; `dead` → status
-`undelivered`, `error = new.error`. Wrapped in `begin … exception when
+`sent`/`delivered` updates the packet row with `outbox_id = new.id` or
+`id = payload->>'packet_version_id'` (a revived row whose version was
+re-offered meanwhile, so `outbox_id` was cleared) → status `sent`,
+`sent_at`, `sent_to = new.payload->>'to'`, `outbox_id = new.id`; that row's
+fresh card, if still `proposed` and not this row's proposal, is superseded
+(`superseded_reason: sent`). `dead` updates only the row with
+`outbox_id = new.id` → status `undelivered`, `error = new.error`. Wrapped in `begin … exception when
 others then raise warning … end` so it can never fail `outbox_sent`,
 `outbox_failed` or the lease sweep.
 
@@ -500,12 +530,17 @@ not know packets never claims one (it would send the email without the PDF).
   (`AbortSignal.timeout(60s)`), check its size and sha256 (a mismatch is
   permanent); build `multipart/mixed` (text/plain body + base64
   application/pdf part with the filename, RFC 2231 encoded when not ASCII)
-  with a fixed `Message-ID: <outbox-<outbox id>@roybalconstruction.com>`;
+  with a fixed `Message-ID: <packet-<packet version id>@roybalconstruction.com>`
+  (one per packet version, so a re-offered version approved again on a new
+  outbox row carries the same id; a payload without a uuid falls back to
+  `<outbox-<outbox id>@…>`);
   POST it to `https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media`
   with `Content-Type: message/rfc822` and `AbortSignal.timeout(120s)`.
-- `findPrior` for packet rows: the `email_messages` tag as today, then
-  Gmail `GET /gmail/v1/users/me/messages?q=rfc822msgid:<that id>`; a hit is
-  adopted, so a timeout after Gmail accepted never sends twice.
+- `findPrior` for packet rows: the `email_messages` tag as today, then an
+  outbound `email_messages` row with that `message_id_header`, then Gmail
+  `GET /gmail/v1/users/me/messages?q=rfc822msgid:<that id>`; a hit is
+  adopted, so a timeout after Gmail accepted never sends twice, on this row
+  or a later one for the same version.
 - Gmail 413, or an error saying the message is too large, is permanent.
 - The `email_messages` row is written as for email (so it shows in the job's
   email history), with `body_text` the body and the subject as sent.

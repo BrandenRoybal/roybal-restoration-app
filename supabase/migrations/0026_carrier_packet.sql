@@ -126,8 +126,10 @@
 -- Roles: the service role gains the doors and read on the three tables;
 -- agent:documents gains one propose grant; the owner approves packet.send as
 -- he approves every comms operation (the comms policy routes it to him, so
--- office's comms approval does not reach it); owner, office, crew_lead, crew,
--- viewer, agent logins and anon read and write exactly what they did before.
+-- office's comms approval does not reach it); no human role may propose
+-- packet.send (section 13b: explicit deny rows); otherwise owner, office,
+-- crew_lead, crew, viewer, agent logins and anon read and write exactly what
+-- they did before.
 --
 -- PUSH ORDER: 0025 (PR #276) goes to each database before this file.
 -- db-push.yml runs `supabase db push` without --include-all, so a database
@@ -140,9 +142,10 @@
 -- select cron.unschedule('carrier-packet-hourly'). To stop filing for good,
 -- revoke the grant (update agent_authority set revoked_at = now() where
 -- agent_id = agent:documents and operation = 'packet.send'; the row and its
--- event stay, events is append-only): the file door then refuses with 42501.
--- Open cards expire on their own; setting the catalog row's deprecated_at
--- makes them decline-only. A queued packet email nobody should send is
+-- event stay, events is append-only): every reserve then skips the job as
+-- not_permitted before anything is built, and re-granting picks the jobs up
+-- again. Open cards expire on their own; setting the catalog row's
+-- deprecated_at makes them decline-only and stops reserving the same way. A queued packet email nobody should send is
 -- cancelled by marking its outbox row dead (its packet then reads
 -- undelivered). Additive: dropping the trigger, the seventeen functions and
 -- the three tables, and putting the outbox channel constraint back, restores
@@ -474,6 +477,13 @@ begin
   if v_row.path is null or v_row.pdf_removed_at is not null then
     raise exception 'packet.send: the PDF is no longer stored, so nothing was sent';
   end if;
+  -- an earlier send of this job's packet that someone set going again
+  if exists (select 1 from public.outbox o
+              where o.channel = 'packet' and o.job_id = v_job
+                and o.status in ('pending', 'sending', 'failed')
+                and o.idempotency_key <> 'outbox:' || p_proposal.idempotency_key) then
+    raise exception 'packet.send: an earlier send of this packet is still going out, so nothing was sent';
+  end if;
 
   -- 5. one outbox row; the subject, body and file name are as filed
   v_payload := jsonb_build_object(
@@ -580,10 +590,16 @@ revoke all on function public.carrier_packet_offer_card(public.carrier_packets, 
 -- means, under the job's lock, after op_expire_proposals (so a card past its
 -- expiry reads expired, not open). In order (design §7):
 --   1. no worker heartbeating the 'packet' channel     → skip lane_off
+--      agent:documents holds no live packet.send grant, or the catalog row
+--      is deprecated (the owner switched filing off)   → skip not_permitted
 --   2. a building row: under 30 minutes old            → skip building
---      older, it failed (abandoned, not permanent) and the run goes on
+--      older, it failed (abandoned, not permanent, its PDF's path kept so
+--      the cleanup removes an upload) and the run goes on
 --   3. this hash failed permanently, or 3 times not counting relabel
---                                                      → skip failed_cap
+--                                                      → skip failed_cap,
+--      with the last try's error (the worker holds the job and texts once)
+--      a packet outbox row of the job is pending, sending or failed (to be
+--      retried)                                        → skip in_flight
 --   4. S = the newest sent row; R = the ready row (locked) and its card
 --   5. R's card approved, executing or executed        → skip in_flight
 --   6. R has this hash: card proposed → skip open; declined → skip declined;
@@ -593,7 +609,10 @@ revoke all on function public.carrier_packet_offer_card(public.carrier_packets, 
 --      error is about size → skip too_large; its stored PDF is missing or
 --      does not match → build (9); else reoffer U while U.offer < 3, else
 --      skip offer_cap
---   8. S has this hash and no ready or undelivered row is newer → skip sent
+--   8. S has this hash: the carrier already has this document. A newer
+--      ready row (its card locked SKIP LOCKED; locked or approved → skip
+--      in_flight) and undelivered rows above S are superseded, an open card
+--      with them (withdrawn), and → skip sent
 --   9. build: a building row, seq max + 1, version S.version + 1 (1 with no
 --      S), the job's number (allocated on its first row), a new build token;
 --      the job's hold is deleted, and so is the lane-wide storage_full hold
@@ -628,6 +647,8 @@ declare
   v_action text;
   v_number text;
   v_seq    integer;
+  v_err    text;
+  r        record;
 begin
   if p_job_id is null then
     raise exception 'carrier_packet_reserve: job id is required' using errcode = 'invalid_parameter_value';
@@ -656,6 +677,12 @@ begin
   if not public.outbox_channel_ready('packet') then
     return jsonb_build_object('action', 'skip', 'reason', 'lane_off');
   end if;
+  -- the owner's switches (the header): nothing is built that could not be filed
+  if not exists (select 1 from public.operation_catalog c
+                  where c.name = 'packet.send' and c.version = 1 and c.deprecated_at is null)
+     or not public.op_agent_permits('b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65', 'packet.send', 'comms', 'propose') then
+    return jsonb_build_object('action', 'skip', 'reason', 'not_permitted');
+  end if;
 
   -- 2. one build at a time; one that never finished is a failed try
   select * into v_build from public.carrier_packets
@@ -664,8 +691,13 @@ begin
     if v_build.created_at > now() - interval '30 minutes' then
       return jsonb_build_object('action', 'skip', 'reason', 'building');
     end if;
+    -- the PDF may have been uploaded before the worker stopped: its path
+    -- lets the cleanup remove it
     update public.carrier_packets
-       set status = 'failed', error = 'abandoned', permanent = false, updated_at = now()
+       set status = 'failed', error = 'abandoned', permanent = false,
+           bucket = coalesce(bucket, 'carrier-packets'),
+           path = coalesce(path, job_id::text || '/' || number || '-v' || version || '-b' || seq || '.pdf'),
+           updated_at = now()
      where id = v_build.id;
   end if;
 
@@ -675,7 +707,19 @@ begin
    where job_id = p_job_id and status = 'failed' and model_hash = p_model_hash
      and coalesce(error, '') <> 'relabel';
   if v_perm or v_tries >= 3 then
-    return jsonb_build_object('action', 'skip', 'reason', 'failed_cap');
+    select c.error into v_err from public.carrier_packets c
+     where c.job_id = p_job_id and c.status = 'failed' and c.model_hash = p_model_hash
+       and coalesce(c.error, '') <> 'relabel'
+     order by c.seq desc limit 1;
+    return jsonb_build_object('action', 'skip', 'reason', 'failed_cap', 'error', left(v_err, 300));
+  end if;
+
+  -- a send of this job's packet is going out: an approved card's, or a dead
+  -- one someone set going again after its PDF was offered afresh. The outbox
+  -- settles it first; a card or a build now could send the carrier two.
+  if exists (select 1 from public.outbox o
+              where o.channel = 'packet' and o.job_id = p_job_id and o.status in ('pending', 'sending', 'failed')) then
+    return jsonb_build_object('action', 'skip', 'reason', 'in_flight');
   end if;
 
   -- 4. what was sent, and what is on offer
@@ -727,10 +771,36 @@ begin
   end if;
 
   if v_action is null then
-    -- 8. the carrier already has this model, and nothing newer is live
-    if v_sent.id is not null and v_sent.model_hash = p_model_hash
-       and not exists (select 1 from public.carrier_packets n
-                        where n.job_id = p_job_id and n.status in ('ready', 'undelivered') and n.seq > v_sent.seq) then
+    -- 8. the carrier already has this model (a change was undone): what is
+    --    newer would only send the carrier its own copy again as a "version
+    --    2", so it is withdrawn
+    if v_sent.id is not null and v_sent.model_hash = p_model_hash then
+      if v_ready.id is not null then
+        -- a card the owner is approving right now is locked: leave it to run
+        select p.status into v_card from public.proposals p where p.id = v_ready.proposal_id for update skip locked;
+        if not found or v_card is null or v_card in ('approved', 'executing', 'executed') then
+          return jsonb_build_object('action', 'skip', 'reason', 'in_flight');
+        end if;
+        if v_card = 'proposed' then
+          update public.proposals p
+             set status = 'superseded',
+                 result = jsonb_build_object('superseded_reason', 'withdrawn',
+                                             'reason', 'the carrier already has this version')
+           where p.id = v_ready.proposal_id and p.status = 'proposed'
+          returning p.id, p.operation, p.job_id, p.claim_id, p.result into r;
+          if found then
+            perform public.emit_event(
+              'proposal.superseded', r.operation, 'proposal', r.id, r.job_id, r.claim_id, r.id,
+              r.result, 'proposal.superseded:' || r.id, 'agent', 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65'::uuid);
+          end if;
+        end if;
+        update public.carrier_packets
+           set status = 'superseded', error = 'withdrawn: the carrier already has this version', updated_at = now()
+         where id = v_ready.id;
+      end if;
+      update public.carrier_packets
+         set status = 'superseded', updated_at = now()
+       where job_id = p_job_id and status = 'undelivered' and seq > v_sent.seq;
       return jsonb_build_object('action', 'skip', 'reason', 'sent');
     end if;
 
@@ -962,8 +1032,8 @@ grant execute on function public.carrier_packet_file(uuid, uuid, jsonb, jsonb, t
 -- carrier_packet_file does) and sets the row ready with it, clearing
 -- outbox_id and error. Returns {status: "filed", proposal_id, offer,
 -- superseded: []}, or {status: "lost", reason} when the row no longer
--- qualifies (missing, not_offerable, open, declined, not_latest, offer_cap,
--- pdf_removed): the worker files nothing and texts nothing.
+-- qualifies (missing, not_offerable, open, declined, in_flight, not_latest,
+-- offer_cap, pdf_removed): the worker files nothing and texts nothing.
 -- ---------------------------------------------------------------------------
 create or replace function public.carrier_packet_reoffer(
   p_packet_id     uuid,
@@ -1016,6 +1086,12 @@ begin
     end if;
   elsif v_row.status <> 'undelivered' then
     return jsonb_build_object('status', 'lost', 'reason', 'not_offerable');
+  end if;
+  -- a send of this job's packet is going out (a dead row someone set going
+  -- again): the outbox settles it
+  if exists (select 1 from public.outbox o
+              where o.channel = 'packet' and o.job_id = v_job and o.status in ('pending', 'sending', 'failed')) then
+    return jsonb_build_object('status', 'lost', 'reason', 'in_flight');
   end if;
   if exists (select 1 from public.carrier_packets n
               where n.job_id = v_job and n.seq > v_row.seq and n.status in ('ready', 'sent', 'undelivered')) then
@@ -1080,9 +1156,14 @@ begin
 
   perform pg_advisory_xact_lock(hashtextextended('carrier_packet:' || v_job::text, 0));
 
+  -- the path the PDF was to be stored at, so the cleanup removes an upload
+  -- the worker could not
   update public.carrier_packets
      set status = 'failed', error = left(coalesce(nullif(btrim(p_error), ''), 'failed'), 2000),
-         permanent = coalesce(p_permanent, false), updated_at = now()
+         permanent = coalesce(p_permanent, false),
+         bucket = coalesce(bucket, 'carrier-packets'),
+         path = coalesce(path, job_id::text || '/' || number || '-v' || version || '-b' || seq || '.pdf'),
+         updated_at = now()
    where id = p_packet_id and status = 'building' and build_token = p_build_token
   returning * into v_row;
   if not found then
@@ -1463,7 +1544,10 @@ grant execute on function public.carrier_packet_media_sizes(text[]) to service_r
 -- and never touch a packet, so without this the packet would read ready
 -- forever. sent or delivered → sent, with sent_at and the address it went to
 -- (the payload's To, the owner's); dead → undelivered, with the error. Only
--- the packet row that recorded this outbox row is touched. Like
+-- the packet row that recorded this outbox row is touched, or, for a send,
+-- the one its payload names: a dead row someone set going again after the
+-- lane re-offered its PDF still records the send, and the re-offer's open
+-- card is superseded. Like
 -- outbox_qbo_link_result it can never fail the write that fired it: the
 -- worker's report of an email Gmail already took must always land.
 -- ---------------------------------------------------------------------------
@@ -1472,12 +1556,36 @@ create or replace function public.outbox_packet_result() returns trigger
   security definer
   set search_path to 'public', 'pg_temp'
 as $$
+declare
+  v_pid  uuid;
+  v_prop uuid;
+  r      record;
 begin
   if new.status in ('sent', 'delivered') then
+    -- the packet the row carries, also when a re-offer has since cleared
+    -- outbox_id (a dead row someone set going again): the carrier has it
+    begin
+      v_pid := (new.payload ->> 'packet_version_id')::uuid;
+    exception when others then
+      v_pid := null;
+    end;
     update public.carrier_packets
        set status = 'sent', sent_at = coalesce(new.sent_at, now()), sent_to = new.payload ->> 'to',
-           error = null, updated_at = now()
-     where outbox_id = new.id and status <> 'sent';
+           outbox_id = new.id, error = null, updated_at = now()
+     where (outbox_id = new.id or id = v_pid) and status <> 'sent'
+    returning proposal_id into v_prop;
+    -- a fresh card for the same PDF is now pointless: it goes
+    if v_prop is not null then
+      update public.proposals p
+         set status = 'superseded', result = jsonb_build_object('superseded_reason', 'sent', 'outbox_id', new.id)
+       where p.id = v_prop and p.status = 'proposed' and p.id is distinct from new.proposal_id
+      returning p.id, p.operation, p.job_id, p.claim_id, p.result into r;
+      if found then
+        perform public.emit_event(
+          'proposal.superseded', r.operation, 'proposal', r.id, r.job_id, r.claim_id, r.id,
+          r.result, 'proposal.superseded:' || r.id, 'agent', 'b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65'::uuid);
+      end if;
+    end if;
   else
     update public.carrier_packets
        set status = 'undelivered', error = left(coalesce(new.error, 'undelivered'), 2000), updated_at = now()
@@ -1492,7 +1600,7 @@ $$;
 
 alter function public.outbox_packet_result() owner to postgres;
 comment on function public.outbox_packet_result() is
-  'AFTER UPDATE OF status on outbox, channel packet, status now sent, delivered or dead: marks the carrier_packets row whose outbox_id is this row sent (sent_at, sent_to = payload to) or undelivered (error). Exception-guarded: it never fails the outbox update (0026).';
+  'AFTER UPDATE OF status on outbox, channel packet, status now sent, delivered or dead: marks the carrier_packets row whose outbox_id is this row, or that the payload''s packet_version_id names, sent (sent_at, sent_to = payload to, outbox_id; an open re-offered card for it is superseded), or the row whose outbox_id is this row undelivered (error). Exception-guarded: it never fails the outbox update (0026).';
 revoke all on function public.outbox_packet_result() from public, anon, authenticated, service_role;
 
 drop trigger if exists outbox_packet_result on public.outbox;
@@ -1542,6 +1650,24 @@ begin
   end if;
 end
 $$;
+
+
+-- ---------------------------------------------------------------------------
+-- 13b. Nobody files packet.send by hand.
+--
+-- Every role may propose comms:* (0004's matrix), which would let any
+-- signed-in login put a "Carrier packet" card in the owner's inbox with a
+-- link of its choosing, or take a packet's next offer key so its re-offer
+-- can never be filed. A packet card is only ever the lane's: an explicit
+-- deny on the operation itself beats the wildcard (op_role_permits), for
+-- propose and, through it, execute-implies-propose. The owner's approve is
+-- untouched (it comes from his comms:* execute), and agent:documents is
+-- governed by the agent role and its own grant, not by these rows.
+-- ---------------------------------------------------------------------------
+insert into public.role_permissions (role, operation, capability, allow)
+select r.role, 'packet.send', 'propose', false
+  from (values ('owner'), ('office'), ('crew_lead'), ('crew'), ('viewer')) as r(role)
+on conflict (org_id, role, operation, capability) do nothing;
 
 
 -- ---------------------------------------------------------------------------
