@@ -380,7 +380,7 @@ async function readReceiptStates(ids, known) {
 }
 
 const UNMATCHED = {
-  waiting_feed: ["Waiting for the bank feed", "disp-x"],      // a card charge under a week old
+  waiting_feed: ["Waiting for the bank feed", "disp-x"],      // a card charge under two weeks old
   store_not_entered: ["Not in QuickBooks yet", "disp-x"],     // a store-account invoice not entered yet
   // a dump ticket: the office books those as Bills, which the match doesn't
   // read, so finding no expense says nothing about whether it's entered
