@@ -35,6 +35,16 @@
             way with one outbox row per receipt on the "qbo" channel:
             "executed" only means they were queued, so its outcome counts
             those rows (updated, waiting, refused and why).
+            A carrier packet card (packet.send, filed by the worker's
+            packet lane as agent:documents) is the adjuster email with the
+            job's packet PDF attached. It is inbox only like those two (filed
+            with no number, and none is ever offered), it goes out on the
+            worker's "packet" channel, so its lane line reads that channel,
+            and what came of it is its one outbox row ("Sent from Gmail",
+            "Couldn't send: …"). Its To is never filed: the card carries
+            the suggestion (suggested_to, and the phrase saying where it
+            came from), and the office page sends the To and Cc he confirms
+            with the approval, in a request it builds itself.
 
    The office page (apps/admin/js/approvals.js) reads both queues and
    the names around them; everything that decides what a card says
@@ -51,7 +61,11 @@
    apps/admin/js/approvals.js. So the page calls no export added after
    step 4; what step 5 added rides on calls it already made (fields on
    the card, lookFrom's options, needs' and inbox's answers), and an
-   older copy just leaves the new lines off.
+   older copy just leaves the new lines off. The carrier packet card
+   rides the same way (kind "packet", its suggestion, email and PDF
+   link on the card's evidence, the "packet" lane in needs' answer,
+   look.packetLane); an older copy makes it a plain card (kind
+   "other"), which the page still recognises by its operation.
    ============================================================ */
 
 const TZ = "America/Anchorage";
@@ -72,16 +86,20 @@ const KINDS = {
   stage: { chip: "Job stage", approve: "Approve and move job" },
   gaps: { chip: "Invoice gaps", approve: "Approve and add lines" },
   qbo: { chip: "QuickBooks", approve: "Approve: update QuickBooks" },
+  packet: { chip: "Carrier packet", approve: "Approve and send" },
   other: { chip: "", approve: "Approve" },
 };
 const TEXT_KIND = { emailSend: "email", sendText: "text", boardEdit: "phase" };
 const SPINE_KIND = { "email.send": "email", "sms.send": "text", "job.set_stage": "stage", "invoice.review_gaps": "gaps",
-  "receipts.qbo_link": "qbo" };
-/* the spine kinds roybal-notify never reads (its INBOX_ONLY_FILTER): no YES number on them */
-const INBOX_ONLY = ["gaps", "qbo"];
+  "receipts.qbo_link": "qbo", "packet.send": "packet" };
+/* the spine kinds roybal-notify never reads (its INBOX_ONLY_FILTER): no YES
+   number on them. A carrier packet is filed with none (carrier_packet_file
+   clears it), and none is offered even if one turns up: a YES can't carry
+   the To he confirms here, so the executor would refuse it. */
+const INBOX_ONLY = ["gaps", "qbo", "packet"];
 /* the spine kinds whose approval writes outbox rows the worker delivers: what
    came of one is in those rows, not in the proposal */
-const SENDS = ["email", "text", "qbo"];
+const SENDS = ["email", "text", "qbo", "packet"];
 /* what each queue calls an answered row */
 const DECIDED = {
   text: ["approved", "executed", "failed", "declined"],
@@ -215,7 +233,8 @@ function refsOf(v) {
            page looks jobId up in), job, by, byKind, byId, status, createdAt,
            expiresAt, decidedAt, answeredAt, evidence, result, error, outbox,
            emailLane (a spine email only: true / false while the worker is /
-           isn't sending email, null when the page couldn't tell), laneHint
+           isn't sending email, null when the page couldn't tell; for a
+           carrier packet, the same for the "packet" channel), laneHint
            (the line a waiting card shows about that, or ""),
            answeredHere (set by decidedText: this tab just answered it; the
            page sets it too while this tab's answer to it is still out),
@@ -225,11 +244,12 @@ function refsOf(v) {
    evidence carries every kind's fields, empty where they don't apply; an
    invoice-gaps card fills lines, hints, total, totalUsd, unpriced, sent and
    invoice (gapsOf); a QuickBooks receipts card fills receipts and link
-   (qboOf)
+   (qboOf); a carrier packet fills suggestedTo, suggestedFrom, filename,
+   pdf and pdfHost (packetOf), and subject and body as an email does
    look: { jobs: {id: name}, ops: {"email.send@1": description},
            people: {id: name}, outbox: {proposalId: newest outbox row},
            outboxes: {proposalId: [its outbox rows]},
-           emailLane, qboLane: true | false | null } */
+           emailLane, qboLane, packetLane: true | false | null } */
 
 /* What a spine email says while the worker isn't sending email, in the
    words roybal-notify texts back when a YES lands in that state ("It's
@@ -272,7 +292,7 @@ export function fromPending(row, look = {}) {
       to: str(p.to), cc: "", subject: str(p.subject), body: str(p.body),
       message: str(p.message), audience: str(p.audience),
       phase: str(phase.name), hours: Number.isFinite(hours) && hours > 0 ? hours : null,
-      stage: "", rationale: "", refs: [], reason: "", ...noGaps(), ...noQbo(),
+      stage: "", rationale: "", refs: [], reason: "", ...noGaps(), ...noQbo(), ...noPacket(),
     },
     result: res, error: str(res.error), outbox: null, outboxes: [],
     // the text queue's email goes out through gmail-proxy, not the worker
@@ -435,6 +455,35 @@ function qboOf(r) {
   };
 }
 
+/* ---------- carrier packets (the worker's packet lane) ---------- */
+const noPacket = () => ({ suggestedTo: "", suggestedFrom: "", filename: "", pdf: "", pdfHost: "" });
+/* The evidence ref that opens the packet PDF (the lane's signed link): one
+   marked kind "pdf", else an https link whose path is a .pdf, else the first
+   https link. Only a link linkOf takes counts, carrying the host it really
+   opens, as every evidence link does. */
+function pdfRef(refs) {
+  const links = arr(refs).slice(0, 10).map((x) => {
+    const o = typeof x === "string" ? { url: x } : obj(x);
+    const link = [o.url, o.href].map(str).map(linkOf).find(Boolean);
+    return link ? { ...link, marked: /^pdf$/i.test(str(o.kind || o.type)) } : null;
+  }).filter(Boolean);
+  const isPdf = (u) => { try { return /\.pdf$/i.test(new URL(u).pathname); } catch { return false; } };
+  return links.find((l) => l.marked) || links.find((l) => isPdf(l.url)) || links[0] || null;
+}
+/* A packet.send row (carrier_packet_file files it; input: subject, body,
+   filename, suggested_to, suggested_from, packet_version_id, offer) → what
+   the card shows beside the email. The suggestion is read from the filed
+   input only: an edit is the To he confirmed, which evidence.to shows once
+   the card is approved. The schema makes each a string; anything else
+   reads as nothing, never as "[object Object]" in the To field. */
+function packetOf(r) {
+  const input = obj(r.input);
+  const text = (v) => (typeof v === "string" ? v.trim() : "");
+  const pdf = pdfRef(r.evidence_refs);
+  return { suggestedTo: text(input.suggested_to), suggestedFrom: text(input.suggested_from), filename: text(input.filename),
+    pdf: pdf ? pdf.url : "", pdfHost: pdf ? pdf.host : "" };
+}
+
 /** One proposals row → a card. The input it shows is what would run:
     input with edited_params on top (op_execute's merge). */
 export function fromProposal(row, look = {}) {
@@ -455,29 +504,34 @@ export function fromProposal(row, look = {}) {
   const what = firstSentence(own(look.ops, str(r.operation)) || own(look.ops, name)) || name || "An ask";
   const gaps = kind === "gaps" ? gapsOf(r) : noGaps();
   const qbo = kind === "qbo" ? qboOf(r) : noQbo();
+  const packet = kind === "packet" ? packetOf(r) : noPacket();
   const key = kind === "email" || kind === "text" ? str(input.to) : kind === "stage" ? stageLabel(input.stage)
     : kind === "gaps" ? `${plural(gaps.lines.length, "line")} · ${USD.format(gaps.totalUsd)}${gaps.unpriced ? ` · ${gaps.unpriced} unpriced` : ""}`
-    : kind === "qbo" ? [jobNamed || job, plural(qbo.receipts.length, "receipt")].filter(Boolean).join(": ") : "";
+    : kind === "qbo" ? [jobNamed || job, plural(qbo.receipts.length, "receipt")].filter(Boolean).join(": ")
+    // the packet's number, version, claim and name, as the attachment is called
+    : kind === "packet" ? packet.filename.replace(/\.pdf$/i, "") : "";
   const byId = str(r.proposed_by_id);
   const status = str(r.status);
   // proposals_sms_code_seq numbers a row while it is proposed (unique only
   // among those, then free for reuse), so only a waiting row offers its number
   const code = Number(r.sms_code) || null;
-  const sending = own(look, "emailLane"), serving = own(look, "qboLane");
-  const emailLane = kind === "email" && (sending === true || sending === false) ? sending : null;
+  // a carrier packet is an email too, sent on the worker's own "packet" channel
+  const sending = own(look, kind === "packet" ? "packetLane" : "emailLane"), serving = own(look, "qboLane");
+  const emailLane = (kind === "email" || kind === "packet") && (sending === true || sending === false) ? sending : null;
   const qboLane = kind === "qbo" && (serving === true || serving === false) ? serving : null;
   return {
     key: "spine:" + str(r.id), lane: "spine", id: str(r.id), code, kind,
     chip: KINDS[kind].chip || name || "Ask",
     title: key ? `${what}: ${key}` : what,
     approveLabel: KINDS[kind].approve,
-    // invoice gaps and QuickBooks receipts are answered here only:
-    // roybal-notify reads none of them, so a YES with their number would
-    // answer like no such number
+    // invoice gaps, QuickBooks receipts and carrier packets are answered
+    // here only: roybal-notify reads none of the first two, so a YES with
+    // their number would answer like no such number, and a packet needs
+    // the To typed on this card
     yesHint: code && status === "proposed" && !INBOX_ONLY.includes(kind) ? `or text YES ${code}` : "",
-    // job.set_stage moves a board job; invoice gaps and receipts are on a
-    // field job; anything else may name either table
-    jobId, jobTable: kind === "stage" ? "board" : kind === "gaps" || kind === "qbo" ? "field" : "either", job,
+    // job.set_stage moves a board job; invoice gaps, receipts and carrier
+    // packets are on a field job; anything else may name either table
+    jobId, jobTable: kind === "stage" ? "board" : kind === "gaps" || kind === "qbo" || kind === "packet" ? "field" : "either", job,
     by: proposerName(r.proposed_by_kind, own(look.people, byId)),
     byKind: str(r.proposed_by_kind), byId,
     status, createdAt: str(r.created_at), expiresAt: str(r.expires_at),
@@ -485,11 +539,11 @@ export function fromProposal(row, look = {}) {
     answeredAt: str(r.approved_at || r.updated_at),     // a decline is the row's last update
     evidence: {
       to: str(input.to), cc: str(input.cc), subject: str(input.subject),
-      body: kind === "email" ? str(input.body) : "",
+      body: kind === "email" || kind === "packet" ? str(input.body) : "",
       message: kind === "text" ? str(input.body) : "", audience: "",
       phase: "", hours: null, stage: kind === "stage" ? stageLabel(input.stage) : "",
       rationale: str(r.rationale), refs: refsOf(r.evidence_refs),
-      reason: str(r.decline_reason), ...gaps, ...qbo,
+      reason: str(r.decline_reason), ...gaps, ...qbo, ...packet,
     },
     result: obj(r.result), error: str(r.error),
     outbox: own(look.outbox, str(r.id)) || null,
@@ -606,7 +660,8 @@ export function skippedLine(skipped) {
     both), proposers per kind, the spine sends whose outbox rows say how
     delivery went (a QuickBooks receipts card's too), and lanes: "email"
     when a spine email is waiting or was sent, "qbo" when a QuickBooks
-    receipts card is, so the page reads the worker's heartbeat. */
+    receipts card is, "packet" when a carrier packet is, so the page reads
+    the worker's heartbeat. */
 export function needs(cards) {
   const out = { field: new Set(), board: new Set(), agents: new Set(), people: new Set(), outbox: new Set(), lanes: new Set() };
   for (const c of cards || []) {
@@ -618,7 +673,8 @@ export function needs(cards) {
     if (UUID.test(c.byId) && c.byKind === "agent") out.agents.add(c.byId);
     if (UUID.test(c.byId) && c.byKind === "human") out.people.add(c.byId);
     if (c.status === "executed" && SENDS.includes(c.kind)) out.outbox.add(c.id);
-    if ((c.kind === "email" || c.kind === "qbo") && (c.status === "proposed" || c.status === "executed")) out.lanes.add(c.kind);
+    // each kind's lane is the worker channel of the same name
+    if ((c.kind === "email" || c.kind === "qbo" || c.kind === "packet") && (c.status === "proposed" || c.status === "executed")) out.lanes.add(c.kind);
   }
   return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v]]));
 }
@@ -648,8 +704,10 @@ function laneOf(heartbeats, channel, now) {
     card has one per receipt); heartbeats the newest worker_heartbeats row
     as read (null: not read, or the read failed), judged at now. */
 export function lookFrom({ catalog = [], agents = [], profiles = [], jobs = [], outbox = [], heartbeats = null, now = Date.now() } = {}) {
+  // packetLane: is the worker serving the "packet" channel (email on, and
+  // CARRIER_PACKET not off). No export of its own: the page reads it here.
   const look = { jobs: {}, ops: {}, people: {}, outbox: {}, outboxes: {},
-    emailLane: emailLaneOf(heartbeats, now), qboLane: qboLaneOf(heartbeats, now) };
+    emailLane: emailLaneOf(heartbeats, now), qboLane: qboLaneOf(heartbeats, now), packetLane: laneOf(heartbeats, "packet", now) };
   for (const j of jobs) if (j && j.id) put(look.jobs, str(j.id), jobName(j));
   for (const o of catalog) {
     if (!o || !o.name) continue;
@@ -702,13 +760,17 @@ export const expiredLine = (n) =>
   n > 0 ? `${n} ${n === 1 ? "ask" : "asks"} expired without an answer in the last 7 days` : "";
 
 /* ---------- what came of it ---------- */
-/** A spine send's outbox row → its delivery state, when it was readable. */
-function delivery(o, now) {
+/** A spine send's outbox row → its delivery state, when it was readable. A
+    carrier packet goes from the office Gmail account, and once the worker
+    has handed it to Gmail that is all there is to know ("delivered" is the
+    same news), so both read as sent from there. */
+function delivery(o, now, kind) {
   const st = str(o && o.status);
   if (st === "pending") {
     const at = ms(o.next_attempt_at);
     return at > now + 60000 ? `Queued, goes out ${akTime(o.next_attempt_at, now)}` : "Queued to send";
   }
+  if (kind === "packet" && (st === "sent" || st === "delivered")) return "Sent from Gmail";
   return own({ sending: "Sending", sent: "Sent", delivered: "Delivered", failed: "Send failed, retrying",
     dead: "Couldn't send" + (str(o && o.error) ? ": " + str(o.error) : "") }, st) || "";
 }
@@ -840,6 +902,21 @@ function qboOutcome(c) {
   return { text: parts.join("; "), tone: trouble ? "bad" : waiting > 0 ? "wait" : "no" };
 }
 
+/* Why the packet lane withdrew a card: the gate's reasons
+   (docs/Carrier_Packet_Design.md §4) that take an approvable PDF away, so a
+   voided invoice or a cleared certificate never leaves one behind; and
+   carrier_packet_reserve's already_sent, a change undone back to the
+   version the carrier was sent. */
+const WITHDRAWN = {
+  already_sent: "the carrier already has this version",
+  deleted: "the job was deleted", archived: "the job was archived",
+  not_water: "the job isn't a water mitigation job now",
+  excluded: "the certificate or the invoices were unticked on the job's packet page",
+  not_certified: "the Certificate of Drying isn't signed now", no_invoice: "the job has no numbered invoice now",
+  unchecked_fills: "meter readings on the Moisture Map need checking",
+  unread_meter_photos: "meter photos on an empty reading need reading",
+};
+
 /* A text-queue row goes pending → approved → executed / failed inside the one
    request that answered it. Seen at 'approved', it may be mid-run (a YES text
    being handled right now, a tap on another phone, or this tab's own answer
@@ -880,16 +957,22 @@ export function outcome(c, now = Date.now(), seenAt = now) {
       // the night's findings no longer match this card's (findings_changed);
       // receipts_qbo_link_file's: QuickBooks needs nothing more for the job
       // (nothing_to_do), or the owner answered tonight's items on another
-      // card (items_changed)
+      // card (items_changed); carrier_packet_withdraw's and
+      // carrier_packet_reserve's: the card's packet is withdrawn (withdrawn,
+      // and why); outbox_packet_result's: an earlier send of the same packet
+      // went out (sent)
       const why = c.result.superseded_reason;
       return { text: why === "no_gaps" ? "No longer needed: the invoice covers it"
         : why === "findings_changed" ? "Closed: the nightly check's findings changed"
         : why === "nothing_to_do" ? "No longer needed: QuickBooks has what it needs"
-        : why === "items_changed" ? "Closed: the nightly QuickBooks match's findings changed" : "Replaced by a newer ask", tone: "no" };
+        : why === "items_changed" ? "Closed: the nightly QuickBooks match's findings changed"
+        : why === "sent" ? "No longer needed: this packet was sent"
+        : why === "withdrawn" ? "Withdrawn: " + (own(WITHDRAWN, str(c.result.reason)) || "the job no longer gets a carrier packet")
+        : "Replaced by a newer ask", tone: "no" };
     }
     if (c.status === "executed") {
-      if (c.kind === "email" || c.kind === "text") {
-        const d = delivery(c.outbox, now);
+      if (c.kind === "email" || c.kind === "text" || c.kind === "packet") {
+        const d = delivery(c.outbox, now, c.kind);
         const st = str(c.outbox && c.outbox.status);
         // still in line (or between retries) while the worker isn't sending
         // email: it waits for that, not for its turn. Read as "queued" too

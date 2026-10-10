@@ -106,6 +106,8 @@ test("checkAddress trims and says what's wrong in plain words", () => {
   assert.equal(S.checkAddress("a@b.com, c@d.com").error, "One address only: this sends to a single adjuster.");
   assert.equal(S.checkAddress("a@b.com;c").error, "One address only: this sends to a single adjuster.");
   assert.equal(S.checkAddress("Bob <bob@carrier.com>").error, "Just the address, without the name.");
+  assert.equal(S.checkAddress("bob@carrier.com>").error, "Just the address, without the name.");
+  assert.equal(S.checkAddress("<bob@carrier.com").error, "Just the address, without the name.");
   assert.equal(S.checkAddress("bob at carrier.com").error, "That doesn't look like an email address.");
   assert.equal(S.checkAddress("bob@carrier").error, "That doesn't look like an email address.");
   assert.equal(S.checkAddress("b".repeat(320) + "@x.com").error, "That address is too long.");

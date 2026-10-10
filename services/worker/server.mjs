@@ -54,6 +54,9 @@ export function createWorker({ cfg = loadConfig(), log = makeLog(), fetchImpl } 
   };
   ctx.adapters.sms = smsAdapter(ctx);
   if (cfg.emailEnabled) ctx.adapters.email = emailAdapter(ctx);
+  // The carrier packet email: the same Gmail connection in packet mode, and
+  // only while 'packet' is served (Gmail configured, CARRIER_PACKET not off).
+  if (cfg.channels.includes("packet")) ctx.adapters.packet = emailAdapter(ctx, { packet: true });
   // Only when the channel is served: with RECEIPTS_QBO=off (or an
   // OUTBOX_CHANNELS without it) no QuickBooks write is made from here.
   if (cfg.channels.includes("qbo")) ctx.adapters.qbo = qboAdapter(ctx);

@@ -66,7 +66,7 @@ test("loadConfig requires the url and key, clamps numbers, and turns email off w
   assert.equal(c.outboxAgentId, "0a7ac824-5042-4bb5-ab0d-8569cea209b1");
   const e = loadConfig({ ...base, GMAIL_CLIENT_ID: "id", GMAIL_CLIENT_SECRET: "s" });
   assert.equal(e.emailEnabled, true);
-  assert.deepEqual(e.channels, ["sms", "email", "qbo"]);
+  assert.deepEqual(e.channels, ["sms", "email", "qbo", "packet"]);
   const half = loadConfig({ ...base, GMAIL_CLIENT_ID: "id" });
   assert.equal(half.emailEnabled, false);
 });
@@ -95,13 +95,13 @@ test("RECEIPTS_QBO=off turns the QuickBooks link off: the qbo channel is not ser
   for (const v of ["off", "OFF", " off "]) {
     const c = loadConfig({ ...base, RECEIPTS_QBO: v });
     assert.equal(c.receiptsQbo, false, v);
-    assert.deepEqual(c.channels, ["sms", "email"], v);
+    assert.deepEqual(c.channels, ["sms", "email", "packet"], v);
     assert.ok(c.queueKinds.includes("receipts.qbo_match"), "the nightly row is still claimed, and finishes {skipped:'off'}");
   }
   for (const v of [undefined, "", "on", "yes", "0"]) {
     const c = loadConfig(v === undefined ? base : { ...base, RECEIPTS_QBO: v });
     assert.equal(c.receiptsQbo, true, String(v));
-    assert.deepEqual(c.channels, ["sms", "email", "qbo"], String(v));
+    assert.deepEqual(c.channels, ["sms", "email", "qbo", "packet"], String(v));
   }
   // an OUTBOX_CHANNELS set on the app replaces the list, and the switch still wins over it
   assert.deepEqual(loadConfig({ ...base, OUTBOX_CHANNELS: "sms,qbo" }).channels, ["sms", "qbo"]);
@@ -165,7 +165,8 @@ const FIELD_CONFIG = fs.readFileSync(path.join(REPO, "apps/field/js/config.js"),
 const FIELD_CLIENT_ID = /export const GMAIL_CLIENT_ID = "([^"]+)"/.exec(FIELD_CONFIG)?.[1];
 const FIELD_SUPABASE_URL = /export const SUPABASE_URL = "([^"]+)"/.exec(FIELD_CONFIG)?.[1];
 // The field modules the worker image copies (services/worker/Dockerfile).
-const COPIED_FIELD = ["reconcile.js", "dryingcalc.js", "model.js", "core.js", "scans.js"].map((f) => `apps/field/js/${f}`);
+const COPIED_FIELD = ["reconcile.js", "dryingcalc.js", "model.js", "core.js", "scans.js", "dryingwatch.js",
+  "meterphotos.js", "merge.js", "thumbs.js", "media.js", "fincalc.js", "completeness.js", "photopdf.js"].map((f) => `apps/field/js/${f}`);
 const CHECKOUT_FILES = ["apps/field/js/config.js", "services/worker/set-gmail-secret.sh",
   "services/worker/adapters/email.mjs", "services/worker/fly.toml", "services/worker/Dockerfile", ".dockerignore",
   ...COPIED_FIELD];
@@ -324,7 +325,7 @@ test("set-gmail-secret.sh stages exactly the pair on stdin, deploys after, never
       `${FIELD_SUPABASE_URL}/functions/v1/roybal-notify/version`], on);
     assert.match(ok.output, /last step of turning email on: migration 0019 applied, roybal-notify deployed/);
     assert.match(ok.output, /worker\.start line with "email":true/);
-    assert.match(ok.output, /"channels":\["sms","email","qbo"\]/);
+    assert.match(ok.output, /"channels":\["sms","email","qbo","packet"\]/);
     assert.match(ok.output, /email\.disabled/);
     assert.doesNotMatch(ok.output, /no deploy/i);
   }
@@ -433,8 +434,7 @@ test("set-gmail-secret.sh checks every path the worker's Dockerfile copies, so n
   assert.ok(listed.includes(".dockerignore"), "the build context's filter is checked too");
   const dockerfile = fs.readFileSync(path.join(REPO, "services/worker/Dockerfile"), "utf8");
   const sources = [...dockerfile.matchAll(/^COPY\s+(?:--\S+\s+)*(.+?)\s+\S+\s*$/gm)].flatMap((m) => m[1].split(/\s+/));
-  assert.deepEqual(sources, ["apps/field/js/reconcile.js", "apps/field/js/dryingcalc.js", "apps/field/js/model.js",
-    "apps/field/js/core.js", "apps/field/js/scans.js", "services/worker"]);
+  assert.deepEqual(sources, [...COPIED_FIELD, "services/worker"]);
   for (const src of sources) {
     assert.ok(listed.some((p) => src === p || src.startsWith(`${p}/`)), `IMAGE_PATHS covers ${src}`);
   }

@@ -1,15 +1,21 @@
 /* The queue lane — claim_job → handler → finish_job.
 
-   Three kinds. `proposal.execute`, which op_proposal_approve enqueues for an
+   Four kinds. `proposal.execute`, which op_proposal_approve enqueues for an
    operation whose runtime is `worker` (none is yet; the lane exists so the
    day one lands, nothing else has to): the handler runs op_execute as the
    job's own principal (the approver), exactly as the SQL runtime path does.
    A proposal whose executor fails is NOT a failed job: the proposal records
    its failure and a re-run would return the same row, so the job is done
    with that outcome in its result. `billing.reconcile`, the nightly billing
-   check pg_cron enqueues (lanes/billing.mjs), and `receipts.qbo_match`, the
-   nightly QuickBooks match (lanes/receipts.mjs): each one's summary is the
+   check pg_cron enqueues (lanes/billing.mjs), `receipts.qbo_match`, the
+   nightly QuickBooks match (lanes/receipts.mjs), and `packet.build`, the
+   hourly carrier packet run (lanes/packet.mjs): each one's summary is the
    result.
+
+   packet.build is imported when its first job runs, not when the worker
+   boots: it brings the PDF writer and a dozen field modules into the image,
+   and a file the image missed must fail that kind only, never stop the
+   worker from claiming the others or delivering the outbox.
 
    Only the kinds in QUEUE_KINDS are ever claimed; any other kind waits as
    `queued` until a worker that knows it is deployed. A kind that IS listed
@@ -46,6 +52,7 @@ export const handlers = {
   },
   "billing.reconcile": billingReconcile,
   "receipts.qbo_match": receiptsQboMatch,
+  "packet.build": async (ctx, job) => (await import("./packet.mjs")).packetBuild(ctx, job),
 };
 
 export async function finishJob(ctx, job, { ok, result = null, error = null, permanent = false }) {

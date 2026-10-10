@@ -115,7 +115,8 @@ export function checkAddress(v) {
   const to = str(v);
   if (!to) return { ok: false, error: "Type the adjuster's email address." };
   if ((to.match(/@/g) || []).length > 1 || /[,;]/.test(to)) return { ok: false, error: "One address only: this sends to a single adjuster." };
-  if (/<[^<>]*>/.test(to)) return { ok: false, error: "Just the address, without the name." };
+  // any angle bracket, not only a <name> pair: the worker refuses a stray one for good (rfc822.mjs validAddresses)
+  if (/[<>]/.test(to)) return { ok: false, error: "Just the address, without the name." };
   if (!SPINE_TO.test(to)) return { ok: false, error: "That doesn't look like an email address." };
   if (to.length > MAX.to) return { ok: false, error: "That address is too long." };
   return { ok: true, to };

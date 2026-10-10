@@ -20,8 +20,26 @@
    so it goes dead with the reason on it and the dead-letter text counts it.
    The check sits inside send(), which the lane calls only after its adopt
    lookup found nothing, so an old row that an earlier attempt DID send is
-   still adopted, never refused. */
+   still adopted, never refused.
 
+   Packet mode — emailAdapter(ctx, { packet: true }), the 'packet' channel
+   (docs/Carrier_Packet_Design.md §9): the carrier packet email, one PDF
+   attached, over the same Gmail connection. The PDF is fetched from the
+   private carrier-packets bucket with the service key and must match the
+   size and sha256 the executor copied onto the row from the packet the owner
+   approved; anything else is refused for good rather than sent. The message
+   goes to Gmail's upload endpoint as raw message/rfc822 bytes (a JSON `raw`
+   would be a third larger and capped lower), under a fixed Message-ID,
+   <packet-<packet version id>@roybalconstruction.com>: one per PDF, not per
+   outbox row, so a card re-offered after a dead send (whose last attempt
+   may have reached Gmail) sends under the same id. That id is the second
+   adopt key: a 17 MB upload that times out may still have been accepted,
+   and then no email_messages row exists, so findPrior also looks for the
+   Message-ID, in email_messages and then in the mailbox, before anything is
+   sent again. Plain `email` rows never
+   take this path; they are built and sent exactly as before. */
+
+import { createHash } from "node:crypto";
 import { buildRfc822, validAddresses, addressList } from "../rfc822.mjs";
 import { DeliveryError, tagFor } from "./sms.mjs";
 import { errText } from "../log.mjs";
@@ -29,6 +47,28 @@ import { EMAIL_MAX_AGE_HOURS_DEFAULT } from "../config.mjs";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
+const GMAIL_UPLOAD_URL = "https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send?uploadType=media";
+const GMAIL_LIST_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
+
+export const PACKET_BUCKET = "carrier-packets";
+// A 17 MB PDF from storage in the same region, and the same bytes plus a
+// third (base64) up to Google: generous, but bounded, so a stalled transfer
+// fails the attempt into a retry instead of holding the lease forever.
+export const PACKET_DOWNLOAD_MS = 60_000;
+export const PACKET_SEND_MS = 120_000;
+export const PACKET_LOOKUP_MS = 30_000;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** The packet email's Message-ID: fixed per packet version (the PDF the
+    owner approved), so every attempt of every outbox row carrying that PDF
+    sends the same one, and an attempt can find a copy Gmail took on an
+    earlier row: the send of a card re-offered after a dead row whose last
+    upload timed out after Gmail accepted it is adopted, never sent twice.
+    A row naming no packet (never written by the executor) keys on itself. */
+export const packetMessageId = (row) => {
+  const pid = String(row?.payload?.packet_version_id ?? "").toLowerCase();
+  return UUID_RE.test(pid) ? `<packet-${pid}@roybalconstruction.com>` : `<outbox-${row.id}@roybalconstruction.com>`;
+};
 
 export function classifyGmailError(status, text) {
   const t = String(text ?? "").slice(0, 400);
@@ -37,6 +77,20 @@ export function classifyGmailError(status, text) {
   }
   // 401/403: token or scope — the next refresh may fix it; 429/5xx: later.
   return new DeliveryError(`Gmail API ${status}: ${t}`, { permanent: false, status });
+}
+
+const TOO_LARGE = /too (large|big)|exceeds? the (maximum|max|size|limit)|size limit|maximum (message )?size/i;
+
+/** Gmail's answer to a packet upload. Too large is permanent: the same PDF
+    would be refused again, and the error says "too large" so the packet lane
+    (carrier_packet_reserve) stops offering that build and rebuilds smaller.
+    A rate limit or an outage that happens to mention a size stays transient. */
+export function classifyPacketError(status, text) {
+  const t = String(text ?? "").slice(0, 400);
+  if (status === 413 || (status !== 429 && status < 500 && TOO_LARGE.test(t))) {
+    return new DeliveryError(`Gmail refused the packet email as too large (${status}): ${t}`, { permanent: true, status });
+  }
+  return classifyGmailError(status, t);
 }
 
 /** Why this row is too old to send, or null when it may go. The text lands
@@ -55,9 +109,60 @@ export function staleEmailReason(row, maxHours, now = Date.now()) {
     `so it was not sent. Send a fresh one if it should still go.`;
 }
 
-export function emailAdapter(ctx) {
+const permanent = (m) => new DeliveryError(m, { permanent: true });
+const transient = (m, status = null) => new DeliveryError(m, { permanent: false, status });
+const timedOut = (e) => e?.name === "TimeoutError" || e?.name === "AbortError";
+
+/** The packet row's one attachment, checked before anything is fetched: it
+    must be a carrier-packets object with a size and a sha256 to hold the
+    download to. Any other shape is not something this code can send. */
+export function packetAttachment(payload, supabaseUrl) {
+  const list = Array.isArray(payload?.attachments) ? payload.attachments : [];
+  if (list.length !== 1) throw permanent(`a packet email carries exactly one attachment; this row has ${list.length}, so it was not sent`);
+  const a = list[0] && typeof list[0] === "object" ? list[0] : {};
+  if (a.bucket !== PACKET_BUCKET) {
+    throw permanent(`the packet attachment must come from the ${PACKET_BUCKET} bucket, not "${String(a.bucket ?? "").slice(0, 60)}", so it was not sent`);
+  }
+  const path = String(a.path ?? "");
+  const segs = path.split("/");
+  if (!path || segs.some((s) => !s || s === "." || s === "..") || /[\x00-\x1f\\]/.test(path)) {
+    throw permanent("the packet attachment has no usable storage path, so it was not sent");
+  }
+  const sha256 = String(a.sha256 ?? "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sha256)) throw permanent("the packet attachment has no sha256 to check the PDF against, so it was not sent");
+  const size = Number(a.bytes);
+  if (!Number.isSafeInteger(size) || size <= 0) throw permanent("the packet attachment has no size to check the PDF against, so it was not sent");
+  return {
+    url: `${supabaseUrl}/storage/v1/object/${PACKET_BUCKET}/${segs.map(encodeURIComponent).join("/")}`,
+    sha256,
+    size,
+    filename: String(a.filename ?? "").trim() || segs.at(-1),
+    contentType: String(a.content_type ?? "").trim() || "application/pdf",
+  };
+}
+
+/** Storage's "no such object": a 404, or the 400 with statusCode "404" in the
+    body that older storage-api versions answer instead. */
+function storageNotFound(status, text) {
+  if (status === 404) return true;
+  if (status !== 400) return false;
+  try {
+    const b = JSON.parse(text);
+    return String(b?.statusCode ?? "") === "404" || /not.?found/i.test(String(b?.error ?? ""));
+  } catch { return false; }
+}
+
+/** A mailbox search Gmail will never answer, whatever the retry: the query
+    itself refused (400), or a token without the read scope (403 naming
+    insufficient permission or scope). A 403 rate limit is not this. */
+function lookupUnusable(status, text) {
+  return status === 400 || (status === 403 && /insufficient|scope/i.test(String(text ?? "")));
+}
+
+export function emailAdapter(ctx, { packet = false } = {}) {
   const { cfg, supa, log } = ctx;
   const doFetch = (...a) => (ctx.fetch ?? globalThis.fetch)(...a);
+  const maxAgeHours = () => (Number.isFinite(cfg.emailMaxAgeHours) ? cfg.emailMaxAgeHours : EMAIL_MAX_AGE_HOURS_DEFAULT);
 
   /** The newest connected account's access token, refreshed when within 5 min of expiry. */
   async function getConnection() {
@@ -97,18 +202,55 @@ export function emailAdapter(ctx) {
     } catch { return null; }
   }
 
+  async function findTagged(row) {
+    const rows = await supa.select(
+      "email_messages",
+      `select=id,gmail_id,thread_id&direction=eq.out&sent_by=eq.${encodeURIComponent(tagFor(row))}&limit=1`,
+    );
+    if (!rows.length) return null;
+    return { providerId: rows[0].gmail_id || "", providerStatus: "sent" };
+  }
+
+  /** The adopt record, and the line in the job's email history. Written
+      before outbox_sent so a crash between the two still leaves the retry
+      something to find; a failure here is logged, never thrown, because the
+      message went. */
+  async function recordSent(row, { gmailId, threadId, account, to, subject, body, messageIdHeader, jobId }) {
+    const firstTo = to.split(",")[0].trim().toLowerCase();
+    try {
+      await supa.insert("email_messages", [{
+        gmail_id: gmailId,
+        thread_id: threadId,
+        direction: "out",
+        from_addr: account,
+        from_name: account,
+        to_addr: to.toLowerCase().slice(0, 500),
+        subject: subject.slice(0, 500),
+        body_text: body,
+        message_id_header: messageIdHeader,
+        // Files the send under its job, as gmail-proxy does, so it shows in
+        // the job's email history. email_messages.job_id is text (a field
+        // project or a coordination job id); outbox.job_id is the uuid the
+        // proposal carried.
+        job_id: jobId == null || jobId === "" ? null : String(jobId),
+        matched_by: "sent",
+        contact_id: await contactIdFor(firstTo),
+        received_at: new Date().toISOString(),
+        read_by_office: true,
+        sent_by: tagFor(row),
+      }]);
+    } catch (e) {
+      log("email.record_failed", { outbox_id: row.id, error: errText(e) });
+    }
+  }
+
+  if (packet) return packetMode();
+
   return {
     channel: "email",
     connection: "gmail",
 
-    async findPrior(row) {
-      const rows = await supa.select(
-        "email_messages",
-        `select=id,gmail_id,thread_id&direction=eq.out&sent_by=eq.${encodeURIComponent(tagFor(row))}&limit=1`,
-      );
-      if (!rows.length) return null;
-      return { providerId: rows[0].gmail_id || "", providerStatus: "sent" };
-    },
+    findPrior: findTagged,
 
     async send(row) {
       const p = row.payload ?? {};
@@ -122,8 +264,7 @@ export function emailAdapter(ctx) {
       if (!body) throw new DeliveryError("email row has an empty body", { permanent: true });
       if (!subject && !inReplyTo) throw new DeliveryError("email row has no subject", { permanent: true });
       // Before the token refresh and the send: a stale row touches nothing at Google.
-      const maxHours = Number.isFinite(cfg.emailMaxAgeHours) ? cfg.emailMaxAgeHours : EMAIL_MAX_AGE_HOURS_DEFAULT;
-      const stale = staleEmailReason(row, maxHours);
+      const stale = staleEmailReason(row, maxAgeHours());
       if (stale) throw new DeliveryError(stale, { permanent: true });
 
       const { accessToken, account } = await getConnection();
@@ -142,35 +283,171 @@ export function emailAdapter(ctx) {
       if (!res.ok) throw classifyGmailError(res.status, await res.text().catch(() => ""));
       const sent = await res.json().catch(() => ({}));
 
-      // The adopt record. Written before outbox_sent so a crash between the
-      // two still leaves the retry something to find.
-      const firstTo = to.split(",")[0].trim().toLowerCase();
-      try {
-        await supa.insert("email_messages", [{
-          gmail_id: String(sent.id ?? ""),
-          thread_id: String(sent.threadId ?? threadId ?? ""),
-          direction: "out",
-          from_addr: account,
-          from_name: account,
-          to_addr: to.toLowerCase().slice(0, 500),
-          subject: (subject || "Re:").slice(0, 500),
-          body_text: body,
-          message_id_header: "",
-          // Files the send under its job, as gmail-proxy does, so it shows in
-          // the job's email history. email_messages.job_id is text (a field
-          // project or a coordination job id); outbox.job_id is the uuid the
-          // proposal carried.
-          job_id: row.job_id == null || row.job_id === "" ? null : String(row.job_id),
-          matched_by: "sent",
-          contact_id: await contactIdFor(firstTo),
-          received_at: new Date().toISOString(),
-          read_by_office: true,
-          sent_by: tagFor(row),
-        }]);
-      } catch (e) {
-        log("email.record_failed", { outbox_id: row.id, error: errText(e) });
-      }
+      await recordSent(row, {
+        gmailId: String(sent.id ?? ""),
+        threadId: String(sent.threadId ?? threadId ?? ""),
+        account, to, subject: subject || "Re:", body,
+        messageIdHeader: "",
+        jobId: row.job_id,
+      });
       return { providerId: String(sent.id ?? ""), providerStatus: "sent" };
     },
   };
+
+  function packetMode() {
+    /** The approved PDF, or a refusal. Missing, or not byte-for-byte the
+        packet on the card, is permanent: a retry would fetch the same object. */
+    async function download(att) {
+      let res;
+      try {
+        res = await doFetch(att.url, {
+          method: "GET",
+          headers: { apikey: cfg.serviceKey, Authorization: `Bearer ${cfg.serviceKey}` },
+          signal: AbortSignal.timeout(PACKET_DOWNLOAD_MS),
+        });
+      } catch (e) {
+        throw transient(`the packet PDF could not be fetched from storage (${timedOut(e) ? "timed out" : errText(e, 200)})`);
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        if (storageNotFound(res.status, text)) {
+          throw permanent("the packet PDF is missing from storage, so it was not sent");
+        }
+        throw transient(`storage answered ${res.status} for the packet PDF: ${text.slice(0, 200)}`, res.status);
+      }
+      let bytes;
+      try {
+        bytes = Buffer.from(await res.arrayBuffer());
+      } catch (e) {
+        throw transient(`the packet PDF download broke off (${timedOut(e) ? "timed out" : errText(e, 200)})`);
+      }
+      if (bytes.length !== att.size) {
+        throw permanent(`the packet PDF in storage does not match the approved one (${bytes.length} bytes, expected ${att.size}), so it was not sent`);
+      }
+      if (createHash("sha256").update(bytes).digest("hex") !== att.sha256) {
+        throw permanent("the packet PDF in storage does not match the approved one (its sha256 differs), so it was not sent");
+      }
+      return bytes;
+    }
+
+    return {
+      channel: "packet",
+      connection: "gmail",
+
+      /* The tag first (one indexed select, as for email), then the mailbox.
+         The mailbox search is what makes an upload that timed out after
+         Gmail accepted it safe to retry, so when Gmail cannot be asked (a
+         network error, a timeout, a 401, a 429, a 5xx, a token that will not
+         refresh) this attempt fails transiently and nothing is sent: an
+         outage that stops the search would almost always stop the send too,
+         and the outbox backoff (2, 4, 8 … minutes, dead after max_attempts)
+         bounds the wait, after which the lane can offer the packet again.
+         Sending blind instead would risk a second copy to the adjuster.
+         Only a search Gmail will NEVER answer (lookupUnusable: the query
+         refused, or a token without the read scope) is logged and skipped,
+         so that a connection problem cannot strand every packet; the send
+         then has the email lane's guarantee, the tag alone. A hit is also
+         recorded in email_messages, so the job's email history shows it and
+         a later retry adopts it from the tag. Gmail indexes a sent message
+         within seconds; the first retry comes minutes later. */
+      async findPrior(row) {
+        const tagged = await findTagged(row);
+        if (tagged) return tagged;
+        // an earlier outbox row's send of the same PDF (a re-offered card)
+        const same = await supa.select(
+          "email_messages",
+          `select=id,gmail_id&direction=eq.out&message_id_header=eq.${encodeURIComponent(packetMessageId(row))}&limit=1`,
+        );
+        if (same.length) return { providerId: same[0].gmail_id || "", providerStatus: "sent" };
+        const { accessToken, account } = await getConnection();
+        const q = `rfc822msgid:${packetMessageId(row)}`;
+        let res;
+        try {
+          // includeSpamTrash: a sent copy moved to the trash was still sent.
+          res = await doFetch(`${GMAIL_LIST_URL}?q=${encodeURIComponent(q)}&includeSpamTrash=true`, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${accessToken}` },
+            signal: AbortSignal.timeout(PACKET_LOOKUP_MS),
+          });
+        } catch (e) {
+          throw transient(`Gmail could not be searched for an earlier send of this packet (${timedOut(e) ? "timed out" : errText(e, 200)}); ` +
+            "not sent yet, so it cannot go twice");
+        }
+        if (!res.ok) {
+          const text = (await res.text().catch(() => "")).slice(0, 300);
+          if (lookupUnusable(res.status, text)) {
+            log("packet.lookup_unusable", { outbox_id: row.id, status: res.status, error: text });
+            return null;
+          }
+          throw transient(`Gmail search for an earlier send of this packet answered ${res.status}: ${text}; not sent yet, so it cannot go twice`, res.status);
+        }
+        const found = await res.json().catch(() => null);
+        if (!found || typeof found !== "object") {
+          throw transient("Gmail's search answer could not be read; not sent yet, so it cannot go twice");
+        }
+        const hit = Array.isArray(found.messages) ? found.messages.find((m) => m?.id) : null;
+        if (!hit) return null;
+        const p = row.payload ?? {};
+        await recordSent(row, {
+          gmailId: String(hit.id),
+          threadId: String(hit.threadId ?? ""),
+          account,
+          to: addressList(p.to),
+          subject: String(p.subject ?? "").trim(),
+          body: String(p.body ?? "").trim(),
+          messageIdHeader: packetMessageId(row),
+          jobId: row.job_id ?? p.job_id,
+        });
+        return { providerId: String(hit.id), providerStatus: "sent" };
+      },
+
+      async send(row) {
+        const p = row.payload ?? {};
+        const to = addressList(p.to);
+        const body = String(p.body ?? "").trim();
+        const subject = String(p.subject ?? "").trim();
+        if (!validAddresses(p.to)) throw permanent("packet row has no valid `to` address");
+        if (p.cc && !validAddresses(p.cc)) throw permanent("packet row has an invalid `cc` address");
+        if (!subject) throw permanent("packet row has no subject");
+        if (!body) throw permanent("packet row has an empty body");
+        const att = packetAttachment(p, cfg.supabaseUrl);
+        // Before the download, the token refresh and the send, as for email.
+        const stale = staleEmailReason(row, maxAgeHours());
+        if (stale) throw permanent(stale);
+
+        const pdf = await download(att);
+        const { accessToken, account } = await getConnection();
+        const messageId = packetMessageId(row);
+        const { bytes } = buildRfc822({
+          to, cc: p.cc, from: account, subject, body, messageId,
+          attachments: [{ filename: att.filename, contentType: att.contentType, bytes: pdf }],
+        });
+
+        let res;
+        try {
+          res = await doFetch(GMAIL_UPLOAD_URL, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "message/rfc822" },
+            body: bytes,
+            signal: AbortSignal.timeout(PACKET_SEND_MS),
+          });
+        } catch (e) {
+          // Gmail may have taken it before the line dropped: the retry's
+          // findPrior searches for the Message-ID before sending again.
+          throw transient(`Gmail upload ${timedOut(e) ? "timed out" : `unreachable: ${errText(e, 200)}`}`);
+        }
+        if (!res.ok) throw classifyPacketError(res.status, await res.text().catch(() => ""));
+        const sent = await res.json().catch(() => ({}));
+
+        await recordSent(row, {
+          gmailId: String(sent.id ?? ""),
+          threadId: String(sent.threadId ?? ""),
+          account, to, subject, body,
+          messageIdHeader: messageId,
+          jobId: row.job_id ?? p.job_id,
+        });
+        return { providerId: String(sent.id ?? ""), providerStatus: "sent" };
+      },
+    };
+  }
 }

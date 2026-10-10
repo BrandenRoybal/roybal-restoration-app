@@ -24,7 +24,15 @@
    card aged off coming back for 48 hours. Then 0025: a rental paid in two
    or three card charges as one line naming each, a second try and why the
    last one didn't go, a charge refused after another was tagged, and a
-   change the office cancelled.
+   change the office cancelled. Then the carrier packet's packet.send: a
+   Carrier packet card on its field job with the email, the suggested To
+   and where it came from, and the PDF link; no YES number even when the
+   row carries one; its outbox row read once approved, and its lane line
+   from the worker's "packet" channel; "Sent from Gmail" or "Couldn't send:
+   …" from that row, and a withdrawn card in words (the carrier already
+   having its version among them), or one closed because an earlier send
+   of the packet went out; and the field module
+   never putting the suggested To in a request.
    Run: node --test test/approvals.test.mjs */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -262,7 +270,7 @@ test("lookFrom: catalog by name@version and name, agents and profiles by id, the
   assert.equal(LOOK.outbox[delivered.id].status, "delivered");
   // every row too, in the order read (a QuickBooks receipts card has one per receipt)
   assert.deepEqual(LOOK.outboxes[delivered.id].map((o) => o.status), ["delivered", "pending"]);
-  assert.deepEqual(lookFrom(), { jobs: {}, ops: {}, people: {}, outbox: {}, outboxes: {}, emailLane: null, qboLane: null },
+  assert.deepEqual(lookFrom(), { jobs: {}, ops: {}, people: {}, outbox: {}, outboxes: {}, emailLane: null, qboLane: null, packetLane: null },
     "no heartbeat read: can't tell");
 });
 
@@ -1538,5 +1546,179 @@ test("QuickBooks receipts (0025): a charge refused after another was tagged is u
   assert.deepEqual(at([row("dead", null, "cancelled")], alone), { text: "Cancelled", tone: "no" });
   for (const rows of [[row("sent", PART)], [row("dead", null, "cancelled:")]]) {
     for (const t of qboTexts(fromProposal({ ...executed, ...alone }, qboLook({ outbox: rows })))) assert.ok(!JUNK.test(t), t);
+  }
+});
+
+/* ---------- carrier packets: packet.send (the worker's packet lane) ---------- */
+const DOCUMENTS = "b7e4c2d9-6a13-4f58-9c2e-7d1a0f3b8e65";          // agent:documents (0026's fixed id)
+const SAMPLE = "c0ffee00-1111-4222-8333-444455556666";              // a field job, "123 Example St"
+const PKT_ROW = "dddddddd-0000-4000-8000-000000000001";             // its carrier_packets row
+const PDF_URL = `https://demo.supabase.co/storage/v1/object/sign/carrier-packets/${SAMPLE}/PKT-2026-0007-v1-b1.pdf?token=demo`;
+const PKT_BODY = "Hello,\n\nAttached is the water mitigation documentation for this claim, as one PDF: carrier packet PKT-2026-0007, version 1.\n\n" +
+  "Insured: Jane Sample\nProperty: 123 Example St, Fairbanks, AK 99701\nClaim: DEMO-12345\nCarrier: Sample Mutual\n\nPlease reply to confirm you received it.";
+/* what carrier_packet_file files: never a to or cc, only the suggestion */
+const pktInput = { packet_version_id: PKT_ROW, offer: 0,
+  subject: "Claim DEMO-12345 - Jane Sample - water mitigation documentation (PKT-2026-0007 v1)", body: PKT_BODY,
+  filename: "PKT-2026-0007 v1 - Claim DEMO-12345 - Sample.pdf", suggested_to: "adjuster@example.com",
+  suggested_from: "the newest email filed to this job on its claim number" };
+const pktCard = {
+  id: "bbbbbbbb-0000-4000-8000-0000000000d1", operation: "packet.send@1", action_type: "comms", sms_code: null,
+  input: pktInput, edited_params: null, proposed_by_kind: "agent", proposed_by_id: DOCUMENTS, proposed_via: "agent",
+  rationale: "Carrier packet PKT-2026-0007 v1 for Jane Sample, 123 Example St, Fairbanks, AK 99701.\n" +
+    "Suggested To: adjuster@example.com, from the newest email filed to this job on its claim number.\n38 pages, 6.1 MB.",
+  evidence_refs: [{ kind: "pdf", label: "Carrier packet PKT-2026-0007 v1 (PDF)", url: PDF_URL }],
+  job_id: SAMPLE, status: "proposed", created_at: iso(-1), expires_at: iso(14 * 24 - 1), approved_at: null, updated_at: iso(-1),
+  decline_reason: null, result: null, error: null,
+};
+const PKT_DESC = "Email the carrier packet to the adjuster. Execution writes one outbox row on the packet channel carrying the stored PDF; the worker sends it once through Gmail, to the address confirmed on the card, and the packet is recorded as sent.";
+const pktLook = (o = {}) => lookFrom({
+  catalog: [...CATALOG, { name: "packet.send", version: 1, description: PKT_DESC }],
+  agents: [{ id: DOCUMENTS, name: "agent:documents" }, { id: AGENT, name: "agent:brief" }],
+  jobs: [{ id: SAMPLE, title: null, customer: "Jane Sample", address: "123 Example St, Fairbanks, AK 99701" }], now: NOW, ...o });
+const PKT_LOOK = pktLook();
+const beatOn = (channels, mins = 0.5) => [{ at: new Date(NOW - mins * 60e3).toISOString(), meta: { channels } }];
+/* approved with the To and Cc he confirmed; runtime sql, so it comes back executed */
+const pktSent = { ...pktCard, status: "executed", edited_params: { to: "claims@example.com", cc: "office@example.com" },
+  approved_at: iso(-2), updated_at: iso(-2), result: { outbox_id: "eeeeeeee-0000-4000-8000-000000000001", packet_version_id: PKT_ROW, to: "claims@example.com" } };
+const pktOut = (status, o = {}) => ({ proposal_id: pktSent.id, status, next_attempt_at: iso(-2), error: null, created_at: iso(-2), updated_at: iso(-1.9), ...o });
+const pktTexts = (c) => [c.title, c.chip, c.approveLabel, c.yesHint, c.job, c.by, c.laneHint, outcome(c, NOW).text,
+  ...Object.values(c.evidence).filter((v) => typeof v === "string")];
+
+test("carrier packet: packet.send makes a Carrier packet card on its field job, with the email, the suggested To and where it came from, and the PDF", () => {
+  const c = fromProposal(pktCard, PKT_LOOK);
+  assert.deepEqual([c.lane, c.kind, c.chip, c.approveLabel], ["spine", "packet", "Carrier packet", "Approve and send"]);
+  assert.equal(c.title, "Email the carrier packet to the adjuster: PKT-2026-0007 v1 - Claim DEMO-12345 - Sample");
+  assert.deepEqual([c.jobTable, c.jobId, c.job], ["field", SAMPLE, "Jane Sample, 123 Example St, Fairbanks, AK 99701"]);
+  assert.equal(c.by, "Documents agent");
+  const e = c.evidence;
+  assert.deepEqual([e.to, e.cc], ["", ""], "the To is never filed: he confirms it on the card");
+  assert.deepEqual([e.suggestedTo, e.suggestedFrom], ["adjuster@example.com", "the newest email filed to this job on its claim number"]);
+  assert.equal(e.subject, pktInput.subject);
+  assert.equal(e.body, PKT_BODY, "the whole email, line breaks and all");
+  assert.equal(e.filename, "PKT-2026-0007 v1 - Claim DEMO-12345 - Sample.pdf");
+  assert.deepEqual([e.pdf, e.pdfHost], [PDF_URL, "demo.supabase.co"]);
+  assert.equal(e.rationale, pktCard.rationale);
+  assert.deepEqual(e.refs, [{ text: "Carrier packet PKT-2026-0007 v1 (PDF)", url: PDF_URL, host: "demo.supabase.co" }]);
+  // another version of the operation is the same kind
+  assert.equal(fromProposal({ ...pktCard, operation: "packet.send@2" }, PKT_LOOK).kind, "packet");
+  // every other kind keeps the packet fields empty
+  for (const other of [fromProposal(email, LOOK), fromPending(reminder, LOOK)]) {
+    assert.deepEqual([other.evidence.suggestedTo, other.evidence.suggestedFrom, other.evidence.filename, other.evidence.pdf, other.evidence.pdfHost],
+      ["", "", "", "", ""]);
+  }
+  for (const t of pktTexts(c)) assert.ok(!JUNK.test(t), t);
+});
+
+test("carrier packet: inbox only, so no YES number even when the row carries one; a text-queue ask on that number keeps its hint", () => {
+  const coded = { ...pktCard, sms_code: 31 };
+  const c = fromProposal(coded, PKT_LOOK);
+  assert.deepEqual([c.code, c.yesHint], [31, ""]);
+  const box = inbox([{ ...reminder, code: 31 }], [coded], PKT_LOOK, NOW);
+  assert.deepEqual(box.waiting.map((x) => [x.kind, x.yesHint]), [["email", "or text YES 31"], ["packet", ""]]);
+});
+
+test("carrier packet: an approved card's outbox row is read (needs) and its lane is the worker's packet channel", () => {
+  const n = needs(inbox([], [pktCard, pktSent], {}, NOW).waiting.concat(inbox([], [pktCard, pktSent], {}, NOW).recent));
+  assert.deepEqual(n.outbox, [pktSent.id], "executed sends only");
+  assert.deepEqual(n.field, [SAMPLE]);
+  assert.deepEqual(n.board, [], "a packet is on a field job");
+  assert.deepEqual(n.agents, [DOCUMENTS]);
+  assert.deepEqual(n.lanes, ["packet"], "waiting or sent: the page reads the heartbeat");
+  assert.deepEqual(needs([fromProposal({ ...pktCard, status: "declined" })]).lanes, [], "a declined packet waits on nothing");
+  assert.deepEqual(needs([fromProposal(email), fromProposal(pktCard)]).lanes, ["email", "packet"]);
+  // answered before the 48 hours: one whose outbox row died since comes back, so its row is read too
+  const old = { ...pktSent, approved_at: iso(-60), updated_at: iso(-60) };
+  const bare = inbox([], [old], {}, NOW);
+  assert.deepEqual(bare.older.map((c) => c.id), [old.id]);
+  assert.deepEqual(needs(bare.older).outbox, [old.id]);
+  const back = inbox([], [old], pktLook({ outbox: [pktOut("dead", { error: "Gmail refused the message", updated_at: iso(-1) })] }), NOW);
+  assert.deepEqual(back.recent.map((c) => c.id), [old.id]);
+  assert.deepEqual(outcome(back.recent[0], NOW), { text: "Couldn't send: Gmail refused the message", tone: "bad" });
+});
+
+test("carrier packet: the lane line reads the packet channel, on its own: email on with packets off says so; the email card reads email", () => {
+  assert.equal(pktLook({ heartbeats: beatOn(["sms", "email", "packet"]) }).packetLane, true);
+  assert.equal(pktLook({ heartbeats: beatOn(["sms", "email"]) }).packetLane, false, "CARRIER_PACKET=off");
+  assert.equal(pktLook({ heartbeats: beatOn(["packet"], 11) }).packetLane, false, "a stopped worker");
+  assert.equal(pktLook({ heartbeats: null }).packetLane, null, "not read: can't tell");
+  const on = pktLook({ heartbeats: beatOn(["sms", "email", "packet"]) });
+  const off = pktLook({ heartbeats: beatOn(["sms", "email"]) });
+  assert.deepEqual([fromProposal(pktCard, on).emailLane, fromProposal(pktCard, on).laneHint], [true, ""]);
+  assert.deepEqual([fromProposal(pktCard, off).emailLane, fromProposal(pktCard, off).laneHint], [false, LANE_OFF_WAITING]);
+  assert.deepEqual([fromProposal(email, off).emailLane, fromProposal(email, off).laneHint], [true, ""], "email itself is on");
+  const onlyEmailOff = pktLook({ heartbeats: beatOn(["sms", "packet"]) });
+  assert.deepEqual([fromProposal(pktCard, onlyEmailOff).laneHint, fromProposal(email, onlyEmailOff).laneHint], ["", LANE_OFF_WAITING]);
+  assert.equal(fromProposal(pktCard, PKT_LOOK).laneHint, "", "no heartbeat read: nothing new");
+  // approved and still in line with the channel off: it waits, in the email's words
+  const queued = (rows, look) => outcome(fromProposal(pktSent, pktLook({ ...look, outbox: rows })), NOW);
+  assert.deepEqual(queued([pktOut("pending")], { heartbeats: beatOn(["sms", "email"]) }), { text: LANE_OFF_QUEUED, tone: "wait" });
+  assert.deepEqual(queued([pktOut("failed", { error: "Gmail API 503" })], { heartbeats: beatOn(["sms", "email"]) }), { text: LANE_OFF_FAILED, tone: "wait" });
+  assert.deepEqual(queued([], { heartbeats: beatOn(["sms", "email"]) }), { text: LANE_OFF_QUEUED, tone: "wait" }, "just approved: no row read yet");
+  assert.deepEqual(queued([pktOut("pending")], { heartbeats: beatOn(["sms", "email", "packet"]) }), { text: "Queued to send", tone: "wait" });
+});
+
+test("carrier packet: what came of it is its one outbox row, Sent from Gmail or Couldn't send and why; the To he confirmed shows", () => {
+  const say = (rows) => outcome(fromProposal(pktSent, pktLook({ outbox: rows })), NOW);
+  assert.deepEqual(say([pktOut("sent")]), { text: "Sent from Gmail", tone: "ok" });
+  assert.deepEqual(say([pktOut("delivered")]), { text: "Sent from Gmail", tone: "ok" });
+  assert.deepEqual(say([pktOut("sending")]), { text: "Sending", tone: "wait" });
+  assert.deepEqual(say([pktOut("failed")]), { text: "Send failed, retrying", tone: "wait" });
+  assert.deepEqual(say([pktOut("pending")]), { text: "Queued to send", tone: "wait" });
+  assert.deepEqual(say([]), { text: "Queued to send", tone: "wait" });
+  assert.deepEqual(say([pktOut("dead", { error: "the packet PDF changed after it was stored (sha256 mismatch)" })]),
+    { text: "Couldn't send: the packet PDF changed after it was stored (sha256 mismatch)", tone: "bad" });
+  assert.deepEqual(say([pktOut("dead")]), { text: "Couldn't send", tone: "bad" });
+  // an email card keeps its own words
+  assert.equal(outcome(fromProposal(delivered, LOOK), NOW).text, "Delivered");
+  // the card names the To and Cc he confirmed; the suggestion stays as filed
+  const e = fromProposal(pktSent, PKT_LOOK).evidence;
+  assert.deepEqual([e.to, e.cc, e.suggestedTo], ["claims@example.com", "office@example.com", "adjuster@example.com"]);
+  // the executor refused (an approval with no To, from a page that couldn't send one), declined, withdrawn, replaced
+  const at = (status, o = {}) => outcome(fromProposal({ ...pktCard, status, updated_at: iso(-1), ...o }, PKT_LOOK), NOW);
+  assert.deepEqual(at("failed", { error: "Reload Approvals and confirm the recipient." }),
+    { text: "Failed: Reload Approvals and confirm the recipient.", tone: "bad" });
+  assert.deepEqual(at("declined", { decline_reason: "Sent it by hand" }), { text: "Declined: Sent it by hand", tone: "no" });
+  assert.deepEqual(at("superseded", { result: { superseded_reason: "withdrawn", reason: "archived" } }), { text: "Withdrawn: the job was archived", tone: "no" });
+  assert.deepEqual(at("superseded", { result: { superseded_reason: "withdrawn", reason: "no_invoice" } }),
+    { text: "Withdrawn: the job has no numbered invoice now", tone: "no" });
+  assert.deepEqual(at("superseded", { result: { superseded_reason: "withdrawn", reason: "constructor" } }),
+    { text: "Withdrawn: the job no longer gets a carrier packet", tone: "no" }, "an unknown reason, even a prototype-named one");
+  assert.deepEqual(at("superseded", { result: { superseded_by: "bbbbbbbb-0000-4000-8000-0000000000d2" } }), { text: "Replaced by a newer ask", tone: "no" });
+});
+
+test("carrier packet: a card withdrawn because the carrier already has its version, or closed because an earlier send of it went out, says so", () => {
+  const at = (result) => outcome(fromProposal({ ...pktCard, status: "superseded", updated_at: iso(-1), result }, PKT_LOOK), NOW);
+  // carrier_packet_reserve: a change undone back to the version that was sent
+  assert.deepEqual(at({ superseded_reason: "withdrawn", reason: "already_sent" }),
+    { text: "Withdrawn: the carrier already has this version", tone: "no" });
+  // outbox_packet_result: a revived send of the same packet went out
+  assert.deepEqual(at({ superseded_reason: "sent", outbox_id: "eeeeeeee-0000-4000-8000-000000000003" }),
+    { text: "No longer needed: this packet was sent", tone: "no" });
+});
+
+test("carrier packet: the PDF is the ref marked pdf, else a .pdf link, else the first https link; never a link that isn't https", () => {
+  const pdf = (refs) => { const e = fromProposal({ ...pktCard, evidence_refs: refs }, PKT_LOOK).evidence; return [e.pdf, e.pdfHost]; };
+  const other = "https://mail.google.com/mail/u/0/#inbox/1";
+  assert.deepEqual(pdf([{ label: "Email from the adjuster", url: other }, { kind: "pdf", label: "The packet", url: PDF_URL }]), [PDF_URL, "demo.supabase.co"]);
+  assert.deepEqual(pdf([{ label: "Email from the adjuster", url: other }, { label: "The packet", href: PDF_URL }]), [PDF_URL, "demo.supabase.co"]);
+  assert.deepEqual(pdf([PDF_URL]), [PDF_URL, "demo.supabase.co"]);
+  assert.deepEqual(pdf([{ label: "Email", url: other }]), [other, "mail.google.com"]);
+  assert.deepEqual(pdf([{ kind: "pdf", url: "javascript:alert(1)" }, { kind: "pdf", url: "http://demo.example/p.pdf" }]), ["", ""]);
+  for (const refs of [[], null, "x", [null, 7, {}], { url: PDF_URL }]) assert.deepEqual(pdf(refs), ["", ""], JSON.stringify(refs));
+});
+
+test("carrier packet: the field module never puts the suggested To in a request; the page builds a packet's approval itself", () => {
+  assert.deepEqual(decisionRequest(fromProposal(pktCard, PKT_LOOK), "approve"),
+    { rpc: "op_proposal_approve", body: { p_proposal_id: pktCard.id, p_via: "inbox" } });
+  assert.deepEqual(decisionRequest(fromProposal(pktCard, PKT_LOOK), "decline", " Sent it by hand "),
+    { rpc: "op_proposal_decline", body: { p_proposal_id: pktCard.id, p_reason: "Sent it by hand" } });
+});
+
+test("carrier packet: an input or refs of any odd shape still reads as words, never null, undefined or NaN", () => {
+  for (const input of [null, "x", [], { subject: null, body: 7, filename: {}, suggested_to: ["a@example.com"], suggested_from: null }]) {
+    const c = fromProposal({ ...pktCard, input, evidence_refs: { url: PDF_URL } }, PKT_LOOK);
+    assert.equal(c.kind, "packet");
+    assert.equal(c.title, "Email the carrier packet to the adjuster", JSON.stringify(input));
+    for (const t of pktTexts(c)) assert.ok(!JUNK.test(t), `${JSON.stringify(input)}: ${t}`);
   }
 });
