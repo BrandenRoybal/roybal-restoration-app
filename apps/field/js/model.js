@@ -37,7 +37,7 @@ export const FORMS = [
     blurb: "Engineer's reports, estimates, letters — print full page + the AI reads them" },
   { key: "moistureMaps",     name: "Moisture Map",       icon: "🗺️", multi: true,
     types: ["restoration"],
-    blurb: "Sketch the affected area + daily MC% readings" },
+    blurb: "Sketch the affected area + daily MC% readings, with 📷 meter photos" },
   { key: "dryingLogs",       name: "Drying Log",         icon: "💧", multi: true,
     types: ["restoration"],
     blurb: "Equipment runtime + psychrometric readings" },
@@ -367,8 +367,11 @@ export function newMoistureMap() {
     readings: [ blankReadingRow() ],
   };
 }
+/* `rk` is the row's stable key (never `id`: merge.js would union the rows).
+   A meter photo points at its reading by it (meterphotos.js), and sync's
+   graft keeps a row object the page is editing by it (graft.js). */
 export function blankReadingRow() {
-  return { date: todayISO(), values: Array(13).fill(""), notes: "" };
+  return { rk: uid(), date: todayISO(), values: Array(13).fill(""), notes: "" };
 }
 
 export function newDryingLog() {

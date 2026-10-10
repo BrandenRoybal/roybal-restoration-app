@@ -68,7 +68,10 @@ async function refresh() {
   });
 }
 
-async function ensureFresh() {
+/* Refresh the session when it is within a minute of expiring. Exported for
+   calls that don't go through api() (officeai.js readMeter: a phone back
+   online after hours away would otherwise send an expired token). */
+export async function ensureFresh() {
   if (session && session.expires_at && session.expires_at - Date.now() < 60000) await refresh();
 }
 

@@ -172,6 +172,29 @@ table.grid.eqscan-rec { font-size: 8pt; }
 table.grid.eqscan-rec td { padding: 1px 4px !important; text-align: left; }
 table.grid.eqscan-rec td:first-child { white-space: nowrap; }
 .eqscan-foot { font-size: 7.5pt; color: #44556b; font-style: italic; margin-top: 3px; break-inside: avoid; }
+/* meter photos on moisture readings: a superscript P on a reading that has a
+   photo of the meter screen (P? while the app's number is unchecked), and
+   the photos after the map's grid. Cards are inline-block like .photocard:
+   Chrome ignores break-inside on grid items, and a photo split across two
+   pages is no proof of anything. */
+table.grid td.mp-td { position: relative; }
+sup.mp-p { display: block !important; position: absolute; top: 1px; right: 2px; font-size: 6pt; font-weight: 800; color: #0f1b2d; line-height: 1; }
+sup.mp-p[hidden] { display: none !important; }
+table.grid td.mp-fill input.mc { background: transparent !important; color: inherit !important; }
+.mp-print__legend { font-size: 7.5pt; color: #44556b; margin: 2px 0 6px; }
+.mp-print__legend sup { font-weight: 800; color: #0f1b2d; }
+.mp-print__title, .mp-cert h2 { font-size: 9pt; font-weight: 800; text-transform: uppercase; letter-spacing: .4px; color: #0f1b2d; margin: 8px 0 3px; break-after: avoid; page-break-after: avoid; }
+.mp-print__grid, .mp-cert .mp-print__grid { display: block !important; font-size: 0; }
+.mp-print__fig, .mp-cert .mp-print__fig {
+  display: inline-block; width: 19.2%; margin: 0 1% 5px 0; vertical-align: top; box-sizing: border-box;
+  break-inside: avoid; page-break-inside: avoid; border: 0.6px solid #6b7892; border-radius: 0;
+}
+.mp-print__fig:nth-child(5n) { margin-right: 0; }
+.mp-print__fig img, .mp-cert .mp-print__fig img { display: block; width: 100%; height: 1.15in; aspect-ratio: auto; object-fit: contain; background: #f3f5f8; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.mp-print__none { height: 1.15in; display: flex; align-items: center; justify-content: center; font-size: 7pt; color: #44556b; }
+.mp-print__fig figcaption, .mp-cert figcaption { font-size: 7pt; padding: 1px 3px; color: #0f1b2d; }
+.mp-cert .subtle { display: none; }
+
 
 /* ---------- totals ---------- */
 .totals { margin-top: 6px; max-width: 320px; margin-left: auto; break-inside: avoid; }

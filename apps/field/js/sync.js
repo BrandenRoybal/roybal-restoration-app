@@ -42,6 +42,7 @@ import { shrinkDataURL } from "./core.js";
 import { mergeProjects, ID_COLLECTIONS, FORM_SLOTS } from "./merge.js";
 import { pruneForeignMeasured } from "./magicplancalc.js";
 import { applyScans } from "./scans.js";
+import { sweepDeletedMapPhotos } from "./meterphotos.js";
 import { isBlankProject } from "./model.js";
 
 const K_CURSOR = "roybal-sync-cursor";
@@ -51,6 +52,7 @@ const K_DELETES = "roybal-sync-deletes";   // [ids pending delete on server ]
 const K_MEDIA = "roybal-media-pushed";     // [sha256 hashes known to be in the bucket]
 const K_THUMBS = "roybal-thumbs-done";     // [sha256 hashes whose thumbnail is settled]
 const K_SWEPT = "roybal-thumbs-swept";     // { projectId: updatedAt of the last COMPLETE sweep }
+const K_REBASED = "roybal-sync-rebased-v211";   // "1" once this install's dirty rows were re-based (below)
 const MAX_ROW = 5_000_000;                 // slimmed rows are ~KBs; this is a last-ditch backstop
 const STALL_CYCLES = 3;                    // media-missing retries before the status light goes red
 
@@ -99,18 +101,24 @@ function sameContent(a, b) {
 }
 
 /* Rules a merge can't hold on its own, applied to every copy sync stores
-   from a merge or from the server. Two today: a job switched to another
+   from a merge or from the server. Three today: a job switched to another
    Magicplan project keeps only that project's measured Floor Plan rows —
    the table merges filled-beats-empty (here and in the server's merge), so
-   a phone that missed the switch would put the old scan's rows back; and
-   the drying log's scanned equipment rows are rewritten from the unioned
+   a phone that missed the switch would put the old scan's rows back; the
+   drying log's scanned equipment rows are rewritten from the unioned
    scan events (scans.js), since a log merges newer-wins whole and the older
-   device's scanned rows would otherwise be lost with it.
+   device's scanned rows would otherwise be lost with it; and meter photos
+   on a deleted moisture map are dropped (meterphotos.js: one taken offline
+   after the delete arrives with its own new id, and nothing would ever
+   show it).
    magicplan.test.mjs checks every mergeProjects call here is followed by it.
-   `out.rebuilt` tells a caller the scan rows had to be rewritten. */
+   `out.rebuilt` tells a caller the copy had to be rewritten. */
 function settleMerged(p, out) {
+  let rebuilt = false;
   try { pruneForeignMeasured(p); } catch { /* never block a sync on it */ }
-  try { const r = applyScans(p); if (out) out.rebuilt = !!(r && r.changed); } catch { /* never block a sync on it */ }
+  try { const r = applyScans(p); rebuilt = !!(r && r.changed); } catch { /* never block a sync on it */ }
+  try { if (sweepDeletedMapPhotos(p)) rebuilt = true; } catch { /* never block a sync on it */ }
+  if (out) out.rebuilt = rebuilt;
   return p;
 }
 
@@ -268,7 +276,9 @@ const savePushed = () => localStorage.setItem(K_PUSHED, JSON.stringify(pushed));
 const saveRevs = () => localStorage.setItem(K_REVS, JSON.stringify(revs));
 const saveDeletes = () => localStorage.setItem(K_DELETES, JSON.stringify(Object.fromEntries(deletes)));
 const saveCursor = () => localStorage.setItem(K_CURSOR, cursor);
-const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-3000)));
+// 6000: meter photos (meterphotos.js) add many small objects; a hash this
+// device forgets is uploaded again on its next push
+const saveMediaPushed = () => localStorage.setItem(K_MEDIA, JSON.stringify([...mediaPushed].slice(-6000)));
 const saveThumbsDone = () => localStorage.setItem(K_THUMBS, JSON.stringify([...thumbsDone].slice(-5000)));
 const saveSwept = () => localStorage.setItem(K_SWEPT, JSON.stringify(sweptAt));
 
@@ -471,6 +481,22 @@ async function uploadNewMedia(media) {
     // photo will ever have a thumbnail made. Best-effort by construction.
     await settleThumb(m.hash, m.text);
   }
+}
+
+/* ---------- once per install: rows an older build left dirty ----------
+   v211 is the first build that merges meterPhotos as a collection. A build
+   before it merged a job's meter photos as one value (its own list whole),
+   so a row it merged and left dirty can lack another phone's photos, reads
+   and checks — and pushed on the rev it adopted, push_project would write
+   that copy over the server's as is. So the first cycle on this build sends
+   every dirty row from base 0: the server merges it (0024 unions the photos)
+   instead. Clean rows are untouched. */
+async function rebaseDirtyOnce() {
+  if (localStorage.getItem(K_REBASED)) return;
+  let n = 0;
+  for (const p of await Store.all()) if (pushed[p.id] !== p.updatedAt) { revs[p.id] = 0; n++; }
+  if (n) saveRevs();
+  localStorage.setItem(K_REBASED, "1");
 }
 
 /* ---------- push local changes (rev-guarded) ---------- */
@@ -735,11 +761,17 @@ async function pull() {
       if (local) await Store.backup(local); // safety net: the outgoing copy stays restorable on-device
       delete full.rev;                      // revs live in sync bookkeeping, not the blob
       settleMerged(full);                   // the server's copy may hold a union its merge built
-      await Store.put(full, { quiet: true, bump: false });
-      revs[row.id] = Number(remote.rev) || 0; saveRevs();
-      pushed[row.id] = remote.updatedAt;             // local now matches server
-      mediaWait.delete(row.id);
-      rowChanged(row.id);
+      /* only over the copy read above: a save that landed during the media
+         download (a meter read, an autosave, Magicplan) leaves the row dirty
+         on its old rev, and this cycle's push merges both on the server */
+      if (await Store.putIf(full, local ? local.updatedAt : undefined)) {
+        revs[row.id] = Number(remote.rev) || 0; saveRevs();
+        pushed[row.id] = remote.updatedAt;             // local now matches server
+        mediaWait.delete(row.id);
+        rowChanged(row.id);
+      } else {
+        needsAnotherPass = true;
+      }
     }
     bump(row.updated_at);
   }
@@ -773,6 +805,7 @@ export async function syncNow(opts = {}) {
     // still pushing unguarded rows gets merged here instead of overwritten by
     // our next guarded push. (Trade-off: a just-deleted job can transiently
     // reappear locally for one cycle; the next pull removes it.)
+    await rebaseDirtyOnce();
     await pull();
     await push();
     // both of these mean DATA NOT BACKED UP — show red, not a quiet counter

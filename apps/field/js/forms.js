@@ -40,6 +40,8 @@ import { equipmentCalc, deployedCounts, DEHU_SIZES } from "./dryingcalc.js";
 import { techName } from "./tech.js";
 import { applyScans, voidPlacement, scanRecord, releaseTypedScans, settleTypedRow, restoreMoveLines, rowScans, rowOutAt, wallTime } from "./scans.js";
 import { fleetReady, refreshFleet } from "./fleet.js";
+import { meterCell, meterCheckBanner, meterAppendix, meterCertSection, meterGateNote, rowOpenForPhotos, onMeterChange } from "./meterui.js";
+import { rowPhotoIds, locPhotoIds, removeMeterPhotos, uncheckedFills, unreadOnEmpty, certSigned } from "./meterphotos.js";
 import { BUILD, SYNC_ENABLED } from "./config.js";
 
 /* ---------- shared job-context fields (bound to the project) ---------- */
@@ -314,12 +316,19 @@ export function moistureMap(project, m) {
   const LOC_BLOCK = 13;
   const locCount = () => Math.max(LOC_BLOCK, m.locCount || 0, ...m.readings.map((r) => (r.values || []).length));
   const gridsBox = h("div");
-  function valueCell(row, n) {
+  /* a 📷 under each of today's readings for a photo of the meter screen
+     (meterui.js): the photo prints with the map, and a number the reader
+     fills in stays amber until the tech confirms it */
+  const meterBanner = meterCheckBanner(project, m);
+  const meterPrint = meterAppendix(project, m);
+  const paintMeterMeta = () => { meterBanner.paint(); meterPrint.paint(); };
+  function valueCell(row, n, open) {
     const c = h("td");
     const input = h("input", { class: "mc", value: row.values[n] ?? "", inputmode: "decimal", style: "min-width:42px" });
-    input.addEventListener("input", () => { row.values[n] = input.value; flagCell(input); redrawChart(); commit(); });
-    flagCell(input);
     c.append(input);
+    const mp = meterCell(project, m, row, n, c, input, { open, onValue: () => { flagCell(input); redrawChart(); }, onState: paintMeterMeta });
+    input.addEventListener("input", () => { row.values[n] = input.value; flagCell(input); redrawChart(); mp.typed(); commit(); });
+    flagCell(input);
     return c;
   }
   function rowEl(row, i, start, end, first) {
@@ -339,10 +348,16 @@ export function moistureMap(project, m) {
       dateCell.textContent = fmtDate(row.date);
     }
     tr.append(dateCell);
-    for (let n = start; n < end; n++) tr.append(valueCell(row, n));
+    const open = rowOpenForPhotos(m, row, i);
+    for (let n = start; n < end; n++) tr.append(valueCell(row, n, open));
     if (first) {
       tr.append(taCell(row, "notes", { minWidth: "120px" }));
-      tr.append(h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { m.readings.splice(i, 1); paintRows(); redrawChart(); commit(); } }, "✕")));
+      tr.append(h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => {
+        const photos = rowPhotoIds(project, m, row);
+        if (photos.length && !confirm(`This date has ${photos.length} meter photo${photos.length > 1 ? "s" : ""}. Delete the date and its photos?`)) return;
+        removeMeterPhotos(project, photos);   // recorded deletes, so they stay gone on every device
+        m.readings.splice(i, 1); paintRows(); redrawChart(); paintMeterMeta(); commit();
+      } }, "✕")));
     }
     return tr;
   }
@@ -371,10 +386,12 @@ export function moistureMap(project, m) {
   delCols.addEventListener("click", () => {
     const keep = (Math.ceil(locCount() / LOC_BLOCK) - 1) * LOC_BLOCK;
     const hasData = m.readings.some((r) => (r.values || []).slice(keep).some((v) => String(v ?? "").trim() !== ""));
-    if (hasData && !confirm(`Locations ${keep + 1}–${locCount()} have readings — remove them anyway?`)) return;
+    const photos = locPhotoIds(project, m, keep);
+    if ((hasData || photos.length) && !confirm(`Locations ${keep + 1}–${locCount()} have ${hasData ? "readings" : "meter photos"} — remove them anyway?`)) return;
+    removeMeterPhotos(project, photos);
     m.readings.forEach((r) => { if (Array.isArray(r.values) && r.values.length > keep) r.values.length = keep; });
     m.locCount = keep;
-    paintRows(); redrawChart(); commit();
+    paintRows(); redrawChart(); paintMeterMeta(); commit();
   });
   function paintColBtns() {
     const total = Math.ceil(locCount() / LOC_BLOCK) * LOC_BLOCK;
@@ -383,6 +400,25 @@ export function moistureMap(project, m) {
     delCols.hidden = total <= LOC_BLOCK;
   }
   paintRows();
+  // the 📷 waits until the server merges meter photos (migration 0024)
+  const meterGate = meterGateNote(() => paintRows());
+
+  /* A sync grafted this job into the page (app.js). A reading row keeps its
+     object by its rk (graft.js), but rows the other copy added, removed or
+     re-dated, and rows from before rk, need the grid drawn again: at once,
+     or once the grid is left when one of its cells is being typed in. */
+  let regraft = false;
+  const redrawGrid = () => { paintRows(); redrawChart(); paintMeterMeta(); };
+  function onGrafted(e) {
+    if (!gridsBox.isConnected) { document.removeEventListener("roybal:grafted", onGrafted); return; }
+    if (!e.detail || e.detail.id !== project.id) return;
+    if (gridsBox.contains(document.activeElement)) { regraft = true; return; }
+    redrawGrid();
+  }
+  gridsBox.addEventListener("focusout", () => setTimeout(() => {
+    if (regraft && !gridsBox.contains(document.activeElement)) { regraft = false; redrawGrid(); }
+  }, 0));
+  document.addEventListener("roybal:grafted", onGrafted);
 
   /* material picker auto-fills the dry goal */
   const dryGoalInput = inp(m, "dryGoal", { placeholder: "≤ 16%", oninput: () => { reflagAll(); redrawChart(); } });
@@ -498,8 +534,12 @@ export function moistureMap(project, m) {
 
     sectionTitle("Moisture Reading Locations (MC% or equivalent)"),
     h("p", { class: "flagnote app-only" }, "Cells flag ", h("span", { class: "dot g" }, "green = at/below dry goal"), " · ", h("span", { class: "dot r" }, "red = still wet"), " automatically."),
+    h("p", { class: "flagnote app-only" }, "Tap 📷 under a reading to photograph the meter screen. The photo is kept as proof and prints with this map."),
+    meterBanner.el,
     gridsBox,
+    meterGate,
     h("div", { class: "app-only row-add", style: "display:flex;gap:8px;flex-wrap:wrap" }, addRow, addCols, delCols),
+    meterPrint.el,
 
     sectionTitle("Drying Trend"),
     h("p", { class: "subtle app-only" }, "MC% over time for each reading location — the line should fall toward the dry goal."),
@@ -1655,6 +1695,7 @@ export function laborLog(project, l) {
    ============================================================ */
 export function certDrying(project, c) {
   const vbody = h("tbody");
+  const certPhotos = h("div", {}, meterCertSection(project));   // redrawn by certSignLock
   function vrow(r, i) {
     const tr = h("tr");
     const mk = (key, w, type = "text") => {
@@ -1701,6 +1742,7 @@ export function certDrying(project, c) {
         h("thead", {}, h("tr", {}, ...["Material / Location", "Meter / Setting", "Goal %", "Final %", "Ref %", "✓ Dry"].map((x) => h("th", {}, x)), h("th", { class: "app-only" }, ""))),
         vbody)),
     addRow,
+    certPhotos,
     sectionTitle("Equipment Deployment Summary"),
     h("div", { class: "grid2" },
       field("Dehumidifiers (# × days)", inp(c, "dehuDays")),
@@ -1711,13 +1753,54 @@ export function certDrying(project, c) {
     h("div", { class: "certstmt" },
       h("p", {}, "The undersigned, an IICRC-certified water restoration technician, hereby certifies that the water damage mitigation and structural drying services described herein were performed at the above property in accordance with the IICRC S500 Standard for Professional Water Damage Restoration. Final moisture-meter readings confirm that affected materials have achieved the documented dry standard by comparison to unaffected reference materials and/or manufacturer specifications. The structure is considered dry per IICRC S500 criteria as of the Drying Completion Date stated above.")),
     sectionTitle("Signatures"),
-    signOrUpload(c, () => [
+    ...certSignLock(project, c, certPhotos, signOrUpload(c, () => [
       sigBlock(c, "sigTech", "sigTechName", "sigTechDate", "IICRC Certified Technician — Roybal Construction, LLC"),
       h("hr", { class: "divider" }),
       sigBlock(c, "sigOwner", "sigOwnerName", "sigOwnerDate", "Property Owner / Insured"),
       h("hr", { class: "divider" }),
       sigBlock(c, "sigAdjuster", "sigAdjusterName", "sigAdjusterDate", "Adjuster / Carrier (if witness required)"),
-    ]));
+    ])));
+}
+
+/* The certificate is signed over its final readings. Until it carries a
+   signature, the pads and the upload are locked (on screen; the paper copy
+   still prints its signature lines), with what to do instead, while a
+   number the app read from a meter photo waits unchecked, or a photo on an
+   empty cell still waits for its read (its number could land after the
+   signature). The lock, and the final readings above it, follow a read
+   landing or a sync while the page is open. Once signed, this phone fills
+   no cell again (meterphotos.js applyMeterRead). */
+function certSignLock(project, c, certPhotos, signEl) {
+  const note = h("p", { class: "mp-banner app-only", hidden: true });
+  let painted = false;
+  function paint() {
+    if (painted && !signEl.isConnected) return false;
+    const first = !painted;
+    painted = true;
+    if (!first) certPhotos.replaceChildren(...[meterCertSection(project)].filter(Boolean));
+    const checks = certSigned(c) ? 0 : uncheckedFills(project).length;
+    const unread = certSigned(c) || checks ? [] : unreadOnEmpty(project);
+    const locked = checks > 0 || unread.length > 0;
+    signEl.toggleAttribute("inert", locked);
+    signEl.classList.toggle("sig-locked", locked);
+    note.hidden = !locked;
+    note.textContent = checks === 1
+      ? "Signing waits: a moisture reading the app read from a meter photo hasn't been checked. Open the Moisture Map and tap the amber ? first."
+      : checks > 1
+        ? `Signing waits: ${checks} moisture readings the app read from meter photos haven't been checked. Open the Moisture Map and tap each amber ? first.`
+        : unread.length
+          ? `Signing waits: the meter photo at location ${unread[0].loc + 1} (${fmtDate(unread[0].date)}) hasn't been read yet and its cell is empty. Type that reading on the Moisture Map, or wait until the phone that took it has signal.`
+          : "";
+    return true;
+  }
+  paint();
+  onMeterChange(project.id, paint);
+  function onGrafted(e) {
+    if (painted && !signEl.isConnected) { document.removeEventListener("roybal:grafted", onGrafted); return; }
+    if (e.detail && e.detail.id === project.id) paint();
+  }
+  document.addEventListener("roybal:grafted", onGrafted);
+  return [note, signEl];
 }
 
 /* ============================================================
@@ -4414,6 +4497,13 @@ export function portalShareForm(project) {
   /* snapshot one form exactly as it prints, upload it, return the approval's doc ref */
   async function snapshotForSigning(doc) {
     requireOnline();
+    // a final reading the app read from a meter photo is a person's number only once checked
+    if (doc.key === "certDrying" && uncheckedFills(project).length)
+      throw new Error("a moisture reading the app read from a meter photo hasn't been checked yet. Open the Moisture Map and tap each amber ? first.");
+    // a photo still waiting for its read on an empty cell could fill a number after the customer has seen this copy
+    const unread = doc.key === "certDrying" ? unreadOnEmpty(project) : [];
+    if (unread.length)
+      throw new Error(`the meter photo at location ${unread[0].loc + 1} (${fmtDate(unread[0].date)}) hasn't been read yet and its cell is empty. Type that reading on the Moisture Map, or wait until the phone that took it has signal.`);
     const sheetEl = doc.key === "packBack" ? packBackReceipt(project) : RENDERERS[doc.key](project, doc.inst);
     const { html, media } = await buildPacketHtml(project, [sheetEl], `${doc.title} — ${project.customer || "Roybal Construction"}`);
     for (const m of media) await ensureUploaded(m.hash, m.text);

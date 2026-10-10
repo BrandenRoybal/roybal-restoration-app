@@ -76,6 +76,7 @@ import {
 } from "../_shared/personas/index.ts";
 import { cleanExtractInput, buildExtractContent, parseScopeNotes, SCOPE_NOTES_SCHEMA, SCOPE_SYSTEM } from "./walkextract.ts";
 import { RECEIPT_READ_SCHEMA, RECEIPT_SYSTEM, receiptReadText, normalizeReceiptRead } from "./receipt.ts";
+import { METER_READ_SCHEMA, METER_SYSTEM, meterReadText, normalizeMeterRead, meterReadMode, meterRef } from "./meter.ts";
 import { isSitePath, cleanPacket, packetHasEvidence, formatTranscript, trimUtterances, buildContent, buildMessageParams, parseBatchResult, customIdFor, kindFromCustomId, siteVisitRules } from "./sitevisit.ts";
 // the direct run (Fly, then roybal-site-draft) and its outcome file — pure,
 // Node-tested in ../_shared/sitedraft.test.mjs
@@ -128,6 +129,16 @@ const FLY_DRAFT_URL = flyDraftUrl(Deno.env.get("SITE_DRAFT_RUNNER_URL") ?? "", D
 // draft that is started and never collected (a lost answer on weak signal, a
 // second tap) still counts. About one typical draft at full price.
 const SITE_DRAFT_RESERVE_USD = Math.max(0, Number(Deno.env.get("SITE_DRAFT_RESERVE_USD") ?? "1.5") || 0);
+// Meter photos on the Moisture Map: one small LCD per call and a tech is
+// standing at the wall, so a fast model. Its own default, not PHOTO_MODEL:
+// the reader's test passes on one model, and retuning photo captions must
+// not swap it silently. Any change here (or to meter.ts's prompt) means the
+// test is run again before METER_READ=fill stays on. The model must accept
+// a forced tool_choice (forcedTool), which the newest models refuse.
+const METER_MODEL = Deno.env.get("METER_READ_MODEL") ?? "claude-sonnet-4-6";
+// off | check (default: read and record, the field fills nothing) | fill —
+// meter.ts meterReadMode. "fill" only once the reader has passed its test.
+const METER_READ = meterReadMode(Deno.env.get("METER_READ"));
 const ASSIST_MODEL = Deno.env.get("OFFICE_ASSIST_MODEL") ?? "claude-sonnet-4-6";  // interactive field assistant (voice/chat)
 // Spoken turns can run a faster model (someone is standing there listening);
 // defaults to the same assistant model until the env override is set.
@@ -1467,6 +1478,36 @@ async function receiptRead(body: Record<string, unknown>) {
 }
 
 /* ============================================================
+   Action: meterRead — a photo of the moisture meter's screen, taken beside
+   one reading on the Moisture Map (meterphotos.js). Returns the number the
+   display shows and whether the field app may offer it as a prefill
+   (fill). The photo is the evidence either way; a person confirms any
+   number before it counts. meter.ts holds the schema, prompt and normaliser.
+   ============================================================ */
+async function meterRead(body: Record<string, unknown>) {
+  const img = dataUrlToImage(String(body.photo ?? ""));
+  if (!img) throw new Error("Couldn't read that photo as an image.");
+  const { input, usage } = await forcedTool({
+    model: METER_MODEL,
+    system: METER_SYSTEM,
+    content: [
+      { type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } },
+      { type: "text", text: meterReadText({ meter: body.meter, material: body.material }) },
+    ],
+    toolName: "meter",
+    schema: METER_READ_SCHEMA as unknown as Record<string, unknown>,
+    maxTokens: 400,
+  });
+  const meter = { ...normalizeMeterRead(input), model: METER_MODEL };
+  return {
+    result: { meter, fill: METER_READ === "fill" }, usage, model: METER_MODEL,
+    // with the photo and cell it was for: the test joins this to the number typed there
+    summary: { value: meter.value, unit: meter.unit, readable: meter.readable, device: meter.device, confidence: meter.confidence,
+      fillable: meter.fillable, mode: METER_READ, ...meterRef(body) },
+  };
+}
+
+/* ============================================================
    Action: estimateImport — read an uploaded Xactimate / Symbility /
    carrier estimate PDF into structured line items + O&P/tax totals so
    the invoice or reconstruction estimate is built FROM the carrier's
@@ -2187,7 +2228,7 @@ async function portalDraft(body: Record<string, unknown>) {
    ============================================================ */
 const ACTIONS: Record<string, (body: Record<string, unknown>) => Promise<{ result: Record<string, unknown>; usage: Usage; model: string; summary: Record<string, unknown>; audioSeconds?: number; ttsChars?: number; costScale?: number; extraCostUsd?: number }>> = {
   photoAnalysis, invoiceDraft, invoiceAudit, scopeInterview, adjusterEmail, contentsVision, contentsJustify, fieldAssist, rebuildDraft, progressNarrative, timelineDraft, planDimensions, docDigest, estimateImport, portalDraft,
-  siteVisitTranscribe, siteVisitStart, siteVisitResult, walkExtract, receiptRead,
+  siteVisitTranscribe, siteVisitStart, siteVisitResult, walkExtract, receiptRead, meterRead,
 };
 
 serve(async (req: Request) => {
@@ -2230,6 +2271,10 @@ serve(async (req: Request) => {
     // which app is asking (field | board | admin) — per-app attribution on
     // the envelope + ledger; also selects the fieldAssist persona
     const app = String(body.app ?? "field");
+
+    // The meter reader switched off: the photo is still the evidence, so
+    // answer before the envelope — no row, no spend, the tech types it.
+    if (action === "meterRead" && METER_READ === "off") return json({ ok: true, capped: false, off: true });
 
     // Site Visit polls: "still running" costs nothing and writes nothing —
     // only a FINISHED draft goes through the envelope + ledger below. The

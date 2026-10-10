@@ -24,6 +24,8 @@ import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
 import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged, reloadFromCloud } from "./sync.js";
 import { graftProject } from "./graft.js";
 import { mergeProjects, tombstoneItems } from "./merge.js";
+import { removeMeterPhotos, mapPhotoIds } from "./meterphotos.js";
+import { onMeterLive, readWaitingMeters, readAllWaitingMeters } from "./meterui.js";
 import { panelModel, evaluateProject } from "./completeness.js";
 import { syncSpine, getUnifiedJobId } from "./spine.js";
 import { generateNarrative, constructionFacts } from "./narrative.js";
@@ -177,6 +179,8 @@ function boot() {
   // ask the browser to shield IndexedDB (jobs + backups + the media queue) from storage eviction
   try { navigator.storage?.persist?.().catch(() => {}); } catch { /* best-effort */ }
   setAuthor(currentEmail());   // stamp new captures with who's signed in ("" offline)
+  // a meter photo's number that comes back after the user moved on lands on the page now on screen
+  onMeterLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
   if (SYNC_ENABLED && isSignedIn()) startSyncUI();
   // walk clips captured with no signal upload themselves: on open, on `online`, on the tab coming back
   if (SYNC_ENABLED) startMediaQueue();
@@ -279,6 +283,7 @@ function updateSyncStatus(s) {
   const [color, title] = map[s.state] || ["var(--green)", "Online"];
   dot.style.color = color; dot.title = title;
   updateNet();                      // a completed sync clears a stale red dot
+  if (s && s.state === "synced") readAllWaitingMeters();   // meter photos taken with no signal get their numbers
   // refresh the account row if it's on screen
   const row = $("#acctRow");
   if (row) {
@@ -2054,6 +2059,7 @@ function formEditor(project, meta, instance) {
 
   const sheetEl = RENDERERS[meta.key](project, instance);
   body.append(sheetEl);
+  if (meta.key === "moistureMaps") readWaitingMeters(project);   // this phone's meter photos still waiting for their numbers
 
   // If a signed copy was uploaded for the Work Auth / Cert of Drying, the printed
   // single-form PDF shows the full-size uploaded document instead of the app form
@@ -2181,6 +2187,7 @@ async function deleteInstance(project, meta, instance, back) {
   const arr = project[meta.key];
   const i = arr.findIndex((x) => x.id === instance.id);
   if (i >= 0) { tombstoneItems(project, instance.id); arr.splice(i, 1); }   // recorded delete — see merge.js
+  if (meta.key === "moistureMaps") removeMeterPhotos(project, mapPhotoIds(project, instance.id));   // its meter photos go with it
   await Store.put(project);
   toast(meta.name + " deleted");
   go(back);
