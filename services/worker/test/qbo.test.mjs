@@ -10,6 +10,7 @@ import { fakeSupa, testConfig, recordingLog, fakeFetch, outboxRow } from "./help
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const MIGRATION = fs.readFileSync(path.join(REPO, "supabase/migrations/0023_receipts_qbo_link.sql"), "utf8");
+const MIGRATION_V2 = fs.readFileSync(path.join(REPO, "supabase/migrations/0025_receipts_qbo_bills_parts.sql"), "utf8");
 
 /* An outbox 'qbo' row as op_exec_receipts_qbo_link writes it (0023): Purchase
    10577, Home Depot, tag to Pollen Apartments and attach the receipt photo. */
@@ -140,4 +141,74 @@ test("through the outbox lane: a delivered row is recorded sent with the provide
   const failed = s.ctx.supa.rpcs("outbox_failed")[0];
   assert.equal(failed.p_permanent, true);
   assert.match(failed.p_error, /^photo_missing: /);
+});
+
+/* ---- 0025: a receipt paid in two or three card charges ---- */
+
+/* The outbox row 0025's executor writes for the Rental Zone receipt: the
+   top level names no charge, each part names one. */
+const partsRow = (over = {}) => qboRow({
+  payload: {
+    ...qboRow().payload, receipt_id: "995d2795-0000-4000-8000-000000000001", job_id: "0b32c79a-0000-4000-8000-000000000002",
+    qbo_txn_id: "", expect_sync_token: "", expect_total: null, customer_id: "502", project_ref: "807760362",
+    file_base: "The Rental Zone 2026-10-07 R284290",
+    parts: [{ qbo_txn_id: "10615", expect_sync_token: "0", expect_total: 126.9, changes: ["tag", "attach"] },
+      { qbo_txn_id: "10661", expect_sync_token: "0", expect_total: 224.1, changes: ["tag", "attach"] }],
+  },
+  ...over,
+});
+const partsDone = (over = {}) => done({ purchaseId: "10615", syncToken: "1", attached: 2,
+  parts: [{ purchaseId: "10615", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
+    { purchaseId: "10661", syncToken: "1", tagged: "done", attached: 1, already_attached: false }], ...over });
+
+test("a receipt in parts: the provider id is the first charge's Purchase id, and the status lists every charge's new SyncToken as 0025's trigger reads it", async () => {
+  const { fetch, adapter } = setup(() => partsDone());
+  const out = await adapter.send(partsRow());
+  assert.deepEqual(out, { providerId: "Purchase:10615:1", providerStatus: "tagged=done;attached=2;parts=10615:1,10661:1", costUsd: 0 });
+  assert.deepEqual(fetch.calls[0].body, { ...partsRow().payload, action: "completePurchase" });
+  // the 0025 trigger: the provider id still Purchase:<id>:<token>, the charges from provider_status parts=
+  const idPattern = /v_m\s+text\[\] := regexp_match\(coalesce\(new\.provider_id, ''\), '(\^Purchase:[^']+)'\)/.exec(MIGRATION_V2);
+  assert.ok(idPattern, "outbox_qbo_link_result parses provider_id with a ^Purchase:… pattern");
+  assert.match(out.providerId, new RegExp(idPattern[1]));
+  const partsPattern = /regexp_match\(coalesce\(new\.provider_status, ''\), '([^']+)'\)/.exec(MIGRATION_V2);
+  assert.ok(partsPattern, "outbox_qbo_link_result reads parts= from provider_status");
+  assert.deepEqual(new RegExp(partsPattern[1]).exec(out.providerStatus)?.[1], "10615:1,10661:1");
+  // with an attach_error and a part_error beside it, the trigger still finds the charges
+  const both = setup(() => partsDone({ attach_error: { code: "qbo_refused", message: "part 2 of 2: refused" },
+    part_error: { code: "changed_in_qbo", message: "part 2 of 2 (expense 10661): changed" } }));
+  const status = (await both.adapter.send(partsRow())).providerStatus;
+  assert.equal(status, "tagged=done;attached=2;parts=10615:1,10661:1;attach_error=qbo_refused;part_error=changed_in_qbo");
+  assert.equal(new RegExp(partsPattern[1]).exec(status)?.[1], "10615:1,10661:1");
+  // three charges
+  const three = setup(() => partsDone({ parts: [{ purchaseId: "1", syncToken: "0" }, { purchaseId: "2", syncToken: "5" }, { purchaseId: "3", syncToken: "12" }],
+    purchaseId: "1", syncToken: "0" }));
+  const threeRow = partsRow();
+  threeRow.payload.parts = [1, 2, 3].map((n) => ({ qbo_txn_id: String(n), expect_sync_token: "0", expect_total: 117, changes: ["tag"] }));
+  assert.deepEqual(await three.adapter.send(threeRow),
+    { providerId: "Purchase:1:0", providerStatus: "tagged=done;attached=2;parts=1:0,2:5,3:12", costUsd: 0 });
+});
+
+test("a later charge QuickBooks refused after an earlier one was written is sent with part_error=<code>, not retried or killed", async () => {
+  const { adapter } = setup(() => partsDone({ parts: [{ purchaseId: "10615", syncToken: "1", tagged: "done", attached: 1 },
+    { purchaseId: "10661", syncToken: "0", tagged: "refused", attached: 0, error: { code: "tagged_other", message: "tagged to 264 Cindy dr." } }],
+  attached: 1, part_error: { code: "tagged_other", message: "part 2 of 2 (expense 10661): tagged to 264 Cindy dr." } }));
+  assert.deepEqual(await adapter.send(partsRow()),
+    { providerId: "Purchase:10615:1", providerStatus: "tagged=done;attached=1;parts=10615:1,10661:0;part_error=tagged_other", costUsd: 0 });
+  const odd = setup(() => partsDone({ part_error: { code: "BAD;CODE=1" } }));
+  assert.match((await odd.adapter.send(partsRow())).providerStatus, /;part_error=unknown$/);
+  // part_error with no parts asked for is reported the same way (qbo-proxy only sends it for parts)
+  const single = setup(() => done({ part_error: { code: "qbo_refused" } }));
+  assert.equal((await single.adapter.send(qboRow())).providerStatus, "tagged=done;attached=1;part_error=qbo_refused");
+});
+
+test("an ok for a receipt in parts without every charge's id and SyncToken is retried, never recorded half", async () => {
+  for (const parts of [undefined, [], [{ purchaseId: "10615", syncToken: "1" }], [{ purchaseId: "10615", syncToken: "1" }, { purchaseId: "10661" }],
+    [{ purchaseId: "10615", syncToken: "1" }, { purchaseId: "P-1", syncToken: "1" }]]) {
+    const { adapter } = setup(() => partsDone({ parts }));
+    await assert.rejects(adapter.send(partsRow()), (e) => e instanceof DeliveryError && e.permanent === false && /each charge/.test(e.message),
+      JSON.stringify(parts));
+  }
+  // one charge (no parts asked): qbo-proxy's parts are not read
+  const { adapter } = setup(() => done({ parts: "ignored" }));
+  assert.equal((await adapter.send(qboRow())).providerStatus, "tagged=done;attached=1");
 });

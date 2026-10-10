@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { matchReceipts, purchaseWindow, vendorFamily, docAgrees, scoreOf, contradicts, MATCHER, EQUIPMENT_EXPENSE_ACCOUNT,
-  PAYMENT_CLEARING_ACCOUNT } from "../lanes/qbomatch.mjs";
+import { matchReceipts, purchaseWindow, vendorFamily, docAgrees, scoreOf, contradicts, canonical, MATCHER, EQUIPMENT_EXPENSE_ACCOUNT,
+  PAYMENT_CLEARING_ACCOUNT, KEEP_FAILED } from "../lanes/qbomatch.mjs";
 import * as oct7 from "./qbo-oct7.fixture.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -52,7 +53,80 @@ function opValidateInput(schema, input) {
   return problems;
 }
 
-function executorProblems(input) {
+/** jsonb's text of a value where the SQL compares text (#>>, ->>): a string as is, null as null. */
+const textOf = (v) => (v == null ? null : typeof v === "string" ? v : JSON.stringify(v));
+
+/* 0025 replaced the executor and the note door (v2). The executor still
+   queues Purchases only (a bill is only noted), and adds: an item in parts
+   (2 or 3 charges, distinct, the first the item's own id and token, each
+   part's changes within the item's and together covering them, |totals|
+   adding up to the receipt), a second try's refile marker, read_photo_ref
+   text or null. The note door takes Purchase, Bill or null, and parts on a
+   Purchase row only (2 or 3 charges, distinct, the first the row's own). */
+function itemProblemsV2(it, i, ch) {
+  const p = [];
+  const parts = it.parts;
+  if (jsonType(parts) !== "null") {
+    if (jsonType(parts) !== "array" || parts.length < 2 || parts.length > 3) p.push(`item ${i} parts must list 2 or 3 charges`);
+    else if (it.qbo_txn_type !== "Purchase" || ch.includes("create")) p.push(`item ${i} parts on a bill or an entry`);
+    else {
+      const ids = [], all = [];
+      let sum = 0, sumOk = true;
+      parts.forEach((x, n) => {
+        const j = n + 1;
+        if (jsonType(x) !== "object") { p.push(`item ${i} part ${j} is not an object`); sumOk = false; return; }
+        if (jsonType(x.qbo_txn_id) !== "string" || !ID.test(x.qbo_txn_id)) p.push(`item ${i} part ${j} qbo_txn_id`);
+        else if (ids.includes(x.qbo_txn_id)) p.push(`item ${i} names charge ${x.qbo_txn_id} twice`);
+        else ids.push(x.qbo_txn_id);
+        if (jsonType(x.qbo_sync_token) !== "string" || !ID.test(x.qbo_sync_token)) p.push(`item ${i} part ${j} qbo_sync_token`);
+        if (jsonType(x.qbo_total) !== "number") { p.push(`item ${i} part ${j} qbo_total`); sumOk = false; } else sum += Math.round(Math.abs(x.qbo_total) * 100);
+        if (!["string", "null"].includes(jsonType(x.qbo_date)) || (x.qbo_date != null && !DATE.test(x.qbo_date))) p.push(`item ${i} part ${j} qbo_date`);
+        const pch = jsonType(x.changes) === "array" ? x.changes : null;
+        if (!pch || !pch.every((c) => typeof c === "string") || new Set(pch).size !== pch.length
+            || !pch.every((c) => ["tag", "attach"].includes(c)) || !pch.every((c) => ch.includes(c))) {
+          p.push(`item ${i} part ${j} changes`);
+        } else all.push(...pch);
+      });
+      if (textOf(parts[0]?.qbo_txn_id) !== textOf(it.qbo_txn_id) || textOf(parts[0]?.qbo_sync_token) !== textOf(it.qbo_sync_token)) {
+        p.push(`item ${i} first part must be the charge the item names`);
+      }
+      if (!ch.every((c) => all.includes(c))) p.push(`item ${i} asks for a change no part asks for`);
+      if (sumOk && jsonType(it.amount) === "number" && sum !== Math.round(Math.abs(it.amount) * 100)) p.push(`item ${i} parts do not add up`);
+    }
+  }
+  const rf = it.refile;
+  if (!["object", "null"].includes(jsonType(rf)) || (jsonType(rf) === "object" && (
+    !["string", "null"].includes(jsonType(rf.proposal_id)) || (rf.proposal_id != null && !UUID.test(rf.proposal_id))
+    || jsonType(rf.error) !== "string" || [...rf.error].length > 60
+    || !["string", "null"].includes(jsonType(rf.why)) || [...String(rf.why ?? "")].length > 200))) {
+    p.push(`item ${i} refile`);
+  }
+  if (!["string", "null"].includes(jsonType(it.read_photo_ref))) p.push(`item ${i} read_photo_ref`);
+  return p;
+}
+
+function notePartsProblems(r, i) {
+  const p = [];
+  if (jsonType(r.parts) === "null") return p;
+  if (jsonType(r.parts) !== "array" || r.parts.length < 2 || r.parts.length > 3) return [`row ${i} parts must list 2 or 3 charges`];
+  if (r.qbo_txn_type !== "Purchase") return [`row ${i} comes in parts but is not a Purchase`];
+  const ids = [];
+  r.parts.forEach((x, n) => {
+    if (jsonType(x) !== "object" || jsonType(x.qbo_txn_id) !== "string" || !ID.test(x.qbo_txn_id)
+        || jsonType(x.qbo_sync_token) !== "string" || !ID.test(x.qbo_sync_token)
+        || !["number", "null"].includes(jsonType(x.qbo_total))
+        || !["string", "null"].includes(jsonType(x.qbo_date)) || (x.qbo_date != null && !DATE.test(x.qbo_date))) {
+      p.push(`row ${i} part ${n + 1}`);
+    } else if (ids.includes(x.qbo_txn_id)) p.push(`row ${i} names charge ${x.qbo_txn_id} twice`);
+    else ids.push(x.qbo_txn_id);
+  });
+  if (textOf(r.parts[0]?.qbo_txn_id) !== textOf(r.qbo_txn_id) || textOf(r.parts[0]?.qbo_sync_token) !== textOf(r.qbo_sync_token)) {
+    p.push(`row ${i} first part must be the charge the row names`);
+  }
+  return p;
+}
+
+function executorProblems(input, v2 = false) {
   const p = [];
   const cust = input.qbo_customer_id;
   if (jsonType(cust) !== "string" || !/^([0-9]{1,20})?$/.test(cust)) p.push("qbo_customer_id");
@@ -107,6 +181,7 @@ function executorProblems(input) {
     // qbo-proxy's completePurchase on top: its receipt id shape, and a photo to attach
     if (!/^[\w.:~-]{1,64}$/.test(it.receipt_id)) p.push(`item ${i} receipt_id for qbo-proxy`);
     if (ch.includes("attach") && !(it.photo_refs?.length >= 1)) p.push(`item ${i} attach with no photo`);
+    if (v2) p.push(...itemProblemsV2(it, i, ch));
   });
   const link = input.link;
   if (!["object", "null"].includes(jsonType(link))) p.push("link must be an object");
@@ -120,7 +195,7 @@ function executorProblems(input) {
   return p;
 }
 
-function noteProblems(jobIds, rows) {
+function noteProblems(jobIds, rows, v2 = false) {
   const p = [];
   if (jobIds.length > 1000) p.push("too many jobs");
   if (rows.length > 5000) p.push("too many rows");
@@ -135,7 +210,8 @@ function noteProblems(jobIds, rows) {
     if (jsonType(r.job_id) !== "string" || !UUID.test(r.job_id)) p.push(`row ${i} job_id`);
     else if (!jobs.has(r.job_id.toLowerCase())) p.push(`row ${i} job outside the call`);
     if (!["in_qbo", "unmatched", "conflict"].includes(r.state)) p.push(`row ${i} state`);
-    if (jsonType(r.qbo_txn_type) !== "null" && r.qbo_txn_type !== "Purchase") p.push(`row ${i} qbo_txn_type`);
+    if (jsonType(r.qbo_txn_type) !== "null" && !(v2 ? ["Purchase", "Bill"] : ["Purchase"]).includes(r.qbo_txn_type)) p.push(`row ${i} qbo_txn_type`);
+    if (v2) p.push(...notePartsProblems(r, i));
     for (const k of ["qbo_txn_id", "qbo_sync_token", "qbo_customer_id"]) {
       if (!["string", "null"].includes(jsonType(r[k])) || !/^([0-9]{1,20})?$/.test(r[k] ?? "")) p.push(`row ${i} ${k}`);
     }
@@ -147,11 +223,25 @@ function noteProblems(jobIds, rows) {
   return p;
 }
 
-/** Every card and every note of a result, through the database's checks. */
-function check(res, jobIds) {
+/** Every card and every note of a result, through the database's checks:
+    0023's (v1), or 0025's (v2). */
+function check(res, jobIds, v2 = false) {
   const wire = JSON.parse(JSON.stringify(res));   // what PostgREST is sent: no undefined, no NaN
   assert.deepEqual(wire.notes, res.notes, "notes survive JSON");
-  assert.deepEqual(noteProblems(jobIds, res.notes), []);
+  assert.deepEqual(noteProblems(jobIds, res.notes, v2), []);
+  const items = res.cards.flatMap((c) => c.input.items);
+  if (v2) {
+    // a note naming one transaction says it has no parts, so the 0025 door
+    // drops a row's old ones instead of keeping them
+    for (const n of res.notes) if (n.qbo_txn_id) assert.ok("parts" in n, `${n.receipt_id} names a transaction but not its parts`);
+  } else {
+    // a v1 database never sees what 0025 added
+    for (const x of [...res.notes, ...items]) {
+      assert.equal("parts" in x, false, `${x.receipt_id} has parts in v1`);
+      assert.equal("refile" in x, false, `${x.receipt_id} has refile in v1`);
+      assert.notEqual(x.qbo_txn_type, "Bill", `${x.receipt_id} names a bill in v1`);
+    }
+  }
   for (const card of res.cards) {
     assert.deepEqual(wire.cards.find((c) => c.job_id === card.job_id), card, "cards survive JSON");
     assert.equal(card.input.job_id, card.job_id);
@@ -159,7 +249,7 @@ function check(res, jobIds) {
     // the door stamps these three; nothing else is added before op_propose
     const stamped = { ...card.input, receipts_fingerprint: "0".repeat(32), items_hash: "f".repeat(32), offer: 0 };
     assert.deepEqual(opValidateInput(INPUT_SCHEMA, stamped), [], `input_schema: job ${card.job_id}`);
-    assert.deepEqual(executorProblems(card.input), [], `executor: job ${card.job_id}`);
+    assert.deepEqual(executorProblems(card.input, v2), [], `executor: job ${card.job_id}`);
     assert.equal(card.input.total_usd, Math.round(card.input.items.reduce((s, i) => s + Math.abs(i.amount), 0) * 100) / 100);
     assert.ok(typeof card.rationale === "string" && card.rationale.endsWith("."));
     assert.deepEqual(card.evidence_refs, []);
@@ -216,8 +306,10 @@ const STORES = {
 
 function run(over = {}) {
   const args = { receipts: [], purchases: [], links: [], jobs: [job()], projects: oct7.PROJECTS, storeAccounts: null, today: TODAY, ...over };
-  return check(matchReceipts(args), args.jobs.map((j) => j.id));
+  return check(matchReceipts(args), args.jobs.map((j) => j.id), args.v2 === true);
 }
+/** A run on a database with 0025 whose bills were read (none, unless given). */
+const runV2 = (over = {}) => run({ v2: true, bills: [], ...over });
 const noteOf = (res, id) => res.notes.find((n) => n.receipt_id === id);
 const cardOf = (res, jobId = ALSTON) => res.cards.find((c) => c.job_id === jobId);
 const itemsOf = (res, jobId = ALSTON) => cardOf(res, jobId)?.input.items ?? [];
@@ -257,6 +349,64 @@ test("the mirrors refuse what the database refuses, so a passing card is not a v
   assert.notDeepEqual(noteProblems([OTHER], [row]), []);
   assert.notDeepEqual(noteProblems([ALSTON], [{ ...row, qbo_txn_id: null }]), []);
   assert.notDeepEqual(noteProblems([ALSTON], [row, row]), []);
+});
+
+test("the 0025 mirrors take what 0025 takes and refuse what it refuses: a bill is noted only, a receipt in parts, a second try", () => {
+  const PROP = "66666666-6666-4666-8666-666666666666";
+  const part = (id, total, over = {}) => ({ qbo_txn_id: id, qbo_sync_token: "0", qbo_total: total, qbo_date: "2026-10-02", changes: ["tag", "attach"], ...over });
+  const good = { job_id: OTHER, job_name: "1885 Chena Landings Lp.", qbo_customer_id: "502", qbo_name: "1885 Chena Landings Lp.",
+    items: [{ receipt_id: "995d2795", vendor: "The Rental Zone", date: "2026-10-07", amount: 351, receipt_no: "R284290",
+      qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0", qbo_doc_number: "", qbo_account_name: "", qbo_total: 126.9,
+      changes: ["tag", "attach"], photo_refs: [photo(5)], project_ref: null, read_photo_ref: photo(5),
+      parts: [part("10615", 126.9), part("10661", 224.1)], refile: { proposal_id: PROP, error: "qbo_throttled", why: "slow down" } }],
+    total_usd: 351, matcher: MATCHER };
+  assert.deepEqual(executorProblems(good, true), []);
+  // v1's executor reads none of it, so a v1 worker must never send it (check() holds v1 results to that)
+  const item = (over) => ({ ...good, items: [{ ...good.items[0], ...over }] });
+  for (const over of [{ parts: null }, { refile: null }, { refile: { proposal_id: null, error: "failed" } }, { read_photo_ref: null },
+    { parts: [part("10615", 126.9), part("10661", 224.1, { changes: [] })] },                       // a charge only checked
+    { parts: [part("10615", 126.9), part("10616", 94), part("10661", 130.1)] },                     // three
+    { amount: -351, parts: [part("10615", -126.9), part("10661", -224.1)] }]) {                     // |totals| add up
+    assert.deepEqual(executorProblems(item(over), true), [], JSON.stringify(over));
+  }
+  for (const over of [
+    { qbo_txn_type: "Bill" },                                                                        // a bill is only noted
+    { parts: [part("10615", 351)] },                                                                 // one part
+    { parts: [part("10615", 100), part("10661", 100), part("1", 100), part("2", 51)] },              // four
+    { parts: [part("10615", 126.9), part("10615", 224.1)] },                                         // the same charge twice
+    { parts: [part("10661", 224.1), part("10615", 126.9)] },                                         // the first is not the item's
+    { parts: [part("10615", 126.9, { qbo_sync_token: "1" }), part("10661", 224.1)] },                // nor its token
+    { parts: [part("10615", 126.9), part("10661", 224.0)] },                                         // a cent short
+    { parts: [part("10615", 126.9, { changes: ["tag"] }), part("10661", 224.1, { changes: ["tag"] })] },   // attach asked of none
+    { parts: [part("10615", 126.9), part("10661", 224.1, { changes: ["create"] })] },
+    { changes: ["tag"], photo_refs: [], parts: [part("10615", 126.9), part("10661", 224.1)] },      // a part asks more than the item
+    { parts: [part("10615", 126.9), part("10661", 224.1, { qbo_date: "10/07/2026" })] },
+    { parts: [part("10615", 126.9), part("10661", "224.10")] },
+    { parts: "10615,10661" },
+    { refile: { proposal_id: "p-1", error: "x" } }, { refile: { proposal_id: PROP } },
+    { refile: { proposal_id: PROP, error: "e".repeat(61) } }, { refile: { proposal_id: PROP, error: "x", why: "w".repeat(201) } },
+    { refile: "again" }, { read_photo_ref: 7 }]) {
+    assert.notDeepEqual(executorProblems(item(over), true), [], JSON.stringify(over));
+  }
+  const create = { account_id: "53", vendor_id: "65", payment_type: "CreditCard", credit: false, doc_number: "70062",
+    expense_account_id: "42", class_id: null, txn_date: null, amount_abs: 351, memo: "" };
+  assert.notDeepEqual(executorProblems(item({ qbo_txn_id: "", qbo_sync_token: "", changes: ["create", "attach"], create }), true), []);
+
+  const row = { receipt_id: "r1", job_id: ALSTON, state: "in_qbo", qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0",
+    qbo_customer_id: "502", amount: 351, receipt_date: "2026-10-07", detail: {}, parts: null };
+  const note = (over) => noteProblems([ALSTON], [{ ...row, ...over }], true);
+  const noted = (id, total) => ({ qbo_txn_id: id, qbo_sync_token: "0", qbo_total: total, qbo_date: "2026-10-02" });
+  for (const over of [{}, { qbo_txn_type: "Bill", qbo_txn_id: "10625" }, { parts: [noted("10615", 126.9), noted("10661", 224.1)] },
+    { parts: [noted("10615", null), { ...noted("10661", 224.1), qbo_date: null }] }, { state: "conflict", qbo_txn_type: null, qbo_txn_id: null }]) {
+    assert.deepEqual(note(over), [], JSON.stringify(over));
+  }
+  assert.notDeepEqual(noteProblems([ALSTON], [{ ...row, qbo_txn_type: "Bill" }]), [], "v1's door takes no bill");
+  for (const over of [{ qbo_txn_type: "Invoice" }, { qbo_txn_type: "Bill", parts: [noted("10615", 126.9), noted("10661", 224.1)] },
+    { parts: [noted("10615", 351)] }, { parts: [noted("10615", 126.9), noted("10615", 224.1)] },
+    { parts: [noted("10661", 224.1), noted("10615", 126.9)] }, { parts: [noted("10615", 126.9), { ...noted("10661", 224.1), qbo_sync_token: 0 }] },
+    { parts: {} }]) {
+    assert.notDeepEqual(note(over), [], JSON.stringify(over));
+  }
 });
 
 /* ---- the pieces ---- */
@@ -335,7 +485,7 @@ test("contradicts: another store, another card, a payment, or a store-account re
   assert.equal(contradicts(hd({ paid_with: "card" }), p10577({ paymentType: "Cash", accountName: "ATM Cash Clearing" })), false);
 });
 
-test("an invoice the slip reader marked \"account\" but the bank paid is a candidate when the expense names it: its invoice number, or the bank account the receipt says paid it", () => {
+test("an invoice the slip reader marked \"account\" but the bank paid is a candidate when the expense names it: its invoice number, or the bank account the receipt says paid it (which alone never scores)", () => {
   // FS&G 209998, stamped PAID and charged to debit card 4558 on Oct 6: QuickBooks 10621, DocNumber 209998
   const fsg = sbs({ id: "fsg", vendor: "FS&G Aggregate Inc.", receipt_date: "2026-10-03", amount: 100.98, receipt_no: "209998" });
   const p10621 = p10577({ id: "10621", syncToken: "2", txnDate: "2026-10-06", total: 100.98, paymentType: "Cash", accountId: "9",
@@ -350,18 +500,93 @@ test("an invoice the slip reader marked \"account\" but the bank paid is a candi
     vendorName: "Vinny Fanelli", docNumber: "", note: "", lines: [line({ amount: 784, customerId: "502", projectRef: "807760362" })],
     attachments: ["Invoice 1065.pdf"], hasAttachment: true });
   assert.equal(contradicts(fbx, p10662), false);
-  assert.equal(scoreOf(fbx, p10662), 1 + 1);
+  // but 8992 is on every checking expense's account name: it tells this one
+  // from any other checking expense of $784 that day not at all, so it scores
+  // nothing and the same day alone is not enough (the safe failure)
+  assert.equal(scoreOf(fbx, p10662), 1);
   // neither: still a store receipt paid from the bank, which it is not
   assert.equal(contradicts({ ...fbx, card_last4: "" }, p10662), true);
   assert.equal(contradicts({ ...fbx, card_last4: "4558" }, p10662), true);
   assert.equal(contradicts({ ...fsg, receipt_no: "209999" }, p10621), true);
+  // the bank account's own four digits, exactly: a partial or longer read is no exception
+  assert.equal(contradicts({ ...fbx, card_last4: "992" }, p10662), true);
+  assert.equal(contradicts({ ...fbx, card_last4: "89921" }, p10662), true);
+  // a debit card's four digits in the memo are not the bank account named
+  assert.equal(contradicts({ ...fsg, receipt_no: "209999", card_last4: "4558" }, p10621), true);
+  // a check or ACH receipt against an unrelated checking expense of the same
+  // amount on the same day (a payroll advance): never a candidate
+  const advance = p10577({ id: "10423", txnDate: "2026-09-18", total: 500, paymentType: "Cash", accountId: "9",
+    accountName: "8992-MMB- Checking", vendorName: "", docNumber: "", note: "", lines: [line({ amount: 500, accountId: "231" })],
+    attachments: [], hasAttachment: false });
+  const ach = sbs({ id: "ach", vendor: "Interior Contracting", receipt_date: "2026-09-18", amount: 500, card_last4: "8992", receipt_no: "" });
+  assert.equal(scoreOf(ach, advance), 1);
+  assert.equal(noteOf(run({ receipts: [ach], purchases: [advance], jobs: [job({ link: LINK })], today: "2026-10-10" }), "ach").state,
+    "unmatched");
 
   const chena = job({ id: OTHER, address: "1885 Chena Landings Lp." });
   const res = run({ receipts: [{ ...fsg, job_id: OTHER }, { ...fbx, job_id: OTHER }], purchases: [p10621, p10662], jobs: [chena],
     today: "2026-10-10" });
   assert.deepEqual(res.notes.map((n) => [n.receipt_id, n.state, n.qbo_txn_id, n.qbo_customer_id]),
-    [["fbx", "in_qbo", "10662", "502"], ["fsg", "in_qbo", "10621", "502"]]);
+    [["fbx", "unmatched", null, null], ["fsg", "in_qbo", "10621", "502"]]);
   assert.deepEqual(res.cards, []);
+});
+
+test("a check or ACH receipt matches a checking expense the office already finished for its job (tagged to the job's linked customer, a document attached): a note, never a card", () => {
+  const chena = job({ id: OTHER, address: "1885 Chena Landings Lp.", link: { job_id: OTHER, qbo_customer_id: "502",
+    qbo_project_ref: "807760362", qbo_name: "1885 Chena Landings Lp. - Huffman", source: "picked" } });
+  // FBX Electric invoice 1065, paid by ACH from ****8992: QuickBooks 10662, under the owner's name, finished by the office
+  const fbx = sbs({ id: "fbx", job_id: OTHER, vendor: "FBX Electric LLC", receipt_date: "2026-10-09", amount: 784, card_last4: "8992",
+    receipt_no: "1065" });
+  const p10662 = p10577({ id: "10662", txnDate: "2026-10-09", total: 784, paymentType: "Cash", accountId: "9", accountName: "8992-MMB- Checking",
+    vendorName: "Vinny Fanelli", docNumber: "", note: "", lines: [line({ amount: 784, customerId: "502", projectRef: "807760362" })],
+    attachments: ["Invoice 1065.pdf"], hasAttachment: true });
+  assert.equal(scoreOf(fbx, p10662, "502"), 2);
+  assert.equal(scoreOf(fbx, p10662, "112"), 1);
+  assert.equal(scoreOf(fbx, p10662), 1);
+  let res = run({ receipts: [fbx], purchases: [p10662], jobs: [chena], today: "2026-10-10" });
+  assert.deepEqual([noteOf(res, "fbx").state, noteOf(res, "fbx").qbo_txn_id, noteOf(res, "fbx").qbo_customer_id], ["in_qbo", "10662", "502"]);
+  assert.deepEqual(res.cards, []);
+  // untagged, tagged to another job, partly tagged, or without its document:
+  // the bank account names nothing, the same day alone is not enough
+  for (const p of [
+    { ...p10662, lines: [line({ amount: 784 })] },
+    { ...p10662, lines: [line({ amount: 784, customerId: "517", projectRef: "815364056" })] },
+    { ...p10662, lines: [line({ amount: 500, customerId: "502" }), line({ id: "2", amount: 284 })] },
+    { ...p10662, attachments: [], hasAttachment: false },
+  ]) {
+    res = run({ receipts: [fbx], purchases: [p], jobs: [chena], today: "2026-10-10" });
+    assert.equal(noteOf(res, "fbx").state, "unmatched");
+    assert.deepEqual(res.cards, []);
+  }
+  // and a job with no link has no customer to finish it for
+  res = run({ receipts: [fbx], purchases: [p10662], jobs: [{ ...chena, link: null }], today: "2026-10-10" });
+  assert.equal(noteOf(res, "fbx").state, "unmatched");
+});
+
+test("a card charge's DocNumber may be the bank's reference: it rules a receipt out only when it is the store's own numbering", () => {
+  // Citi fills the Home Depot charges with 7 digits: 10519 "5020046" is receipt "1303 00002 79356"
+  const r = hd({ id: "hd-0928", receipt_date: "2026-09-28", amount: 67.88, receipt_no: "1303 00002 79356" });
+  const p10519 = p10577({ id: "10519", syncToken: "2", txnDate: "2026-09-28", total: 67.88, docNumber: "5020046",
+    lines: [line({ amount: 67.88, ...POLLEN })], attachments: ["IMG_9661.jpeg"], hasAttachment: true });
+  assert.equal(contradicts(r, p10519), false);
+  let res = run({ receipts: [r], purchases: [p10519], jobs: [job({ link: LINK })] });
+  assert.deepEqual([noteOf(res, "hd-0928").state, noteOf(res, "hd-0928").qbo_txn_id], ["in_qbo", "10519"]);
+  // untagged with no photo, it goes on the card
+  const bare = { ...p10519, lines: [line({ amount: 67.88 })], attachments: [], hasAttachment: false };
+  res = run({ receipts: [r], purchases: [bare], jobs: [job({ link: LINK })] });
+  assert.deepEqual(itemsOf(res).map((i) => [i.qbo_txn_id, i.changes.join("+")]), [["10519", "tag+attach"]]);
+  // a number as long as the receipt's is the store's own: Home Depot rental
+  // deposits 193594 and 193615, $50 each on card 1674 a day apart
+  const rental = hd({ id: "hd-rent", receipt_date: "2026-09-18", amount: 50, card_last4: "1674", receipt_no: "193615" });
+  const deposit = (id, doc, date) => p10577({ id, txnDate: date, total: 50, accountId: "240", accountName: "1674 US Bank - Amazon (0687)",
+    docNumber: doc, note: "Deposit on equipment rental", lines: [line({ amount: 50 })] });
+  assert.equal(contradicts(rental, deposit("10456", "193594", "2026-09-17")), true);
+  assert.equal(contradicts(rental, deposit("10454", "193615", "2026-09-18")), false);
+  // on an account, or against a bill, a different number is another invoice whatever its length
+  assert.equal(contradicts(sbs(), p10563({ docNumber: "7006248" })), true);
+  assert.equal(contradicts(sbs({ paid_with: "card", card_last4: "" }), p10563({ docNumber: "7006248" })), false);
+  assert.equal(contradicts(sbs({ paid_with: "", card_last4: "" }), p10563({ docNumber: "7006248" })), false);
+  assert.equal(contradicts(sbs({ paid_with: "", card_last4: "" }), { ...p10563({ docNumber: "7006248" }), txnType: "Bill" }), true);
 });
 
 test("a store invoice QuickBooks dates up to two weeks off is still the receipt's when its DocNumber carries the receipt number and the store agrees", () => {
@@ -383,6 +608,18 @@ test("a store invoice QuickBooks dates up to two weeks off is still the receipt'
   assert.equal(state({ ...p10630, docNumber: "" }), "store_not_entered");               // no invoice number to go by
   // the receipt number must name a store: a receipt with no vendor family gets no slack
   assert.equal(state(p10630, { vendor: "Joe's Lumber" }), "store_not_entered");
+  // and the expense must be that store's: by its vendor, or by its memo
+  assert.equal(state({ ...p10630, txnDate: "2026-09-22", vendorName: "Vinny Fanelli", note: "" }), "store_not_entered");
+  assert.equal(state({ ...p10630, txnDate: "2026-09-22", vendorName: "", note: "SPENARD BUILDERS SUPPLY" }), "in_qbo 10630");
+  // Sherwin's longer DocNumber agrees by its prefix; a number under 5 digits never does
+  assert.equal(state({ ...p10630, txnDate: "2026-09-25", docNumber: "7006533910926" }), "in_qbo 10630");
+  assert.equal(state({ ...p10630, txnDate: "2026-09-25", docNumber: "3391" }, { receipt_no: "3391" }), "store_not_entered");
+  // only for an invoice on an account: a card charge's date is the bank's,
+  // and a rental agreement's number repeats on each week's charge
+  assert.equal(state({ ...p10630, txnDate: "2026-09-28", paymentType: "CreditCard", accountName: "1674 US Bank" },
+    { paid_with: "card", card_last4: "1674" }), "waiting_feed");
+  assert.equal(state({ ...p10630, txnDate: "2026-10-05", paymentType: "CreditCard", accountName: "1674 US Bank" },
+    { paid_with: "card", card_last4: "1674" }), "in_qbo 10630");
   // inside the usual -1..+3 days nothing changed: the same expense with no DocNumber still matches on store + date
   assert.equal(state({ ...p10630, txnDate: "2026-10-05", docNumber: "" }), "in_qbo 10630");
   // and the window QuickBooks is asked for reaches back that far
@@ -951,6 +1188,353 @@ test("the same rows in any order give the same answer", () => {
     jobs: [...args.jobs].reverse(), projects: [...args.projects].reverse() });
   assert.deepEqual(b, a);
   assert.deepEqual(a.notes.map((n) => n.receipt_id), [...a.notes.map((n) => n.receipt_id)].sort());
+});
+
+/* ---- 0025 (v2): bills, a receipt in parts, second tries ---- */
+
+const CHENA = { job_id: OTHER, qbo_customer_id: "502", qbo_project_ref: "807760362", qbo_name: "1885 Chena Landings Lp.", source: "picked" };
+const chena = (over = {}) => job({ id: OTHER, address: "1885 Chena Landings Lp.", link: CHENA, ...over });
+// FNSB dump ticket 01286734 → Bill 10625 (read Oct 10): entered by the office
+// a week late, DocNumber the ticket number, tagged to the job, the ticket's photo
+const dump = (over = {}) => ({ job_id: ALSTON, id: "fnsb", vendor: "FNSB Solid Waste Division #001", receipt_date: "2026-10-01",
+  amount: 34.04, category: "dump", paid_with: "account", card_last4: "", receipt_no: "01286734", photo_ref: photo(4), ...over });
+const b10625 = (over = {}) => ({ id: "10625", syncToken: "0", txnDate: "2026-10-01", total: 34.04, credit: false, paymentType: "",
+  accountId: "99", accountName: "Accounts Payable (A/P)", vendorId: "355", vendorName: "FNSB Solid Waste", docNumber: "01286734",
+  note: "CONSTRUCTION MATRL", lines: [line({ amount: 34.04, accountId: "226", ...POLLEN })], attachments: ["FNSB 01286734.jpg"],
+  hasAttachment: true, ...over });
+const BILL_DETAIL = { qbo_doc_number: "01286734", qbo_account_name: "Accounts Payable (A/P)", qbo_total: 34.04 };
+// Rental Zone receipt 995d2795 (job 1885 Chena Landings), $351.00 on 10/07 =
+// Purchase 10615 $126.90 at checkout (10/02) + 10661 $224.10 at return
+// (10/07), both by bank rule on card 1658, untagged, no photo
+const RENTAL_TODAY = "2026-10-10";
+const rental = (over = {}) => ({ job_id: OTHER, id: "995d2795", vendor: "The Rental Zone (A Division of Airport Equipment Rentals)",
+  receipt_date: "2026-10-07", amount: 351, category: "equipment", paid_with: "card", card_last4: "1658", receipt_no: "R284290",
+  photo_ref: photo(5), ...over });
+const charge = (id, txnDate, total, over = {}) => p10577({ id, syncToken: "0", txnDate, total, accountId: "37",
+  accountName: "1658 - Bank of America AK Air CC", vendorId: "83", vendorName: "Airport Equipment Rental, Inc", docNumber: "",
+  note: "AIRPORT EQUIPMENT RENTAL FAIRBANKS    AK - RULE", lines: [line({ amount: total, accountId: EQUIPMENT_EXPENSE_ACCOUNT })], ...over });
+const p10615 = (over) => charge("10615", "2026-10-02", 126.9, over);
+const p10661 = (over) => charge("10661", "2026-10-07", 224.1, over);
+const rentalRun = (over = {}) => runV2({ receipts: [rental()], purchases: [p10615(), p10661()], jobs: [chena()], today: RENTAL_TODAY, ...over });
+// a failed update of r1 (Home Depot 10577): the 0025 executor's queued row,
+// then the outbox_qbo_link_result trigger's error
+const PROP1 = "11111111-1111-4111-8111-111111111111";   // the card whose approval queued it
+const PROP2 = "22222222-2222-4222-8222-222222222222";   // the card that held its second try
+const failedRow = (detail = {}, over = {}) => ({ receipt_id: "r1", job_id: ALSTON, state: "failed", qbo_txn_type: "Purchase",
+  qbo_txn_id: "10577", qbo_sync_token: "0", qbo_customer_id: "112", amount: 1369.5, receipt_date: "2026-09-30", parts: null,
+  proposal_id: PROP1, detail: { vendor: "The Home Depot #1303", qbo_total: 1369.5, read_photo_ref: photo(1),
+    failed_at: "2026-10-07T15:00:00Z", ...detail }, ...over });
+const again = (links, over = {}) => runV2({ receipts: [hd()], purchases: [p10577()], links, jobs: [job({ link: LINK })], ...over });
+const kept = (res, why) => {
+  assert.deepEqual(res.cards, [], why);
+  assert.equal(noteOf(res, "r1"), undefined, why);
+  assert.equal(res.stats.owned.failed, 1, why);
+};
+
+test("a dump ticket is its bill by ticket number, and a bill is only noted: tagged to the job in_qbo (photo or not), untagged a conflict the office tags by hand", () => {
+  const linked = [job({ link: LINK })];
+  let res = runV2({ receipts: [dump(), hd()], purchases: [p10577()], bills: [b10625()], jobs: linked });
+  assert.deepEqual(noteOf(res, "fnsb"), { receipt_id: "fnsb", job_id: ALSTON, amount: 34.04, receipt_date: "2026-10-01", state: "in_qbo",
+    qbo_txn_type: "Bill", qbo_txn_id: "10625", qbo_sync_token: "0", parts: null, qbo_customer_id: "112", detail: BILL_DETAIL });
+  assert.deepEqual(itemsOf(res).map((i) => i.receipt_id), ["r1"]);       // the card holds the expense only
+  // no document on the bill: still in QuickBooks; nothing attaches to a bill
+  res = runV2({ receipts: [dump()], bills: [b10625({ attachments: [], hasAttachment: false })], jobs: linked });
+  assert.equal(noteOf(res, "fnsb").state, "in_qbo");
+  assert.deepEqual(res.cards, []);
+  // untagged: a conflict, never an item, not even the photo
+  const untagged = b10625({ lines: [line({ amount: 34.04, accountId: "226" })], attachments: [], hasAttachment: false });
+  res = runV2({ receipts: [dump()], bills: [untagged], jobs: linked });
+  assert.deepEqual(noteOf(res, "fnsb"), { receipt_id: "fnsb", job_id: ALSTON, amount: 34.04, receipt_date: "2026-10-01", state: "conflict",
+    qbo_txn_type: "Bill", qbo_txn_id: "10625", qbo_sync_token: "0", parts: null, qbo_customer_id: null,
+    detail: { reason: "bill_untagged", ...BILL_DETAIL } });
+  assert.deepEqual(res.cards, []);
+  assert.equal(res.stats.conflicts, 1);
+  // tagged to another customer, partly tagged, or on a job with no project: as an expense would be, naming the bill
+  const state = (bill, jobs = linked) => {
+    const n = noteOf(runV2({ receipts: [dump()], bills: [bill], jobs }), "fnsb");
+    return [n.state, n.detail.reason, n.qbo_txn_type, n.qbo_txn_id, n.qbo_customer_id];
+  };
+  assert.deepEqual(state(b10625({ lines: [line({ amount: 34.04, customerId: "399", customerName: "264 Cindy dr." })] })),
+    ["conflict", "tagged_other", "Bill", "10625", "399"]);
+  assert.deepEqual(state(b10625({ lines: [line({ amount: 30, ...POLLEN }), line({ id: "2", amount: 4.04 })] })),
+    ["conflict", "partly_tagged", "Bill", "10625", "112"]);
+  assert.deepEqual(state(untagged, [job()]), ["unmatched", "needs_job_link", "Bill", "10625", null]);
+  // never in parts: a bill is one transaction, and a split reads card charges only
+  assert.equal(rentalRun({ bills: [charge("10700", "2026-10-03", 126.9), charge("10701", "2026-10-07", 224.1)].map((b) => ({ ...b, paymentType: "" })) })
+    .cards[0].input.items[0].parts.map((p) => p.qbo_txn_id).join(), "10615,10661");
+});
+
+test("no bill found: bill_not_entered when the bills were read, bill_not_checked when they were not (or in v1); another ticket's bill is not this ticket's", () => {
+  const linked = [job({ link: LINK })];
+  const reason = (over) => noteOf(runV2({ receipts: [dump()], jobs: linked, ...over }), "fnsb").detail.reason;
+  assert.equal(reason({}), "bill_not_entered");
+  assert.equal(reason({ bills: null }), "bill_not_checked");
+  assert.equal(noteOf(run({ receipts: [dump()], bills: [b10625()], jobs: linked }), "fnsb").detail.reason, "bill_not_checked");   // v1 reads none
+  // the borough charges by the 20 lb, so another ticket of the same amount the same day is common: only the ticket's own number counts
+  for (const docNumber of ["01286735", "", "1286", "02286734"]) {
+    assert.equal(reason({ bills: [b10625({ docNumber })] }), "bill_not_entered", docNumber);
+  }
+  // a zero dropped on either side is the same ticket
+  assert.equal(noteOf(runV2({ receipts: [dump({ receipt_no: "1286734" })], bills: [b10625()], jobs: linked }), "fnsb").state, "in_qbo");
+  // a receipt paid at the counter is never a bill
+  const counter = hd({ id: "c1", vendor: "FNSB Solid Waste", receipt_date: "2026-10-01", amount: 34.04, receipt_no: "01286734", card_last4: "" });
+  assert.equal(noteOf(runV2({ receipts: [counter], bills: [b10625()], jobs: linked }), "c1").detail.reason, "waiting_feed");
+});
+
+test("the bills not read tonight: a receipt matched to a bill (in_qbo or conflict) keeps its row as it is, never re-noted bill_not_checked", () => {
+  const was = (over = {}) => ({ receipt_id: "fnsb", job_id: ALSTON, state: "in_qbo", qbo_txn_type: "Bill", qbo_txn_id: "10625",
+    qbo_sync_token: "0", qbo_customer_id: "112", amount: 34.04, receipt_date: "2026-10-01", detail: BILL_DETAIL, parts: null,
+    proposal_id: null, ...over });
+  const linked = [job({ link: LINK })];
+  for (const row of [was(), was({ state: "conflict", qbo_customer_id: null, detail: { reason: "bill_untagged", ...BILL_DETAIL } })]) {
+    const res = runV2({ receipts: [dump()], bills: null, links: [row], jobs: linked });
+    const { proposal_id: _, ...asWas } = row;
+    assert.deepEqual(noteOf(res, "fnsb"), asWas, row.state);
+    assert.equal(res.stats.carried, 1, row.state);
+    assert.equal(res.stats.receipts, 0, "carried, not matched");
+  }
+  // a manual run for another job carries nothing of this one
+  assert.deepEqual(matchReceipts({ receipts: [dump()], bills: null, links: [was()], jobs: linked, today: TODAY, v2: true, scope: [OTHER] }).notes, []);
+  // with the bills read it is matched again
+  let res = runV2({ receipts: [dump()], bills: [b10625({ lines: [line({ amount: 34.04 })] })], links: [was()], jobs: linked });
+  assert.equal(noteOf(res, "fnsb").detail.reason, "bill_untagged");
+  // a row that names no bill is not kept: the ticket reads bill_not_checked
+  res = runV2({ receipts: [dump()], bills: null, jobs: linked, links: [was({ state: "unmatched", qbo_txn_type: null, qbo_txn_id: null,
+    qbo_sync_token: null, qbo_customer_id: null, detail: { reason: "bill_not_entered" } })] });
+  assert.equal(noteOf(res, "fnsb").detail.reason, "bill_not_checked");
+});
+
+test("Rental Zone 995d2795, $351.00 paid as 10615 at checkout and 10661 at return: ONE item whose top level is the first charge, every charge in parts", () => {
+  const res = rentalRun();
+  assert.deepEqual(res.notes, []);
+  assert.deepEqual(itemsOf(res, OTHER), [{
+    receipt_id: "995d2795", vendor: "The Rental Zone (A Division of Airport Equipment Rentals)", date: "2026-10-07", amount: 351,
+    receipt_no: "R284290", qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0", qbo_doc_number: "",
+    qbo_account_name: "1658 - Bank of America AK Air CC", qbo_vendor_name: "Airport Equipment Rental, Inc", qbo_total: 126.9,
+    changes: ["tag", "attach"], photo_refs: [photo(5)], project_ref: "807760362", read_photo_ref: photo(5),
+    parts: [
+      { qbo_txn_id: "10615", qbo_sync_token: "0", qbo_total: 126.9, qbo_date: "2026-10-02", changes: ["tag", "attach"] },
+      { qbo_txn_id: "10661", qbo_sync_token: "0", qbo_total: 224.1, qbo_date: "2026-10-07", changes: ["tag", "attach"] },
+    ],
+  }]);
+  assert.equal(cardOf(res, OTHER).input.qbo_customer_id, "502");
+  assert.equal(cardOf(res, OTHER).input.total_usd, 351);
+  assert.equal(res.stats.matched, 1);
+  // no photo yet: each charge is tagged only
+  assert.deepEqual(itemsOf(rentalRun({ receipts: [rental({ photo_ref: null })] }), OTHER).map((i) => [i.changes, i.parts.map((p) => p.changes)]),
+    [[["tag"], [["tag"], ["tag"]]]]);
+  // the job has no project yet: a note naming every charge, the receipt's total in its detail
+  assert.deepEqual(noteOf(rentalRun({ jobs: [chena({ link: null })] }), "995d2795"), {
+    receipt_id: "995d2795", job_id: OTHER, amount: 351, receipt_date: "2026-10-07", state: "unmatched",
+    qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0", qbo_customer_id: null,
+    parts: [{ qbo_txn_id: "10615", qbo_sync_token: "0", qbo_total: 126.9, qbo_date: "2026-10-02" },
+      { qbo_txn_id: "10661", qbo_sync_token: "0", qbo_total: 224.1, qbo_date: "2026-10-07" }],
+    detail: { reason: "needs_job_link", qbo_account_name: "1658 - Bank of America AK Air CC", qbo_total: 351 },
+  });
+});
+
+test("two sets that add up to the receipt, or one set two receipts could use: a conflict (ambiguous_split) naming the charges, and no write", () => {
+  let res = rentalRun({ purchases: [p10615(), p10661(), charge("10700", "2026-10-03", 200), charge("10701", "2026-10-07", 151)] });
+  assert.deepEqual(res.cards, []);
+  assert.deepEqual(noteOf(res, "995d2795"), { receipt_id: "995d2795", job_id: OTHER, amount: 351, receipt_date: "2026-10-07",
+    state: "conflict", qbo_txn_type: null, qbo_txn_id: null, qbo_sync_token: null, qbo_customer_id: null,
+    detail: { reason: "ambiguous_split", candidates: ["10615", "10661", "10700", "10701"] } });
+  res = rentalRun({ receipts: [rental(), rental({ id: "995d2796" })] });
+  assert.deepEqual(res.notes.map((n) => [n.receipt_id, n.detail.reason, n.detail.candidates]),
+    [["995d2795", "ambiguous_split", ["10615", "10661"]], ["995d2796", "ambiguous_split", ["10615", "10661"]]]);
+  assert.deepEqual(res.cards, []);
+  // a charge one receipt could be on its own is never used to make up another's total
+  res = rentalRun({ receipts: [rental(), rental({ id: "rz-out", receipt_date: "2026-10-02", amount: 126.9 })] });
+  assert.deepEqual(itemsOf(res, OTHER).map((i) => [i.receipt_id, i.qbo_txn_id, "parts" in i]), [["rz-out", "10615", false]]);
+  assert.equal(noteOf(res, "995d2795").detail.reason, "waiting_feed");
+});
+
+test("a receipt in parts only when every guard holds: equipment, by card, 3 days old, untouched charges of one account, the last on the receipt's day", () => {
+  const outcome = (over) => {
+    const res = rentalRun(over);
+    const n = noteOf(res, "995d2795");
+    return n ? n.detail.reason : itemsOf(res, OTHER).map((i) => (i.parts ?? []).map((p) => p.qbo_txn_id).join("+")).join();
+  };
+  assert.equal(outcome({}), "10615+10661");
+  // two days old: the closing charge may not have posted, so a look-alike set could still show
+  assert.equal(outcome({ today: "2026-10-09" }), "waiting_feed");
+  assert.equal(outcome({ receipts: [rental({ category: "materials" })] }), "waiting_feed");
+  assert.equal(outcome({ receipts: [rental({ card_last4: "" })] }), "waiting_feed");
+  assert.equal(outcome({ receipts: [rental({ card_last4: "3176" })] }), "waiting_feed");                  // another card
+  assert.equal(outcome({ receipts: [rental({ paid_with: "account" })] }), "store_not_entered");
+  // a charge someone touched: a DocNumber naming another agreement, a job tag (even this job's), a document
+  for (const touched of [p10615({ docNumber: "284100" }), p10615({ lines: [line({ amount: 126.9, accountId: "1150040005", customerId: "502" })] }),
+    p10615({ attachments: ["agreement.pdf"], hasAttachment: true })]) {
+    assert.equal(outcome({ purchases: [touched, p10661()] }), "waiting_feed", JSON.stringify(touched.docNumber + touched.attachments));
+  }
+  assert.equal(outcome({ purchases: [p10615({ docNumber: "284290" }), p10661()] }), "10615+10661");   // the receipt's own number is no harm
+  assert.equal(outcome({ purchases: [p10615(), p10661({ accountId: "240" })] }), "waiting_feed");      // two accounts
+  assert.equal(outcome({ purchases: [p10615(), p10661({ txnDate: "2026-10-05" })] }), "waiting_feed"); // no charge at return
+  assert.equal(outcome({ purchases: [p10615({ txnDate: "2026-09-22" }), p10661()] }), "waiting_feed"); // checkout over 14 days before
+  assert.equal(outcome({ purchases: [p10615({ credit: true }), p10661()] }), "waiting_feed");
+  assert.equal(outcome({ purchases: [p10615({ vendorName: "Home Depot", note: "" }), p10661()] }), "waiting_feed");
+  // a charge another receipt holds
+  const held = { receipt_id: "r9", job_id: ALSTON, state: "in_qbo", qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0",
+    qbo_customer_id: "112", amount: 126.9, receipt_date: "2026-10-02", detail: {}, parts: null };
+  assert.equal(outcome({ receipts: [rental(), hd({ id: "r9", amount: 1 })], links: [held], jobs: [chena(), job({ link: LINK })] }), "waiting_feed");
+  // switched off: splits false, the bills not read (the default follows them), or v1
+  assert.equal(outcome({ splits: false }), "waiting_feed");
+  assert.equal(outcome({ bills: null }), "waiting_feed");
+  assert.equal(outcome({ bills: null, splits: true }), "10615+10661");      // only listBills failed: the lane keeps splits on
+  assert.equal(noteOf(run({ receipts: [rental()], purchases: [p10615(), p10661()], jobs: [chena()], today: RENTAL_TODAY }), "995d2795").detail.reason,
+    "waiting_feed");
+});
+
+test("a second try: a KEEP_FAILED refusal keeps the failed row while nothing moved; anything moved goes on a new card, marked refile", () => {
+  assert.ok(KEEP_FAILED.has("cancelled"));
+  const changed = { error: "changed_in_qbo: Purchase 10577 changed in QuickBooks since the card was filed" };
+  kept(again([failedRow(changed)]), "nothing moved");
+  // the same refusal, but the expense's SyncToken moved: a second try on a new card
+  let res = again([failedRow(changed)], { purchases: [p10577({ syncToken: "3" })] });
+  assert.deepEqual(itemsOf(res).map((i) => [i.receipt_id, i.qbo_sync_token, i.refile]),
+    [["r1", "3", { proposal_id: PROP1, error: "changed_in_qbo", why: "Purchase 10577 changed in QuickBooks since the card was filed" }]]);
+  assert.equal(cardOf(res).rationale,
+    "1 receipt on 2156 Alston rd. matches a QuickBooks expense that has no job tag or photo; 1 is a second try after the last update failed.");
+  assert.equal(res.stats.owned.failed, 0);
+  // the receipt's date, its photo, or the job's project moved: the same
+  for (const [what, over] of [["date", { receipts: [hd({ receipt_date: "2026-10-01" })] }], ["photo", { receipts: [hd({ photo_ref: photo(9) })] }],
+    ["project", { jobs: [job({ link: { ...LINK, qbo_customer_id: "272", qbo_project_ref: null } })] }]]) {
+    assert.deepEqual(itemsOf(again([failedRow(changed)], over)).map((i) => i.refile?.error), ["changed_in_qbo"], what);
+  }
+  // marked dead by hand: cancelled, kept until something moves
+  for (const error of ["cancelled: marked dead by hand", "cancelled: Branden, booked by hand on 10/8"]) kept(again([failedRow({ error })]), error);
+  assert.deepEqual(itemsOf(again([failedRow({ error: "cancelled: marked dead by hand" })], { purchases: [p10577({ syncToken: "1" })] }))
+    .map((i) => i.refile), [{ proposal_id: PROP1, error: "cancelled", why: "marked dead by hand" }]);
+  // any other failure goes again at once, to the same expense
+  res = again([failedRow({ error: "qbo_throttled: QuickBooks asked us to slow down" })]);
+  assert.deepEqual(itemsOf(res).map((i) => [i.qbo_txn_id, i.refile]),
+    [["10577", { proposal_id: PROP1, error: "qbo_throttled", why: "QuickBooks asked us to slow down" }]]);
+  // a failed row whose transaction is not tonight's match (another expense, or none): kept, someone may have changed the books on purpose
+  kept(again([failedRow({ error: "qbo_throttled: x" }, { qbo_txn_id: "10500" })]), "another expense");
+  kept(again([failedRow({ error: "qbo_throttled: x" })], { purchases: [] }), "none");
+  // QuickBooks has it right now (the office fixed it by hand): a note replaces the failed row
+  res = again([failedRow(changed)], { purchases: [p10577({ syncToken: "4", lines: [line({ amount: 1369.5, ...POLLEN })], attachments: ["r.jpg"], hasAttachment: true })] });
+  assert.deepEqual([noteOf(res, "r1").state, noteOf(res, "r1").parts, res.cards.length, res.stats.owned.failed], ["in_qbo", null, 0, 0]);
+  // a store invoice whose entry failed is entered again, marked the same way
+  res = runV2({ receipts: [sbs()], jobs: [job({ link: LINK })], storeAccounts: STORES,
+    links: [failedRow({ error: "qbo_unavailable: QuickBooks is down" }, { receipt_id: "r2", qbo_txn_id: null, qbo_sync_token: null, amount: 212.28,
+      receipt_date: "2026-09-28", detail: { read_photo_ref: photo(2), error: "qbo_unavailable: QuickBooks is down" } })] });
+  assert.deepEqual(itemsOf(res).map((i) => [i.changes, i.refile.error]), [[["create", "attach"], "qbo_unavailable"]]);
+});
+
+test("one automatic retry per code: a second try that dies of the same code is kept; another code, or anything moved, goes again", () => {
+  // the queued row of a second try keeps its marker (detail.refile); the trigger then writes the new error
+  const second = (error, refileError) => failedRow({ error, refile: { proposal_id: PROP1, error: refileError, why: "QuickBooks asked us to slow down" } },
+    { proposal_id: PROP2 });
+  kept(again([second("qbo_throttled: QuickBooks asked us to slow down", "qbo_throttled")]), "the same code twice");
+  kept(again([second("QuickBooks went away", "failed")]), "no code, twice");
+  assert.deepEqual(itemsOf(again([second("qbo_unavailable: QuickBooks is down", "qbo_throttled")])).map((i) => i.refile),
+    [{ proposal_id: PROP2, error: "qbo_unavailable", why: "QuickBooks is down" }]);
+  assert.deepEqual(itemsOf(again([second("qbo_throttled: QuickBooks asked us to slow down", "qbo_throttled")], { purchases: [p10577({ syncToken: "1" })] }))
+    .map((i) => i.refile.error), ["qbo_throttled"]);
+});
+
+test("a declined second try stays declined while it is the same item; anything different goes on the new card", () => {
+  const f = failedRow({ error: "qbo_throttled: QuickBooks asked us to slow down", refiled_proposal_id: PROP2.toUpperCase() });
+  const [it] = itemsOf(again([f]));
+  assert.deepEqual(it.refile, { proposal_id: PROP1, error: "qbo_throttled", why: "QuickBooks asked us to slow down" });
+  const other = { ...it, receipt_id: "r9", qbo_txn_id: "10999", refile: undefined };
+  const card = (status, items) => new Map([[PROP2, { status, items: JSON.parse(JSON.stringify(items)) }]]);
+  // the owner declined the card that held it (another receipt's line beside it), or approved that card without it
+  for (const status of ["declined", "executed"]) kept(again([f], { answered: card(status, [other, it]) }), status);
+  // keys in another order are the same item (jsonb keeps its own order)
+  const shuffled = Object.fromEntries(Object.entries(it).reverse());
+  assert.equal(canonical(shuffled), canonical(it));
+  kept(again([f], { answered: card("declined", [shuffled]) }), "shuffled");
+  // still open, or expired, superseded, failed: tonight's card is the try
+  for (const status of ["proposed", "expired", "superseded", "failed"]) {
+    assert.deepEqual(itemsOf(again([f], { answered: card(status, [it]) })).map((i) => i.receipt_id), ["r1"], status);
+  }
+  // something moved since the owner said no: the expense's SyncToken, the photo, the charge
+  for (const [what, over] of [["token", { purchases: [p10577({ syncToken: "1" })] }], ["photo", { receipts: [hd({ photo_ref: photo(9) })] }],
+    ["document", { purchases: [p10577({ attachments: ["statement.pdf"], hasAttachment: true })] }]]) {
+    assert.deepEqual(itemsOf(again([f], { answered: card("declined", [it]), ...over })).map((i) => i.receipt_id), ["r1"], what);
+  }
+  // a declined card that never held this receipt, or a card other than the one stamped, is no answer
+  assert.equal(itemsOf(again([f], { answered: card("declined", [other]) })).length, 1);
+  assert.equal(itemsOf(again([{ ...f, detail: { ...f.detail, refiled_proposal_id: PROP1 } }], { answered: card("declined", [it]) })).length, 1);
+});
+
+test("the second try's marker: the failed row's card, its code, and its words without the code, collapsed and cut to 120", () => {
+  const marker = (error, over = {}) => itemsOf(again([failedRow({ error }, over)], { purchases: [p10577({ syncToken: "1" })] }))[0].refile;
+  assert.deepEqual(marker("bad_request:   receipt_id\n  must be  text "), { proposal_id: PROP1, error: "bad_request", why: "receipt_id must be text" });
+  assert.deepEqual(marker("QuickBooks went away"), { proposal_id: PROP1, error: "failed", why: "QuickBooks went away" });
+  assert.deepEqual(marker(""), { proposal_id: PROP1, error: "failed" });
+  assert.deepEqual(marker("qbo_throttled:  "), { proposal_id: PROP1, error: "qbo_throttled" });
+  assert.equal(marker(`qbo_refused: ${"x".repeat(300)}`).why, "x".repeat(120));
+  // cut by characters: never half of one (jsonb refuses a lone surrogate)
+  const why = marker(`qbo_unavailable: ${"a".repeat(119)}\u{1F69A} and more`).why;
+  assert.equal(why, `${"a".repeat(119)}\u{1F69A}`);
+  assert.equal([...why].length, 120);
+  // the card id as the door compares it (lowercase); a row with none is still tried, unstamped
+  assert.equal(marker("qbo_throttled: x", { proposal_id: PROP1.toUpperCase() }).proposal_id, PROP1);
+  assert.deepEqual(marker("qbo_throttled: x", { proposal_id: null }), { proposal_id: null, error: "qbo_throttled", why: "x" });
+});
+
+test("a photo refusal on a row queued before 0025 (no read_photo_ref) is tried once more; one that recorded the photo is kept while it is the same", () => {
+  const legacy = (error) => {
+    const f = failedRow({ error });
+    delete f.detail.read_photo_ref;
+    return f;
+  };
+  for (const code of ["photo_missing", "photo_type", "photo_unreadable", "photo_too_big", "upload_refused"]) {
+    assert.ok(KEEP_FAILED.has(code));
+    assert.deepEqual(itemsOf(again([legacy(`${code}: the photo`)])).map((i) => [i.refile.error, i.read_photo_ref]), [[code, photo(1)]], code);
+    kept(again([failedRow({ error: `${code}: the photo` })]), code);
+    assert.equal(itemsOf(again([failedRow({ error: `${code}: the photo` })], { receipts: [hd({ photo_ref: photo(9) })] })).length, 1, code);
+  }
+  // a refusal that was not about the photo is kept on such a row
+  kept(again([legacy("tagged_other: Purchase 10577 is tagged to 264 Cindy dr.")]), "tagged_other");
+});
+
+test("v1 (no 0025): no bill, no parts, no second try, no key 0025 added; a failed receipt stays held and its expense is free", () => {
+  const res = run({ receipts: [hd(), dump(), rental({ job_id: ALSTON }), hd({ id: "r2" })], purchases: [p10577(), p10615(), p10661()],
+    bills: [b10625()], links: [failedRow({ error: "qbo_throttled: x", refiled_proposal_id: PROP2 })], jobs: [job({ link: LINK })],
+    today: "2026-10-10", answered: new Map([[PROP2, { status: "declined", items: [] }]]), splits: true });
+  // check() held every note and item to 0023: no parts, refile or Bill
+  assert.equal(res.stats.owned.failed, 1);
+  assert.equal(noteOf(res, "fnsb").detail.reason, "bill_not_checked");
+  assert.equal(noteOf(res, "995d2795").detail.reason, "waiting_feed");
+  assert.deepEqual(itemsOf(res).map((i) => [i.receipt_id, i.qbo_txn_id]), [["r2", "10577"]]);
+  assert.deepEqual(Object.keys(itemsOf(res)[0]), ["receipt_id", "vendor", "date", "amount", "receipt_no", "qbo_txn_type", "qbo_txn_id",
+    "qbo_sync_token", "qbo_doc_number", "qbo_account_name", "qbo_vendor_name", "qbo_total", "changes", "photo_refs", "project_ref", "read_photo_ref"]);
+});
+
+/** The filing door's items hash: md5 of jsonb_build_array(items, link, qbo_customer_id)::text, jsonb's
+    text being keys shortest first then by their bytes, ", " and ": " between. */
+function jsonbText(v) {
+  if (Array.isArray(v)) return `[${v.map(jsonbText).join(", ")}]`;
+  if (v && typeof v === "object") {
+    const keys = Object.keys(v).filter((k) => v[k] !== undefined)
+      .sort((a, b) => Buffer.byteLength(a) - Buffer.byteLength(b) || Buffer.compare(Buffer.from(a), Buffer.from(b)));
+    return `{${keys.map((k) => `${JSON.stringify(k)}: ${jsonbText(v[k])}`).join(", ")}}`;
+  }
+  return JSON.stringify(v);
+}
+const itemsHash = (input) => crypto.createHash("md5")
+  .update(jsonbText([input.items, input.link ?? null, input.qbo_customer_id ?? null])).digest("hex");
+
+test("an ordinary Purchase item is the same JSON with 0025 as without, so its card hashes the same and a card the owner declined is not offered again", () => {
+  const args = { receipts: oct7.RECEIPTS, purchases: oct7.PURCHASES, links: [], jobs: oct7.JOB_ROWS, projects: oct7.PROJECTS,
+    storeAccounts: null, today: oct7.TODAY };
+  const ids = oct7.JOB_ROWS.map((j) => j.id);
+  const v1 = check(matchReceipts(args), ids).cards;
+  const v2 = check(matchReceipts({ ...args, v2: true, bills: [] }), ids, true).cards;
+  assert.deepEqual(v2, v1);
+  assert.equal(JSON.stringify(v2[0].input.items), JSON.stringify(v1[0].input.items));    // key order too
+  // the hash the v1 worker's Alston card was filed under (the matcher at the branch's base, through jsonbText)
+  assert.equal(itemsHash(v1[0].input), "3c0e3330ab3318fc1346978da2ab57e9");
+  assert.equal(itemsHash(v2[0].input), "3c0e3330ab3318fc1346978da2ab57e9");
+  // and one line on its own
+  const one = (v2on) => matchReceipts({ receipts: [hd()], purchases: [p10577()], jobs: [job({ link: LINK })], projects: oct7.PROJECTS,
+    today: TODAY, ...(v2on ? { v2: true, bills: [] } : {}) }).cards[0].input.items;
+  assert.equal(JSON.stringify(one(true)), JSON.stringify(one(false)));
+  assert.equal(crypto.createHash("md5").update(jsonbText(one(true))).digest("hex"), crypto.createHash("md5").update(jsonbText(one(false))).digest("hex"));
 });
 
 /* ---- the Oct 7 books, as they were read ---- */

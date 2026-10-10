@@ -3,12 +3,16 @@
    ------------------------------------------------------------
    Receipts phase 3 (the QuickBooks link). The nightly matcher in the
    worker pairs each receipt with the QuickBooks expense (Purchase) it
-   belongs to; once the owner approves, the worker's qbo adapter asks
-   this proxy to finish that expense: tag its lines to the job's
-   QuickBooks project and attach the receipt photo. This module holds
-   every decision that work makes, so it can be unit-tested from Node
-   (node --experimental-strip-types purchases.test.mjs), the same split
-   as payments.ts. index.ts only does the fetching.
+   belongs to, or with the two or three card charges it was paid in; once
+   the owner approves, the worker's qbo adapter asks this proxy to finish
+   them: tag their lines to the job's QuickBooks project and attach the
+   receipt photo. Bills (Bill: the dump tickets the office books on
+   account) are only READ here (listBills, so the matcher can note them);
+   nothing in this module writes a bill, and completePurchase refuses one.
+   This module holds every decision that work makes, so it can be
+   unit-tested from Node (node --experimental-strip-types
+   purchases.test.mjs), the same split as payments.ts. index.ts only does
+   the fetching.
 
    The rules that keep the books safe:
    • Never a second expense for something already in QuickBooks. A
@@ -22,6 +26,8 @@
      sends every line exactly as read and only adds CustomerRef (in the
      line's detail) and ProjectRef (beside it, where QuickBooks keeps
      it). Accounts, classes, amounts and memos are never touched.
+   • Never a write to Accounts Payable: a Bill is read, never tagged,
+     never given a photo, never entered.
    • Every write is idempotent by itself: a retry adopts its own tag,
      its own "[r:<receipt id>]" attachment and its own entry, so the
      worker's outbox lane needs no lookup of its own.
@@ -34,6 +40,14 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 const str = (v: unknown) => (v == null ? "" : String(v));
 const DIGITS = /^[0-9]{1,20}$/;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The QuickBooks transactions the matcher reads: a card or bank expense
+    (Purchase), or a bill the office entered on account (Bill). Only a
+    Purchase is ever written (completePurchase); a Bill is only read. */
+export type TxnType = "Purchase" | "Bill";
+/** A receipt paid in two or three card charges is finished as that many
+    parts of one request (receipts.qbo_link items' parts[]). */
+export const MAX_PARTS = 3;
 
 /** The receipt photo gate. The app stores a display-sized JPEG (about
     0.5 MB); 20 MB bounds what one edge invocation will decode. */
@@ -168,6 +182,9 @@ export const purchasesQuery = (from: string, to: string, start: number) =>
   paged(`select * from Purchase where TxnDate >= '${escapeQ(from)}' and TxnDate <= '${escapeQ(to)}'`, start);
 export const attachablesSinceQuery = (since: string, start: number) =>
   paged(`select * from Attachable where MetaData.CreateTime >= '${escapeQ(since)}'`, start);
+/** listBills' read (bills are only read, never written). */
+export const billsQuery = (from: string, to: string, start: number) =>
+  paged(`select * from Bill where TxnDate >= '${escapeQ(from)}' and TxnDate <= '${escapeQ(to)}'`, start);
 export const purchaseAttachablesQuery = (purchaseId: string) =>
   `select * from Attachable where AttachableRef.EntityRef.Type = 'Purchase' and AttachableRef.EntityRef.Value = '${escapeQ(purchaseId)}'`;
 /** Store invoices: SBS enters the invoice number as DocNumber, Sherwin the
@@ -231,13 +248,14 @@ export function parseWindow(body: Q): { from: string; to: string } | { error: st
     after its date (bar a rare back-dated entry). */
 export const attachableSince = (from: string) => `${addDays(from, -7)}T00:00:00-08:00`;
 
-/** purchase Id → the FileNames of the Attachables linked to it. */
-export function attachmentsByPurchase(attachables: Q[]): Map<string, string[]> {
+/** transaction Id → the FileNames of the Attachables linked to it, for one
+    transaction type (a Purchase's and a Bill's ids are kept apart). */
+export function attachmentsByPurchase(attachables: Q[], type: TxnType = "Purchase"): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const a of attachables) {
     for (const ref of Array.isArray(a?.AttachableRef) ? a.AttachableRef : []) {
       const e = ref?.EntityRef;
-      if (str(e?.type) !== "Purchase" || !str(e?.value)) continue;
+      if (str(e?.type) !== type || !str(e?.value)) continue;
       const id = str(e.value);
       out.set(id, [...(out.get(id) ?? []), str(a.FileName)]);
     }
@@ -254,12 +272,28 @@ function detailOf(line: Q): Q | null {
 const TAGGABLE = new Set(["AccountBasedExpenseLineDetail", "ItemBasedExpenseLineDetail"]);
 const taggable = (line: Q) => TAGGABLE.has(str(line?.DetailType)) && !!detailOf(line);
 
+const compactLines = (lines: unknown) => (Array.isArray(lines) ? lines : []).map((l: Q) => {
+  const d = detailOf(l) ?? {};
+  return {
+    id: str(l?.Id),
+    amount: round2(Number(l?.Amount) || 0),
+    detailType: str(l?.DetailType),
+    accountId: str(d.AccountRef?.value),
+    accountName: str(d.AccountRef?.name),
+    classId: str(d.ClassRef?.value),
+    customerId: str(d.CustomerRef?.value),
+    customerName: str(d.CustomerRef?.name),
+    projectRef: str(l?.ProjectRef?.value),
+  };
+});
+
 /** One QuickBooks expense, cut down to what the matcher reads. Missing
     references are "" (never null) so "untagged" is one test. ProjectRef is
     read where QuickBooks keeps it: on the line, beside the detail. */
 export function compactPurchase(p: Q, files: string[] = []): Q {
   const acct = p?.AccountRef ?? p?.CreditCardAccountRef ?? {};
   return {
+    txnType: "Purchase",
     id: str(p?.Id),
     syncToken: str(p?.SyncToken),
     txnDate: str(p?.TxnDate),
@@ -272,20 +306,35 @@ export function compactPurchase(p: Q, files: string[] = []): Q {
     vendorName: str(p?.EntityRef?.name),
     docNumber: str(p?.DocNumber),
     note: str(p?.PrivateNote),
-    lines: (Array.isArray(p?.Line) ? p.Line : []).map((l: Q) => {
-      const d = detailOf(l) ?? {};
-      return {
-        id: str(l?.Id),
-        amount: round2(Number(l?.Amount) || 0),
-        detailType: str(l?.DetailType),
-        accountId: str(d.AccountRef?.value),
-        accountName: str(d.AccountRef?.name),
-        classId: str(d.ClassRef?.value),
-        customerId: str(d.CustomerRef?.value),
-        customerName: str(d.CustomerRef?.name),
-        projectRef: str(l?.ProjectRef?.value),
-      };
-    }),
+    lines: compactLines(p?.Line),
+    attachments: files,
+    hasAttachment: files.length > 0,
+  };
+}
+
+/** One QuickBooks bill in the same shape, so the matcher reads both the
+    same way: the account is Accounts Payable (APAccountRef), the vendor is
+    VendorRef, there is no payment type, and a bill is never a credit (a
+    vendor credit is another entity, not read). The FNSB dump tickets are
+    bills: DocNumber is the ticket number, one line, which the office tags
+    to the job when it enters the bill. Only read: the matcher notes a
+    bill, and nothing here ever writes one. */
+export function compactBill(b: Q, files: string[] = []): Q {
+  return {
+    txnType: "Bill",
+    id: str(b?.Id),
+    syncToken: str(b?.SyncToken),
+    txnDate: str(b?.TxnDate),
+    total: round2(Number(b?.TotalAmt) || 0),
+    credit: false,
+    paymentType: "",
+    accountId: str(b?.APAccountRef?.value),
+    accountName: str(b?.APAccountRef?.name),
+    vendorId: str(b?.VendorRef?.value),
+    vendorName: str(b?.VendorRef?.name),
+    docNumber: str(b?.DocNumber),
+    note: str(b?.PrivateNote),
+    lines: compactLines(b?.Line),
     attachments: files,
     hasAttachment: files.length > 0,
   };
@@ -309,10 +358,14 @@ export type Create = {
   account_id: string; vendor_id: string; payment_type: string; credit: boolean; doc_number: string;
   expense_account_id: string; class_id: string; txn_date: string; amount_abs: number; memo: string;
 };
+export type Part = { txnId: string; expectSyncToken: string; expectTotal: number | null; changes: string[] };
 export type CompleteRequest = {
   receiptId: string; jobId: string; proposalId: string; txnId: string;
   expectSyncToken: string; expectTotal: number | null; changes: string[];
   customerId: string; projectRef: string; photoRefs: string[]; fileBase: string; create: Create | null;
+  // a receipt paid in two or three card charges: every charge, in order
+  // (txnId, expectSyncToken and expectTotal above are then empty)
+  parts: Part[] | null;
 };
 
 export const MARKER_RE = /^media:([0-9a-f]{64}):(\d+)$/;
@@ -320,26 +373,58 @@ const RECEIPT_ID = /^[\w.:~-]{1,64}$/;   // a return slip is "<receipt id>~ret"
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHANGES = ["tag", "attach", "create"];
 
+/** A list of changes: non-empty, each one of `allowed`, no repeats. */
+const changesOf = (v: unknown, allowed: string[]): string[] | null => {
+  const c = Array.isArray(v) ? v.map(str) : [];
+  return c.length && c.every((x) => allowed.includes(x)) && new Set(c).size === c.length ? c : null;
+};
+
 /** The outbox payload (receipts.qbo_link@1), checked again here: the proxy
     is the last stop before QuickBooks, and a malformed row would fail the
-    same way on every retry, so it is a permanent refusal. */
+    same way on every retry, so it is a permanent refusal. Only an expense
+    (Purchase) is ever written: a bill names Accounts Payable, which this
+    proxy only reads, so a Bill is refused before anything is fetched. */
 export function parseCompleteRequest(b: Q): CompleteRequest {
   const bad = (m: string) => refuse("bad_request", m);
   const receiptId = str(b?.receipt_id);
   if (!RECEIPT_ID.test(receiptId)) throw bad("receipt_id is missing or not a receipt id");
   const proposalId = str(b?.proposal_id);
   if (!UUID.test(proposalId)) throw bad("proposal_id must be a uuid");
-  if (str(b?.qbo_txn_type) !== "Purchase") throw bad("qbo_txn_type must be 'Purchase'");
-  const changes = Array.isArray(b?.changes) ? b.changes.map(str) : [];
-  if (!changes.length || changes.some((c: string) => !CHANGES.includes(c)) || new Set(changes).size !== changes.length)
-    throw bad("changes must be a non-empty list of tag, attach, create");
+  if (str(b?.qbo_txn_type) !== "Purchase") {
+    throw bad("qbo_txn_type must be 'Purchase': only an expense is written; a bill is only read, never tagged or attached to");
+  }
+  const changes = changesOf(b?.changes, CHANGES);
+  if (!changes) throw bad("changes must be a non-empty list of tag, attach, create");
   const creating = changes.includes("create");
 
   const txnId = str(b?.qbo_txn_id);
   const expectSyncToken = str(b?.expect_sync_token);
   // the expense's TotalAmt at filing; the executor lets it be null
   const expectTotal = b?.expect_total == null ? null : Number(b.expect_total);
-  if (creating) {
+
+  // two or three card charges for one receipt: each is checked like a
+  // one-expense item, and the top level names none of them (a qbo-proxy
+  // older than parts refuses such a payload instead of tagging one charge)
+  let parts: Part[] | null = null;
+  if (b?.parts != null) {
+    if (!Array.isArray(b.parts) || b.parts.length < 2 || b.parts.length > MAX_PARTS)
+      throw bad(`parts must list 2 to ${MAX_PARTS} charges`);
+    if (creating) throw bad("only card charges already in QuickBooks (never entered) come in parts");
+    if (txnId || expectSyncToken) throw bad("a receipt in parts names its charges in parts, not in qbo_txn_id");
+    parts = b.parts.map((x: Q, i: number) => {
+      const id = str(x?.qbo_txn_id), tok = str(x?.expect_sync_token);
+      const tot = x?.expect_total == null ? null : Number(x.expect_total);
+      if (!DIGITS.test(id)) throw bad(`part ${i + 1} qbo_txn_id must be a QuickBooks id`);
+      if (!DIGITS.test(tok)) throw bad(`part ${i + 1} expect_sync_token must be a SyncToken`);
+      if (tot != null && !Number.isFinite(tot)) throw bad(`part ${i + 1} expect_total must be a number`);
+      // none: a charge already tagged to the job with a document, only checked
+      const ch = Array.isArray(x?.changes) && !x.changes.length ? [] : changesOf(x?.changes, ["tag", "attach"]);
+      if (!ch || ch.some((c) => !changes.includes(c))) throw bad(`part ${i + 1} changes must be tag and/or attach, from the item's changes`);
+      return { txnId: id, expectSyncToken: tok, expectTotal: tot == null ? null : round2(tot), changes: ch };
+    });
+    if (new Set(parts.map((x) => x.txnId)).size !== parts.length) throw bad("parts name the same charge twice");
+    if (changes.some((c) => !parts!.some((x) => x.changes.includes(c)))) throw bad("a change no part asks for");
+  } else if (creating) {
     if (txnId) throw bad("a create item carries no qbo_txn_id");
   } else {
     if (!DIGITS.test(txnId)) throw bad("qbo_txn_id must be a QuickBooks id");
@@ -383,7 +468,7 @@ export function parseCompleteRequest(b: Q): CompleteRequest {
   return {
     receiptId, jobId: str(b?.job_id), proposalId, txnId, expectSyncToken,
     expectTotal: expectTotal == null ? null : round2(expectTotal),
-    changes, customerId, projectRef, photoRefs, fileBase: str(b?.file_base), create,
+    changes, customerId, projectRef, photoRefs, fileBase: str(b?.file_base), create, parts,
   };
 }
 
@@ -518,17 +603,19 @@ export function createBody(r: CompleteRequest): Q {
 }
 
 /** Is this store invoice already in QuickBooks (entered by hand, or by an
-    earlier try of ours)? Same store account, and either the same number, or
-    a number that starts with ours (Sherwin's suffix) at the same amount and
-    direction. Our own marker wins a tie. */
+    earlier try of ours)? Same store account and direction (a purchase is
+    never a return's entry, nor a return a purchase's), and either the same
+    number, or a number that starts with ours (Sherwin's suffix) at the same
+    amount. Our own marker wins a tie. */
 export function pickExistingCreate(purchases: Q[], r: CompleteRequest): Q | null {
   const c = r.create!;
-  const onAccount = purchases.filter((p) => str(p?.AccountRef?.value) === c.account_id);
+  // the same direction always: a return slip often prints the original
+  // invoice's number, and the purchase is never the return's entry
+  const onAccount = purchases.filter((p) => str(p?.AccountRef?.value) === c.account_id && (p?.Credit === true) === c.credit);
   const exact = onAccount.filter((p) => str(p?.DocNumber) === c.doc_number);
   const prefix = onAccount.filter((p) =>
     str(p?.DocNumber).startsWith(c.doc_number) &&
-    Math.abs(round2(Number(p?.TotalAmt) || 0) - c.amount_abs) <= 0.005 &&
-    (p?.Credit === true) === c.credit);
+    Math.abs(round2(Number(p?.TotalAmt) || 0) - c.amount_abs) <= 0.005);
   const pool = exact.length ? exact : prefix;
   if (!pool.length) return null;
   const mark = receiptMarker(r.receiptId);
@@ -675,13 +762,32 @@ export type CompleteIO = {
   boundary?: () => string;
 };
 
+export type Fault = { code: string; message: string };
+export type PartReply = {
+  purchaseId: string; syncToken: string;
+  // refused: QuickBooks refused this charge after an earlier charge of the
+  // same receipt was written; nothing was written to this one, and
+  // syncToken is the one it was read with
+  tagged: "done" | "adopted" | "not_needed" | "refused";
+  attached: number; already_attached: boolean;
+  attach_error?: Fault;
+  error?: Fault;                                                      // why a refused charge was refused
+};
 export type CompleteReply = {
   ok: true; purchaseId: string; syncToken: string;
   tagged: "done" | "adopted" | "not_needed"; attached: number; already_attached: boolean;
   adopted: { create: boolean; tag: boolean; attach: number };
   // QuickBooks refused the photo after the tag or the entry was in: the
   // write stands (the row is sent and records the expense), the photo did not
-  attach_error?: { code: string; message: string };
+  attach_error?: Fault;
+  // a receipt paid in parts: how each charge went, in order (purchaseId and
+  // syncToken above are the first charge's)
+  parts?: PartReply[];
+  // a receipt paid in parts whose later charge QuickBooks refused after an
+  // earlier charge was written: the first such charge, as
+  // "part <k> of <n> (expense <id>): <why>". The written charges stand, so
+  // the answer is ok (the row is sent) and the receipt records the refusal.
+  part_error?: Fault;
 };
 
 async function readPurchase(io: CompleteIO, id: string): Promise<Q> {
@@ -719,10 +825,15 @@ async function tagStep(io: CompleteIO, id: string, r: CompleteRequest, wantTag: 
   }
 }
 
+type Files = Map<number, { contentType: string; bytes: Uint8Array }>;
+
 /** One approved receipt, end to end: (1) enter the store invoice when the
     item says 'create' and it is not in QuickBooks yet, (2) tag the expense
     to the job, (3) attach the photo. Each step adopts its own earlier work,
-    so a retry after a lost answer finishes instead of doubling.
+    so a retry after a lost answer finishes instead of doubling. A receipt
+    paid in two or three card charges does (2) and (3) for each charge in
+    turn, with the same photo and marker on each. Only an expense is ever
+    written: a bill is refused (bad_request) before anything is read.
 
     The job's project is checked first: the card was approved for the
     project in the payload, and an office relink or unlink since (while the
@@ -732,16 +843,12 @@ async function tagStep(io: CompleteIO, id: string, r: CompleteRequest, wantTag: 
     gone, or not a JPEG, PNG or PDF, refuses the whole change with nothing
     written. QuickBooks can still refuse an upload after the tag or the
     entry went in: that answers ok, with attach_error, since the write
-    stands and the receipt must record it. */
+    stands and the receipt must record it. In the same way, a charge of a
+    receipt in parts that QuickBooks refuses after an earlier charge was
+    written answers ok, with part_error (completeParts). */
 export async function completePurchase(raw: Q, io: CompleteIO): Promise<CompleteReply> {
   const r = parseCompleteRequest(raw);
-  const adopted = { create: false, tag: false, attach: 0 };
   const wantTag = r.changes.includes("tag") || r.changes.includes("create");
-  const attach = r.changes.includes("attach");
-  let id = r.txnId;
-  let expectSyncToken = r.expectSyncToken;
-  let purchase: Q | null = null;
-  let tagged: CompleteReply["tagged"] = "not_needed";
 
   // 0. the job is still linked to the project this approval tags to
   if (wantTag) {
@@ -752,6 +859,129 @@ export async function completePurchase(raw: Q, io: CompleteIO): Promise<Complete
         ` (this approval named ${r.customerId}); nothing was written`);
     }
   }
+
+  const files: Files = new Map();
+  return r.parts ? await completeParts(r, r.parts, io, files) : await completeOne(r, io, files);
+}
+
+/** A receipt paid in parts (the job's link already checked).
+
+    Before the first charge is written, every charge is read and its tag
+    decided (one tagged to another job, partly tagged, or changed since the
+    card refuses the whole receipt with nothing written), and the photo is
+    read and checked once (the gate). Then each charge is finished in order.
+    A retry starts again from the first charge and adopts what is done.
+
+    A charge that fails while the charges are being finished:
+    - worth retrying (QuickBooks down or throttling, a stale object twice):
+      the whole receipt throws, so the outbox retries; the retry adopts
+      what this try wrote.
+    - refused for good, with nothing of this receipt's in the books yet (no
+      earlier charge tagged, adopted, given our photo, or carrying a
+      document): the whole receipt is refused, named by its charge, as the
+      pre-check would have.
+    - refused for good after an earlier charge was written: refusing the
+      receipt would leave that write in the books with the receipt marked
+      failed, so the charge is recorded as tagged "refused" (with the
+      SyncToken it was read with and the error), the remaining charges are
+      still finished, and the answer is ok with part_error naming the first
+      refused charge. The totals (tagged, attached) leave refused charges
+      out. */
+async function completeParts(r: CompleteRequest, parts: Part[], io: CompleteIO, files: Files): Promise<CompleteReply> {
+  const total = parts.length;
+  const one = (part: Part): CompleteRequest => ({ ...r, txnId: part.txnId, expectSyncToken: part.expectSyncToken,
+    expectTotal: part.expectTotal, changes: part.changes, create: null, parts: null });
+  const label = (i: number, part: Part, message: string) => `part ${i + 1} of ${total} (expense ${part.txnId}): ${message}`;
+  const named = (i: number, part: Part, e: unknown) => {
+    const f = toCompleteError(e);
+    return new CompleteError(f.code, label(i, part, f.message), f.permanent, f.status);
+  };
+
+  // the pre-check: nothing is written unless every charge can be
+  const readTokens = new Map<string, string>();
+  for (const [i, part] of parts.entries()) {
+    try {
+      const p = await readPurchase(io, part.txnId);
+      readTokens.set(part.txnId, str(p.SyncToken));
+      const plan = tagPlan(p, r.customerId, part.changes.includes("tag"));
+      if (plan.action === "refuse") throw refuse(plan.code, plan.message);
+      if (plan.action === "tag") {
+        const stale = staleCheck(p, part.expectSyncToken, part.expectTotal);
+        if (stale) throw stale;
+      }
+    } catch (e) { throw named(i, part, e); }
+  }
+  if (parts.some((x) => x.changes.includes("attach"))) await fetchPhotoPages(r, io, files, r.photoRefs.map((_, i) => i + 1));
+
+  const replies: PartReply[] = [];
+  const adopted = { create: false, tag: false, attach: 0 };
+  // something of this receipt's is in the books on an earlier charge: its
+  // tag (written or adopted), a photo of ours (uploaded now or by an
+  // earlier try), or a document already there
+  let booksChanged = false;
+  let partError: Fault | undefined;
+  for (const [i, part] of parts.entries()) {
+    const read = readTokens.get(part.txnId) || part.expectSyncToken;
+    if (!part.changes.length) {
+      replies.push({ purchaseId: part.txnId, syncToken: read, tagged: "not_needed", attached: 0, already_attached: false });
+      continue;
+    }
+    let out: CompleteReply;
+    try {
+      // with an earlier charge written, a photo QuickBooks refuses here is
+      // reported with that write (attach_error), not as nothing done
+      out = await completeOne(one(part), io, files, booksChanged);
+    } catch (e) {
+      const f = toCompleteError(e);
+      if (!f.permanent || !booksChanged) throw named(i, part, e);
+      const error = { code: f.code, message: f.message.slice(0, 300) };
+      replies.push({ purchaseId: part.txnId, syncToken: read, tagged: "refused", attached: 0, already_attached: false, error });
+      partError ??= { code: f.code, message: label(i, part, f.message).slice(0, 300) };
+      continue;
+    }
+    adopted.tag ||= out.adopted.tag;
+    adopted.attach += out.adopted.attach;
+    replies.push({ purchaseId: out.purchaseId, syncToken: out.syncToken, tagged: out.tagged, attached: out.attached,
+      already_attached: out.already_attached, ...(out.attach_error ? { attach_error: out.attach_error } : {}) });
+    booksChanged ||= out.tagged !== "not_needed" || out.attached > 0 || out.already_attached || out.adopted.attach > 0;
+  }
+
+  // replies[0] is never a refused charge: the first charge comes before any
+  // write, and a refusal with nothing written threw above
+  const tagged = replies.some((x) => x.tagged === "done") ? "done" as const
+    : replies.some((x) => x.tagged === "adopted") ? "adopted" as const : "not_needed" as const;
+  const firstError = replies.findIndex((x) => x.attach_error);
+  return {
+    ok: true, purchaseId: replies[0].purchaseId, syncToken: replies[0].syncToken, tagged,
+    attached: replies.reduce((a, x) => a + x.attached, 0), already_attached: replies.some((x) => x.already_attached),
+    adopted, parts: replies,
+    ...(firstError >= 0 ? { attach_error: { code: replies[firstError].attach_error!.code,
+      message: `part ${firstError + 1} of ${replies.length}: ${replies[firstError].attach_error!.message}`.slice(0, 300) } } : {}),
+    ...(partError ? { part_error: partError } : {}),
+  };
+}
+
+/** Read and check the photo pages not read yet (the photo gate). */
+async function fetchPhotoPages(r: CompleteRequest, io: CompleteIO, files: Files, pages: number[]) {
+  for (const n of pages) {
+    if (files.has(n)) continue;
+    const text = await io.photo(mediaHash(r.photoRefs[n - 1]));
+    if (text == null) throw refuse("photo_missing", `the receipt photo (page ${n}) is no longer in storage`);
+    files.set(n, parseDataUrl(text));
+  }
+}
+
+/** One expense (the job's link already checked). booksChanged: an earlier
+    charge of the same receipt is already written, so a photo refused here
+    is reported with that write even when this expense needed no tag. */
+async function completeOne(r: CompleteRequest, io: CompleteIO, files: Files, booksChanged = false): Promise<CompleteReply> {
+  const adopted = { create: false, tag: false, attach: 0 };
+  const wantTag = r.changes.includes("tag") || r.changes.includes("create");
+  const attach = r.changes.includes("attach");
+  let id = r.txnId;
+  let expectSyncToken = r.expectSyncToken;
+  let purchase: Q | null = null;
+  let tagged: CompleteReply["tagged"] = "not_needed";
 
   // 1a. the store entry: theirs, or ours from an earlier try (nothing written yet)
   if (r.create) {
@@ -769,15 +999,7 @@ export async function completePurchase(raw: Q, io: CompleteIO): Promise<Complete
   // upload, read and checked. Run before the first write, or before the
   // photo step when nothing is written; a 'skip' plan reads no photo.
   let plan = null as AttachPlan | null;
-  const files = new Map<number, { contentType: string; bytes: Uint8Array }>();
-  const fetchPages = async (pages: number[]) => {
-    for (const n of pages) {
-      if (files.has(n)) continue;
-      const text = await io.photo(mediaHash(r.photoRefs[n - 1]));
-      if (text == null) throw refuse("photo_missing", `the receipt photo (page ${n}) is no longer in storage`);
-      files.set(n, parseDataUrl(text));
-    }
-  };
+  const fetchPages = (pages: number[]) => fetchPhotoPages(r, io, files, pages);
   const planFor = async (purchaseId: string) =>
     attachPlan(rowsOf(await io.query(purchaseAttachablesQuery(purchaseId)), "Attachable"), r.receiptId, r.photoRefs.length);
   let gated = false;
@@ -810,8 +1032,9 @@ export async function completePurchase(raw: Q, io: CompleteIO): Promise<Complete
   }
 
   // 3. the photo. Once the expense carries the job's tag (written now, or
-  // by an earlier try), a refusal here leaves the books changed: it is
-  // reported with the write instead of as nothing done.
+  // by an earlier try), or an earlier charge of the same receipt was
+  // written, a refusal here leaves the books changed: it is reported with
+  // the write instead of as nothing done.
   let attached = 0, alreadyAttached = false;
   let attachError: CompleteReply["attach_error"];
   if (attach) {
@@ -835,7 +1058,7 @@ export async function completePurchase(raw: Q, io: CompleteIO): Promise<Complete
       }
     } catch (e) {
       const f = toCompleteError(e);
-      if (!f.permanent || tagged === "not_needed") throw e;
+      if (!f.permanent || (tagged === "not_needed" && !booksChanged)) throw e;
       attachError = { code: f.code, message: f.message.slice(0, 300) };
     }
   }

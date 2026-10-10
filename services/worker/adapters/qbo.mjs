@@ -4,8 +4,10 @@
    adapters/sms.mjs goes through roybal-notify. qbo-proxy stays the only
    holder of the QuickBooks token (it refreshes and rotates it; a second
    refresher here would race it), and the only place that knows Intuit's
-   rules: it tags every line of the expense to the job's project, attaches
-   the receipt photo from field-media, or enters a store invoice first.
+   rules: it tags every line of the expense (or of each of the two or three
+   card charges one receipt was paid in) to the job's project,
+   attaches the receipt photo from field-media, or enters a store invoice
+   first.
 
    Exactly-once without an adopt lookup: findPrior answers null, because
    completePurchase is idempotent by itself and a retry is the adopt. It
@@ -84,12 +86,29 @@ export function qboAdapter(ctx) {
       }
       const status = [`tagged=${String(data.tagged ?? "")}`, `attached=${Number(data.attached) || 0}`];
       if (data.already_attached === true) status.push("already_attached=true");
+      // a receipt in parts: every charge and its new SyncToken (the first is
+      // also the provider id)
+      if (Array.isArray(p.parts)) {
+        const parts = Array.isArray(data.parts) ? data.parts : [];
+        const ids = parts.map((x) => `${String(x?.purchaseId ?? "")}:${String(x?.syncToken ?? "")}`);
+        if (parts.length !== p.parts.length || !ids.every((x) => /^[0-9]{1,20}:[0-9]{1,20}$/.test(x))) {
+          throw new DeliveryError(`qbo-proxy answered ok without each charge's id and SyncToken (${parts.length} of ${p.parts.length})`,
+            { permanent: false });
+        }
+        status.push(`parts=${ids.join(",")}`);
+      }
       // QuickBooks refused the photo after the tag or the new expense was
       // written: the row is sent (the write is real, and its id is recorded),
       // and the receipt shows the photo as not attached, with the code
       const attachError = data.attach_error && typeof data.attach_error === "object"
         ? String(data.attach_error.code ?? "").replace(/[^a-z_]/g, "").slice(0, 40) || "unknown" : "";
       if (attachError) status.push(`attach_error=${attachError}`);
+      // a receipt in parts whose later charge QuickBooks refused after an
+      // earlier one was written: sent as well (the written charge is real),
+      // and the receipt shows which charge was refused, with the code
+      const partError = data.part_error && typeof data.part_error === "object"
+        ? String(data.part_error.code ?? "").replace(/[^a-z_]/g, "").slice(0, 40) || "unknown" : "";
+      if (partError) status.push(`part_error=${partError}`);
       return { providerId: `Purchase:${id}:${token}`, providerStatus: status.join(";"), costUsd: 0 };
     },
   };

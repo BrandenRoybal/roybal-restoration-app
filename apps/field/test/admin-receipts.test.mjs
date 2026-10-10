@@ -4,7 +4,8 @@
    return, the pull races (compare-and-swap, graft), two devices changing
    one return, the phone check, the return windows page, the
    window-closing reminder, and QuickBooks (0023): each receipt's badge and
-   the job's project link.
+   the job's project link; then 0025's bills, receipts paid in parts, a
+   refused charge, a cancelled change and a second try's card.
    Run: node apps/field/test/admin-receipts.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -45,6 +46,8 @@ let qboMissing = false;              // 0023 not applied yet
 let qboProxyOld = false;             // a qbo-proxy from before phase 3: no listProjects
 let QL = [];                         // job_qbo_links
 const QR = [];                       // receipt_qbo_links
+let PROPS = [];                      // proposals (0025: the card holding a failed receipt's second try)
+let propsAnswer = 200;               // 403: a login that can't read proposals
 // listProjects rows as qbo-proxy compacts them (ids from the Oct 7 read)
 const PROJECTS = [
   { id: "444", name: "1192 Bemis Ct.", fqn: "1192 Bemis Ct.", parentId: "", isProject: true },
@@ -79,6 +82,11 @@ globalThis.fetch = async (url, opts = {}) => {
   if (u.includes("/rest/v1/receipt_qbo_links")) {
     const ids = JSON.parse("[" + new URL(u).searchParams.get("receipt_id").match(/^in\.\((.*)\)$/)[1] + "]");
     return json(200, QR.filter((r) => ids.includes(r.receipt_id)));
+  }
+  if (u.includes("/rest/v1/proposals")) {
+    if (propsAnswer !== 200) return json(propsAnswer, { code: "42501", message: "permission denied for table proposals" });
+    const ids = JSON.parse("[" + new URL(u).searchParams.get("id").match(/^in\.\((.*)\)$/)[1] + "]");
+    return json(200, PROPS.filter((p) => ids.includes(p.id)).map(({ id, status }) => ({ id, status })));
   }
   if (u.includes("/functions/v1/qbo-proxy")) {
     if (qboProxyOld) return json(404, { ok: false, error: "Unknown action: listProjects" });
@@ -523,6 +531,166 @@ await test("every QuickBooks state reads in the office's words", async () => {
   assert.equal(M.qboStatus({ state: "something_new", detail: {} }), null, "a state this page doesn't know shows nothing");
 });
 
+/* ---------- 0025: bills, a receipt paid in parts, a cancel, a second try ---------- */
+// FNSB dump ticket 01286734 → Bill 10625; Rental Zone 995d2795 ($351.00) =
+// Purchase 10615 ($126.90, Oct 2) + 10661 ($224.10, Oct 7), card 1658
+const BILL_DETAIL = { qbo_doc_number: "01286734", qbo_account_name: "Accounts Payable (A/P)", qbo_total: 34.04 };
+const RZ_ACCOUNT = "1658 - Bank of America AK Air CC";
+const rzParts = (t1 = "0", t2 = "0") => [
+  { qbo_txn_id: "10615", qbo_sync_token: t1, qbo_total: 126.9, qbo_date: "2026-10-02" },
+  { qbo_txn_id: "10661", qbo_sync_token: t2, qbo_total: 224.1, qbo_date: "2026-10-07" }];
+const CARD_OPEN = "cccccccc-0000-4000-8000-0000000000c1", CARD_NO = "cccccccc-0000-4000-8000-0000000000c2";
+const CARD_RAN = "cccccccc-0000-4000-8000-0000000000c3", CARD_GONE = "cccccccc-0000-4000-8000-0000000000c4";
+
+await test("0025 in the office's words: a bill, a receipt in parts, a refused charge, the new reasons, a cancel and a second try", async () => {
+  const st = (row, card) => M.qboStatus(row, card) || {};
+  // a bill is only ever noted: in QuickBooks, untagged, or not entered yet
+  const bill = st({ state: "in_qbo", qbo_txn_type: "Bill", qbo_txn_id: "10625", qbo_sync_token: "0", parts: null, detail: BILL_DETAIL });
+  assert.deepEqual([bill.text, bill.tone, bill.title],
+    ["In QuickBooks ✓ bill #10625", "disp-g", "QuickBooks bill 10625 · Accounts Payable (A/P) · doc # 01286734"]);
+  assert.equal(st({ state: "conflict", qbo_txn_type: "Bill", qbo_txn_id: "10625", parts: null, detail: { reason: "bill_untagged", ...BILL_DETAIL } }).text,
+    "Check in QuickBooks: booked as a bill without a job: tag it in QuickBooks");
+  const notEntered = st({ state: "unmatched", detail: { reason: "bill_not_entered" } });
+  assert.deepEqual([notEntered.text, notEntered.tone], ["No QuickBooks bill with this ticket's number yet", "disp-x"]);
+  assert.equal(st({ state: "unmatched", detail: { reason: "bill_not_checked" } }).text, "Booked as a bill: not checked", "the bills couldn't be read that night");
+  assert.equal(st({ state: "unmatched", qbo_txn_type: "Bill", qbo_txn_id: "10625", detail: { reason: "needs_job_link" } }).text, "Link the job to QuickBooks");
+  // a receipt paid in two card charges: both named, in and done alike
+  const split = { state: "in_qbo", qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0", parts: rzParts(),
+    detail: { qbo_account_name: RZ_ACCOUNT, qbo_total: 351 } };
+  assert.deepEqual([st(split).text, st(split).tone, st(split).title],
+    ["In QuickBooks ✓ #10615 + #10661", "disp-g", "QuickBooks expenses 10615 + 10661 · " + RZ_ACCOUNT]);
+  const sent = (status) => ({ ...split, state: "done", qbo_sync_token: "1", parts: rzParts("1", "1"),
+    detail: { ...split.detail, provider_id: "Purchase:10615:1", provider_status: status } });
+  assert.equal(st(sent("tagged=done;attached=2;parts=10615:1,10661:1")).text, "In QuickBooks ✓ #10615 + #10661");
+  assert.equal(st(sent("tagged=done;attached=1;parts=10615:1,10661:1;attach_error=photo_unreadable")).text,
+    "Tagged in QuickBooks #10615 + #10661; photo not attached: the photo couldn't be read");
+  // the later charge refused after the first was tagged: done, and it says which
+  const refused = st(sent("tagged=done;attached=1;parts=10615:1,10661:0;part_error=changed_in_qbo"));
+  assert.deepEqual([refused.text, refused.tone],
+    ["Tagged #10615 in QuickBooks; #10661 refused: changed in QuickBooks since the card was filed", "disp-b"]);
+  assert.equal(st(sent("tagged=done;attached=1;parts=10615:1,10661:0;part_error=tagged_other;attach_error=upload_refused")).text,
+    "Tagged #10615 in QuickBooks; #10661 refused: tagged to another job; photo not attached: QuickBooks refused it");
+  const three = { ...sent("tagged=done;attached=0;parts=10615:1,10616:1,10661:0;part_error=frobbed"),
+    parts: [rzParts("1")[0], { qbo_txn_id: "10616", qbo_sync_token: "1", qbo_total: 94, qbo_date: "2026-10-03" }, rzParts()[1]] };
+  assert.equal(st(three).text, "Tagged #10615 in QuickBooks; #10616 or #10661 refused: frobbed", "three charges: which later one isn't told");
+  assert.equal(st({ state: "done", qbo_txn_id: "10615", detail: { provider_status: "tagged=done;part_error=qbo_refused" } }).text,
+    "Tagged #10615 in QuickBooks; a charge refused: QuickBooks refused it");
+  // more than one set of charges adds up
+  assert.equal(st({ state: "conflict", qbo_txn_type: null, qbo_txn_id: null,
+    detail: { reason: "ambiguous_split", candidates: ["10615", "10661", "10700", "10701"] } }).text,
+  "Check in QuickBooks: more than one set of charges adds up to it");
+  // the office cancelled it: its own words, neutral, never "QuickBooks refused"
+  for (const [error, text] of [["cancelled: marked dead by hand", "Cancelled: marked dead by hand"],
+    ["cancelled: Branden: wrong job, tagged by hand", "Cancelled: Branden: wrong job, tagged by hand"], ["cancelled:", "Cancelled"]]) {
+    const c = st({ state: "failed", qbo_txn_id: "10577", detail: { error } });
+    assert.deepEqual([c.text, c.tone, c.title], [text, "disp-x", "QuickBooks expense 10577 · " + error], error);
+  }
+  assert.ok(!M.QBO_REFUSED_CODES.includes("cancelled"), "cancelled is no refusal");
+  // a second try that died of the same code: the matcher won't offer a third
+  const down = "qbo_unavailable: QuickBooks 503: Service Unavailable";
+  const twice = { state: "failed", qbo_txn_id: "10577",
+    detail: { error: down, refile: { proposal_id: CARD_RAN, error: "qbo_unavailable", why: "QuickBooks 503" } } };
+  assert.deepEqual([st(twice).text, st(twice).tone],
+    ["Couldn't update QuickBooks: QuickBooks 503: Service Unavailable · Tried twice; needs a fix", "disp-r"]);
+  assert.equal(st({ ...twice, detail: { ...twice.detail, refile: { proposal_id: null, error: "relinked" } } }).text,
+    "Couldn't update QuickBooks: QuickBooks 503: Service Unavailable", "a second try that died of something else");
+  assert.equal(st({ state: "failed", detail: { error: "lease expired", refile: { error: "failed" } } }).text,
+    "Couldn't update QuickBooks: lease expired · Tried twice; needs a fix", "no code either time");
+  // the card holding its second try: open, or answered without it
+  const refiled = { state: "failed", qbo_txn_id: "10577",
+    detail: { error: "relinked: the job was linked to another QuickBooks project", refiled_proposal_id: CARD_OPEN } };
+  assert.equal(st(refiled, "proposed").text, "QuickBooks refused: the job was linked to another QuickBooks project · On a new card in Approvals");
+  assert.equal(st(refiled, "declined").text, "QuickBooks refused: the job was linked to another QuickBooks project · Second try declined in Approvals");
+  assert.equal(st(refiled, "executed").text, "QuickBooks refused: the job was linked to another QuickBooks project · Second try declined in Approvals");
+  for (const card of [undefined, "", "expired", "superseded", "constructor", null, 7]) {
+    assert.equal(st(refiled, card).text, "QuickBooks refused: the job was linked to another QuickBooks project", String(card));
+  }
+  assert.equal(st({ ...twice, detail: { ...twice.detail, refiled_proposal_id: CARD_OPEN } }, "proposed").text,
+    "Couldn't update QuickBooks: QuickBooks 503: Service Unavailable · On a new card in Approvals", "the open card is the news");
+  // a row from before 0025 (no parts key, no type) reads exactly as it did, and so does parts: null
+  for (const [row, text] of [
+    [{ state: "in_qbo", qbo_txn_id: "10577", detail: { qbo_account_name: "3176 - Citi" } }, "In QuickBooks ✓ #10577"],
+    [{ state: "done", qbo_txn_id: "10577", detail: { provider_status: "tagged=done;attached=0;attach_error=qbo_refused" } },
+      "Tagged in QuickBooks #10577; photo not attached: QuickBooks refused it"],
+    [{ state: "failed", qbo_txn_id: "10566", detail: { error: "tagged_other: expense 10566 is already tagged" } },
+      "QuickBooks refused: expense 10566 is already tagged"],
+  ]) {
+    assert.deepEqual(M.qboStatus(row), M.qboStatus({ ...row, parts: null, qbo_txn_type: "Purchase" }));
+    assert.equal(M.qboStatus(row).text, text);
+    if (row.state === "in_qbo") assert.equal(M.qboStatus(row).title, "QuickBooks expense 10577 · 3176 - Citi");
+  }
+  assert.equal(st({ ...split, parts: "10615,10661" }).text, "In QuickBooks ✓ #10615", "parts that aren't a list: the row's own id");
+});
+
+await test("0025 on screen: every column read (a database without 0025 answers too), a split and a bill named, each second try's card read in one more select", async () => {
+  const saved = QR.splice(0);
+  const ret = (await credits()).find((c) => c.returnOf === "R2");
+  PROPS = [{ id: CARD_OPEN, status: "proposed" }, { id: CARD_NO, status: "declined" }];
+  QR.push(
+    { receipt_id: "R1", state: "done", qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "1", parts: rzParts("1", "1"),
+      detail: { qbo_account_name: RZ_ACCOUNT, qbo_total: 351, provider_status: "tagged=done;attached=2;parts=10615:1,10661:1" } },
+    { receipt_id: "R2", state: "failed", qbo_txn_type: "Purchase", qbo_txn_id: "10519", parts: null,
+      detail: { error: "qbo_unavailable: QuickBooks 503: Service Unavailable", refiled_proposal_id: CARD_OPEN.toUpperCase() } },
+    { receipt_id: "S1", state: "in_qbo", qbo_txn_type: "Bill", qbo_txn_id: "10625", parts: null, detail: BILL_DETAIL },
+    { receipt_id: "S2", state: "failed", qbo_txn_id: "10566",
+      detail: { error: "relinked: the job was linked to another QuickBooks project", refiled_proposal_id: CARD_NO } },
+    { receipt_id: ret.id, state: "failed", qbo_txn_id: "10600", detail: { error: "cancelled: marked dead by hand", refiled_proposal_id: CARD_GONE } });
+  const cardReads = (from) => calls.slice(from).filter((c) => c.u.includes("/rest/v1/proposals"));
+  const qbBadges = (id) => badgesOf(rowFor(id)).filter((b) => /QuickBooks|Cancelled/.test(b));
+  try {
+    let from = calls.length;
+    await go("#/receipts");
+    const reads = qboReads(from);
+    assert.equal(reads.length, 1);
+    assert.equal(new URL(reads[0].u).searchParams.get("select"), "*", "no column list: naming parts would answer 400 before 0025");
+    assert.equal(cardReads(from).length, 1, "one select of the cards");
+    const q = new URL(cardReads(from)[0].u).searchParams;
+    assert.equal(q.get("select"), "id,status");
+    assert.deepEqual(JSON.parse("[" + q.get("id").slice(4, -1) + "]").sort(), [CARD_OPEN, CARD_NO, CARD_GONE].sort(), "each card once");
+    assert.deepEqual(qbBadges("R1"), ["In QuickBooks ✓ #10615 + #10661"]);
+    assert.match(rowFor("R1").querySelector(".badge.disp-g[title]").title, /^QuickBooks expenses 10615 \+ 10661 · 1658 - Bank of America AK Air CC$/);
+    assert.deepEqual(qbBadges("R2"), ["Couldn't update QuickBooks: QuickBooks 503: Service Unavailable · On a new card in Approvals"]);
+    assert.deepEqual(badgesOf(rowFor("S1")), ["In QuickBooks ✓ bill #10625"]);
+    assert.deepEqual(badgesOf(rowFor("S2")), ["QuickBooks refused: the job was linked to another QuickBooks project · Second try declined in Approvals"]);
+    assert.deepEqual(qbBadges(ret.id), ["Cancelled: marked dead by hand"], "a card it can't find: nothing more");
+    assert.equal(rowFor(ret.id).querySelector(".badge.disp-x[title]").title, "QuickBooks expense 10600 · cancelled: marked dead by hand");
+    noJunk(view);
+    // a search repaints from what this page already read: neither is asked again
+    type(view.querySelector(".rl-search"), "home depot");
+    await settle(220);
+    assert.equal(cardReads(from).length, 1, "nothing asked twice");
+    assert.equal(qboReads(from).length, 1);
+    type(view.querySelector(".rl-search"), "");
+    await settle(220);
+    // a login that can't read proposals, or a read that fails: the badges, with no card line
+    for (const answer of [403, 503]) {
+      propsAnswer = answer;
+      from = calls.length;
+      await go("#/receipts");
+      assert.equal(cardReads(from).length, 1, String(answer));
+      assert.deepEqual(qbBadges("R2"), ["Couldn't update QuickBooks: QuickBooks 503: Service Unavailable"], String(answer));
+      assert.deepEqual(badgesOf(rowFor("S1")), ["In QuickBooks ✓ bill #10625"], String(answer));
+    }
+    propsAnswer = 200;
+    // no failed row names a card: proposals isn't read at all
+    for (const r of QR) delete r.detail.refiled_proposal_id;
+    from = calls.length;
+    await go("#/receipts");
+    assert.equal(cardReads(from).length, 0);
+    // the receipt's own page reads it too
+    QR.find((r) => r.receipt_id === "R2").detail.refiled_proposal_id = CARD_NO;
+    from = calls.length;
+    await go(`#/receipts/${JOB}/R2`);
+    assert.equal(cardReads(from).length, 1);
+    assert.ok(badgesOf(view.querySelector(".rl-badges"))
+      .includes("Couldn't update QuickBooks: QuickBooks 503: Service Unavailable · Second try declined in Approvals"));
+  } finally {
+    propsAnswer = 200;
+    PROPS = [];
+    QR.splice(0, QR.length, ...saved);
+  }
+});
+
 await test("Link to QuickBooks: the picker starts on the QuickBooks Time match, searches, and saves through job_qbo_link_set", async () => {
   await go("#/receipts");
   assert.equal(button(view, "Link to QuickBooks"), undefined, "no job header while every job is listed");
@@ -850,7 +1018,7 @@ await test("a return whose item was read again since won't open in Change: it sa
   assert.equal(view.querySelector(".rl-form"), null);
 });
 
-const stray = calls.filter((c) => !/\/rest\/v1\/(rpc\/role_is|rpc\/receipt_|rpc\/field_build_floor|receipt_vendors|receipt_return_reviews|job_qbo_links|receipt_qbo_links|rpc\/job_qbo_link_set)|\/functions\/v1\/qbo-proxy/.test(c.u));
+const stray = calls.filter((c) => !/\/rest\/v1\/(rpc\/role_is|rpc\/receipt_|rpc\/field_build_floor|receipt_vendors|receipt_return_reviews|job_qbo_links|receipt_qbo_links|proposals|rpc\/job_qbo_link_set)|\/functions\/v1\/qbo-proxy/.test(c.u));
 console.log("  (sync nudges: " + [...new Set(stray.map((c) => c.u.replace(/\?.*$/, "")))].join(", ") + ")");
 console.log(`\n${pass} passed`);
 process.exit(0);

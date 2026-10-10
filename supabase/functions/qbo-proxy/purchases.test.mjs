@@ -22,6 +22,7 @@ import {
   CompleteError, QboError, ProvenKeys, parseQboFault, classifyQboError, toCompleteError, bearerOf, sameKey,
   rowsOf, pagedRows, PAGE, projectsQuery, purchasesQuery, attachablesSinceQuery, purchaseAttachablesQuery, docNumberQuery,
   parseWindow, attachableSince, attachmentsByPurchase, compactPurchase, compactProject,
+  billsQuery, compactBill,
   parseCompleteRequest, tagPlan, staleCheck, tagLines, tagUpdateBody, receiptMarker, requestIdFor, createBody,
   pickExistingCreate, attachPlan, mediaHash, storageMissing, parseDataUrl, photoFileName, attachMetadata,
   multipartBody, uploadedAttachable, completePurchase, MAX_PHOTO_BYTES,
@@ -76,6 +77,37 @@ const A10566 = { FileName: "SW InvNo 80669163000926.pdf", FileAccessUri: "/v3/co
   ContentType: "application/pdf", documentId: "b206e01b-ce49-4b12-8617-3355b47f9333", domain: "QBO", sparse: false, Id: "1000004711", SyncToken: "1",
   MetaData: { CreateTime: "2026-10-02T08:15:11-07:00", LastUpdatedTime: "2026-10-02T08:15:13-07:00" },
   AttachableRef: [{ EntityRef: { value: "10566", type: "Purchase" }, IncludeOnSend: false }] };
+/* A dump ticket booked as a bill: the shape of Bill 10625 (FNSB, read
+   2026-10-10), here as it was before anyone tagged it. */
+const B10625 = {
+  SalesTermRef: { value: "3" }, DueDate: "2026-11-30", Balance: 34.04, domain: "QBO", sparse: false, Id: "10625", SyncToken: "0",
+  MetaData: { CreateTime: "2026-10-08T08:41:46-07:00", LastUpdatedTime: "2026-10-08T08:41:46-07:00" },
+  DocNumber: "01286734", TxnDate: "2026-10-01", CurrencyRef: { value: "USD", name: "United States Dollar" },
+  PrivateNote: "CONSTRUCTION MATRL", LinkedTxn: [],
+  Line: [{ Id: "1", LineNum: 1, Description: "CONSTRUCTION MATRL", Amount: 34.04, LinkedTxn: [], DetailType: "AccountBasedExpenseLineDetail",
+    AccountBasedExpenseLineDetail: { ClassRef: { value: "1000000001", name: "Operations:Construction" },
+      AccountRef: { value: "226", name: "Cost of Goods Sold:Waste disposal (Customer)" }, BillableStatus: "NotBillable", TaxCodeRef: { value: "NON" } },
+    CustomExtensions: [] }],
+  VendorRef: { value: "355", name: "FNSB Solid Waste" }, APAccountRef: { value: "99", name: "Accounts Payable (A/P)" }, TotalAmt: 34.04,
+};
+const A10625 = { FileName: "FNSB 01286734.jpg", Id: "1000004901", ContentType: "image/jpeg",
+  AttachableRef: [{ EntityRef: { value: "10625", type: "Bill" }, IncludeOnSend: false }] };
+
+/* One rental paid as two card charges (read 2026-10-10): Rental Zone
+   receipt $351.00 = 10615 ($126.90 at checkout) + 10661 ($224.10 at return). */
+const rental = (id, date, total, created) => ({
+  AccountRef: { value: "37", name: "1658 - Bank of America AK Air CC" }, PaymentType: "CreditCard",
+  EntityRef: { value: "83", name: "Airport Equipment Rental, Inc", type: "Vendor" }, Credit: false, TotalAmt: total, PurchaseEx: PX,
+  domain: "QBO", sparse: false, Id: id, SyncToken: "0", MetaData: { CreateTime: created, LastUpdatedTime: created }, CustomField: [],
+  TxnDate: date, CurrencyRef: { value: "USD", name: "United States Dollar" }, PrivateNote: "AIRPORT EQUIPMENT RENTAL FAIRBANKS    AK - RULE",
+  Line: [{ Id: "1", Description: "AIRPORT EQUIPMENT RENTAL FAIRBANKS    AK - RULE", Amount: total, DetailType: "AccountBasedExpenseLineDetail",
+    AccountBasedExpenseLineDetail: { ClassRef: { value: "1000000001", name: "Construction" },
+      AccountRef: { value: "1150040005", name: "Cost of Goods Sold:Equipment Rental" }, BillableStatus: "NotBillable", TaxCodeRef: { value: "NON" } },
+    CustomExtensions: [] }],
+});
+const P10615 = rental("10615", "2026-10-02", 126.9, "2026-10-06T07:22:52-07:00");
+const P10661 = rental("10661", "2026-10-07", 224.1, "2026-10-09T01:09:04-07:00");
+
 // an uploaded photo with no link (the QuickBooks UI leaves these behind)
 const A_ORPHAN = { FileName: "IMG_9547.jpg", Id: "1000004291", ContentType: "image/jpeg" };
 
@@ -116,6 +148,18 @@ const CREATE = { account_id: "53", vendor_id: "65", payment_type: "CreditCard", 
   memo: "Spenard 700665392 (from the job receipts app)" };
 const createPayload = (o = {}) => payload({ qbo_txn_id: "", expect_sync_token: "", expect_total: 0,
   changes: ["create", "attach"], create: CREATE, file_base: "Spenard 2026-10-03 700665392", ...o });
+
+/** A dump ticket's bill as an outbox payload would name it. Never sent by
+    the executor (a bill is only noted); the proxy refuses it unread. */
+const billPayload = (o = {}) => payload({ qbo_txn_type: "Bill", qbo_txn_id: "10625", expect_sync_token: "0", expect_total: 34.04,
+  file_base: "FNSB 2026-10-01 01286734", ...o });
+/** The Rental Zone receipt: two charges, the top level names neither. */
+const RZ = "995d2795-0000-4000-8000-000000000001";
+const RZ_JOB = "b1885000-0000-4000-8000-000000000001";
+const PART = (id, total, o = {}) => ({ qbo_txn_id: id, expect_sync_token: "0", expect_total: total, changes: ["tag", "attach"], ...o });
+const partsPayload = (o = {}) => payload({ receipt_id: RZ, job_id: RZ_JOB, qbo_txn_id: "", expect_sync_token: "", expect_total: 351,
+  customer_id: "502", project_ref: "807760362", file_base: "Rental Zone 2026-10-07 R284290",
+  parts: [PART("10615", 126.9), PART("10661", 224.1)], ...o });
 
 const fault = (code, detail = "x") => JSON.stringify({ Fault: { Error: [{ Message: "m", Detail: detail, code }], type: "ValidationFault" } });
 const enc = (s) => new TextEncoder().encode(s);
@@ -257,7 +301,7 @@ test("attachmentsByPurchase: only links to a Purchase count", () => {
 
 test("compactPurchase: the untagged Home Depot bank-rule expense (10577)", () => {
   assert.deepEqual(compactPurchase(P10577, []), {
-    id: "10577", syncToken: "0", txnDate: "2026-09-30", total: 1369.5, credit: false, paymentType: "CreditCard",
+    txnType: "Purchase", id: "10577", syncToken: "0", txnDate: "2026-09-30", total: 1369.5, credit: false, paymentType: "CreditCard",
     accountId: "36", accountName: "3176 - Citi - Home Depot Consumer Credit Card", vendorId: "25", vendorName: "Home Depot",
     docNumber: "", note: "THE HOME DEPOT FAIRBANKS AK - RULE",
     lines: [{ id: "1", amount: 1369.5, detailType: "AccountBasedExpenseLineDetail", accountId: "42",
@@ -308,7 +352,7 @@ test("parseCompleteRequest: the 10577 payload reads as written", () => {
   assert.deepEqual(r, {
     receiptId: RECEIPT, jobId: "a628eea5-0000-4000-8000-000000000001", proposalId: PROPOSAL, txnId: "10577",
     expectSyncToken: "0", expectTotal: 1369.5, changes: ["tag", "attach"], customerId: "112", projectRef: "412739523",
-    photoRefs: [marker(SHA1, PHOTO1)], fileBase: "Home Depot 2026-09-30 1303-00001-50615", create: null,
+    photoRefs: [marker(SHA1, PHOTO1)], fileBase: "Home Depot 2026-09-30 1303-00001-50615", create: null, parts: null,
   });
   assert.equal(parseCompleteRequest(payload({ project_ref: null })).projectRef, "");
   assert.equal(parseCompleteRequest(payload({ changes: ["attach"], customer_id: "" })).customerId, "");
@@ -343,7 +387,8 @@ test("parseCompleteRequest: what the executor lets be null is accepted", () => {
 test("parseCompleteRequest: every malformed payload is a permanent bad_request", () => {
   const bad = [
     payload({ receipt_id: "" }), payload({ receipt_id: "has space" }), payload({ receipt_id: "x".repeat(65) }),
-    payload({ proposal_id: "p1" }), payload({ qbo_txn_type: "Bill" }),
+    payload({ proposal_id: "p1" }), payload({ qbo_txn_type: "Invoice" }), payload({ qbo_txn_type: "" }),
+    createPayload({ qbo_txn_type: "Bill" }),
     payload({ changes: [] }), payload({ changes: ["tag", "tag"] }), payload({ changes: ["delete"] }), payload({ changes: "tag" }),
     payload({ qbo_txn_id: "" }), payload({ qbo_txn_id: "10577; drop" }), payload({ expect_sync_token: "" }),
     payload({ expect_total: "lots" }), payload({ customer_id: "" }), payload({ customer_id: "Pollen" }),
@@ -517,6 +562,17 @@ test("pickExistingCreate: same number on the same store account is the same invo
   assert.equal(pickExistingCreate([P10563], misread).Id, "10563");
 });
 
+test("pickExistingCreate: a return slip printing the original invoice's number never adopts the purchase", () => {
+  // the return of 1146.75 on Spenard 700665392: QuickBooks holds the purchase (a debit) under that number
+  const purchase = { ...P10563, Id: "10644", TotalAmt: 1146.75, DocNumber: "700665392", Credit: false };
+  const ret = parseCompleteRequest(createPayload({ create: { ...CREATE, credit: true } }));
+  assert.equal(pickExistingCreate([purchase], ret), null);
+  const entered = { ...purchase, Id: "10700", Credit: true };
+  assert.equal(pickExistingCreate([purchase, entered], ret).Id, "10700", "the credit itself is adopted");
+  // and a purchase never adopts a credit of the same number
+  assert.equal(pickExistingCreate([entered], parseCompleteRequest(createPayload())), null);
+});
+
 test("pickExistingCreate: Sherwin's longer DocNumber matches by prefix only at the same amount and direction", () => {
   const sw = (o = {}) => parseCompleteRequest(createPayload({ create: { ...CREATE, account_id: "52", vendor_id: "9", doc_number: "80669", amount_abs: 36, ...o } }));
   assert.equal(pickExistingCreate([P10566], sw()).Id, "10566");
@@ -658,7 +714,8 @@ test("uploadedAttachable: the new id, a Fault refused, silence retried", () => {
     QuickBooks does (5010 on a stale one) and replaces Line; `edits` makes
     someone else save the expense right after each of our next reads. */
 const JOB = "a628eea5-0000-4000-8000-000000000001";
-function qbo({ purchases = [P10577], attachables = [], photos = { [SHA1]: PHOTO1 }, links = { [JOB]: "112" }, uploadFails = null } = {}) {
+function qbo({ purchases = [P10577], attachables = [], photos = { [SHA1]: PHOTO1 }, links = { [JOB]: "112" },
+  uploadFails = null } = {}) {
   const w = {
     purchases: new Map(purchases.map((p) => [String(p.Id), structuredClone(p)])),
     attachables: structuredClone(attachables), photos, links, calls: [], posts: [], uploads: [], edits: 0, nextId: 10700,
@@ -666,8 +723,9 @@ function qbo({ purchases = [P10577], attachables = [], photos = { [SHA1]: PHOTO1
   w.io = {
     query: async (q) => {
       w.calls.push("query");
-      let m = /AttachableRef\.EntityRef\.Value = '(\d+)'/.exec(q);
-      if (m) return { QueryResponse: { Attachable: w.attachables.filter((a) => (a.AttachableRef ?? []).some((r) => r.EntityRef?.value === m[1])) } };
+      let m = /AttachableRef\.EntityRef\.Type = '(\w+)' and AttachableRef\.EntityRef\.Value = '(\d+)'/.exec(q);
+      if (m) return { QueryResponse: { Attachable: w.attachables.filter((a) => (a.AttachableRef ?? []).some((r) =>
+        r.EntityRef?.type === m[1] && r.EntityRef?.value === m[2])) } };
       m = /DocNumber LIKE '(\d+)%'/.exec(q);
       if (m) return { QueryResponse: { Purchase: [...w.purchases.values()].filter((p) => String(p.DocNumber ?? "").startsWith(m[1])) } };
       throw new Error("unexpected query " + q);
@@ -1009,6 +1067,318 @@ test("store entry adopted but tagged to another job: refused", async () => {
 });
 
 /* ============================================================
+   bills (a dump ticket) and receipts paid in parts (a rental)
+   ============================================================ */
+
+test("billsQuery: the window, paged like the expenses", () => {
+  assert.equal(billsQuery("2026-09-01", "2026-10-08", 1),
+    "select * from Bill where TxnDate >= '2026-09-01' and TxnDate <= '2026-10-08' startposition 1 maxresults 1000");
+});
+
+test("attachmentsByPurchase: with 'Bill', only links to a bill count", () => {
+  const m = attachmentsByPurchase([A10563, A10625, A_ORPHAN], "Bill");
+  assert.deepEqual([...m.keys()], ["10625"]);
+  assert.deepEqual(m.get("10625"), ["FNSB 01286734.jpg"]);
+});
+
+test("compactBill: the FNSB dump ticket reads like an expense, with its vendor and A/P account", () => {
+  assert.deepEqual(compactBill(B10625, ["FNSB 01286734.jpg"]), {
+    txnType: "Bill", id: "10625", syncToken: "0", txnDate: "2026-10-01", total: 34.04, credit: false, paymentType: "",
+    accountId: "99", accountName: "Accounts Payable (A/P)", vendorId: "355", vendorName: "FNSB Solid Waste",
+    docNumber: "01286734", note: "CONSTRUCTION MATRL",
+    lines: [{ id: "1", amount: 34.04, detailType: "AccountBasedExpenseLineDetail", accountId: "226",
+      accountName: "Cost of Goods Sold:Waste disposal (Customer)", classId: "1000000001", customerId: "", customerName: "", projectRef: "" }],
+    attachments: ["FNSB 01286734.jpg"], hasAttachment: true,
+  });
+  assert.deepEqual(compactBill({ Id: "1" }).lines, [], "an odd row does not throw");
+});
+
+test("parseCompleteRequest: a bill is only read, never written: every Bill payload is a permanent bad_request", () => {
+  for (const b of [billPayload(), billPayload({ changes: ["attach"], customer_id: "" }), billPayload({ changes: ["tag"] }),
+    billPayload({ qbo_txn_id: "", changes: ["create", "attach"], create: CREATE })]) {
+    assert.throws(() => parseCompleteRequest(b), (e) => e instanceof CompleteError && e.code === "bad_request" && e.permanent &&
+      e.status === 409 && /a bill is only read/.test(e.message), JSON.stringify(b.changes));
+  }
+});
+
+test("parseCompleteRequest: a receipt in two charges reads each charge; the top level names none", () => {
+  const r = parseCompleteRequest(partsPayload());
+  assert.equal(r.txnId, "");
+  assert.deepEqual(r.parts, [
+    { txnId: "10615", expectSyncToken: "0", expectTotal: 126.9, changes: ["tag", "attach"] },
+    { txnId: "10661", expectSyncToken: "0", expectTotal: 224.1, changes: ["tag", "attach"] },
+  ]);
+  // a charge already tagged by hand needs only the photo
+  const mixed = parseCompleteRequest(partsPayload({ parts: [PART("10615", 126.9, { changes: ["attach"] }), PART("10661", 224.1)] }));
+  assert.deepEqual(mixed.parts.map((x) => x.changes), [["attach"], ["tag", "attach"]]);
+});
+
+test("parseCompleteRequest: every malformed receipt in parts is a permanent bad_request", () => {
+  const bad = [
+    partsPayload({ parts: [PART("10615", 126.9)] }),
+    partsPayload({ parts: [PART("1", 1), PART("2", 1), PART("3", 1), PART("4", 1)] }),
+    partsPayload({ parts: "10615,10661" }),
+    partsPayload({ parts: [PART("10615", 126.9), PART("10615", 126.9)] }),
+    partsPayload({ qbo_txn_id: "10615" }), partsPayload({ expect_sync_token: "0" }),
+    partsPayload({ qbo_txn_type: "Bill" }),
+    partsPayload({ changes: ["create", "attach"], create: CREATE }),
+    partsPayload({ parts: [PART("10615", 126.9, { qbo_txn_id: "" }), PART("10661", 224.1)] }),
+    partsPayload({ parts: [PART("10615", 126.9, { expect_sync_token: "" }), PART("10661", 224.1)] }),
+    partsPayload({ parts: [PART("10615", "lots"), PART("10661", 224.1)] }),
+    partsPayload({ parts: [PART("10615", 126.9, { changes: ["create"] }), PART("10661", 224.1)] }),
+    partsPayload({ changes: ["tag"], parts: [PART("10615", 126.9, { changes: ["tag", "attach"] }), PART("10661", 224.1, { changes: ["tag"] })] }),
+    partsPayload({ parts: [PART("10615", 126.9, { changes: ["tag"] }), PART("10661", 224.1, { changes: ["tag"] })] }),
+  ];
+  for (const b of bad) {
+    assert.throws(() => parseCompleteRequest(b), (e) => e instanceof CompleteError && e.code === "bad_request" && e.permanent,
+      JSON.stringify(b.parts ?? b).slice(0, 160));
+  }
+});
+
+test("a v1 payload sent to this proxy without parts still names one expense (nothing changed for old rows)", () => {
+  const r = parseCompleteRequest(payload());
+  assert.equal(r.txnId, "10577");
+  assert.equal(r.parts, null);
+});
+
+test("tagUpdateBody and attachMetadata only ever name an expense", () => {
+  assert.deepEqual(Object.keys(tagUpdateBody(P10577, "112", "412739523")), ["Id", "SyncToken", "sparse", "PaymentType", "Line"]);
+  assert.equal(attachMetadata("10625", "a.jpg", "image/jpeg").AttachableRef[0].EntityRef.type, "Purchase");
+});
+
+test("a bill: completePurchase refuses it as bad_request before anything is read or written", async () => {
+  // an expense with the bill's id is in the books too: it is not touched either
+  const same = { ...structuredClone(P10577), Id: "10625" };
+  for (const b of [billPayload(), billPayload({ changes: ["attach"], customer_id: "" })]) {
+    const w = qbo({ purchases: [same], links: { [JOB]: "112" } });
+    const link = w.io.jobLink;
+    w.io.jobLink = async (job) => { w.calls.push("jobLink"); return link(job); };
+    await fails(completePurchase(b, w.io), (e) => {
+      assert.equal(e.code, "bad_request");
+      assert.ok(e.permanent);
+      assert.equal(e.status, 409);
+      assert.match(e.message, /a bill is only read/);
+    });
+    assert.deepEqual(w.calls, [], "nothing fetched: no job link, no read, no photo");
+    assert.equal(w.posts.length, 0);
+    assert.equal(w.uploads.length, 0);
+    assert.equal(w.purchases.get("10625").SyncToken, "0");
+  }
+});
+
+test("two charges: each read and checked first, then each tagged and given the same photo", async () => {
+  const w = qbo({ purchases: [P10615, P10661], links: { [RZ_JOB]: "502" } });
+  const r = await completePurchase(partsPayload(), w.io);
+  assert.equal(r.ok, true);
+  assert.equal(r.part_error, undefined);
+  assert.equal(r.purchaseId, "10615");
+  assert.equal(r.tagged, "done");
+  assert.equal(r.attached, 2);
+  assert.deepEqual(r.parts, [
+    { purchaseId: "10615", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
+    { purchaseId: "10661", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
+  ]);
+  assert.deepEqual(w.calls, ["get:10615", "get:10661", "photo",
+    "get:10615", "query", "update:10615", "upload", "get:10661", "query", "update:10661", "upload"], "the photo is read once");
+  for (const id of ["10615", "10661"]) {
+    const line = w.purchases.get(id).Line[0];
+    assert.deepEqual(line.AccountBasedExpenseLineDetail.CustomerRef, { value: "502" });
+    assert.deepEqual(line.ProjectRef, { value: "807760362" });
+  }
+  assert.deepEqual(w.uploads.map((u) => [u.meta.AttachableRef[0].EntityRef.value, u.meta.FileName]), [
+    ["10615", `Rental Zone 2026-10-07 R284290 p1 [r:${RZ}].jpg`],
+    ["10661", `Rental Zone 2026-10-07 R284290 p1 [r:${RZ}].jpg`],
+  ]);
+  // a retry after a lost answer adopts both and writes nothing
+  const posts = w.posts.length, ups = w.uploads.length;
+  const again = await completePurchase(partsPayload(), w.io);
+  assert.equal(again.tagged, "adopted");
+  assert.deepEqual(again.adopted, { create: false, tag: true, attach: 2 });
+  assert.equal(w.posts.length, posts);
+  assert.equal(w.uploads.length, ups);
+});
+
+test("two charges: the second tagged to another job refuses the whole receipt with nothing written", async () => {
+  const other = structuredClone(P10661);
+  other.Line[0].AccountBasedExpenseLineDetail.CustomerRef = { value: "444", name: "1192 Bemis Ct." };
+  const w = qbo({ purchases: [P10615, other], links: { [RZ_JOB]: "502" } });
+  await fails(completePurchase(partsPayload(), w.io), (e) => {
+    assert.equal(e.code, "tagged_other");
+    assert.ok(e.permanent);
+    assert.match(e.message, /^part 2 of 2 \(expense 10661\): expense 10661 is already tagged to 1192 Bemis Ct\./);
+  });
+  assert.equal(w.posts.length, 0);
+  assert.equal(w.uploads.length, 0);
+  assert.equal(w.purchases.get("10615").SyncToken, "0");
+});
+
+test("two charges: one changed since the card (new total) refuses before anything is written", async () => {
+  const changed = { ...structuredClone(P10661), SyncToken: "1", TotalAmt: 230 };
+  const w = qbo({ purchases: [P10615, changed], links: { [RZ_JOB]: "502" } });
+  await fails(completePurchase(partsPayload(), w.io), (e) => {
+    assert.equal(e.code, "changed_in_qbo");
+    assert.match(e.message, /^part 2 of 2 \(expense 10661\)/);
+  });
+  assert.equal(w.posts.length, 0);
+});
+
+test("two charges: the photo gone refuses before anything is written; a relink refuses before anything is read", async () => {
+  const w = qbo({ purchases: [P10615, P10661], links: { [RZ_JOB]: "502" }, photos: {} });
+  await fails(completePurchase(partsPayload(), w.io), (e) => assert.equal(e.code, "photo_missing"));
+  assert.equal(w.posts.length, 0);
+  const moved = qbo({ purchases: [P10615, P10661], links: { [RZ_JOB]: "444" } });
+  await fails(completePurchase(partsPayload(), moved.io), (e) => assert.equal(e.code, "relinked"));
+  assert.deepEqual(moved.calls, []);
+});
+
+test("two charges: a charge QuickBooks no longer has is purchase_missing, named", async () => {
+  const w = qbo({ purchases: [P10615], links: { [RZ_JOB]: "502" } });
+  await fails(completePurchase(partsPayload(), w.io), (e) => {
+    assert.equal(e.code, "purchase_missing");
+    assert.match(e.message, /^part 2 of 2 \(expense 10661\): QuickBooks has no expense 10661/);
+  });
+  assert.equal(w.posts.length, 0);
+});
+
+test("two charges: an upload refused on the second charge is reported with the writes, not as nothing done", async () => {
+  const refused = new QboError(400, fault("6000", "File too large"));
+  const w = qbo({ purchases: [P10615, P10661], links: { [RZ_JOB]: "502" } });
+  let n = 0;
+  const up = w.io.upload;
+  w.io.upload = async (...a) => { if (++n === 2) throw refused; return up(...a); };
+  const r = await completePurchase(partsPayload(), w.io);
+  assert.equal(r.ok, true);
+  assert.equal(r.attached, 1);
+  assert.equal(r.parts[1].tagged, "done");
+  assert.equal(r.attach_error.code, r.parts[1].attach_error.code);
+  assert.match(r.attach_error.message, /^part 2 of 2: /);
+});
+
+test("two charges: the first already tagged by hand needs only the photo; the second is tagged", async () => {
+  const mine = structuredClone(P10615);
+  mine.Line[0].AccountBasedExpenseLineDetail.CustomerRef = { value: "502" };
+  mine.SyncToken = "3";
+  const w = qbo({ purchases: [mine, P10661], links: { [RZ_JOB]: "502" } });
+  const r = await completePurchase(partsPayload({ parts: [PART("10615", 126.9, { expect_sync_token: "3", changes: ["attach"] }),
+    PART("10661", 224.1)] }), w.io);
+  assert.deepEqual(r.parts.map((x) => [x.tagged, x.attached]), [["not_needed", 1], ["done", 1]]);
+  assert.equal(w.posts.length, 1);
+});
+
+/* A charge refused after an earlier one was written (TASK: part_error). */
+
+/** QuickBooks refuses the tag update of one expense, every time. The
+    default is a validation fault (400, permanent); a 503 is worth retrying. */
+const refuseUpdateOf = (w, id, f = new QboError(400, fault("6000", "A business validation error has occurred"))) => {
+  const post = w.io.postPurchase;
+  w.io.postPurchase = async (body, requestId) => {
+    if (body.Id === id) { w.calls.push("refused:" + id); throw f; }
+    return post(body, requestId);
+  };
+  return post;
+};
+const REFUSED_6000 = "QuickBooks refused the change (400 / 6000): A business validation error has occurred";
+
+test("two charges: the second refused for good after the first was tagged and given the photo: ok, with part_error", async () => {
+  const w = qbo({ purchases: [P10615, P10661], links: { [RZ_JOB]: "502" } });
+  refuseUpdateOf(w, "10661");
+  const r = await completePurchase(partsPayload(), w.io);
+  assert.deepEqual(r, {
+    ok: true, purchaseId: "10615", syncToken: "1", tagged: "done", attached: 1, already_attached: false,
+    adopted: { create: false, tag: false, attach: 0 },
+    parts: [
+      { purchaseId: "10615", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
+      // the token it was read with, so the adapter's parts=<id>:<token> still reads
+      { purchaseId: "10661", syncToken: "0", tagged: "refused", attached: 0, already_attached: false,
+        error: { code: "qbo_refused", message: REFUSED_6000 } },
+    ],
+    part_error: { code: "qbo_refused", message: `part 2 of 2 (expense 10661): ${REFUSED_6000}` },
+  });
+  // nothing more was written for the second charge: refused at its tag, before its photo
+  assert.deepEqual(w.calls, ["get:10615", "get:10661", "photo",
+    "get:10615", "query", "update:10615", "upload", "get:10661", "query", "refused:10661"]);
+  assert.equal(w.posts.length, 1);
+  assert.deepEqual(w.uploads.map((u) => u.meta.AttachableRef[0].EntityRef.value), ["10615"]);
+  assert.equal(w.purchases.get("10661").SyncToken, "0");
+  assert.equal(w.purchases.get("10661").Line[0].AccountBasedExpenseLineDetail.CustomerRef, undefined);
+});
+
+test("three charges: the second refused, the third still finished; part_error names the first refused charge", async () => {
+  const P10662 = rental("10662", "2026-10-08", 15, "2026-10-09T02:00:00-07:00");
+  const three = partsPayload({ parts: [PART("10615", 126.9), PART("10661", 224.1), PART("10662", 15)] });
+  const w = qbo({ purchases: [P10615, P10661, P10662], links: { [RZ_JOB]: "502" } });
+  refuseUpdateOf(w, "10661");
+  const r = await completePurchase(three, w.io);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.parts.map((x) => [x.purchaseId, x.syncToken, x.tagged, x.attached]),
+    [["10615", "1", "done", 1], ["10661", "0", "refused", 0], ["10662", "1", "done", 1]]);
+  assert.equal(r.attached, 2, "the refused charge counts for nothing");
+  assert.equal(r.tagged, "done");
+  assert.deepEqual(r.part_error, { code: "qbo_refused", message: `part 2 of 3 (expense 10661): ${REFUSED_6000}` });
+  // the second and the third both refused: still the second, and both recorded
+  const both = qbo({ purchases: [P10615, P10661, P10662], links: { [RZ_JOB]: "502" } });
+  refuseUpdateOf(both, "10661");
+  refuseUpdateOf(both, "10662", new QboError(400, fault("6140", "Duplicate Document Number Error")));
+  const r2 = await completePurchase(three, both.io);
+  assert.deepEqual(r2.parts.map((x) => [x.tagged, x.error?.message.slice(0, 38) ?? ""]),
+    [["done", ""], ["refused", "QuickBooks refused the change (400 / 6"], ["refused", "QuickBooks refused the change (400 / 6"]]);
+  assert.match(r2.parts[2].error.message, /6140/);
+  assert.deepEqual(r2.part_error, { code: "qbo_refused", message: `part 2 of 3 (expense 10661): ${REFUSED_6000}` });
+  assert.equal(r2.attached, 1);
+  assert.equal(both.posts.length, 1);
+});
+
+test("two charges: the second refused when the first needed nothing and nothing of ours is there: the whole receipt is refused", async () => {
+  // 10615 tagged to the job by hand, with the bookkeeper's document: only checked
+  const done = structuredClone(P10615);
+  done.Line[0].AccountBasedExpenseLineDetail.CustomerRef = { value: "502" };
+  const doc = { FileName: "Rental Zone checkout.pdf", Id: "1000004999", ContentType: "application/pdf",
+    AttachableRef: [{ EntityRef: { value: "10615", type: "Purchase" }, IncludeOnSend: false }] };
+  const w = qbo({ purchases: [done, P10661], attachables: [doc], links: { [RZ_JOB]: "502" } });
+  refuseUpdateOf(w, "10661");
+  await fails(completePurchase(partsPayload({ parts: [PART("10615", 126.9, { changes: [] }), PART("10661", 224.1)] }), w.io), (e) => {
+    assert.ok(e instanceof CompleteError);
+    assert.equal(e.code, "qbo_refused");
+    assert.ok(e.permanent);
+    assert.equal(e.status, 409);
+    assert.equal(e.message, `part 2 of 2 (expense 10661): ${REFUSED_6000}`);
+  });
+  assert.equal(w.posts.length, 0);
+  assert.equal(w.uploads.length, 0);
+  assert.equal(w.purchases.get("10661").SyncToken, "0");
+});
+
+test("two charges: QuickBooks down on the second after the first was written: retried; the retry adopts the first and finishes", async () => {
+  const w = qbo({ purchases: [P10615, P10661], links: { [RZ_JOB]: "502" } });
+  const post = refuseUpdateOf(w, "10661", new QboError(503, "Service Unavailable"));
+  await fails(completePurchase(partsPayload(), w.io), (e) => {
+    assert.ok(e instanceof CompleteError);
+    assert.equal(e.code, "qbo_unavailable");
+    assert.equal(e.permanent, false);
+    assert.equal(e.status, 502);
+    assert.match(e.message, /^part 2 of 2 \(expense 10661\): QuickBooks 503/);
+  });
+  assert.equal(w.purchases.get("10615").SyncToken, "1", "the first charge's tag is in");
+  assert.equal(w.uploads.length, 1);
+  // the outbox retries the same row once QuickBooks is back
+  w.io.postPurchase = post;
+  w.calls.length = 0;
+  const r = await completePurchase(partsPayload(), w.io);
+  assert.equal(r.ok, true);
+  assert.equal(r.part_error, undefined);
+  assert.equal(r.tagged, "done");
+  assert.deepEqual(r.parts, [
+    { purchaseId: "10615", syncToken: "1", tagged: "adopted", attached: 0, already_attached: false },
+    { purchaseId: "10661", syncToken: "1", tagged: "done", attached: 1, already_attached: false },
+  ]);
+  assert.deepEqual(r.adopted, { create: false, tag: true, attach: 1 });
+  assert.deepEqual(w.calls, ["get:10615", "get:10661", "photo",
+    "get:10615", "query", "get:10661", "query", "update:10661", "upload"], "nothing written twice to the first charge");
+  assert.equal(w.posts.filter((x) => x.body.Id === "10615").length, 1);
+  assert.deepEqual(w.uploads.map((u) => u.meta.AttachableRef[0].EntityRef.value), ["10615", "10661"]);
+});
+
+/* ============================================================
    index.ts itself: the gate, the token refresh, the replies
    ============================================================ */
 
@@ -1096,6 +1466,7 @@ globalThis.fetch = async (input, init = {}) => {
       const page = (rows) => rows.slice(start - 1, start - 1 + 1000);
       if (/from Customer/.test(q)) return J({ QueryResponse: { Customer: page(CUSTOMERS) } });
       if (/from Purchase where TxnDate/.test(q)) return J({ QueryResponse: { Purchase: page(net.purchases) } });
+      if (/from Bill where TxnDate/.test(q)) return J({ QueryResponse: { Bill: page(net.bills) } });
       if (/from Attachable where MetaData/.test(q)) return J({ QueryResponse: { Attachable: page(net.attachables) } });
       if (/AttachableRef\.EntityRef\.Value = '(\d+)'/.test(q)) return J({ QueryResponse: {} });
     }
@@ -1124,7 +1495,7 @@ const reset = () => {
   db.row = freshToken(); db.race = null; db.updates.length = 0; db.links = { [JOB]: "112" };
   net.pings.length = 0; net.qbo.length = 0; net.refreshes = 0;
   net.pingAnswer = () => new Response("true", { status: 200 });
-  net.purchases = [P10577, P10563, P10566]; net.attachables = [A10563, A10566, A_ORPHAN];
+  net.purchases = [P10577, P10563, P10566]; net.attachables = [A10563, A10566, A_ORPHAN, A10625]; net.bills = [B10625];
 };
 
 test("index.ts: the function's own service key reads purchases, with no ping", async () => {
@@ -1141,6 +1512,33 @@ test("index.ts: the function's own service key reads purchases, with no ping", a
     "select * from Attachable where MetaData.CreateTime >= '2026-08-25T00:00:00-08:00' startposition 1 maxresults 1000",
   ]);
   assert.ok(net.qbo.every((c) => c.auth === "Bearer AT0" && c.minor === "70"));
+});
+
+test("index.ts: listBills reads the window's bills with their own documents, for the service key only", async () => {
+  reset();
+  const r = await call({ action: "listBills", from: "2026-09-01", to: "2026-10-08" }, OWN_KEY);
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.bills.map((b) => [b.txnType, b.id, b.docNumber, b.vendorName, b.attachments]),
+    [["Bill", "10625", "01286734", "FNSB Solid Waste", ["FNSB 01286734.jpg"]]]);
+  assert.deepEqual(net.qbo.map((c) => c.query), [
+    "select * from Bill where TxnDate >= '2026-09-01' and TxnDate <= '2026-10-08' startposition 1 maxresults 1000",
+    "select * from Attachable where MetaData.CreateTime >= '2026-08-25T00:00:00-08:00' startposition 1 maxresults 1000",
+  ]);
+  const listed = await call({ action: "listPurchases", from: "2026-09-01", to: "2026-10-08" }, OWN_KEY);
+  assert.ok(listed.body.purchases.every((p) => p.txnType === "Purchase" && !p.attachments.includes("FNSB 01286734.jpg")),
+    "a bill's document is not an expense's");
+  assert.equal((await call({ action: "listBills", from: "2026-06-01", to: "2026-10-08" }, OWN_KEY)).status, 400);
+});
+
+test("index.ts: completePurchase refuses a bill with 409 bad_request; QuickBooks is never called", async () => {
+  reset();
+  const r = await call({ action: "completePurchase", ...billPayload() }, OWN_KEY);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.ok, false);
+  assert.equal(r.body.code, "bad_request");
+  assert.equal(r.body.permanent, true);
+  assert.match(r.body.error, /^bad_request: .*a bill is only read/);
+  assert.deepEqual(net.qbo, [], "no read, no write: not /bill, not /purchase, not /upload");
 });
 
 test("index.ts: listPurchases pages past 1000 expenses", async () => {
@@ -1169,12 +1567,12 @@ test("index.ts: an sb_secret_ key PostgREST refuses gets nothing, and is asked a
   reset();
   net.pingAnswer = () => J({ code: "42501", message: "permission denied for function qbo_service_ping" }, 403);
   const bad = "sb_secret_not_the_service_role";
-  for (const action of ["listPurchases", "completePurchase"]) {
+  for (const action of ["listPurchases", "listBills", "completePurchase"]) {
     const r = await call({ action, from: "2026-09-01", to: "2026-09-02" }, bad);
     assert.equal(r.status, 401);
     assert.match(r.body.error, /server-only/);
   }
-  assert.equal(net.pings.length, 2);
+  assert.equal(net.pings.length, 3);
   assert.equal(net.qbo.length, 0);
   // a 200 that is not exactly true proves nothing either
   net.pingAnswer = () => new Response('"true"', { status: 200 });
@@ -1184,7 +1582,7 @@ test("index.ts: an sb_secret_ key PostgREST refuses gets nothing, and is asked a
 test("index.ts: the publishable key, a user JWT and no key at all are refused the server-only actions", async () => {
   reset();
   for (const key of ["sb_publishable_shipped_in_config_js", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1In0.c2ln", ""]) {
-    for (const action of ["listPurchases", "completePurchase"]) {
+    for (const action of ["listPurchases", "listBills", "completePurchase"]) {
       const r = await call({ action, from: "2026-09-01", to: "2026-09-02" }, key);
       assert.equal(r.status, 401, `${action} with ${key.slice(0, 14) || "no key"}`);
     }

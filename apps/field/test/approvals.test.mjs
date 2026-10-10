@@ -21,7 +21,10 @@
    only), what came of it counted from its outbox rows (updated, waiting,
    refused or failed and why, in words from qbo-proxy's error codes), the
    worker's "qbo" channel off, and a change the worker gave up on after the
-   card aged off coming back for 48 hours.
+   card aged off coming back for 48 hours. Then 0025: a rental paid in two
+   or three card charges as one line naming each, a second try and why the
+   last one didn't go, a charge refused after another was tagged, and a
+   change the office cancelled.
    Run: node --test test/approvals.test.mjs */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -1426,4 +1429,110 @@ test("QuickBooks receipts: an item or link of any odd shape still reads as words
     qboLook({ outbox: [{ proposal_id: qboCard.id, status: "dead", error: { code: 1 } }, { proposal_id: qboCard.id, status: null }] }));
   assert.deepEqual(outcome(junk, NOW), { text: "None of 2 updated in QuickBooks; 1 waiting; 1 failed: no reason given", tone: "bad" });
   assert.ok(!JUNK.test(outcome(junk, NOW).text));
+});
+
+/* ---------- 0025: a receipt paid in parts, a second try, a refused charge, a cancel ---------- */
+const CHENA = "1885 Chena Landings Lp.";
+const BOFA = "1658 - Bank of America AK Air CC";
+/* Rental Zone receipt 995d2795, $351.00 on Oct 7 = Purchase 10615 $126.90 at
+   checkout (Oct 2) + 10661 $224.10 at return (Oct 7), card 1658, as the
+   matcher files it: the top level is the first charge, every charge in parts */
+const rz = { receipt_id: "995d2795", vendor: "The Rental Zone (A Division of Airport Equipment Rentals)", date: "2026-10-07", amount: 351,
+  receipt_no: "R284290", qbo_txn_type: "Purchase", qbo_txn_id: "10615", qbo_sync_token: "0", qbo_doc_number: "", qbo_account_name: BOFA,
+  qbo_vendor_name: "Airport Equipment Rental, Inc", qbo_total: 126.9, changes: ["tag", "attach"], photo_refs: [sha("f")],
+  project_ref: "807760362", read_photo_ref: sha("f"),
+  parts: [{ qbo_txn_id: "10615", qbo_sync_token: "0", qbo_total: 126.9, qbo_date: "2026-10-02", changes: ["tag", "attach"] },
+    { qbo_txn_id: "10661", qbo_sync_token: "0", qbo_total: 224.1, qbo_date: "2026-10-07", changes: ["tag", "attach"] }] };
+const CHENA_ID = "c8a3e0d1-1885-4c1a-9b6e-0a2f4d8c1885";
+const rzInput = { ...qboInput, job_id: CHENA_ID, job_name: CHENA, qbo_customer_id: "502", qbo_name: CHENA, link: undefined, items: [rz], total_usd: 351 };
+const rzCard = { ...qboCard, id: "bbbbbbbb-0000-4000-8000-0000000000c5", job_id: CHENA_ID, input: rzInput };
+const RZ_LINE = "The Rental Zone (A Division of Airport Equipment Rentals) · Oct 7 · $351.00 → 2 QuickBooks charges, "
+  + `10615 ($126.90, Oct 2) + 10661 ($224.10, Oct 7) (Airport Equipment Rental, Inc, ${BOFA}): tag to ${CHENA}, attach the photo`;
+
+test("QuickBooks receipts (0025): a rental paid in two charges is one line naming both, with each charge's amount and date", () => {
+  const c = fromProposal(rzCard, QBO_LOOK);
+  assert.deepEqual(c.evidence.receipts, [{ id: "995d2795", text: RZ_LINE }]);
+  assert.equal(approveConfirm(c), `Update QuickBooks for 1 receipt on ${CHENA}?`, "one receipt, however many charges");
+  // three charges; a part with no total, date or id still reads as words
+  const three = { ...rz, parts: [rz.parts[0], { qbo_txn_id: "10616", qbo_total: 94, qbo_date: "2026-10-03" },
+    { qbo_txn_id: "10661", qbo_total: 130.1, qbo_date: "2026-10-07" }] };
+  const odd = { ...rz, qbo_vendor_name: "", qbo_account_name: "", photo_refs: [], changes: ["tag"],
+    parts: [{ qbo_txn_id: "10615", qbo_total: null, qbo_date: "10/02/2026" }, { qbo_total: NaN }, null, "x"] };
+  const more = fromProposal({ ...rzCard, input: { ...rzInput, items: [three, odd] } }, QBO_LOOK);
+  assert.deepEqual(more.evidence.receipts.map((x) => x.text), [
+    "The Rental Zone (A Division of Airport Equipment Rentals) · Oct 7 · $351.00 → 3 QuickBooks charges, "
+      + `10615 ($126.90, Oct 2) + 10616 ($94.00, Oct 3) + 10661 ($130.10, Oct 7) (Airport Equipment Rental, Inc, ${BOFA}): tag to ${CHENA}, attach the photo`,
+    "The Rental Zone (A Division of Airport Equipment Rentals) · Oct 7 · $351.00 → 4 QuickBooks charges, "
+      + `10615 + a charge + a charge + a charge: tag to ${CHENA}`,
+  ]);
+  for (const t of qboTexts(more)) assert.ok(!JUNK.test(t), t);
+  // one part, or none, is no receipt in parts: the v1 line, byte for byte
+  for (const parts of [[rz.parts[0]], [], null, "10615,10661"]) {
+    const one = fromProposal({ ...qboCard, input: { ...qboInput, items: [{ ...hd, parts }] } }, QBO_LOOK);
+    assert.deepEqual(one.evidence.receipts, [{ id: "r-1369", text: HD_LINE }], JSON.stringify(parts));
+  }
+  // and every v1 card reads as it did
+  assert.deepEqual(fromProposal(qboCard, QBO_LOOK).evidence.receipts, [{ id: "r-6788", text: HD2_LINE }, { id: "r-1369", text: HD_LINE }]);
+});
+
+test("QuickBooks receipts (0025): a second try says so, and why the last one didn't go", () => {
+  const PREV = "bbbbbbbb-0000-4000-8000-0000000000b9";
+  const line = (refile, item = hd, input = qboInput) =>
+    fromProposal({ ...qboCard, input: { ...input, items: [{ ...item, refile }] } }, QBO_LOOK).evidence.receipts[0].text;
+  assert.equal(line({ proposal_id: PREV, error: "qbo_unavailable", why: "QuickBooks 503: Service Unavailable" }),
+    HD_LINE + " · Trying again: last time QuickBooks was down");
+  assert.equal(line({ proposal_id: PREV, error: "relinked", why: "the job was linked to another QuickBooks project" }),
+    HD_LINE + " · Trying again: last time the job's QuickBooks project changed after approval");
+  assert.equal(line({ proposal_id: null, error: "failed", why: "lease expired (held by w1)" }),
+    HD_LINE + " · Trying again: last time lease expired (held by w1)", "no code: the words as they were");
+  assert.equal(line({ proposal_id: PREV, error: "failed" }), HD_LINE + " · Trying again: last time it didn't go through");
+  assert.equal(line({ proposal_id: PREV, error: "cancelled", why: "Branden: wrong job" }), HD_LINE + " · Trying again: last time it was cancelled");
+  assert.equal(line({ error: "constructor", why: "x ".repeat(100) }), HD_LINE + " · Trying again: last time " + "x ".repeat(60).slice(0, 119) + "…");
+  assert.equal(line({ proposal_id: PREV, error: "qbo_throttled" }, rz, rzInput), RZ_LINE + " · Trying again: last time QuickBooks was too busy");
+  // a marker of any other shape is no second try
+  for (const refile of [null, "qbo_unavailable", ["qbo_unavailable"], 7]) assert.equal(line(refile), HD_LINE, JSON.stringify(refile));
+  const c = fromProposal({ ...qboCard, input: { ...qboInput, items: [{ ...hd, refile: { error: null, why: null } }] } }, QBO_LOOK);
+  for (const t of qboTexts(c)) assert.ok(!JUNK.test(t), t);
+});
+
+test("QuickBooks receipts (0025): a charge refused after another was tagged is updated, and says so; a change the office cancelled says cancelled", () => {
+  const executed = { ...qboCard, status: "executed", approved_at: iso(-2), updated_at: iso(-2), result: { queued: 3, skipped: 0 },
+    input: { ...qboInput, items: [hd2, hd, rz] } };
+  const row = (status, provider_status = null, error = null) => ({ proposal_id: executed.id, status, error, provider_status,
+    next_attempt_at: iso(-2), created_at: iso(-2), updated_at: iso(-1) });
+  const SENT = "tagged=done;attached=1";
+  const PART = "tagged=done;attached=1;parts=10615:1,10661:0;part_error=changed_in_qbo";
+  const at = (rows, o = {}) => outcome(fromProposal({ ...executed, ...o }, qboLook({ outbox: rows })), NOW);
+  const alone = { result: { queued: 1 }, job_id: CHENA_ID, input: rzInput };
+  assert.deepEqual(at([row("sent", PART)], alone),
+    { text: "Tagged in QuickBooks; one charge refused: changed in QuickBooks since the card was filed", tone: "bad" });
+  assert.deepEqual(at([row("sent", "tagged=done;attached=0;parts=10615:1,10661:0;part_error=tagged_other;attach_error=upload_refused")], alone),
+    { text: "Tagged in QuickBooks; one charge refused: tagged to another job; photo not attached: QuickBooks refused the photo", tone: "bad" });
+  assert.deepEqual(at([row("sent", "tagged=done;parts=10615:1,10661:0;part_error=frobbed")], alone),
+    { text: "Tagged in QuickBooks; one charge refused: frobbed", tone: "bad" }, "a code this page doesn't know");
+  assert.deepEqual(at([row("sent", "tagged=done;attached=2;parts=10615:1,10661:1")], alone), { text: "Updated in QuickBooks", tone: "ok" });
+  assert.deepEqual(at([row("sent", SENT), row("sent", SENT), row("sent", PART)]),
+    { text: "All 3 updated in QuickBooks; 1 with a charge refused: changed in QuickBooks since the card was filed", tone: "bad" });
+  assert.deepEqual(at([row("sent", "tagged=done;attached=0;attach_error=photo_type"), row("sent", SENT), row("sent", PART)]),
+    { text: "All 3 updated in QuickBooks; 1 photo not attached: the photo isn't a JPEG, PNG or PDF; 1 with a charge refused: changed in QuickBooks since the card was filed", tone: "bad" });
+  assert.deepEqual(at([row("sent", PART), row("pending"), row("dead", null, "tagged_other: expense 10577 is already tagged to Bemis Ct in QuickBooks")]),
+    { text: "1 of 3 updated in QuickBooks; 1 with a charge refused: changed in QuickBooks since the card was filed; 1 waiting; 1 refused: tagged to another job", tone: "bad" });
+  // the office cancelled the queued change (outbox row marked dead, error 'cancelled: <who and why>'): its own verb, not a trouble
+  assert.deepEqual(at([row("dead", null, "cancelled: marked dead by hand")], alone),
+    { text: "Not updated in QuickBooks: cancelled (marked dead by hand)", tone: "no" });
+  assert.deepEqual(at([row("dead", null, "cancelled: Branden, wrong job; tagged it by hand")], alone),
+    { text: "Not updated in QuickBooks: cancelled (Branden, wrong job; tagged it by hand)", tone: "no" });
+  assert.deepEqual(at([row("dead", null, "cancelled:")], alone), { text: "Not updated in QuickBooks: cancelled", tone: "no" });
+  assert.deepEqual(at([row("sent", SENT), row("sent", SENT), row("dead", null, "cancelled: marked dead by hand")]),
+    { text: "2 of 3 updated in QuickBooks; 1 cancelled: marked dead by hand", tone: "no" });
+  assert.deepEqual(at([row("sent", SENT), row("pending"), row("dead", null, "cancelled: Branden")]),
+    { text: "1 of 3 updated in QuickBooks; 1 waiting; 1 cancelled: Branden", tone: "wait" });
+  assert.deepEqual(at([row("dead", null, "cancelled:"), row("dead", null, "qbo_unavailable: QuickBooks 503"),
+    row("dead", null, "tagged_other: expense 10584 is already tagged to Bemis Ct in QuickBooks")]),
+  { text: "None of 3 updated in QuickBooks; 1 refused: tagged to another job; 1 failed: QuickBooks was down; 1 cancelled", tone: "bad" });
+  // a dead row with no error at all is still "no reason given", as before
+  assert.deepEqual(at([row("dead", null, null)], alone), { text: "Not updated in QuickBooks: no reason given", tone: "bad" });
+  for (const rows of [[row("sent", PART)], [row("dead", null, "cancelled:")]]) {
+    for (const t of qboTexts(fromProposal({ ...executed, ...alone }, qboLook({ outbox: rows })))) assert.ok(!JUNK.test(t), t);
+  }
 });
