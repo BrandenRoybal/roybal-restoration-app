@@ -5,6 +5,7 @@ import { matchReceipts } from "../lanes/qbomatch.mjs";
 import { runJob, handlers } from "../lanes/queue.mjs";
 import { loadConfig } from "../config.mjs";
 import { fakeSupa, testConfig, recordingLog, fakeFetch, jobRow } from "./helpers.mjs";
+import { SupaError } from "../supa.mjs";
 import * as oct7 from "./qbo-oct7.fixture.mjs";
 
 const NOW = new Date("2026-10-08T20:00:00Z");   // noon in Anchorage, Oct 8
@@ -67,13 +68,22 @@ const projectRow = (j) => ({ id: j.id, deleted: j.deleted, data: { address: j.ad
 const receiptRow = (r) => ({ ...r, deleted_at: null, subtotal: null, tax: null, notes: "", items: [], logged_by: "", has_photo: true });
 const ok = (key, list) => ({ status: 200, body: { [key]: list, ok: true, data: { [key]: list } } });
 
-/** The Oct 7 world: the lane's tables, qbo-proxy, and the two doors. */
+/** The Oct 7 world: the lane's tables, qbo-proxy, and the two doors. v2: the
+    database has migration 0025 (its receipt_qbo_claims table answers);
+    without it PostgREST answers 404, as on a database at 0024. */
 function world({ receipts = oct7.RECEIPTS.map(receiptRow), links = [], jobLinks = [], projects = oct7.JOB_ROWS.map(projectRow),
-  settings = [], maxRows, proxy, note, door, cfg = {}, now = NOW } = {}) {
+  settings = [], maxRows, proxy, note, door, cfg = {}, now = NOW, v2 = false, bills = [], proposals = [] } = {}) {
   const pg = postgrest({ job_receipts: receipts, receipt_qbo_links: links, job_qbo_links: jobLinks, field_projects: projects,
-    app_settings: settings }, { maxRows });
+    app_settings: settings, receipt_qbo_claims: [], proposals }, { maxRows });
   const supa = fakeSupa({
-    select: Object.fromEntries(["job_receipts", "receipt_qbo_links", "job_qbo_links", "field_projects", "app_settings"].map((t) => [t, pg(t)])),
+    select: {
+      ...Object.fromEntries(["job_receipts", "receipt_qbo_links", "job_qbo_links", "field_projects", "app_settings", "proposals"]
+        .map((t) => [t, pg(t)])),
+      receipt_qbo_claims: v2 ? pg("receipt_qbo_claims") : () => {
+        throw new SupaError(404, { code: "PGRST205", message: "Could not find the table 'public.receipt_qbo_claims' in the schema cache" },
+          "/rest/v1/receipt_qbo_claims");
+      },
+    },
     rpc: {
       receipt_qbo_links_note: note ?? ((a) => ({ written: a.p_rows.length, kept: 0, removed: 0 })),
       receipts_qbo_link_file: door ?? ((a) => (a.p_input
@@ -89,6 +99,7 @@ function world({ receipts = oct7.RECEIPTS.map(receiptRow), links = [], jobLinks 
       if (proxy) { const r = proxy(body); if (r) return r; }
       if (body.action === "listProjects") return ok("projects", oct7.PROJECTS);
       if (body.action === "listPurchases") return ok("purchases", oct7.PURCHASES.filter((p) => p.txnDate >= body.from && p.txnDate <= body.to));
+      if (body.action === "listBills") return ok("bills", bills.filter((b) => b.txnDate >= body.from && b.txnDate <= body.to));
       return { status: 404, body: { ok: false, error: `Unknown action: ${body.action}` } };
     },
   }]);
@@ -114,6 +125,8 @@ test("the nightly run on the Oct 7 rows: one read of each table, two qbo-proxy r
   assert.deepEqual(out, { run_date: "2026-10-08", receipts: 27, matched: 9, in_qbo: 4, unmatched: 18, conflicts: 0, cards_filed: 1,
     skipped: { empty: 4 }, errors: [] });
 
+  // a database without 0025: asked once, then matched as 0023 did
+  assert.deepEqual(selects(supa, "receipt_qbo_claims"), ["select=receipt_id&limit=1"]);
   // reads: live receipts with the matcher's columns only (no notes, line items or who logged it)
   assert.deepEqual(selects(supa, "job_receipts"), [
     "select=job_id,id,vendor,receipt_date,amount,category,paid_with,card_last4,receipt_no,photo_ref&deleted_at=is.null&order=job_id.asc,id.asc&limit=1000",
@@ -125,6 +138,7 @@ test("the nightly run on the Oct 7 rows: one read of each table, two qbo-proxy r
   assert.deepEqual(selects(supa, "app_settings"), [`select=key,value&key=eq.${STORE_ACCOUNTS_KEY}`]);
   assert.equal(selects(supa, "receipt_qbo_links").length, 1);   // empty: one read says so
   assert.equal(selects(supa, "job_qbo_links").length, 1);
+  assert.deepEqual(selects(supa, "proposals"), []);             // second tries are 0025's
 
   // qbo-proxy, under the service key: the projects, then the expenses from 14 days before the oldest receipt
   assert.deepEqual(fetch.calls.map((c) => [c.url, c.init.method, c.body]), [
@@ -157,7 +171,8 @@ test("the nightly run on the Oct 7 rows: one read of each table, two qbo-proxy r
   // the logs carry counts and ids, never a vendor, an amount or a customer name
   const run = ctx.log.lines.find((l) => l.event === "receipts.run");
   assert.deepEqual(run, { event: "receipts.run", run_date: "2026-10-08", manual: false, receipts: 27, matched: 9, in_qbo: 4,
-    unmatched: 18, conflicts: 0, cards: 1, cards_filed: 1, purchases: 83, notes_written: 22, notes_removed: 0, errors: 0 });
+    unmatched: 18, conflicts: 0, cards: 1, cards_filed: 1, purchases: 83, bills: null, v2: false, notes_written: 22, notes_removed: 0,
+    errors: 0 });
   assert.deepEqual(ctx.log.lines.filter((l) => l.event === "receipts.filed"),
     [{ event: "receipts.filed", job_id: oct7.JOBS.alston, proposal_id: "p-a628eea5", items: 5, superseded: 0 }]);
   assert.doesNotMatch(JSON.stringify(ctx.log.lines), /Pollen|Home Depot|Spenard|1369/);
@@ -367,6 +382,118 @@ test("a worker told to stop mid-run gives the run back (a retry, never dead)", a
   assert.equal(fin.p_permanent, false);
   assert.match(fin.p_error, /stopping/);
   assert.equal(doorCalls(supa).length, 1);
+});
+
+/* ---- 0025 (v2) ---- */
+
+const LINK_COLS_V1 = "receipt_id,job_id,state,qbo_txn_type,qbo_txn_id,qbo_sync_token,qbo_customer_id,amount,receipt_date,detail";
+const r06 = oct7.RECEIPTS.find((r) => r.id === "r06");     // Home Depot $1369.50 → Purchase 10577
+// r06's update failed (QuickBooks throttled past the retries), and its second
+// try went on card uuid(2)
+const failed06 = { receipt_id: "r06", job_id: oct7.JOBS.alston, state: "failed", qbo_txn_type: "Purchase", qbo_txn_id: "10577",
+  qbo_sync_token: "0", qbo_customer_id: "112", amount: 1369.5, receipt_date: "2026-09-30", parts: null, proposal_id: uuid(1),
+  detail: { read_photo_ref: r06.photo_ref, error: "qbo_throttled: QuickBooks asked us to slow down", refiled_proposal_id: uuid(2).toUpperCase() } };
+// rows of receipts gone since, stamped too: their cards are read, 100 ids to a request
+const goneRows = Array.from({ length: 120 }, (_, i) => ({ ...failed06, receipt_id: `gone${i}`, qbo_txn_id: String(20000 + i),
+  detail: { ...failed06.detail, refiled_proposal_id: uuid(1000 + i) } }));
+// The Rental Zone receipt on 1885 Chena Landings: $351.00 = 10615 (in the
+// Oct 7 books) + 10661, charged at return on Oct 7
+const RENTAL = receiptRow({ job_id: oct7.JOBS.chena, id: "995d2795", vendor: "The Rental Zone (A Division of Airport Equipment Rentals)",
+  receipt_date: "2026-10-07", amount: 351, category: "equipment", paid_with: "card", card_last4: "1658", receipt_no: "R284290",
+  photo_ref: `media:${"5a".repeat(32)}:4242` });
+const P10661 = { ...oct7.PURCHASES.find((p) => p.id === "10615"), id: "10661", txnDate: "2026-10-07", total: 224.1,
+  lines: [{ id: "1", amount: 224.1, detailType: "AccountBasedExpenseLineDetail", accountId: "1150040005", accountName: "", classId: "",
+    customerId: "", customerName: "", projectRef: "" }] };
+const CHENA_LINK = { job_id: oct7.JOBS.chena, qbo_customer_id: "502", qbo_project_ref: "807760362", qbo_name: "1885 Chena Landings Lp.",
+  source: "picked" };
+// FNSB ticket r10, matched on an earlier night to Bill 10625
+const BILL10 = { receipt_id: "r10", job_id: oct7.JOBS.alston, state: "in_qbo", qbo_txn_type: "Bill", qbo_txn_id: "10625", qbo_sync_token: "0",
+  qbo_customer_id: "112", amount: 34.04, receipt_date: "2026-10-01", parts: null, proposal_id: null,
+  detail: { qbo_doc_number: "01286734", qbo_account_name: "Accounts Payable (A/P)", qbo_total: 34.04 } };
+const OCT10 = new Date("2026-10-10T20:00:00Z");
+/** Oct 10 on a database with 0025: the Oct 7 rows, the rental, Chena linked, and 10661 in the books. */
+const rentalWorld = (listBills, over = {}) => world({ v2: true, now: OCT10, receipts: [...oct7.RECEIPTS.map(receiptRow), RENTAL],
+  jobLinks: [CHENA_LINK], links: [BILL10], ...over,
+  proxy: (b) => (b.action === "listBills" ? listBills()
+    : b.action === "listPurchases" ? ok("purchases", [...oct7.PURCHASES, P10661].filter((p) => p.txnDate >= b.from && p.txnDate <= b.to)) : null) });
+
+test("with 0025: the bills are read too, the links with their parts and proposal, and the cards that hold failed receipts' second tries", async () => {
+  // the card r06's second try went on: declined by the owner, holding exactly tonight's item
+  const want = expected({ v2: true, bills: [], links: [failed06] });
+  const retry = want.cards.find((c) => c.job_id === oct7.JOBS.alston).input.items.find((i) => i.receipt_id === "r06");
+  assert.deepEqual(retry.refile, { proposal_id: uuid(1), error: "qbo_throttled", why: "QuickBooks asked us to slow down" });
+  const declined = { id: uuid(2), status: "declined", input: { job_id: oct7.JOBS.alston, items: [JSON.parse(JSON.stringify(retry))] } };
+  const links = [failed06, ...goneRows, { ...failed06, receipt_id: "odd", detail: { refiled_proposal_id: "p-1" } },
+    { ...failed06, receipt_id: "r01", state: "unmatched", detail: { refiled_proposal_id: uuid(3) } }];
+  const { supa, ctx, fetch } = world({ v2: true, links, proposals: [declined] });
+  const out = await receiptsQboMatch(ctx, nightly());
+
+  assert.deepEqual(selects(supa, "receipt_qbo_claims"), ["select=receipt_id&limit=1"]);
+  assert.match(selects(supa, "receipt_qbo_links")[0], new RegExp(`^select=${LINK_COLS_V1},parts,proposal_id&order=receipt_id\\.asc&limit=1000$`));
+  assert.deepEqual(fetch.calls.map((c) => c.body), [
+    { action: "listProjects" },
+    { from: "2026-09-04", to: "2026-10-08", action: "listPurchases" },
+    { from: "2026-09-04", to: "2026-10-08", action: "listBills" },
+  ]);
+  // every failed row's stamp that is a uuid, lowercased, sorted, 100 to a request, each request paged to its end
+  const stamped = [uuid(2), ...goneRows.map((l) => l.detail.refiled_proposal_id)].sort();
+  const read = (ids) => `select=id,status,input&id=in.(${ids.join(",")})&order=id.asc&limit=100`;
+  assert.deepEqual(selects(supa, "proposals"), [read(stamped.slice(0, 100)), `${read(stamped.slice(0, 100))}&id=gt.${uuid(2)}`,
+    read(stamped.slice(100))]);
+
+  // the declined second try stays declined: r06 is held, the rest of Alston's card is filed
+  assert.equal(out.skipped.failed, 1);
+  const alston = doorCalls(supa).find((a) => a.p_job_id === oct7.JOBS.alston).p_input;
+  assert.deepEqual(alston.items.map((i) => i.qbo_txn_id), ["10519", "10520", "10584", "10614"]);
+  assert.equal(noteCalls(supa)[0].p_rows.find((n) => n.receipt_id === "r10").detail.reason, "bill_not_entered");
+  assert.deepEqual(ctx.log.lines.find((l) => l.event === "receipts.run").bills, 0);
+  // the card still open: r06's second try is on tonight's card
+  const open = world({ v2: true, links, proposals: [{ ...declined, status: "proposed" }] });
+  await receiptsQboMatch(open.ctx, nightly());
+  assert.deepEqual(doorCalls(open.supa).find((a) => a.p_job_id === oct7.JOBS.alston).p_input.items.find((i) => i.receipt_id === "r06"), retry);
+
+  // the same rows on a database without 0025: no proposals, the 0023 columns, no bills
+  const v1 = world({ links });
+  await receiptsQboMatch(v1.ctx, nightly());
+  assert.deepEqual(selects(v1.supa, "proposals"), []);
+  assert.match(selects(v1.supa, "receipt_qbo_links")[0], new RegExp(`^select=${LINK_COLS_V1}&order=`));
+  assert.equal(v1.fetch.calls.some((c) => c.body.action === "listBills"), false);
+});
+
+test("listBills failing (500, ok:false, no list, unreachable) leaves only the bills unread: the run goes on, a matched bill keeps its row, receipts in parts are still found", async () => {
+  const replies = [
+    () => ({ status: 500, body: { ok: false, error: "QuickBooks token refresh failed" } }),
+    () => ({ status: 200, body: { ok: false, error: "QuickBooks not connected" } }),
+    () => ({ status: 200, body: { ok: true, data: {} } }),
+    () => { throw new TypeError("fetch failed"); },
+  ];
+  for (const reply of replies) {
+    const { supa, ctx } = rentalWorld(reply);
+    await runJob(ctx, nightly("2026-10-10"));
+    const fin = supa.rpcs("finish_job")[0];
+    assert.equal(fin.p_ok, true, fin.p_error);
+    const line = ctx.log.lines.find((l) => l.event === "receipts.bills_not_read");
+    assert.deepEqual(Object.keys(line), ["event", "run_date", "error"]);
+    assert.equal(line.run_date, "2026-10-10");
+    assert.match(line.error, /qbo-proxy listBills/);
+    assert.equal(ctx.log.lines.find((l) => l.event === "receipts.run").bills, null);
+    const rows = noteCalls(supa)[0].p_rows;
+    const { proposal_id: _, ...asWas } = BILL10;
+    assert.deepEqual(rows.find((n) => n.receipt_id === "r10"), asWas);
+    const chena = doorCalls(supa).find((a) => a.p_job_id === oct7.JOBS.chena).p_input;
+    assert.deepEqual(chena.items.map((i) => [i.receipt_id, i.qbo_txn_id, i.parts.map((p) => p.qbo_txn_id)]), [["995d2795", "10615", ["10615", "10661"]]]);
+  }
+});
+
+test("a qbo-proxy older than listBills (404) gets no bills and no receipts in parts, and the run goes on", async () => {
+  const { supa, ctx } = rentalWorld(() => ({ status: 404, body: { ok: false, error: "Unknown action: listBills" } }));
+  const out = await receiptsQboMatch(ctx, nightly("2026-10-10"));
+  assert.match(ctx.log.lines.find((l) => l.event === "receipts.bills_not_read").error, /Unknown action: listBills/);
+  const rows = noteCalls(supa)[0].p_rows;
+  assert.equal(rows.find((n) => n.receipt_id === "995d2795").detail.reason, "waiting_feed");
+  assert.equal(rows.find((n) => n.receipt_id === "r10").qbo_txn_type, "Bill");      // kept as it was
+  assert.equal(doorCalls(supa).find((a) => a.p_job_id === oct7.JOBS.chena).p_input, null);
+  assert.equal(out.errors.length, 0);
 });
 
 test("the queue dispatches receipts.qbo_match to this lane and finishes the job with the summary", async () => {

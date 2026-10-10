@@ -10,6 +10,12 @@
 -- Everything it writes is rolled back (sequence values it draws are not; that
 -- is what every proposal does anyway).
 --
+-- CI runs it against the database rebuilt through every migration, so it
+-- holds 0023's rules as 0025 left them: where 0025 changed one (rules 6 and
+-- 11: the note door may now replace a failed row it is sent), the rule below
+-- is 0025's. receipts_qbo_v2.test.sql holds the rest of 0025 (bills,
+-- receipts paid in parts, the claims table, second tries).
+--
 -- The rules it holds 0023 to:
 --   1. The catalog row is money, runtime sql, owner-approved, with the
 --      template, emits, amount field and schema the worker and the inbox
@@ -31,12 +37,13 @@
 --   5. The fingerprint moves with each receipt's amount, date, photo, deletion
 --      and move, and with nothing else.
 --   6. The note door writes in_qbo, unmatched and conflict rows, rewrites
---      nothing unchanged, never touches a queued, done or failed row, removes
---      what left a job it covers (first, so an expense it held is free for
---      tonight's claim), refuses rows outside its jobs and receipt ids
---      qbo-proxy cannot carry, and turns a claim on an expense another
---      receipt holds into a conflict; the unique index refuses a second claim
---      written directly.
+--      nothing unchanged, never touches a queued or done row, removes what
+--      left a job it covers (first, so an expense it held is free for
+--      tonight's claim) but never a failed row, refuses rows outside its jobs
+--      and receipt ids qbo-proxy cannot carry, and turns a claim on an
+--      expense another receipt holds into a conflict; the unique index
+--      refuses a second claim written directly. A failed row the call sends
+--      is replaced (0025; rule 11).
 --   7. The filing door returns each of its shapes, refuses malformed input,
 --      skips receipts edited since the worker read them, files as
 --      agent:integrations (proposed_via agent, waiting on the owner, 14
@@ -58,9 +65,14 @@
 --  10. An edit may only drop items: a changed item, a foreign item or a
 --      changed top-level field fails; a dropped one is simply not queued.
 --  11. The trigger maps a sent outbox row to done (provider id, new sync
---      token) and a dead one to failed (the error), and the note door keeps
---      both. An approved store entry is queued with no expense id; sent, it
---      records the new expense, unless another receipt holds that one.
+--      token) and a dead one to failed (the error). The note door keeps the
+--      done row whether it is sent or not. A failed row the call does not
+--      send is never removed or changed (a person reads it); a failed row the
+--      call sends is replaced (0025: a second try that found the receipt in
+--      QuickBooks, or found nothing): its changes, proposal_id and outbox_id
+--      cleared and its detail replaced, so detail.error is gone. An approved
+--      store entry is queued with no expense id; sent, it records the new
+--      expense, unless another receipt holds that one.
 --  12. The picker refuses anyone but owner/office, a deleted or missing job
 --      and a malformed id; it links, relinks (an unchanged pick writes
 --      nothing) and unlinks, with events; owner and office read the links,
@@ -1590,8 +1602,11 @@ end
 $$;
 
 
--- 11b. the trigger: QuickBooks refuses r-e2 for good, and the note door
---      keeps both approval-path rows
+-- 11b. the trigger: QuickBooks refuses r-e2 for good. Then the note door,
+--      both halves of the failed-row rule (0025): a night that does not send
+--      r-e2 leaves the failed row exactly as the trigger wrote it; a night
+--      that sends it (a second try that found nothing) replaces it whole. The
+--      done row r-hd is kept either way.
 do $$
 begin
   update public.outbox set status = 'sending', locked_by = 'rq-test-worker', lease_until = now() + interval '2 minutes',
@@ -1609,23 +1624,57 @@ savepoint s;
 set local role service_role;
 do $$
 declare
-  l public.receipt_qbo_links;
-  r jsonb;
+  a  constant uuid := '00000000-0000-0000-0000-00000000f2a0';
+  e  constant uuid := '00000000-0000-0000-0000-00000000f2e0';
+  pe uuid := (select v::uuid from rq_state where k = 'pe');
+  l  public.receipt_qbo_links;
+  hd jsonb := (select to_jsonb(x) from public.receipt_qbo_links x where receipt_id = 'r-hd');
+  e2 jsonb;
+  r  jsonb;
 begin
   select * into l from public.receipt_qbo_links where receipt_id = 'r-e2';
   if l.state is distinct from 'failed' or coalesce(l.detail ->> 'error', '') !~ '^tagged_other' or l.detail ->> 'failed_at' is null
-     or l.qbo_sync_token is distinct from '0' then
+     or l.qbo_sync_token is distinct from '0' or l.proposal_id is distinct from pe or l.outbox_id is null
+     or l.changes is distinct from '{tag,attach}' then
     raise exception 'a dead row left r-e2 as %', to_jsonb(l);
   end if;
-  r := public.receipt_qbo_links_note(array['00000000-0000-0000-0000-00000000f2a0'::uuid, '00000000-0000-0000-0000-00000000f2e0'::uuid],
-         jsonb_build_array(
-           jsonb_build_object('receipt_id', 'r-hd', 'job_id', '00000000-0000-0000-0000-00000000f2a0', 'state', 'unmatched'),
-           jsonb_build_object('receipt_id', 'r-e2', 'job_id', '00000000-0000-0000-0000-00000000f2e0', 'state', 'unmatched')));
-  -- r-sbs and r-sw are not in tonight's rows, so they go; r-hd and r-e2 stay
-  if r is distinct from '{"written": 0, "kept": 2, "removed": 2}'
-     or (select state from public.receipt_qbo_links where receipt_id = 'r-hd') is distinct from 'done'
-     or (select state from public.receipt_qbo_links where receipt_id = 'r-e2') is distinct from 'failed' then
-    raise exception 'the note door touched a done or failed row (answered %)', r;
+  e2 := to_jsonb(l);
+  if hd ->> 'state' is distinct from 'done' then
+    raise exception 'r-hd is %, not done, before the note', hd ->> 'state';
+  end if;
+
+  -- not sent: tonight's rows for a and e name neither receipt. r-sbs and
+  -- r-sw (in_qbo, no longer named) go; the done row and the failed row stay,
+  -- not a field changed
+  r := public.receipt_qbo_links_note(array[a, e], '[]');
+  if r is distinct from '{"written": 0, "kept": 0, "removed": 2}'
+     or exists (select 1 from public.receipt_qbo_links where receipt_id in ('r-sbs', 'r-sw'))
+     or (select to_jsonb(x) from public.receipt_qbo_links x where receipt_id = 'r-hd') is distinct from hd
+     or (select to_jsonb(x) from public.receipt_qbo_links x where receipt_id = 'r-e2') is distinct from e2 then
+    raise exception 'a note that sends neither the done nor the failed row answered % and left r-hd % and r-e2 %', r,
+      (select to_jsonb(x) from public.receipt_qbo_links x where receipt_id = 'r-hd'),
+      (select to_jsonb(x) from public.receipt_qbo_links x where receipt_id = 'r-e2');
+  end if;
+
+  -- sent: r-hd is kept as it is; r-e2's failed row is replaced by the row
+  -- the call sends, nothing of the approval left on it
+  r := public.receipt_qbo_links_note(array[a, e], jsonb_build_array(
+         jsonb_build_object('receipt_id', 'r-hd', 'job_id', a, 'state', 'unmatched'),
+         jsonb_build_object('receipt_id', 'r-e2', 'job_id', e, 'state', 'unmatched', 'amount', -12,
+                            'receipt_date', '2026-10-02', 'detail', '{"reason": "not_found"}'::jsonb)));
+  if r is distinct from '{"written": 1, "kept": 1, "removed": 0}' then
+    raise exception 'a note that sends the done and the failed row answered %, not the failed one written and the done one kept', r;
+  end if;
+  if (select to_jsonb(x) from public.receipt_qbo_links x where receipt_id = 'r-hd') is distinct from hd then
+    raise exception 'the note door touched a done row: r-hd is %',
+      (select to_jsonb(x) from public.receipt_qbo_links x where receipt_id = 'r-hd');
+  end if;
+  select * into l from public.receipt_qbo_links where receipt_id = 'r-e2';
+  if l.state is distinct from 'unmatched' or l.job_id is distinct from e or l.qbo_txn_type is not null or l.qbo_txn_id is not null
+     or l.qbo_sync_token is not null or l.qbo_customer_id is not null or l.amount is distinct from -12
+     or l.receipt_date is distinct from '2026-10-02' or l.changes is distinct from '{}' or l.proposal_id is not null
+     or l.outbox_id is not null or l.detail is distinct from '{"reason": "not_found"}' then
+    raise exception 'the failed row the note door was sent is %', to_jsonb(l);
   end if;
 end
 $$;

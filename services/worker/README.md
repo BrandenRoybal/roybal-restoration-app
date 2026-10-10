@@ -117,7 +117,13 @@ few milliseconds inside one request.
   not attached". Everything else, QuickBooks down or throttling, a stale
   SyncToken, the function unreachable, retries.
   The provider id `Purchase:<id>:<SyncToken>` is what the 0023 trigger reads
-  back into the receipt's row. Served only while `qbo` is in
+  back into the receipt's row. A receipt paid in two or three card charges
+  (0025) is tagged and photographed on each; its provider id is the first
+  charge's, and the provider status adds `parts=<id>:<token>,…` (each
+  charge's new SyncToken, which the 0025 trigger writes into the row's
+  `parts`) and, when QuickBooks refused a later charge after an earlier one
+  was written, `part_error=<code>`: that row is sent, since the written
+  charge is real. Served only while `qbo` is in
   `OUTBOX_CHANNELS` (the default); `RECEIPTS_QBO=off` takes it out.
 - **Carrier packets** (`packet` rows: one per approved `packet.send` card)
   are an email with one PDF attached, sent by the email adapter in packet
@@ -283,24 +289,28 @@ THIS WORKER  lanes/billing.mjs
   finishes older ones `{"skipped":"stale"}`. To see a first
   result without waiting for the morning, enqueue a manual run (above).
 
-## The nightly QuickBooks match (`receipts.qbo_match`, migration 0023)
+## The nightly QuickBooks match (`receipts.qbo_match`, migrations 0023 and 0025)
 
 Every morning it finds each job receipt's expense in QuickBooks and files,
 per job, ONE `receipts.qbo_link` card in the Approvals inbox listing the
 expenses that need the job's tag, the receipt photo, or both. Approving the
 card queues one `qbo` outbox row per receipt, and the outbox lane delivers
 each through qbo-proxy (above). This lane only reads and files; it never
-writes QuickBooks.
+writes QuickBooks. Migration 0025 (v2) adds bills (read, never written), a
+receipt paid in two or three card charges, and a second try for a receipt
+whose update failed (below).
 
 ```
 pg_cron 14:50 UTC (05:50 AKST / 06:50 AKDT), receipts-qbo-match-nightly
   → enqueue('receipts.qbo_match', {run_date: <Alaska date>}, key receipts.qbo_match:<date>, priority -10, agent:integrations)
 THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
+  receipt_qbo_claims  one row, to learn whether the database has 0025 (v2)
   job_receipts        every live receipt, the ten columns the matcher reads, paged by (job_id, id)
-  receipt_qbo_links   where each receipt stands; job_qbo_links: each job's QuickBooks project
+  receipt_qbo_links   where each receipt stands (v2: its parts and proposal too); job_qbo_links: each job's QuickBooks project
   field_projects      title, address, customer, qbJobcodeName and deleted of the jobs with receipts
   app_settings        receipts.qbo_store_accounts (store entry, below; unset = off)
-  qbo-proxy           listProjects; listPurchases from 14 days before the oldest receipt to today
+  proposals           v2: id, status, input of each card a failed receipt's second try went on, 100 ids a request
+  qbo-proxy           listProjects; listPurchases (v2: and listBills) from 14 days before the oldest receipt to today
   → receipt_qbo_links_note(job ids, rows)                         in_qbo / unmatched / conflict, one call
   → receipts_qbo_link_file(job, input | null, rationale, evidence) per job: its card, or none
 ```
@@ -329,6 +339,57 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
   one receipt, and two equally good expenses are left to a person. Receipts
   dated in the last 60 days are matched; an older one keeps the row it had.
+- **Bills are read, never written** (v2). The office books FNSB dump
+  tickets as Bills, so qbo-proxy's `listBills` is read beside the expenses
+  and a dump ticket matches the bill whose DocNumber is its ticket number
+  (`01286734`; a leading zero dropped on either side is the same ticket,
+  and another ticket's bill of the same amount the same day is never it). A
+  matched bill is only ever noted, never put on a card: every FNSB bill so
+  far was entered tagged to the job with the ticket's photo, and nothing
+  here writes to Accounts Payable. Tagged to the job's project it is
+  `in_qbo` (a document or not); untagged it is a conflict, `bill_untagged`,
+  that the office tags by hand; tagged elsewhere, partly tagged, or on a job
+  with no project, as an expense would be. The executor and qbo-proxy's
+  `completePurchase` still take Purchases only.
+- **A receipt in parts** (v2). A rental is charged at checkout and the
+  balance at return, so one receipt can be two or three card charges
+  (Rental Zone receipt 995d2795, $351.00 on 10/07 on 1885 Chena Landings =
+  Purchase 10615, $126.90 on 10/02, + 10661, $224.10 on 10/07, card 1658).
+  Only for an equipment receipt paid by card with its last four, no single
+  expense of its total, and three days old or more (by then the closing
+  charge has posted): 2 or 3 charges from the same store on the same card
+  and account, untagged, with no document and no other number in the
+  DocNumber, no other receipt matched or could match, dated up to 14 days
+  before the receipt with the last a day before it to three after, adding
+  up to the receipt to the cent, and only when exactly one such set exists
+  (two sets, or one set two receipts could use: `conflict`,
+  `ambiguous_split`). It is ONE line on the card whose top level is the
+  first charge (its id, SyncToken and total) and whose `parts` list every
+  charge and what each needs; the executor hands qbo-proxy the charges with
+  no transaction at the top, so a qbo-proxy older than parts refuses it
+  instead of tagging one charge. The receipt's row keeps every charge in
+  `parts`, and `receipt_qbo_claims` holds each for this receipt alone.
+- **Second tries** (v2). A receipt whose update failed is matched again,
+  to the same expense (or the same charges) only: a different expense, or
+  none, keeps the failed row for a person, since someone may have changed
+  the books on purpose. Found right in QuickBooks, or now a conflict, a
+  note replaces the failed row; otherwise its line goes on a new card,
+  marked as a second try (`refile`: the failed card, the code, the words),
+  and the failed row names that card (`detail.refiled_proposal_id`). Its
+  limits:
+  - a refusal that would come back the same (`tagged_other`,
+    `partly_tagged`, `untaggable`, `untaggable_line`, `purchase_missing`,
+    `changed_in_qbo`, `photo_missing`, `photo_type`, `photo_unreadable`,
+    `photo_too_big`, `upload_refused`, `qbo_refused`, `cancelled`) is kept
+    for a person until something it depends on moves: the expense or a
+    charge or its SyncToken, the job's project, the receipt's total or date,
+    or its photo (a row queued before 0025 recorded no photo, so a refusal
+    about the photo is tried once more);
+  - one automatic retry per code: a second try that fails with the code it
+    was retrying is kept, while nothing moved;
+  - a declined second try stays declined: while the card it went on is
+    declined (or approved with this line taken off), the same line is not
+    offered again; anything moved makes it another line.
 - **What each receipt gets.** A line on its job's card when the expense needs
   `tag`, `attach` or both (a tag already set is never changed), or a row in
   `receipt_qbo_links`:
@@ -337,17 +398,21 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   - `unmatched`, `detail.reason`: `waiting_feed` (a card charge two weeks old
     or less; the bank feed lags, up to 11 days on the US Bank card), `store_not_entered` (a receipt on a store
     account, Spenard or Sherwin, whose invoice is not in QuickBooks yet; they
-    are entered by hand about nine days late), `bill_not_checked` (a dump
-    ticket: the office books those as Bills, which the match does not read),
-    `needs_job_link` (found, but the job has no QuickBooks project; nothing
+    are entered by hand about nine days late), `bill_not_entered` (v2: a
+    dump ticket whose bill is not in QuickBooks yet), `bill_not_checked` (a
+    dump ticket on a night the bills were not read: v1, or `listBills`
+    failing), `needs_job_link` (found, but the job has no QuickBooks project; nothing
     goes on the card, not even the photo, until the job is linked, because
     an approved attach would leave the receipt done and its tag never
     offered), `not_found`.
   - `conflict`, `detail.reason`: `ambiguous` (the expenses in
-    `detail.candidates`), `tagged_other` (tagged to another customer,
-    `detail.qbo_customer_name`), `partly_tagged`.
-  Receipts the approval path holds (`queued`, `done`, `failed`) are not
-  looked at again; re-filing a failed one is not in v1.
+    `detail.candidates`), `ambiguous_split` (v2: more than one set of
+    charges, in `detail.candidates`), `tagged_other` (tagged to another customer,
+    `detail.qbo_customer_name`), `partly_tagged`, `bill_untagged` (v2).
+  A row names `qbo_txn_type` `Purchase`, or `Bill` (v2, a note only), and
+  in v2 `parts` (null for one transaction). Receipts the approval path
+  holds (`queued`, `done`) are not looked at again; a `failed` one is held
+  as well before 0025, and from 0025 gets a second try (above).
 - **The job's project.** A job in `job_qbo_links` tags to its project. A job
   with none gets a suggestion on its card, and approving the card links it:
   `suggested_tagged` when tonight's matched expenses for the job are all
@@ -370,7 +435,8 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
 - **The summary** is the job's result, in the `job.done` event:
   `{run_date, receipts, matched, in_qbo, unmatched, conflicts, cards_filed,
   skipped: {reason: count}, errors: [≤20 {job_id, message}]}`. `skipped`
-  counts `queued`, `done` and `failed` (receipts the approval path holds),
+  counts `queued`, `done` and `failed` (receipts the approval path holds;
+  from 0025, `failed` counts those kept for a person tonight),
   then each door answer that filed nothing: `unchanged`, `empty`,
   `qbo_lane_off` (no worker serves the `qbo` channel), `receipts_moved` (a
   receipt left the job or was edited since the run read it),
@@ -382,8 +448,23 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   `{"skipped":"qbo_proxy_not_updated"}` before anything is written. The last
   runs:
   `select at, data -> 'result' as summary from public.events where kind = 'job.done' and operation = 'receipts.qbo_match' order by at desc limit 5`.
-  `fly logs` shows one `receipts.run` line per run (counts only), a
-  `receipts.filed` per card and a `receipts.job_failed` per error.
+  `fly logs` shows one `receipts.run` line per run (counts only, `v2` and
+  how many `bills`, null when they were not read), a `receipts.filed` per
+  card, a `receipts.job_failed` per error and a `receipts.bills_not_read`
+  when `listBills` failed.
+- **The v2 gates.** Each run first reads one row of `receipt_qbo_claims`,
+  the table 0025 adds: on a database without it (PostgREST 404,
+  `PGRST205` or `42P01`) the run matches exactly as 0023 did (no bills, no
+  parts, failed receipts held, the 0023 columns read), and any other error
+  fails the run, so a mis-granted 0025 is never taken for an older
+  database. A qbo-proxy that answers 404 to `listBills` alone is older than
+  this change: no bills and no receipts in parts that night (it could not
+  deliver them), second tries still go. Any other `listBills` failure leaves
+  only the bills unread (`receipts.bills_not_read` in the log): dump tickets
+  read `bill_not_checked`, a receipt already matched to a bill keeps its
+  `in_qbo` or `conflict` row as it is, receipts in parts are still found,
+  and the run goes on. `listProjects` and `listPurchases` failing still fail
+  the run.
 - **A missed night is not caught up**: a `run_date` older than yesterday in
   Alaska finishes done with `{"skipped":"stale"}`.
 - **Run it now** (Supabase SQL editor). One job, or a few:
@@ -431,10 +512,24 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   3. stop filing for good: `update public.agent_authority set revoked_at = now() where agent_id = '5d0c1f3e-8a2b-4c7d-9e61-2f4a8b3c7d10' and operation = 'receipts.qbo_link' and revoked_at is null`
      (do 1 or 2 as well, or every run records each job as a 42501 error);
   4. open cards: decline them in the inbox, or let them expire (14 days);
-  5. an approved change nobody should send: mark its outbox row dead
-     (`update public.outbox set status = 'dead' where id = …`; the receipt then
-     shows failed). A tag or photo already written stays in QuickBooks, where
-     the office edits it like any other.
+  5. an approved change nobody should send: mark its outbox row dead, with
+     who and why as the error, only while it waits
+     (`update public.outbox set status = 'dead', error = 'cancelled: <who and why>' where id = … and status in ('pending', 'failed')`).
+     It must answer UPDATE 1. UPDATE 0 means the worker is sending it right
+     now or already sent it: wait, read the receipt again, and fix the
+     expense in QuickBooks if it was written (a sent row marked dead
+     afterwards stays done). The receipt then shows failed `cancelled: …`
+     (any death the worker did not make reads as a cancel, with no error
+     too: `cancelled: marked dead by hand`). `cancelled` is on the keep
+     list, so the match never offers that change again unless the receipt
+     or its expense moves. A change cancelled after a failed try may be
+     partly in QuickBooks already (a tag written before the photo failed,
+     or a first charge): it stays there, where the office edits it like
+     any other.
+  To stop only the v2 behaviour, run the worker build before it: on a
+  database with 0025 it notes nothing in parts, never notes over a failed
+  row, and its notes keep a row's parts. Removing 0025 itself is in the
+  migration's header.
   Taking `receipts.qbo_match` out of `QUEUE_KINDS` is NOT a rollback: the
   nightly rows would wait `queued` forever.
 - **Deploy order**: the database, then qbo-proxy, then roybal-notify, then
@@ -466,6 +561,25 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   Until the worker is deployed the nightly rows wait `queued`; the new
   worker runs yesterday's and today's. To see a first result without waiting
   for the morning, enqueue a manual run (above).
+- **Deploy order for 0025 (v2)**: merge, then the database, then qbo-proxy,
+  then the worker.
+  1. Merge the PR to main.
+  2. Migration 0025 ("staging", then "production"), after 0024 on each
+     database (the DB push has no `--include-all`). If staging was rehearsed
+     from the branch and the file changed in review since, run
+     `supabase migration repair --status reverted 0025` on staging first:
+     `db push` tracks files by version and would not apply it again.
+  3. qbo-proxy ("deploy qbo-proxy"): `listBills`, and `completePurchase`
+     taking a receipt in parts. Until it is live, `listBills` answers 404 and
+     runs go on without bills or parts.
+  4. The worker, redeployed on the owner's Mac from an up-to-date main, as in
+     the billing check's step 3 (`fly deploy --config services/worker/fly.toml
+     --dockerfile services/worker/Dockerfile --ha=false .`). Check:
+     `fly logs -a roybal-worker` shows the next `receipts.run` with
+     `"v2":true` (a manual run, above, shows it at once).
+  Any order is safe (the gates above): a worker before 0025 matches as 0023
+  did, and 0025 takes everything the 0023 worker sends, so an open v1 card
+  executes as before.
 
 ## The hourly carrier packet (`packet.build`, migration 0026)
 
