@@ -390,8 +390,9 @@ ok(s.get === 0 && s.put === 0, `…and the next cycle finds it clean — get=${s
   const has = (p) => p.receipts.some((r) => r.id === "office1") && p.receipts.some((r) => r.id === "rcf2" && r.vendor === "typed after");
   ok(has(fd) && has(fsv), "once it saves, the office's receipt and the crew's edit are on the phone and the server");
 
-  // clean on disk, its edit can't save, the office corrects it (and deletes
-  // another such job), and the app is closed before either edit lands
+  // clean on disk, its edit can't save, the office deletes it (and corrects
+  // another such job, then edits a third job), and the app is closed before
+  // either edit lands
   await Store.put({ id: "clm", customer: "Claim", claimNumber: "CLM-1", notes: "", receipts: [{ id: "c1", vendor: "Spenard", amount: "1" }] });
   await Store.put({ id: "trash", customer: "Trash me", notes: "", receipts: [{ id: "t1", vendor: "Spenard", amount: "2" }] });
   await sync2.syncNow(); await sync2.syncNow();
@@ -402,31 +403,40 @@ ok(s.get === 0 && s.put === 0, `…and the next cycle finds it clean — get=${s
   }
   await settle(450);
   const crow = serverRows.get("clm");
-  crow.data = { ...crow.data, claimNumber: "CLM-1-CORRECTED", receipts: [{ ...crow.data.receipts[0], amount: "112.40" }], updatedAt: new Date(Date.now() + 120000).toISOString(), rev: crow.data.rev + 1 };
+  crow.data = { ...crow.data, claimNumber: "CLM-1-CORRECTED", receipts: [{ ...crow.data.receipts[0], amount: "112.40" }], updatedAt: new Date().toISOString(), rev: crow.data.rev + 1 };
   crow.updated_at = new Date(Date.now() + 120000).toISOString();
   const trow = serverRows.get("trash");
-  trow.deleted = true; trow.updated_at = new Date(Date.now() + 121000).toISOString();
+  trow.deleted = true; trow.updated_at = new Date(Date.now() + 119000).toISOString();   // the delete is pulled first
+  const j0 = serverRows.get("job0");                      // a later row for a job with nothing queued
+  j0.data = { ...j0.data, customer: "J0 office", updatedAt: new Date().toISOString(), rev: j0.data.rev + 1 };
+  j0.updated_at = new Date(Date.now() + 125000).toISOString();
   await sync2.syncNow();
-  ok((localStorage.getItem("roybal-sync-cursor") || "") < crow.updated_at, "the pull holds its place at changes it couldn't apply under a queued edit");
+  ok((localStorage.getItem("roybal-sync-cursor") || "") < trow.updated_at, "the pull holds its place at changes it couldn't apply under a queued edit (a later row doesn't move it past them)");
   ok((await Store.get("clm")).claimNumber === "CLM-1" && !!(await Store.get("trash")), "…and wrote nothing under them");
+  ok((await Store.get("job0")).customer === "J0 office", "…while the later row for another job still applies");
   // "Reload app": a fresh page (its own core.js, so an empty save queue) over the same storage
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "roybal-relaunch-"));
-  fs.cpSync(fileURLToPath(new URL("../js/", import.meta.url)), tmp, { recursive: true });
-  const core3 = await import(pathToFileURL(path.join(tmp, "core.js")).href);
-  const sync3 = await import(pathToFileURL(path.join(tmp, "sync.js")).href);
-  sync3.sweepTuning.pauseMs = 0;
-  sync3.sweepTuning.shrink = async (src) => "data:image/jpeg;base64," + src.slice(-40);
-  for (let i = 0; i < 3; i++) await sync3.syncNow();
-  const c = await core3.Store.get("clm");
-  ok(c && c.claimNumber === "CLM-1-CORRECTED" && c.receipts[0].amount === "112.40", `after the reload the phone has the office's correction — claim=${c && c.claimNumber} amount=${c && c.receipts[0].amount}`);
-  ok((await core3.Store.get("trash")) === null, "…and the job the office deleted is gone");
-  c.notes = "next day";
-  await core3.Store.put(c);
-  for (let i = 0; i < 3; i++) await sync3.syncNow();
-  const sc = serverRows.get("clm").data;
-  ok(sc.claimNumber === "CLM-1-CORRECTED" && sc.receipts[0].amount === "112.40" && sc.notes === "next day", `the crew's next edit keeps it on the server — claim=${sc.claimNumber} amount=${sc.receipts[0].amount}`);
-  ok(serverRows.get("trash").deleted === true, "…and the deleted job stays deleted");
-  fs.rmSync(tmp, { recursive: true, force: true });
+  try {
+    fs.cpSync(fileURLToPath(new URL("../js/", import.meta.url)), tmp, { recursive: true });
+    const core3 = await import(pathToFileURL(path.join(tmp, "core.js")).href);
+    const sync3 = await import(pathToFileURL(path.join(tmp, "sync.js")).href);
+    sync3.sweepTuning.pauseMs = 0;
+    sync3.sweepTuning.shrink = async (src) => "data:image/jpeg;base64," + src.slice(-40);
+    for (let i = 0; i < 3; i++) await sync3.syncNow();
+    const c = await core3.Store.get("clm");
+    ok(c && c.claimNumber === "CLM-1-CORRECTED" && c.receipts[0].amount === "112.40", `after the reload the phone has the office's correction — claim=${c && c.claimNumber} amount=${c && c.receipts[0].amount}`);
+    ok((await core3.Store.get("trash")) === null, "…and the job the office deleted is gone");
+    // the crew's next edits, stamped after the office's (a stale copy would win the merge)
+    await settle(5);
+    c.notes = "next day";
+    await core3.Store.put(c);
+    const tl = await core3.Store.get("trash");
+    if (tl) { tl.notes = "next day too"; await core3.Store.put(tl); }
+    for (let i = 0; i < 3; i++) await sync3.syncNow();
+    const sc = serverRows.get("clm").data;
+    ok(sc.claimNumber === "CLM-1-CORRECTED" && sc.receipts[0].amount === "112.40" && sc.notes === "next day", `the crew's next edit keeps it on the server — claim=${sc.claimNumber} amount=${sc.receipts[0].amount}`);
+    ok(serverRows.get("trash").deleted === true, "…and the deleted job stays deleted");
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
   globalThis.fetch = fetch0;
   OSP.put = put0;
 }

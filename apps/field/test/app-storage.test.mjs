@@ -7,15 +7,25 @@
    job just to count them.
    Run: node apps/field/test/app-storage.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
-import { JSDOM } from "jsdom";
+import { JSDOM, VirtualConsole } from "jsdom";
 import "fake-indexeddb/auto";
 
 const SHELL = `<!DOCTYPE html><html><body>
   <header id="topbar"><button id="backBtn" hidden></button>
     <div><span id="topbarSub"></span></div><div id="netStatus">●</div></header>
   <main id="view"></main><div id="toast" hidden></div></body></html>`;
-const dom = new JSDOM(SHELL, { url: "http://localhost/", pretendToBeVisual: true });
+// jsdom can't navigate: a location.reload() shows up as its "not implemented" error
+const reloads = [];
+const vc = new VirtualConsole();
+vc.on("jsdomError", (e) => { if (/navigation/i.test(String(e && e.message))) reloads.push(e.message); else console.error(e); });
+vc.sendTo(console, { omitJSDOMErrors: true });
+const dom = new JSDOM(SHELL, { url: "http://localhost/", pretendToBeVisual: true, virtualConsole: vc });
 const { window } = dom;
+// an installed copy: a service worker is in control, and a deploy hands over to a new one
+const swListeners = {};
+Object.defineProperty(window.navigator, "serviceWorker", { configurable: true, value: {
+  controller: {}, addEventListener: (t, fn) => { (swListeners[t] ||= []).push(fn); },
+  register: () => Promise.resolve({ update: () => {} }) } });
 for (const k of ["document", "window", "navigator", "location", "history", "HTMLElement", "Node", "Event", "CustomEvent", "Image", "FileReader", "getComputedStyle", "DOMParser", "localStorage"]) {
   if (window[k] === undefined) continue;
   try { globalThis[k] = window[k]; }
@@ -52,7 +62,7 @@ indexedDB.open = (...a) => {
   return origOpen(...a);
 };
 
-const { Store } = await import("../js/core.js");
+const { Store, hasUnsaved } = await import("../js/core.js");
 await import("../js/app.js");
 
 const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
@@ -153,6 +163,34 @@ await test("a page that fails for another reason keeps a way out: ‹ and Job li
   await settle(120);
   assert.equal(location.hash, "#/");
   assert.match(text(), /Alston/, "the job list");
+});
+
+// last: once the reload has "happened", this page stays reloading
+await test("a new version arriving while an edit can't save waits for it to land: no reload over the crew's typing", async () => {
+  await Store.put({ ...(await Store.get("jobA")), receipts: [{ id: "R2", vendor: "", amount: "", items: [] }] });
+  await nav("#/p/jobA/f/receipts/R2");
+  let writesDown = true;
+  const tx = P.transaction;
+  P.transaction = function (names, mode, ...rest) {
+    if (writesDown && mode === "readwrite") throw new DOMException("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.", "InvalidStateError");
+    return tx.call(this, names, mode, ...rest);
+  };
+  const vendor = view().querySelector('input[placeholder^="Home Depot"]');
+  vendor.value = "Spenard"; vendor.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await settle(450);
+  assert.match(view().querySelector(".saved-pill").textContent, /Not saved/);
+  for (const fn of swListeners.controllerchange || []) fn();     // the deploy activates
+  await settle(120);
+  assert.equal(reloads.length, 0, "no reload while the edit waits to save (it used to reload, and the edit was gone)");
+  assert.ok(hasUnsaved());
+  await nav("#/p/jobA/f/receipts");                 // a page change while it still can't save
+  assert.equal(reloads.length, 0);
+  writesDown = false;
+  P.transaction = tx;
+  await nav("#/p/jobA");                            // the next page change saves it; then the update applies
+  await settle(120);
+  assert.equal((await Store.get("jobA")).receipts[0].vendor, "Spenard");
+  assert.equal(reloads.length, 1, "the update applies once nothing is waiting to save");
 });
 
 console.log(`\n${pass} passed`);

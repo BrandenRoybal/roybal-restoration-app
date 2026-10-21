@@ -2971,20 +2971,37 @@ if ("serviceWorker" in navigator) {
     const a = document.activeElement;
     return !!document.querySelector(".sc") || !!(a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable));
   };
-  // the last edit (autosave waits 350 ms) is saved before the page goes
+  // the last edit (autosave waits 350 ms) is saved before the page goes; an
+  // edit that still can't save (core.js keeps it queued) is never reloaded
+  // away — the update waits for a page change or app switch after it lands
   const doReload = () => {
     if (reloading) return;
     reloading = true;
-    Promise.resolve().then(flushPending).catch(() => {}).then(() => location.reload());
+    Promise.resolve().then(flushPending).catch(() => {}).then(() => {
+      if (!hasUnsaved()) return location.reload();
+      reloading = false;
+      later();
+    });
+  };
+  let waiting = false;
+  const later = () => {
+    if (waiting) return;
+    waiting = true;
+    const fire = () => {
+      waiting = false;
+      window.removeEventListener("hashchange", onHash);
+      document.removeEventListener("visibilitychange", onHide);
+      doReload();
+    };
+    const onHash = () => { if (!typing()) fire(); };
+    const onHide = () => { if (document.hidden) fire(); };
+    window.addEventListener("hashchange", onHash);
+    document.addEventListener("visibilitychange", onHide);
   };
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (hadController && !reloading) {
       if (!typing()) doReload();
-      else {
-        const safe = () => { if (!typing()) doReload(); };
-        window.addEventListener("hashchange", safe, { once: true });
-        document.addEventListener("visibilitychange", () => { if (document.hidden) doReload(); }, { once: true });
-      }
+      else later();
     }
     hadController = true;
   });
