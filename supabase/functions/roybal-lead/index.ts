@@ -42,6 +42,11 @@
  *                             defaults to the service key)
  *           LEAD_ALLOW_ORIGIN(optional, default https://www.roybalconstruction.com;
  *                             comma-separated list, "*" to allow any)
+ *           LEAD_ALERT_EMAILS(optional — who gets the lead email; comma-
+ *                             separated, default the owner's address, "off"
+ *                             for none. The text goes either way.)
+ *           LEAD_EMAIL_HOURLY_MAX (optional, default 10 — lead emails per
+ *                             hour, per address)
  * Deploy:   supabase functions deploy roybal-lead --no-verify-jwt
  *   (--no-verify-jwt is required: the public website has no session. The
  *    function self-protects via the limits above and has no read path.)
@@ -51,6 +56,7 @@
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { alertRecipients, leadAlertRows, LEAD_ALERT_OPERATION, type LeadForMail } from "../_shared/leadmail.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -64,6 +70,7 @@ const num = (name: string, dflt: number) => {
 const IP_MAX = num("LEAD_IP_MAX", 5);
 const SUBNET_MAX = num("LEAD_SUBNET_MAX", 12);
 const HOURLY_MAX = num("LEAD_HOURLY_MAX", 40);
+const EMAIL_HOURLY_MAX = num("LEAD_EMAIL_HOURLY_MAX", 10);
 
 const ALLOW = (Deno.env.get("LEAD_ALLOW_ORIGIN") ?? "https://www.roybalconstruction.com")
   .split(",").map((s) => s.trim()).filter(Boolean);
@@ -188,6 +195,50 @@ async function alertOwner(body: string): Promise<void> {
     }
   }
   console.log(`lead alert -> ${sent}/${cells.length} recipients`);
+}
+
+/* ---------- owner alert, by email ----------
+   The same lead in the owner's inbox, so a web lead reaches him twice: an
+   outbox row the worker's email lane sends from the connected Gmail (the
+   adjuster emails' path, exactly once), with every detail the form sent
+   and a link to the lead's page in the office app. The rows are built in
+   ../_shared/leadmail.ts; LEAD_ALERT_EMAILS says who gets them.
+
+   Filed only while that lane is up (rpc/outbox_channel_ready, 0019): with
+   the worker down the text is the alert, and an email that would land
+   hours late is not queued. At most LEAD_EMAIL_HOURLY_MAX an hour per
+   address, so a flood that gets past the limits above still cannot spend
+   the Gmail account's daily sending allowance. Never fatal, like the text. */
+async function emailOwner(lead: LeadForMail): Promise<void> {
+  const { to, rejected } = alertRecipients(Deno.env.get("LEAD_ALERT_EMAILS"));
+  if (rejected) console.error(`${rejected} LEAD_ALERT_EMAILS entr${rejected === 1 ? "y is" : "ies are"} not an email address. Fix the secret.`);
+  if (!to.length) return;                  // switched off, or nothing valid
+  const ready = await fetch(`${SUPABASE_URL}/rest/v1/rpc/outbox_channel_ready`, {
+    method: "POST",
+    headers: { ...svc, "Content-Type": "application/json" },
+    body: JSON.stringify({ p_channel: "email" }),
+  });
+  if (!ready.ok || (await ready.json().catch(() => false)) !== true) {
+    console.warn(`lead email not filed: the worker's email lane is not up (${ready.status}); the text still went`);
+    return;
+  }
+  const sinceIso = new Date(Date.now() - 3600_000).toISOString();
+  const recent = await fetch(
+    `${SUPABASE_URL}/rest/v1/outbox?select=id&operation=eq.${LEAD_ALERT_OPERATION}&created_at=gt.${encodeURIComponent(sinceIso)}`,
+    { headers: { ...svc, Prefer: "count=exact", Range: "0-0" } },
+  );
+  const sent = Number((recent.headers.get("content-range") ?? "").split("/")[1]);
+  if (recent.ok && Number.isFinite(sent) && sent >= EMAIL_HOURLY_MAX * to.length) {
+    console.warn(`lead email not filed: ${sent} lead emails in the last hour (LEAD_EMAIL_HOURLY_MAX ${EMAIL_HOURLY_MAX}); the text still went`);
+    return;
+  }
+  const ins = await fetch(`${SUPABASE_URL}/rest/v1/outbox?on_conflict=idempotency_key`, {
+    method: "POST",
+    headers: { ...svc, "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates,return=minimal" },
+    body: JSON.stringify(leadAlertRows(lead, to)),
+  });
+  if (!ins.ok) console.error(`lead email not filed (${ins.status}):`, (await ins.text().catch(() => "")).slice(0, 300));
+  else console.log(`lead email -> filed for ${to.length} address(es)`);
 }
 
 const LOSS_TYPES: Record<string, string> = {
@@ -421,19 +472,24 @@ serve(async (req) => {
 
   console.log(`lead captured ${id} (${emergency ? "EMERGENCY" : "normal"}, ${service || "unspecified"})`);
 
-  /* Text the owner. A lead nobody knows about is worse than no form at all —
-     in restoration, response time IS the product, and this endpoint used to
-     drop leads onto the board in total silence.
+  /* Text the owner, and email him the same lead. A lead nobody knows about
+     is worse than no form at all — in restoration, response time IS the
+     product, and this endpoint used to drop leads onto the board in total
+     silence.
 
      Deliberately AFTER the insert and never fatal: the lead is already safe,
-     so a Twilio outage must not turn a captured lead into an error the
-     visitor sees. kind 'webLead' is quiet-hours exempt and sits outside the
-     protected SMS reserve (see roybal-notify). */
-  await alertOwner(
-    `${emergency ? "🚨 WEB EMERGENCY" : "🌐 Web form lead"} — ${name}, ${phone}` +
-    `${service ? `, ${service}` : ""}${address ? `, ${address}` : ""}. ` +
-    `${message ? clip(message, 90) : "No details given."}`,
-  ).catch((e) => console.error("lead alert failed (lead is saved)", String(e?.message ?? e)));
+     so a Twilio or Gmail outage must not turn a captured lead into an error
+     the visitor sees. kind 'webLead' is quiet-hours exempt and sits outside
+     the protected SMS reserve (see roybal-notify). */
+  await Promise.all([
+    alertOwner(
+      `${emergency ? "🚨 WEB EMERGENCY" : "🌐 Web form lead"} — ${name}, ${phone}` +
+      `${service ? `, ${service}` : ""}${address ? `, ${address}` : ""}. ` +
+      `${message ? clip(message, 90) : "No details given."}`,
+    ).catch((e) => console.error("lead alert failed (lead is saved)", String(e?.message ?? e))),
+    emailOwner({ id, customer: name, phone, email, address, service, message, emergency, createdAt: now })
+      .catch((e) => console.error("lead email failed (lead is saved)", String(e?.message ?? e))),
+  ]);
 
   return json({ ok: true }, 200, origin);
 });
