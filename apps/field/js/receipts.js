@@ -24,7 +24,7 @@
    is read-only here — a retake or a re-read would flip its sign or drop
    its links — and the receipt it returns carries a "↩ Returned" badge.
    ============================================================ */
-import { h, Store, toast, fmtDate, money, fileToDataURL, todayISO } from "./core.js";
+import { h, Store, toast, fmtDate, money, fileToDataURL, todayISO, autosave, unsavedProject } from "./core.js";
 import { setCtx, commit, field, inp, ta, sel, seg, lineItems } from "./formkit.js";
 import { newReceipt, blankLineItem, author } from "./model.js";
 import { tombstoneItems } from "./merge.js";
@@ -60,6 +60,25 @@ const RECEIPT_MAX_DIM = 2000;
 const RECEIPT_QUALITY = 0.8;
 const MAX_PAGES = 4;   // pages of a PDF receipt the AI reads (page 1 + 3)
 
+/* app.js: the job object the page on screen is bound to (or null). An AI read
+   that answers after the crew moved on lands THERE (or on the stored row),
+   never on the editor's old copy — writing that copy back used to drop the
+   receipt snapped meanwhile, or the read itself (meterui.js does the same). */
+let liveOf = () => null;
+export function onReceiptLive(fn) { liveOf = typeof fn === "function" ? fn : () => null; }
+
+/* receipts with an AI read out, by id: an editor reopened meanwhile shows
+   "Reading…" instead of offering a second (paid) read of the same photo */
+const READING = new Set();
+/* the receipts page on screen: { jobId, receiptId (null = the list), el,
+   refresh }. A read that lands after its editor closed repaints it. */
+let mounted = null;
+function repaintFor(jobId, receiptId) {
+  const m = mounted;
+  if (!m || m.jobId !== jobId || !m.el.isConnected) return;
+  if (m.receiptId === null || m.receiptId === receiptId) m.refresh();
+}
+
 const listHash = (project) => `#/p/${project.id}/f/receipts`;
 const editHash = (project, r) => `#/p/${project.id}/f/receipts/${r.id}`;
 
@@ -84,6 +103,7 @@ async function fileToReceiptPages(f) {
     editor opens and the AI read fires if there's signal. */
 async function addReceiptFiles(project, files) {
   let last = null;
+  const mine = [];
   for (const f of files) {
     let pages;
     try { pages = await fileToReceiptPages(f); }
@@ -94,10 +114,22 @@ async function addReceiptFiles(project, files) {
     r.extraPages = pages.slice(1, MAX_PAGES);
     project.receipts.push(r);
     PENDING_READ.add(r.id);
+    mine.push(r);
     last = r;
   }
   if (!last) return;
-  await Store.put(project);
+  try {
+    await Store.put(project);
+  } catch {
+    // nothing on screen may claim a photo the phone doesn't hold: take this
+    // snap's receipts back out (only these: an earlier upload's receipts
+    // still waiting for their read are saved) and say so — the paper is
+    // still in hand
+    project.receipts = project.receipts.filter((x) => !mine.includes(x));
+    mine.forEach((x) => PENDING_READ.delete(x.id));
+    toast("This phone couldn't save that photo. Snap it again; if it keeps happening, close and reopen the app.", 6000);
+    return;
+  }
   location.hash = editHash(project, last);
 }
 
@@ -121,16 +153,18 @@ function receiptsList(project, { view, setChrome }) {
   const body = view; body.replaceChildren();
   setCtx(project, null);
   const { camera, upload } = captureInputs(project);
+  let totals = totalsCard(project);
+  mounted = { jobId: project.id, receiptId: null, el: camera, refresh: () => receiptsList(project, { view, setChrome }) };
 
   body.append(
     h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px" },
       h("h1", {}, "🧾 Receipts"),
       h("button", { class: "btn btn--primary btn--sm", onclick: () => camera.click() }, "📷 Snap receipt")),
     h("p", { class: "subtle" }, "Every material, rental and dump receipt for this job. Snap it at the counter — the AI reads it, you check it."),
-    totalsCard(project),
+    totals,
     h("div", { class: "btn-row", style: "margin:6px 0 12px;flex-wrap:wrap" },
       h("button", { class: "btn btn--ghost btn--sm", onclick: () => upload.click() }, "📎 Upload photo / PDF"),
-      h("button", { class: "btn btn--ghost btn--sm", onclick: () => { const r = newReceipt(); project.receipts.push(r); Store.put(project).then(() => { location.hash = editHash(project, r); }); } }, "✎ Type one in")),
+      h("button", { class: "btn btn--ghost btn--sm", onclick: () => { const r = newReceipt(); project.receipts.push(r); Store.put(project).then(() => { location.hash = editHash(project, r); }, () => { project.receipts = project.receipts.filter((x) => x !== r); toast("This phone couldn't save a new receipt. Try again; if it keeps happening, close and reopen the app.", 5000); }); } }, "✎ Type one in")),
     camera, upload);
 
   if (!project.receipts.length) {
@@ -151,14 +185,21 @@ function receiptsList(project, { view, setChrome }) {
 
   const list = h("div", { class: "joblist" });
   body.append(list);
+  // a read landing while the list is up: rows and totals repaint, the search stays
+  mounted.refresh = () => {
+    const t = totalsCard(project); totals.replaceWith(t); totals = t;
+    if (lib) state = new Map(lib.buildIndex([project]).map((e) => [e.id, e]));
+    paint();
+  };
 
   // every word somewhere on the receipt: "3/4 plywood" finds 3/4" CDX plywood 4x8
   const hay = (r) => norm([r.vendor, r.notes, r.receiptNo, r.cardLast4, ...(r.items || []).map((it) => it && (it.desc + " " + (it.sku || "")))]
     .filter(Boolean).join(" "));
   const matches = (r) => norm(q).split(" ").filter(Boolean).every((w) => hay(r).includes(w));
-  let state = new Map(), returnStatus = () => "", slip = () => false;
-  receiptLib().then((lib) => {
-    if (!lib || !list.isConnected) return;
+  let state = new Map(), returnStatus = () => "", slip = () => false, lib = null;
+  receiptLib().then((l) => {
+    if (!l || !list.isConnected) return;
+    lib = l;
     state = new Map(lib.buildIndex([project]).map((e) => [e.id, e]));
     returnStatus = lib.returnStatus;
     if (typeof lib.isSlip === "function") slip = lib.isSlip;
@@ -234,7 +275,7 @@ function receiptEditor(project, r, ctx) {
   const { view, setChrome } = ctx;
   setChrome("Receipt", listHash(project), "Receipt — " + (r.vendor || "untitled"));
   const body = view; body.replaceChildren();
-  const pill = h("span", { class: "saved-pill" }, "✓ Saved");
+  const pill = h("span", { class: "saved-pill" }, "✓ Saved");   // setCtx turns it red if an edit is still unsaved
   setCtx(project, pill);
   if (!Array.isArray(r.items)) r.items = [];
   if (!Array.isArray(r.extraPages)) r.extraPages = [];
@@ -245,16 +286,29 @@ function receiptEditor(project, r, ctx) {
   retake.addEventListener("change", async () => {
     const f = retake.files[0]; retake.value = "";
     if (!f) return;
-    try {
-      const pages = await fileToReceiptPages(f);
-      if (!pages.length) return;
-      r.photo = pages[0]; r.extraPages = pages.slice(1, MAX_PAGES);
-      await Store.put(project);
-      paintPhoto();
-      if (aiReady()) runRead({ overwrite: !!r.ai });
-    } catch { toast("Couldn't read that file — try a photo or a PDF."); }
+    let pages;
+    try { pages = await fileToReceiptPages(f); }
+    catch { toast("Couldn't read that file — try a photo or a PDF."); return; }
+    if (!pages.length) return;
+    const before = { photo: r.photo, extraPages: r.extraPages };
+    r.photo = pages[0]; r.extraPages = pages.slice(1, MAX_PAGES);
+    try { await Store.put(project); }
+    catch {
+      // the old photo stays, in memory and on screen: a read must never go
+      // out on a photo the phone doesn't hold
+      r.photo = before.photo; r.extraPages = before.extraPages;
+      toast("This phone couldn't save the new photo, so the old one stays. Try again in a moment.", 5000);
+      return;
+    }
+    paintPhoto();
+    if (aiReady()) runRead({ overwrite: !!r.ai });
   });
   const readBtn = h("button", { type: "button", class: "btn btn--ghost btn--sm" }, "✨ Read receipt");
+  if (READING.has(r.id)) { readBtn.disabled = true; readBtn.textContent = "✨ Reading…"; }
+  mounted = { jobId: project.id, receiptId: r.id, el: readBtn, refresh: () => {
+    const cur = (project.receipts || []).find((x) => x && x.id === r.id);
+    if (cur) receiptEditor(project, cur, ctx); else location.hash = listHash(project);
+  } };
   const readStatus = h("div", { class: "subtle", style: "font-size:12px;margin:6px 0 0" });
   function paintPhoto() {
     const pages = r.extraPages.length ? ` · ${1 + r.extraPages.length} pages` : "";
@@ -277,36 +331,77 @@ function receiptEditor(project, r, ctx) {
   }
 
   /* AI read: fills what's blank; a second read asks before overwriting */
-  let reading = false;
   async function runRead({ overwrite = false } = {}) {
-    if (reading) return;
+    if (READING.has(r.id)) return;
     if (!r.photo) return toast("Snap the receipt first.");
     if (isMediaMarker(r.photo)) return toast("The photo hasn't loaded on this device yet — sync online first.");
     if (!aiAvailable()) return;
     if (overwrite && !confirm("Read it again and replace the vendor, total, items and the rest with what the AI reads?")) return;
-    reading = true; readBtn.disabled = true; readBtn.textContent = "✨ Reading…";
-    try {
-      const read = await readReceipt(project, [r.photo, ...r.extraPages]);
-      // the slip was logged as a return meanwhile: it is gone, nothing to land
-      if (!project.receipts.includes(r)) { reading = false; return; }
-      const changed = applyReceiptRead(r, read, { overwrite });
-      r.ai = { at: new Date().toISOString(), model: read.model || "", confidence: typeof read.confidence === "number" ? read.confidence : null };
-      // a return slip (receiptlib.js isSlip): the refund never lands on the
-      // total, it waits here for "Log as a return"
-      if (read.isReturn === true) { r.ai.isReturn = true; r.ai.refund = amountNum(read.refund) > 0 ? amountNum(read.refund) : null; }
-      await Store.put(project);
-      const priced = (Array.isArray(read.items) ? read.items : []).filter((it) => it && amountNum(it.price) !== 0);
-      const slipRead = read.isReturn === true || (!(amountNum(read.total) > 0) && priced.length > 0 && priced.every((it) => amountNum(it.price) < 0));
-      toast(slipRead && !(amountNum(r.amount) > 0) ? `Read a return slip from ${read.vendor || "the store"}. Tap ↩ Log as a return to take it off the job total.`
-        : changed.length ? `Read ${read.vendor || "the receipt"} — ${money(amountNum(read.total))}. Check it, then Done.` : "Read it — nothing new to fill in.", 4000);
-      // repaint every field with what landed — unless the editor is no longer
-      // on screen (the return form opened over it): that form stays
-      if (readBtn.isConnected) receiptEditor(project, r, ctx);
+    READING.add(r.id); readBtn.disabled = true; readBtn.textContent = "✨ Reading…";
+    const sent = r.photo, jobId = project.id;
+    // the button comes back here, and on this receipt's page if it was reopened
+    const done = () => {
+      READING.delete(r.id); readBtn.disabled = false; readBtn.textContent = "✨ Read receipt";
+      if (!readBtn.isConnected) repaintFor(jobId, r.id);
+    };
+    let read;
+    try { read = await readReceipt(project, [r.photo, ...r.extraPages]); }
+    catch (e) { done(); toast("Couldn't read the receipt — " + (e && e.message ? e.message : "try again")); return; }
+    // land on the job the page now shows, else its edit still waiting to save,
+    // else the stored row — found by id, never this editor's old copy
+    let target;
+    try { target = liveOf(jobId) || unsavedProject(jobId) || (await Store.get(jobId)); }
+    catch {
+      done();
+      toast(`Read ${read.vendor || "the receipt"}, but this phone couldn't save it. Tap ✨ Read receipt on it again once the phone is saving.`, 6000);
       return;
-    } catch (e) {
-      toast("Couldn't read the receipt — " + (e && e.message ? e.message : "try again"));
     }
-    reading = false; readBtn.disabled = false; readBtn.textContent = "✨ Read receipt";
+    const tr = ((target && target.receipts) || []).find((x) => x && x.id === r.id);
+    // the slip was logged as a return, or deleted (or the whole job), meanwhile: nothing to land
+    if (!tr) { done(); toast("That receipt is gone from the job — the read was not kept."); return; }
+    // retaken while it was reading: this read is of the old photo
+    if (tr.photo !== sent) {
+      done();
+      // the Retake's own read was turned away while this one ran: read the new photo now
+      if (readBtn.isConnected && aiReady()) runRead({ overwrite: !!tr.ai });
+      else toast("The photo changed while it was reading. Tap ✨ Read receipt for the new one.");
+      return;
+    }
+    const changed = applyReceiptRead(tr, read, { overwrite });
+    tr.ai = { at: new Date().toISOString(), model: read.model || "", confidence: typeof read.confidence === "number" ? read.confidence : null };
+    // a return slip (receiptlib.js isSlip): the refund never lands on the
+    // total, it waits here for "Log as a return"
+    if (read.isReturn === true) { tr.ai.isReturn = true; tr.ai.refund = amountNum(read.refund) > 0 ? amountNum(read.refund) : null; }
+    let savedOk = true;
+    try { await Store.put(target); }
+    catch {
+      // the read stays on the receipt in memory and in the save queue (which
+      // retries on its own): never a second AI call for a save that failed
+      savedOk = false;
+      autosave(target, readBtn.isConnected ? pill : null);
+    }
+    // a page that opened this job while the write was landing (the router
+    // reads the job first) holds a copy without the read: its next save would
+    // drop it, so the read lands there too
+    const now = liveOf(jobId);
+    const lr = now && now !== target ? (now.receipts || []).find((x) => x && x.id === r.id) : null;
+    if (lr && lr.photo === sent) {
+      applyReceiptRead(lr, read, { overwrite });
+      lr.ai = { ...tr.ai };
+      autosave(now, null);
+    }
+    const shown = readBtn.isConnected;
+    const priced = (Array.isArray(read.items) ? read.items : []).filter((it) => it && amountNum(it.price) !== 0);
+    const slipRead = read.isReturn === true || (!(amountNum(read.total) > 0) && priced.length > 0 && priced.every((it) => amountNum(it.price) < 0));
+    if (!savedOk) toast(`Read ${read.vendor || "the receipt"}, but this phone couldn't save it yet. It keeps trying; don't close the app until it says ✓ Saved.`, 6000);
+    else toast(slipRead && !(amountNum(tr.amount) > 0) ? `Read a return slip from ${read.vendor || "the store"}. Tap ↩ Log as a return to take it off the job total.`
+      : changed.length ? `Read ${read.vendor || "the receipt"} — ${money(amountNum(read.total))}.` + (shown ? " Check it, then Done." : "") : "Read it — nothing new to fill in.", 4000);
+    // repaint every field with what landed; when the crew moved on, done()
+    // repaints the list or the receipt's reopened page instead (never the
+    // return form, which registers nothing)
+    READING.delete(r.id);
+    if (shown) receiptEditor(target, tr, ctx);
+    else done();
   }
   readBtn.addEventListener("click", () => runRead({ overwrite: !!r.ai }));
   paintPhoto();
@@ -333,7 +428,7 @@ function receiptEditor(project, r, ctx) {
   if (!(amountNum(r.amount) > 0)) receiptLib().then((lib) => {
     if (!lib || typeof lib.isSlip !== "function" || !slipBox.isConnected || amountNum(r.amount) > 0) return;
     const go = () => {
-      if (reading) return toast("The AI is still reading it. One moment.");
+      if (READING.has(r.id)) return toast("The AI is still reading it. One moment.");
       commit(); returnForm(project, r, ctx);
     };
     slipBox.replaceChildren(lib.isSlip(r)
@@ -369,7 +464,7 @@ function receiptEditor(project, r, ctx) {
     drift,
     field("Notes", ta(r, "notes", { rows: 2, placeholder: "What it was for, who bought it, anything to return…" })),
     h("div", { class: "sticky-actions" },
-      h("button", { type: "button", class: "btn btn--primary", onclick: async () => { commit(); location.hash = listHash(project); } }, "✓ Done"),
+      h("button", { type: "button", class: "btn btn--primary", onclick: () => { location.hash = listHash(project); } }, "✓ Done"),
       h("button", { type: "button", class: "btn btn--danger", style: "flex:0 0 auto;width:auto", onclick: async () => {
         // returns logged against only this receipt go with it — a credit with
         // no receipt would sit on the job total with nothing to explain it
@@ -391,7 +486,8 @@ function receiptEditor(project, r, ctx) {
         const gone = new Set(kill);
         project.receipts = project.receipts.filter((x) => x && !gone.has(x.id));
         tombstoneItems(project, kill);   // so the delete sticks across devices (merge.js)
-        await Store.put(project);
+        try { await Store.put(project); }
+        catch { autosave(project, pill); toast("This phone couldn't save the delete yet. It keeps trying.", 5000); location.hash = listHash(project); return; }
         toast("Receipt deleted.");
         location.hash = listHash(project);
       } }, "🗑")));
@@ -414,6 +510,7 @@ function returnView(project, r, ctx) {
   setChrome("Return", listHash(project), "Return — " + (r.vendor || ""));
   view.replaceChildren();
   setCtx(project, null);
+  mounted = null;
   const orig = project.receipts.find((x) => x && x.id === r.returnOf && !isReturn(x));
   const pages = [r.photo, ...(Array.isArray(r.extraPages) ? r.extraPages : [])].filter(Boolean);
   const lines = (Array.isArray(r.items) ? r.items : []).filter(Boolean);
@@ -455,6 +552,7 @@ async function returnForm(project, slip, ctx) {
   setChrome("Log a return", listHash(project), "Log a return");
   view.replaceChildren();
   setCtx(project, null);
+  mounted = null;
   const back = () => {
     const cur = project.receipts.find((x) => x && x.id === slip.id);
     if (cur && !isReturn(cur)) receiptEditor(project, cur, ctx); else location.hash = listHash(project);
@@ -580,10 +678,17 @@ async function returnForm(project, slip, ctx) {
         photo: cur.photo || "", extraPages: Array.isArray(cur.extraPages) ? cur.extraPages.slice(0, MAX_PAGES - 1) : [],
         by: author() || "", nowISO: new Date().toISOString() });
       saving = true; save.disabled = true;
+      const before = { receipts: project.receipts, dead: project.deletedIds ? { ...project.deletedIds } : undefined };
       project.receipts = project.receipts.filter((x) => !(x && x.id === slip.id));
       project.receipts.push(c);
       tombstoneItems(project, [slip.id]);   // so the slip stays gone on every device (merge.js)
-      await Store.put(project);
+      try { await Store.put(project); }
+      catch {
+        // nothing kept: the job goes back to the slip, so Save can be tapped again
+        project.receipts = before.receipts;
+        if (before.dead) project.deletedIds = before.dead; else delete project.deletedIds;
+        throw new Error("This phone couldn't save the return. Try again in a moment; if it keeps happening, close and reopen the app.");
+      }
       toast(`Return logged: ${money(receiptAmount(c))} off this job.`, 3500);
       location.hash = listHash(project);
     } catch (e) {

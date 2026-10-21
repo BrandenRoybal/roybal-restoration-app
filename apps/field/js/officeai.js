@@ -361,8 +361,21 @@ export function digestSupportDoc(project, pages, hint) {
     receiptcalc.js applyReceiptRead lands it on the receipt. A return slip
     comes back isReturn with total null and the refund in `refund` (a reader
     deployed before that sends neither, and drops a negative total). */
-export function readReceipt(project, pages) {
-  return callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }).then((b) => b.receipt || {});
+export const readTuning = { receiptMs: 60000 };   // tests shorten it
+export async function readReceipt(project, pages) {
+  // like readMeter: a phone back from hours offline refreshes first, and a
+  // read that never answers gives up (the button comes back) instead of
+  // leaving "Reading…" on screen for good
+  await ensureFresh().catch(() => { /* the call below reports it */ });
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), readTuning.receiptMs) : null;
+  try {
+    const b = await callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }, { signal: ctl ? ctl.signal : undefined });
+    return b.receipt || {};
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error("no answer in a minute — check the signal and tap ✨ Read receipt again");
+    throw e;
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 /** Read the number on a photo of the moisture meter's screen (one photo, a

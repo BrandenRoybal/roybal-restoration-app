@@ -32,7 +32,7 @@
    - before any merge or overwrite, the local copy is snapshotted
      to the on-device backups store (restorable from the job page).
    ============================================================ */
-import { Store, onProjectSaved, onProjectDeleted, likelyOffline } from "./core.js";
+import { Store, onProjectSaved, onProjectDeleted, likelyOffline, hasUnsaved, flushPending, unsavedProject } from "./core.js";
 import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSince, uploadMedia, downloadMedia,
          pushProject, tombstoneProject, reviveProject } from "./supa.js";
 import { SYNC_VIA_RPC } from "./config.js";
@@ -134,6 +134,9 @@ function settleMerged(p, out) {
    fed each other rev bumps forever — 6k pointless row rewrites in one day
    (Jul 2026 disk-IO incident). */
 async function absorb(localRef, serverFull, why) {
+  // its newest edit is still in the save queue: no backup, no merge now —
+  // once that edit lands the row is dirty and the next push merges on the server
+  if (unsavedProject(localRef.id)) return null;
   for (let attempt = 0; attempt < 4; attempt++) {
     const local = (await Store.get(localRef.id)) || localRef;
     await Store.backup(local);                     // our side, restorable (never throws)
@@ -199,6 +202,7 @@ async function adoptServerMerge(localRef, res, fetchMedia, have) {
     mediaWait.set(id, (mediaWait.get(id) || 0) + 1);
     return "media-missing";
   }
+  if (unsavedProject(id)) return "raced";         // an edit still waiting to save: adopt after it lands
   const local = (await Store.get(id)) || localRef;
   await Store.backup(local);                       // our side stays restorable
   const settled = {};
@@ -379,9 +383,17 @@ async function sweepThumbs() {
   let uploads = 0, failures = 0;
   const spent = () => uploads >= sweepTuning.maxPerCycle || failures >= sweepTuning.maxFailures;
   try {
-    for (const p of await Store.all()) {
+    /* Candidates from the stamps core.js keeps (no job is loaded to find
+       them), then ONE job at a time — this used to read every job on the
+       phone after every green cycle, and on Oct 21 2026 that whole-store read
+       was what iOS killed the storage process under, again and again. A job
+       push() just sent with every thumbnail settled is already stamped and is
+       not read at all. */
+    const ids = Store.stamps().filter(([id, at]) => sweptAt[id] !== at).map(([id]) => id);
+    for (const id of ids) {
       if (spent()) break;
-      if (sweptAt[p.id] === p.updatedAt) continue;   // unchanged since a clean pass
+      const p = await Store.get(id);
+      if (!p || sweptAt[p.id] === p.updatedAt) continue;   // gone, or unchanged since a clean pass
       let media;
       try { ({ media } = await deflateSynced(p)); } catch { continue; }
       let complete = true;
@@ -500,10 +512,35 @@ async function rebaseDirtyOnce() {
 }
 
 /* ---------- push local changes (rev-guarded) ---------- */
-async function push() {
-  const all = await Store.all();
+/* What push() looks at. A FULL scan walks every key and reads one job at a
+   time (peak memory = the biggest job, never the whole store): on the first
+   cycle, on ↻ Sync / back online (force), and every fullScanMs — that is what
+   catches a row this page did not write (another tab) or bookkeeping lost in
+   a crash. Between scans only rows whose last-known updatedAt differs from
+   what was pushed are read — the same test as before, made on core.js's
+   stamps instead of on every job loaded into memory. */
+export const syncTuning = { fullScanMs: 10 * 60 * 1000 };
+let lastFullScan = 0;
+async function pushCandidates(force) {
+  if (force || !lastFullScan || Date.now() - lastFullScan >= syncTuning.fullScanMs) {
+    return { full: true, ids: await Store.keys() };
+  }
+  return { full: false, ids: Store.stamps().filter(([id, at]) => pushed[id] !== at).map(([id]) => id) };
+}
+/* a job just pushed whose every object already has its thumbnail settled
+   needs no sweep — stamp it so sweepThumbs never reads or re-hashes it */
+function markSwept(p, media) {
+  if (media.every((m) => thumbsDone.has(m.hash))) { sweptAt[p.id] = p.updatedAt; saveSwept(); }
+}
+
+async function push(force = false) {
+  const { full, ids } = await pushCandidates(force);
   let skippedNow = 0, lastErr = null;
-  for (const p of all) {
+  for (const id of ids) {
+    let p;
+    try { p = await Store.get(id); }
+    catch (e) { if (e && e.code === "storage-lost") throw e; lastErr = e; continue; }
+    if (!p) continue;
     if (pushed[p.id] === p.updatedAt) continue;        // already up to date
     try {
       const { slim, media } = await deflateSynced(p);
@@ -532,6 +569,22 @@ async function push() {
           revs[p.id] = Number(res.rev) || base + 1; saveRevs();
           pushed[p.id] = p.updatedAt; savePushed();
           mediaWait.delete(p.id);
+          markSwept(p, media);
+          continue;
+        }
+        if (res.status === "current" && res.data && res.data.updatedAt === p.updatedAt && sameContent(slim, res.data)) {
+          // The server already holds exactly what this row holds, stamp and all
+          // (a different stamp still takes the adopt below: the local stamp must
+          // not stay ahead of the server's, or the pull tie-guard would skip the
+          // next device's edit) — this device only lost its bookkeeping (a crash dropped the last localStorage
+          // writes: revs/pushed). Nothing to adopt, so nothing to inflate, back
+          // up or rewrite: record the rev and go clean. Before this, every such
+          // reopen inflated the job, snapshotted it into the backups record and
+          // rewrote it — three times on Oct 21 2026, each right after a relaunch.
+          revs[p.id] = Number(res.rev) || base; saveRevs();
+          pushed[p.id] = p.updatedAt; savePushed();
+          mediaWait.delete(p.id);
+          markSwept(p, media);
           continue;
         }
         if (res.status === "merged" || res.status === "current") {
@@ -637,6 +690,7 @@ async function push() {
     }
   }
   skipped = skippedNow;
+  if (full) lastFullScan = Date.now();
   for (const [id, queuedAt] of [...deletes]) {
     try {
       // STALENESS GUARD: a queued delete can now outlive a sign-out, so it may
@@ -727,6 +781,10 @@ async function pull() {
     }
     const remote = row.data;
     if (!remote || !remote.id) { bump(row.updated_at); continue; }
+    // our own echo (or anything not newer than the copy here) is settled on the
+    // stamp alone — no need to load a 30 MB job to compare two timestamps
+    const seen = Store.stampOf(row.id);
+    if (seen !== undefined && (remote.updatedAt || "") <= seen) { bump(row.updated_at); continue; }
     const local = await Store.get(row.id);
     // local wins ties: only a STRICTLY newer remote may touch local work
     if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bump(row.updated_at); continue; }
@@ -805,9 +863,13 @@ export async function syncNow(opts = {}) {
     // still pushing unguarded rows gets merged here instead of overwritten by
     // our next guarded push. (Trade-off: a just-deleted job can transiently
     // reappear locally for one cycle; the next pull removes it.)
+    // an edit whose save failed and waits in core.js's queue goes to disk
+    // first, so this cycle sees it as the dirty row it is (if it still can't
+    // land, Store.putIf/delIf refuse to write under it — see core.js)
+    if (hasUnsaved()) await flushPending().catch(() => {});
     await rebaseDirtyOnce();
     await pull();
-    await push();
+    await push(!!opts.force);
     // both of these mean DATA NOT BACKED UP — show red, not a quiet counter
     const stalled = [...mediaWait.values()].filter((n) => n >= STALL_CYCLES).length;
     const problems = [];
@@ -824,6 +886,7 @@ export async function syncNow(opts = {}) {
     // that's the honest "offline", proven by a real attempt rather than by a
     // flag that lies. Anything else is a server/app problem and stays an error.
     if (e instanceof TypeError && !updateRequired) setStatus("offline");
+    else if (e && e.code === "storage-lost") setStatus("error", { message: "This phone stopped saving — tap Reload at the bottom of the screen." });
     else setStatus("error", {
       needsUpdate: updateRequired,
       message: updateRequired
