@@ -182,6 +182,17 @@ const OWED_GAP_MS = 10 * 60 * 1000;
 const owedAt = new Map();   // job id → when a rebuilt union was last pushed back (adoptServerMerge)
 async function adoptServerMerge(localRef, res, fetchMedia, have) {
   const id = localRef.id;
+  // an edit still waiting to save: nothing to adopt now. Once it lands the
+  // row is dirty, its save schedules a push, and that push merges on the
+  // server. It lands stamped past the server's copy, as an edit made after
+  // adopting it would be: a server clock running ahead must not make the
+  // union's older value of an element win over what the crew typed
+  const queued = unsavedProject(id);
+  if (queued) {
+    const at = res && res.data ? res.data.updatedAt || "" : "";
+    if (at > (queued.updatedAt || "")) queued.updatedAt = at;
+    return "queued";
+  }
   let full, missing;
   try {
     // The union may reference photos this device has never held; take their
@@ -202,7 +213,6 @@ async function adoptServerMerge(localRef, res, fetchMedia, have) {
     mediaWait.set(id, (mediaWait.get(id) || 0) + 1);
     return "media-missing";
   }
-  if (unsavedProject(id)) return "raced";         // an edit still waiting to save: adopt after it lands
   const local = (await Store.get(id)) || localRef;
   await Store.backup(local);                       // our side stays restorable
   const settled = {};
@@ -593,7 +603,9 @@ async function push(force = false) {
           //             it wrote nothing, so adopt its copy and go clean.
           const why = await adoptServerMerge(p, res, resolveMedia, localMedia);
           if (why === "media-fetch-failed") lastErr = new Error("merge media fetch failed");
-          if (why !== true) needsAnotherPass = true;   // retry in 1.5s, not 45s
+          // retry in 1.5s, not 45s — but not for a queued edit: its own save
+          // schedules the push, and until then every pass would redo this one
+          if (why !== true && why !== "queued") needsAnotherPass = true;
           continue;
         }
         // FAIL CLOSED. Anything we do not recognise must not fall into the
@@ -748,10 +760,14 @@ async function pull() {
   // (one 187-photo job used to block every other job's sync). Later rows still
   // apply, but the cursor FREEZES at the first stuck row so it is refetched
   // next cycle — already-applied later rows then fall out of the tie guard.
-  let stuckOnMedia = false;
-  const bump = (ts) => { if (!stuckOnMedia) bumpCursor(ts); };
+  // A row for a job whose edit still waits in core.js's save queue is held the
+  // same way: nothing may be written under that edit, and if it never lands
+  // (the app is closed first) the row must still be fetched again, not passed.
+  let hold = false;
+  const bump = (ts) => { if (!hold) bumpCursor(ts); };
   for (const row of rows) {
     if (row.deleted) {
+      if (unsavedProject(row.id)) { hold = true; continue; }
       const local = await Store.get(row.id);
       if (local && pushed[row.id] !== local.updatedAt && !isBlankProject(local)) {
         // this device holds UNSYNCED work on the job — a tombstone must not
@@ -767,6 +783,7 @@ async function pull() {
       if (local) {
         await Store.backup(local);           // delete — keep a restorable snapshot
         if (!(await Store.delIf(row.id, local.updatedAt))) {
+          if (unsavedProject(row.id)) { hold = true; continue; }   // queued meanwhile: as above
           // an edit landed while we were backing up — treat it as dirty work
           revs[row.id] = 0; saveRevs();
           bump(row.updated_at);
@@ -785,6 +802,7 @@ async function pull() {
     // stamp alone — no need to load a 30 MB job to compare two timestamps
     const seen = Store.stampOf(row.id);
     if (seen !== undefined && (remote.updatedAt || "") <= seen) { bump(row.updated_at); continue; }
+    if (unsavedProject(row.id)) { hold = true; continue; }
     const local = await Store.get(row.id);
     // local wins ties: only a STRICTLY newer remote may touch local work
     if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bump(row.updated_at); continue; }
@@ -808,7 +826,7 @@ async function pull() {
     // the status red if it never resolves.
     if (missing > 0) {
       mediaWait.set(row.id, (mediaWait.get(row.id) || 0) + 1);
-      stuckOnMedia = true;
+      hold = true;
       continue;
     }
     const localDirty = local && pushed[row.id] !== local.updatedAt;   // unsynced edits on this device
@@ -827,6 +845,9 @@ async function pull() {
         pushed[row.id] = remote.updatedAt;             // local now matches server
         mediaWait.delete(row.id);
         rowChanged(row.id);
+      } else if (unsavedProject(row.id)) {
+        hold = true;                        // queued during the download: as above
+        continue;
       } else {
         needsAnotherPass = true;
       }

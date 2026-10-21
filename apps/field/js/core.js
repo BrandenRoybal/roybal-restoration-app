@@ -357,6 +357,7 @@ function paintPill(pill, state) {
   }
 }
 async function saveQueued() {
+  let firstErr = null;
   for (const [id, entry] of [..._unsaved]) {
     if (_unsaved.get(id) !== entry) continue;      // a newer edit for this job replaced it — that one goes next
     // it stays queued while its write is in flight, so Store.putIf can't land
@@ -365,14 +366,17 @@ async function saveQueued() {
       await Store.put(entry.project);
     } catch (e) {
       const kept = _unsaved.get(id);              // it, or a newer edit that queued itself meanwhile
-      kept.failed = true;
-      paintPill(kept.pill, "failed");
-      clearTimeout(retryTimer);
-      retryTimer = setTimeout(() => { doSave().catch(() => {}); }, retryMs);
-      retryMs = Math.min(retryMs * 2, 30000);
-      throw e;
+      if (kept) { kept.failed = true; paintPill(kept.pill, "failed"); }
+      if (!firstErr) firstErr = e;
+      continue;                                    // one job that can't save must not hold the others
     }
     if (_unsaved.get(id) === entry) { _unsaved.delete(id); paintPill(entry.pill, "saved"); }
+  }
+  if (firstErr) {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => { doSave().catch(() => {}); }, retryMs);
+    retryMs = Math.min(retryMs * 2, 30000);
+    throw firstErr;
   }
   retryMs = 2000;
 }
@@ -382,6 +386,9 @@ function doSave() {
   return pass;
 }
 export function autosave(project, pill) {
+  // no pill of its own (a read landing off screen): the job's page keeps its pill
+  const prev = _unsaved.get(project.id);
+  if (!pill && prev) pill = prev.pill;
   _unsaved.set(project.id, { project, pill, failed: false });
   clearTimeout(saveTimer);
   paintPill(pill, "saving");

@@ -11,6 +11,8 @@ import { COMPANY, ensureLineItemIds } from "./model.js";
 let CTX = { project: null, pill: null };
 export function setCtx(project, pill) { CTX = { project, pill }; bindPill(project, pill); }
 export function commit() { if (CTX.project) autosave(CTX.project, CTX.pill); }
+/** The save pill of the form page showing this very job object (null if none). */
+export const pillFor = (project) => (project && CTX.project === project ? CTX.pill : null);
 
 /* ---------- field wrapper ---------- */
 export function field(label, node, hint) {

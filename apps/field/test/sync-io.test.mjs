@@ -345,5 +345,91 @@ ok(s.get === 0 && s.put === 0, `…and the next cycle finds it clean — get=${s
   DBP.transaction = origTx;
 }
 
+/* A JOB WHOSE SAVE KEEPS FAILING (a full disk: QuotaExceededError on its big
+   write, while reads and other jobs work). Sync must not re-push it every
+   1.5 s, and must not pass by the office's change to it: if the queued edit
+   never lands (the app is closed first), the phone still has to pick that
+   change up, or its next edit reverts it on the server. */
+{
+  const { autosave, flushPending, unsavedProject } = await import("../js/core.js");
+  const fs = await import("node:fs"), os = await import("node:os"), path = await import("node:path");
+  const { fileURLToPath, pathToFileURL } = await import("node:url");
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const OLD = Symbol("held by the page that is closed before it saves");
+  let failing = new Set();
+  const OSP = globalThis.IDBObjectStore.prototype, put0 = OSP.put;
+  OSP.put = function (v, ...rest) {
+    if (this.name === "projects" && v && (v[OLD] || failing.has(v.id))) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    return put0.call(this, v, ...rest);
+  };
+  let rpcs = 0;
+  const fetch0 = globalThis.fetch;
+  globalThis.fetch = (url, opts) => { if (String(url).includes("/rpc/push_project")) rpcs++; return fetch0(url, opts); };
+
+  // dirty on disk, the office moved the same job, the next edit can't save
+  await Store.put({ id: "full", customer: "Full", notes: "", receipts: [receipt("f1")] });
+  await sync2.syncNow(); await sync2.syncNow();
+  const frow = serverRows.get("full");
+  frow.data = { ...frow.data, receipts: [...frow.data.receipts, { id: "office1", vendor: "Office", amount: "9" }], updatedAt: new Date().toISOString(), rev: frow.data.rev + 1 };
+  frow.updated_at = new Date(Date.now() + 30000).toISOString();
+  const f = await Store.get("full");
+  f.receipts.push(receipt("f2"));
+  await Store.put(f);                                     // lands: the row is dirty
+  failing.add("full");
+  f.receipts.at(-1).vendor = "typed after";
+  autosave(f, null);
+  await settle(450);
+  rpcs = 0;
+  await sync2.syncNow();
+  await settle(3500);                                     // a 1.5 s re-pass would have run twice by now
+  ok(rpcs === 1, `a job whose edit can't save is pushed once, not again every 1.5 s — push_project calls=${rpcs}`);
+  failing.delete("full");
+  await flushPending();
+  for (let i = 0; i < 3; i++) await sync2.syncNow();
+  const fd = await Store.get("full"), fsv = serverRows.get("full").data;
+  const has = (p) => p.receipts.some((r) => r.id === "office1") && p.receipts.some((r) => r.id === "rcf2" && r.vendor === "typed after");
+  ok(has(fd) && has(fsv), "once it saves, the office's receipt and the crew's edit are on the phone and the server");
+
+  // clean on disk, its edit can't save, the office corrects it (and deletes
+  // another such job), and the app is closed before either edit lands
+  await Store.put({ id: "clm", customer: "Claim", claimNumber: "CLM-1", notes: "", receipts: [{ id: "c1", vendor: "Spenard", amount: "1" }] });
+  await Store.put({ id: "trash", customer: "Trash me", notes: "", receipts: [{ id: "t1", vendor: "Spenard", amount: "2" }] });
+  await sync2.syncNow(); await sync2.syncNow();
+  for (const id of ["clm", "trash"]) {
+    const p = await Store.get(id);
+    p[OLD] = true; p.notes = "crew typing";
+    autosave(p, null);
+  }
+  await settle(450);
+  const crow = serverRows.get("clm");
+  crow.data = { ...crow.data, claimNumber: "CLM-1-CORRECTED", receipts: [{ ...crow.data.receipts[0], amount: "112.40" }], updatedAt: new Date(Date.now() + 120000).toISOString(), rev: crow.data.rev + 1 };
+  crow.updated_at = new Date(Date.now() + 120000).toISOString();
+  const trow = serverRows.get("trash");
+  trow.deleted = true; trow.updated_at = new Date(Date.now() + 121000).toISOString();
+  await sync2.syncNow();
+  ok((localStorage.getItem("roybal-sync-cursor") || "") < crow.updated_at, "the pull holds its place at changes it couldn't apply under a queued edit");
+  ok((await Store.get("clm")).claimNumber === "CLM-1" && !!(await Store.get("trash")), "…and wrote nothing under them");
+  // "Reload app": a fresh page (its own core.js, so an empty save queue) over the same storage
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "roybal-relaunch-"));
+  fs.cpSync(fileURLToPath(new URL("../js/", import.meta.url)), tmp, { recursive: true });
+  const core3 = await import(pathToFileURL(path.join(tmp, "core.js")).href);
+  const sync3 = await import(pathToFileURL(path.join(tmp, "sync.js")).href);
+  sync3.sweepTuning.pauseMs = 0;
+  sync3.sweepTuning.shrink = async (src) => "data:image/jpeg;base64," + src.slice(-40);
+  for (let i = 0; i < 3; i++) await sync3.syncNow();
+  const c = await core3.Store.get("clm");
+  ok(c && c.claimNumber === "CLM-1-CORRECTED" && c.receipts[0].amount === "112.40", `after the reload the phone has the office's correction — claim=${c && c.claimNumber} amount=${c && c.receipts[0].amount}`);
+  ok((await core3.Store.get("trash")) === null, "…and the job the office deleted is gone");
+  c.notes = "next day";
+  await core3.Store.put(c);
+  for (let i = 0; i < 3; i++) await sync3.syncNow();
+  const sc = serverRows.get("clm").data;
+  ok(sc.claimNumber === "CLM-1-CORRECTED" && sc.receipts[0].amount === "112.40" && sc.notes === "next day", `the crew's next edit keeps it on the server — claim=${sc.claimNumber} amount=${sc.receipts[0].amount}`);
+  ok(serverRows.get("trash").deleted === true, "…and the deleted job stays deleted");
+  fs.rmSync(tmp, { recursive: true, force: true });
+  globalThis.fetch = fetch0;
+  OSP.put = put0;
+}
+
 console.log("\n" + (failures ? `FAILED: ${failures}` : "ALL SYNC I/O CHECKS PASSED"));
 process.exit(failures ? 1 : 0);

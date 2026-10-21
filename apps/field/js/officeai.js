@@ -364,18 +364,23 @@ export function digestSupportDoc(project, pages, hint) {
 export const readTuning = { receiptMs: 60000 };   // tests shorten it
 export async function readReceipt(project, pages) {
   // like readMeter: a phone back from hours offline refreshes first, and a
-  // read that never answers gives up (the button comes back) instead of
-  // leaving "Reading…" on screen for good
-  await ensureFresh().catch(() => { /* the call below reports it */ });
+  // read that never answers — the refresh included — gives up (the button
+  // comes back) instead of leaving "Reading…" on screen for good
+  const noAnswer = "no answer in a minute — check the signal and tap ✨ Read receipt again";
   const ctl = typeof AbortController === "function" ? new AbortController() : null;
-  const timer = ctl ? setTimeout(() => ctl.abort(), readTuning.receiptMs) : null;
+  let timer = null;
+  const gaveUp = new Promise((_, reject) => {
+    timer = setTimeout(() => { if (ctl) ctl.abort(); reject(new Error(noAnswer)); }, readTuning.receiptMs);
+  });
+  gaveUp.catch(() => {});
   try {
-    const b = await callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }, { signal: ctl ? ctl.signal : undefined });
+    await Promise.race([ensureFresh().catch(() => { /* the call below reports it */ }), gaveUp]);
+    const b = await Promise.race([callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }, { signal: ctl ? ctl.signal : undefined }), gaveUp]);
     return b.receipt || {};
   } catch (e) {
-    if (e && e.name === "AbortError") throw new Error("no answer in a minute — check the signal and tap ✨ Read receipt again");
+    if (e && e.name === "AbortError") throw new Error(noAnswer);
     throw e;
-  } finally { if (timer) clearTimeout(timer); }
+  } finally { clearTimeout(timer); }
 }
 
 /** Read the number on a photo of the moisture meter's screen (one photo, a

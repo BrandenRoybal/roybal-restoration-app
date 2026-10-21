@@ -25,7 +25,7 @@
    its links — and the receipt it returns carries a "↩ Returned" badge.
    ============================================================ */
 import { h, Store, toast, fmtDate, money, fileToDataURL, todayISO, autosave, unsavedProject } from "./core.js";
-import { setCtx, commit, field, inp, ta, sel, seg, lineItems } from "./formkit.js";
+import { setCtx, commit, pillFor, field, inp, ta, sel, seg, lineItems } from "./formkit.js";
 import { newReceipt, blankLineItem, author } from "./model.js";
 import { tombstoneItems } from "./merge.js";
 import { aiAvailable, aiReady, readReceipt } from "./officeai.js";
@@ -70,6 +70,10 @@ export function onReceiptLive(fn) { liveOf = typeof fn === "function" ? fn : () 
 /* receipts with an AI read out, by id: an editor reopened meanwhile shows
    "Reading…" instead of offering a second (paid) read of the same photo */
 const READING = new Set();
+/* job id → the read landing on it now: two reads that answer together land
+   one after the other, so neither writes its own copy of the job over the
+   other's */
+const LANDING = new Map();
 /* the receipts page on screen: { jobId, receiptId (null = the list), el,
    refresh }. A read that lands after its editor closed repaints it. */
 let mounted = null;
@@ -347,61 +351,73 @@ function receiptEditor(project, r, ctx) {
     let read;
     try { read = await readReceipt(project, [r.photo, ...r.extraPages]); }
     catch (e) { done(); toast("Couldn't read the receipt — " + (e && e.message ? e.message : "try again")); return; }
-    // land on the job the page now shows, else its edit still waiting to save,
-    // else the stored row — found by id, never this editor's old copy
-    let target;
-    try { target = liveOf(jobId) || unsavedProject(jobId) || (await Store.get(jobId)); }
-    catch {
-      done();
-      toast(`Read ${read.vendor || "the receipt"}, but this phone couldn't save it. Tap ✨ Read receipt on it again once the phone is saving.`, 6000);
-      return;
+    // one landing per job at a time (LANDING): the one before has written, or
+    // queued, its copy by the time this one picks where to land
+    const before = LANDING.get(jobId);
+    let release;
+    const mine = new Promise((res) => { release = res; });
+    LANDING.set(jobId, mine);
+    await before;
+    try {
+      // land on the job the page now shows, else its edit still waiting to save,
+      // else the stored row — found by id, never this editor's old copy
+      let target;
+      try { target = liveOf(jobId) || unsavedProject(jobId) || (await Store.get(jobId)); }
+      catch {
+        done();
+        toast(`Read ${read.vendor || "the receipt"}, but this phone couldn't save it. Tap ✨ Read receipt on it again once the phone is saving.`, 6000);
+        return;
+      }
+      const tr = ((target && target.receipts) || []).find((x) => x && x.id === r.id);
+      // the slip was logged as a return, or deleted (or the whole job), meanwhile: nothing to land
+      if (!tr) { done(); toast("That receipt is gone from the job — the read was not kept."); return; }
+      // retaken while it was reading: this read is of the old photo
+      if (tr.photo !== sent) {
+        done();
+        // the Retake's own read was turned away while this one ran: read the new photo now
+        if (readBtn.isConnected && aiReady()) runRead({ overwrite: !!tr.ai });
+        else toast("The photo changed while it was reading. Tap ✨ Read receipt for the new one.");
+        return;
+      }
+      const changed = applyReceiptRead(tr, read, { overwrite });
+      tr.ai = { at: new Date().toISOString(), model: read.model || "", confidence: typeof read.confidence === "number" ? read.confidence : null };
+      // a return slip (receiptlib.js isSlip): the refund never lands on the
+      // total, it waits here for "Log as a return"
+      if (read.isReturn === true) { tr.ai.isReturn = true; tr.ai.refund = amountNum(read.refund) > 0 ? amountNum(read.refund) : null; }
+      let savedOk = true;
+      try { await Store.put(target); }
+      catch {
+        // the read stays on the receipt in memory and in the save queue (which
+        // retries on its own): never a second AI call for a save that failed
+        savedOk = false;
+        autosave(target, readBtn.isConnected ? pill : pillFor(target));
+      }
+      // a page that opened this job while the write was landing (the router
+      // reads the job first) holds a copy without the read: its next save would
+      // drop it, so the read lands there too
+      const now = liveOf(jobId);
+      const lr = now && now !== target ? (now.receipts || []).find((x) => x && x.id === r.id) : null;
+      if (lr && lr.photo === sent) {
+        applyReceiptRead(lr, read, { overwrite });
+        lr.ai = { ...tr.ai };
+        autosave(now, pillFor(now));
+      }
+      const shown = readBtn.isConnected;
+      const priced = (Array.isArray(read.items) ? read.items : []).filter((it) => it && amountNum(it.price) !== 0);
+      const slipRead = read.isReturn === true || (!(amountNum(read.total) > 0) && priced.length > 0 && priced.every((it) => amountNum(it.price) < 0));
+      if (!savedOk) toast(`Read ${read.vendor || "the receipt"}, but this phone couldn't save it yet. It keeps trying; don't close the app until it says ✓ Saved.`, 6000);
+      else toast(slipRead && !(amountNum(tr.amount) > 0) ? `Read a return slip from ${read.vendor || "the store"}. Tap ↩ Log as a return to take it off the job total.`
+        : changed.length ? `Read ${read.vendor || "the receipt"} — ${money(amountNum(read.total))}.` + (shown ? " Check it, then Done." : "") : "Read it — nothing new to fill in.", 4000);
+      // repaint every field with what landed; when the crew moved on, done()
+      // repaints the list or the receipt's reopened page instead (never the
+      // return form, which registers nothing)
+      READING.delete(r.id);
+      if (shown) receiptEditor(target, tr, ctx);
+      else done();
+    } finally {
+      release();
+      if (LANDING.get(jobId) === mine) LANDING.delete(jobId);
     }
-    const tr = ((target && target.receipts) || []).find((x) => x && x.id === r.id);
-    // the slip was logged as a return, or deleted (or the whole job), meanwhile: nothing to land
-    if (!tr) { done(); toast("That receipt is gone from the job — the read was not kept."); return; }
-    // retaken while it was reading: this read is of the old photo
-    if (tr.photo !== sent) {
-      done();
-      // the Retake's own read was turned away while this one ran: read the new photo now
-      if (readBtn.isConnected && aiReady()) runRead({ overwrite: !!tr.ai });
-      else toast("The photo changed while it was reading. Tap ✨ Read receipt for the new one.");
-      return;
-    }
-    const changed = applyReceiptRead(tr, read, { overwrite });
-    tr.ai = { at: new Date().toISOString(), model: read.model || "", confidence: typeof read.confidence === "number" ? read.confidence : null };
-    // a return slip (receiptlib.js isSlip): the refund never lands on the
-    // total, it waits here for "Log as a return"
-    if (read.isReturn === true) { tr.ai.isReturn = true; tr.ai.refund = amountNum(read.refund) > 0 ? amountNum(read.refund) : null; }
-    let savedOk = true;
-    try { await Store.put(target); }
-    catch {
-      // the read stays on the receipt in memory and in the save queue (which
-      // retries on its own): never a second AI call for a save that failed
-      savedOk = false;
-      autosave(target, readBtn.isConnected ? pill : null);
-    }
-    // a page that opened this job while the write was landing (the router
-    // reads the job first) holds a copy without the read: its next save would
-    // drop it, so the read lands there too
-    const now = liveOf(jobId);
-    const lr = now && now !== target ? (now.receipts || []).find((x) => x && x.id === r.id) : null;
-    if (lr && lr.photo === sent) {
-      applyReceiptRead(lr, read, { overwrite });
-      lr.ai = { ...tr.ai };
-      autosave(now, null);
-    }
-    const shown = readBtn.isConnected;
-    const priced = (Array.isArray(read.items) ? read.items : []).filter((it) => it && amountNum(it.price) !== 0);
-    const slipRead = read.isReturn === true || (!(amountNum(read.total) > 0) && priced.length > 0 && priced.every((it) => amountNum(it.price) < 0));
-    if (!savedOk) toast(`Read ${read.vendor || "the receipt"}, but this phone couldn't save it yet. It keeps trying; don't close the app until it says ✓ Saved.`, 6000);
-    else toast(slipRead && !(amountNum(tr.amount) > 0) ? `Read a return slip from ${read.vendor || "the store"}. Tap ↩ Log as a return to take it off the job total.`
-      : changed.length ? `Read ${read.vendor || "the receipt"} — ${money(amountNum(read.total))}.` + (shown ? " Check it, then Done." : "") : "Read it — nothing new to fill in.", 4000);
-    // repaint every field with what landed; when the crew moved on, done()
-    // repaints the list or the receipt's reopened page instead (never the
-    // return form, which registers nothing)
-    READING.delete(r.id);
-    if (shown) receiptEditor(target, tr, ctx);
-    else done();
   }
   readBtn.addEventListener("click", () => runRead({ overwrite: !!r.ai }));
   paintPhoto();

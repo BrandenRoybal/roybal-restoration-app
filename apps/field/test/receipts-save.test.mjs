@@ -69,6 +69,7 @@ globalThis.fetch = (url, opts = {}) => {
 const { Store, flushPending, unsavedProject, onProjectSaved } = await import("../js/core.js");
 const { receiptsPage, onReceiptLive } = await import("../js/receipts.js");
 const { readTuning } = await import("../js/officeai.js");
+const { signIn } = await import("../js/supa.js");
 
 const view = document.getElementById("view");
 const ctx = { view, setChrome: () => {} };
@@ -433,6 +434,111 @@ await test("↩ Save return when the phone can't save: nothing changes, it says 
   assert.match(toastText(), /Return logged/);
   const disk = (await Store.get("j16")).receipts;
   assert.ok(disk.some((r) => r.kind === "return") && !disk.some((r) => r.id === "S1"));
+});
+
+await test("two reads that answer together after the crew left the job both land (one used to write its copy over the other's)", async () => {
+  const p = job("j17");
+  await Store.put(p, { bump: false, quiet: true });
+  await open(p);
+  await snap(cameraOnList()); await follow();                  // receipt A: its read goes out
+  const na = asks.length - 1;
+  btn(/✓ Done/).click(); await settle(); await follow();
+  await snap(cameraOnList()); await follow();                  // receipt B: its read goes out
+  const nb = asks.length - 1;
+  btn(/✓ Done/).click(); await settle(); await follow();
+  live = null; view.replaceChildren(); location.hash = "#/";   // back to the job list
+  asks[na].answer(spenard);
+  asks[nb].answer({ ...spenard, vendor: "Home Depot", total: 42.1, receiptNo: "1" });
+  await settle(300);
+  const disk = (await Store.get("j17")).receipts;
+  assert.equal(disk[0].vendor, "Spenard Builders Supply");
+  assert.equal(disk[1].vendor, "Home Depot");
+  assert.ok(disk[0].ai && disk[1].ai);
+});
+
+await test("a late read whose save fails leaves the save pill with the receipt the crew is on: Not saved, then ✓ Saved once it lands", async () => {
+  const p = job("j18", [
+    { id: "A", vendor: "", amount: "", photo: "data:image/jpeg;base64,QQ==", items: [], extraPages: [] },
+    { id: "B", vendor: "Home Depot", amount: "9.00", items: [], extraPages: [], photo: "" }]);
+  await Store.put(p, { bump: false, quiet: true });
+  await open(p, "A");
+  btn(/Read receipt/).click(); await settle();
+  const n = asks.length - 1;
+  btn(/✓ Done/).click(); await settle(); await follow();
+  location.hash = "#/p/j18/f/receipts/B"; await follow();       // receipt B, nothing waiting to save
+  storageDown();
+  asks[n].answer(spenard); await settle(450);
+  assert.match(pill().textContent, /Not saved/, "the read waits to save: B's pill doesn't say ✓ Saved");
+  const notes = () => view.querySelector('textarea[placeholder^="What it was for"]');
+  notes().value = "for the bathroom"; notes().dispatchEvent(new window.Event("input"));
+  await settle(450);
+  storageBack();
+  await flushPending();
+  const disk = (await Store.get("j18")).receipts;
+  assert.equal(disk[0].vendor, "Spenard Builders Supply");
+  assert.equal(disk[1].notes, "for the bathroom");
+  assert.equal(pill().textContent, "✓ Saved", "not stuck on Not saved / Saving…");
+});
+
+await test("…and when the crew's own edit on that receipt is the one waiting, the late read doesn't take its pill: ✓ Saved once both land", async () => {
+  const p = job("j20", [
+    { id: "A", vendor: "", amount: "", photo: "data:image/jpeg;base64,QQ==", items: [], extraPages: [] },
+    { id: "B", vendor: "Home Depot", amount: "9.00", items: [], extraPages: [], photo: "" }]);
+  await Store.put(p, { bump: false, quiet: true });
+  await open(p, "A");
+  btn(/Read receipt/).click(); await settle();
+  const n = asks.length - 1;
+  btn(/✓ Done/).click(); await settle(); await follow();
+  location.hash = "#/p/j20/f/receipts/B"; await follow();
+  const notes = () => view.querySelector('textarea[placeholder^="What it was for"]');
+  storageDown();
+  notes().value = "for the bathroom"; notes().dispatchEvent(new window.Event("input"));
+  await settle(450);
+  assert.match(pill().textContent, /Not saved/);
+  asks[n].answer(spenard); await settle(150);
+  storageBack();
+  await flushPending();
+  const disk = (await Store.get("j20")).receipts;
+  assert.equal(disk[0].vendor, "Spenard Builders Supply");
+  assert.equal(disk[1].notes, "for the bathroom");
+  assert.equal(pill().textContent, "✓ Saved", "was left on Not saved, and Saving… for good after a tap");
+});
+
+await test("a sign-in refresh that never answers still gives the button back within the read's minute (and Log as a return works)", async () => {
+  const realFetch = globalThis.fetch;
+  let tokenCalls = 0;
+  globalThis.fetch = (url, opts) => {
+    if (!/auth\/v1\/token/.test(String(url))) return realFetch(url, opts);
+    // the sign-in answers with a session a few seconds from expiry; the refresh then hangs
+    if (++tokenCalls === 1) return Promise.resolve({ ok: true, status: 200, json: async () => ({ access_token: "t", refresh_token: "r", expires_in: 5, user: { email: "crew@example.com" } }) });
+    return new Promise(() => {});
+  };
+  await signIn("crew@example.com", "pw");
+  readTuning.receiptMs = 80;
+  const slip = { id: "S1", vendor: "Spenard Builders Supply", date: "2026-10-14", amount: "", category: "materials",
+    items: [{ id: "s1", desc: "2x4x8 KD stud", qty: "2", unit: "ea", price: "-4.50" }], photo: "data:image/jpeg;base64,U0xJUA==", extraPages: [] };
+  const purchase = { id: "P1", vendor: "Spenard Builders Supply", date: "2026-10-12", amount: "155.26", category: "materials",
+    items: [{ id: "i1", desc: "2x4x8 KD stud", qty: "10", unit: "ea", price: "4.50" }], photo: "", extraPages: [] };
+  const p = job("j19", [purchase, slip]);
+  await Store.put(p, { bump: false, quiet: true });
+  await open(p, "S1");
+  const before = asks.length;
+  btn(/Read receipt/).click();
+  await settle(300);
+  assert.equal(tokenCalls, 2, "the refresh was asked");
+  assert.equal(asks.length, before, "no AI call went out");
+  assert.equal(btn(/Read receipt|Reading/).textContent, "✨ Read receipt");
+  assert.equal(btn(/Read receipt|Reading/).disabled, false);
+  assert.match(toastText(), /no answer in a minute/);
+  for (let i = 0; i < 40 && !btn(/Log (it )?as a return/); i++) await settle(50);
+  btn(/Log (it )?as a return/).click(); await settle(100);
+  assert.ok(btn(/Save return/), "the return form opens");
+  readTuning.receiptMs = 60000;
+  globalThis.fetch = (url, opts) => /auth\/v1\/token/.test(String(url))
+    ? Promise.resolve({ ok: true, status: 200, json: async () => ({ access_token: "t", refresh_token: "r", expires_in: 3600, user: { email: "crew@example.com" } }) })
+    : realFetch(url, opts);
+  await signIn("crew@example.com", "pw");
+  globalThis.fetch = realFetch;
 });
 
 await settle(50);

@@ -195,6 +195,33 @@ await test("a backup cut short by a lost connection keeps every snapshot (only a
   assert.equal(kept[0].data.customer, "v9", "the snapshot that couldn't be written is skipped");
 });
 
+await test("one job that can't save (a full disk) doesn't hold up another job's edit: that one lands and says ✓ Saved", async () => {
+  await Store.put(job("Q")); await Store.put(job("B2"));
+  const OS = globalThis.IDBObjectStore.prototype, put = OS.put;
+  OS.put = function (v, ...rest) {
+    if (this.name === "projects" && v && v.id === "Q") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    return put.call(this, v, ...rest);
+  };
+  const pillQ = document.createElement("span"), pillB = document.createElement("span");
+  const q = await Store.get("Q"); q.customer = "won't fit";
+  autosave(q, pillQ);
+  await new Promise((r) => setTimeout(r, 450));
+  assert.match(pillQ.textContent, /Not saved/);
+  const b = await Store.get("B2"); b.customer = "typed in B";
+  autosave(b, pillB);
+  await new Promise((r) => setTimeout(r, 450));
+  assert.equal(pillB.textContent, "✓ Saved", "was Saving… for good, behind Q");
+  assert.equal(unsavedProject("B2"), null);
+  assert.equal((await Store.get("B2")).customer, "typed in B");
+  assert.match(pillQ.textContent, /Not saved/);
+  assert.equal(unsavedProject("Q"), q);
+  await assert.rejects(flushPending(), (e) => e.name === "QuotaExceededError");
+  OS.put = put;
+  await flushPending();
+  assert.equal(pillQ.textContent, "✓ Saved");
+  assert.equal((await Store.get("Q")).customer, "won't fit");
+});
+
 await new Promise((r) => setTimeout(r, 50));
 assert.equal(unhandled.length, 0, "no unhandled rejections: " + unhandled.map(String).join("; "));
 console.log(`\n${pass} passed`);
