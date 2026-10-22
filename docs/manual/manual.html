@@ -588,17 +588,20 @@
 
   <h2 class="sec" id="s-leads">Leads</h2>
   <figure class="wide"><div class="frame" style="height:3.6in"><img src="shots/admin-leads.jpg"></div><figcaption><b>Leads</b>: open leads, newest first, with the next move on each.</figcaption></figure>
-  <p>Every open lead from the web form, the AI phone line, the website chat and the office shows here with its channel, age, message, phone, address and estimated value. ⚠ marks an emergency.</p>
+  <p>Every open lead from the web form, the AI phone line, the website chat and the office shows here, newest first. Each row starts with when it came in, in Alaska time (hover for the full date), then every way to reach the person on one line: tap the phone number to call, tap the email to write to them, and the address. The email is the one they typed on the website form; a phone or chat lead (those never ask) shows the contact record's email marked <i>(on file)</i> when there is one. Below that is their message, word for word. ⚠ marks an emergency.</p>
   <table>
     <tr><th style="width:27%">Button</th><th>What it does</th></tr>
-    <tr><td>📞 Call</td><td>Calls the lead.</td></tr>
     <tr><td>📅 Site visit</td><td>Books the visit: date, time and who's going. The visit shows on the board card and on the bid in Field Forms.</td></tr>
     <tr><td>📱 Confirm by text</td><td>Opens an editable confirmation text. Texts only go out between 7 AM and 8 PM Alaska time.</td></tr>
     <tr><td>⏰ Follow-up</td><td>Sets the next move and when.</td></tr>
     <tr><td>✓ Done</td><td>Logs what happened (site visit done, estimate sent, waiting on customer, no answer) and the next step.</td></tr>
     <tr><td>📝 Notes</td><td>Free notes on the lead.</td></tr>
     <tr><td>✕ Lost / spam</td><td>Pick a reason (price, went with another contractor, no response, not a fit) and archive it.</td></tr>
+    <tr><td>🖨 Print / PDF</td><td>Opens the whole lead on one letter page (clicking the lead's name does the same).</td></tr>
   </table>
+  <figure class="wide"><div class="frame" style="height:3.4in"><img src="shots/admin-lead-sheet.jpg"></div><figcaption><b>Lead record</b>: one lead on a letterhead page, ready to print or save as a PDF.</figcaption></figure>
+  <p>The lead record has who it is, when it came in, phone, email and address, their message word for word (a chat lead's whole conversation, a phone lead's caller ID), where it stands (status, first contact, site visit, next follow-up), the follow-up history and the office's notes. <span class="ui">🖨 Print / Save PDF</span> prints only that page; choose <i>Save as PDF</i> in the print box to keep a copy, named for the customer and the day it came in. On an iPhone, open Print, then Share the preview to save the PDF.</p>
+  <p>Every new website form lead also arrives by email, on top of the text: who, when, phone, email, address, the service and their message, with a link straight to its lead record. The email comes from the company Gmail, so it sits in the inbox but may not ping the phone the way the text does.</p>
   <p>Marking a lead <b>Won</b> happens on the Job Board (<a href="#s-editjob">Editing a job</a>).</p>
   <div class="warn"><b>Scam pattern</b>Out-of-state owner, no address, "remote estimate only", a broker RFQ or a video-call-only request: reply only with the standard intake (address, photos, site visit required, owner pays directly). Never accept third-party payments or overpayments.</div>
 
@@ -828,7 +831,7 @@
   </svg>
   </div>
   <ul>
-    <li><b>Website form.</b> The customer fills in name, phone, email, the service, the address, a description and whether it is an emergency, then taps <i>Request my free estimate</i>. The lead lands on the board and the office gets a text.</li>
+    <li><b>Website form.</b> The customer fills in name, phone, email, the service, the address, a description and whether it is an emergency, then taps <i>Request my free estimate</i>. The lead lands on the board and in Office Admin → Leads, and the office gets a text and an email. Nothing about it goes to info@roybalconstruction.com; the app is where web leads live.</li>
     <li><b>Phone.</b> Calls we miss forward to the AI receptionist, which takes the details and books the lead with "AI-booked from a phone call" in the notes.</li>
     <li><b>Website chat.</b> The AI chat on the site can book a lead the same way.</li>
     <li><b>Everything else</b> (email to info@roybalconstruction.com, Yelp, referrals, walk-ins) is entered by the office with <span class="ui">+ New Job</span> on the board at stage Leads / Bids.</li>
@@ -851,6 +854,7 @@
     <tr><td>📷 Equipment scan in and out</td><td>Waiting</td><td>Field build v208. A QR label on every unit; the crew scans units in, between rooms and out from the Drying Log, and Office Admin → Equipment shows where every unit is, keeps the fleet list and prints the labels. Scanning, the fleet list and labels switch on once this feature's database update is applied; Branden writes "require v208" before the crew starts scanning. Out now works from the jobs right away.</td></tr>
     <tr><td>📷 Meter photos on moisture readings</td><td>Waiting</td><td>Field build v211. A 📷 under each of today's readings on the Moisture Map photographs the meter screen; the photo prints with the map and beside the final reading on the Cert. of Drying. The 📷 switches on once this feature's database update is applied. The app filling the number in from the photo stays off until it reads the crews' first 50 or so meter photos correctly; until then every number is typed.</td></tr>
     <tr><td>📄 Carrier packets</td><td>Waiting</td><td>Field build v213. When a water job is dry and has a numbered invoice, the app builds one numbered PDF for the adjuster (PKT-2026-0001 v1) and files it as a card in Approvals; approving emails it once from the company Gmail, and a later change makes version 2 with the same number. Approvals tab only, never by text. Cards start once this feature's database update is applied and the app's sending service is updated.</td></tr>
+    <tr><td>🖨 Lead record and web lead emails</td><td>Waiting</td><td>Office Admin → Leads shows when each lead came in (Alaska time) and the email it came from, and prints any lead as a one-page PDF. Every new website form lead is also emailed to the owner, on top of the text, once the website lead service is updated.</td></tr>
     <tr><td>Receipts matched to QuickBooks</td><td>Planned</td><td>Nightly match to bank-feed charges, then "tag + attach" approvals; materials onto T&amp;M invoices; cost vs estimate.</td></tr>
     <tr><td>Magicplan quantities into the estimate</td><td>Planned</td><td>Room measurements flowing straight into estimate line items.</td></tr>
     <tr><td>📅 My Week</td><td>Parked</td><td>Hidden until the board schedule feeds it reliably, so crews never see wrong days.</td></tr>
