@@ -39,7 +39,7 @@ globalThis.fetch = async (url) => {
   throw new TypeError("network down");
 };
 
-const { Store } = await import("../js/core.js");
+const { Store, flushPending } = await import("../js/core.js");
 const { newDryingLog, blankEquipRow } = await import("../js/model.js");
 const { setCtx } = await import("../js/formkit.js");
 const { dryingLog, scanDeps } = await import("../js/forms.js");
@@ -765,7 +765,7 @@ await test("✕ on a scanned row asks, then undoes the scan with void events (th
   assert.deepEqual(p.dryingLogs[0].equipment.map((r) => r.asset), ["AM-015", ""]);
 });
 
-await test("scans from another device land in the table when the page opens, and are saved", () => {
+await test("scans from another device land in the table when the page opens, and are saved", async () => {
   const p = job();
   // another device's events merged in, rows not derived yet (and the log came from an older copy)
   p.equipmentScans.push({ id: "x1", tag: "DH-003", act: "place", at: T1, room: "Bedroom", type: "Dehumidifier",
@@ -775,7 +775,9 @@ await test("scans from another device land in the table when the page opens, and
   const tags = rowsOf(sheet).map((tr) => inputsOf(tr)[0].value);
   assert.ok(tags.includes("DH-003") && tags.includes("AM-015"), tags.join(","));
   assert.equal(pill.textContent, "Saving…");
-  // nothing new: no save
+  // nothing new: no save (once the first one has landed: a pill drawn while
+  // an edit is still waiting to save says Saving…, core.js bindPill)
+  await flushPending();
   render(p);
   assert.equal(pill.textContent, "✓ Saved");
 });
@@ -887,7 +889,7 @@ await test("✕ on a typed row whose scan an edit already corrected asks nothing
   assert.equal(liveOf(p, "AM-020").removed, "", "typed in again: not refilled");
 });
 
-await test("a Removed this phone typed before the other phone's corrected scan, on the copy that won: a later edit here stands through the next sync", () => {
+await test("a Removed this phone typed before the other phone's corrected scan, on the copy that won: a later edit here stands through the next sync", async () => {
   const two = () => {
     const p = job();
     p.dryingLogs[0].equipment[0].notes = "fan on high";
@@ -903,6 +905,7 @@ await test("a Removed this phone typed before the other phone's corrected scan, 
   B.updatedAt = "2026-10-07T20:05:00.000Z";
   syncIn(B, A);
   assert.equal(liveOf(B, "AM-020").removed, "2026-10-07T11:30", "B's copy won: its 11:30 stands");
+  await flushPending();                                              // the typed 11:30 lands first (bindPill)
   const events = B.equipmentScans.length, stamp = B.updatedAt;
   render(B);                                                         // only opening the log changes nothing, saves nothing
   assert.equal(B.equipmentScans.length, events);
