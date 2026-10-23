@@ -46,12 +46,13 @@ const HAND = "4f9c2a5c-ad4e-4bac-9e87-6d5abc913e54";
 const CONTACT_PHONE = "5a0d3b6d-be5f-4cbd-8f98-7e6bcd024f65";
 
 // roybal-lead's notes, byte for byte (supabase/functions/roybal-lead/index.ts)
-const webNotes = ({ service, email, emergency, message }) =>
+const webNotes = ({ service, email, emergency, message, flag }) =>
   `Website form submission.\n` +
   (service ? `Service requested: ${service}\n` : "") +
   (email ? `Email: ${email}\n` : "") +
   (emergency ? `⚠️ Marked as an ACTIVE EMERGENCY by the customer.\n` : "") +
-  (message ? `\n${message}` : "");
+  (message ? `\n${message}` : "") +
+  (flag ? `\n\n${flag}` : "");
 // roybal-web-agent's
 const chatNotes = ({ path, urgent, summary, transcript }) =>
   `AI web receptionist (roybalconstruction.com${path}).\n` +
@@ -170,13 +171,29 @@ await test("the notes split: each lane's own words come back out, the office's a
   assert.deepEqual(S.splitNotes(L[HAND]), { lane: null, office: "Met at the hardware store; wants a deck before snow." });
   assert.deepEqual(S.splitNotes({ ...L[WEB], notes: "Customer called, see message." }), { lane: null, office: "Customer called, see message." });
   assert.equal(S.splitNotes({ channel: "phone", notes: phoneNotes({ from: "", summary: "x" }), message: "x" }).lane.caller, "");
+  // a screened or repeat web lead: roybal-lead's flag after the message lands with the office's notes,
+  // and the form's lines and the customer's words still come back out
+  const FLAG = "🚩 Likely spam — fake phone number (555-0199 is reserved for movies/TV); address is out of state (CA)\n" +
+    "(Auto-screened, no text was sent. If this is a real customer, work it normally.)";
+  const sw = S.splitNotes({ ...L[WEB], notes: webNotes({ service: "Water Damage Restoration", email: "jane.sample@example.com", message: MSG, flag: FLAG }) + "\nCalled, real customer." });
+  assert.deepEqual(sw.lane, { service: "Water Damage Restoration", email: "jane.sample@example.com", emergency: false });
+  assert.equal(sw.office, FLAG + "\nCalled, real customer.");
+  const REPEAT = "Repeat: this phone or email already came in through the form, and texted you, in the last 24 hours.";
+  const sr = S.splitNotes({ ...L[WEB2], notes: webNotes({ service: "Mold Removal", emergency: true, flag: REPEAT }) });
+  assert.deepEqual(sr.lane, { service: "Mold Removal", email: "", emergency: true });
+  assert.equal(sr.office, REPEAT);
+  // sent with no message: the flag is never shown as the customer's words
+  const nm = S.readLead({ ...L[WEB2], notes: webNotes({ service: "Mold Removal", flag: FLAG }) });
+  assert.equal(nm.message, "");
 });
 
 await test("the split reads the shapes the lanes really write (their code still says it this way)", () => {
   const src = (p) => readFileSync(new URL("../../../" + p, import.meta.url), "utf8");
   const lead = src("supabase/functions/roybal-lead/index.ts");
   for (const s of ["`Website form submission.\\n`", "`Service requested: ${service}\\n`", "`Email: ${email}\\n`",
-    "`⚠️ Marked as an ACTIVE EMERGENCY by the customer.\\n`", "(message ? `\\n${message}` : \"\")"]) assert.ok(lead.includes(s), "roybal-lead: " + s);
+    "`⚠️ Marked as an ACTIVE EMERGENCY by the customer.\\n`", "(message ? `\\n${message}` : \"\")",
+    "(flag ? `\\n\\n${flag}` : \"\")"]) assert.ok(lead.includes(s), "roybal-lead: " + s);
+  assert.ok(lead.indexOf("`Website form submission.\\n`") < lead.indexOf("(flag ? `\\n\\n${flag}` : \"\")"), "the flag comes last");
   const chat = src("supabase/functions/roybal-web-agent/index.ts");
   for (const s of ["`AI web receptionist (roybalconstruction.com${path}).\\n`", "\"⚠️ ACTIVE EMERGENCY per the visitor.\\n\"",
     "\\n\\n--- what they told the assistant ---\\n${transcript}`"]) assert.ok(chat.includes(s), "web agent: " + s);

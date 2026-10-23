@@ -44,10 +44,25 @@
  *                             comma-separated list, "*" to allow any)
  *           LEAD_ALERT_EMAILS(optional — who gets the lead email; comma-
  *                             separated, default the owner's address, "off"
- *                             for none. The text goes either way.)
+ *                             for none. The text goes either way, and a
+ *                             screened lead texts when no email can go.)
  *           LEAD_EMAIL_HOURLY_MAX (optional, default 10 — lead emails per
  *                             hour, per address)
- * Deploy:   supabase functions deploy roybal-lead --no-verify-jwt
+ *           LEAD_SCREEN      (optional, default "on" — "off" disables the
+ *                             spam/sales-pitch screening below)
+ *           LEAD_SCREEN_THRESHOLD (optional, default 4 — points to screen)
+ *
+ * Screening (../_shared/leadscreen.ts), because the limits above stop bots
+ * but not a person pasting a scam template into the form. A screened lead
+ * is STILL SAVED and STILL EMAILED (subject "[Likely spam]" / "[Sales
+ * pitch]", with the reasons) — it just doesn't text the owner, doesn't
+ * create a CRM contact, and gets a 🚩 in its board title. An emergency (the
+ * button, or damage happening now in the message) is always texted, flagged,
+ * screened or not, and so is a screened lead whose email can't go. A repeat
+ * (same phone or email through the form, and texted, in the last 24h) also
+ * skips the text. The flag goes at the END of the notes, after the
+ * customer's message, so the office app still reads the form's lines.
+ * Deploy:  supabase functions deploy roybal-lead --no-verify-jwt
  *   (--no-verify-jwt is required: the public website has no session. The
  *    function self-protects via the limits above and has no read path.)
  *
@@ -57,6 +72,9 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { alertRecipients, leadAlertRows, LEAD_ALERT_OPERATION, type LeadForMail } from "../_shared/leadmail.ts";
+import {
+  screenLead, screenLabel, nanp10, alertPlan, flagNote, DEFAULT_THRESHOLD, type ScreenResult,
+} from "../_shared/leadscreen.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -71,6 +89,9 @@ const IP_MAX = num("LEAD_IP_MAX", 5);
 const SUBNET_MAX = num("LEAD_SUBNET_MAX", 12);
 const HOURLY_MAX = num("LEAD_HOURLY_MAX", 40);
 const EMAIL_HOURLY_MAX = num("LEAD_EMAIL_HOURLY_MAX", 10);
+const SCREEN_ON = !/^(off|no|false|0)$/i.test((Deno.env.get("LEAD_SCREEN") ?? "on").trim());
+const SCREEN_THRESHOLD = num("LEAD_SCREEN_THRESHOLD", DEFAULT_THRESHOLD);
+const REPEAT_WINDOW_MS = 24 * 3600_000;
 
 const ALLOW = (Deno.env.get("LEAD_ALLOW_ORIGIN") ?? "https://www.roybalconstruction.com")
   .split(",").map((s) => s.trim()).filter(Boolean);
@@ -99,8 +120,8 @@ const digits = (v: unknown) => String(v ?? "").replace(/[^\d]/g, "");
    Counts prior web leads in the last hour. `created_at` is the row's own
    column; the per-IP tally uses data->>ipHash, which we set below and which
    never leaves this function. */
-async function countSince(filter: string): Promise<number> {
-  const sinceIso = new Date(Date.now() - 3600_000).toISOString();
+async function countSince(filter: string, windowMs = 3600_000): Promise<number> {
+  const sinceIso = new Date(Date.now() - windowMs).toISOString();
   const q = `coordination_jobs?select=id&created_at=gt.${encodeURIComponent(sinceIso)}&${filter}`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, {
     headers: { ...svc, Prefer: "count=exact", Range: "0-0" },
@@ -153,8 +174,8 @@ async function hashId(value: string): Promise<string> {
 /* ---------- owner alert ----------
    Per recipient, so one bad number cannot stop the others, and partial
    delivery still counts as an alert. Mirrors sendAlert() in
-   services/phone-agent/tools.mjs. */
-async function alertOwner(body: string): Promise<void> {
+   services/phone-agent/tools.mjs. Returns how many recipients took it. */
+async function alertOwner(body: string): Promise<number> {
   /* ⚠️ Normalize to US E.164 and DROP anything else. Filtering on
      `digits.length >= 10` and passing the raw digits on looks equivalent and
      is not: a number carrying an extension or a stray country code has 12+
@@ -178,7 +199,7 @@ async function alertOwner(body: string): Promise<void> {
   }
   if (!cells.length) {
     console.error("NO VALID ALERT RECIPIENTS — lead saved but nobody was texted. Fix ALERT_CELLS / OWNER_CELL.");
-    return;
+    return 0;
   }
   let sent = 0;
   for (const to of cells) {
@@ -195,6 +216,7 @@ async function alertOwner(body: string): Promise<void> {
     }
   }
   console.log(`lead alert -> ${sent}/${cells.length} recipients`);
+  return sent;
 }
 
 /* ---------- owner alert, by email ----------
@@ -208,37 +230,53 @@ async function alertOwner(body: string): Promise<void> {
    the worker down the text is the alert, and an email that would land
    hours late is not queued. At most LEAD_EMAIL_HOURLY_MAX an hour per
    address, so a flood that gets past the limits above still cannot spend
-   the Gmail account's daily sending allowance. Never fatal, like the text. */
-async function emailOwner(lead: LeadForMail): Promise<void> {
+   the Gmail account's daily sending allowance. Never fatal, like the text.
+
+   Two steps, because a screened lead's email is its only alert: whether an
+   email can go is asked BEFORE the text decision (so one that can't texts
+   instead), and the rows are filed AFTER the lead is saved. */
+async function emailTargets(): Promise<{ to: string[]; capped: boolean }> {
   const { to, rejected } = alertRecipients(Deno.env.get("LEAD_ALERT_EMAILS"));
   if (rejected) console.error(`${rejected} LEAD_ALERT_EMAILS entr${rejected === 1 ? "y is" : "ies are"} not an email address. Fix the secret.`);
-  if (!to.length) return;                  // switched off, or nothing valid
+  if (!to.length) return { to: [], capped: false };        // switched off, or nothing valid
   const ready = await fetch(`${SUPABASE_URL}/rest/v1/rpc/outbox_channel_ready`, {
     method: "POST",
     headers: { ...svc, "Content-Type": "application/json" },
     body: JSON.stringify({ p_channel: "email" }),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!ready.ok || (await ready.json().catch(() => false)) !== true) {
-    console.warn(`lead email not filed: the worker's email lane is not up (${ready.status}); the text still went`);
-    return;
+    console.warn(`lead email won't be filed: the worker's email lane is not up (${ready.status})`);
+    return { to: [], capped: false };
   }
   const sinceIso = new Date(Date.now() - 3600_000).toISOString();
   const recent = await fetch(
     `${SUPABASE_URL}/rest/v1/outbox?select=id&operation=eq.${LEAD_ALERT_OPERATION}&created_at=gt.${encodeURIComponent(sinceIso)}`,
-    { headers: { ...svc, Prefer: "count=exact", Range: "0-0" } },
+    { headers: { ...svc, Prefer: "count=exact", Range: "0-0" }, signal: AbortSignal.timeout(10_000) },
   );
   const sent = Number((recent.headers.get("content-range") ?? "").split("/")[1]);
   if (recent.ok && Number.isFinite(sent) && sent >= EMAIL_HOURLY_MAX * to.length) {
-    console.warn(`lead email not filed: ${sent} lead emails in the last hour (LEAD_EMAIL_HOURLY_MAX ${EMAIL_HOURLY_MAX}); the text still went`);
-    return;
+    console.warn(`lead email won't be filed: ${sent} lead emails in the last hour (LEAD_EMAIL_HOURLY_MAX ${EMAIL_HOURLY_MAX})`);
+    return { to: [], capped: true };
   }
+  return { to, capped: false };
+}
+
+/** Files the rows; true when they were filed. */
+async function emailOwner(lead: LeadForMail, to: string[]): Promise<boolean> {
+  if (!to.length) return false;
   const ins = await fetch(`${SUPABASE_URL}/rest/v1/outbox?on_conflict=idempotency_key`, {
     method: "POST",
     headers: { ...svc, "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates,return=minimal" },
     body: JSON.stringify(leadAlertRows(lead, to)),
+    signal: AbortSignal.timeout(10_000),
   });
-  if (!ins.ok) console.error(`lead email not filed (${ins.status}):`, (await ins.text().catch(() => "")).slice(0, 300));
-  else console.log(`lead email -> filed for ${to.length} address(es)`);
+  if (!ins.ok) {
+    console.error(`lead email not filed (${ins.status}):`, (await ins.text().catch(() => "")).slice(0, 300));
+    return false;
+  }
+  console.log(`lead email -> filed for ${to.length} address(es)`);
+  return true;
 }
 
 const LOSS_TYPES: Record<string, string> = {
@@ -378,13 +416,56 @@ serve(async (req) => {
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
 
+  /* Screening. Pure and never fatal: a scorer that throws counts as "not
+     screened", so the worst case is today's behavior, never a lost lead. */
+  let screen: ScreenResult | null = null;
+  if (SCREEN_ON) {
+    try {
+      const r = screenLead({ name, phone, email, address, service, message }, SCREEN_THRESHOLD);
+      if (r.screened) screen = r;
+    } catch (e) { console.error("lead screen threw (lead continues unscreened)", String((e as Error)?.message ?? e)); }
+  }
+  const phoneDigits = nanp10(phone);
+  const emailLower = email.toLowerCase();
+
+  /* Repeat: the same phone or email through the form in the last 24h, on
+     a lead that TEXTED (a re-send; the form's button already stops a
+     double-click). Saved like any lead, texted once. A customer whose first
+     try was screened and not texted is not a repeat, so trying again can
+     still reach the owner. Keys on fields this function started writing
+     with screening, so it only sees submissions from after this deploy. */
+  let repeat = false;
+  try {
+    if (phoneDigits && await countSince(`data->>source=eq.web&data->>texted=eq.true&data->>phoneDigits=eq.${phoneDigits}`, REPEAT_WINDOW_MS) > 0) repeat = true;
+    else if (emailLower && await countSince(`data->>source=eq.web&data->>texted=eq.true&data->>emailLower=eq.${encodeURIComponent(emailLower)}`, REPEAT_WINDOW_MS) > 0) repeat = true;
+  } catch { /* a counting hiccup means "not a repeat" */ }
+
+  /* Whether the email can go decides whether a screened lead texts, so ask
+     now, but wait at most 5 seconds before saving the lead: a slow answer
+     counts as "no email" for the decision (a screened lead texts), and the
+     email still files when the answer comes. The rows are filed after the
+     lead is saved. */
+  const NO_MAIL = { to: [] as string[], capped: false };
+  const mailCheck = emailTargets().catch((e) => {
+    console.error("lead email check failed (treated as: no email)", String((e as Error)?.message ?? e));
+    return NO_MAIL;
+  });
+  let waiting: ReturnType<typeof setTimeout> | undefined;
+  const mailNow = await Promise.race([mailCheck, new Promise<null>((r) => { waiting = setTimeout(() => r(null), 5000); })]);
+  clearTimeout(waiting);
+  const plan = alertPlan({
+    emergency, message, screened: !!screen, repeat,
+    emailCanGo: !!mailNow && mailNow.to.length > 0, emailCapped: !!mailNow && mailNow.capped,
+  });
+
   // CRM: resolve the person and carry the link on the lead card. UNTRUSTED —
   // this is a public lane, so the resolver never enriches an existing contact
   // from here (a stranger typing a customer's phone gets a link queued for
   // review, never a silent field fill). Never fatal: a resolver hiccup must
-  // not cost a lead.
+  // not cost a lead. A screened lead is not a person to keep in the CRM, so
+  // it skips this (and the opt-in below, which hangs off contactId).
   let contactId: string | null = null;
-  try {
+  if (!screen) try {
     const cr = await fetch(`${SUPABASE_URL}/rest/v1/rpc/contact_resolve`, {
       method: "POST",
       headers: { ...svc, "Content-Type": "application/json" },
@@ -416,13 +497,22 @@ serve(async (req) => {
     } catch (e) { console.error("opt-in stamp failed (lead continues)", String((e as Error)?.message ?? e)); }
   }
 
+  // the flag (flagNote) goes last, after the customer's message
+  const notesWith = (flag: string) =>
+    `Website form submission.\n` +
+    (service ? `Service requested: ${service}\n` : "") +
+    (email ? `Email: ${email}\n` : "") +
+    (emergency ? `⚠️ Marked as an ACTIVE EMERGENCY by the customer.\n` : "") +
+    (message ? `\n${message}` : "") +
+    (flag ? `\n\n${flag}` : "");
+
   // Same envelope and field names as services/phone-agent/tools.mjs createLead,
   // so the board renders a web lead and a phone lead identically.
   const lead = {
     id,
     stage: "lead",
     type: isRemodel ? "remodel" : "mitigation",
-    title: `${name} — ${service || lossType}`,
+    title: `${screen ? "🚩 " : ""}${name} — ${service || lossType}`,
     customer: name,
     phone,
     email,
@@ -435,12 +525,7 @@ serve(async (req) => {
     scheduleMode: "auto",
     pinnedStart: "",
     durationDays: null,
-    notes:
-      `Website form submission.\n` +
-      (service ? `Service requested: ${service}\n` : "") +
-      (email ? `Email: ${email}\n` : "") +
-      (emergency ? `⚠️ Marked as an ACTIVE EMERGENCY by the customer.\n` : "") +
-      (message ? `\n${message}` : ""),
+    notes: notesWith(flagNote(screen, repeat, plan)),
     // the customer's verbatim ask as its own field (CRM §13.3) — the Leads
     // Inbox renders it in the open; notes keeps the composite for the board
     message,
@@ -451,6 +536,15 @@ serve(async (req) => {
     ipHash,
     subnetHash,
     webLead: true,
+    // match keys for the repeat check above (normalized, so formatting
+    // differences between submissions don't hide a repeat)
+    ...(phoneDigits ? { phoneDigits } : {}),
+    ...(emailLower ? { emailLower } : {}),
+    ...(screen ? { screened: true, screen: { kind: screen.kind, score: screen.score, pitchScore: screen.pitchScore, reasons: screen.reasons } } : {}),
+    ...(repeat ? { repeat: true } : {}),
+    // true once a text is DELIVERED (set below): the repeat check above
+    // counts only leads that reached the owner's phone
+    texted: false,
     ...(contactId ? { contactId } : {}),
     rev: 1,
     createdAt: now,
@@ -470,7 +564,11 @@ serve(async (req) => {
     );
   }
 
-  console.log(`lead captured ${id} (${emergency ? "EMERGENCY" : "normal"}, ${service || "unspecified"})`);
+  console.log(
+    `lead captured ${id} (${emergency ? "EMERGENCY" : "normal"}, ${service || "unspecified"}` +
+    `${screen ? `, screened ${screen.kind} ${screen.score}/${screen.pitchScore}` : ""}${repeat ? ", repeat" : ""})`,
+  );
+
 
   /* Text the owner, and email him the same lead. A lead nobody knows about
      is worse than no form at all — in restoration, response time IS the
@@ -481,15 +579,56 @@ serve(async (req) => {
      so a Twilio or Gmail outage must not turn a captured lead into an error
      the visitor sees. kind 'webLead' is quiet-hours exempt and sits outside
      the protected SMS reserve (see roybal-notify). */
-  await Promise.all([
-    alertOwner(
-      `${emergency ? "🚨 WEB EMERGENCY" : "🌐 Web form lead"} — ${name}, ${phone}` +
-      `${service ? `, ${service}` : ""}${address ? `, ${address}` : ""}. ` +
-      `${message ? clip(message, 90) : "No details given."}`,
-    ).catch((e) => console.error("lead alert failed (lead is saved)", String(e?.message ?? e))),
-    emailOwner({ id, customer: name, phone, email, address, service, message, emergency, createdAt: now })
-      .catch((e) => console.error("lead email failed (lead is saved)", String(e?.message ?? e))),
+  const forMail: LeadForMail = {
+    id, customer: name, phone, email, address, service, message, emergency, createdAt: now,
+    ...(screen ? { screen: { kind: screen.kind as "scam" | "solicitation", reasons: screen.reasons } } : {}),
+    ...(repeat ? { repeat: true } : {}),
+    texted: plan.text,
+  };
+  // the flag is only its label here, so the customer's words still fit the 300 characters
+  const sms = () => alertOwner(
+    `${screen ? `🚩 ${screenLabel(screen)} | ` : ""}` +
+    `${emergency ? "🚨 WEB EMERGENCY" : "🌐 Web form lead"} — ${name}, ${phone}` +
+    `${service ? `, ${service}` : ""}${address ? `, ${address}` : ""}. ` +
+    `${message ? clip(message, 90) : "No details given."}`,
+  ).catch((e) => { console.error("lead alert failed (lead is saved)", String(e?.message ?? e)); return 0; });
+  if (!plan.text) console.log(`lead alert held back (${plan.why}); the email is its alert`);
+  let fellBack = false;
+  const [textedNow, textedLater] = await Promise.all([
+    plan.text ? sms() : Promise.resolve(0),
+    (mailNow ? Promise.resolve(mailNow) : mailCheck).then(async (m) => {
+      const filed = await emailOwner(forMail, m.to)
+        .catch((e) => { console.error("lead email failed (lead is saved)", String(e?.message ?? e)); return false; });
+      // the email was its only alert and it didn't go after all: text it
+      if (!filed && !plan.text && plan.why === "screened" && m.to.length) {
+        console.warn("lead email not filed: texting the screened lead instead");
+        fellBack = true;
+        return sms();
+      }
+      return 0;
+    }).catch(() => 0),
   ]);
+
+  /* Record what really happened, through the board's rev-bumping patch so
+     an open board adopts it: texted only once a text was delivered (so a
+     customer whose text never went is not a "repeat" when they try again),
+     and a fallback text's reason in the notes. Best-effort: if this fails,
+     a re-send just texts again. */
+  if (textedNow + textedLater > 0) {
+    try {
+      const patch = {
+        texted: true,
+        ...(fellBack ? { notes: notesWith(flagNote(screen, repeat, { text: true, why: "no-email" })) } : {}),
+      };
+      const pr = await fetch(`${SUPABASE_URL}/rest/v1/rpc/coordination_job_patch`, {
+        method: "POST",
+        headers: { ...svc, "Content-Type": "application/json" },
+        body: JSON.stringify({ p_id: id, p_patch: patch }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!pr.ok) console.error(`lead texted stamp failed (${pr.status}); a re-send will text again`);
+    } catch (e) { console.error("lead texted stamp failed; a re-send will text again", String((e as Error)?.message ?? e)); }
+  }
 
   return json({ ok: true }, 200, origin);
 });

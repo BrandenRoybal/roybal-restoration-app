@@ -62,6 +62,12 @@ export interface LeadForMail {
   message?: string;
   emergency?: boolean;
   createdAt: string;
+  /** From ../_shared/leadscreen.ts. Absent = an ordinary lead, email unchanged. */
+  screen?: { kind: "scam" | "solicitation"; reasons: string[] };
+  /** Same phone or email already came in through the form, and texted, in the last 24h. */
+  repeat?: boolean;
+  /** false when roybal-lead held the text back (screened or repeat). Default true. */
+  texted?: boolean;
 }
 
 // one line: no control characters, no line breaks (a subject or a field label line)
@@ -74,9 +80,23 @@ const block = (v: unknown) => String(v ?? "").replace(/\r\n?/g, "\n").replace(/[
 export function leadAlertEmail(l: LeadForMail, adminUrl: string = ADMIN_URL): { subject: string; body: string } {
   const name = line(l.customer) || "Someone";
   const service = line(l.service);
-  const subject = ((l.emergency ? "🚨 EMERGENCY web lead: " : "New web lead: ") + name + (service ? " — " + service : "")).slice(0, 180);
+  const tag = l.screen ? (l.screen.kind === "solicitation" ? "[Sales pitch] " : "[Likely spam] ") : l.repeat ? "[Repeat] " : "";
+  const subject = (tag + (l.emergency ? "🚨 EMERGENCY web lead: " : "New web lead: ") + name + (service ? " — " + service : "")).slice(0, 180);
   const message = block(l.message);
+  const flag = l.screen
+    ? [
+        (l.screen.kind === "solicitation"
+          ? "🚩 Auto-screened as a SALES PITCH, not a customer. Why:"
+          : "🚩 Auto-screened as LIKELY SPAM. Why:"),
+        ...l.screen.reasons.slice(0, 6).map((r) => "  - " + line(r)),
+        "If this is a real customer, just work it like any other lead.",
+        "",
+      ]
+    : l.repeat
+      ? ["Repeat: this phone or email already came in through the form, and texted you, in the last 24 hours.", ""]
+      : [];
   const parts = [
+    ...flag,
     l.emergency ? "New lead from the website form. The customer marked it an ACTIVE EMERGENCY." : "New lead from the website form.",
     "",
     "Received: " + (akWhen(l.createdAt) || "just now"),
@@ -92,7 +112,9 @@ export function leadAlertEmail(l: LeadForMail, adminUrl: string = ADMIN_URL): { 
     "Open the lead (print it or save a PDF from there):",
     adminUrl.replace(/\/?$/, "/") + "#/leads/" + encodeURIComponent(line(l.id)),
     "",
-    "Sent by the Roybal app when the form came in. The same lead went to you by text and is in the office app's Leads tab.",
+    l.texted === false
+      ? "Sent by the Roybal app when the form came in. No text was sent for this one; it is in the office app's Leads tab."
+      : "Sent by the Roybal app when the form came in. The same lead went to you by text and is in the office app's Leads tab.",
   ];
   return { subject, body: parts.join("\n") };
 }
