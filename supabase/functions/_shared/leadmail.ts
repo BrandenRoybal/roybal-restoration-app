@@ -64,7 +64,7 @@ export interface LeadForMail {
   createdAt: string;
   /** From ../_shared/leadscreen.ts. Absent = an ordinary lead, email unchanged. */
   screen?: { kind: "scam" | "solicitation"; reasons: string[] };
-  /** Same phone or email already came in through the form in the last 24h. */
+  /** Same phone or email already came in through the form, and texted, in the last 24h. */
   repeat?: boolean;
   /** false when roybal-lead held the text back (screened or repeat). Default true. */
   texted?: boolean;
@@ -93,7 +93,7 @@ export function leadAlertEmail(l: LeadForMail, adminUrl: string = ADMIN_URL): { 
         "",
       ]
     : l.repeat
-      ? ["Repeat: this phone or email already came in through the form in the last 24 hours.", ""]
+      ? ["Repeat: this phone or email already came in through the form, and texted you, in the last 24 hours.", ""]
       : [];
   const parts = [
     ...flag,
