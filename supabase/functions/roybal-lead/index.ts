@@ -47,7 +47,18 @@
  *                             for none. The text goes either way.)
  *           LEAD_EMAIL_HOURLY_MAX (optional, default 10 — lead emails per
  *                             hour, per address)
- * Deploy:   supabase functions deploy roybal-lead --no-verify-jwt
+ *           LEAD_SCREEN      (optional, default "on" — "off" disables the
+ *                             spam/sales-pitch screening below)
+ *           LEAD_SCREEN_THRESHOLD (optional, default 4 — points to screen)
+ *
+ * Screening (../_shared/leadscreen.ts), because the limits above stop bots
+ * but not a person pasting a scam template into the form. A screened lead
+ * is STILL SAVED and STILL EMAILED (subject "[Likely spam]" / "[Sales
+ * pitch]", with the reasons) — it just doesn't text the owner, doesn't
+ * create a CRM contact, and gets a 🚩 in its board title. An emergency is
+ * always texted, flagged, screened or not. A repeat (same phone or email
+ * through the form in the last 24h) also skips the text.
+ * Deploy:  supabase functions deploy roybal-lead --no-verify-jwt
  *   (--no-verify-jwt is required: the public website has no session. The
  *    function self-protects via the limits above and has no read path.)
  *
@@ -57,6 +68,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { alertRecipients, leadAlertRows, LEAD_ALERT_OPERATION, type LeadForMail } from "../_shared/leadmail.ts";
+import { screenLead, screenSummary, nanp10, DEFAULT_THRESHOLD, type ScreenResult } from "../_shared/leadscreen.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -71,6 +83,9 @@ const IP_MAX = num("LEAD_IP_MAX", 5);
 const SUBNET_MAX = num("LEAD_SUBNET_MAX", 12);
 const HOURLY_MAX = num("LEAD_HOURLY_MAX", 40);
 const EMAIL_HOURLY_MAX = num("LEAD_EMAIL_HOURLY_MAX", 10);
+const SCREEN_ON = !/^(off|no|false|0)$/i.test((Deno.env.get("LEAD_SCREEN") ?? "on").trim());
+const SCREEN_THRESHOLD = num("LEAD_SCREEN_THRESHOLD", DEFAULT_THRESHOLD);
+const REPEAT_WINDOW_MS = 24 * 3600_000;
 
 const ALLOW = (Deno.env.get("LEAD_ALLOW_ORIGIN") ?? "https://www.roybalconstruction.com")
   .split(",").map((s) => s.trim()).filter(Boolean);
@@ -99,8 +114,8 @@ const digits = (v: unknown) => String(v ?? "").replace(/[^\d]/g, "");
    Counts prior web leads in the last hour. `created_at` is the row's own
    column; the per-IP tally uses data->>ipHash, which we set below and which
    never leaves this function. */
-async function countSince(filter: string): Promise<number> {
-  const sinceIso = new Date(Date.now() - 3600_000).toISOString();
+async function countSince(filter: string, windowMs = 3600_000): Promise<number> {
+  const sinceIso = new Date(Date.now() - windowMs).toISOString();
   const q = `coordination_jobs?select=id&created_at=gt.${encodeURIComponent(sinceIso)}&${filter}`;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${q}`, {
     headers: { ...svc, Prefer: "count=exact", Range: "0-0" },
@@ -378,13 +393,36 @@ serve(async (req) => {
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
 
+  /* Screening. Pure and never fatal: a scorer that throws counts as "not
+     screened", so the worst case is today's behavior, never a lost lead. */
+  let screen: ScreenResult | null = null;
+  if (SCREEN_ON) {
+    try {
+      const r = screenLead({ name, phone, email, address, service, message }, SCREEN_THRESHOLD);
+      if (r.screened) screen = r;
+    } catch (e) { console.error("lead screen threw (lead continues unscreened)", String((e as Error)?.message ?? e)); }
+  }
+  const phoneDigits = nanp10(phone);
+  const emailLower = email.toLowerCase();
+
+  /* Repeat: the same phone or email through the form in the last 24h (the
+     double-click, or a scammer re-sending). Saved like any lead, texted
+     once. Keys on fields this function started writing with screening, so
+     it only sees submissions from after this deploy. */
+  let repeat = false;
+  try {
+    if (phoneDigits && await countSince(`data->>source=eq.web&data->>phoneDigits=eq.${phoneDigits}`, REPEAT_WINDOW_MS) > 0) repeat = true;
+    else if (emailLower && await countSince(`data->>source=eq.web&data->>emailLower=eq.${encodeURIComponent(emailLower)}`, REPEAT_WINDOW_MS) > 0) repeat = true;
+  } catch { /* a counting hiccup means "not a repeat" */ }
+
   // CRM: resolve the person and carry the link on the lead card. UNTRUSTED —
   // this is a public lane, so the resolver never enriches an existing contact
   // from here (a stranger typing a customer's phone gets a link queued for
   // review, never a silent field fill). Never fatal: a resolver hiccup must
-  // not cost a lead.
+  // not cost a lead. A screened lead is not a person to keep in the CRM, so
+  // it skips this (and the opt-in below, which hangs off contactId).
   let contactId: string | null = null;
-  try {
+  if (!screen) try {
     const cr = await fetch(`${SUPABASE_URL}/rest/v1/rpc/contact_resolve`, {
       method: "POST",
       headers: { ...svc, "Content-Type": "application/json" },
@@ -422,7 +460,7 @@ serve(async (req) => {
     id,
     stage: "lead",
     type: isRemodel ? "remodel" : "mitigation",
-    title: `${name} — ${service || lossType}`,
+    title: `${screen ? "🚩 " : ""}${name} — ${service || lossType}`,
     customer: name,
     phone,
     email,
@@ -436,6 +474,8 @@ serve(async (req) => {
     pinnedStart: "",
     durationDays: null,
     notes:
+      (screen ? `🚩 ${screenSummary(screen, 6)}\n(Auto-screened: no text was sent. If this is a real customer, work it normally.)\n\n` : "") +
+      (repeat && !screen ? `Repeat: this phone or email already came in through the form in the last 24 hours.\n\n` : "") +
       `Website form submission.\n` +
       (service ? `Service requested: ${service}\n` : "") +
       (email ? `Email: ${email}\n` : "") +
@@ -451,6 +491,12 @@ serve(async (req) => {
     ipHash,
     subnetHash,
     webLead: true,
+    // match keys for the repeat check above (normalized, so formatting
+    // differences between submissions don't hide a repeat)
+    ...(phoneDigits ? { phoneDigits } : {}),
+    ...(emailLower ? { emailLower } : {}),
+    ...(screen ? { screened: true, screen: { kind: screen.kind, score: screen.score, pitchScore: screen.pitchScore, reasons: screen.reasons } } : {}),
+    ...(repeat ? { repeat: true } : {}),
     ...(contactId ? { contactId } : {}),
     rev: 1,
     createdAt: now,
@@ -470,7 +516,14 @@ serve(async (req) => {
     );
   }
 
-  console.log(`lead captured ${id} (${emergency ? "EMERGENCY" : "normal"}, ${service || "unspecified"})`);
+  console.log(
+    `lead captured ${id} (${emergency ? "EMERGENCY" : "normal"}, ${service || "unspecified"}` +
+    `${screen ? `, screened ${screen.kind} ${screen.score}/${screen.pitchScore}` : ""}${repeat ? ", repeat" : ""})`,
+  );
+
+  // Screened and repeat leads skip the text. An emergency always texts —
+  // a missed flood costs more than a two-second look at a flagged one.
+  const texted = emergency || (!screen && !repeat);
 
   /* Text the owner, and email him the same lead. A lead nobody knows about
      is worse than no form at all — in restoration, response time IS the
@@ -481,14 +534,22 @@ serve(async (req) => {
      so a Twilio or Gmail outage must not turn a captured lead into an error
      the visitor sees. kind 'webLead' is quiet-hours exempt and sits outside
      the protected SMS reserve (see roybal-notify). */
+  const mail: LeadForMail = {
+    id, customer: name, phone, email, address, service, message, emergency, createdAt: now,
+    ...(screen ? { screen: { kind: screen.kind as "scam" | "solicitation", reasons: screen.reasons } } : {}),
+    ...(repeat ? { repeat: true } : {}),
+    texted,
+  };
   await Promise.all([
-    alertOwner(
-      `${emergency ? "🚨 WEB EMERGENCY" : "🌐 Web form lead"} — ${name}, ${phone}` +
-      `${service ? `, ${service}` : ""}${address ? `, ${address}` : ""}. ` +
-      `${message ? clip(message, 90) : "No details given."}`,
-    ).catch((e) => console.error("lead alert failed (lead is saved)", String(e?.message ?? e))),
-    emailOwner({ id, customer: name, phone, email, address, service, message, emergency, createdAt: now })
-      .catch((e) => console.error("lead email failed (lead is saved)", String(e?.message ?? e))),
+    texted
+      ? alertOwner(
+          `${screen ? `🚩 ${clip(screenSummary(screen, 2), 110)} | ` : ""}` +
+          `${emergency ? "🚨 WEB EMERGENCY" : "🌐 Web form lead"} — ${name}, ${phone}` +
+          `${service ? `, ${service}` : ""}${address ? `, ${address}` : ""}. ` +
+          `${message ? clip(message, 90) : "No details given."}`,
+        ).catch((e) => console.error("lead alert failed (lead is saved)", String(e?.message ?? e)))
+      : Promise.resolve(console.log(`lead alert held back (${screen ? "screened" : "repeat"})`)),
+    emailOwner({ ...mail }).catch((e) => console.error("lead email failed (lead is saved)", String(e?.message ?? e))),
   ]);
 
   return json({ ok: true }, 200, origin);
