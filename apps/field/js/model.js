@@ -593,9 +593,14 @@ export function newFloorPlan() {
 export function newWorkAuth() {
   return {
     date: todayISO(),
-    scope: {                     // pre-checked authorized scope items
-      0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true,
+    termsVersion: WA_TERMS_CURRENT,   // the wording this authorization is signed under (WA_VERSIONS)
+    scope: {                     // pre-checked authorized scope items (indexes into its version's scope list)
+      0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true,
     },
+    depositAmount: "",           // mitigation deposit due at signing (Oct 2026 terms)
+    roomsAffected: "",
+    mortgageCo: "",              // mortgage company on the property, if any (it co-signs insurance checks)
+    paymentInitials: "",         // owner's initials on the payment acknowledgment (in-person signing)
     mode: "sign",                // "sign" | "upload"
     smsConsent: false,           // owner opts in to job text messages (affirmative, optional)
     ownerSig: "", ownerName: "", ownerDate: todayISO(),
@@ -623,15 +628,120 @@ export function blankVerifyRow() {
   return { material: "", meter: "", goal: "", final: "", reference: "", dry: false };
 }
 
-export const SCOPE_ITEMS = [
-  "Emergency water extraction and surface drying.",
-  "Moisture mapping, readings, and documentation per IICRC S500 standard.",
-  "Placement and daily monitoring of drying equipment (air movers, dehumidifiers, HEPA scrubbers as needed).",
-  "Removal of unsalvageable materials (flood cuts, flooring, insulation) as warranted by moisture readings.",
-  "Application of EPA-registered antimicrobial / antifungal treatment to affected structural surfaces.",
-  "Photo documentation and drying logs for insurance carrier submission.",
-  "Additional scope items identified during mitigation — owner / adjuster notified before execution.",
-];
+/* ============================================================
+   Work Authorization wording, by version.
+
+   A signed authorization has to keep printing the words the owner signed
+   under, and the field app draws the form from code — so the wording is
+   versioned here and each authorization carries `termsVersion`. One with
+   no version predates versioning: it was created under the April 2026
+   wording and keeps it. New authorizations get the current version.
+
+   Branden, 2026-10-24: water mitigation is paid by the owner, deposit first,
+   not after insurance pays ("we're just not in a financial position to wait
+   on insurance reimbursement"). That is the October 2026 wording.
+
+   Both the field form (forms.js) and the carrier packet (services/worker)
+   read these lists, so the two can't drift apart. The scope checkboxes are
+   stored by index, which is why each version has its own scope list.
+   ============================================================ */
+export const WA_TERMS_LEGACY = "2026-04";
+export const WA_TERMS_CURRENT = "2026-10";
+
+const WA_AUTHORIZATION = ["Authorization", "By signing, property owner (“Owner”) authorizes Roybal Construction, LLC (“Contractor”) to perform the mitigation and restoration services described above."];
+const WA_ACCESS = ["Access", "Owner grants Contractor and crew reasonable access during business hours and emergency access as required to prevent further damage."];
+
+export const WA_VERSIONS = {
+  "2026-04": {
+    label: "April 2026",
+    scope: [
+      "Emergency water extraction and surface drying.",
+      "Moisture mapping, readings, and documentation per IICRC S500 standard.",
+      "Placement and daily monitoring of drying equipment (air movers, dehumidifiers, HEPA scrubbers as needed).",
+      "Removal of unsalvageable materials (flood cuts, flooring, insulation) as warranted by moisture readings.",
+      "Application of EPA-registered antimicrobial / antifungal treatment to affected structural surfaces.",
+      "Photo documentation and drying logs for insurance carrier submission.",
+      "Additional scope items identified during mitigation — owner / adjuster notified before execution.",
+    ],
+    payment: [],                 // no separate payment section: its Payment term sits in the terms list
+    terms: [
+      WA_AUTHORIZATION,
+      ["Payment", "Payment is due upon completion or receipt of insurance proceeds. Owner remains responsible for any balance not covered by insurance, including deductibles and depreciation holdbacks."],
+      ["Insurance", "Owner agrees to cooperate fully with the claims process, including providing adjuster access and signing any supplemental carrier authorization required."],
+      WA_ACCESS,
+      ["Exclusions", "This Work Order covers mitigation only. Reconstruction requires a separate written estimate and authorization. Contractor is not responsible for pre-existing damage unrelated to this loss."],
+      ["Right to Stop", "Contractor may stop work if site conditions pose a safety risk, access is denied, or payment cannot be confirmed."],
+    ],
+    ack: "",
+    signLead: "By signing below, the Property Owner confirms they have read and agree to the Terms & Conditions above, and authorize Roybal Construction, LLC to commence the described scope of work.",
+  },
+  "2026-10": {
+    label: "October 2026",
+    scope: [
+      "Emergency water extraction and surface drying.",
+      "Moisture mapping, readings, and documentation per IICRC S500 standard.",
+      "Placement and daily monitoring of drying equipment (air movers, dehumidifiers, HEPA scrubbers as needed).",
+      "Removal of unsalvageable materials (flood cuts, flooring, insulation) as warranted by moisture readings and water category.",
+      "Containment and HEPA filtration where required (Category 3 water or suspected mold).",
+      "Application of EPA-registered antimicrobial / antifungal treatment to affected structural surfaces.",
+      "Photo documentation, moisture maps and drying logs for the insurance claim.",
+      "Additional scope items identified during mitigation — owner (and adjuster, if a claim is open) notified before execution.",
+    ],
+    payment: [
+      ["Deposit", "A mitigation deposit is due when this Authorization is signed, before drying equipment is set. Mitigation begins once the deposit is received, and the deposit is credited in full to the final invoice. Standard deposit: $2,500 for Category 1 or 2 water affecting up to two rooms; $5,000 for Category 3 (sewage) water or three or more rooms."],
+      ["Owner Pays", "Owner is responsible for payment in full whether or not, when, or how much the insurance carrier pays, including the deductible, depreciation and any item the carrier does not approve. Contractor does not wait on insurance for payment. Contractor will provide the photos, moisture readings, drying logs and line-item invoice the carrier needs, and will speak with the adjuster at Owner’s request."],
+      ["Final Invoice", "The balance is due on receipt of the final invoice, when drying is complete and the Certificate of Drying is issued. Payment may be made by card or bank transfer (ACH) through Contractor’s secure QuickBooks Payments link, or by check. Owner authorizes Contractor to charge the payment method Owner provided through that link for any balance not paid within 7 days of the invoice date. Card and bank details are entered by Owner through the secure link and are never written on this form."],
+      ["Insurance Checks", "If a carrier check names Contractor as a payee (alone or with Owner or a mortgage company): if Owner’s balance is unpaid, Owner will endorse and deliver the check to Contractor within 5 business days of receiving it, to be applied to the balance, and any amount above what Owner owes will be refunded to Owner; if Owner has already paid in full, Contractor will endorse the check to Owner promptly."],
+      ["Scope Changes", "If the loss turns out larger than first assessed (for example, Category 3 water or additional rooms), Contractor may require an additional deposit before that added work proceeds."],
+      ["Late Payment", "Balances not paid within 30 days of the invoice date accrue a finance charge of 1.5% per month, or the maximum allowed by law if lower. Owner agrees to pay reasonable costs of collection, including attorney fees, as allowed by law."],
+      ["Non-Payment", "If the deposit or an additional deposit is not paid, Contractor may decline to begin, or may stop work and remove equipment after notifying Owner. Contractor is not responsible for further damage, including microbial growth, that results from work not started or stopped for non-payment."],
+    ],
+    terms: [
+      WA_AUTHORIZATION,
+      ["Insurance", "Owner will open the claim, ask the adjuster for any available emergency-services advance, give the adjuster access, and sign any supplemental carrier authorization required. The claim is between Owner and Owner’s insurance company."],
+      WA_ACCESS,
+      ["Exclusions", "This Work Order covers mitigation only. Reconstruction requires a separate written estimate, authorization and deposit. Contractor is not responsible for pre-existing damage unrelated to this loss."],
+      ["Right to Stop", "Contractor may stop work if site conditions pose a safety risk, access is denied, or payment terms are not met."],
+    ],
+    ack: "I understand that payment is my responsibility, is due as stated above, and does not depend on when or whether my insurance company pays.",
+    signLead: "By signing below, the Property Owner confirms they have read and agree to the Payment Terms (including the payment acknowledgment) and the Terms & Conditions above, and authorizes Roybal Construction, LLC to commence the described scope of work.",
+  },
+};
+
+/* the version an authorization was written under: no stamp = April 2026 */
+export function waTermsVersion(wa) {
+  const v = wa && typeof wa === "object" ? wa.termsVersion : "";
+  return Object.prototype.hasOwnProperty.call(WA_VERSIONS, v) ? v : WA_TERMS_LEGACY;
+}
+export const waWording = (wa) => WA_VERSIONS[waTermsVersion(wa)];
+export const waScopeItems = (wa) => waWording(wa).scope;
+
+/* signed in person, uploaded as a signed scan, or signed in the portal */
+export function waIsSigned(wa) {
+  if (!wa || typeof wa !== "object") return false;
+  const filled = (v) => typeof v === "string" && v.trim() !== "";
+  return filled(wa.ownerSig) || filled(wa.portalSignedAt)
+    || (Array.isArray(wa.uploadedPages) && wa.uploadedPages.length > 0) || filled(wa.uploadedDoc);
+}
+
+/* Move an UNSIGNED authorization from older wording to the current one.
+   A signed one never moves — it keeps the words the owner signed under.
+   Returns true when it changed. Scope checkboxes are re-mapped by meaning:
+   the April list had no containment item, so items 5–7 of the new list are
+   the April 4–6, and containment (new 4) starts checked like every item. */
+export function upgradeWorkAuthTerms(wa) {
+  if (!wa || typeof wa !== "object" || waIsSigned(wa)) return false;
+  if (waTermsVersion(wa) === WA_TERMS_CURRENT) return false;
+  const old = wa.scope && typeof wa.scope === "object" ? wa.scope : {};
+  const on = (i) => old[i] === true || old[String(i)] === true;
+  wa.scope = { 0: on(0), 1: on(1), 2: on(2), 3: on(3), 4: true, 5: on(4), 6: on(5), 7: on(6) };
+  wa.termsVersion = WA_TERMS_CURRENT;
+  for (const k of ["depositAmount", "roomsAffected", "mortgageCo", "paymentInitials"]) if (typeof wa[k] !== "string") wa[k] = "";
+  return true;
+}
+
+/* the current wording's scope list (kept under its old name for importers) */
+export const SCOPE_ITEMS = WA_VERSIONS[WA_TERMS_CURRENT].scope;
 
 export const CHANGE_REASONS = [
   "Concealed / Unforeseen Condition",

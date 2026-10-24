@@ -28,7 +28,7 @@
    completeness.js and dryingcalc.js. None touches the DOM when it loads. */
 
 import { createHash } from "node:crypto";
-import { jobType, lossTypesOf, COMPANY, SCOPE_ITEMS } from "../../../apps/field/js/model.js";
+import { jobType, lossTypesOf, COMPANY, waWording } from "../../../apps/field/js/model.js";
 import { applyScans, scanRecord, wallTime, rowRoom } from "../../../apps/field/js/scans.js";
 import { uncheckedFills, unreadOnEmpty, finalReadingPhotos, mapPhotoEntries, photoAt } from "../../../apps/field/js/meterphotos.js";
 import { goalFor, gpp } from "../../../apps/field/js/core.js";
@@ -37,7 +37,7 @@ import { evaluateProject } from "../../../apps/field/js/completeness.js";
 import { MARKER_RE } from "../../../apps/field/js/media.js";
 import { thumbKey } from "../../../apps/field/js/thumbs.js";
 import { deployedCounts } from "../../../apps/field/js/dryingcalc.js";
-import { TERMS, SIGN_LEAD, SMS_LINKS, OWNER_SIG_LABEL, REP_SIG_LABEL, smsConsentLine } from "./workauth.mjs";
+import { SMS_LINKS, OWNER_SIG_LABEL, REP_SIG_LABEL, smsConsentLine } from "./workauth.mjs";
 
 /* model format; bump on any layout-visible change (every section's hash moves with it) */
 export const MODEL_V = 1;
@@ -425,23 +425,40 @@ function workAuthParts(b) {
   // the form prints in the packet once it is signed (an unsigned one is a completeness gap, not a document)
   if (!filled(wa.ownerSig) && !filled(wa.repSig) && !filled(wa.portalSignedAt)) return [];
   const scope = isObj(wa.scope) ? wa.scope : {};
+  // the words this authorization was signed under (model.js WA_VERSIONS by termsVersion)
+  const words = waWording(wa);
   // only the checked items, as bullets: a number beside a bullet read as a gap where an item was left unchecked
-  const items = SCOPE_ITEMS.filter((t, i) => scope[i] === true || scope[String(i)] === true);
+  const items = words.scope.filter((t, i) => scope[i] === true || scope[String(i)] === true);
+  const term = ([k, v]) => ({ t: "para", text: `${k}: ${v}`, size: 8.5, font: "reg", color: "black" });
+  const dollars = (v) => { const s = line(v); return s ? (s.startsWith("$") ? s : `$${s}`) : ""; };
+  // October 2026 wording on: the loss facts the deposit is set by, then the Payment Terms
+  const lossFields = words.payment.length ? [{ t: "fields", cols: 3, pairs: [
+    ["Water category", line(p.waterCategory) ? `Category ${line(p.waterCategory)}` : ""],
+    ["Rooms affected", line(wa.roomsAffected)], ["Mortgage company", line(wa.mortgageCo)],
+  ] }] : [];
+  const paymentBlocks = words.payment.length ? [
+    { t: "subhead", text: "Payment terms", right: "" },
+    { t: "fields", cols: 2, pairs: [["Mitigation deposit (due at signing)", dollars(wa.depositAmount)], ["Balance", "Due on receipt of the final invoice"]] },
+    ...words.payment.map(term),
+    { t: "para", text: `Owner initials: ${line(wa.paymentInitials) || "________"}  ${words.ack}`, size: 8.5, font: "bold", color: "black" },
+  ] : [];
   const blocks = [
     { t: "fields", cols: 3, pairs: [["Date", mdy(wa.date)], ["Work order #", line(p.workOrderNo)], ["Claim #", line(p.claimNo)]] },
     { t: "fields", cols: 2, pairs: [
       ["Property address", line(p.address)], ["Owner name", line(p.customer) || line(wa.ownerName)],
       ["Phone", line(p.phone)], ["Email", line(p.email)], ["Ins. carrier", line(p.carrier)], ["Loss cause", line(p.lossCause)],
     ] },
+    ...lossFields,
     { t: "subhead", text: "Scope of authorized work", right: "" },
     items.length ? { t: "bullets", items } : { t: "note", text: "No scope items were checked on this authorization." },
+    ...paymentBlocks,
     { t: "subhead", text: "Terms & conditions", right: "" },
-    ...TERMS.map(([k, v]) => ({ t: "para", text: `${k}: ${v}`, size: 8.5, font: "reg", color: "black" })),
+    ...words.terms.map(term),
     { t: "subhead", text: "Text message consent (optional)", right: "" },
     { t: "para", text: smsConsentLine(wa.smsConsent), size: 8.5, font: "reg", color: "black" },
     { t: "para", text: SMS_LINKS, size: 7.5, font: "reg", color: "sub" },
     { t: "subhead", text: "Authorization & signatures", right: "" },
-    { t: "para", text: SIGN_LEAD, size: 8.5, font: "reg", color: "sub" },
+    { t: "para", text: words.signLead, size: 8.5, font: "reg", color: "sub" },
     { t: "signatures", items: [
       sigItem(media, OWNER_SIG_LABEL, wa, { sig: "ownerSig", name: "ownerName", date: "ownerDate" }, "workAuth", { portal: true, fallbackName: p.customer }),
       sigItem(media, REP_SIG_LABEL, wa, { sig: "repSig", name: "repName", date: "repDate" }, "workAuth"),

@@ -12,8 +12,8 @@ import {
   changedSections, mediaNames, planMedia, emailText, rationaleText, readyText, holdText, suggestedFrom,
   CERT_STATEMENT, SCAN_FOOT, SCAN_LEGEND, SECTION_TITLES,
 } from "../packet/model.mjs";
-import { SCOPE_ITEMS } from "../../../apps/field/js/model.js";
-import { TERMS, SMS_CONSENT, SMS_LINKS, SIGN_LEAD, OWNER_SIG_LABEL, REP_SIG_LABEL } from "../packet/workauth.mjs";
+import { WA_VERSIONS, WA_TERMS_CURRENT, newWorkAuth } from "../../../apps/field/js/model.js";
+import { SMS_CONSENT, SMS_LINKS, OWNER_SIG_LABEL, REP_SIG_LABEL } from "../packet/workauth.mjs";
 import {
   demoProject, demoProjectUpload, demoMediaStore, demoMediaSizes, demoImages, markerOf, hashOf, signaturePng,
   DEMO_TODAY, DEMO_NOW, DEMO_UPDATED_AT, LOST_MARKER, EXCLUDED_DOC_ID,
@@ -271,8 +271,12 @@ test("model: certificate as an uploaded signed copy", () => {
 });
 
 test("model: work authorization words are the form's, verbatim", () => {
-  for (const [k, v] of TERMS) assert.ok(FORMS.includes(`termRow("${k}", "${v}")`), `term ${k} drifted from forms.js`);
-  for (const s of [SMS_CONSENT, SMS_LINKS, SIGN_LEAD, OWNER_SIG_LABEL, REP_SIG_LABEL, CERT_STATEMENT, SCAN_FOOT]) {
+  // the versioned wording (scope, payment, terms, acknowledgment, sign lead) is
+  // read by both from model.js WA_VERSIONS; the form must draw it from there
+  assert.ok(FORMS.includes("waWording(wa)"), "forms.js draws the work authorization from waWording()");
+  assert.ok(!FORMS.includes('termRow("Payment", "'), "no inline copy of the terms left in forms.js");
+  const { scope: SCOPE_ITEMS, terms: TERMS, signLead: SIGN_LEAD } = WA_VERSIONS["2026-04"];   // the demo predates versioning
+  for (const s of [SMS_CONSENT, SMS_LINKS, OWNER_SIG_LABEL, REP_SIG_LABEL, CERT_STATEMENT, SCAN_FOOT]) {
     assert.ok(FORMS.includes(`"${s}"`), `not in forms.js: ${s.slice(0, 50)}`);
   }
   assert.ok(FORMS.includes(SCAN_LEGEND));
@@ -297,6 +301,32 @@ test("model: work authorization words are the form's, verbatim", () => {
   p.workAuth.ownerSig = "";
   p.workAuth.repSig = "";
   assert.equal(sec(build(p), "workAuth"), null, "an unsigned work authorization is not printed");
+});
+
+test("model: a signed April 2026 authorization keeps its words; an October 2026 one prints deposit terms", () => {
+  const legacy = blocksOf(build(), "workAuth");
+  const lp = legacy.filter((b) => b.t === "para").map((b) => b.text);
+  assert.ok(lp.some((t) => t.startsWith("Payment: Payment is due upon completion or receipt of insurance proceeds.")), "old wording stays on the old signature");
+  assert.ok(!legacy.some((b) => b.t === "subhead" && b.text === "Payment terms"));
+
+  const p = demoProject();
+  p.waterCategory = "3";
+  p.workAuth = { ...p.workAuth, termsVersion: WA_TERMS_CURRENT, scope: { 0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
+    depositAmount: "5,000", roomsAffected: "Kitchen, basement", mortgageCo: "Northrim Bank", paymentInitials: "JS" };
+  const W = WA_VERSIONS[WA_TERMS_CURRENT];
+  const bl = blocksOf(build(p), "workAuth");
+  const paras = bl.filter((b) => b.t === "para").map((b) => b.text);
+  assert.ok(bl.some((b) => b.t === "subhead" && b.text === "Payment terms"));
+  for (const [k, v] of [...W.payment, ...W.terms]) assert.ok(paras.includes(`${k}: ${v}`), `missing ${k}`);
+  assert.ok(!paras.some((t) => t.includes("receipt of insurance proceeds")), "the old payment line is gone");
+  assert.ok(paras.includes(`Owner initials: JS  ${W.ack}`));
+  assert.ok(paras.includes(W.signLead));
+  const pairs = bl.filter((b) => b.t === "fields").flatMap((b) => b.pairs);
+  assert.deepEqual(pairs.find(([k]) => k === "Mitigation deposit (due at signing)"), ["Mitigation deposit (due at signing)", "$5,000"]);
+  assert.deepEqual(pairs.find(([k]) => k === "Water category"), ["Water category", "Category 3"]);
+  assert.deepEqual(pairs.find(([k]) => k === "Mortgage company"), ["Mortgage company", "Northrim Bank"]);
+  assert.deepEqual(bl.find((b) => b.t === "bullets").items, W.scope);
+  assert.equal(newWorkAuth().termsVersion, WA_TERMS_CURRENT, "new authorizations get the current wording");
 });
 
 test("model: floor plan and supporting documents print full pages", () => {
