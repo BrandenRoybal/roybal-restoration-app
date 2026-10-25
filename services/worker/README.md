@@ -344,7 +344,10 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   (`ambiguous`), the same slip entered twice counting once, and a copy
   whose twin already holds a check takes no other (it reads `duplicate`).
   A check whose DocNumber is the invoice number, dated in the usual days,
-  is found by that number like any expense. A check found by the payee's
+  is found by that number like any expense, and a check whose DocNumber
+  names a live receipt's invoice is never another receipt's by the name
+  alone, though that invoice cannot reach it (its vendor read otherwise,
+  or the check dated past its days). A check found by the payee's
   name alone is never tagged, the same rule as a return's credit found
   without the slip's number: tagged to the job's project (its link, or the
   card's suggestion from the job's other matches) it gets the invoice's
@@ -353,10 +356,13 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   it says so (`detail.by_payee`): on later nights it holds the check
   against a receipt the name alone reaches too, never against one it does
   not (the invoice its DocNumber names, dated in the usual days, however
-  its vendor reads). A receipt in QuickBooks on an expense it can no longer
-  be tonight (deleted, voided or changed in QuickBooks) takes no check by
-  the name in its place, though it still counts against another receipt
-  the name reaches; it keeps its row. A return slip's
+  its vendor reads), and against none once the receipt can no longer be
+  it. A receipt in QuickBooks on an expense it can no longer be tonight
+  (deleted, voided or changed in QuickBooks) takes no check by the name in
+  its place, though it still counts against another receipt the name
+  reaches; it keeps its row, unless another receipt may be that expense
+  tonight (re-amounted to its sum, or its DocNumber now naming that one's
+  invoice): then the row gives it up, one expense to one row. A return slip's
   id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
   one receipt, and two equally good expenses are left to a person. Receipts
   dated in the last 60 days are matched; an older one keeps the row it had.

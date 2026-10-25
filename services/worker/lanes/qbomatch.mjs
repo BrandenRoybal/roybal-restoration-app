@@ -648,7 +648,8 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // it only against a receipt the name alone reaches too (nameHeld): any
   // other that may be it, such as one whose invoice number the check's
   // DocNumber carries, dated in its usual days, takes it, as on a fresh
-  // run, however its vendor reads.
+  // run, however its vendor reads; and once its receipt can no longer be
+  // it, it holds it against none (step 1).
   const claimedBy = new Map();
   const nameHeld = new Map();
   for (const l of links) {
@@ -744,7 +745,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     && str(s.receipt_date) === str(r.receipt_date) && sameSlip(r, s))).map((s) => s.id).sort(byText)[0];
 
   // ---- 1. which expense each receipt is ----
-  for (const r of eligible) {
+  const findCands = (r) => {
     // the job's linked QuickBooks customer (a picked or approved link only:
     // a suggestion is made from the matches, after them; step 1a)
     const link = jobById.get(r.job_id)?.link;
@@ -762,7 +763,22 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       r.cands.push({ p, score, check, byStore: ok.byStore, byPayee: check && payeeOnly(r, p) });
     }
     r.best = r.cands.reduce((m, c) => Math.max(m, c.score), 0);
+  };
+  for (const r of eligible) findCands(r);
+  // A check noted in_qbo by its payee's name for a receipt that can no
+  // longer be it (not among its candidates: changed in QuickBooks, such as
+  // re-amounted, or its DocNumber now naming another invoice) holds it for
+  // no one: another receipt that may be it finds it tonight, as on a fresh
+  // run
+  let released = false;
+  for (const r of eligible) {
+    const own = linkOf.get(r.id);
+    const k = own && txnKey(own.qbo_txn_type, own.qbo_txn_id);
+    if (nameHeld.get(k) !== r.id || r.cands.some((c) => txnKey(c.p.txnType, c.p.id) === k)) continue;
+    nameHeld.delete(k);
+    released = true;
   }
+  if (released) for (const r of eligible) findCands(r);
   // A check two receipts could be by its payee is neither's: a sub paid the
   // same sum twice (two jobs' equal draws) is not told apart by the name and
   // two weeks of dates, so a person decides (a conflict for each). The same
@@ -779,6 +795,19 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       checkSeekers.set(k, (checkSeekers.get(k) ?? new Set()).add(firstTwin(r, eligible)));
     }
   }
+  // A check whose DocNumber names a receipt's invoice is that receipt's,
+  // though the name does not reach it (its vendor read otherwise, or paid
+  // by card) or the check is dated past its days: that receipt counts as
+  // well, so one the name alone reaches never takes it. Not one the name
+  // would reach, on a check held by the name (nameHeld): the hold decides
+  for (const p of txns) {
+    if (p.paymentType !== "Check") continue;
+    const k = txnKey(p.txnType, p.id);
+    for (const s of eligible) {
+      if (!docAgrees(s.receipt_no, p.docNumber) || (checkTo(s, p) && nameHeld.has(k))) continue;
+      checkSeekers.set(k, (checkSeekers.get(k) ?? new Set()).add(firstTwin(s, eligible)));
+    }
+  }
   const shared = (c) => c.byPayee && (checkSeekers.get(txnKey(c.p.txnType, c.p.id))?.size ?? 0) > 1;
   // A receipt in QuickBooks on an expense it can no longer be tonight
   // (deleted, voided or changed there since: not among its candidates)
@@ -786,15 +815,21 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // check is another invoice's. It still counts against another receipt
   // the name reaches (checkSeekers, counted before). Left with nothing
   // else, it keeps its row as it is, as an older receipt does, and a twin
-  // of it reads as its duplicate (step 1c)
+  // of it reads as its duplicate (step 1c). Not when another receipt may
+  // be that expense tonight: its row gives the expense up, and it is
+  // matched as on a fresh run (one expense, one receipt)
+  const keptRows = [];
   for (const r of [...eligible]) {
     const own = linkOf.get(r.id);
     if (own?.state !== "in_qbo" || r.cands.some((c) => txnKey(c.p.txnType, c.p.id) === txnKey(own.qbo_txn_type, own.qbo_txn_id))
         || !r.cands.some((c) => c.byPayee)) continue;
+    const k = txnKey(own.qbo_txn_type, own.qbo_txn_id);
+    if (eligible.some((s) => s.cands.some((c) => txnKey(c.p.txnType, c.p.id) === k))) continue;
     r.cands = r.cands.filter((c) => !c.byPayee);
     r.best = r.cands.reduce((m, c) => Math.max(m, c.score), 0);
     if (r.cands.length) continue;
     eligible.splice(eligible.indexOf(r), 1);
+    keptRows.push(r);
     if (wanted(r.job_id)) {
       notes.push(carry(own, r.job_id, v2));
       stats.carried += 1;
@@ -932,6 +967,19 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
         const ids = sets === "capped" ? [] : [...new Set(sets.flat().map((p) => p.id))].sort(byText);
         r.ambiguousSplit = ids;
       }
+    }
+  }
+
+  // A row kept as it is (above) whose expense step 1a or 1b gave another
+  // receipt tonight is not kept after all, so the expense is noted once:
+  // its receipt reads as one nothing was found for
+  for (const r of keptRows) {
+    const own = linkOf.get(r.id);
+    if (!taken.has(txnKey(own.qbo_txn_type, own.qbo_txn_id))) continue;
+    eligible.push(r);
+    if (wanted(r.job_id)) {
+      notes.splice(notes.findIndex((n) => n.receipt_id === r.id), 1);
+      stats.carried -= 1;
     }
   }
 
