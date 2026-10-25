@@ -872,11 +872,14 @@ test("a check whose DocNumber is the receipt's invoice number, dated in the usua
   // dated past the usual days, both rest on the name: a person decides
   res = awRun([numbered(), aw0], [byNumber({ txnDate: "2026-10-13" })]);
   assert.deepEqual(reasons(res), { aw: "ambiguous", aw0: "ambiguous" });
-  // the same where the invoice the check names cannot reach it (its vendor read otherwise, paid by card, or more than two weeks
-  // before the check): the numberless one still never takes it by the name alone (before, the card put its photo on it)
+  // the same where the invoice the check names cannot reach it (its vendor read otherwise, paid by card, more than two weeks
+  // before the check, or of another sum: the check holds back $600): the numberless one still never takes it by the name alone
+  // (before, the card put its photo on it); nor where that invoice is older than the 60 days matched, paid late (before, it
+  // did not count)
   const awn = aw({ id: "awn", receipt_date: "2026-10-18", photo_ref: photo(16) });
   const p10740 = byNumber({ id: "10740", docNumber: "2025100", txnDate: "2026-10-19" });
-  for (const over of [{ vendor: "Aaron Wall Electric" }, { paid_with: "card" }, { receipt_date: "2026-10-04" }]) {
+  for (const over of [{ vendor: "Aaron Wall Electric" }, { paid_with: "card" }, { receipt_date: "2026-10-04" }, { amount: 5985 },
+    { receipt_date: "2026-08-14" }]) {
     res = awRun([numbered({ id: "awx", receipt_no: "2025100", receipt_date: "2026-10-11", photo_ref: photo(11), ...over }), awn], [p10740]);
     assert.deepEqual([res.cards, noteOf(res, "awn").detail], [[], { reason: "ambiguous", candidates: ["10740"] }], JSON.stringify(over));
   }
@@ -894,6 +897,8 @@ test("a check whose DocNumber is the receipt's invoice number, dated in the usua
     const fresh = run({ receipts: [...first, ...then], purchases, jobs: [awJob()], today: AW_TODAY, v2: true, bills: [] });
     return [n1, n2, fresh];
   };
+  // a night's notes by receipt: the door's order puts a row giving up an expense first
+  const byReceipt = (res) => [...res.notes].sort((a, b) => (a.receipt_id < b.receipt_id ? -1 : 1));
   const finished = byNumber({ attachments: ["Aaron Wall 2025117.pdf"], hasAttachment: true });
   let [n1, n2, fresh] = nights([aw0], [numbered()], [finished]);
   assert.deepEqual([awFound(n1, "aw0"), noteOf(n1, "aw0").detail.by_payee], ["in_qbo 10701", true]);
@@ -909,6 +914,31 @@ test("a check whose DocNumber is the receipt's invoice number, dated in the usua
   const later = byNumber({ txnDate: "2026-10-13", attachments: ["Aaron Wall 2025117.pdf"], hasAttachment: true });
   [n1, n2] = nights([aw({ id: "aw0", receipt_date: "2026-10-10", photo_ref: photo(10) })], [numbered()], [later]);
   assert.deepEqual([awFound(n1, "aw0"), awFound(n2, "aw0"), awFound(n2)], ["in_qbo 10701", "in_qbo 10701", "unmatched store_not_entered"]);
+  // but not where it would send that invoice to the sub's next equal check by the name instead (445, 10/16, past the numberless
+  // one's two weeks; tagged to the job, untagged, or its PDF attached): both are a person's, as on a fresh run (before, the
+  // card put the invoice's photo on 445, or it was noted there)
+  for (const over of [{}, { lines: [line({ amount: 5385, accountId: "83" })] }, { attachments: ["Aaron Wall 1885.pdf"], hasAttachment: true }]) {
+    [n1, n2, fresh] = nights([aw({ id: "aw0", receipt_date: "2026-10-01", photo_ref: photo(10) })], [numbered()],
+      [later, p10701({ id: "10720", docNumber: "445", txnDate: "2026-10-16", ...over })]);
+    assert.deepEqual([awFound(n1, "aw0"), n2.cards, reasons(n2)], ["in_qbo 10701", [], { aw: "ambiguous", aw0: "ambiguous" }], JSON.stringify(over));
+    assert.deepEqual(byReceipt(n2), byReceipt(fresh), JSON.stringify(over));
+  }
+  // and none against the invoice the check names where the name does not reach that one (its vendor read otherwise, paid by
+  // card, dated more than two weeks before the check or after it, of another sum, or older than the 60 days matched): the
+  // numberless one that took it by the name reads as on a fresh run (before, in QuickBooks on it for good where the vendor
+  // read right)
+  const held = byNumber({ id: "10740", docNumber: "2025100", txnDate: "2026-10-19", attachments: ["Aaron Wall 1885.pdf"], hasAttachment: true });
+  const awx100 = (over) => numbered({ id: "awx", receipt_no: "2025100", receipt_date: "2026-10-11", photo_ref: photo(11), ...over });
+  for (const over of [{ vendor: "Aaron Wall Electric" }, { paid_with: "card" }, { receipt_date: "2026-10-04" }, { receipt_date: "2026-10-21" },
+    { amount: 5985 }, { receipt_date: "2026-08-14" }]) {
+    [n1, n2, fresh] = nights([awn], [awx100(over)], [held]);
+    assert.deepEqual([awFound(n1, "awn"), noteOf(n2, "awn").detail], ["in_qbo 10740", { reason: "ambiguous", candidates: ["10740"] }],
+      JSON.stringify(over));
+    assert.deepEqual(byReceipt(n2), byReceipt(fresh), JSON.stringify(over));
+  }
+  // the name reaching it (10/14, five days before the check), the hold stands
+  [, n2] = nights([awn], [awx100({ receipt_date: "2026-10-14" })], [held]);
+  assert.deepEqual([awFound(n2, "awn"), awFound(n2, "awx")], ["in_qbo 10740", "unmatched store_not_entered"]);
   // one the name does not reach (the vendor misread, no number) but other evidence does (paid from the checking account the
   // check is drawn on, on the check's day, the check finished for the job: FBX's rule) takes it, as on a fresh run
   const fromChecking = aw({ id: "awz", vendor: "Aron Wall", paid_with: "account", card_last4: "8992", receipt_no: "", receipt_date: "2026-10-13",
@@ -2590,6 +2620,11 @@ test("step 1a holds nothing from one night to the next: a receipt uploaded since
   // and the night after, and once the job is linked to 502
   assert.deepEqual(both(night([fsgChena, fbxChena, gh], readBack(n2))), ["in_qbo", "10670", "unmatched", null]);
   assert.deepEqual(both(night([fsgChena, fbxChena, gh], readBack(n1), [chena()])), ["in_qbo", "10670", "unmatched", null]);
+  // the same where FBX is older than the 60 days matched by the night Golden Heart's invoice (10/10) comes: FBX's row is let go
+  // (before, both were noted in QuickBooks on 10670, and the door wrote Golden Heart's claimed_by_other)
+  const late = runV2({ receipts: [fsgChena, fbxChena, { ...gh, receipt_date: "2026-10-10" }], purchases: [p10621, p10670], links: readBack(n1),
+    jobs: [chena({ link: null })], today: "2026-12-09" });
+  assert.deepEqual([noteOf(late, "gh").state, noteOf(late, "gh").qbo_txn_id, noteOf(late, "fbx"), late.stats.carried], ["in_qbo", "10670", undefined, 1]);
 });
 
 test("a row kept on a check its receipt can no longer be gives it up when step 1a matches that check for another receipt: one expense, one row", () => {
@@ -2611,6 +2646,33 @@ test("a row kept on a check its receipt can no longer be gives it up when step 1
   // a run for FBX's job answers for that job only
   const scoped = runV2({ ...rows, links: [inQbo], scope: [ALSTON] });
   assert.deepEqual([scoped.notes.map((n) => n.receipt_id), scoped.stats.carried], [["fbx", "fsg"], 0]);
+});
+
+test("an older receipt's row on a check it took by the payee's name is let go to the invoice the check's DocNumber names: one expense, one row", () => {
+  // aw0, a numberless Aaron Wall invoice of 08/24, took check 10701 (DocNumber 2025117, 08/27, finished for 502) by the name on
+  // 09/01, and invoice 2025117 is uploaded since. By 10/25 aw0 is older than the 60 days matched: it keeps the row it had
+  const k = p10701({ txnDate: "2026-08-27", docNumber: "2025117", attachments: ["Aaron Wall 2025117.pdf"], hasAttachment: true });
+  const aw0 = aw({ id: "aw0", receipt_date: "2026-08-24", photo_ref: photo(10) });
+  const nights = (first, then, purchases) => {
+    const n1 = runV2({ receipts: [first], purchases, jobs: [awJob()], today: "2026-09-01" });
+    const rows = { receipts: [first, then], purchases, jobs: [awJob()], today: AW_TODAY };
+    return [n1, runV2({ ...rows, links: readBack(n1) }), runV2(rows)];
+  };
+  // the invoice takes it by its number, and aw0's row is not kept (the note door removes it), as on a fresh run (before, both
+  // were noted in QuickBooks on 10701, and the door wrote the invoice's claimed_by_other)
+  let [n1, n2, fresh] = nights(aw0, aw({ id: "aws", receipt_no: "2025117", receipt_date: "2026-08-27", photo_ref: photo(11) }), [k]);
+  assert.deepEqual([awFound(n1, "aw0"), noteOf(n1, "aw0").detail.by_payee], ["in_qbo 10701", true]);
+  assert.deepEqual([awFound(n2, "aws"), noteOf(n2, "aw0"), n2.stats.carried], ["in_qbo 10701", undefined, 0]);
+  assert.deepEqual(n2.notes, fresh.notes);
+  // the same with the check dated past the invoice's usual days (the name reaches it too): the older row holds it not against
+  // that invoice (before, it read "not in QuickBooks yet")
+  [n1, n2, fresh] = nights(aw({ id: "aw0", receipt_date: "2026-08-20", photo_ref: photo(10) }),
+    aw({ id: "aws", receipt_no: "2025117", receipt_date: "2026-08-26", photo_ref: photo(11) }), [{ ...k, txnDate: "2026-08-30" }]);
+  assert.deepEqual([awFound(n1, "aw0"), awFound(n2, "aws"), noteOf(n2, "aw0")], ["in_qbo 10701", "in_qbo 10701", undefined]);
+  assert.deepEqual(n2.notes, fresh.notes);
+  // against a numberless one it holds the check, as before, and keeps its row
+  [, n2] = nights(aw0, aw({ id: "awn", receipt_date: "2026-08-27", photo_ref: photo(11) }), [k]);
+  assert.deepEqual([awFound(n2, "aw0"), awFound(n2, "awn"), n2.stats.carried], ["in_qbo 10701", "unmatched store_not_entered", 1]);
 });
 
 /** receipt_qbo_links_note (0025) as it writes a night's rows: one at a time, in the order sent. It first drops the rows of

@@ -347,7 +347,8 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   is found by that number like any expense, and a check whose DocNumber
   names a live receipt's invoice is never another receipt's by the name
   alone, though that invoice cannot reach it (its vendor read otherwise,
-  or the check dated past its days). A check found by the payee's
+  the check dated past its days or of another sum, or the receipt older
+  than the 60 days matched). A check found by the payee's
   name alone is never tagged, the same rule as a return's credit found
   without the slip's number: tagged to the job's project (its link, or the
   card's suggestion from the job's other matches) it gets the invoice's
@@ -357,15 +358,21 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   against a receipt the name alone reaches too, never against one it does
   not (the invoice its DocNumber names, dated in the usual days, however
   its vendor reads), and against none once the receipt can no longer be
-  it. A receipt in QuickBooks on an expense it can no longer be tonight
-  (deleted, voided or changed in QuickBooks) takes no check by the name in
-  its place, though it still counts against another receipt the name
-  reaches; it keeps its row, unless another receipt may be that expense
-  tonight (re-amounted to its sum, or its DocNumber now naming that one's
-  invoice): then the row gives it up, one expense to one row. A return slip's
-  id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
-  one receipt, and two equally good expenses are left to a person. Receipts
-  dated in the last 60 days are matched; an older one keeps the row it had.
+  it; nor against the invoice its DocNumber names where that one would
+  take the sub's next equal check by the name instead (both are a
+  person's, as on a fresh run), or where the receipt holding it is older
+  than the 60 days. A receipt in QuickBooks on an expense it can no longer
+  be tonight (deleted, voided or changed in QuickBooks) takes no check by
+  the name in its place, though it still counts against another receipt
+  the name reaches; it keeps its row, unless another receipt may be that
+  expense tonight (re-amounted to its sum, or its DocNumber now naming
+  that one's invoice): then the row gives it up, one expense to one row.
+  A return slip's id is `<receipt id>~ret`. The surest receipt chooses
+  first, one expense goes to one receipt, and two equally good expenses
+  are left to a person. Receipts
+  dated in the last 60 days are matched; an older one keeps the row it had,
+  unless another receipt is matched to that expense tonight: the row is
+  let go.
 - **Bills are read, never written** (v2). The office books FNSB dump
   tickets as Bills, so qbo-proxy's `listBills` is read beside the expenses
   and a dump ticket matches the bill whose DocNumber is its ticket number

@@ -648,8 +648,10 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // it only against a receipt the name alone reaches too (nameHeld): any
   // other that may be it, such as one whose invoice number the check's
   // DocNumber carries, dated in its usual days, takes it, as on a fresh
-  // run, however its vendor reads; and once its receipt can no longer be
-  // it, it holds it against none (step 1).
+  // run, however its vendor reads; once its receipt can no longer be it, it
+  // holds it against none; and an older receipt's, or one that would send
+  // the invoice the check's DocNumber names to another check, holds it not
+  // against that invoice (step 1).
   const claimedBy = new Map();
   const nameHeld = new Map();
   for (const l of links) {
@@ -668,6 +670,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     owned: { queued: 0, done: 0, failed: 0 }, jobs: [] };
   const notes = [];
   const eligible = [];
+  const older = [];       // on a live job, not matched tonight: older (or dated ahead, or no total)
   for (const r of live) {
     const link = linkOf.get(r.id);
     const job = jobById.get(r.job_id);
@@ -701,6 +704,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       continue;
     }
     // Older (or dated ahead, or no total): keep what it was, unchanged.
+    older.push(r);
     if (link && NOTE_STATES.has(link.state) && Number(r.amount) !== 0 && wanted(r.job_id)) {
       notes.push(carry(link, r.job_id, v2));
       stats.carried += 1;
@@ -719,6 +723,10 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // not name the receipt's invoice, or it is dated past the usual three
   // days (only checkTo lets it in).
   const payeeOnly = (r, p) => !docAgrees(r.receipt_no, p.docNumber) || str(p.txnDate) > addDays(r.receipt_date, 3);
+  // The payee's name reaches the receipt, whoever holds the check: its sum
+  // and sign, dated from the day before it to CHECK_DAYS after (checkTo)
+  const nameReaches = (r, p) => checkTo(r, p) && cents(p.total) === cents(r.amount) && (p.credit === true) === (Number(r.amount) < 0)
+    && str(p.txnDate) >= addDays(r.receipt_date, -1) && str(p.txnDate) <= addDays(r.receipt_date, CHECK_DAYS);
   const admissible = (r, p, returned = null) => {
     if (!DIGITS.test(str(p.id)) || !DIGITS.test(str(p.syncToken))) return null;
     if (cents(p.total) !== cents(r.amount) || (p.credit === true) !== (Number(r.amount) < 0)) return null;
@@ -778,6 +786,21 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     nameHeld.delete(k);
     released = true;
   }
+  // Nor does it hold the check from the invoice its DocNumber names (a
+  // number outranks the name) where the receipt holding it is older, not
+  // matched again (its row is let go once that one takes it, after step
+  // 1b), or where the hold would send that invoice, kept from the check, to
+  // the sub's next equal check by the name instead: both are matched as on
+  // a fresh run
+  const olderIds = new Set(older.map((r) => r.id));
+  for (const p of txns) {
+    const k = txnKey(p.txnType, p.id);
+    const holder = nameHeld.get(k);
+    if (!holder || !eligible.some((s) => s.id !== holder && docAgrees(s.receipt_no, p.docNumber) && (olderIds.has(holder)
+        || (nameReaches(s, p) && !s.cands.some((c) => txnKey(c.p.txnType, c.p.id) === k) && s.cands.some((c) => c.byPayee))))) continue;
+    nameHeld.delete(k);
+    released = true;
+  }
   if (released) for (const r of eligible) findCands(r);
   // A check two receipts could be by its payee is neither's: a sub paid the
   // same sum twice (two jobs' equal draws) is not told apart by the name and
@@ -797,15 +820,17 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   }
   // A check whose DocNumber names a receipt's invoice is that receipt's,
   // though the name does not reach it (its vendor read otherwise, or paid
-  // by card) or the check is dated past its days: that receipt counts as
-  // well, so one the name alone reaches never takes it. Not one the name
-  // would reach, on a check held by the name (nameHeld): the hold decides
+  // by card) or the check is dated past its days, or the receipt is older
+  // and not matched again: that receipt counts as well, so one the name
+  // alone reaches never takes it. Not one the name reaches (nameReaches),
+  // on a check held by the name (nameHeld): the hold decides
+  const known = [...eligible, ...older];
   for (const p of txns) {
     if (p.paymentType !== "Check") continue;
     const k = txnKey(p.txnType, p.id);
-    for (const s of eligible) {
-      if (!docAgrees(s.receipt_no, p.docNumber) || (checkTo(s, p) && nameHeld.has(k))) continue;
-      checkSeekers.set(k, (checkSeekers.get(k) ?? new Set()).add(firstTwin(s, eligible)));
+    for (const s of known) {
+      if (!docAgrees(s.receipt_no, p.docNumber) || (nameHeld.has(k) && nameReaches(s, p))) continue;
+      checkSeekers.set(k, (checkSeekers.get(k) ?? new Set()).add(firstTwin(s, known)));
     }
   }
   const shared = (c) => c.byPayee && (checkSeekers.get(txnKey(c.p.txnType, c.p.id))?.size ?? 0) > 1;
@@ -981,6 +1006,16 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       notes.splice(notes.findIndex((n) => n.receipt_id === r.id), 1);
       stats.carried -= 1;
     }
+  }
+  // So too an older receipt's in_qbo row, kept as it is, on an expense
+  // another receipt is matched to tonight (the invoice a check it held by
+  // the name names, step 1): the row is let go, and the note door removes it
+  for (const r of older) {
+    const own = linkOf.get(r.id);
+    const i = notes.findIndex((n) => n.receipt_id === r.id);
+    if (own?.state !== "in_qbo" || i < 0 || !taken.has(txnKey(own.qbo_txn_type, own.qbo_txn_id))) continue;
+    notes.splice(i, 1);
+    stats.carried -= 1;
   }
 
   // ---- 1c. a receipt entered twice (the same slip on the same job and day) ----
