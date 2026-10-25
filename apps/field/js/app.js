@@ -167,7 +167,6 @@ function startSyncUI() {
     const fresh = await Store.get(id);
     if (!fresh) return;
     graftProject(liveProject, fresh);
-    syncGrafts++;
     // a page holding rows that have no ids (the drying log's equipment) repaints them
     document.dispatchEvent(new CustomEvent("roybal:grafted", { detail: { id } }));
   });
@@ -196,9 +195,6 @@ let liveProject = null;
 /* that object when it is job `id`'s: where a write finishing after the user
    moved on lands, because the page's next save writes this copy, not the stored one */
 const liveCopy = (id) => (liveProject && liveProject.id === id ? liveProject : null);
-// sync grafts into that object so far: Restore tells one (the copy is then the
-// stored row) from the copy saving itself (it wrote over the stored row)
-let syncGrafts = 0;
 
 /* A route that cannot read or write the store must still leave the screen
    matching the URL. It used to throw on flushPending (or Store.get) with no
@@ -1337,11 +1333,11 @@ const sizeLabel = (bytes) => bytes >= 1048576
    directly, never through the save queue: one landing before the merge is
    merged in, and one landing after it adds to the restored copy instead of
    writing the old one back. A write that went around that copy to the store
-   (sync's, before its graft) is unioned into it first, unless sync grafted
-   the stored row into that copy while the backup saved: then it is the
-   stored copy already, and the older read would only bring back what the
-   office cleared or removed. A copy that saved itself meanwhile wrote over
-   the stored row, so the read is all that still holds such a write.
+   (sync's, before its graft) is unioned into it first, in the tick Restore's
+   read of the stored copy arrives and before the backup, so whatever lands
+   on that copy while the backup saves goes on top and stands: a read, the
+   crew's own tap (an Unarchive clearing its date), sync's graft of an
+   office edit, an AI draft stamped by a clock behind the job's.
    The page then re-renders from it, with no reload, so an edit still waiting
    to save on another job is never in the way; so does any other page of this
    job the crew opened meanwhile, which may hold a copy read before the
@@ -1379,20 +1375,17 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
       await flushPending().catch(() => {});
       if (unsavedProject(id)) return stillSaving();
       const current = await Store.get(id);
-      // the page's copy as that read left it (sync can graft into it while the backup saves)
-      const seen = liveCopy(id), seenGrafts = syncGrafts;
+      // a write that went around the page's copy (sync's before its graft, or
+      // a page's left before its write landed) is in that read: union it in
+      // now, never by the stamps alone, which a skewed clock puts out of order
+      const early = liveCopy(id);
+      if (early && current && current.updatedAt !== early.updatedAt && !unsavedProject(id)) graftProject(early, mergeProjects(early, current).merged);
       if (current) await Store.backup(current, { keep });
       const live = liveCopy(id);
       const base = live || (await Store.get(id));
       // an edit queued meanwhile on another copy of the job would save over this one
       const queued = unsavedProject(id);
       if (queued && queued !== live) return stillSaving();
-      // a write that went around the page's copy (sync's before its graft, or
-      // a page's left before its write landed) is in the stored copy: union it
-      // in, never by the stamps alone, which a skewed clock puts out of order.
-      // A page copy sync grafted since that read is the stored copy already
-      const still = live && live === seen && syncGrafts === seenGrafts;
-      if (still && !queued && current && current.updatedAt !== live.updatedAt) graftProject(live, mergeProjects(live, current).merged);
       const snap = { ...data };
       delete snap.rev;
       // UNION, never replace: the current copy is the newer side, so its

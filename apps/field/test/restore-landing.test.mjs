@@ -537,6 +537,50 @@ await test("a Progress Update saved around the page's copy is kept when a read s
   assert.equal((await Store.get("jobX")).progressNarrative, "Week 2: drywall hung and taped.", "the update is kept");
 });
 
+/* the union of Restore's read goes in before its backup: what the page's copy
+   saves while the backup is written goes on top of it, even a cleared field */
+await test("an Unarchive tapped while Restore's backup is written stays unarchived", async () => {
+  const job = { id: "jobY", jobType: "restoration", customer: "Yukon", address: "9 Yukon Dr",
+    updatedAt: "2026-10-20T00:00:00.000Z", archivedAt: "2026-10-21T00:00:00.000Z", receipts: [] };
+  await Store.put(job, { bump: false, quiet: true });
+  const { archivedAt: _was, ...unarchived } = job;
+  await Store.backup({ ...unarchived, updatedAt: "2026-10-19T00:00:00.000Z", receipts: [{ id: "lost", vendor: "Rental Zone", amount: 42, items: [] }] });
+  await nav("#/p/jobY");
+  await until(() => buttons(/Unarchive/).length > 0 && buttons(/⏪ Restore/).length > 0);
+  onBackupTx = () => buttons(/Unarchive/)[0].click();
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  assert.equal(onBackupTx, null, "Unarchive was tapped inside the restore");
+  const after = await Store.get("jobY");
+  assert.deepEqual(after.receipts.map((r) => r.id), ["lost"]);
+  assert.equal(after.archivedAt || "", "", "the job stays unarchived");
+});
+
+await test("on a job stamped ahead of the phone's clock, an AI timeline draft landing during Restore's backup is kept", async () => {
+  const ahead = new Date(Date.now() + 5 * 60e3).toISOString();
+  const job = { id: "jobS", jobType: "construction", constructionType: "remodel", customer: "Salcha", address: "2 Salcha Rd", updatedAt: ahead, receipts: [],
+    boardPlan: { phases: [{ name: "Old guess", estimatedHours: 2, lagDays: 0, confidence: 0.4 }], notBefore: "", notBeforeLabel: "",
+      assumptions: [], generatedAt: "2026-10-01T00:00:00.000Z", status: "dismissed" } };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, updatedAt: "2026-10-19T00:00:00.000Z", receipts: [{ id: "lost", vendor: "Rental Zone", amount: 42, items: [] }] });
+  await nav("#/p/jobS");
+  await until(() => buttons(/Estimate timeline/).length > 0 && buttons(/⏪ Restore/).length > 0);
+  holdDraft = [];
+  buttons(/Estimate timeline/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const draftBack = holdDraft[0];
+  holdDraft = null;
+  onBackupTx = () => draftBack();                    // saved on the page's copy, stamped by this phone's clock
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  assert.equal(onBackupTx, null, "the draft came back inside the restore");
+  const after = await Store.get("jobS");
+  assert.deepEqual(after.receipts.map((r) => r.id), ["lost"]);
+  assert.equal(`${after.boardPlan.status}:${after.boardPlan.phases.map((p) => p.name).join("+")}`, "draft:Demo+Drywall", "the new draft is kept");
+});
+
 await test("a backup stamped while the phone's clock ran ahead says its time is off", async () => {
   const job = { id: "jobK", jobType: "restoration", customer: "Kodiak", address: "3 Kodiak Ct", updatedAt: "2026-10-20T00:00:00.000Z", receipts: [] };
   await Store.put(job, { bump: false, quiet: true });
