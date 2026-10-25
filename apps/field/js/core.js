@@ -242,7 +242,6 @@ export function approxBytes(node) {
   return n;
 }
 const isQuotaError = (e) => !!e && (e.name === "QuotaExceededError" || e.code === 22);
-let lastSnapMs = 0;   // two snapshots of one job in the same millisecond still get two keys
 
 /* save/delete listeners — the sync engine subscribes to push changes up */
 const _savedFns = [], _deletedFns = [];
@@ -374,21 +373,29 @@ export const Store = {
   async backup(project, opts = {}) {
     if (!project || !project.id) return;
     const id = project.id;
-    const ms = Math.max(Date.now(), lastSnapMs + 1);
-    lastSnapMs = ms;
-    const takenAt = new Date(ms).toISOString();
-    const bytes = approxBytes(project);
-    const rec = { id: snapKey(id, takenAt, bytes), jobId: id, takenAt, bytes, data: project };
     const keep = opts.keep;
+    let rec;
     /* one transaction, all or nothing: read the job's keys, drop what the new
-       copy pushes out of retention, write the new copy */
+       copy pushes out of retention, write the new copy.
+       The new copy is stamped after the job's newest stored one, whatever the
+       clock says: key order IS snapshot order, and a clock that ran ahead and
+       was set back would otherwise leave its stamps sorting as newest for
+       good — retention pruning the real newest copies, latestBackup handing
+       out a stale one. The stamp is read inside the transaction, so two
+       backups of one job in the same millisecond still get two keys, and set
+       once, so run()'s retry looks for the same key. */
     const save = () => run(BACKUPS, "readwrite", (t) => {
       const os = t.objectStore(BACKUPS);
       const keys = os.getAllKeys(snapRange(id));
       keys.onsuccess = () => {
+        const mine = ownSnapKeys(id, keys.result);
+        if (!rec.id) {
+          const after = mine.length ? Date.parse(parseSnapKey(mine[0]).takenAt) + 1 : 0;
+          rec.takenAt = new Date(Math.max(Date.now(), after || 0)).toISOString();
+          rec.id = snapKey(id, rec.takenAt, rec.bytes);
+        }
         // run()'s retry after a lost connection may find this copy already
         // written (the first try committed, the page just never heard)
-        const mine = ownSnapKeys(id, keys.result);
         const older = mine.filter((k) => k !== rec.id);
         const victims = snapVictims([rec.id, ...older]).filter((k) => k !== keep);
         for (const k of victims) os.delete(k);
@@ -397,6 +404,7 @@ export const Store = {
       };
     });
     try {
+      rec = { jobId: id, bytes: approxBytes(project), data: project };
       try {
         await save();
       } catch (e) {

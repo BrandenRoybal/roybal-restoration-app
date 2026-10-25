@@ -162,6 +162,26 @@ await test("a disk that stays full skips the snapshot and never throws", async (
   assert.deepEqual((await Store.backups("j7")).map((s) => s.data.customer), ["Job 3"], "room was made; the new copy didn't fit");
 });
 
+await test("a clock that ran ahead and was set back never leaves old copies sorting as newest", async () => {
+  const realNow = Date.now;
+  Date.now = () => realNow() + 864e5;                               // a day fast…
+  try { await Store.backup(job("c1", 1)); await Store.backup(job("c1", 2)); } finally { Date.now = realNow; }
+  // …then set right, and the app relaunched (a fresh module, as a reload is)
+  const { Store: Relaunched } = await import("../js/core.js?relaunch");
+  for (let n = 3; n <= 14; n++) await Relaunched.backup(job("c1", n));
+  assert.equal((await Relaunched.latestBackup("c1")).customer, "Job 14", "the copy taken last is the newest");
+  assert.deepEqual((await Relaunched.backups("c1")).map((s) => s.data.customer).slice(0, 3), ["Job 14", "Job 13", "Job 12"]);
+  assert.equal((await Relaunched.snapshots("c1")).length, 10, "and the fast-clock copies aged out like any other");
+});
+
+await test("a job that can't even be measured is skipped, never thrown at the sync that asked", async () => {
+  const odd = job("j9", 1); odd.self = odd;                            // no real job does this; backup() still must not throw
+  const warn = console.warn; let warned = 0; console.warn = () => { warned++; };
+  try { await Store.backup(odd); } finally { console.warn = warn; }
+  assert.equal(warned, 1);
+  assert.deepEqual(await Store.snapshots("j9"), []);
+});
+
 await test("a failed backup that isn't a full disk rolls back whole — no snapshot is lost to it", async () => {
   for (let n = 1; n <= 10; n++) await Store.backup(job("j8", n));
   const warn = console.warn; console.warn = () => {};
