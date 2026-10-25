@@ -12,7 +12,8 @@ import {
   lineItems, taCell, sheet, sheetFooter, letterhead, commit, uploadDoc, uploadedDocPages,
 } from "./formkit.js";
 import {
-  SCOPE_ITEMS, CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
+  CHANGE_REASONS, newPhoto, dispositionLabel, depreciation,
+  waWording, waTermsVersion, waIsSigned, upgradeWorkAuthTerms, WA_TERMS_CURRENT, WA_VERSIONS,
   blankReadingRow, blankPsychroRow, blankEquipRow,
   blankLineItem, blankVerifyRow, COMPANY,
   TRADES, SELECTION_STATUSES, SUB_STATUSES, PUNCH_STATUSES, PUNCH_PRIORITIES,
@@ -1407,17 +1408,44 @@ export function dryingLog(project, d) {
 /* ============================================================
    3. WORK AUTHORIZATION & SERVICE AGREEMENT
    ============================================================ */
+/* The wording comes from WA_VERSIONS (model.js) by the authorization's
+   termsVersion, so a signed authorization keeps printing the words it was
+   signed under and the carrier packet prints the same ones. */
 export function workAuth(project, wa) {
+  if (!wa.scope || typeof wa.scope !== "object") wa.scope = {};
+  const words = waWording(wa);
+  const current = waTermsVersion(wa) === WA_TERMS_CURRENT;
   const scopeList = h("div");
-  SCOPE_ITEMS.forEach((txt, i) => scopeList.append(check(wa.scope, i, `${i + 1}. ${txt}`)));
+  words.scope.forEach((txt, i) => scopeList.append(check(wa.scope, i, `${i + 1}. ${txt}`)));
 
-  const terms = h("div", { class: "terms" },
-    termRow("Authorization", "By signing, property owner (“Owner”) authorizes Roybal Construction, LLC (“Contractor”) to perform the mitigation and restoration services described above."),
-    termRow("Payment", "Payment is due upon completion or receipt of insurance proceeds. Owner remains responsible for any balance not covered by insurance, including deductibles and depreciation holdbacks."),
-    termRow("Insurance", "Owner agrees to cooperate fully with the claims process, including providing adjuster access and signing any supplemental carrier authorization required."),
-    termRow("Access", "Owner grants Contractor and crew reasonable access during business hours and emergency access as required to prevent further damage."),
-    termRow("Exclusions", "This Work Order covers mitigation only. Reconstruction requires a separate written estimate and authorization. Contractor is not responsible for pre-existing damage unrelated to this loss."),
-    termRow("Right to Stop", "Contractor may stop work if site conditions pose a safety risk, access is denied, or payment cannot be confirmed."));
+  const terms = h("div", { class: "terms" }, ...words.terms.map(([k, v]) => termRow(k, v)));
+
+  // Payment Terms (October 2026 wording on): deposit first, owner pays.
+  const payment = words.payment.length ? [
+    sectionTitle("Payment Terms"),
+    h("div", { class: "grid2" },
+      field("Mitigation Deposit (due at signing) $", inp(wa, "depositAmount", { inputmode: "decimal", placeholder: "2,500 or 5,000" })),
+      field("Balance", h("p", { style: "margin:6px 0 0" }, "Due on receipt of the final invoice, when drying is complete and the Certificate of Drying is issued."))),
+    h("div", { class: "terms" }, ...words.payment.map(([k, v]) => termRow(k, v))),
+    h("div", { class: "termrow wa-ack" },
+      h("span", { class: "termrow__k" }, "Owner Initials:"),
+      h("span", { class: "termrow__v" },
+        inp(wa, "paymentInitials", { placeholder: "Initials", attrs: { maxlength: "6", style: "width:90px;margin-right:10px" } }),
+        h("strong", {}, words.ack))),
+  ] : [];
+
+  // An unsigned authorization started under older wording can be moved to
+  // the current one; a signed one never moves (app-only, never printed).
+  let el;
+  const upgradeBar = (!current && !waIsSigned(wa)) ? h("div", { class: "app-only banner", style: "margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#FFF7ED" },
+    h("p", { style: "margin:0 0 8px" }, `This authorization uses the ${words.label} terms (payment after insurance). New authorizations use the ${WA_VERSIONS[WA_TERMS_CURRENT].label} terms: deposit at signing, owner pays. If you already sent this one to the portal for signature, send it again after switching.`),
+    h("button", { type: "button", class: "btn btn--primary btn--sm", style: "width:auto", onclick: () => {
+      if (!upgradeWorkAuthTerms(wa)) return;
+      commit();
+      const fresh = workAuth(project, wa);
+      el.replaceWith(fresh);
+      toast(`Switched to the ${WA_VERSIONS[WA_TERMS_CURRENT].label} terms.`);
+    } }, `Switch to ${WA_VERSIONS[WA_TERMS_CURRENT].label} terms`)) : null;
 
   // The Owner Name field (bound to the job customer) auto-fills the signature
   // block's printed name — one place to type it, always in sync.
@@ -1431,7 +1459,8 @@ export function workAuth(project, wa) {
     commit();
   });
 
-  return sheet("WORK AUTHORIZATION & SERVICE AGREEMENT", "Water Mitigation / Restoration Services", "Work Authorization & Service Agreement",
+  el = sheet("WORK AUTHORIZATION & SERVICE AGREEMENT", "Water Mitigation / Restoration Services", "Work Authorization & Service Agreement",
+    upgradeBar,
     h("div", { class: "grid3" },
       field("Date", inp(wa, "date", { type: "date" })),
       field("Work Order #", inp(project, "workOrderNo")),
@@ -1444,9 +1473,15 @@ export function workAuth(project, wa) {
       field("Email", inp(project, "email", { type: "email" })),
       field("Ins. Carrier", inp(project, "carrier"))),
     field("Loss Cause", ta(project, "lossCause", { rows: 2 })),
+    current ? h("div", { class: "grid3" },
+      field("Water Category", seg(project, "waterCategory", [{ value: "1", label: "Cat 1" }, { value: "2", label: "Cat 2" }, { value: "3", label: "Cat 3" }])),
+      field("Rooms Affected", inp(wa, "roomsAffected")),
+      field("Mortgage Company (if any)", inp(wa, "mortgageCo"))) : null,
 
     sectionTitle("Scope of Authorized Work"),
     scopeList,
+
+    ...payment,
 
     sectionTitle("Terms & Conditions"),
     terms,
@@ -1458,12 +1493,13 @@ export function workAuth(project, wa) {
       "Terms of Service: app.roybalconstruction.com/terms.html · Privacy Policy: app.roybalconstruction.com/privacy.html"),
 
     sectionTitle("Authorization & Signatures"),
-    h("p", { class: "subtle" }, "By signing below, the Property Owner confirms they have read and agree to the Terms & Conditions above, and authorize Roybal Construction, LLC to commence the described scope of work."),
+    h("p", { class: "subtle" }, words.signLead),
     signOrUpload(wa, () => [
       ownerSig,
       h("hr", { class: "divider" }),
       sigBlock(wa, "repSig", "repName", "repDate", "Contractor Representative (Roybal Construction, LLC)"),
     ]));
+  return el;
 }
 function termRow(k, v) {
   return h("div", { class: "termrow" }, h("span", { class: "termrow__k" }, k + ":"), h("span", { class: "termrow__v" }, v));

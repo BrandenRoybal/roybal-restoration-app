@@ -464,7 +464,7 @@ function localMediaIndex(local) {
 }
 function localFirstMedia(local) {
   if (!local) return downloadRemembered;
-  const index = localMediaIndex(local);
+  const index = typeof local === "function" ? local : localMediaIndex(local);
   return async (hash) => {
     const map = await index();
     return map.has(hash) ? map.get(hash) : downloadRemembered(hash);
@@ -481,11 +481,12 @@ function localFirstMedia(local) {
    network failure throws and previewPhotos leaves the entry for inflate,
    which degrades to exactly the pre-stage-2 behaviour.
 
-   `have` is either the local project or an already-built hash→bytes Map, so
-   the push path can reuse the map it just deflated instead of hashing every
-   photo on the job a second time. */
+   `have` is the local project, an already-built hash→bytes Map, or a
+   localMediaIndex() that localFirstMedia shares, so neither the push path
+   nor a pull hashes every photo on the job a second time. */
 function previewFirst(have) {
   const index = have instanceof Map ? async () => have
+    : typeof have === "function" ? have
     : (have ? localMediaIndex(have) : null);
   return async (hash) => {
     if (index && (await index()).has(hash)) return null;
@@ -721,8 +722,7 @@ async function push(force = false) {
       // server instead of only from whichever device still holds a copy
       let data = null;                       // null → the server keeps the copy it already holds
       try {
-        const snaps = await Store.backups(id);
-        const snap = snaps.length ? snaps[0].data : null;
+        const snap = await Store.latestBackup(id);   // the newest copy only — never every snapshot at once
         if (snap && snap.id === id) {
           const { slim, media } = await deflateSynced(snap);
           await uploadNewMedia(media);
@@ -812,8 +812,9 @@ async function pull() {
       // original — ~12 KB instead of ~228 KB each. Anything without a preview
       // (no thumbnail yet, signatures, PDF pages) falls through to inflate and
       // downloads in full exactly as before.
-      const { project: shown } = await previewPhotos(remote, previewFirst(local));
-      ({ project: full, missing } = await inflateProject(shown, localFirstMedia(local)));
+      const have = local && localMediaIndex(local);   // one hashing pass, shared by both stages
+      const { project: shown } = await previewPhotos(remote, previewFirst(have));
+      ({ project: full, missing } = await inflateProject(shown, localFirstMedia(have)));
     } catch {
       break;   // media fetch failed (network) — retry this row from the same cursor next cycle
     }
@@ -946,8 +947,9 @@ export async function reloadFromCloud(id) {
   // already here is identical to refetching them and spares the download that
   // makes this recovery painful on a job site.
   const local = await Store.get(id);
-  const { project: shown } = await previewPhotos(row.data, previewFirst(local));
-  const { project: full, missing } = await inflateProject(shown, localFirstMedia(local));
+  const have = local && localMediaIndex(local);
+  const { project: shown } = await previewPhotos(row.data, previewFirst(have));
+  const { project: full, missing } = await inflateProject(shown, localFirstMedia(have));
   if (missing > 0) {
     // storing markers-as-photos is how second devices used to end up with
     // garbage images — refuse rather than write a corrupt copy

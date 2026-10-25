@@ -195,6 +195,42 @@ await test("a backup cut short by a lost connection keeps every snapshot (only a
   assert.equal(kept[0].data.customer, "v9", "the snapshot that couldn't be written is skipped");
 });
 
+await test("a backup that saved but was reported lost is kept once on the retry: nothing older is pruned for it, and a full disk can't cut the job to one copy", async () => {
+  for (let i = 0; i < 10; i++) await Store.backup({ ...job("T"), customer: "v" + i });
+  // the first try commits, then the page hears "connection lost" instead of complete
+  let lie = true, fullDisk = false, puts = 0;
+  const tx = P.transaction;
+  P.transaction = function (names, mode, ...rest) {
+    const real = tx.call(this, names, mode, ...rest);
+    if (!(mode === "readwrite" && [].concat(names).includes("backups"))) return real;
+    const os = real.objectStore.bind(real);
+    real.objectStore = (n) => {
+      const s = os(n), put = s.put.bind(s);
+      // run()'s retry writing that same big copy again on a nearly full phone: refused
+      s.put = (v) => {
+        puts++;
+        if (!fullDisk) return put(v);
+        return s.transaction._execRequestAsync({ source: s, operation: () => { throw new DOMException("The quota has been exceeded.", "QuotaExceededError"); } });
+      };
+      return s;
+    };
+    if (!lie) return real;
+    lie = false;
+    const w = { objectStore: (n) => real.objectStore(n), abort: () => real.abort(),
+      get error() { return new DOMException("Connection to Indexed Database server lost.", "UnknownError"); } };
+    real.oncomplete = () => { fullDisk = true; w.onabort && w.onabort(); };
+    real.onabort = () => w.onabort && w.onabort();
+    return w;
+  };
+  const warn = console.warn; console.warn = () => {};
+  await Store.backup({ ...job("T"), customer: "v10" });
+  console.warn = warn;
+  P.transaction = tx;
+  const kept = await Store.backups("T");
+  assert.equal(puts, 1, "the retry finds the copy already there and doesn't write it again");
+  assert.deepEqual(kept.map((s) => s.data.customer), ["v10", "v9", "v8", "v7", "v6", "v5", "v4", "v3", "v2", "v1"]);
+});
+
 await test("one job that can't save (a full disk) doesn't hold up another job's edit: that one lands and says ✓ Saved", async () => {
   await Store.put(job("Q")); await Store.put(job("B2"));
   const OS = globalThis.IDBObjectStore.prototype, put = OS.put;

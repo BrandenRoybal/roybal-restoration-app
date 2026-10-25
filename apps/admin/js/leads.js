@@ -18,6 +18,12 @@
    unworked = stage lead, no outcome, no follow-up set, never touched.
    That count badges the Leads tab (refreshLeadsBadge) and the same
    definition feeds the morning brief's 🆕 line (roybal-brief).
+
+   Each card leads with when it came in (Alaska time) and every way to
+   reach the person on one line: phone, the email they gave (or the
+   contact record's, marked on file), address. The name and 🖨 Print /
+   PDF open #/leads/<id>, the whole lead on one letter page
+   (leadsheet.js), which the sync repaint leaves alone like an open form.
    ============================================================ */
 import { h, clear, toast, uid } from "../../js/core.js";
 import { SYNC_ENABLED } from "../../js/config.js";
@@ -25,6 +31,7 @@ import { rest, currentEmail } from "../../js/supa.js";
 import { visitDate, visitTime, visitPeople, scheduleVisitPatch, cancelVisitPatch,
   bidSteps, bidStats, visitChip, visitConfirmText, visitConfirmedPatch } from "../../board/js/leadvisit.js";
 import { sendViaCompany, smsHref } from "../../js/sms.js";
+import { readLead, akShort, akWhen, leadSheet, pdfName } from "./leadsheet.js";
 
 /* mirrors apps/board/js/board.js — same ids, same colors, same labels */
 const CHANNELS = [
@@ -72,10 +79,16 @@ function age(iso) {
   return `${Math.round(m / 1440)}d ago`;
 }
 
+/* one lead on paper: #/leads/<id> */
+const SHEET = /^#\/leads\/([A-Za-z0-9-]{8,80})$/;
+const sheetId = () => (SHEET.exec(location.hash) || [])[1] || null;
+const EMAIL = /^[^\s@<>,;:"?&]+@[^\s@<>,;:"?&]+\.[^\s@<>,;:"?&]+$/;
+
 /* an open triage form or an in-flight patch must survive the sync repaint —
-   the campaignsBusy() rule, same reason */
+   the campaignsBusy() rule, same reason. So must the lead sheet: a repaint
+   mid-print would blank the page the print box is showing. */
 let busy = false;
-export const leadsBusy = () => busy;
+export const leadsBusy = () => busy || !!sheetId();
 /* a route change tears down any open form, so the latch must not outlive it —
    otherwise one abandoned follow-up form silences the sync repaint for good */
 export const leadsResetBusy = () => { busy = false; };
@@ -111,6 +124,19 @@ async function fetchCrew() {
     crewCache = res.ok ? (await res.json()).map((r) => r.data).filter(Boolean) : [];
   } catch (_) { crewCache = []; }
   return crewCache;
+}
+
+/* the linked contact records' emails, for leads that came in without one
+   (phone and chat leads never ask). A failed read just shows no email. */
+async function fetchContactEmails(ids) {
+  const out = {};
+  const want = [...new Set(ids.filter((x) => /^[0-9a-f-]{36}$/i.test(String(x || ""))))];
+  if (!want.length) return out;
+  try {
+    const res = await rest(`contacts?id=in.(${want.join(",")})&select=id,email`, { method: "GET" });
+    if (res.ok) for (const c of await res.json()) if (c && c.email) out[c.id] = { email: c.email };
+  } catch (_) { /* offline: no on-file emails */ }
+  return out;
 }
 
 /* ---------- nav badge: the unworked count ---------- */
@@ -156,6 +182,9 @@ export function fmtTouch(ms) {
 
 /* ---------- the tab ---------- */
 export function leadsTab() {
+  const sid = sheetId();
+  if (sid) return leadSheetPage(sid);
+  setPrintMode(false);
   const box = h("div");
   box.append(h("div", { class: "atoolbar" }, h("h1", {}, "Leads")));
   if (!SYNC_ENABLED) { box.append(h("p", { class: "muted" }, "Leads need the cloud connection.")); return box; }
@@ -169,9 +198,9 @@ export function leadsTab() {
     let crew = [];
     try {
       crew = await fetchCrew();
-      const res = await rest("coordination_jobs?deleted=eq.false&data->>stage=eq.lead&select=id,data&order=created_at.desc&limit=100", { method: "GET" });
+      const res = await rest("coordination_jobs?deleted=eq.false&data->>stage=eq.lead&select=id,data,created_at&order=created_at.desc&limit=100", { method: "GET" });
       if (!res.ok) throw new Error(String(res.status));
-      rows = (await res.json()).map((r) => ({ id: r.id, d: r.data || {} })).filter((r) => isOpenLead(r.d));
+      rows = (await res.json()).map((r) => ({ id: r.id, d: r.data || {}, createdAt: r.created_at })).filter((r) => isOpenLead(r.d));
     } catch (_) {
       clear(host).append(h("div", { class: "card" },
         h("p", { class: "muted" }, "Couldn't load leads — check your connection and try again.")));
@@ -190,32 +219,52 @@ export function leadsTab() {
         "No open leads. New web-form, AI-chat, and phone leads land here the moment they come in — and on the board's Lead column at the same time.")));
       return;
     }
-    for (const r of rows) host.append(leadRow(r.id, r.d, crew));
+    const onFile = await fetchContactEmails(rows.filter((r) => !r.d.email && r.d.contactId).map((r) => r.d.contactId));
+    for (const r of rows) host.append(leadRow(r.id, r.d, crew, { createdAt: r.createdAt, contact: onFile[r.d.contactId] || null }));
   })();
   return box;
 }
 
-function leadRow(id, d, crew) {
+function leadRow(id, d, crew, meta) {
   const row = h("div", { class: "card lrow" + (isUnworked(d) ? " lrow--new" : "") });
-  paintRow(row, id, d, crew);
+  paintRow(row, id, d, crew, meta);
   return row;
 }
 
-function paintRow(row, id, d, crew = []) {
+/* meta: what the blob doesn't carry and a repaint must keep: the row's
+   insert time (older leads have no createdAt) and the contact's email */
+function paintRow(row, id, d, crew = [], meta = {}) {
   clear(row);
   row.className = "card lrow" + (isUnworked(d) ? " lrow--new" : "");
   const ch = channelInfo(d);
+  const L = readLead(d, meta);
 
-  /* header: who · channel · priority · age */
+  /* header: who (opens the whole lead) · channel · priority · when it came in */
   row.append(h("div", { class: "lhead" },
-    h("strong", { style: "font-size:14.5px" }, d.title || d.customer || "Untitled lead"),
+    h("a", { class: "lname", href: "#/leads/" + id, title: "Open the whole lead on one page, to print or save as a PDF" }, L.title),
     ch ? h("span", { class: "lchip", style: `border-color:${ch.color};color:${ch.color}` }, ch.label) : null,
     d.priority === "high" ? h("span", { class: "lchip lchip--hot" }, "⚠ emergency") : null,
     isUnworked(d) ? h("span", { class: "lchip lchip--new" }, "new") : null,
-    h("span", { class: "muted", style: "margin-left:auto;font-size:12px;white-space:nowrap" }, age(d.createdAt))));
+    L.received ? h("span", { class: "lwhen", title: "Received " + akWhen(L.received) },
+      akShort(L.received) + (age(L.received) ? " · " + age(L.received) : "")) : null));
 
-  /* the customer's message, in the open (message field; older cards: notes) */
-  const text = String(d.message || d.notes || "").trim();
+  /* every way to reach them, on one line: tap to call, tap to email */
+  const mail = L.email && EMAIL.test(L.email);
+  const reach = [
+    L.phone ? h("a", { class: "lpill", href: "tel:" + digits(L.phone), title: "Call" }, "📞 " + L.phone) : null,
+    L.email ? h(mail ? "a" : "span", { class: "lpill" + (mail ? "" : " lpill--plain"), href: mail ? "mailto:" + L.email : null,
+      title: L.emailOnFile ? "From their contact record; the lead came in without an email" : "The email they gave" },
+      "✉️ " + L.email + (L.emailOnFile ? " (on file)" : "")) : null,
+    L.address ? h("span", { class: "lpill lpill--plain" }, "📍 " + L.address) : null,
+    d.estValue ? h("span", { class: "lpill lpill--plain" }, "~" + money(d.estValue)) : null,
+    d.contactId ? h("a", { class: "lpill lpill--link", href: "#/c/" + d.contactId }, "Contact page") : null,
+  ].filter(Boolean);
+  if (reach.length) row.append(h("div", { class: "lcontact" }, ...reach));
+
+  /* the customer's message, in the open (the lane's message field; a
+     hand-entered lead's notes). A web form sent with no message shows none,
+     not the notes' copy of the contact details. */
+  const text = L.message;
   if (text) {
     const short = text.length > 420;
     const msg = h("div", { class: "lmsg" }, short ? text.slice(0, 420) + "…" : text);
@@ -225,17 +274,6 @@ function paintRow(row, id, d, crew = []) {
       row.append(more);
     }
   }
-
-  /* contact facts */
-  const facts = [
-    d.phone ? h("a", { href: "tel:" + digits(d.phone) }, d.phone) : null,
-    d.address || null,
-    d.estValue ? "~" + money(d.estValue) : null,
-    d.contactId ? h("a", { href: "#/c/" + d.contactId }, "contact page") : null,
-  ].filter(Boolean);
-  const factLine = h("div", { class: "muted", style: "font-size:12.5px;margin-top:6px" });
-  facts.forEach((f, i) => { if (i) factLine.append(" · "); factLine.append(f); });
-  if (facts.length) row.append(factLine);
 
   /* current state chips */
   const state = h("div", { class: "lstate" });
@@ -280,7 +318,7 @@ function paintRow(row, id, d, crew = []) {
       busy = false;
       badgeCache.at = 0;                    // force a badge recount next paint
       refreshLeadsBadge();
-      (after || ((nd) => paintRow(row, id, nd, crew)))(data);
+      (after || ((nd) => paintRow(row, id, nd, crew, meta)))(data);
     } catch (e) {
       busy = false;
       if (btn) btn.disabled = false;
@@ -328,7 +366,7 @@ function paintRow(row, id, d, crew = []) {
       if (!date.value) { err.hidden = false; err.textContent = "Pick a date for the site visit."; return; }
       apply(scheduleVisitPatch(d, { date: date.value, time: time.value, by: who.value || me }), save,
         (nd) => {
-          paintRow(row, id, nd, crew);
+          paintRow(row, id, nd, crew, meta);
           toast("Site visit booked — the bid file shows up in Field Forms");
           // straight on to the confirmation text — still nothing sends until Send is tapped
           const cb = row.querySelector("[data-confirm-visit]");
@@ -377,7 +415,7 @@ function paintRow(row, id, d, crew = []) {
       }
       // the text is out; stamp the lead (a failed stamp doesn't un-send it)
       apply(visitConfirmedPatch(d, new Date().toISOString(), uid()), null,
-        (nd) => { paintRow(row, id, nd, crew); toast("Confirmation texted to " + d.phone); });
+        (nd) => { paintRow(row, id, nd, crew, meta); toast("Confirmation texted to " + d.phone); });
     });
     formHost.append(h("div", { class: "lform", style: "flex-direction:column;align-items:stretch;gap:6px" },
       ta, note, h("div", { style: "display:flex;gap:8px" }, send, cancel)));
@@ -452,10 +490,84 @@ function paintRow(row, id, d, crew = []) {
     formHost.append(h("div", { class: "lform" }, sel, confirmBtn, cancel));
   });
 
+  /* the whole lead on one page; the phone pill above is the call button */
+  const printBtn = h("a", { class: "btn btn--ghost btn--sm", href: "#/leads/" + id,
+    title: "Everything about this lead on one page: print it or save it as a PDF" }, "🖨 Print / PDF");
+
   // DOM append() stringifies null (the campaigns lesson) — filter first
   for (const el of [
-    d.phone ? h("a", { class: "btn btn--ghost btn--sm", href: "tel:" + digits(d.phone) }, "📞 Call") : null,
-    visitBtn, confirmBtn, followBtn, doneBtn, touchedBtn, notesBtn, lostBtn,
+    visitBtn, confirmBtn, followBtn, doneBtn, touchedBtn, notesBtn, lostBtn, printBtn,
   ].filter(Boolean)) actions.append(el);
   row.append(actions, formHost, err);
+}
+
+/* ---------- one lead on paper (#/leads/<id>) ---------- */
+/* While the sheet is open the body prints only the sheet (body.ls-print),
+   the page box is letter with the field forms' margins, and the tab title
+   is the PDF's file name; leaving the page puts all three back, so another
+   tab printed with Ctrl+P keeps the browser's (the equipment labels' rule). */
+let baseTitle = null;
+function setPrintMode(on, title) {
+  document.body.classList.toggle("ls-print", !!on);
+  let st = document.getElementById("ls-page-style");
+  if (on && !st) document.head.append(st = h("style", { id: "ls-page-style" }, "@page { size: letter; margin: 0.5in 0.5in 0.55in; }"));
+  if (!on && st) st.remove();
+  if (on) {
+    if (baseTitle == null) baseTitle = document.title;
+    document.title = title;
+  } else if (baseTitle != null) {
+    document.title = baseTitle;
+    baseTitle = null;
+  }
+}
+window.addEventListener("hashchange", () => { if (!sheetId()) setPrintMode(false); });
+
+async function fetchContact(cid) {
+  if (!/^[0-9a-f-]{36}$/i.test(String(cid || ""))) return null;
+  try {
+    const res = await rest(`contacts?id=eq.${cid}&select=id,email&limit=1`, { method: "GET" });
+    return res.ok ? (await res.json())[0] || null : null;
+  } catch (_) { return null; }
+}
+
+function leadSheetPage(id) {
+  setPrintMode(false);                  // another lead's sheet may be up: its title and print mode go until this one loads
+  const box = h("div");
+  const print = h("button", { type: "button", class: "btn btn--primary btn--sm", disabled: true, onclick: () => window.print() }, "Loading…");
+  const host = h("div", { class: "ls-sheets" }, h("p", { class: "muted" }, "Loading the lead…"));
+  box.append(
+    h("div", { class: "atoolbar ls-noprint" }, h("h1", {}, "Lead record"),
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
+        h("a", { class: "btn btn--ghost btn--sm", href: "#/leads" }, "← Leads"), print)),
+    h("p", { class: "muted ls-noprint", style: "font-size:13px;margin:-6px 0 12px" },
+      "Print it, or choose Save as PDF in the print box. On an iPhone, open Print, then Share the preview to save the PDF."),
+    host);
+  if (!SYNC_ENABLED) { clear(host).append(h("p", { class: "muted" }, "Leads need the cloud connection.")); return box; }
+
+  (async () => {
+    let r = null;
+    try {
+      const res = await rest(`coordination_jobs?id=eq.${encodeURIComponent(id)}&select=id,data,created_at,deleted&limit=1`, { method: "GET" });
+      if (!res.ok) throw new Error(String(res.status));
+      r = (await res.json())[0] || null;
+    } catch (_) {
+      if (sheetId() === id) clear(host).append(h("div", { class: "card" },
+        h("p", { class: "muted" }, "Couldn't load the lead. Check your connection and try again.")));
+      return;
+    }
+    if (sheetId() !== id) return;                   // the office moved on
+    if (!r || r.deleted) {
+      clear(host).append(h("div", { class: "card" }, h("p", { class: "muted" },
+        "This lead isn't here any more: it was deleted, or the link is wrong. ", h("a", { href: "#/leads" }, "Back to Leads"))));
+      return;
+    }
+    const d = r.data || {};
+    const [crew, contact] = await Promise.all([fetchCrew(), !d.email && d.contactId ? fetchContact(d.contactId) : null]);
+    if (sheetId() !== id) return;
+    clear(host).append(leadSheet(d, { createdAt: r.created_at, contact, crew }));
+    setPrintMode(true, pdfName(d, r.created_at));
+    print.disabled = false;
+    print.textContent = "🖨 Print / Save PDF";
+  })();
+  return box;
 }

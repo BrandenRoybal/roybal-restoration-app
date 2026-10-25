@@ -198,6 +198,52 @@ async function run(names, mode, body) {
 }
 const req1 = (r, set, map = (x) => x) => { r.onsuccess = () => set(map(r.result)); };
 
+/* ---------- backup snapshot keys ----------
+   One record per snapshot, keyed "<job id>#<takenAt>#<bytes>" in the backups
+   store, so a job's snapshots are found, ordered and pruned from their KEYS
+   (getAllKeys) without loading a single copy. A key is read from the right,
+   and a job's range is filtered to its own id, so an id holding "#" cannot
+   claim another job's snapshots. A record from before the split is keyed by
+   the bare job id, which sorts below the range. */
+const SNAP_SEP = "#";
+export const SNAP_MAX = 10;                       // newest snapshots kept per job…
+export const SNAP_BUDGET = 64 * 1024 * 1024;      // …while their estimated size fits this…
+export const SNAP_MIN = 2;                        // …but never fewer than the newest two
+const snapRange = (id) => IDBKeyRange.bound(id + SNAP_SEP, id + SNAP_SEP + "\uffff");
+export const snapKey = (id, takenAt, bytes) => [id, takenAt, bytes].join(SNAP_SEP);
+export function parseSnapKey(key) {
+  const parts = String(key).split(SNAP_SEP);
+  const bytes = Number(parts.pop()) || 0;
+  const takenAt = parts.pop() || "";
+  return { key: String(key), jobId: parts.join(SNAP_SEP), takenAt, bytes };
+}
+/* the job's own snapshot keys out of a range read, newest first (takenAt is a
+   fixed-width ISO stamp, so key order is time order) */
+export const ownSnapKeys = (id, keys) =>
+  (keys || []).map(String).filter((k) => parseSnapKey(k).jobId === id).sort().reverse();
+/* The keys (newest first) that fall outside the retention line: past `max`,
+   or past `min` once the running size passes `budget`. */
+export function snapVictims(keysNewestFirst, max = SNAP_MAX, budget = SNAP_BUDGET, min = SNAP_MIN) {
+  let total = 0;
+  return keysNewestFirst.filter((k, i) => {
+    total += parseSnapKey(k).bytes;
+    return i >= max || (i >= min && total > budget);
+  });
+}
+/* Rough in-memory size of a job: the length of every string in it (inline
+   photos are nearly all of it). A walk, not JSON.stringify — stringifying a
+   100 MB job just to measure it would hold a second copy of it in memory. */
+export function approxBytes(node) {
+  if (typeof node === "string") return node.length;
+  if (!node || typeof node !== "object") return 8;
+  let n = 0;
+  if (Array.isArray(node)) { for (const v of node) n += approxBytes(v); return n; }
+  for (const k in node) n += k.length + approxBytes(node[k]);
+  return n;
+}
+const isQuotaError = (e) => !!e && (e.name === "QuotaExceededError" || e.code === 22);
+let lastSnapMs = 0;   // two snapshots of one job in the same millisecond still get two keys
+
 /* save/delete listeners — the sync engine subscribes to push changes up */
 const _savedFns = [], _deletedFns = [];
 export function onProjectSaved(fn) { _savedFns.push(fn); }
@@ -303,38 +349,114 @@ export const Store = {
   /* ---------- on-device backups ----------
      Snapshotted automatically right before cloud sync merges or replaces a
      local job with a copy from another device — the safety net under the
-     merge engine. Newest first, last 10 per job, this device only (never
-     synced), restorable from the job page. Snapshots hold the job AS STORED
-     ON DEVICE — full inline photos — so they can run multi-MB; under quota
-     pressure this sheds a job's older snapshots, and a snapshot that still
-     can't be written is skipped rather than ever blocking a sync cycle. */
-  async backup(project) {
+     merge engine. This device only (never synced), restorable from the job
+     page. Snapshots hold the job AS STORED ON DEVICE — full inline photos.
+
+     ONE RECORD PER SNAPSHOT. They used to share one record per job (up to 10
+     full copies), and every backup read that whole record into memory to add
+     a copy, then wrote it all back. On a photo-heavy job that is hundreds of
+     MB per sync: in October 2026 an iPhone crashed on every launch ("A
+     problem repeatedly occurred") because each launch re-pulled a ~124 MB job
+     and backed it up first, loading every older copy with it. Now a backup
+     writes only itself and prunes by key, so nothing old is loaded: the
+     newest SNAP_MAX within SNAP_BUDGET, never fewer than SNAP_MIN. A full
+     disk makes room first and tries once more; a snapshot that still can't
+     be written is skipped rather than ever blocking a sync.
+
+     A record from before the split (keyed by the bare job id) is never read
+     by sync or by opening a job; the job page loads it only on request
+     (olderBackups). Its copies are older than every new snapshot, so it goes
+     the first time the new ones outgrow their retention.
+
+     opts.keep: a snapshot key (or the bare job id, for the pre-split record)
+     this backup must not prune — the one a Restore is reading from, so the
+     backup of the current copy taken just before can't delete it. */
+  async backup(project, opts = {}) {
     if (!project || !project.id) return;
+    const id = project.id;
+    const ms = Math.max(Date.now(), lastSnapMs + 1);
+    lastSnapMs = ms;
+    const takenAt = new Date(ms).toISOString();
+    const bytes = approxBytes(project);
+    const rec = { id: snapKey(id, takenAt, bytes), jobId: id, takenAt, bytes, data: project };
+    const keep = opts.keep;
+    /* one transaction, all or nothing: read the job's keys, drop what the new
+       copy pushes out of retention, write the new copy */
+    const save = () => run(BACKUPS, "readwrite", (t) => {
+      const os = t.objectStore(BACKUPS);
+      const keys = os.getAllKeys(snapRange(id));
+      keys.onsuccess = () => {
+        // run()'s retry after a lost connection may find this copy already
+        // written (the first try committed, the page just never heard)
+        const mine = ownSnapKeys(id, keys.result);
+        const older = mine.filter((k) => k !== rec.id);
+        const victims = snapVictims([rec.id, ...older]).filter((k) => k !== keep);
+        for (const k of victims) os.delete(k);
+        if (victims.length && keep !== id) os.delete(id);   // the pre-split record is older still
+        if (older.length === mine.length) os.put(rec);      // not again when the retry finds it there
+      };
+    });
     try {
-      const row = (await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(project.id), set))) || { id: project.id, snaps: [] };
-      row.snaps.unshift({ takenAt: new Date().toISOString(), data: project });
-      row.snaps = row.snaps.slice(0, 10);
       try {
-        await run(BACKUPS, "readwrite", (t) => { t.objectStore(BACKUPS).put(row); });
+        await save();
       } catch (e) {
-        // a full disk sheds old snapshots; a lost connection is not a full
-        // disk (the retry would land the cut record and lose 8 good ones)
-        if (!e || e.name !== "QuotaExceededError") throw e;
-        row.snaps = row.snaps.slice(0, 2);         // quota: keep the 2 newest
-        await run(BACKUPS, "readwrite", (t) => { t.objectStore(BACKUPS).put(row); });
+        if (!isQuotaError(e)) throw e;
+        // a full disk: free space in its own transaction first (a delete only
+        // counts once it commits), keeping the job's newest other snapshot —
+        // two copies with the new one, as the old format kept — then retry
+        await run(BACKUPS, "readwrite", (t) => {
+          const os = t.objectStore(BACKUPS);
+          const keys = os.getAllKeys(snapRange(id));
+          keys.onsuccess = () => {
+            const older = ownSnapKeys(id, keys.result).filter((k) => k !== rec.id && k !== keep);
+            for (const k of older.slice(1)) os.delete(k);
+          };
+          if (keep !== id) os.delete(id);
+        });
+        await save();
       }
     } catch (e) {
       try { console.warn("backup snapshot skipped:", e); } catch {}
     }
   },
-  async backups(id) {
-    const row = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(id), set));
-    return (row && row.snaps) || [];
+  /** A job's snapshots, newest first, as { key, jobId, takenAt, bytes } —
+      keys only, no copy is loaded. Open one with snapshot(key). */
+  async snapshots(id) {
+    const keys = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).getAllKeys(snapRange(id)), set));
+    return ownSnapKeys(id, keys).map(parseSnapKey);
   },
-  /** Whether a job has any snapshot here — a key count, so the record (up to
-      10 full copies of the job) is never loaded just to decide to show the card. */
-  async hasBackups(id) {
+  /** One snapshot's copy of the job, or null when it is gone. */
+  async snapshot(key) {
+    const rec = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(key), set));
+    return (rec && rec.data) || null;
+  },
+  /** The newest snapshot's copy of the job (one record loaded), or null. */
+  async latestBackup(id) {
+    const [newest] = await Store.snapshots(id);
+    return newest ? Store.snapshot(newest.key) : null;
+  },
+  /** Every snapshot, newest first, loaded: [{ takenAt, bytes, data }]. Bounded
+      by the retention above — still, the job page lists keys instead. */
+  async backups(id) {
+    const out = [];
+    for (const s of await Store.snapshots(id)) {
+      const data = await Store.snapshot(s.key);
+      if (data) out.push({ takenAt: s.takenAt, bytes: s.bytes, data });
+    }
+    return out;
+  },
+  /** Whether the job still has a record from before the split (a key count —
+      the record itself is never loaded to answer). */
+  async hasOlderBackups(id) {
     return (await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).count(id), set))) > 0;
+  },
+  /** The pre-split record's snapshots, newest first: [{ takenAt, data }]. It
+      holds up to 10 full copies of the job and loads all at once, which on a
+      photo-heavy job is more than a phone can hold — so only the job page's
+      "Show older backups" button calls this. */
+  async olderBackups(id) {
+    const row = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(id), set));
+    return row && Array.isArray(row.snaps) ? row.snaps : [];
   },
 };
 

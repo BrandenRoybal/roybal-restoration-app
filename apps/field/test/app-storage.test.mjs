@@ -97,10 +97,13 @@ await test("a route that can't read the phone's storage says so, with Try again,
   assert.equal(banner(), null, "the banner goes once the store answers again");
 });
 
-await test("the backups card shows only when this phone holds backups, and reads them only when unfolded", async () => {
-  let reads = 0;
-  const realBackups = Store.backups;
-  Store.backups = (id) => { reads++; return realBackups.call(Store, id); };
+await test("the backups card shows only when this phone holds backups, and reads a copy only when its Restore is tapped", async () => {
+  const reads = { backups: 0, snapshot: 0, olderBackups: 0 };
+  const real = {};
+  for (const k of Object.keys(reads)) {
+    real[k] = Store[k];
+    Store[k] = (...a) => { reads[k]++; return real[k].apply(Store, a); };
+  }
   await nav("#/");
   await nav("#/p/jobA");
   await settle(80);
@@ -110,17 +113,20 @@ await test("the backups card shows only when this phone holds backups, and reads
   await nav("#/p/jobA");
   await settle(80);
   assert.match(text(), /⏪ Backups on this device/);
-  assert.equal(reads, 0, "folded: the full copies are not read");
   const head = [...view().querySelectorAll("div")].find((d) => d.firstChild && d.firstChild.textContent === "⏪ Backups on this device");
+  assert.match(head.textContent, /1 snapshot\b/);
   head.click();
   await settle(80);
-  assert.equal(reads, 1);
-  assert.match(head.textContent, /1 snapshot\b/);
-  assert.ok([...view().querySelectorAll("button")].some((b) => /⏪ Restore/.test(b.textContent)));
-  head.click(); head.click();
-  await settle(40);
-  assert.equal(reads, 1, "read once per page");
-  Store.backups = realBackups;
+  assert.deepEqual(reads, { backups: 0, snapshot: 0, olderBackups: 0 }, "opening the job and unfolding the card load no copy");
+  const restore = [...view().querySelectorAll("button")].find((b) => /⏪ Restore/.test(b.textContent));
+  assert.ok(restore);
+  globalThis.confirm = window.confirm = () => false;   // read it, then back out: no restore, no reload
+  restore.click();
+  await settle(80);
+  globalThis.confirm = window.confirm = () => true;
+  assert.deepEqual(reads, { backups: 0, snapshot: 1, olderBackups: 0 }, "Restore reads that one copy");
+  assert.equal(restore.disabled, false);
+  for (const k of Object.keys(reads)) Store[k] = real[k];
 });
 
 await test("an edit whose save failed is what the page shows when the crew comes back to it, and it lands once the phone saves again", async () => {
@@ -163,6 +169,61 @@ await test("a page that fails for another reason keeps a way out: ‹ and Job li
   await settle(120);
   assert.equal(location.hash, "#/");
   assert.match(text(), /Alston/, "the job list");
+});
+
+const jobWritesDown = () => {
+  const tx = P.transaction;
+  P.transaction = function (names, mode, ...rest) {
+    if (mode === "readwrite" && [].concat(names).includes("projects")) throw new DOMException("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.", "InvalidStateError");
+    return tx.call(this, names, mode, ...rest);
+  };
+  return () => { P.transaction = tx; };
+};
+const toastText = () => document.getElementById("toast").textContent;
+const restoreButtons = () => [...view().querySelectorAll("button")].filter((b) => /⏪ Restore/.test(b.textContent));
+
+await test("Restore waits for an edit to the job that hasn't saved yet: it doesn't merge into the older saved copy or reload over the edit", async () => {
+  await Store.put({ ...(await Store.get("jobA")), receipts: [{ id: "R3", vendor: "", amount: "", items: [] }] });
+  await nav("#/p/jobA/f/receipts/R3");
+  const writesBack = jobWritesDown();
+  const vendor = view().querySelector('input[placeholder^="Home Depot"]');
+  vendor.value = "Fairbanks Lumber"; vendor.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await settle(450);
+  assert.match(view().querySelector(".saved-pill").textContent, /Not saved/);
+  await nav("#/p/jobA");                            // the job page, from the queued copy
+  const before = (await Store.get("jobA")).updatedAt;
+  restoreButtons()[0].click();
+  await settle(150);
+  assert.match(toastText(), /hasn't saved on this phone yet/);
+  assert.equal(reloads.length, 0, "no reload over the queued edit");
+  assert.equal((await Store.get("jobA")).updatedAt, before, "the restore wrote nothing under the edit");
+  assert.equal(restoreButtons()[0].disabled, false);
+  writesBack();
+  await nav("#/p/jobA/f/receipts");                 // the next page change saves it
+  assert.equal((await Store.get("jobA")).receipts.find((r) => r.id === "R3").vendor, "Fairbanks Lumber");
+});
+
+await test("a Restore that can't save says so, and the backup it was restoring is still on the phone", async () => {
+  const jobB = { id: "jobB", jobType: "restoration", customer: "Chena", address: "1885 Chena Landings", updatedAt: "2026-10-20T00:00:00.000Z", receipts: [] };
+  await Store.put(jobB, { bump: false, quiet: true });
+  await Store.backup({ ...jobB, receipts: [{ id: "lost", vendor: "Rental Zone" }] });   // the oldest holds what went missing
+  for (let i = 1; i < 10; i++) await Store.backup({ ...jobB, notes: "v" + i });
+  const source = (await Store.snapshots("jobB")).at(-1).key;
+  await nav("#/");
+  await nav("#/p/jobB");
+  const btns = restoreButtons();
+  assert.equal(btns.length, 10);
+  const writesBack = jobWritesDown();
+  const warn = console.warn; console.warn = () => {};
+  btns.at(-1).click();                              // the oldest: the backup of the current copy pushes it past 10
+  await settle(150);
+  console.warn = warn;
+  writesBack();
+  assert.match(toastText(), /restore didn't save/);
+  assert.equal(btns.at(-1).disabled, false, "the button comes back");
+  assert.equal(reloads.length, 0);
+  assert.ok((await Store.snapshots("jobB")).some((s) => s.key === source), "the backup being restored was not pruned");
+  assert.equal((await Store.snapshot(source)).receipts[0].vendor, "Rental Zone");
 });
 
 // last: once the reload has "happened", this page stays reloading

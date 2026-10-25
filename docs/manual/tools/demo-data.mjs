@@ -262,14 +262,17 @@ export const fieldRows = () => JOBS.map((d) => ({ id: d.id, data: d, deleted: fa
 /* ---------- board / leads (coordination_jobs rows) ---------- */
 export const LEADS = [
   { id: "demo-lead-1", data: { title: "Basement water, sump failed", customer: "Riley Chen", phone: "907-555-0101", address: "500 Demo Loop, Fairbanks, AK",
-      message: "Sump pump quit overnight, about an inch of water in the finished basement. Can someone come today?", channel: "phone", source: "phone", priority: "emergency",
+      message: "Sump pump quit overnight, about an inch of water in the finished basement. Can someone come today?", channel: "phone", source: "phone", priority: "high",
       stage: "lead", createdAt: iso(-0.05), estValue: 6500, leadLog: [] } },
-  { id: "demo-lead-2", data: { title: "Deck rebuild quote", customer: "Morgan Ellis", phone: "907-555-0102", address: "600 Sample Way, North Pole, AK",
-      message: "Looking for a quote to replace a 12x20 deck next spring.", channel: "web", source: "web", stage: "lead", createdAt: iso(-1.2),
-      firstTouchAt: iso(-1.1), estValue: 18000, siteVisit: { at: iso(2), by: "cj@example.com", status: "booked" }, leadLog: [{ kind: "contacted", at: iso(-1.1) }] } },
+  // a website form lead, notes written the way roybal-lead writes them, plus an office note
+  { id: "demo-lead-2", data: { title: "Morgan Ellis — Deck Construction", customer: "Morgan Ellis", phone: "907-555-0102", email: "morgan.ellis@example.com",
+      address: "600 Sample Way, North Pole, AK", message: "Looking for a quote to replace a 12x20 deck next spring.", channel: "web-form", source: "web", webLead: true,
+      notes: "Website form submission.\nService requested: Deck Construction\nEmail: morgan.ellis@example.com\n\nLooking for a quote to replace a 12x20 deck next spring.\nWants composite decking, open to a cover over half of it.",
+      stage: "lead", createdAt: iso(-1.2), firstTouchAt: iso(-1.1), estValue: 18000, siteVisit: { at: ymd(2) + "T10:00", by: "cj@example.com", status: "booked" },
+      leadLog: [{ id: "ll1", kind: "note", at: ymd(-1.1), note: "Called back, booked the site visit." }] } },
   { id: "demo-lead-3", data: { title: "Bathroom remodel", customer: "Avery Brooks", phone: "907-555-0103", address: "700 Example St, Fairbanks, AK",
       message: "Full gut of an upstairs bath. Tile shower, new vanity.", channel: "referral", source: "referral", stage: "lead", createdAt: iso(-4),
-      firstTouchAt: iso(-3.9), nextAction: "Send ROM estimate", nextActionAt: iso(-1), estValue: 32000, leadLog: [] } },
+      firstTouchAt: iso(-3.9), nextAction: "Send ROM estimate", nextActionAt: ymd(-1), estValue: 32000, leadLog: [] } },
 ];
 
 /* ---------- crew (crew_members rows) ---------- */
