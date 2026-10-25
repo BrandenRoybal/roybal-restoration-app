@@ -335,7 +335,13 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   account 1150040008), or, for a receipt charged to a store account, money
   paid from the bank, unless the expense carries the receipt number or the
   bank account the receipt names (the slip reader marks any invoice with no
-  card on it "account", debit and ACH payments included). A return slip's
+  card on it "account", debit and ACH payments included). A sub's invoice
+  ("account", or not told) paid by a QuickBooks check: a check whose payee
+  is the receipt's vendor word for word (in any order, Inc./LLC aside; two
+  words at least; never a store) scores +2 and may be dated up to 14 days
+  after the invoice (Aaron Wall $5,385 on 10/09: check 438, Purchase 10701,
+  10/13); a check two receipts could be is neither's (`ambiguous`), the
+  same slip entered twice counting once. A return slip's
   id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
   one receipt, and two equally good expenses are left to a person. Receipts
   dated in the last 60 days are matched; an older one keeps the row it had.
@@ -380,7 +386,8 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   - a refusal that would come back the same (`tagged_other`,
     `partly_tagged`, `untaggable`, `untaggable_line`, `purchase_missing`,
     `changed_in_qbo`, `photo_missing`, `photo_type`, `photo_unreadable`,
-    `photo_too_big`, `upload_refused`, `qbo_refused`, `cancelled`) is kept
+    `photo_too_big`, `upload_refused`, `qbo_refused`, `entered_elsewhere`,
+    `cancelled`) is kept
     for a person until something it depends on moves: the expense or a
     charge or its SyncToken, the job's project, the receipt's total or date,
     or its photo (a row queued before 0025 recorded no photo, so a refusal
@@ -404,11 +411,32 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
     failing), `needs_job_link` (found, but the job has no QuickBooks project; nothing
     goes on the card, not even the photo, until the job is linked, because
     an approved attach would leave the receipt done and its tag never
-    offered), `not_found`.
+    offered), `duplicate` (the same slip as another live receipt on the job:
+    store, receipt number of 5 digits or more, total and date; the one that
+    holds an expense, or else the first by id, stands for it and
+    `detail.duplicate_of` names it; never entered by store entry), `not_found`.
   - `conflict`, `detail.reason`: `ambiguous` (the expenses in
     `detail.candidates`), `ambiguous_split` (v2: more than one set of
     charges, in `detail.candidates`), `tagged_other` (tagged to another customer,
-    `detail.qbo_customer_name`), `partly_tagged`, `bill_untagged` (v2).
+    `detail.qbo_customer_name`), `partly_tagged`, `bill_untagged` (v2),
+    `maybe_entered` (store entry on: an invoice it would enter that QuickBooks
+    may already hold, `detail.candidates`, or another receipt carries on
+    another job or day, `detail.receipts`; below),
+    `credit_untagged` (a return's store credit found without the slip's
+    number, below, with no job tag: the office tags it by hand).
+  A return (a negative total, such as the app's `<receipt id>~ret`) matches
+  only a credit (`Credit = true`). A return slip often prints the invoice it
+  returns, which the reader takes for the slip's number, while the
+  bookkeeper enters the store's credit under the credit memo's own number
+  (the Spenard Styrofoam return: slip read `7066665392` for invoice
+  700665392, credit 10688 entered as `800053082`). On a store account, when
+  the slip's number names a purchase of the same store on the same job
+  (bought on or before the return, at least the refund; its number, or up
+  to two misread digits on numbers of 9 digits or more), the credit's
+  number disagreeing does not rule it out: the store on the credit, the
+  exact cents, the sign and a day before to three days after must hold,
+  and such a match is noted or given the slip's photo, never tagged.
+  Store entry never enters a return: the credit is the bookkeeper's.
   A row names `qbo_txn_type` `Purchase`, or `Bill` (v2, a note only), and
   in v2 `parts` (null for one transaction). Receipts the approval path
   holds (`queued`, `done`) are not looked at again; a `failed` one is held
@@ -418,9 +446,20 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   `suggested_tagged` when tonight's matched expenses for the job are all
   tagged to one customer and it is an active project (never a parent
   customer or a sub-customer that is not a project; store invoices are
-  tagged as they are entered), unless the job's QuickBooks Time jobcode names
+  tagged as they are entered; a return's credit found without the slip's
+  number, and a check found by its payee's name, do not count: their tag
+  is a person's, on a match the receipt's number never named), unless the job's QuickBooks Time jobcode names
   another project (then nothing is suggested); else `suggested_qbtime` when
-  the jobcode has exactly one project's name.
+  the jobcode has exactly one project's name. Until the link is made, a
+  `suggested_tagged` project stands in for it in one place only: a check or
+  ACH receipt nothing else matched may be matched to a checking expense the
+  office finished by hand for that project (every line tagged to it, a
+  document attached), as it would be once the job is linked. That match is
+  only ever noted `in_qbo` (with `detail.job_link` = `suggested_tagged`),
+  never put on a card and never counted toward the suggestion; an expense
+  another receipt could be, or two receipts could be, is no one's (the
+  same slip entered twice is one: its first copy matches, the other reads
+  `duplicate`).
 - **The door, per job.** Items → a new card (`filed`; the job's older open
   card is superseded). The same items on the same receipts as a card still
   open, or one already answered, stand (`unchanged`); one whose approval
@@ -489,6 +528,15 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   attaches the photo. qbo-proxy looks for the
   bookkeeper's own entry of the same invoice first and adopts it, so it never
   doubles one; `min_age_days` gives the bookkeeper that many days first.
+  qbo-proxy adopts only an entry on the store's account: the same number
+  booked on any other account refuses the entry (`entered_elsewhere`, kept
+  for a person). The matcher holds back any entry QuickBooks may already
+  hold (`conflict`, `maybe_entered`): a transaction of the same direction
+  whose DocNumber names the invoice on any account, one from the store or on
+  its account at its total within 14 days under any number (a misread
+  number, a debit-card charge the slip reader called "account"), whoever
+  holds it, or another live receipt for the same slip on another job or
+  day. A duplicate receipt is never entered.
   Equipment receipts book to expense account 1150040005 instead of the
   store's; dump tickets are never entered (FNSB bills them). Turn it on only on the owner's word:
   ```sql

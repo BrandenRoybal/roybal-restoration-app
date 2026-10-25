@@ -499,11 +499,16 @@ await test("every QuickBooks state reads in the office's words", async () => {
   assert.equal(t("unmatched", { reason: "bill_not_checked" }), "Booked as a bill: not checked");
   assert.equal(t("unmatched", { reason: "needs_job_link" }), "Link the job to QuickBooks");
   assert.equal(t("unmatched", { reason: "not_found" }), "No QuickBooks match");
+  // a second receipt for the same slip on the job: not "not in QuickBooks yet", which would have the office enter it again
+  assert.equal(t("unmatched", { reason: "duplicate", duplicate_of: "r-0700" }), "Duplicate of another receipt");
   assert.equal(t("unmatched", { reason: "constructor" }), "No QuickBooks match", "a reason this page doesn't know");
   assert.equal(t("conflict", { reason: "ambiguous" }), "Check in QuickBooks: more than one expense matches");
   assert.equal(t("conflict", { reason: "partly_tagged" }), "Check in QuickBooks: only part of the expense is tagged to a job");
   assert.equal(t("conflict", { reason: "tagged_other" }), "Check in QuickBooks: tagged to another job");
   assert.equal(t("conflict", { reason: "claimed_by_other" }), "Check in QuickBooks: another receipt has this expense");
+  // store entry held back (maybe_entered): an expense that may be it, or the same slip on another receipt
+  assert.equal(t("conflict", { reason: "maybe_entered", candidates: ["10688"] }), "Check in QuickBooks: this invoice may already be entered");
+  assert.equal(t("conflict", { reason: "maybe_entered", receipts: ["b"] }), "Check in QuickBooks: another receipt has the same invoice");
   assert.equal(t("failed", { error: "changed_in_qbo: expense 10577 changed in QuickBooks since the card was filed" }),
     "QuickBooks refused: expense 10577 changed in QuickBooks since the card was filed");
   // a refusal is QuickBooks (or the card) saying no; anything else outlasted the retries without QuickBooks answering

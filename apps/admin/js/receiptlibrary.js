@@ -396,6 +396,9 @@ const UNMATCHED = {
   // office enters them about a week late)
   bill_not_entered: ["No matching QuickBooks bill yet", "disp-x"],
   needs_job_link: ["Link the job to QuickBooks", "disp-b"],   // found, but the job has no project to tag
+  // the same slip as another receipt on the job (store, number, total, day):
+  // entered twice, so delete one; detail.duplicate_of names the other
+  duplicate: ["Duplicate of another receipt", "disp-b"],
   not_found: ["No QuickBooks match", "disp-x"],
 };
 function conflictWords(d) {
@@ -409,6 +412,13 @@ function conflictWords(d) {
   if (d.reason === "bill_untagged") return "booked as a bill without a job: tag it in QuickBooks";
   // a rental paid in parts, where two sets of charges each add up (0025: detail.candidates)
   if (d.reason === "ambiguous_split") return "more than one set of charges adds up to it";
+  // store entry held back: QuickBooks has an expense that may be this invoice
+  // (detail.candidates), or another receipt carries the same slip on another
+  // job or day (detail.receipts); a person looks before anyone enters it
+  if (d.reason === "maybe_entered") {
+    return Array.isArray(d.candidates) && d.candidates.length ? "this invoice may already be entered"
+      : "another receipt has the same invoice";
+  }
   return String(d.reason || "").replace(/_/g, " ").trim() || "the expense needs a look";
 }
 // qbo-proxy's error starts with its code ("tagged_other: expense 10566 is
