@@ -172,7 +172,7 @@ function startSyncUI() {
   });
   // a Magicplan write that finishes after the user moved on (the home's
   // auto-create or auto-adopt, a slow Pull) lands on the page now on screen
-  onMagicplanLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
+  onMagicplanLive(liveCopy);
   startSync(updateSyncStatus);
 }
 function boot() {
@@ -180,9 +180,9 @@ function boot() {
   try { navigator.storage?.persist?.().catch(() => {}); } catch { /* best-effort */ }
   setAuthor(currentEmail());   // stamp new captures with who's signed in ("" offline)
   // a meter photo's number that comes back after the user moved on lands on the page now on screen
-  onMeterLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
+  onMeterLive(liveCopy);
   // a receipt read that comes back after the user moved on lands on the page now on screen
-  onReceiptLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
+  onReceiptLive(liveCopy);
   if (SYNC_ENABLED && isSignedIn()) startSyncUI();
   // walk clips captured with no signal upload themselves: on open, on `online`, on the tab coming back
   if (SYNC_ENABLED) startMediaQueue();
@@ -192,6 +192,9 @@ function boot() {
 /* the project object the current page's inputs are bound to (null on the
    list/login screens) — sync grafts merged changes into it, see startSyncUI */
 let liveProject = null;
+/* that object when it is job `id`'s: where a write finishing after the user
+   moved on lands, because the page's next save writes this copy, not the stored one */
+const liveCopy = (id) => (liveProject && liveProject.id === id ? liveProject : null);
 
 /* A route that cannot read or write the store must still leave the screen
    matching the URL. It used to throw on flushPending (or Store.get) with no
@@ -940,9 +943,10 @@ function rebuildPanel(project) {
       const qa = (project.rebuildQA || []).filter((x) => x && String(x.a || "").trim());
       if (qa.length) facts.estimatorAnswers = qa.map((x) => ({ question: x.q, answer: x.a }));
       const draft = await draftRebuild(project, facts);
-      // the call can take a while — write onto a FRESH copy (the tech may have
-      // kept editing) and only repaint if they're still on this job home
-      const fresh = (await Store.get(project.id)) || project;
+      // the call can take a while — write onto the job's newest copy (the tech
+      // may have kept editing, or moved on: a page of this job saves its own
+      // copy, so the draft lands there) and only repaint if they're still on this job home
+      const fresh = liveCopy(project.id) || unsavedProject(project.id) || (await Store.get(project.id)) || project;
       fresh.rebuildDraft = { draft, chips: rebuildChips(draft), createdAt: new Date().toISOString(), status: "draft" };
       fresh.updatedAt = new Date().toISOString();
       await Store.put(fresh);
@@ -1051,7 +1055,8 @@ function timelinePanel(project) {
       const qa = (project.timelineQA || []).filter((x) => x && String(x.a || "").trim());
       if (qa.length) facts.plannerAnswers = qa.map((x) => ({ assumption: x.q, answer: x.a }));
       const draft = await draftTimeline(project, facts, history);
-      const fresh = (await Store.get(project.id)) || project;
+      // onto the job's newest copy, as the rebuild draft above
+      const fresh = liveCopy(project.id) || unsavedProject(project.id) || (await Store.get(project.id)) || project;
       fresh.boardPlan = {
         phases: planPhases(draft),
         notBefore: isoDateOnly(draft.notBefore),   // never trust model prose as a date
@@ -1325,13 +1330,21 @@ const sizeLabel = (bytes) => bytes >= 1048576
    meanwhile lands on that same object (receipts.js liveOf) and saves it
    directly, never through the save queue: one landing before the merge is
    merged in, and one landing after it adds to the restored copy instead of
-   writing the old one back. The page then re-renders from it, with no reload,
-   so an edit still waiting to save on another job is never in the way. An
-   edit to this job still in the save queue is the newest copy: the restore
-   waits for it. A save that fails keeps the restore in the queue, which
-   retries on its own, like any other edit. */
+   writing the old one back. A write that went around that copy to the store
+   (sync's, before its graft) is newer than it: the copy takes it in first.
+   The page then re-renders from it, with no reload, so an edit still waiting
+   to save on another job is never in the way; so does any other page of this
+   job the crew opened meanwhile, which may hold a copy read before the
+   restore. An edit to this job still in the save queue is the newest copy:
+   the restore waits for it. A save that fails keeps the restore in the
+   queue, which retries on its own, like any other edit.
+
+   Snapshots sort in the order they were saved, not by the clock (core.js
+   backup), so after a phone's clock ran ahead the later ones carry times
+   just past that one: a time still in the future says so. */
 function backupRow(project, takenAt, line, load, keep) {
   const when = String(takenAt || "").replace("T", " ").slice(0, 16);
+  const ahead = Date.parse(takenAt) > Date.now() + 60e3 ? " (time is off: this phone's clock was ahead)" : "";
   const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
   btn.addEventListener("click", async () => {
     btn.disabled = true;
@@ -1341,24 +1354,27 @@ function backupRow(project, takenAt, line, load, keep) {
       btn.disabled = false;
       return;
     }
-    const id = project.id, here = location.hash;
+    const id = project.id;
     const stillSaving = () => {
       btn.disabled = false;
       toast("Your last change to this job is still saving on this phone. It keeps trying by itself; tap Restore again in a moment.", 5000);
     };
-    // the job on screen once the restore is in: from its copy, now restored
-    const showIt = () => { if (location.hash === here) route(); };
+    // the job on screen once the restore is in, on whichever of its pages:
+    // one opened meanwhile may be bound to a copy read before the restore
+    const showIt = () => { if (location.hash === `#/p/${id}` || location.hash.startsWith(`#/p/${id}/`)) route(); };
     let target = null, bits = [];
     try {
       await flushPending().catch(() => {});
       if (unsavedProject(id)) return stillSaving();
       const current = await Store.get(id);
       if (current) await Store.backup(current, { keep });
-      const live = liveProject && liveProject.id === id ? liveProject : null;
+      const live = liveCopy(id);
       const base = live || (await Store.get(id));
       // an edit queued meanwhile on another copy of the job would save over this one
       const queued = unsavedProject(id);
       if (queued && queued !== live) return stillSaving();
+      // a write that went around the page's copy (sync's, before its graft) is newer than it
+      if (live && !queued && current && Date.parse(current.updatedAt) > Date.parse(live.updatedAt)) graftProject(live, current);
       const snap = { ...data };
       delete snap.rev;
       // UNION, never replace: the current copy is the newer side, so its
@@ -1387,7 +1403,7 @@ function backupRow(project, takenAt, line, load, keep) {
     showIt();
   });
   return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
-    h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}`), btn);
+    h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}${ahead}`), btn);
 }
 
 /* ---------- "take the cloud's copy" card ----------
@@ -1506,6 +1522,8 @@ function messageLogCard(project) {
 }
 
 function projectHome(project) {
+  // a re-render with another copy (a draft landing, a Restore) binds the page to it
+  liveProject = project;
   setChrome(project.customer || "Job", "#/");
   const body = clear(view);
   // keep the unified-job spine in step with this field job (fire-and-forget, never blocks UI)

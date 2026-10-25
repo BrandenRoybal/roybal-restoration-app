@@ -421,6 +421,8 @@ export const Store = {
           };
           if (keep !== id) os.delete(id);
         });
+        // the failed try wrote nothing: stamp again, after any copy saved meanwhile
+        rec.id = undefined;
         await save();
       }
     } catch (e) {

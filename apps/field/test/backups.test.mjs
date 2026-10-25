@@ -174,6 +174,16 @@ await test("a clock that ran ahead and was set back never leaves old copies sort
   assert.equal((await Relaunched.snapshots("c1")).length, 10, "and the fast-clock copies aged out like any other");
 });
 
+await test("two backups of one job on a full disk at once each land, in the order they were taken", async () => {
+  await Store.backup(job("c2", 1));
+  // a sync's backup and a Restore's together, the same size (one number differs), both first tries out of room
+  quotaFailures = 2;
+  await Promise.all([Store.backup(job("c2", 2)), Store.backup(job("c2", 3))]);
+  assert.equal(quotaFailures, 0);
+  assert.deepEqual((await Store.backups("c2")).map((s) => s.data.customer), ["Job 3", "Job 2", "Job 1"]);
+  assert.equal((await Store.latestBackup("c2")).customer, "Job 3");
+});
+
 await test("a job that can't even be measured is skipped, never thrown at the sync that asked", async () => {
   const odd = job("j9", 1); odd.self = odd;                            // no real job does this; backup() still must not throw
   const warn = console.warn; let warned = 0; console.warn = () => { warned++; };
