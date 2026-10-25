@@ -3,14 +3,16 @@
    Bound inputs autosave to the active project. One editable DOM
    serves both the on-screen UI and the print/PDF output.
    ============================================================ */
-import { h, autosave, fileToDataURL, signaturePad, money, toast } from "./core.js";
+import { h, autosave, bindPill, fileToDataURL, signaturePad, money, toast } from "./core.js";
 import { fileToDocPages } from "./pdf.js";
 import { COMPANY, ensureLineItemIds } from "./model.js";
 
 /* save context (set once per form render) */
 let CTX = { project: null, pill: null };
-export function setCtx(project, pill) { CTX = { project, pill }; }
+export function setCtx(project, pill) { CTX = { project, pill }; bindPill(project, pill); }
 export function commit() { if (CTX.project) autosave(CTX.project, CTX.pill); }
+/** The save pill of the form page showing this very job object (null if none). */
+export const pillFor = (project) => (project && CTX.project === project ? CTX.pill : null);
 
 /* ---------- field wrapper ---------- */
 export function field(label, node, hint) {

@@ -32,7 +32,7 @@
    - before any merge or overwrite, the local copy is snapshotted
      to the on-device backups store (restorable from the job page).
    ============================================================ */
-import { Store, onProjectSaved, onProjectDeleted, likelyOffline } from "./core.js";
+import { Store, onProjectSaved, onProjectDeleted, likelyOffline, hasUnsaved, flushPending, unsavedProject } from "./core.js";
 import { isSignedIn, upsertRows, guardedUpsertRow, reviveRow, fetchRow, fetchSince, uploadMedia, downloadMedia,
          pushProject, tombstoneProject, reviveProject } from "./supa.js";
 import { SYNC_VIA_RPC } from "./config.js";
@@ -134,6 +134,9 @@ function settleMerged(p, out) {
    fed each other rev bumps forever — 6k pointless row rewrites in one day
    (Jul 2026 disk-IO incident). */
 async function absorb(localRef, serverFull, why) {
+  // its newest edit is still in the save queue: no backup, no merge now —
+  // once that edit lands the row is dirty and the next push merges on the server
+  if (unsavedProject(localRef.id)) return null;
   for (let attempt = 0; attempt < 4; attempt++) {
     const local = (await Store.get(localRef.id)) || localRef;
     await Store.backup(local);                     // our side, restorable (never throws)
@@ -179,6 +182,17 @@ const OWED_GAP_MS = 10 * 60 * 1000;
 const owedAt = new Map();   // job id → when a rebuilt union was last pushed back (adoptServerMerge)
 async function adoptServerMerge(localRef, res, fetchMedia, have) {
   const id = localRef.id;
+  // an edit still waiting to save: nothing to adopt now. Once it lands the
+  // row is dirty, its save schedules a push, and that push merges on the
+  // server. It lands stamped past the server's copy, as an edit made after
+  // adopting it would be: a server clock running ahead must not make the
+  // union's older value of an element win over what the crew typed
+  const queued = unsavedProject(id);
+  if (queued) {
+    const at = res && res.data ? res.data.updatedAt || "" : "";
+    if (at > (queued.updatedAt || "")) queued.updatedAt = at;
+    return "queued";
+  }
   let full, missing;
   try {
     // The union may reference photos this device has never held; take their
@@ -379,9 +393,17 @@ async function sweepThumbs() {
   let uploads = 0, failures = 0;
   const spent = () => uploads >= sweepTuning.maxPerCycle || failures >= sweepTuning.maxFailures;
   try {
-    for (const p of await Store.all()) {
+    /* Candidates from the stamps core.js keeps (no job is loaded to find
+       them), then ONE job at a time — this used to read every job on the
+       phone after every green cycle, and on Oct 21 2026 that whole-store read
+       was what iOS killed the storage process under, again and again. A job
+       push() just sent with every thumbnail settled is already stamped and is
+       not read at all. */
+    const ids = Store.stamps().filter(([id, at]) => sweptAt[id] !== at).map(([id]) => id);
+    for (const id of ids) {
       if (spent()) break;
-      if (sweptAt[p.id] === p.updatedAt) continue;   // unchanged since a clean pass
+      const p = await Store.get(id);
+      if (!p || sweptAt[p.id] === p.updatedAt) continue;   // gone, or unchanged since a clean pass
       let media;
       try { ({ media } = await deflateSynced(p)); } catch { continue; }
       let complete = true;
@@ -501,10 +523,35 @@ async function rebaseDirtyOnce() {
 }
 
 /* ---------- push local changes (rev-guarded) ---------- */
-async function push() {
-  const all = await Store.all();
+/* What push() looks at. A FULL scan walks every key and reads one job at a
+   time (peak memory = the biggest job, never the whole store): on the first
+   cycle, on ↻ Sync / back online (force), and every fullScanMs — that is what
+   catches a row this page did not write (another tab) or bookkeeping lost in
+   a crash. Between scans only rows whose last-known updatedAt differs from
+   what was pushed are read — the same test as before, made on core.js's
+   stamps instead of on every job loaded into memory. */
+export const syncTuning = { fullScanMs: 10 * 60 * 1000 };
+let lastFullScan = 0;
+async function pushCandidates(force) {
+  if (force || !lastFullScan || Date.now() - lastFullScan >= syncTuning.fullScanMs) {
+    return { full: true, ids: await Store.keys() };
+  }
+  return { full: false, ids: Store.stamps().filter(([id, at]) => pushed[id] !== at).map(([id]) => id) };
+}
+/* a job just pushed whose every object already has its thumbnail settled
+   needs no sweep — stamp it so sweepThumbs never reads or re-hashes it */
+function markSwept(p, media) {
+  if (media.every((m) => thumbsDone.has(m.hash))) { sweptAt[p.id] = p.updatedAt; saveSwept(); }
+}
+
+async function push(force = false) {
+  const { full, ids } = await pushCandidates(force);
   let skippedNow = 0, lastErr = null;
-  for (const p of all) {
+  for (const id of ids) {
+    let p;
+    try { p = await Store.get(id); }
+    catch (e) { if (e && e.code === "storage-lost") throw e; lastErr = e; continue; }
+    if (!p) continue;
     if (pushed[p.id] === p.updatedAt) continue;        // already up to date
     try {
       const { slim, media } = await deflateSynced(p);
@@ -533,6 +580,22 @@ async function push() {
           revs[p.id] = Number(res.rev) || base + 1; saveRevs();
           pushed[p.id] = p.updatedAt; savePushed();
           mediaWait.delete(p.id);
+          markSwept(p, media);
+          continue;
+        }
+        if (res.status === "current" && res.data && res.data.updatedAt === p.updatedAt && sameContent(slim, res.data)) {
+          // The server already holds exactly what this row holds, stamp and all
+          // (a different stamp still takes the adopt below: the local stamp must
+          // not stay ahead of the server's, or the pull tie-guard would skip the
+          // next device's edit) — this device only lost its bookkeeping (a crash dropped the last localStorage
+          // writes: revs/pushed). Nothing to adopt, so nothing to inflate, back
+          // up or rewrite: record the rev and go clean. Before this, every such
+          // reopen inflated the job, snapshotted it into the backups record and
+          // rewrote it — three times on Oct 21 2026, each right after a relaunch.
+          revs[p.id] = Number(res.rev) || base; saveRevs();
+          pushed[p.id] = p.updatedAt; savePushed();
+          mediaWait.delete(p.id);
+          markSwept(p, media);
           continue;
         }
         if (res.status === "merged" || res.status === "current") {
@@ -541,7 +604,9 @@ async function push() {
           //             it wrote nothing, so adopt its copy and go clean.
           const why = await adoptServerMerge(p, res, resolveMedia, localMedia);
           if (why === "media-fetch-failed") lastErr = new Error("merge media fetch failed");
-          if (why !== true) needsAnotherPass = true;   // retry in 1.5s, not 45s
+          // retry in 1.5s, not 45s — but not for a queued edit: its own save
+          // schedules the push, and until then every pass would redo this one
+          if (why !== true && why !== "queued") needsAnotherPass = true;
           continue;
         }
         // FAIL CLOSED. Anything we do not recognise must not fall into the
@@ -638,6 +703,7 @@ async function push() {
     }
   }
   skipped = skippedNow;
+  if (full) lastFullScan = Date.now();
   for (const [id, queuedAt] of [...deletes]) {
     try {
       // STALENESS GUARD: a queued delete can now outlive a sign-out, so it may
@@ -694,10 +760,14 @@ async function pull() {
   // (one 187-photo job used to block every other job's sync). Later rows still
   // apply, but the cursor FREEZES at the first stuck row so it is refetched
   // next cycle — already-applied later rows then fall out of the tie guard.
-  let stuckOnMedia = false;
-  const bump = (ts) => { if (!stuckOnMedia) bumpCursor(ts); };
+  // A row for a job whose edit still waits in core.js's save queue is held the
+  // same way: nothing may be written under that edit, and if it never lands
+  // (the app is closed first) the row must still be fetched again, not passed.
+  let hold = false;
+  const bump = (ts) => { if (!hold) bumpCursor(ts); };
   for (const row of rows) {
     if (row.deleted) {
+      if (unsavedProject(row.id)) { hold = true; continue; }
       const local = await Store.get(row.id);
       if (local && pushed[row.id] !== local.updatedAt && !isBlankProject(local)) {
         // this device holds UNSYNCED work on the job — a tombstone must not
@@ -713,6 +783,7 @@ async function pull() {
       if (local) {
         await Store.backup(local);           // delete — keep a restorable snapshot
         if (!(await Store.delIf(row.id, local.updatedAt))) {
+          if (unsavedProject(row.id)) { hold = true; continue; }   // queued meanwhile: as above
           // an edit landed while we were backing up — treat it as dirty work
           revs[row.id] = 0; saveRevs();
           bump(row.updated_at);
@@ -727,6 +798,11 @@ async function pull() {
     }
     const remote = row.data;
     if (!remote || !remote.id) { bump(row.updated_at); continue; }
+    // our own echo (or anything not newer than the copy here) is settled on the
+    // stamp alone — no need to load a 30 MB job to compare two timestamps
+    const seen = Store.stampOf(row.id);
+    if (seen !== undefined && (remote.updatedAt || "") <= seen) { bump(row.updated_at); continue; }
+    if (unsavedProject(row.id)) { hold = true; continue; }
     const local = await Store.get(row.id);
     // local wins ties: only a STRICTLY newer remote may touch local work
     if (local && (remote.updatedAt || "") <= (local.updatedAt || "")) { bump(row.updated_at); continue; }
@@ -751,7 +827,7 @@ async function pull() {
     // the status red if it never resolves.
     if (missing > 0) {
       mediaWait.set(row.id, (mediaWait.get(row.id) || 0) + 1);
-      stuckOnMedia = true;
+      hold = true;
       continue;
     }
     const localDirty = local && pushed[row.id] !== local.updatedAt;   // unsynced edits on this device
@@ -770,6 +846,9 @@ async function pull() {
         pushed[row.id] = remote.updatedAt;             // local now matches server
         mediaWait.delete(row.id);
         rowChanged(row.id);
+      } else if (unsavedProject(row.id)) {
+        hold = true;                        // queued during the download: as above
+        continue;
       } else {
         needsAnotherPass = true;
       }
@@ -806,9 +885,13 @@ export async function syncNow(opts = {}) {
     // still pushing unguarded rows gets merged here instead of overwritten by
     // our next guarded push. (Trade-off: a just-deleted job can transiently
     // reappear locally for one cycle; the next pull removes it.)
+    // an edit whose save failed and waits in core.js's queue goes to disk
+    // first, so this cycle sees it as the dirty row it is (if it still can't
+    // land, Store.putIf/delIf refuse to write under it — see core.js)
+    if (hasUnsaved()) await flushPending().catch(() => {});
     await rebaseDirtyOnce();
     await pull();
-    await push();
+    await push(!!opts.force);
     // both of these mean DATA NOT BACKED UP — show red, not a quiet counter
     const stalled = [...mediaWait.values()].filter((n) => n >= STALL_CYCLES).length;
     const problems = [];
@@ -825,6 +908,7 @@ export async function syncNow(opts = {}) {
     // that's the honest "offline", proven by a real attempt rather than by a
     // flag that lies. Anything else is a server/app problem and stays an error.
     if (e instanceof TypeError && !updateRequired) setStatus("offline");
+    else if (e && e.code === "storage-lost") setStatus("error", { message: "This phone stopped saving — tap Reload at the bottom of the screen." });
     else setStatus("error", {
       needsUpdate: updateRequired,
       message: updateRequired

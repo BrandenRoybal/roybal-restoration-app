@@ -1,7 +1,7 @@
 /* ============================================================
    Roybal Field Forms — app shell + hash router
    ============================================================ */
-import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow, stripCtrl, likelyOffline } from "./core.js";
+import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow, stripCtrl, likelyOffline, unsavedProject, hasUnsaved, onStorageLost, onStorageBack, isConnectionLost } from "./core.js";
 import {
   formByKey, formCount, newProject, isBlankProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
@@ -49,7 +49,7 @@ import { helpPage } from "./help.js";
 import { magicplanPanel, onMagicplanLive } from "./magicplan.js";
 import { mpTileLine, pruneForeignMeasured } from "./magicplancalc.js";
 import { openSiteVisitNext } from "./sitevisit.js";
-import { receiptsPage } from "./receipts.js";
+import { receiptsPage, onReceiptLive } from "./receipts.js";
 import { receiptTileLine } from "./receiptcalc.js";
 
 const view = $("#view");
@@ -87,7 +87,7 @@ function go(hash, opts = {}) {
 }
 backBtn.addEventListener("click", () => go(backTarget));
 
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => { route(); });
 window.addEventListener("load", boot);
 window.addEventListener("roybal-tech-changed", renderTechChip);  // refresh the header chip when tech is set anywhere
 
@@ -181,6 +181,8 @@ function boot() {
   setAuthor(currentEmail());   // stamp new captures with who's signed in ("" offline)
   // a meter photo's number that comes back after the user moved on lands on the page now on screen
   onMeterLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
+  // a receipt read that comes back after the user moved on lands on the page now on screen
+  onReceiptLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
   if (SYNC_ENABLED && isSignedIn()) startSyncUI();
   // walk clips captured with no signal upload themselves: on open, on `online`, on the tab coming back
   if (SYNC_ENABLED) startMediaQueue();
@@ -191,8 +193,57 @@ function boot() {
    list/login screens) — sync grafts merged changes into it, see startSyncUI */
 let liveProject = null;
 
+/* A route that cannot read or write the store must still leave the screen
+   matching the URL. It used to throw on flushPending (or Store.get) with no
+   catch: the hash moved, the old page stayed, ‹ pointed at the same hash and
+   did nothing, and "Saving…" sat there — the app looked frozen. */
 async function route() {
-  await flushPending();              // persist any in-flight edit before reloading
+  try { await routeInner(); }
+  catch (e) { routeTroublePage(e); }
+}
+/* storage-lost (core.js gave up after a reopen) or any IndexedDB DOMException */
+const isStorageTrouble = (e) => !!e && (e.code === "storage-lost" || isConnectionLost(e) ||
+  (typeof DOMException !== "undefined" && e instanceof DOMException));
+function routeTroublePage(e) {
+  liveProject = null;
+  const storage = isStorageTrouble(e);
+  if (!storage) { try { console.error("route failed:", e); } catch {} }
+  // always a way out: the home-screen app has no address bar (a reload
+  // keeps this URL, so it can't be the only exit from a page that won't open)
+  const away = (location.hash || "#/") !== "#/";
+  setChrome(storage ? "Not saved" : "Couldn't open", away ? "#/" : null);
+  const body = clear(view);
+  body.append(h("div", { class: "card", style: "border-left:4px solid var(--red)" },
+    h("h1", {}, storage ? "⚠ This phone stopped saving" : "⚠ This page couldn't open"),
+    h("p", {}, (storage ? "The phone's storage for this app stopped responding. " : "") +
+      (hasUnsaved() ? "Your last changes are still in the app but NOT saved yet. " : "") +
+      (storage ? "Tap Try again. If it keeps happening, tap Reload app." : "Tap Try again, or go back to the job list.")),
+    h("p", { class: "subtle", style: "font-size:12px" }, String((e && e.message) || e || "")),
+    h("div", { class: "btn-row" },
+      h("button", { class: "btn btn--primary", onclick: () => route() }, "↻ Try again"),
+      storage ? h("button", { class: "btn btn--ghost", onclick: () => reloadApp() }, "Reload app")
+        : away ? h("button", { class: "btn btn--ghost", onclick: () => go("#/") }, "‹ Job list") : null)));
+}
+function reloadApp() {
+  flushPending().catch(() => {}).then(() => {
+    if (hasUnsaved() && !confirm("Some changes haven't saved on this phone yet and will be lost if the app reloads now. Reload anyway?")) return;
+    location.reload();
+  });
+}
+/* the banner: storage failed even after a reopen (core.js onStorageLost) */
+let storageBanner = null;
+onStorageLost(() => {
+  if (storageBanner || typeof document === "undefined") return;
+  storageBanner = h("div", { role: "alert", style: "position:fixed;left:0;right:0;bottom:0;z-index:9999;background:var(--red,#c0392b);color:#fff;padding:10px 14px;display:flex;gap:10px;align-items:center;justify-content:space-between" },
+    h("span", {}, "⚠ This phone stopped saving. Nothing new is being kept."),
+    h("button", { class: "btn btn--sm", style: "width:auto;flex:none", onclick: () => reloadApp() }, "Reload"));
+  document.body.append(storageBanner);
+});
+onStorageBack(() => { if (storageBanner) { storageBanner.remove(); storageBanner = null; } });
+
+async function routeInner() {
+  try { await flushPending(); }      // persist any in-flight edit before reloading
+  catch { /* still queued in core.js; the page below opens THAT copy (unsavedProject) */ }
   renderTechChip();
   liveProject = null;
   if (needsLogin()) return renderLogin();
@@ -211,7 +262,8 @@ async function route() {
     return helpPage(clear(view));
   }
   if (parts[0] === "p" && parts[1]) {
-    const project = await Store.get(parts[1]);
+    // an edit that hasn't reached the disk is the newest copy of this job
+    const project = unsavedProject(parts[1]) || await Store.get(parts[1]);
     if (!project) return go("#/");
     liveProject = project;
     mountAssist(project);   // 💬 job-aware assistant floats over every job page
@@ -1226,7 +1278,7 @@ function backupsCard(project) {
   const box = h("div");
   Promise.all([Store.snapshots(project.id), Store.hasOlderBackups(project.id)]).then(([snaps, older]) => {
     if (!snaps.length && !older) return;
-    const rows = snaps.map((s) => backupRow(project, s.takenAt, `about ${sizeLabel(s.bytes)}`, () => Store.snapshot(s.key)));
+    const rows = snaps.map((s) => backupRow(project, s.takenAt, `about ${sizeLabel(s.bytes)}`, () => Store.snapshot(s.key), s.key));
     const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
       h("div", { style: "font-weight:700" }, "⏪ Backups on this device"),
       h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" },
@@ -1243,7 +1295,7 @@ function backupsCard(project) {
         try {
           const old = await Store.olderBackups(project.id);
           more.replaceWith(...(old.length
-            ? old.map((s) => backupRow(project, s.takenAt, backupCounts(s.data), async () => s.data))
+            ? old.map((s) => backupRow(project, s.takenAt, backupCounts(s.data), async () => s.data, project.id))
             : [h("p", { class: "subtle", style: "margin:8px 0 0;font-size:13px" }, "No older backups left on this device.")]));
         } catch {
           more.disabled = false; more.textContent = "Show older backups";
@@ -1264,8 +1316,11 @@ const sizeLabel = (bytes) => bytes >= 1048576
   : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 /* one backup: its time and a line about it, and a Restore that reads the copy
    (load) only when tapped, says what it holds, then adds back what the job
-   is missing */
-function backupRow(project, takenAt, line, load) {
+   is missing. `keep` is where the copy lives (its snapshot key, or the job id
+   for a pre-split backup), so the backup of the current copy can't prune it.
+   An edit to this job still in the save queue is the newest copy: it lands
+   first or the restore waits, and the reload never drops another job's. */
+function backupRow(project, takenAt, line, load, keep) {
   const when = String(takenAt || "").replace("T", " ").slice(0, 16);
   const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
   btn.addEventListener("click", async () => {
@@ -1276,24 +1331,38 @@ function backupRow(project, takenAt, line, load) {
       btn.disabled = false;
       return;
     }
-    const current = await Store.get(project.id);
-    if (current) await Store.backup(current);
-    const snap = { ...data };
-    delete snap.rev;
-    // UNION, never replace: the current copy is the newer side, so its
-    // scalars win and the snapshot only contributes what went missing.
-    const { merged, added, filledForms } = current
-      ? mergeProjects(current, snap)
-      : { merged: snap, added: 0, filledForms: 0 };
-    merged.id = project.id;
-    delete merged.rev;
-    pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring back what it took off
-    await Store.put(merged);     // fresh updatedAt → re-syncs
-    const bits = [];
-    if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
-    if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
-    toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
-    setTimeout(() => location.reload(), 600);
+    const queued = () => {
+      if (!unsavedProject(project.id)) return false;
+      btn.disabled = false;
+      toast("Your last change to this job hasn't saved on this phone yet. Wait for ✓ Saved, then restore.");
+      return true;
+    };
+    try {
+      await flushPending().catch(() => {});
+      if (queued()) return;
+      const current = await Store.get(project.id);
+      if (current) await Store.backup(current, { keep });
+      const snap = { ...data };
+      delete snap.rev;
+      // UNION, never replace: the current copy is the newer side, so its
+      // scalars win and the snapshot only contributes what went missing.
+      const { merged, added, filledForms } = current
+        ? mergeProjects(current, snap)
+        : { merged: snap, added: 0, filledForms: 0 };
+      merged.id = project.id;
+      delete merged.rev;
+      pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring back what it took off
+      if (queued()) return;           // an edit queued meanwhile (a receipt read landing) would save over it
+      await Store.put(merged);     // fresh updatedAt → re-syncs
+      const bits = [];
+      if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
+      if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
+      toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
+      setTimeout(reloadApp, 600);
+    } catch {
+      btn.disabled = false;
+      toast("The restore didn't save on this phone. Close and reopen the app, then try again.");
+    }
   });
   return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
     h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}`), btn);
@@ -2935,20 +3004,37 @@ if ("serviceWorker" in navigator) {
     const a = document.activeElement;
     return !!document.querySelector(".sc") || !!(a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable));
   };
-  // the last edit (autosave waits 350 ms) is saved before the page goes
+  // the last edit (autosave waits 350 ms) is saved before the page goes; an
+  // edit that still can't save (core.js keeps it queued) is never reloaded
+  // away — the update waits for a page change or app switch after it lands
   const doReload = () => {
     if (reloading) return;
     reloading = true;
-    Promise.resolve().then(flushPending).catch(() => {}).then(() => location.reload());
+    Promise.resolve().then(flushPending).catch(() => {}).then(() => {
+      if (!hasUnsaved()) return location.reload();
+      reloading = false;
+      later();
+    });
+  };
+  let waiting = false;
+  const later = () => {
+    if (waiting) return;
+    waiting = true;
+    const fire = () => {
+      waiting = false;
+      window.removeEventListener("hashchange", onHash);
+      document.removeEventListener("visibilitychange", onHide);
+      doReload();
+    };
+    const onHash = () => { if (!typing()) fire(); };
+    const onHide = () => { if (document.hidden) fire(); };
+    window.addEventListener("hashchange", onHash);
+    document.addEventListener("visibilitychange", onHide);
   };
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (hadController && !reloading) {
       if (!typing()) doReload();
-      else {
-        const safe = () => { if (!typing()) doReload(); };
-        window.addEventListener("hashchange", safe, { once: true });
-        document.addEventListener("visibilitychange", () => { if (document.hidden) doReload(); }, { once: true });
-      }
+      else later();
     }
     hadController = true;
   });

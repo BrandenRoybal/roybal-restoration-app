@@ -77,16 +77,30 @@ export const money = (n) =>
   (Number(n) || 0).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
 /* ---------- IndexedDB store ("projects" + on-device "backups" + the
-   "media_queue" of clips waiting to upload) ---------- */
+   "media_queue" of clips waiting to upload) ----------
+   THE CONNECTION HEALS. On an iPhone the database lives in a separate WebKit
+   process, and iOS can kill that process while the page stays alive (Oct 2026,
+   a receipts session on a 30 MB job: four times in ten minutes). WebKit then
+   fails every request on the old handle ("Connection to Indexed Database server
+   lost" / "The database connection is closing.") and this module used to keep
+   that dead handle forever: every save failed, "Saving…" never cleared and the
+   app looked frozen until it was killed. Now a lost connection is dropped,
+   reopened and the operation tried ONCE more; if that fails too the app is
+   told (onStorageLost) so it can say so and offer a reload.
+   EVERY WRITE RESOLVES ON COMMIT (transaction complete), not on request
+   success: a write the storage process aborts after the request succeeded
+   used to be reported saved — listeners fired, the pill said ✓ Saved — and
+   the receipt quietly never existed. */
 const DB_NAME = "roybal-field";
 const DB_VERSION = 3;          // 3: media_queue (Walkthrough V1). Bump = onupgradeneeded on every installed phone: add stores, never drop.
 const STORE = "projects";
 const BACKUPS = "backups";
 export const MEDIA_STORE = "media_queue";
-let _db;
+let _db = null, _opening = null;
 function db() {
   if (_db) return Promise.resolve(_db);
-  return new Promise((resolve, reject) => {
+  if (_opening) return _opening;
+  _opening = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const d = req.result;
@@ -97,19 +111,92 @@ function db() {
         m.createIndex("projectId", "projectId", { unique: false });
       }
     };
-    req.onsuccess = () => { _db = req.result; resolve(_db); };
+    req.onsuccess = () => {
+      const d = req.result;
+      // the browser closed it under us (storage process gone, or cleared):
+      // forget it, so the next operation opens a fresh one
+      d.onclose = () => { if (_db === d) _db = null; };
+      _db = d; resolve(d);
+    };
     req.onerror = () => reject(req.error);
     // another tab holds the old version open: don't hang — the reload picks it up
     req.onblocked = () => reject(new Error("The app is open in another tab on an older version. Close it and reopen."));
   });
+  const p = _opening;
+  p.then(() => { if (_opening === p) _opening = null; }, () => { if (_opening === p) _opening = null; });
+  return p;
 }
-function tx(mode, name = STORE) { return db().then((d) => d.transaction(name, mode).objectStore(name)); }
-const reqProm = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-/* settles when the transaction does: committed, or aborted with its error */
-const txDone = (t) => new Promise((res, rej) => {
-  t.oncomplete = () => res();
-  t.onabort = () => rej(t.error || new DOMException("The save was abandoned.", "AbortError"));
-});
+/* The errors a dead connection produces. InvalidStateError: a transaction
+   asked of a closing/closed handle. UnknownError: WebKit's "server lost" (and
+   genuine I/O trouble, for which one reopen is the right first move too).
+   QuotaExceededError / ConstraintError / DataCloneError are NOT here: a retry
+   cannot help them and they must reach the caller as they are. */
+export function isConnectionLost(e) {
+  if (!e) return false;
+  if (e.name === "InvalidStateError" || e.name === "UnknownError") return true;
+  return /connection.*(lost|closing|closed)|database.*closed/i.test(String(e.message || ""));
+}
+function dropConnection() {
+  const d = _db; _db = null;
+  try { d && d.close(); } catch { /* already gone */ }
+}
+const _lostFns = [], _backFns = [];
+let _storageLost = false;
+/** fn(error): the store failed even after a reopen — the app should say so. */
+export function onStorageLost(fn) { _lostFns.push(fn); }
+/** fn(): a store operation succeeded again after onStorageLost. */
+export function onStorageBack(fn) { _backFns.push(fn); }
+export const storageLost = () => _storageLost;
+function markLost(e) {
+  if (_storageLost) return;
+  _storageLost = true;
+  _lostFns.forEach((f) => { try { f(e); } catch {} });
+}
+function markBack() {
+  if (!_storageLost) return;
+  _storageLost = false;
+  _backFns.forEach((f) => { try { f(); } catch {} });
+}
+/* One transaction. `body(t, setResult)` issues the requests; the promise
+   settles when the TRANSACTION does — complete → the result, abort → its
+   error (the request's own error when the transaction carries none). */
+function attempt(names, mode, body) {
+  return db().then((d) => new Promise((resolve, reject) => {
+    let t;
+    try { t = d.transaction(names, mode); } catch (e) { reject(e); return; }
+    let out, reqErr = null;
+    t.oncomplete = () => resolve(out);
+    t.onabort = () => reject(t.error || reqErr || new DOMException("The save was abandoned.", "AbortError"));
+    t.onerror = (ev) => { reqErr = reqErr || (ev && ev.target && ev.target.error) || null; };
+    try { body(t, (v) => { out = v; }); }
+    catch (e) { try { t.abort(); } catch {} reject(e); }
+  }));
+}
+/* attempt, and once more on a fresh connection when the first failed because
+   the connection died. Safe to repeat: every write here is a put/delete by key
+   (idempotent), and the conditional ones re-check inside their own
+   transaction — a first attempt that did land makes the second answer "moved"
+   (false), which every caller already treats as "try again next cycle". */
+async function run(names, mode, body) {
+  let v;
+  try { v = await attempt(names, mode, body); }
+  catch (e) {
+    if (!isConnectionLost(e)) throw e;
+    dropConnection();
+    try { v = await attempt(names, mode, body); }
+    catch (e2) {
+      if (isConnectionLost(e2)) {
+        dropConnection();
+        markLost(e2);
+        throw Object.assign(new Error("This phone's storage stopped responding (" + (e2.message || e2.name) + ")."), { code: "storage-lost", cause: e2 });
+      }
+      throw e2;
+    }
+  }
+  markBack();
+  return v;
+}
+const req1 = (r, set, map = (x) => x) => { r.onsuccess = () => set(map(r.result)); };
 
 /* ---------- backup snapshot keys ----------
    One record per snapshot, keyed "<job id>#<takenAt>#<bytes>" in the backups
@@ -162,85 +249,101 @@ const _savedFns = [], _deletedFns = [];
 export function onProjectSaved(fn) { _savedFns.push(fn); }
 export function onProjectDeleted(fn) { _deletedFns.push(fn); }
 
+/* updatedAt of every row this page has read or written, by id. Lets the sync
+   engine find what it owes the server WITHOUT loading every job (a phone holds
+   every job on the account: 200+ MB of inline media in Oct 2026, and two
+   whole-store reads per sync cycle were the moments iOS killed its storage).
+   Exact for this page's own writes — all of them pass through Store below;
+   another tab's writes show up at the next full scan (sync.js). */
+const _stamps = new Map();
+const stampRow = (p) => { if (p && p.id != null) _stamps.set(p.id, p.updatedAt || ""); };
+
 export const Store = {
   async all() {
-    const os = await tx("readonly");
-    return new Promise((res, rej) => {
-      const r = os.getAll();
-      r.onsuccess = () => res((r.result || []).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "")));
-      r.onerror = () => rej(r.error);
-    });
+    const rows = await run(STORE, "readonly", (t, set) => req1(t.objectStore(STORE).getAll(), set, (x) => x || []));
+    rows.forEach(stampRow);
+    return rows.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+  },
+  /** Every job id — keys only, no job is loaded. */
+  async keys() {
+    return run(STORE, "readonly", (t, set) => req1(t.objectStore(STORE).getAllKeys(), set, (x) => x || []));
   },
   async get(id) {
-    const os = await tx("readonly");
-    return new Promise((res, rej) => {
-      const r = os.get(id);
-      r.onsuccess = () => res(r.result || null);
-      r.onerror = () => rej(r.error);
-    });
+    const row = await run(STORE, "readonly", (t, set) => req1(t.objectStore(STORE).get(id), set, (x) => x || null));
+    if (row) stampRow(row); else _stamps.delete(id);
+    return row;
   },
+  /** updatedAt of a row as this page last saw it (undefined = not seen). */
+  stampOf(id) { return _stamps.get(id); },
+  /** [id, updatedAt] for every row this page has seen. */
+  stamps() { return [..._stamps]; },
   /* opts.bump:false keeps the existing updatedAt; opts.quiet:true skips
      listeners (used by sync when writing rows pulled from the server).
      A bump is STRICTLY MONOTONIC: an edit in the same millisecond as the
      previous save still advances updatedAt, so sync's dirty-check
-     (pushed[id] !== updatedAt) can never mistake a fresh edit for clean. */
+     (pushed[id] !== updatedAt) can never mistake a fresh edit for clean.
+     Resolves once the write is COMMITTED; listeners fire only then. */
   async put(project, opts = {}) {
     if (opts.bump !== false) {
       const prev = Date.parse(project.updatedAt) || 0;
       project.updatedAt = new Date(Math.max(Date.now(), prev + 1)).toISOString();
     }
-    const os = await tx("readwrite");
-    return new Promise((res, rej) => {
-      const r = os.put(project);
-      r.onsuccess = () => { if (!opts.quiet) _savedFns.forEach((f) => { try { f(project); } catch {} }); res(project); };
-      r.onerror = () => rej(r.error);
-    });
+    await run(STORE, "readwrite", (t) => { t.objectStore(STORE).put(project); });
+    stampRow(project);
+    if (!opts.quiet) _savedFns.forEach((f) => { try { f(project); } catch {} });
+    return project;
   },
   async del(id, opts = {}) {
-    const os = await tx("readwrite");
-    return new Promise((res, rej) => {
-      const r = os.delete(id);
-      r.onsuccess = () => { if (!opts.quiet) _deletedFns.forEach((f) => { try { f(id); } catch {} }); res(); };
-      r.onerror = () => rej(r.error);
-    });
+    // a deleted job's edit still waiting to save (autosave below) must not
+    // write the job back: let a save in flight finish, then drop the rest
+    await saveChain;
+    _unsaved.delete(id);
+    await run(STORE, "readwrite", (t) => { t.objectStore(STORE).delete(id); });
+    _stamps.delete(id);
+    if (!opts.quiet) _deletedFns.forEach((f) => { try { f(id); } catch {} });
   },
 
   /* conditional put: only lands if the stored row's updatedAt still matches
      what the caller read (get+put in ONE transaction, so a concurrent save
      can't slip between them). Quiet by design — sync-engine use only.
-     Returns true when the write landed, false when the row moved. */
+     Returns true when the write landed, false when the row moved. An edit
+     still in the save queue (autosave below) counts as the row having moved:
+     it is the newest copy of the job even though it hasn't reached the disk,
+     and the sync write would otherwise land under it — then be overwritten
+     by the queued save (or grafted over it on screen). */
   async putIf(project, expectedUpdatedAt) {
-    const os = await tx("readwrite");
-    return new Promise((res, rej) => {
+    if (_unsaved.has(project.id)) return false;
+    const landed = await run(STORE, "readwrite", (t, set) => {
+      const os = t.objectStore(STORE);
       const g = os.get(project.id);
       g.onsuccess = () => {
         const cur = g.result;
-        if ((cur ? cur.updatedAt : undefined) !== expectedUpdatedAt) return res(false);
-        const r = os.put(project);
-        r.onsuccess = () => res(true);
-        r.onerror = () => rej(r.error);
+        if ((cur ? cur.updatedAt : undefined) !== expectedUpdatedAt) { set(false); if (cur) stampRow(cur); return; }
+        os.put(project); set(true);
       };
-      g.onerror = () => rej(g.error);
     });
+    if (landed) stampRow(project);
+    return landed;
   },
 
   /* conditional delete: only removes the row if its updatedAt still matches
      what the caller last read — an edit that landed in between keeps the row
      (get+delete in ONE transaction). Quiet by design — sync-engine use only.
-     Returns true when the delete landed, false when the row moved. */
+     Returns true when the delete landed, false when the row moved (or an
+     edit is still in the save queue, as for putIf). */
   async delIf(id, expectedUpdatedAt) {
-    const os = await tx("readwrite");
-    return new Promise((res, rej) => {
+    if (_unsaved.has(id)) return false;
+    const gone = await run(STORE, "readwrite", (t, set) => {
+      const os = t.objectStore(STORE);
       const g = os.get(id);
       g.onsuccess = () => {
         const cur = g.result;
-        if ((cur ? cur.updatedAt : undefined) !== expectedUpdatedAt) return res(false);
-        const r = os.delete(id);
-        r.onsuccess = () => res(true);
-        r.onerror = () => rej(r.error);
+        if ((cur ? cur.updatedAt : undefined) !== expectedUpdatedAt) { set(false); return; }
+        os.delete(id); set(true);
       };
-      g.onerror = () => rej(g.error);
     });
+    if (gone) _stamps.delete(id);
+    return gone;
   },
 
   /* ---------- on-device backups ----------
@@ -263,8 +366,12 @@ export const Store = {
      A record from before the split (keyed by the bare job id) is never read
      by sync or by opening a job; the job page loads it only on request
      (olderBackups). Its copies are older than every new snapshot, so it goes
-     the first time the new ones outgrow their retention. */
-  async backup(project) {
+     the first time the new ones outgrow their retention.
+
+     opts.keep: a snapshot key (or the bare job id, for the pre-split record)
+     this backup must not prune — the one a Restore is reading from, so the
+     backup of the current copy taken just before can't delete it. */
+  async backup(project, opts = {}) {
     if (!project || !project.id) return;
     const id = project.id;
     const ms = Math.max(Date.now(), lastSnapMs + 1);
@@ -272,19 +379,23 @@ export const Store = {
     const takenAt = new Date(ms).toISOString();
     const bytes = approxBytes(project);
     const rec = { id: snapKey(id, takenAt, bytes), jobId: id, takenAt, bytes, data: project };
+    const keep = opts.keep;
     /* one transaction, all or nothing: read the job's keys, drop what the new
        copy pushes out of retention, write the new copy */
-    const save = async () => {
-      const os = await tx("readwrite", BACKUPS);
+    const save = () => run(BACKUPS, "readwrite", (t) => {
+      const os = t.objectStore(BACKUPS);
       const keys = os.getAllKeys(snapRange(id));
       keys.onsuccess = () => {
-        const victims = snapVictims([rec.id, ...ownSnapKeys(id, keys.result)]);
+        // run()'s retry after a lost connection may find this copy already
+        // written (the first try committed, the page just never heard)
+        const mine = ownSnapKeys(id, keys.result);
+        const older = mine.filter((k) => k !== rec.id);
+        const victims = snapVictims([rec.id, ...older]).filter((k) => k !== keep);
         for (const k of victims) os.delete(k);
-        if (victims.length) os.delete(id);          // the pre-split record is older still
-        os.put(rec);
+        if (victims.length && keep !== id) os.delete(id);   // the pre-split record is older still
+        if (older.length === mine.length) os.put(rec);      // not again when the retry finds it there
       };
-      await txDone(os.transaction);
-    };
+    });
     try {
       try {
         await save();
@@ -293,11 +404,15 @@ export const Store = {
         // a full disk: free space in its own transaction first (a delete only
         // counts once it commits), keeping the job's newest other snapshot —
         // two copies with the new one, as the old format kept — then retry
-        const os = await tx("readwrite", BACKUPS);
-        const keys = os.getAllKeys(snapRange(id));
-        keys.onsuccess = () => { for (const k of ownSnapKeys(id, keys.result).slice(1)) os.delete(k); };
-        os.delete(id);
-        await txDone(os.transaction);
+        await run(BACKUPS, "readwrite", (t) => {
+          const os = t.objectStore(BACKUPS);
+          const keys = os.getAllKeys(snapRange(id));
+          keys.onsuccess = () => {
+            const older = ownSnapKeys(id, keys.result).filter((k) => k !== rec.id && k !== keep);
+            for (const k of older.slice(1)) os.delete(k);
+          };
+          if (keep !== id) os.delete(id);
+        });
         await save();
       }
     } catch (e) {
@@ -307,12 +422,12 @@ export const Store = {
   /** A job's snapshots, newest first, as { key, jobId, takenAt, bytes } —
       keys only, no copy is loaded. Open one with snapshot(key). */
   async snapshots(id) {
-    const keys = await reqProm((await tx("readonly", BACKUPS)).getAllKeys(snapRange(id)));
+    const keys = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).getAllKeys(snapRange(id)), set));
     return ownSnapKeys(id, keys).map(parseSnapKey);
   },
   /** One snapshot's copy of the job, or null when it is gone. */
   async snapshot(key) {
-    const rec = await reqProm((await tx("readonly", BACKUPS)).get(key));
+    const rec = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(key), set));
     return (rec && rec.data) || null;
   },
   /** The newest snapshot's copy of the job (one record loaded), or null. */
@@ -333,37 +448,93 @@ export const Store = {
   /** Whether the job still has a record from before the split (a key count —
       the record itself is never loaded to answer). */
   async hasOlderBackups(id) {
-    return (await reqProm((await tx("readonly", BACKUPS)).count(id))) > 0;
+    return (await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).count(id), set))) > 0;
   },
   /** The pre-split record's snapshots, newest first: [{ takenAt, data }]. It
       holds up to 10 full copies of the job and loads all at once, which on a
       photo-heavy job is more than a phone can hold — so only the job page's
       "Show older backups" button calls this. */
   async olderBackups(id) {
-    const row = await reqProm((await tx("readonly", BACKUPS)).get(id));
+    const row = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(id), set));
     return row && Array.isArray(row.snaps) ? row.snaps : [];
   },
 };
 
-/* ---------- debounced autosave with a visual "Saved" pulse ---------- */
-let saveTimer, pendingProject = null, pendingPill = null;
-async function doSave() {
-  if (!pendingProject) return;
-  const p = pendingProject, pill = pendingPill;
-  pendingProject = null; pendingPill = null;
-  await Store.put(p);
-  if (pill) { pill.textContent = "✓ Saved"; pill.style.color = "var(--green)"; }
+/* ---------- debounced autosave with a visual "Saved" pulse ----------
+   An edit leaves this queue only when its write COMMITTED. A failed save
+   keeps it (newest object per job), says so on the pill, and retries on its
+   own — it used to be dropped before the write was even tried, leaving
+   "Saving…" on screen for good and the edit nowhere. Passes run one at a
+   time, so a flush waits for a save already in flight: "flushed" means on
+   disk, or still queued and the flush rejects. */
+const _unsaved = new Map();          // job id -> { project, pill, failed } not yet on disk
+let saveTimer = null, retryTimer = null, retryMs = 2000, saveChain = Promise.resolve();
+function paintPill(pill, state) {
+  if (!pill) return;
+  if (state === "saving") { pill.textContent = "Saving…"; pill.style.color = "var(--muted)"; pill.onclick = null; }
+  else if (state === "saved") { pill.textContent = "✓ Saved"; pill.style.color = "var(--green)"; pill.onclick = null; }
+  else {
+    pill.textContent = "⚠ Not saved — tap to retry"; pill.style.color = "var(--red)";
+    pill.onclick = () => { paintPill(pill, "saving"); flushPending().catch(() => {}); };
+  }
+}
+async function saveQueued() {
+  let firstErr = null;
+  for (const [id, entry] of [..._unsaved]) {
+    if (_unsaved.get(id) !== entry) continue;      // a newer edit for this job replaced it — that one goes next
+    // it stays queued while its write is in flight, so Store.putIf can't land
+    // a sync write under it in the meantime
+    try {
+      await Store.put(entry.project);
+    } catch (e) {
+      const kept = _unsaved.get(id);              // it, or a newer edit that queued itself meanwhile
+      if (kept) { kept.failed = true; paintPill(kept.pill, "failed"); }
+      if (!firstErr) firstErr = e;
+      continue;                                    // one job that can't save must not hold the others
+    }
+    if (_unsaved.get(id) === entry) { _unsaved.delete(id); paintPill(entry.pill, "saved"); }
+  }
+  if (firstErr) {
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => { doSave().catch(() => {}); }, retryMs);
+    retryMs = Math.min(retryMs * 2, 30000);
+    throw firstErr;
+  }
+  retryMs = 2000;
+}
+function doSave() {
+  const pass = saveChain.then(saveQueued);
+  saveChain = pass.catch(() => {});
+  return pass;
 }
 export function autosave(project, pill) {
-  pendingProject = project; pendingPill = pill;
+  // no pill of its own (a read landing off screen): the job's page keeps its pill
+  const prev = _unsaved.get(project.id);
+  if (!pill && prev) pill = prev.pill;
+  _unsaved.set(project.id, { project, pill, failed: false });
   clearTimeout(saveTimer);
-  if (pill) { pill.textContent = "Saving…"; pill.style.color = "var(--muted)"; }
-  saveTimer = setTimeout(doSave, 350);
+  paintPill(pill, "saving");
+  saveTimer = setTimeout(() => { doSave().catch(() => { /* the pill and onStorageLost say so */ }); }, 350);
 }
-/* write any pending edit immediately (call before navigating / reloading) */
+/* write any pending edit immediately (call before navigating / reloading).
+   Rejects when it could not — the edit stays queued. */
 export async function flushPending() {
   clearTimeout(saveTimer);
   await doSave();
+}
+/** The in-memory copy of a job whose last edit has not reached the disk yet
+    (null when everything is saved) — the router opens THAT, never the older
+    stored row, so a failed save is never overwritten by the next edit. */
+export function unsavedProject(id) { const e = _unsaved.get(id); return e ? e.project : null; }
+export const hasUnsaved = () => _unsaved.size > 0;
+/** A page that (re)renders a job with an edit still queued takes over that
+    edit's pill, so the retry that lands it turns THIS pill green (formkit
+    setCtx calls it) — the old pill left with the old page. */
+export function bindPill(project, pill) {
+  const e = project && pill ? _unsaved.get(project.id) : null;
+  if (!e || e.project !== project) return;
+  e.pill = pill;
+  paintPill(pill, e.failed ? "failed" : "saving");
 }
 
 /* ---------- toast ---------- */
@@ -888,21 +1059,17 @@ export function daysBetween(aIso, bIso) {
    listeners: the queue (mediaqueue.js) owns the lifecycle. */
 export const MediaStore = {
   async put(row) {
-    const os = await tx("readwrite", MEDIA_STORE);
-    return reqProm(os.put(row));
+    return run(MEDIA_STORE, "readwrite", (t, set) => req1(t.objectStore(MEDIA_STORE).put(row), set));
   },
   async get(id) {
-    const os = await tx("readonly", MEDIA_STORE);
-    return (await reqProm(os.get(id))) || null;
+    return run(MEDIA_STORE, "readonly", (t, set) => req1(t.objectStore(MEDIA_STORE).get(id), set, (x) => x || null));
   },
   /** Every queued row, oldest first. */
   async all() {
-    const os = await tx("readonly", MEDIA_STORE);
-    const rows = (await reqProm(os.getAll())) || [];
+    const rows = await run(MEDIA_STORE, "readonly", (t, set) => req1(t.objectStore(MEDIA_STORE).getAll(), set, (x) => x || []));
     return rows.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.id).localeCompare(String(b.id)));
   },
   async del(id) {
-    const os = await tx("readwrite", MEDIA_STORE);
-    return reqProm(os.delete(id));
+    return run(MEDIA_STORE, "readwrite", (t) => { t.objectStore(MEDIA_STORE).delete(id); });
   },
 };
