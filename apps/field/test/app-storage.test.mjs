@@ -62,10 +62,15 @@ indexedDB.open = (...a) => {
   return origOpen(...a);
 };
 
-const { Store, hasUnsaved } = await import("../js/core.js");
+const { Store, hasUnsaved, autosave, flushPending } = await import("../js/core.js");
 await import("../js/app.js");
 
 const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
+/* poll, not a fixed wait: a page renders after its store reads come back */
+async function until(ok, ms = 3000) {
+  const end = Date.now() + ms;
+  while (!ok()) { if (Date.now() > end) throw new Error("timed out waiting for: " + ok); await settle(20); }
+}
 const view = () => document.getElementById("view");
 const text = () => view().textContent;
 const banner = () => document.querySelector('[role="alert"]');
@@ -180,6 +185,8 @@ const jobWritesDown = () => {
   return () => { P.transaction = tx; };
 };
 const toastText = () => document.getElementById("toast").textContent;
+// a tap whose toast is waited for: the last test's toast is still up
+const tap = (btn) => { document.getElementById("toast").textContent = ""; btn.click(); };
 const restoreButtons = () => [...view().querySelectorAll("button")].filter((b) => /⏪ Restore/.test(b.textContent));
 
 await test("Restore waits for an edit to the job that hasn't saved yet: it doesn't merge into the older saved copy or reload over the edit", async () => {
@@ -191,19 +198,42 @@ await test("Restore waits for an edit to the job that hasn't saved yet: it doesn
   await settle(450);
   assert.match(view().querySelector(".saved-pill").textContent, /Not saved/);
   await nav("#/p/jobA");                            // the job page, from the queued copy
+  await until(() => restoreButtons().length > 0);
   const before = (await Store.get("jobA")).updatedAt;
-  restoreButtons()[0].click();
-  await settle(150);
-  assert.match(toastText(), /hasn't saved on this phone yet/);
+  const btn = restoreButtons()[0];
+  tap(btn);
+  await until(() => /still saving on this phone/.test(toastText()));
+  await settle(800);                                // past any reload a restore could schedule
   assert.equal(reloads.length, 0, "no reload over the queued edit");
   assert.equal((await Store.get("jobA")).updatedAt, before, "the restore wrote nothing under the edit");
-  assert.equal(restoreButtons()[0].disabled, false);
+  assert.equal(btn.disabled, false);
   writesBack();
   await nav("#/p/jobA/f/receipts");                 // the next page change saves it
   assert.equal((await Store.get("jobA")).receipts.find((r) => r.id === "R3").vendor, "Fairbanks Lumber");
 });
 
-await test("a Restore that can't save says so, and the backup it was restoring is still on the phone", async () => {
+await test("an edit queued while Restore runs, on another copy of the job, stops the restore before it saves", async () => {
+  await nav("#/p/jobA");
+  await until(() => restoreButtons().length > 0);
+  const before = (await Store.get("jobA")).updatedAt;
+  const backup = Store.backup;
+  // a write that fails mid-restore leaves its own copy of the job in the save queue
+  Store.backup = async (p, o) => { if (p && p.id === "jobA") autosave({ ...p, notes: "typed" }, null); return backup.call(Store, p, o); };
+  const writesBack = jobWritesDown();
+  const btn = restoreButtons()[0];
+  tap(btn);
+  await until(() => /still saving on this phone/.test(toastText()));
+  Store.backup = backup;
+  await settle(800);
+  assert.equal(reloads.length, 0);
+  assert.equal((await Store.get("jobA")).updatedAt, before, "nothing put under the queued copy");
+  assert.equal(btn.disabled, false);
+  writesBack();
+  await flushPending();
+  assert.equal((await Store.get("jobA")).notes, "typed", "the queued edit lands as it was");
+});
+
+await test("a Restore that can't save keeps the restore in the save queue, says so, and keeps the backup it was restoring", async () => {
   const jobB = { id: "jobB", jobType: "restoration", customer: "Chena", address: "1885 Chena Landings", updatedAt: "2026-10-20T00:00:00.000Z", receipts: [] };
   await Store.put(jobB, { bump: false, quiet: true });
   await Store.backup({ ...jobB, receipts: [{ id: "lost", vendor: "Rental Zone" }] });   // the oldest holds what went missing
@@ -211,19 +241,40 @@ await test("a Restore that can't save says so, and the backup it was restoring i
   const source = (await Store.snapshots("jobB")).at(-1).key;
   await nav("#/");
   await nav("#/p/jobB");
+  await until(() => restoreButtons().length === 10);
   const btns = restoreButtons();
-  assert.equal(btns.length, 10);
   const writesBack = jobWritesDown();
   const warn = console.warn; console.warn = () => {};
-  btns.at(-1).click();                              // the oldest: the backup of the current copy pushes it past 10
-  await settle(150);
+  tap(btns.at(-1));                              // the oldest: the backup of the current copy pushes it past 10
+  await until(() => /couldn't save it yet/.test(toastText()));
   console.warn = warn;
-  writesBack();
-  assert.match(toastText(), /restore didn't save/);
-  assert.equal(btns.at(-1).disabled, false, "the button comes back");
+  assert.match(toastText(), /Recovered 1 item from the backup, but/);
+  assert.doesNotMatch(toastText(), /close|reopen/i, "never sends the crew past the save queue");
+  assert.ok(hasUnsaved(), "the restore waits in the save queue");
+  await settle(800);
   assert.equal(reloads.length, 0);
   assert.ok((await Store.snapshots("jobB")).some((s) => s.key === source), "the backup being restored was not pruned");
   assert.equal((await Store.snapshot(source)).receipts[0].vendor, "Rental Zone");
+  assert.deepEqual((await Store.get("jobB")).receipts, [], "nothing reached the disk yet");
+  writesBack();
+  await flushPending();                             // the queue lands it once the phone saves again
+  assert.deepEqual((await Store.get("jobB")).receipts.map((r) => r.vendor), ["Rental Zone"]);
+  assert.ok(!hasUnsaved());
+});
+
+await test("a Restore that can't even read the job leaves everything as it was and says to try again", async () => {
+  await nav("#/p/jobB");
+  await until(() => restoreButtons().length > 0);
+  const get = Store.get;
+  Store.get = async () => { throw Object.assign(new Error("storage stopped"), { code: "storage-lost" }); };
+  const before = (await get.call(Store, "jobB")).updatedAt;
+  const btn = restoreButtons()[0];
+  tap(btn);
+  await until(() => /couldn't run the restore/.test(toastText()));
+  Store.get = get;
+  assert.equal(btn.disabled, false);
+  assert.ok(!hasUnsaved());
+  assert.equal((await Store.get("jobB")).updatedAt, before);
 });
 
 // last: once the reload has "happened", this page stays reloading

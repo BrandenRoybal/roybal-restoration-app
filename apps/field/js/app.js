@@ -1,7 +1,7 @@
 /* ============================================================
    Roybal Field Forms — app shell + hash router
    ============================================================ */
-import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow, stripCtrl, likelyOffline, unsavedProject, hasUnsaved, onStorageLost, onStorageBack, isConnectionLost } from "./core.js";
+import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, autosave, downloadFile, csvRow, stripCtrl, likelyOffline, unsavedProject, hasUnsaved, onStorageLost, onStorageBack, isConnectionLost } from "./core.js";
 import {
   formByKey, formCount, newProject, isBlankProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
@@ -1318,8 +1318,18 @@ const sizeLabel = (bytes) => bytes >= 1048576
    (load) only when tapped, says what it holds, then adds back what the job
    is missing. `keep` is where the copy lives (its snapshot key, or the job id
    for a pre-split backup), so the backup of the current copy can't prune it.
-   An edit to this job still in the save queue is the newest copy: it lands
-   first or the restore waits, and the reload never drops another job's. */
+
+   The restore lands IN the copy of the job this page is bound to
+   (liveProject), merged and grafted in one tick, and that copy is what it
+   saves. A receipt read, a meter read or a Magicplan write that finishes
+   meanwhile lands on that same object (receipts.js liveOf) and saves it
+   directly, never through the save queue: one landing before the merge is
+   merged in, and one landing after it adds to the restored copy instead of
+   writing the old one back. The page then re-renders from it, with no reload,
+   so an edit still waiting to save on another job is never in the way. An
+   edit to this job still in the save queue is the newest copy: the restore
+   waits for it. A save that fails keeps the restore in the queue, which
+   retries on its own, like any other edit. */
 function backupRow(project, takenAt, line, load, keep) {
   const when = String(takenAt || "").replace("T", " ").slice(0, 16);
   const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
@@ -1331,38 +1341,50 @@ function backupRow(project, takenAt, line, load, keep) {
       btn.disabled = false;
       return;
     }
-    const queued = () => {
-      if (!unsavedProject(project.id)) return false;
+    const id = project.id, here = location.hash;
+    const stillSaving = () => {
       btn.disabled = false;
-      toast("Your last change to this job hasn't saved on this phone yet. Wait for ✓ Saved, then restore.");
-      return true;
+      toast("Your last change to this job is still saving on this phone. It keeps trying by itself; tap Restore again in a moment.", 5000);
     };
+    // the job on screen once the restore is in: from its copy, now restored
+    const showIt = () => { if (location.hash === here) route(); };
+    let target = null, bits = [];
     try {
       await flushPending().catch(() => {});
-      if (queued()) return;
-      const current = await Store.get(project.id);
+      if (unsavedProject(id)) return stillSaving();
+      const current = await Store.get(id);
       if (current) await Store.backup(current, { keep });
+      const live = liveProject && liveProject.id === id ? liveProject : null;
+      const base = live || (await Store.get(id));
+      // an edit queued meanwhile on another copy of the job would save over this one
+      const queued = unsavedProject(id);
+      if (queued && queued !== live) return stillSaving();
       const snap = { ...data };
       delete snap.rev;
       // UNION, never replace: the current copy is the newer side, so its
       // scalars win and the snapshot only contributes what went missing.
-      const { merged, added, filledForms } = current
-        ? mergeProjects(current, snap)
+      const { merged, added, filledForms } = base
+        ? mergeProjects(base, snap)
         : { merged: snap, added: 0, filledForms: 0 };
-      merged.id = project.id;
+      merged.id = id;
       delete merged.rev;
       pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring back what it took off
-      if (queued()) return;           // an edit queued meanwhile (a receipt read landing) would save over it
-      await Store.put(merged);     // fresh updatedAt → re-syncs
-      const bits = [];
+      // nothing awaited from the merge to here: no landing can fall between them
+      target = live ? graftProject(live, merged) : merged;
       if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
       if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
-      toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
-      setTimeout(reloadApp, 600);
+      await Store.put(target);     // fresh updatedAt → re-syncs
     } catch {
       btn.disabled = false;
-      toast("The restore didn't save on this phone. Close and reopen the app, then try again.");
+      if (!target) { toast("This phone couldn't run the restore just now. Try again in a moment.", 5000); return; }
+      // the restore is in this job's copy: the save queue keeps it and retries
+      autosave(target, null);
+      toast(`${bits.length ? `Recovered ${bits.join(" and ")} from the backup, but` : "The restore is in, but"} this phone couldn't save it yet. It keeps trying by itself; leave the app open.`, 6000);
+      showIt();
+      return;
     }
+    toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
+    showIt();
   });
   return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
     h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}`), btn);

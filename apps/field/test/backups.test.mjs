@@ -206,4 +206,36 @@ await test("a failed backup that isn't a full disk rolls back whole — no snaps
   assert.equal(kept[9].data.customer, "Job 1");
 });
 
+await test("a Restore's backup never prunes the copy being restored: an older-format backup outliving retention", async () => {
+  await putOldRecord("k1", [{ takenAt: "2026-10-01T00:00:00.000Z", data: job("k1", 0) }]);
+  for (let n = 1; n <= 10; n++) await Store.backup(job("k1", n));
+  await Store.backup(job("k1", 11), { keep: "k1" });                 // restoring from "Show older backups"
+  assert.equal(await Store.hasOlderBackups("k1"), true, "the older record being restored stays");
+  assert.equal((await Store.snapshots("k1")).length, 10, "the oldest snapshot still made room");
+  await Store.backup(job("k1", 12));                                   // no restore: it ages out as usual
+  assert.equal(await Store.hasOlderBackups("k1"), false);
+});
+
+await test("a Restore's backup on a full disk frees room around the snapshot being restored", async () => {
+  for (let n = 1; n <= 10; n++) await Store.backup(job("k2", n));
+  const oldest = (await Store.snapshots("k2")).at(-1).key;
+  quotaFailures = 1;
+  await Store.backup(job("k2", 11), { keep: oldest });
+  assert.equal(quotaFailures, 0);
+  const kept = (await Store.snapshots("k2")).map((s) => s.key);
+  assert.ok(kept.includes(oldest), "the snapshot being restored survives the free-up");
+  assert.equal((await Store.snapshot(oldest)).customer, "Job 1");
+  assert.equal((await Store.latestBackup("k2")).customer, "Job 11", "and the backup of the current copy landed");
+});
+
+await test("a Restore's backup on a full disk keeps the older-format backup being restored", async () => {
+  await putOldRecord("k3", [{ takenAt: "2026-10-01T00:00:00.000Z", data: job("k3", 0) }]);
+  for (let n = 1; n <= 3; n++) await Store.backup(job("k3", n));
+  quotaFailures = 1;
+  await Store.backup(job("k3", 4), { keep: "k3" });
+  assert.equal(quotaFailures, 0);
+  assert.equal(await Store.hasOlderBackups("k3"), true, "the older record being restored stays");
+  assert.equal((await Store.olderBackups("k3"))[0].data.customer, "Job 0");
+});
+
 console.log(`\n${pass} passed`);
