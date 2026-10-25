@@ -1319,23 +1319,25 @@ function backupsCard(project) {
 const backupCounts = (d) => `${(d && d.photos || []).length} photos, ${(d && d.moistureMaps || []).length} moisture maps, ` +
   `${(d && d.dryingLogs || []).length} drying logs, ${(d && d.constructionLogs || []).length} field reports`;
 /* a form only tapped open: every field still empty or as the factory made it
-   (any day's date, any freshly minted id) — what the form tile saves when a
-   job has none yet */
+   (any freshly minted id, and the dates it fills in, which are all the day it
+   was opened: one the crew set to another day makes it a filled form) — what
+   the form tile saves when a job has none yet */
 function tappedOpen(key, form) {
   const make = FACTORY[key];
   const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
   if (typeof make !== "function" || !isObj(form)) return false;
   const unset = (v) => v == null || v === "" || (Array.isArray(v) && !v.length);
   const day = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v);
+  const days = new Set();   // the plain dates (a createdAt stamp is UTC and never typed)
   const same = (v, b, k) => {
     if (k === "id" && typeof v === "string" && typeof b === "string") return true;
-    if (day(v) && day(b)) return true;
+    if (day(v) && day(b)) { if (v.length === 10) days.add(v); return true; }
     if (Array.isArray(v)) return Array.isArray(b) && v.length === b.length && v.every((x, i) => same(x, b[i]));
     if (isObj(v)) return isObj(b) && Object.keys(v).every((kk) => same(v[kk], b[kk], kk));
     return v === b;
   };
   const blank = make();
-  return Object.keys(form).every((k) => unset(form[k]) || same(form[k], blank[k], k));
+  return Object.keys(form).every((k) => unset(form[k]) || same(form[k], blank[k], k)) && days.size <= 1;
 }
 const sizeLabel = (bytes) => bytes >= 1048576
   ? `${(bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1)} MB`

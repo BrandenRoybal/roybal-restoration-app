@@ -100,7 +100,7 @@ P.transaction = function (names, mode, ...rest) {
 
 const { Store, onProjectSaved, autosave, unsavedProject, flushPending } = await import("../js/core.js");
 await import("../js/app.js");
-const { newWorkAuth, newCertCompletion } = await import("../js/model.js");
+const { newWorkAuth, newCertCompletion, newCertDrying } = await import("../js/model.js");
 
 const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 async function until(ok, ms = 4000) {
@@ -902,6 +902,67 @@ await test("a certificate of completion tapped open blank, then restored, comes 
   assert.equal(cc.sigOwnerName, "Dana Two Rivers");
   assert.deepEqual([cc.issueDate, cc.sigContractorDate, cc.sigOwnerDate], [SIGNED, SIGNED, SIGNED], "the signed dates, not today's");
   assert.equal(cc.warrantyWorkmanship, "2 years", "the warranty that was signed");
+});
+
+await test("a certificate tapped open on an Alaska evening, when its createdAt stamp is already tomorrow in UTC, still counts as blank", async () => {
+  const SIGNED = "2026-10-20";
+  const signed = { ...newCertCompletion(), issueDate: SIGNED, completionDate: "2026-10-19", scopeSummary: "Bath remodel",
+    sigOwner: "data:image/png;base64,T1dORVI=", sigOwnerName: "Lee Farmers Loop", sigOwnerDate: SIGNED };
+  const blank = newCertCompletion();
+  const tomorrow = new Date(Date.parse(blank.issueDate) + 86400e3).toISOString().slice(0, 10);
+  blank.createdAt = `${tomorrow}T02:30:00.000Z`;     // 6:30 PM the day before, Alaska time
+  const job = { id: "jobCE", jobType: "construction", constructionType: "remodel", customer: "Lee", address: "5 Farmers Loop Rd",
+    updatedAt: new Date().toISOString(), receipts: [], certCompletion: blank };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, updatedAt: "2026-10-21T00:00:00.000Z", certCompletion: signed });
+  await nav("#/p/jobCE");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  tap(buttons(/⏪ Restore/)[0]);
+  await until(() => toasted(/Recovered 1 form from the backup\./));
+  await settle(400);
+  const cc = (await Store.get("jobCE")).certCompletion;
+  assert.equal(cc.sigOwnerName, "Lee Farmers Loop");
+  assert.deepEqual([cc.issueDate, cc.sigOwnerDate], [SIGNED, SIGNED], "the signed dates, not the blank's");
+});
+
+await test("a certificate opened blank whose issue date the crew then set is a filled form: Restore keeps that date", async () => {
+  const SIGNED = "2026-10-22", SET = "2026-10-23";
+  const signed = { ...newCertDrying(), issueDate: SIGNED, sigTech: "data:image/png;base64,QlI=", sigTechName: "Branden", sigTechDate: SIGNED };
+  for (const [id, setAside] of [["jobCD", false], ["jobCS", true]]) {
+    const job = { id, jobType: "restoration", customer: "Badger", address: "7 Badger Rd", updatedAt: "2026-10-24T09:00:00.000Z", rev: 3, receipts: [] };
+    if (setAside) {                                  // this phone's signed copy, set aside for the cloud's
+      const local = { ...job, updatedAt: "2026-10-24T11:00:00.000Z", certDrying: signed };
+      delete local.rev;
+      await Store.put(local, { bump: false, quiet: true });
+      await nav(`#/p/${id}`);
+      await until(() => buttons(/Take the cloud.s copy/).length > 0);
+      cloudRow = { id, data: job, deleted: false, updated_at: job.updatedAt };
+      try {
+        tap(buttons(/Take the cloud.s copy/)[0]);
+        await until(() => toasted(/Took the cloud.s copy/));
+      } finally { cloudRow = null; }
+      await settle(900);
+      await nav("#/");
+    } else {                                         // sync's copy from before a newer one without the cert replaced it
+      await Store.put(job, { bump: false, quiet: true });
+      await Store.backup({ ...job, updatedAt: "2026-10-21T00:00:00.000Z", certDrying: signed });
+    }
+    await nav(`#/p/${id}/f/certDrying`);             // a blank, then the crew sets its issue date
+    type(input("Issue Date"), SET);
+    for (let i = 0; i < 150 && ((await Store.get(id)).certDrying || {}).issueDate !== SET; i++) await settle(30);
+    assert.equal((await Store.get(id)).certDrying.issueDate, SET, "the date the crew set is saved");
+    await nav(`#/p/${id}`);
+    await until(() => buttons(/⏪ Restore/).length > 0);
+    tap(buttons(/⏪ Restore/)[0]);
+    await until(() => toasted(setAside
+      ? /Recovered 1 form from the backup\. Where both had a value, the job's copy, saved at least as recently, kept its own\./
+      : /Recovered 1 form from the backup\./));
+    await settle(400);
+    const cd = (await Store.get(id)).certDrying;
+    assert.equal(cd.issueDate, SET, `the issue date the crew set stays (${setAside ? "set-aside" : "replaced"} backup)`);
+    assert.equal(cd.sigTechName, "Branden", "what the job's form lacked comes back");
+    assert.ok(cd.sigTech, "with the signature");
+  }
 });
 
 await test("a copy set aside before this update, whose record doesn't say what it is, still brings this phone's changes back", async () => {
