@@ -340,8 +340,11 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   is the receipt's vendor word for word (in any order, Inc./LLC aside; two
   words at least; never a store) scores +2 and may be dated up to 14 days
   after the invoice (Aaron Wall $5,385 on 10/09: check 438, Purchase 10701,
-  10/13); a check two receipts could be is neither's (`ambiguous`), the
-  same slip entered twice counting once. A return slip's
+  10/13); a check two receipts could be by the payee's name is neither's
+  (`ambiguous`), the same slip entered twice counting once, and a copy
+  whose twin already holds a check takes no other (it reads `duplicate`).
+  A check whose DocNumber is the invoice number, dated in the usual days,
+  is found by that number like any expense. A return slip's
   id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
   one receipt, and two equally good expenses are left to a person. Receipts
   dated in the last 60 days are matched; an older one keeps the row it had.
@@ -456,10 +459,11 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   office finished by hand for that project (every line tagged to it, a
   document attached), as it would be once the job is linked. That match is
   only ever noted `in_qbo` (with `detail.job_link` = `suggested_tagged`),
-  never put on a card and never counted toward the suggestion; an expense
-  another receipt could be, or two receipts could be, is no one's (the
-  same slip entered twice is one: its first copy matches, the other reads
-  `duplicate`).
+  never put on a card and never counted toward the suggestion, and it
+  holds the expense for no other night: a receipt uploaded since that the
+  expense names takes it. An expense another receipt could be, or two
+  receipts could be, is no one's (the same slip entered twice is one: its
+  first copy matches, the other reads `duplicate`).
 - **The door, per job.** Items → a new card (`filed`; the job's older open
   card is superseded). The same items on the same receipts as a card still
   open, or one already answered, stand (`unchanged`); one whose approval

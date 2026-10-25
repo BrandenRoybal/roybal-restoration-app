@@ -509,8 +509,14 @@ await test("every QuickBooks state reads in the office's words", async () => {
   // store entry held back (maybe_entered): an expense that may be it, or the same slip on another receipt
   assert.equal(t("conflict", { reason: "maybe_entered", candidates: ["10688"] }), "Check in QuickBooks: this invoice may already be entered");
   assert.equal(t("conflict", { reason: "maybe_entered", receipts: ["b"] }), "Check in QuickBooks: another receipt has the same invoice");
+  // a return's store credit found without the slip's number, untagged: the office tags it by hand
+  assert.equal(t("conflict", { reason: "credit_untagged", qbo_total: -1146.75 }, "10688"),
+    "Check in QuickBooks: a store credit without a job: tag it in QuickBooks");
   assert.equal(t("failed", { error: "changed_in_qbo: expense 10577 changed in QuickBooks since the card was filed" }),
     "QuickBooks refused: expense 10577 changed in QuickBooks since the card was filed");
+  // qbo-proxy refusing a store entry whose invoice is booked on another account: a refusal, not trouble that outlasted the retries
+  assert.equal(t("failed", { error: "entered_elsewhere: invoice 700665392 is already in QuickBooks as expense 10690 on 8992-MMB- Checking; nothing was written" }),
+    "QuickBooks refused: invoice 700665392 is already in QuickBooks as expense 10690 on 8992-MMB- Checking; nothing was written");
   // a refusal is QuickBooks (or the card) saying no; anything else outlasted the retries without QuickBooks answering
   assert.equal(t("failed"), "Couldn't update QuickBooks: the change didn't go through");
   assert.equal(t("failed", { error: "qbo_not_connected: QuickBooks is not connected" }), "Couldn't update QuickBooks: QuickBooks is not connected");

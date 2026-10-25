@@ -1287,6 +1287,7 @@ test("QuickBooks receipts: what came of it is counted from its outbox rows, refu
     qbo_unavailable: "QuickBooks was down", qbo_unreachable: "couldn't reach QuickBooks", storage_unavailable: "couldn't read the photo from storage",
     create_unclear: "QuickBooks didn't confirm the new expense", upload_unclear: "QuickBooks didn't confirm the photo",
     relinked: "the job's QuickBooks project changed after approval", link_unreadable: "couldn't read the job's QuickBooks link",
+    entered_elsewhere: "already in QuickBooks on another account",
   };
   const one = (error) => outcome(fromProposal({ ...executed, result: { queued: 1, skipped: 0 }, input: { ...qboInput, items: [hd] } },
     qboLook({ outbox: [row("dead", error)] })), NOW);

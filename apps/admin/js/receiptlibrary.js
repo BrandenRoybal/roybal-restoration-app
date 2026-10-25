@@ -410,6 +410,9 @@ function conflictWords(d) {
   if (d.reason === "claimed_by_other") return "another receipt has this expense";
   // a bill is only read, never written: the office tags it by hand (0025)
   if (d.reason === "bill_untagged") return "booked as a bill without a job: tag it in QuickBooks";
+  // a return's store credit found without the slip's number is never tagged
+  // from here: the office tags it by hand
+  if (d.reason === "credit_untagged") return "a store credit without a job: tag it in QuickBooks";
   // a rental paid in parts, where two sets of charges each add up (0025: detail.candidates)
   if (d.reason === "ambiguous_split") return "more than one set of charges adds up to it";
   // store entry held back: QuickBooks has an expense that may be this invoice
@@ -435,7 +438,7 @@ function refusalWords(err) {
 // apps/field/js/approvals.js (a test holds them equal).
 export const QBO_REFUSED_CODES = ["tagged_other", "partly_tagged", "untaggable", "untaggable_line", "changed_in_qbo",
   "purchase_missing", "photo_missing", "photo_type", "photo_unreadable", "photo_too_big", "upload_refused", "qbo_refused",
-  "bad_request", "relinked"];
+  "bad_request", "relinked", "entered_elsewhere"];
 const codeOf = (err) => (/^cancell?ed\b/i.test(String(err || "").trim()) ? "cancelled"
   : (/^([a-z_]+):/.exec(String(err || "").trim()) || [])[1] || "");
 // The photo QuickBooks refused after the tag (or the new entry) went in: the

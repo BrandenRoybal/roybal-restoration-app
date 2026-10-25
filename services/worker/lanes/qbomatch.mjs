@@ -629,10 +629,15 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // From 0025 a failed receipt that is still live holds its transactions
   // too: it is matched again tonight and may need them back, and no other
   // receipt takes a charge whose update was refused.
+  // A step 1a note (in_qbo, detail.job_link) holds nothing: step 1a works
+  // its match out again each night, and a receipt uploaded since that the
+  // expense names must find it in step 1, which keeps step 1a off it.
   const claimedBy = new Map();
   for (const l of links) {
     const live = liveIds.has(str(l.receipt_id));
-    if (!(l.state === "queued" || l.state === "done" || (l.state === "in_qbo" && live) || (v2 === true && l.state === "failed" && live))) continue;
+    const viaSuggestion = l.state === "in_qbo" && !!detailOf(l).job_link;
+    if (!(l.state === "queued" || l.state === "done" || (l.state === "in_qbo" && live && !viaSuggestion)
+        || (v2 === true && l.state === "failed" && live))) continue;
     if (str(l.qbo_txn_id)) claimedBy.set(txnKey(l.qbo_txn_type, l.qbo_txn_id), str(l.receipt_id));
     for (const part of Array.isArray(l.parts) ? l.parts : []) {
       if (str(part?.qbo_txn_id)) claimedBy.set(txnKey(l.qbo_txn_type, part.qbo_txn_id), str(l.receipt_id));
@@ -726,14 +731,24 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       const ok = admissible(r, p, returned);
       if (!ok) continue;
       const score = scoreOf(r, p, jobCustomer);
-      if (score >= MIN_SCORE) r.cands.push({ p, score, check: checkTo(r, p), byStore: ok.byStore });
+      if (score < MIN_SCORE) continue;
+      // byPayee: a check that rests on its payee's name, as its DocNumber
+      // does not name the receipt's invoice, or it is dated past the usual
+      // three days (only checkTo lets it in)
+      const check = checkTo(r, p);
+      r.cands.push({ p, score, check, byStore: ok.byStore,
+        byPayee: check && (!docAgrees(r.receipt_no, p.docNumber) || str(p.txnDate) > addDays(r.receipt_date, 3)) });
     }
     r.best = r.cands.reduce((m, c) => Math.max(m, c.score), 0);
   }
   // A check two receipts could be by its payee is neither's: a sub paid the
   // same sum twice (two jobs' equal draws) is not told apart by the name and
   // two weeks of dates, so a person decides (a conflict for each). The same
-  // invoice entered twice is one payee's claim, not two (firstTwin)
+  // invoice entered twice is one payee's claim, not two (firstTwin). Only a
+  // match that rests on the payee's name (byPayee) is held back so: a check
+  // whose DocNumber names the invoice, dated in the usual window, is that
+  // receipt's, though it still counts against one that could be it by the
+  // name alone
   const checkSeekers = new Map();       // txn key → the slips that could be it
   for (const r of eligible) {
     for (const c of r.cands) {
@@ -742,13 +757,19 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       checkSeekers.set(k, (checkSeekers.get(k) ?? new Set()).add(firstTwin(r, eligible)));
     }
   }
-  const shared = (c) => c.check && checkSeekers.get(txnKey(c.p.txnType, c.p.id)).size > 1;
+  const shared = (c) => c.byPayee && (checkSeekers.get(txnKey(c.p.txnType, c.p.id))?.size ?? 0) > 1;
+  // A slip one of its twins already holds an expense for (matched tonight,
+  // or its row: queued, done, failed or in_qbo) takes no check of its own:
+  // a sub's next equal check is another invoice's, and step 1c calls this
+  // copy a duplicate
+  const slipHeld = (r) => live.some((s) => s.id !== r.id && s.job_id === r.job_id && str(s.receipt_date) === str(r.receipt_date)
+    && sameSlip(r, s) && (!!s.match || ["queued", "done", "failed", "in_qbo"].includes(str(linkOf.get(s.id)?.state))));
   // The surest receipts choose first, so a weak match never takes the
   // expense a strong one needs; ties go by date, then id (the same order
   // every night).
   const taken = new Set();
   for (const r of [...eligible].sort((a, b) => b.best - a.best || byText(a.receipt_date, b.receipt_date) || byText(a.id, b.id))) {
-    const left = r.cands.filter((c) => !taken.has(txnKey(c.p.txnType, c.p.id)));
+    const left = r.cands.filter((c) => !taken.has(txnKey(c.p.txnType, c.p.id)) && !(c.check && slipHeld(r)));
     if (!left.length) continue;
     const top = Math.max(...left.map((c) => c.score));
     const tops = left.filter((c) => c.score === top);
@@ -758,7 +779,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     }
     r.match = tops[0].p;
     r.byStore = tops[0].byStore === true;
-    r.byPayee = tops[0].check === true;
+    r.byPayee = tops[0].byPayee === true;
     taken.add(txnKey(r.match.txnType, r.match.id));
   }
 
