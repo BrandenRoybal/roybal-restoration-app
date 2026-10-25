@@ -492,8 +492,8 @@ await test("a write that went around the page's copy with an older stamp (a cloc
 });
 
 /* the page's copy saving itself while the backup is written (a receipt read
-   landing on it) writes over the stored row: the read Restore took before its
-   backup is then the only copy of the write that went around, so it is still unioned in */
+   landing on it) writes over the stored row: the write that went around that
+   copy is kept because Restore unioned its read into the copy before the backup */
 await test("a write that went around the page's copy is kept when a read saves that copy during Restore's backup", async () => {
   await jobWithLostReceipt("jobV");
   const answer = await readOutThenJobPage("jobV");
@@ -579,6 +579,27 @@ await test("on a job stamped ahead of the phone's clock, an AI timeline draft la
   const after = await Store.get("jobS");
   assert.deepEqual(after.receipts.map((r) => r.id), ["lost"]);
   assert.equal(`${after.boardPlan.status}:${after.boardPlan.phases.map((p) => p.name).join("+")}`, "draft:Demo+Drywall", "the new draft is kept");
+});
+
+/* a backup taken while a server merge had the job stamped ahead of this phone,
+   and the job since saved by a landing stamped with this phone's clock: the
+   backup's stamp is the later one, but it is never the newer side */
+await test("a backup stamped ahead of the job never puts its old values back over the job's", async () => {
+  const at = (min) => new Date(Date.now() + min * 60e3).toISOString();
+  const job = { id: "jobG", jobType: "restoration", customer: "Rivera & Sons", address: "7 Rivera Ln", claimNo: "CLM-2", updatedAt: at(0),
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 120, items: [] }] };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, customer: "Rivera", claimNo: "CLM-1", updatedAt: at(4),
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 100, items: [] }, { id: "lost", vendor: "Rental Zone", amount: 42, items: [] }] });
+  await nav("#/p/jobG");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  const after = await Store.get("jobG");
+  assert.deepEqual(after.receipts.map((r) => `${r.id}:${r.amount}`).sort(), ["lost:42", "r1:120"], "the lost receipt is back; r1 keeps its corrected amount");
+  assert.equal(after.customer, "Rivera & Sons", "the corrected name stays");
+  assert.equal(after.claimNo, "CLM-2", "the corrected claim number stays");
 });
 
 await test("a backup stamped while the phone's clock ran ahead says its time is off", async () => {

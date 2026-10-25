@@ -1,14 +1,15 @@
 /* The backups card's Restore while sync pulls an office edit to the same job
    (apps/field/js/app.js backupRow, sync.js pull, the app's onSyncRowChanged
-   graft; jsdom). Restore reads the stored copy, saves it as a backup, then
-   unions that read into the page's copy when their stamps differ, for a write
-   that went around the page's copy. When sync clean-applies the office's row
-   and grafts it into the page's copy while the backup saves, the page's copy
-   is newer than that read: the union filled what the office cleared from the
-   old read and added the old room name back, and the restore pushed it.
-   On an iPhone the pull lands there when WebKit runs its save between
-   Restore's read and its backup; here the harness holds back the backup's
-   "complete" until the pull has landed and been grafted.
+   graft; jsdom). Restore unions its read of the stored copy into the page's
+   copy, for a write that went around that copy, in the tick the read arrives
+   and before its backup. When sync clean-applies the office's row and grafts
+   it into the page's copy while the backup saves, the graft lands on top.
+   A union done after the backup judged the grafted copy against the older
+   read: it filled what the office cleared and added the old room name back,
+   and the restore pushed it. On an iPhone the pull lands there when WebKit
+   runs its save between Restore's read and its backup; here the harness
+   holds back the backup's "complete" until the pull has landed and been
+   grafted.
    Run: node apps/field/test/restore-sync.test.mjs   (from repo root) */
 import assert from "node:assert/strict";
 import { JSDOM, VirtualConsole } from "jsdom";

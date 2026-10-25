@@ -1386,10 +1386,12 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
       // an edit queued meanwhile on another copy of the job would save over this one
       const queued = unsavedProject(id);
       if (queued && queued !== live) return stillSaving();
-      const snap = { ...data };
-      delete snap.rev;
       // UNION, never replace: the current copy is the newer side, so its
-      // scalars win and the snapshot only contributes what went missing.
+      // scalars win and the snapshot only contributes what went missing. A
+      // backup taken while the job was stamped by a clock ahead of this
+      // phone's would otherwise be "newer" and put its old values back
+      const snap = { ...data, updatedAt: "" };
+      delete snap.rev;
       const { merged, added, filledForms } = base
         ? mergeProjects(base, snap)
         : { merged: snap, added: 0, filledForms: 0 };
