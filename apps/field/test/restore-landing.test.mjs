@@ -491,6 +491,52 @@ await test("a write that went around the page's copy with an older stamp (a cloc
   assert.equal(after.progressNarrative, "Week 2: drywall hung and taped.", "the update is kept");
 });
 
+/* the page's copy saving itself while the backup is written (a receipt read
+   landing on it) writes over the stored row: the read Restore took before its
+   backup is then the only copy of the write that went around, so it is still unioned in */
+await test("a write that went around the page's copy is kept when a read saves that copy during Restore's backup", async () => {
+  await jobWithLostReceipt("jobV");
+  const answer = await readOutThenJobPage("jobV");
+  const row = await Store.get("jobV");
+  await Store.put({ ...row, photos: [{ id: "ph1", caption: "from the office" }] }, { quiet: true });
+  onBackupTx = () => answer(spenard);
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  assert.equal(onBackupTx, null, "the read answered inside the restore");
+  assert.deepEqual(await stored("jobV"), ["R1:Spenard Builders Supply", "lost:Rental Zone"]);
+  assert.deepEqual(((await Store.get("jobV")).photos || []).map((p) => p.id), ["ph1"], "the other write is kept");
+});
+
+await test("a Progress Update saved around the page's copy is kept when a read saves that copy during Restore's backup", async () => {
+  const job = { id: "jobX", jobType: "construction", constructionType: "remodel", customer: "Ester", address: "4 Ester Dome Rd",
+    updatedAt: "2026-10-20T00:00:00.000Z", receipts: [{ id: "R1", photo, extraPages: [], vendor: "", amount: "", items: [] }] };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, receipts: [...job.receipts, { id: "lost", vendor: "Rental Zone", amount: 42, items: [] }] });
+  const answerRead = await readOutThenJobPage("jobX");
+  // a Progress Update asked for, then back to the job home while it's written
+  await nav("#/p/jobX/progress");
+  await until(() => buttons(/Generate update/).length > 0);
+  holdDraft = [];
+  buttons(/Generate update/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const answer = holdDraft[0];
+  holdDraft = null;
+  await nav("#/p/jobX");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  toasts.length = 0;
+  answer();
+  await until(() => toasted(/Progress update drafted/));
+  await settle(200);
+  onBackupTx = () => answerRead(spenard);
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  assert.equal(onBackupTx, null, "the read answered inside the restore");
+  assert.deepEqual(await stored("jobX"), ["R1:Spenard Builders Supply", "lost:Rental Zone"]);
+  assert.equal((await Store.get("jobX")).progressNarrative, "Week 2: drywall hung and taped.", "the update is kept");
+});
+
 await test("a backup stamped while the phone's clock ran ahead says its time is off", async () => {
   const job = { id: "jobK", jobType: "restoration", customer: "Kodiak", address: "3 Kodiak Ct", updatedAt: "2026-10-20T00:00:00.000Z", receipts: [] };
   await Store.put(job, { bump: false, quiet: true });
