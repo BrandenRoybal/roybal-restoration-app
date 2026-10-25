@@ -345,11 +345,18 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   whose twin already holds a check takes no other (it reads `duplicate`).
   A check whose DocNumber is the invoice number, dated in the usual days,
   is found by that number like any expense. A check found by the payee's
-  name and noted `in_qbo` says so (`detail.by_payee`): on later nights it
-  holds the check against a receipt the name alone reaches, never against
-  the invoice its DocNumber names. A receipt in QuickBooks on an expense
-  tonight's read no longer holds takes no check by the name in its place;
-  it keeps its row. A return slip's
+  name alone is never tagged, the same rule as a return's credit found
+  without the slip's number: tagged to the job's project (its link, or the
+  card's suggestion from the job's other matches) it gets the invoice's
+  photo or is `in_qbo`; untagged it is a conflict, `check_untagged`, that
+  the office tags by hand; tagged elsewhere, `tagged_other`. Noted `in_qbo`
+  it says so (`detail.by_payee`): on later nights it holds the check
+  against a receipt the name alone reaches too, never against one it does
+  not (the invoice its DocNumber names, dated in the usual days, however
+  its vendor reads). A receipt in QuickBooks on an expense it can no longer
+  be tonight (deleted, voided or changed in QuickBooks) takes no check by
+  the name in its place, though it still counts against another receipt
+  the name reaches; it keeps its row. A return slip's
   id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
   one receipt, and two equally good expenses are left to a person. Receipts
   dated in the last 60 days are matched; an older one keeps the row it had.
@@ -431,7 +438,9 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
     may already hold, `detail.candidates`, or another receipt carries on
     another job or day, `detail.receipts`; below),
     `credit_untagged` (a return's store credit found without the slip's
-    number, below, with no job tag: the office tags it by hand).
+    number, below, with no job tag: the office tags it by hand),
+    `check_untagged` (a sub's check found by the payee's name, above, with
+    no job tag: the office tags it by hand).
   A return (a negative total, such as the app's `<receipt id>~ret`) matches
   only a credit (`Credit = true`). A return slip often prints the invoice it
   returns, which the reader takes for the slip's number, while the

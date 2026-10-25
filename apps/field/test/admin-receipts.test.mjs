@@ -512,6 +512,9 @@ await test("every QuickBooks state reads in the office's words", async () => {
   // a return's store credit found without the slip's number, untagged: the office tags it by hand
   assert.equal(t("conflict", { reason: "credit_untagged", qbo_total: -1146.75 }, "10688"),
     "Check in QuickBooks: a store credit without a job: tag it in QuickBooks");
+  // a sub's check found by its payee's name alone, untagged: never tagged from here either
+  assert.equal(t("conflict", { reason: "check_untagged", qbo_total: 5385, qbo_doc_number: "438" }, "10701"),
+    "Check in QuickBooks: a check to this payee without a job: tag it in QuickBooks");
   assert.equal(t("failed", { error: "changed_in_qbo: expense 10577 changed in QuickBooks since the card was filed" }),
     "QuickBooks refused: expense 10577 changed in QuickBooks since the card was filed");
   // qbo-proxy refusing a store entry whose invoice is booked on another account: a refusal, not trouble that outlasted the retries

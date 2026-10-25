@@ -670,6 +670,27 @@ test("a check is the receipt's only when it is a check, to the receipt's vendor 
   }
 });
 
+test("a check found by its payee's name is never tagged from here: untagged it is a conflict the office tags by hand, as a return's credit found without the slip's number; a tag needs the number", () => {
+  const bare = p10701({ lines: [line({ amount: 5385, accountId: "83" })] });
+  // linked, not linked with the job's other matches suggesting 502 (FS&G 209998), or not linked at all: the check is
+  // recorded, and nothing goes on a card for it (before, a linked job's card tagged it and attached the photo)
+  for (const [receipts, jobs] of [[[aw()], [awJob()]], [[fsgChena, aw()], [awJob({ link: null })]], [[aw()], [awJob({ link: null })]]]) {
+    const res = awRun(receipts, [p10621, bare], jobs);
+    assert.deepEqual(noteOf(res, "aw"), { receipt_id: "aw", job_id: OTHER, amount: 5385, receipt_date: "2026-10-09", state: "conflict",
+      qbo_txn_type: "Purchase", qbo_txn_id: "10701", qbo_sync_token: "0", qbo_customer_id: null,
+      detail: { reason: "check_untagged", qbo_doc_number: "438", qbo_account_name: "8992-MMB- Checking", qbo_total: 5385 } }, JSON.stringify(jobs[0].link));
+    assert.deepEqual(itemsOf(res, OTHER), []);
+  }
+  // tagged by hand to the job (check 438 on Oct 21): the photo only, or nothing to do once its document is there
+  assert.equal(awFound(awRun([aw()], [p10701()])), "card 10701 attach");
+  assert.equal(awFound(awRun([aw()], [p10701({ attachments: ["Aaron Wall 1885.pdf"], hasAttachment: true })])), "in_qbo 10701");
+  // the check's DocNumber is the invoice number, dated in the usual days: found by that number, it is tagged and photographed
+  const numbered = aw({ receipt_no: "2025117" });
+  assert.equal(awFound(awRun([numbered], [{ ...bare, docNumber: "2025117", txnDate: "2026-10-09" }])), "card 10701 tag+attach");
+  // the same check dated past the usual days: only the payee's name lets it in
+  assert.equal(awFound(awRun([numbered], [{ ...bare, docNumber: "2025117" }])), "conflict check_untagged");
+});
+
 test("a check found by its payee's name never suggests the job's link: tagged by hand to another job's project, the card would have linked this job there", () => {
   const to517 = (p) => ({ ...p, lines: p.lines.map((l) => ({ ...l, customerId: "517", customerName: "292 Beechwood St. - Stevens", projectRef: "815364056" })) });
   const unlinked = [awJob({ link: null })];
@@ -740,6 +761,39 @@ test("a copy of an invoice whose twin holds a check takes no other check: the su
   res = runV2({ receipts: [twin("aw1"), twin("aw2")], purchases: [p10720], links: [inQbo()], jobs: [awJob()], today: AW_TODAY });
   const { proposal_id: _, ...asItWas } = inQbo();
   assert.deepEqual([res.cards, noteOf(res, "aw2"), noteOf(res, "aw1").detail], [[], asItWas, { reason: "duplicate", duplicate_of: "aw2" }]);
+  // the same with check 438 voided there (QuickBooks keeps it, at $0) or its amount changed: no longer one it could be
+  for (const changed of [{ syncToken: "1", total: 0, note: "Voided", lines: [line({ amount: 0, accountId: "83" })] }, { syncToken: "1", total: 5358 }]) {
+    res = runV2({ receipts: [twin("aw1"), twin("aw2")], purchases: [p10701(changed), p10720], links: [inQbo()], jobs: [awJob()], today: AW_TODAY });
+    assert.deepEqual([res.cards, noteOf(res, "aw2"), noteOf(res, "aw1").detail], [[], asItWas, { reason: "duplicate", duplicate_of: "aw2" }],
+      JSON.stringify(changed));
+  }
+  // gone, with no other check of the sum: not in QuickBooks, as a receipt with no row reads (never kept on the deleted id)
+  res = runV2({ receipts: [twin("aw2")], purchases: [], links: [inQbo()], jobs: [awJob()], today: AW_TODAY });
+  assert.equal(awFound(res, "aw2"), "unmatched store_not_entered");
+  // a row that is not in QuickBooks (not entered, the night before the check was written; or a person's to decide) holds
+  // no expense: tonight it finds the check by the payee's name, as a receipt with no row does
+  const none = { qbo_txn_type: null, qbo_txn_id: null, qbo_sync_token: null, qbo_customer_id: null };
+  for (const row of [inQbo({ ...none, state: "unmatched", detail: { reason: "store_not_entered" } }),
+    inQbo({ ...none, state: "conflict", detail: { reason: "ambiguous", candidates: ["10701"] } })]) {
+    res = runV2({ receipts: [twin("aw2")], purchases: [p10701()], links: [row], jobs: [awJob()], today: AW_TODAY });
+    assert.equal(awFound(res, "aw2"), "card 10701 attach", row.state);
+  }
+  // gone, and tonight a check by its number too (10731, on the invoice's day, untagged): that one, as any receipt takes it
+  const p10731 = p10701({ id: "10731", txnDate: "2026-10-09", docNumber: "20251009", lines: [line({ amount: 5385, accountId: "83" })] });
+  res = runV2({ receipts: [twin("aw2")], purchases: [p10720, p10731], links: [inQbo()], jobs: [awJob()], today: AW_TODAY });
+  assert.equal(awFound(res, "aw2"), "card 10731 tag+attach");
+  // a run for another job answers for that job only: no row for this one (the note door would clear the job's other rows)
+  res = runV2({ receipts: [twin("aw2")], purchases: [p10720], links: [inQbo()], jobs: [awJob(), job({ link: LINK })], today: AW_TODAY,
+    scope: [ALSTON] });
+  assert.deepEqual(res.notes, []);
+  // gone, and another numberless invoice of the sum (aw5, 10/11) reaches the check the office entered in its place (10725: 10/13,
+  // #438) by the name alone, as aw2 does: still two claims, so a person decides (before, aw5 took it, and the card put its photo
+  // on what may be aw2's check)
+  const aw5 = aw({ id: "aw5", receipt_date: "2026-10-11", photo_ref: photo(12) });
+  for (const p10725 of [p10701({ id: "10725" }), p10701({ id: "10725", lines: [line({ amount: 5385, accountId: "83" })] })]) {
+    res = runV2({ receipts: [twin("aw2"), aw5], purchases: [p10725], links: [inQbo()], jobs: [awJob()], today: AW_TODAY });
+    assert.deepEqual([res.cards, noteOf(res, "aw2"), noteOf(res, "aw5").detail], [[], asItWas, { reason: "ambiguous", candidates: ["10725"] }]);
+  }
   // the same invoice number on another day, or on another job, is no twin (as firstTwin and step 1c read it): it still
   // competes for the sub's next equal check, and a person decides
   const numbered = (over = {}) => aw({ receipt_no: "2025117", ...over });
@@ -753,7 +807,7 @@ test("a copy of an invoice whose twin holds a check takes no other check: the su
 
 test("one invoice entered on two jobs, or on two days, is two claims on one check: a person decides, and no card tags it to either", () => {
   const untagged = p10701({ lines: [line({ amount: 5385, accountId: "83" })] });
-  // on 1885 Chena Landings (502) and on 2156 Alston rd. (112): one claim, and the card would have tagged the check to the first by id
+  // on 1885 Chena Landings (502) and on 2156 Alston rd. (112): one claim, and the first by id would have taken the check
   let res = run({ receipts: [aw({ id: "aw-a", receipt_no: "2025117" }), aw({ id: "aw-c", job_id: ALSTON, receipt_no: "2025117" })],
     purchases: [untagged], jobs: [awJob(), job({ link: LINK })], today: AW_TODAY });
   assert.deepEqual([res.cards, reasons(res)], [[], { "aw-a": "ambiguous", "aw-c": "ambiguous" }]);
@@ -812,6 +866,23 @@ test("a check whose DocNumber is the receipt's invoice number, dated in the usua
   assert.deepEqual([awFound(n1, "aw0"), noteOf(n1, "aw0").detail.by_payee], ["in_qbo 10701", true]);
   assert.deepEqual([awFound(n2), awFound(n2, "aw0")], ["in_qbo 10701", "unmatched store_not_entered"]);
   assert.deepEqual([awFound(fresh), awFound(fresh, "aw0")], ["in_qbo 10701", "unmatched store_not_entered"]);
+  // however the reader took the invoice's vendor, or how it was paid: the name holds nothing against a receipt it does not reach
+  for (const over of [{ vendor: "Aaron Wall Electric" }, { paid_with: "card" }]) {
+    [, n2] = nights([aw0], [numbered(over)], [finished]);
+    assert.deepEqual([awFound(n2), awFound(n2, "aw0")], ["in_qbo 10701", "unmatched store_not_entered"], JSON.stringify(over));
+  }
+  // an invoice the check names but dated more than three days before it reaches it by the name alone too: the hold stands
+  // (holding nothing would turn the settled one and the newcomer into two conflicts)
+  const later = byNumber({ txnDate: "2026-10-13", attachments: ["Aaron Wall 2025117.pdf"], hasAttachment: true });
+  [n1, n2] = nights([aw({ id: "aw0", receipt_date: "2026-10-10", photo_ref: photo(10) })], [numbered()], [later]);
+  assert.deepEqual([awFound(n1, "aw0"), awFound(n2, "aw0"), awFound(n2)], ["in_qbo 10701", "in_qbo 10701", "unmatched store_not_entered"]);
+  // one the name does not reach (the vendor misread, no number) but other evidence does (paid from the checking account the
+  // check is drawn on, on the check's day, the check finished for the job: FBX's rule) takes it, as on a fresh run
+  const fromChecking = aw({ id: "awz", vendor: "Aron Wall", paid_with: "account", card_last4: "8992", receipt_no: "", receipt_date: "2026-10-13",
+    photo_ref: photo(13) });
+  [n1, n2, fresh] = nights([aw({ id: "aw0", receipt_date: "2026-10-14", photo_ref: photo(10) })], [fromChecking], [later]);
+  assert.deepEqual([awFound(n1, "aw0"), awFound(n2, "awz"), awFound(n2, "aw0"), awFound(fresh, "awz")],
+    ["in_qbo 10701", "in_qbo 10701", "unmatched store_not_entered", "in_qbo 10701"]);
   // the same where the numberless one was left alone on that check by another invoice taking its own check by number
   // (2025110 on 10700, 10/13): invoice 2025117, uploaded since, still takes 10701
   const awx = numbered({ id: "awx", receipt_date: "2026-10-13", receipt_no: "2025110", photo_ref: photo(11) });

@@ -413,6 +413,8 @@ function conflictWords(d) {
   // a return's store credit found without the slip's number is never tagged
   // from here: the office tags it by hand
   if (d.reason === "credit_untagged") return "a store credit without a job: tag it in QuickBooks";
+  // so is a check found by its payee's name alone: the matcher never tags it
+  if (d.reason === "check_untagged") return "a check to this payee without a job: tag it in QuickBooks";
   // a rental paid in parts, where two sets of charges each add up (0025: detail.candidates)
   if (d.reason === "ambiguous_split") return "more than one set of charges adds up to it";
   // store entry held back: QuickBooks has an expense that may be this invoice
