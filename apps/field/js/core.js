@@ -369,7 +369,10 @@ export const Store = {
 
      opts.keep: a snapshot key (or the bare job id, for the pre-split record)
      this backup must not prune — the one a Restore is reading from, so the
-     backup of the current copy taken just before can't delete it. */
+     backup of the current copy taken just before can't delete it.
+     opts.discarded: this copy is this phone's own work being thrown away
+     ("Take the cloud's copy"), not an older copy sync replaced; Restore
+     reads it back as such (snapshotEntry). */
   async backup(project, opts = {}) {
     if (!project || !project.id) return;
     const id = project.id;
@@ -405,6 +408,7 @@ export const Store = {
     });
     try {
       rec = { jobId: id, bytes: approxBytes(project), data: project };
+      if (opts.discarded) rec.discarded = true;
       try {
         await save();
       } catch (e) {
@@ -439,6 +443,11 @@ export const Store = {
   async snapshot(key) {
     const rec = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(key), set));
     return (rec && rec.data) || null;
+  },
+  /** One snapshot as { data, discarded }, or null when it is gone. */
+  async snapshotEntry(key) {
+    const rec = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(key), set));
+    return rec && rec.data ? { data: rec.data, discarded: rec.discarded === true } : null;
   },
   /** The newest snapshot's copy of the job (one record loaded), or null. */
   async latestBackup(id) {

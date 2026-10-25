@@ -955,7 +955,7 @@ export async function reloadFromCloud(id) {
     // garbage images — refuse rather than write a corrupt copy
     throw new Error(`${missing} photo${missing === 1 ? "" : "s"} on the cloud copy haven't finished uploading from the other device. Try again in a minute.`);
   }
-  if (local) await Store.backup(local);       // the discarded copy stays restorable on this device
+  if (local) await Store.backup(local, { discarded: true });   // the discarded copy stays restorable on this device
   full.id = id;
   delete full.rev;                            // revs live in sync bookkeeping, not the blob
   settleMerged(full);

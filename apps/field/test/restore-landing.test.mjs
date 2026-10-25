@@ -39,13 +39,14 @@ window.requestAnimationFrame = globalThis.requestAnimationFrame;
 window.confirm = () => true;
 globalThis.confirm = window.confirm;
 window.scrollTo = () => {};
+window.alert = () => {};
 const ctxStub = new Proxy({}, { get: () => () => {} });
 window.HTMLCanvasElement.prototype.getContext = () => ctxStub;
 window.HTMLCanvasElement.prototype.toDataURL = () => "data:image/png;base64,stub";
 // each receipt read waits here until the test answers it; so does an AI draft while holdDraft is set,
 // and the board's answer to "site visit done" while holdBoard is
 const asks = [];
-let holdDraft = null, holdBoard = null;
+let holdDraft = null, holdBoard = null, cloudRow = null;
 const held = (hold, body) => hold ? new Promise((resolve) => hold.push(() => resolve(body()))) : Promise.resolve(body());
 globalThis.fetch = window.fetch = (url, opts = {}) => {
   let body = {};
@@ -64,6 +65,9 @@ globalThis.fetch = window.fetch = (url, opts = {}) => {
     return held(holdDraft, () => ({ ok: true, status: 200, json: async () => ({ ok: true, draft: { narrative: "Week 2: drywall hung and taped." } }) }));
   if (holdBoard && /coordination_jobs\?select=id,data/.test(String(url)))
     return held(holdBoard, () => ({ ok: true, status: 200, json: async () => [] }));
+  // the server's row for "Take the cloud's copy", while cloudRow is set
+  if (cloudRow && String(url).includes(`/rest/v1/field_projects?id=eq.${cloudRow.id}&select=id,data,deleted,updated_at`))
+    return Promise.resolve({ ok: true, status: 200, json: async () => [cloudRow], text: async () => "" });
   return Promise.reject(new TypeError("offline in this test"));
 };
 const quiet = { error: console.error, warn: console.warn };
@@ -94,6 +98,7 @@ P.transaction = function (names, mode, ...rest) {
 
 const { Store, onProjectSaved, autosave, unsavedProject, flushPending } = await import("../js/core.js");
 await import("../js/app.js");
+const { newWorkAuth } = await import("../js/model.js");
 
 const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 async function until(ok, ms = 4000) {
@@ -242,18 +247,19 @@ await test("a read that lands in the same tick as Restore's merge is kept", asyn
   await jobWithLostReceipt("jobS3");
   const answer = await readOutThenJobPage("jobS3");
   // the merge reading the backup's receipts is the moment the read answers
-  const snap = Store.snapshot;
-  Store.snapshot = async (k) => {
-    const d = await snap.call(Store, k);
-    if (!d || d.id !== "jobS3") return d;
+  const entry = Store.snapshotEntry;
+  Store.snapshotEntry = async (k) => {
+    const got = await entry.call(Store, k);
+    const d = got && got.data;
+    if (!d || d.id !== "jobS3") return got;
     let fired = false; const rc = d.receipts;
     Object.defineProperty(d, "receipts", { enumerable: true, configurable: true, get() { if (!fired) { fired = true; answer(spenard); } return rc; } });
-    return d;
+    return got;
   };
   try {
     tap(buttons(/⏪ Restore/)[0]);
     await recovered();
-  } finally { Store.snapshot = snap; }
+  } finally { Store.snapshotEntry = entry; }
   await until(() => toasted(/Read Spenard/));
   await settle(800);
   assert.deepEqual(await stored("jobS3"), ["R1:Spenard Builders Supply", "lost:Rental Zone"]);
@@ -629,6 +635,110 @@ await test("a backup stamped while the phone's clock ran ahead says its time is 
     await until(() => buttons(/⏪ Restore/).length === 3);
     assert.deepEqual(marked(), [true, false, false]);
   } finally { Date.now = realNow; }
+});
+
+await test("on a job stamped ahead of the phone's clock, a regenerated Progress Update saved around the page's copy is kept by a Restore", async () => {
+  // the job already has an update, so both copies hold one: the stamps alone would keep the old
+  const ahead = new Date(Date.now() + 5 * 60e3).toISOString();
+  const job = { id: "jobRG", jobType: "construction", constructionType: "remodel", customer: "Ester", address: "9 Ester Dome Rd", updatedAt: ahead, receipts: [],
+    progressNarrative: "Week 1: demo done.", progressNarrativeDate: "2026-10-18" };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, updatedAt: "2026-10-20T00:00:00.000Z", receipts: [{ id: "lost", vendor: "Rental Zone", amount: 42, items: [] }] });
+  await nav("#/p/jobRG/progress");
+  await until(() => buttons(/Generate update|Regenerate/).length > 0);
+  holdDraft = [];
+  buttons(/Generate update|Regenerate/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const answer = holdDraft[0];
+  holdDraft = null;
+  await nav("#/p/jobRG");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  toasts.length = 0;
+  answer();                                          // saved on a store copy, stamped by this phone's clock
+  await until(() => toasted(/Progress update drafted/));
+  await settle(200);
+  const mid = await Store.get("jobRG");
+  assert.equal(mid.progressNarrative, "Week 2: drywall hung and taped.");
+  assert.ok(mid.updatedAt < ahead, "the store write's stamp is behind the page copy's");
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  const after = await Store.get("jobRG");
+  assert.deepEqual(after.receipts.map((r) => r.id), ["lost"]);
+  assert.equal(after.progressNarrative, "Week 2: drywall hung and taped.", "the new update is kept, not the old one");
+});
+
+await test("after \"Take the cloud's copy\", Restore brings this phone's unsynced changes back, and a form it only tapped open never covers the signed one", async () => {
+  const SIGNED = "2026-10-20";
+  const signed = { ...newWorkAuth(), date: SIGNED, scope: { 0: true, 1: true, 2: true, 3: true, 4: false, 5: false, 6: true, 7: true }, smsConsent: true,
+    ownerSig: "data:image/png;base64,T1dORVI=", ownerName: "Pat Chena", ownerDate: SIGNED, repSig: "data:image/png;base64,UkVQ", repName: "Branden", repDate: SIGNED };
+  // the cloud's copy, with the work auth another phone had the owner sign
+  const cloud = { id: "jobTC", jobType: "restoration", customer: "Chena", address: "5 Chena Pump Rd", claimNo: "CLM-1", updatedAt: "2026-10-24T09:00:00.000Z", rev: 7,
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 100, items: [] }], workAuth: signed };
+  // this phone's later work, never synced; it had only tapped the work auth open
+  const local = { ...cloud, customer: "Chena Hot Springs LLC", claimNo: "CLM-7", updatedAt: "2026-10-24T11:00:00.000Z", workAuth: newWorkAuth(),
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 120, items: [] }, { id: "r2", vendor: "Rental Zone", amount: 42, items: [] }] };
+  delete local.rev;
+  await Store.put(local, { bump: false, quiet: true });
+  await nav("#/p/jobTC");
+  await until(() => buttons(/Take the cloud.s copy/).length > 0);
+  cloudRow = { id: "jobTC", data: cloud, deleted: false, updated_at: cloud.updatedAt };
+  try {
+    tap(buttons(/Take the cloud.s copy/)[0]);
+    await until(() => toasted(/Took the cloud.s copy/));
+  } finally { cloudRow = null; }
+  await settle(900);                                 // its reload is a no-op here: open the job again
+  await nav("#/");
+  await nav("#/p/jobTC");
+  assert.equal((await Store.get("jobTC")).claimNo, "CLM-1", "the cloud's copy replaced this phone's");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  let asked = "";
+  globalThis.confirm = window.confirm = (m) => { asked = m; return true; };
+  try {
+    tap(buttons(/⏪ Restore/)[0]);
+    await until(() => toasted(/Brought back this phone's changes from before it took the cloud's copy\./));
+  } finally { globalThis.confirm = window.confirm = () => true; }
+  assert.match(asked, /set aside when it took the cloud's copy/, "the Restore question says what this backup is");
+  await settle(400);
+  const after = await Store.get("jobTC");
+  assert.deepEqual(after.receipts.map((r) => `${r.id}:${r.amount}`).sort(), ["r1:120", "r2:42"], "the new receipt and the corrected amount are back");
+  assert.equal(after.customer, "Chena Hot Springs LLC");
+  assert.equal(after.claimNo, "CLM-7");
+  const wa = after.workAuth;
+  assert.equal(wa.ownerName, "Pat Chena", "the signed work auth stays");
+  assert.deepEqual([wa.date, wa.ownerDate, wa.repDate], [SIGNED, SIGNED, SIGNED], "with its signed dates");
+  assert.equal(wa.scope[4], false, "the scope the owner declined stays unchecked");
+  assert.equal(wa.smsConsent, true);
+  // the set-aside copy again: the job now has all of it
+  assert.equal((await Store.snapshots("jobTC")).length, 2, "the set-aside copy and the one Restore saved first");
+  await until(() => buttons(/⏪ Restore/).length >= 2);
+  tap(buttons(/⏪ Restore/).pop());                  // the oldest: the set-aside copy
+  await until(() => toasted(/Nothing was missing/));
+  await settle(400);
+  assert.equal((await Store.get("jobTC")).claimNo, "CLM-7");
+});
+
+await test("a work authorization tapped open blank, then restored, comes back as signed: its dates, scope and text opt-in", async () => {
+  const SIGNED = "2026-10-20";
+  const signed = { ...newWorkAuth(), date: SIGNED, scope: { 0: true, 1: true, 2: true, 3: true, 4: false, 5: false, 6: true, 7: true }, smsConsent: true,
+    ownerSig: "data:image/png;base64,T1dORVI=", ownerName: "Pat Chena", ownerDate: SIGNED, repSig: "data:image/png;base64,UkVQ", repName: "Branden", repDate: SIGNED };
+  const job = { id: "jobWA", jobType: "restoration", customer: "Chena Ridge HOA", address: "4 Chena Ridge Rd", updatedAt: new Date().toISOString(), receipts: [] };
+  await Store.put(job, { bump: false, quiet: true });
+  // sync's copy from before a newer one without the work auth replaced it
+  await Store.backup({ ...job, updatedAt: "2026-10-21T00:00:00.000Z", workAuth: signed });
+  await nav("#/p/jobWA/f/workAuth");                  // "where did it go?": the tile saves a blank
+  assert.ok((await Store.get("jobWA")).workAuth, "opening the form saved a blank");
+  await nav("#/p/jobWA");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  tap(buttons(/⏪ Restore/)[0]);
+  await until(() => toasted(/Recovered 1 form from the backup\./));
+  await settle(400);
+  const wa = (await Store.get("jobWA")).workAuth;
+  assert.equal(wa.ownerName, "Pat Chena");
+  assert.ok(wa.ownerSig, "the owner's signature is back");
+  assert.deepEqual([wa.date, wa.ownerDate, wa.repDate], [SIGNED, SIGNED, SIGNED], "the signed dates, not today's");
+  assert.deepEqual([wa.scope[4], wa.scope[5]], [false, false], "the scope the owner declined stays unchecked");
+  assert.equal(wa.smsConsent, true, "the owner's text opt-in is kept");
 });
 
 quiet.error.call(console, `\n${pass} passed`);

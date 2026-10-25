@@ -102,7 +102,7 @@ await test("a route that can't read the phone's storage says so, with Try again,
 });
 
 await test("the backups card shows only when this phone holds backups, and reads a copy only when its Restore is tapped", async () => {
-  const reads = { backups: 0, snapshot: 0, olderBackups: 0 };
+  const reads = { backups: 0, snapshotEntry: 0, olderBackups: 0 };
   const real = {};
   for (const k of Object.keys(reads)) {
     real[k] = Store[k];
@@ -121,7 +121,7 @@ await test("the backups card shows only when this phone holds backups, and reads
   assert.match(head.textContent, /1 snapshot\b/);
   head.click();
   await settle(80);
-  assert.deepEqual(reads, { backups: 0, snapshot: 0, olderBackups: 0 }, "opening the job and unfolding the card load no copy");
+  assert.deepEqual(reads, { backups: 0, snapshotEntry: 0, olderBackups: 0 }, "opening the job and unfolding the card load no copy");
   const restore = [...view().querySelectorAll("button")].find((b) => /⏪ Restore/.test(b.textContent));
   assert.ok(restore);
   let asked = 0;
@@ -129,7 +129,7 @@ await test("the backups card shows only when this phone holds backups, and reads
   restore.click();
   await until(() => asked === 1);
   globalThis.confirm = window.confirm = () => true;
-  assert.deepEqual(reads, { backups: 0, snapshot: 1, olderBackups: 0 }, "Restore reads that one copy");
+  assert.deepEqual(reads, { backups: 0, snapshotEntry: 1, olderBackups: 0 }, "Restore reads that one copy");
   assert.equal(restore.disabled, false);
   for (const k of Object.keys(reads)) Store[k] = real[k];
 });
