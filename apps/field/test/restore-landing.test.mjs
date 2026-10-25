@@ -794,5 +794,35 @@ await test("a certificate of completion tapped open blank, then restored, comes 
   assert.equal(cc.warrantyWorkmanship, "2 years", "the warranty that was signed");
 });
 
+await test("a copy set aside before this update, whose record doesn't say what it is, still brings this phone's changes back", async () => {
+  const cloud = { id: "jobLS", jobType: "restoration", customer: "Goldstream", address: "1 Goldstream Rd", claimNo: "CLM-1", updatedAt: "2026-10-24T09:00:00.000Z",
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 100, items: [] }] };
+  const local = { ...cloud, claimNo: "CLM-7", updatedAt: "2026-10-24T11:00:00.000Z",
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 120, items: [] }, { id: "r2", vendor: "Rental Zone", amount: 42, items: [] }] };
+  // what "Take the cloud's copy" did before this update: a plain backup of this phone's copy, then the cloud's, unbumped
+  await Store.backup(local);
+  const [{ key }] = await Store.snapshots("jobLS");
+  await new Promise((resolve, reject) => {
+    const open = indexedDB.open("roybal-field");
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const t = open.result.transaction("backups", "readwrite"), os = t.objectStore("backups"), get = os.get(key);
+      get.onsuccess = () => { const rec = get.result; delete rec.kind; os.put(rec); };
+      t.oncomplete = () => { open.result.close(); resolve(); };
+      t.onerror = () => reject(t.error);
+    };
+  });
+  assert.equal((await Store.snapshotEntry(key)).kind, "", "the record says nothing about what it holds");
+  await Store.put(cloud, { bump: false, quiet: true });
+  await nav("#/p/jobLS");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  tap(buttons(/⏪ Restore/)[0]);
+  await until(() => toasted(/Brought back what that backup had\./));
+  await settle(400);
+  const after = await Store.get("jobLS");
+  assert.deepEqual(after.receipts.map((r) => `${r.id}:${r.amount}`).sort(), ["r1:120", "r2:42"], "the new receipt and the corrected amount are back");
+  assert.equal(after.claimNo, "CLM-7");
+});
+
 quiet.error.call(console, `\n${pass} passed`);
 process.exit(0);

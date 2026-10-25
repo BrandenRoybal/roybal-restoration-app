@@ -1341,18 +1341,21 @@ const sizeLabel = (bytes) => bytes >= 1048576
   ? `${(bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1)} MB`
   : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 /* one backup: its time and a line about it, and a Restore that reads the copy
-   (load, giving { data, discarded }) only when tapped, says what it holds,
+   (load, giving { data, kind }) only when tapped, says what it holds,
    then adds back what the job is missing. `keep` is where the copy lives (its
    snapshot key, or the job id for a pre-split backup), so the backup of the
    current copy can't prune it.
 
-   The job is the newer side of that union and the backup only fills in what
-   it lacks: a backup taken while the job was stamped by a clock ahead of this
-   phone's would otherwise count as newer and put its old values back over
-   the crew's corrections. The one exception is the copy "Take the cloud's
-   copy" set aside (discarded): that is this phone's own work, not an older
-   copy, so it keeps its stamp and, where it is newer than the job, its values
-   come back too. A form on either side that was only tapped open (a factory
+   For a copy sync replaced, or one a delete or a Restore saved first (kind
+   "replaced"), the job is the newer side of that union and the backup only
+   fills in what it lacks: a backup
+   taken while the job was stamped by a clock ahead of this phone's would
+   otherwise count as newer and put its old values back over the crew's
+   corrections. The copy "Take the cloud's copy" set aside ("set-aside") is
+   this phone's own work, not an older copy, so it keeps its stamp and, where
+   it is newer than the job, its values come back too. So does a backup saved
+   before records said which they are, as every backup always did: it may be
+   a set-aside copy. A form on either side that was only tapped open (a factory
    blank, nothing typed) never stands in for the other side's: its dates and
    pre-checked boxes are defaults, not anyone's answer, and would otherwise
    win over a signed copy.
@@ -1394,9 +1397,9 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
     const got = await Promise.resolve().then(load).catch(() => null);
     const data = got && got.data;
     if (!data) { btn.disabled = false; toast("That backup is no longer on this device."); return; }
-    const setAside = got.discarded === true;
+    const replaced = got.kind === "replaced", setAside = got.kind === "set-aside";
     const kept = setAside
-      ? "This is the copy this phone set aside when it took the cloud's copy. Nothing on the job is removed — anything it has that the job doesn't comes back, and so do the changes this phone made after the cloud's copy was saved."
+      ? "This is the copy this phone set aside when it took the cloud's copy. Nothing on the job is removed — anything it has that the job doesn't comes back, and if the job hasn't changed since, so do the changes this phone hadn't synced."
       : "Nothing on the job is removed — this only adds back what the backup has and the current copy doesn't.";
     if (!confirm(`Bring back anything missing from the ${when} backup${off}?\n\nIt holds ${backupCounts(data)}.\n\n${kept} The current copy is saved as a backup first either way.`)) {
       btn.disabled = false;
@@ -1434,9 +1437,9 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
       if (queued && queued !== live) return stillSaving();
       // UNION, never replace: the current copy is the newer side, so its
       // scalars win and the snapshot only contributes what went missing —
-      // except the copy "Take the cloud's copy" set aside, which keeps its
-      // stamp (see above)
-      const snap = { ...data, updatedAt: setAside ? data.updatedAt : "" };
+      // except a set-aside copy, or one saved before records said, which
+      // keeps its stamp (see above)
+      const snap = { ...data, updatedAt: replaced ? "" : data.updatedAt };
       delete snap.rev;
       let side = base;
       for (const key of base ? FORM_SLOTS : []) {
@@ -1461,12 +1464,12 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
       if (!target) { toast("This phone couldn't run the restore just now. Try again in a moment.", 5000); return; }
       // the restore is in this job's copy: the save queue keeps it and retries
       autosave(target, null);
-      toast(`${backNewer ? "This phone's changes are back, but" : bits.length ? `Recovered ${bits.join(" and ")} from the backup, but` : "The restore is in, but"} this phone couldn't save it yet. It keeps trying by itself; leave the app open.`, 6000);
+      toast(`${!backNewer && bits.length ? `Recovered ${bits.join(" and ")} from the backup, but` : "The restore is in, but"} this phone couldn't save it yet. It keeps trying by itself; leave the app open.`, 6000);
       showIt();
       return;
     }
-    // a newer set-aside copy is the merge's newer side, so its counts are of the job's side
-    toast(backNewer ? "Brought back this phone's changes from before it took the cloud's copy."
+    // a backup newer than the job is the merge's newer side, so its counts are of the job's side
+    toast(backNewer ? (setAside ? "Brought back this phone's changes from before it took the cloud's copy." : "Brought back what that backup had.")
       : bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
     showIt();
   });
