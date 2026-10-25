@@ -5,8 +5,8 @@
 
    What it decides, per live receipt on a live job:
      in_qbo     its QuickBooks expense is already tagged to the job, and has a
-                document attached or the receipt has no photo to add yet:
-                nothing to do (a note)
+                document attached, or the receipt has no photo to add yet, or
+                it is a check found by its payee's name: nothing to do (a note)
      an item    the expense needs the job tag, the photo, or both: one line
                 on the job's receipts.qbo_link card, for the owner to approve
      unmatched  no expense found (a note, with the reason the office reads:
@@ -57,11 +57,11 @@
    is found by the check's payee, the receipt's vendor by name (checkTo).
    When the check's DocNumber does not name the invoice, or it is dated past
    the usual days, the match rests on the payee's name, the exact amount
-   and two weeks of dates (byPayee), and the same rule holds as for a
-   return: it is only ever noted or given the invoice's photo, never
-   tagged (untagged, check_untagged), and it never suggests the job's link.
-   A sub paid the same sum for two jobs' draws would otherwise have one
-   job's check tagged to the other.
+   and two weeks of dates (byPayee), and it is only ever noted: never
+   tagged (untagged, check_untagged), never given the invoice's photo, and
+   it never suggests the job's link. A sub paid the same sum for two jobs'
+   draws, or twice for one, would otherwise have one invoice's check tagged
+   or photographed for the other.
 
    An "expense" here is a QuickBooks Purchase (a card charge, or a store
    invoice entered against the store's account) or, from migration 0025, a
@@ -310,7 +310,8 @@ const nameWords = (v) => [...new Set(lc(v).replace(/[.'‘’]/g, "").split(/[^a
     the app keeps no check number, and the receipt's number is the payee's
     invoice number, which a short check number can equal by chance. A check
     found this way alone (byPayee) never suggests the job's link
-    (jobProject) and is never tagged (check_untagged). */
+    (jobProject) and is only ever noted: never tagged (check_untagged), and
+    never given the photo. */
 export function checkTo(r, p) {
   if (p.paymentType !== "Check" || !["account", ""].includes(lc(r.paid_with))) return false;
   if (vendorFamily(r.vendor) || vendorFamily(p.vendorName)) return false;
@@ -654,6 +655,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // against that invoice (step 1).
   const claimedBy = new Map();
   const nameHeld = new Map();
+  const freedFor = new Map();     // txn key → the receipts its name hold no longer holds it against
   for (const l of links) {
     const live = liveIds.has(str(l.receipt_id));
     const viaSuggestion = l.state === "in_qbo" && !!detailOf(l).job_link;
@@ -740,7 +742,7 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     const holder = claimedBy.get(txnKey(p.txnType, p.id));
     if (holder && holder !== r.id) return null;
     const byName = nameHeld.get(txnKey(p.txnType, p.id));
-    if (byName && byName !== r.id && checkTo(r, p) && payeeOnly(r, p)) return null;
+    if (byName && byName !== r.id && !freedFor.get(txnKey(p.txnType, p.id))?.has(r.id) && checkTo(r, p) && payeeOnly(r, p)) return null;
     if (!contradicts(r, p)) return { byStore: false };
     return returned && creditForReturn(r, p) ? { byStore: true } : null;
   };
@@ -787,18 +789,25 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     released = true;
   }
   // Nor does it hold the check from the invoice its DocNumber names (a
-  // number outranks the name) where the receipt holding it is older, not
-  // matched again (its row is let go once that one takes it, after step
-  // 1b), or where the hold would send that invoice, kept from the check, to
-  // the sub's next equal check by the name instead: both are matched as on
-  // a fresh run
+  // number outranks the name), one the name reaches and not a copy of the
+  // receipt holding it (the same slip entered twice is one claim), where
+  // the receipt holding it is older, not matched again (it is let go for
+  // that invoice only, and its row once that one takes it, after step 1b),
+  // or where the hold would send that invoice, kept from the check, to the
+  // sub's next equal check by the name instead: both are matched as on a
+  // fresh run
   const olderIds = new Set(older.map((r) => r.id));
   for (const p of txns) {
     const k = txnKey(p.txnType, p.id);
     const holder = nameHeld.get(k);
-    if (!holder || !eligible.some((s) => s.id !== holder && docAgrees(s.receipt_no, p.docNumber) && (olderIds.has(holder)
-        || (nameReaches(s, p) && !s.cands.some((c) => txnKey(c.p.txnType, c.p.id) === k) && s.cands.some((c) => c.byPayee))))) continue;
-    nameHeld.delete(k);
+    if (!holder) continue;
+    const h = eligible.find((s) => s.id === holder);
+    const named = eligible.filter((s) => s.id !== holder && !(h && firstTwin(s, eligible) === firstTwin(h, eligible))
+      && docAgrees(s.receipt_no, p.docNumber) && nameReaches(s, p) && (olderIds.has(holder)
+        || (!s.cands.some((c) => txnKey(c.p.txnType, c.p.id) === k) && s.cands.some((c) => c.byPayee))));
+    if (!named.length) continue;
+    freedFor.set(k, new Set(named.map((s) => s.id)));
+    if (h) nameHeld.delete(k);       // a holder matched again holds it against none
     released = true;
   }
   if (released) for (const r of eligible) findCands(r);
@@ -1146,7 +1155,8 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
         // here: a store's credit found without the slip's number
         // (creditForReturn), or a check found by its payee's name (byPayee).
         // Untagged, the office tags it by hand; tagged to the job it is
-        // noted, or given the receipt's photo
+        // noted, or a credit is given the receipt's photo (a check is only
+        // noted, below)
         if ((r.byStore || r.byPayee) && !anyTagged.length) {
           notes.push({ ...base, state: "conflict", ...txn, qbo_customer_id: null,
             detail: { reason: r.byStore ? "credit_untagged" : "check_untagged", ...qboDetail } });
@@ -1181,10 +1191,13 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
         }
         const changesOf = (x) => [...(taggedOf(x).length ? [] : ["tag"]), ...(!hasDocument(x) && photo.length ? ["attach"] : [])];
         const changes = ["tag", "attach"].filter((c) => ms.some((x) => changesOf(x).includes(c)));
-        if (!changes.length) {
+        if (!changes.length || r.byPayee) {
           // a step 1a match says so: in QuickBooks on the project the job's
           // card suggests, which the owner has not approved yet; and a check
-          // found by its payee's name, which holds it against the name only
+          // found by its payee's name, which holds it against the name only.
+          // Such a check is noted with or without its document: the name
+          // alone never puts a photo on a check, which may be another
+          // invoice's (equal draws from one sub)
           notes.push({ ...base, state: "in_qbo", ...txn, qbo_customer_id: project.id,
             detail: r.viaSuggestion ? { ...qboDetail, job_link: "suggested_tagged" } : r.byPayee ? { ...qboDetail, by_payee: true } : qboDetail });
           stats.in_qbo += 1;

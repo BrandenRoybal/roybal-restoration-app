@@ -349,11 +349,12 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   alone, though that invoice cannot reach it (its vendor read otherwise,
   the check dated past its days or of another sum, or the receipt older
   than the 60 days matched). A check found by the payee's
-  name alone is never tagged, the same rule as a return's credit found
-  without the slip's number: tagged to the job's project (its link, or the
-  card's suggestion from the job's other matches) it gets the invoice's
-  photo or is `in_qbo`; untagged it is a conflict, `check_untagged`, that
-  the office tags by hand; tagged elsewhere, `tagged_other`. Noted `in_qbo`
+  name alone is only ever noted, never put on a card: it is never tagged
+  and never given the invoice's photo, so tagged to the job's project (its
+  link, or the card's suggestion from the job's other matches) it is
+  `in_qbo`, with a document or not; untagged it is a conflict,
+  `check_untagged`, that the office tags by hand; tagged elsewhere,
+  `tagged_other`. Noted `in_qbo`
   it says so (`detail.by_payee`): on later nights it holds the check
   against a receipt the name alone reaches too, never against one it does
   not (the invoice its DocNumber names, dated in the usual days, however
@@ -429,7 +430,8 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   `tag`, `attach` or both (a tag already set is never changed), or a row in
   `receipt_qbo_links`:
   - `in_qbo`: tagged to the job, and a document attached or no photo to add
-    (a receipt with no photo yet). Nothing to do.
+    (a receipt with no photo yet, or a check found by the payee's name
+    alone). Nothing to do.
   - `unmatched`, `detail.reason`: `waiting_feed` (a card charge two weeks old
     or less; the bank feed lags, up to 11 days on the US Bank card), `store_not_entered` (a receipt on a store
     account, Spenard or Sherwin, whose invoice is not in QuickBooks yet; they
