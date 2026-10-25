@@ -60,6 +60,8 @@ globalThis.fetch = window.fetch = (url, opts = {}) => {
     return held(holdDraft, () => ({ ok: true, status: 200, json: async () => ({ ok: true, draft: {
       scopeAreas: [{ area: "Kitchen", items: [{ desc: "Hang and finish drywall", qty: 96, unit: "SF", trade: "Drywall", confidence: 0.9 }] }],
       tradeSequence: [{ trade: "Drywall", confidence: 0.9 }], selections: [] } }) }));
+  if (/roybal-ai-office/.test(String(url)) && body.action === "progressNarrative")
+    return held(holdDraft, () => ({ ok: true, status: 200, json: async () => ({ ok: true, draft: { narrative: "Week 2: drywall hung and taped." } }) }));
   if (holdBoard && /coordination_jobs\?select=id,data/.test(String(url)))
     return held(holdBoard, () => ({ ok: true, status: 200, json: async () => [] }));
   return Promise.reject(new TypeError("offline in this test"));
@@ -458,6 +460,35 @@ await test("a write that went around the page's copy to the store (sync's, befor
   const after = await Store.get("jobW");
   assert.deepEqual(after.receipts.map((r) => r.id).sort(), ["R1", "lost"]);
   assert.deepEqual((after.photos || []).map((p) => p.id), ["ph1"], "the other write is kept");
+});
+
+await test("a write that went around the page's copy with an older stamp (a clock behind the job's) is kept by a Restore too", async () => {
+  // the job's stamp is ahead of this phone's clock (a server merge floors it at the server's clock)
+  const ahead = new Date(Date.now() + 5 * 60e3).toISOString();
+  const job = { id: "jobP", jobType: "construction", constructionType: "remodel", customer: "Pioneer", address: "7 Pioneer Rd", updatedAt: ahead, receipts: [] };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, updatedAt: "2026-10-20T00:00:00.000Z", receipts: [{ id: "lost", vendor: "Rental Zone", amount: 42, items: [] }] });
+  // a Progress Update asked for, then back to the job home while it's written
+  await nav("#/p/jobP/progress");
+  await until(() => buttons(/Generate update/).length > 0);
+  holdDraft = [];
+  buttons(/Generate update/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const answer = holdDraft[0];
+  holdDraft = null;
+  await nav("#/p/jobP");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  toasts.length = 0;
+  answer();                                          // saved on a store copy, stamped by this phone's clock
+  await until(() => toasted(/Progress update drafted/));
+  await settle(200);
+  assert.ok((await Store.get("jobP")).updatedAt < ahead, "the store write's stamp is behind the page copy's");
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  const after = await Store.get("jobP");
+  assert.deepEqual(after.receipts.map((r) => r.id), ["lost"]);
+  assert.equal(after.progressNarrative, "Week 2: drywall hung and taped.", "the update is kept");
 });
 
 await test("a backup stamped while the phone's clock ran ahead says its time is off", async () => {
