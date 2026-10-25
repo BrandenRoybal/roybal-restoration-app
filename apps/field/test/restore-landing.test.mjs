@@ -746,13 +746,88 @@ await test("a copy set aside that is older than the cloud's copy it gave way to 
     tap(buttons(/⏪ Restore/)[0]);
     await until(() => toasted(/Recovered 1 item from the backup\./));
   } finally { globalThis.confirm = window.confirm = () => true; }
-  assert.match(asked, /set aside when it took the cloud's copy\. The job's copy is newer, so where both have a value the job's stays/);
+  assert.match(asked, /set aside when it took the cloud's copy\. The job's copy is at least as new, so where both have a value the job's stays/);
   assert.doesNotMatch(asked, /its changes come back|hadn't synced/, "it promises nothing the merge won't do");
   await settle(400);
   const after = await Store.get("jobSO");
   assert.deepEqual(after.receipts.map((r) => `${r.id}:${r.amount}`).sort(), ["r1:100", "r2:42"], "the new receipt comes back; the job's amount stays");
   assert.equal(after.claimNo, "CLM-1");
   assert.equal(after.notes, "office: adjuster visit Tue");
+});
+
+await test("a set-aside copy stamped the same as the cloud's copy says the job's values stay, and they do", async () => {
+  const at = "2026-10-24T11:00:00.000Z";
+  const cloud = { id: "jobSE", jobType: "restoration", customer: "Ester", address: "3 Ester Dome Rd", claimNo: "CLM-1", updatedAt: at, rev: 8,
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 100, items: [] }] };
+  const local = { ...cloud, claimNo: "CLM-7", receipts: [...cloud.receipts, { id: "r2", vendor: "Rental Zone", amount: 42, items: [] }] };
+  delete local.rev;
+  await Store.put(local, { bump: false, quiet: true });
+  await nav("#/p/jobSE");
+  await until(() => buttons(/Take the cloud.s copy/).length > 0);
+  cloudRow = { id: "jobSE", data: cloud, deleted: false, updated_at: at };
+  try {
+    tap(buttons(/Take the cloud.s copy/)[0]);
+    await until(() => toasted(/Took the cloud.s copy/));
+  } finally { cloudRow = null; }
+  await settle(900);
+  await nav("#/");
+  await nav("#/p/jobSE");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  let asked = "";
+  globalThis.confirm = window.confirm = (m) => { asked = m; return true; };
+  try {
+    tap(buttons(/⏪ Restore/)[0]);
+    await until(() => toasted(/Recovered 1 item from the backup\./));
+  } finally { globalThis.confirm = window.confirm = () => true; }
+  assert.match(asked, /The job's copy is at least as new/);
+  await settle(400);
+  assert.equal((await Store.get("jobSE")).claimNo, "CLM-1", "on equal stamps the job's side wins, as the question said");
+});
+
+await test("a set-aside copy's Restore question goes by the stored copy's stamp when a draft was saved around the page's copy", async () => {
+  // this phone's copy is newer than the cloud's, but a Progress Update drafted since is newer still
+  const cloud = { id: "jobPU", jobType: "construction", constructionType: "remodel", customer: "Harding", address: "6 Harding Dr", claimNo: "CLM-1",
+    updatedAt: "2026-10-24T09:00:00.000Z", rev: 7, receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 100, items: [] }] };
+  const local = { ...cloud, claimNo: "CLM-7", updatedAt: "2026-10-24T11:00:00.000Z",
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 120, items: [] }, { id: "r2", vendor: "Rental Zone", amount: 42, items: [] }] };
+  delete local.rev;
+  await Store.put(local, { bump: false, quiet: true });
+  await nav("#/p/jobPU");
+  await until(() => buttons(/Take the cloud.s copy/).length > 0);
+  cloudRow = { id: "jobPU", data: cloud, deleted: false, updated_at: cloud.updatedAt };
+  try {
+    tap(buttons(/Take the cloud.s copy/)[0]);
+    await until(() => toasted(/Took the cloud.s copy/));
+  } finally { cloudRow = null; }
+  await settle(900);
+  await nav("#/");
+  await nav("#/p/jobPU/progress");
+  await until(() => buttons(/Generate update|Regenerate/).length > 0);
+  holdDraft = [];
+  buttons(/Generate update|Regenerate/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const answer = holdDraft[0];
+  holdDraft = null;
+  await nav("#/p/jobPU");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  toasts.length = 0;
+  answer();                                          // saved on a store copy, around the job home's
+  await until(() => toasted(/Progress update drafted/));
+  await settle(200);
+  assert.ok((await Store.get("jobPU")).updatedAt > local.updatedAt, "the draft stamped the stored copy after the set-aside one");
+  let asked = "";
+  globalThis.confirm = window.confirm = (m) => { asked = m; return true; };
+  try {
+    tap(buttons(/⏪ Restore/)[0]);
+    await until(() => toasted(/Recovered 1 item from the backup\./));
+  } finally { globalThis.confirm = window.confirm = () => true; }
+  assert.match(asked, /The job's copy is at least as new, so where both have a value the job's stays/);
+  assert.doesNotMatch(asked, /its changes come back/, "it promises nothing the merge won't do");
+  await settle(400);
+  const after = await Store.get("jobPU");
+  assert.deepEqual(after.receipts.map((r) => `${r.id}:${r.amount}`).sort(), ["r1:100", "r2:42"]);
+  assert.equal(after.claimNo, "CLM-1");
+  assert.equal(after.progressNarrative, "Week 2: drywall hung and taped.", "the draft is kept");
 });
 
 await test("a work authorization tapped open blank, then restored, comes back as signed: its dates, scope and text opt-in", async () => {

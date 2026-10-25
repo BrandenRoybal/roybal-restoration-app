@@ -1400,14 +1400,17 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
     if (!data) { btn.disabled = false; toast("That backup is no longer on this device."); return; }
     const replaced = got.kind === "replaced", setAside = got.kind === "set-aside";
     // a set-aside copy's changes come back only as the merge's newer side, which
-    // is by the stamps: the cloud's copy can be stamped after this phone's edits
-    const shown = liveCopy(project.id) || project;
-    const ahead = String(data.updatedAt || "") > String((shown && shown.updatedAt) || "");
+    // is by the stamps: the cloud's copy can be stamped after this phone's edits.
+    // The job's side carries the stored copy's stamp (the union below gives it
+    // to the page's copy when a write went around that copy)
+    const seen = Store.stampOf(project.id);
+    const jobAt = seen !== undefined ? seen : (liveCopy(project.id) || project).updatedAt;
+    const ahead = String(data.updatedAt || "") > String(jobAt || "");
     const kept = !setAside
       ? "Nothing on the job is removed — this only adds back what the backup has and the current copy doesn't."
       : ahead
         ? "This is the copy this phone set aside when it took the cloud's copy, and it is newer than the job: its changes come back, and nothing on the job is removed."
-        : "This is the copy this phone set aside when it took the cloud's copy. The job's copy is newer, so where both have a value the job's stays; anything the backup has that the job doesn't comes back.";
+        : "This is the copy this phone set aside when it took the cloud's copy. The job's copy is at least as new, so where both have a value the job's stays; anything the backup has that the job doesn't comes back.";
     if (!confirm(`Bring back anything missing from the ${when} backup${off}?\n\nIt holds ${backupCounts(data)}.\n\n${kept} The current copy is saved as a backup first either way.`)) {
       btn.disabled = false;
       return;
