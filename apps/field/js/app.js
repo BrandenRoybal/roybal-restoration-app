@@ -1214,54 +1214,89 @@ function boardCard(project) {
    back, and nothing anyone else did is touched. That also makes the button
    idempotent — tapping it repeatedly in the field changes nothing after the
    first time. Reverting a bad edit is a different job, and belongs to the
-   admin-side history (blob_history), which can revert wholesale on purpose. */
+   admin-side history (blob_history), which can revert wholesale on purpose.
+
+   LISTED BY KEY, OPENED ON TAP. The card used to load every snapshot just to
+   print what each one held, so opening a photo-heavy job read every copy at
+   once — the same load that crashed an iPhone on every launch from sync (see
+   Store.backup). A row now shows only its time and size, a backup is read
+   when its Restore is tapped, and backups saved before snapshots were split
+   up load only from the "Show older backups" button, with a warning. */
 function backupsCard(project) {
   const box = h("div");
-  Store.backups(project.id).then((snaps) => {
-    if (!snaps.length) return;
-    const rows = snaps.map((s) => {
-      const d = s.data || {};
-      const when = String(s.takenAt || "").replace("T", " ").slice(0, 16);
-      const desc = `${when} — ${(d.photos || []).length} photos, ${(d.moistureMaps || []).length} moisture maps, ` +
-        `${(d.dryingLogs || []).length} drying logs, ${(d.constructionLogs || []).length} field reports`;
-      const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
-      btn.addEventListener("click", async () => {
-        if (!confirm(`Bring back anything missing from the ${when} backup?\n\nNothing on the job is removed — this only adds back what the backup has and the current copy doesn't. The current copy is saved as a backup first either way.`)) return;
-        btn.disabled = true;
-        const current = await Store.get(project.id);
-        if (current) await Store.backup(current);
-        const snap = { ...s.data };
-        delete snap.rev;
-        // UNION, never replace: the current copy is the newer side, so its
-        // scalars win and the snapshot only contributes what went missing.
-        const { merged, added, filledForms } = current
-          ? mergeProjects(current, snap)
-          : { merged: snap, added: 0, filledForms: 0 };
-        merged.id = project.id;
-        delete merged.rev;
-        pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring back what it took off
-        await Store.put(merged);     // fresh updatedAt → re-syncs
-        const bits = [];
-        if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
-        if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
-        toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
-        setTimeout(() => location.reload(), 600);
-      });
-      return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
-        h("span", { class: "subtle", style: "font-size:13px" }, desc), btn);
-    });
+  Promise.all([Store.snapshots(project.id), Store.hasOlderBackups(project.id)]).then(([snaps, older]) => {
+    if (!snaps.length && !older) return;
+    const rows = snaps.map((s) => backupRow(project, s.takenAt, `about ${sizeLabel(s.bytes)}`, () => Store.snapshot(s.key)));
     const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
       h("div", { style: "font-weight:700" }, "⏪ Backups on this device"),
       h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" },
-        `${snaps.length} snapshot${snaps.length === 1 ? "" : "s"}`));
+        `${snaps.length} snapshot${snaps.length === 1 ? "" : "s"}${older ? " + older" : ""}`));
     const bodyBox = h("div", {},
       h("p", { class: "subtle", style: "margin:6px 0 2px;font-size:13px" },
         "Saved automatically right before cloud sync replaced this job with a version from another device. Restoring only ADDS BACK what's missing — it never removes anyone else's work, so it's safe to tap."),
       ...rows);
+    if (older) {
+      const more = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;margin-top:10px" }, "Show older backups");
+      more.addEventListener("click", async () => {
+        if (!confirm("These backups were saved before this app update, all in one piece, so opening them loads every copy at once.\n\nOn a job with lots of photos that can be more than this phone can hold, and the app may crash and reload. Open them?")) return;
+        more.disabled = true; more.textContent = "Opening…";
+        try {
+          const old = await Store.olderBackups(project.id);
+          more.replaceWith(...(old.length
+            ? old.map((s) => backupRow(project, s.takenAt, backupCounts(s.data), async () => s.data))
+            : [h("p", { class: "subtle", style: "margin:8px 0 0;font-size:13px" }, "No older backups left on this device.")]));
+        } catch {
+          more.disabled = false; more.textContent = "Show older backups";
+          toast("Couldn't open the older backups.");
+        }
+      });
+      bodyBox.append(more);
+    }
     foldable(head, bodyBox, "backups", true);   // rarely needed — starts tucked away
     box.append(h("div", { class: "card app-only" }, head, bodyBox));
   }).catch(() => {});
   return box;
+}
+const backupCounts = (d) => `${(d && d.photos || []).length} photos, ${(d && d.moistureMaps || []).length} moisture maps, ` +
+  `${(d && d.dryingLogs || []).length} drying logs, ${(d && d.constructionLogs || []).length} field reports`;
+const sizeLabel = (bytes) => bytes >= 1048576
+  ? `${(bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1)} MB`
+  : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+/* one backup: its time and a line about it, and a Restore that reads the copy
+   (load) only when tapped, says what it holds, then adds back what the job
+   is missing */
+function backupRow(project, takenAt, line, load) {
+  const when = String(takenAt || "").replace("T", " ").slice(0, 16);
+  const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const data = await Promise.resolve().then(load).catch(() => null);
+    if (!data) { btn.disabled = false; toast("That backup is no longer on this device."); return; }
+    if (!confirm(`Bring back anything missing from the ${when} backup?\n\nIt holds ${backupCounts(data)}.\n\nNothing on the job is removed — this only adds back what the backup has and the current copy doesn't. The current copy is saved as a backup first either way.`)) {
+      btn.disabled = false;
+      return;
+    }
+    const current = await Store.get(project.id);
+    if (current) await Store.backup(current);
+    const snap = { ...data };
+    delete snap.rev;
+    // UNION, never replace: the current copy is the newer side, so its
+    // scalars win and the snapshot only contributes what went missing.
+    const { merged, added, filledForms } = current
+      ? mergeProjects(current, snap)
+      : { merged: snap, added: 0, filledForms: 0 };
+    merged.id = project.id;
+    delete merged.rev;
+    pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring back what it took off
+    await Store.put(merged);     // fresh updatedAt → re-syncs
+    const bits = [];
+    if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
+    if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
+    toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
+    setTimeout(() => location.reload(), 600);
+  });
+  return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
+    h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}`), btn);
 }
 
 /* ---------- "take the cloud's copy" card ----------
