@@ -632,15 +632,21 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // A step 1a note (in_qbo, detail.job_link) holds nothing: step 1a works
   // its match out again each night, and a receipt uploaded since that the
   // expense names must find it in step 1, which keeps step 1a off it.
+  // A check noted in_qbo by its payee's name alone (detail.by_payee) holds
+  // it only against a receipt the name alone reaches too (nameHeld): one
+  // whose invoice number the check's DocNumber carries, dated in its usual
+  // days, takes it, as on a fresh run.
   const claimedBy = new Map();
+  const nameHeld = new Map();
   for (const l of links) {
     const live = liveIds.has(str(l.receipt_id));
     const viaSuggestion = l.state === "in_qbo" && !!detailOf(l).job_link;
     if (!(l.state === "queued" || l.state === "done" || (l.state === "in_qbo" && live && !viaSuggestion)
         || (v2 === true && l.state === "failed" && live))) continue;
-    if (str(l.qbo_txn_id)) claimedBy.set(txnKey(l.qbo_txn_type, l.qbo_txn_id), str(l.receipt_id));
+    const held = l.state === "in_qbo" && detailOf(l).by_payee === true ? nameHeld : claimedBy;
+    if (str(l.qbo_txn_id)) held.set(txnKey(l.qbo_txn_type, l.qbo_txn_id), str(l.receipt_id));
     for (const part of Array.isArray(l.parts) ? l.parts : []) {
-      if (str(part?.qbo_txn_id)) claimedBy.set(txnKey(l.qbo_txn_type, part.qbo_txn_id), str(l.receipt_id));
+      if (str(part?.qbo_txn_id)) held.set(txnKey(l.qbo_txn_type, part.qbo_txn_id), str(l.receipt_id));
     }
   }
 
@@ -695,6 +701,10 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
   // store credit under the credit memo's own number (creditForReturn), only
   // when the caller passes the purchase the slip names (returned): step 1
   // does, step 1a never does.
+  // A check rests on its payee's name (payeeOnly) when its DocNumber does
+  // not name the receipt's invoice, or it is dated past the usual three
+  // days (only checkTo lets it in).
+  const payeeOnly = (r, p) => !docAgrees(r.receipt_no, p.docNumber) || str(p.txnDate) > addDays(r.receipt_date, 3);
   const admissible = (r, p, returned = null) => {
     if (!DIGITS.test(str(p.id)) || !DIGITS.test(str(p.syncToken))) return null;
     if (cents(p.total) !== cents(r.amount) || (p.credit === true) !== (Number(r.amount) < 0)) return null;
@@ -707,6 +717,8 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
         && !(d > hi && d <= checkHi && checkTo(r, p))) return null;
     const holder = claimedBy.get(txnKey(p.txnType, p.id));
     if (holder && holder !== r.id) return null;
+    const byName = nameHeld.get(txnKey(p.txnType, p.id));
+    if (byName && byName !== r.id && !(checkTo(r, p) && !payeeOnly(r, p))) return null;
     if (!contradicts(r, p)) return { byStore: false };
     return returned && creditForReturn(r, p) ? { byStore: true } : null;
   };
@@ -732,14 +744,29 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
       if (!ok) continue;
       const score = scoreOf(r, p, jobCustomer);
       if (score < MIN_SCORE) continue;
-      // byPayee: a check that rests on its payee's name, as its DocNumber
-      // does not name the receipt's invoice, or it is dated past the usual
-      // three days (only checkTo lets it in)
+      // byPayee: a check that rests on its payee's name (payeeOnly)
       const check = checkTo(r, p);
-      r.cands.push({ p, score, check, byStore: ok.byStore,
-        byPayee: check && (!docAgrees(r.receipt_no, p.docNumber) || str(p.txnDate) > addDays(r.receipt_date, 3)) });
+      r.cands.push({ p, score, check, byStore: ok.byStore, byPayee: check && payeeOnly(r, p) });
     }
     r.best = r.cands.reduce((m, c) => Math.max(m, c.score), 0);
+  }
+  // A receipt in QuickBooks on an expense tonight's read no longer holds
+  // (deleted or changed there since) takes no check by its payee's name in
+  // its place: the sub's next equal check is another invoice's. Left with
+  // nothing else, it keeps its row as it is, as an older receipt does, and
+  // a twin of it reads as its duplicate (step 1c)
+  const read = new Set(txns.map((p) => txnKey(p.txnType, p.id)));
+  for (const r of [...eligible]) {
+    const own = linkOf.get(r.id);
+    if (own?.state !== "in_qbo" || read.has(txnKey(own.qbo_txn_type, own.qbo_txn_id)) || !r.cands.some((c) => c.byPayee)) continue;
+    r.cands = r.cands.filter((c) => !c.byPayee);
+    r.best = r.cands.reduce((m, c) => Math.max(m, c.score), 0);
+    if (r.cands.length) continue;
+    eligible.splice(eligible.indexOf(r), 1);
+    if (wanted(r.job_id)) {
+      notes.push(carry(own, r.job_id, v2));
+      stats.carried += 1;
+    }
   }
   // A check two receipts could be by its payee is neither's: a sub paid the
   // same sum twice (two jobs' equal draws) is not told apart by the name and
@@ -1055,9 +1082,10 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
         const changes = ["tag", "attach"].filter((c) => ms.some((x) => changesOf(x).includes(c)));
         if (!changes.length) {
           // a step 1a match says so: in QuickBooks on the project the job's
-          // card suggests, which the owner has not approved yet
+          // card suggests, which the owner has not approved yet; and a check
+          // found by its payee's name, which holds it against the name only
           notes.push({ ...base, state: "in_qbo", ...txn, qbo_customer_id: project.id,
-            detail: r.viaSuggestion ? { ...qboDetail, job_link: "suggested_tagged" } : qboDetail });
+            detail: r.viaSuggestion ? { ...qboDetail, job_link: "suggested_tagged" } : r.byPayee ? { ...qboDetail, by_payee: true } : qboDetail });
           stats.in_qbo += 1;
           continue;
         }
@@ -1155,7 +1183,19 @@ export function matchReceipts({ receipts = [], purchases = [], bills = null, lin
     cards.push({ job_id: jobId, job_name: jobName, input, rationale: rationaleOf(jobName, kept), evidence_refs: [] });
   }
 
-  notes.sort((a, b) => byText(a.receipt_id, b.receipt_id));
+  // The note door writes one row at a time, and holds one expense to one
+  // receipt as it goes (receipt_qbo_links_txn_key): a row that gives up an
+  // expense its receipt holds in QuickBooks goes first, so the receipt
+  // taking that expense tonight is not written claimed_by_other by the row
+  // it replaces
+  const gives = (n) => {
+    const l = linkOf.get(n.receipt_id);
+    if (l?.state !== "in_qbo" || !str(l.qbo_txn_id)) return false;
+    const now = n.state === "in_qbo" ? txnsOf(n) : [];
+    return txnsOf(l).some((k) => !now.includes(k));
+  };
+  const giving = new Set(notes.filter(gives).map((n) => n.receipt_id));
+  notes.sort((a, b) => Number(giving.has(b.receipt_id)) - Number(giving.has(a.receipt_id)) || byText(a.receipt_id, b.receipt_id));
   return { notes, cards, stats };
 }
 

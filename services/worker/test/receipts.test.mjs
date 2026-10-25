@@ -151,12 +151,12 @@ test("the nightly run on the Oct 7 rows: one read of each table, two qbo-proxy r
     assert.ok(c.init.signal, "a hung read cannot hold the queue lane");
   }
 
-  // one note, every job with receipts, exactly the matcher's rows (grouped by job)
+  // one note, every job with receipts, exactly the matcher's rows in its order (not job by job: a row that gives up an
+  // expense goes before the one, on any job, that takes it)
   const want = expected();
-  const byReceipt = (rows) => [...rows].sort((a, b) => (a.receipt_id < b.receipt_id ? -1 : 1));
   assert.equal(noteCalls(supa).length, 1);
   assert.deepEqual(noteCalls(supa)[0].p_job_ids, JOB_IDS);
-  assert.deepEqual(byReceipt(noteCalls(supa)[0].p_rows), want.notes);
+  assert.deepEqual(noteCalls(supa)[0].p_rows, want.notes);
   assert.equal(want.notes.length, 22);
 
   // the door for each job the run looked at: Alston's card, and no input for the four with nothing to approve

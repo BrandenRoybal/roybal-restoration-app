@@ -311,7 +311,7 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   app_settings        receipts.qbo_store_accounts (store entry, below; unset = off)
   proposals           v2: id, status, input of each card a failed receipt's second try went on, 100 ids a request
   qbo-proxy           listProjects; listPurchases (v2: and listBills) from 14 days before the oldest receipt to today
-  → receipt_qbo_links_note(job ids, rows)                         in_qbo / unmatched / conflict, one call
+  → receipt_qbo_links_note(job ids, rows)                         in_qbo / unmatched / conflict, one call; a row giving up an expense first
   → receipts_qbo_link_file(job, input | null, rationale, evidence) per job: its card, or none
 ```
 
@@ -344,7 +344,12 @@ THIS WORKER  lanes/receipts.mjs, matching in lanes/qbomatch.mjs (pure)
   (`ambiguous`), the same slip entered twice counting once, and a copy
   whose twin already holds a check takes no other (it reads `duplicate`).
   A check whose DocNumber is the invoice number, dated in the usual days,
-  is found by that number like any expense. A return slip's
+  is found by that number like any expense. A check found by the payee's
+  name and noted `in_qbo` says so (`detail.by_payee`): on later nights it
+  holds the check against a receipt the name alone reaches, never against
+  the invoice its DocNumber names. A receipt in QuickBooks on an expense
+  tonight's read no longer holds takes no check by the name in its place;
+  it keeps its row. A return slip's
   id is `<receipt id>~ret`. The surest receipt chooses first, one expense goes to
   one receipt, and two equally good expenses are left to a person. Receipts
   dated in the last 60 days are matched; an older one keeps the row it had.
