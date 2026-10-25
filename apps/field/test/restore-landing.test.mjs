@@ -700,7 +700,7 @@ await test("after \"Take the cloud's copy\", Restore brings this phone's unsynce
     tap(buttons(/⏪ Restore/)[0]);
     await until(() => toasted(/Brought back this phone's changes from before it took the cloud's copy\./));
   } finally { globalThis.confirm = window.confirm = () => true; }
-  assert.match(asked, /set aside when it took the cloud's copy/, "the Restore question says what this backup is");
+  assert.match(asked, /set aside when it took the cloud's copy, and it is newer than the job: its changes come back/, "the Restore question says what this backup is, and that its changes win");
   await settle(400);
   const after = await Store.get("jobTC");
   assert.deepEqual(after.receipts.map((r) => `${r.id}:${r.amount}`).sort(), ["r1:120", "r2:42"], "the new receipt and the corrected amount are back");
@@ -715,9 +715,44 @@ await test("after \"Take the cloud's copy\", Restore brings this phone's unsynce
   assert.equal((await Store.snapshots("jobTC")).length, 2, "the set-aside copy and the one Restore saved first");
   await until(() => buttons(/⏪ Restore/).length >= 2);
   tap(buttons(/⏪ Restore/).pop());                  // the oldest: the set-aside copy
-  await until(() => toasted(/Nothing was missing/));
+  await until(() => toasted(/Nothing was missing — the job already has everything in that backup, or a newer value in its place\./));
   await settle(400);
   assert.equal((await Store.get("jobTC")).claimNo, "CLM-7");
+});
+
+await test("a copy set aside that is older than the cloud's copy it gave way to says the job's values stay, and they do", async () => {
+  // this phone's edits were made offline before the office's, so the cloud's copy is stamped after them
+  const cloud = { id: "jobSO", jobType: "restoration", customer: "Salcha", address: "2 Salcha Rd", claimNo: "CLM-1", updatedAt: "2026-10-24T11:00:00.000Z", rev: 8,
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 100, items: [] }], notes: "office: adjuster visit Tue" };
+  const local = { ...cloud, claimNo: "CLM-7", updatedAt: "2026-10-24T10:00:00.000Z", notes: "",
+    receipts: [{ id: "r1", vendor: "Spenard Builders", amount: 120, items: [] }, { id: "r2", vendor: "Rental Zone", amount: 42, items: [] }] };
+  delete local.rev;
+  await Store.put(local, { bump: false, quiet: true });
+  await nav("#/p/jobSO");
+  await until(() => buttons(/Take the cloud.s copy/).length > 0);
+  cloudRow = { id: "jobSO", data: cloud, deleted: false, updated_at: cloud.updatedAt };
+  try {
+    tap(buttons(/Take the cloud.s copy/)[0]);
+    await until(() => toasted(/Took the cloud.s copy/));
+  } finally { cloudRow = null; }
+  await settle(900);
+  await nav("#/");
+  await nav("#/p/jobSO");
+  assert.equal((await Store.get("jobSO")).updatedAt, cloud.updatedAt, "the job is the cloud's copy, unchanged since");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  let asked = "";
+  globalThis.confirm = window.confirm = (m) => { asked = m; return true; };
+  try {
+    tap(buttons(/⏪ Restore/)[0]);
+    await until(() => toasted(/Recovered 1 item from the backup\./));
+  } finally { globalThis.confirm = window.confirm = () => true; }
+  assert.match(asked, /set aside when it took the cloud's copy\. The job's copy is newer, so where both have a value the job's stays/);
+  assert.doesNotMatch(asked, /its changes come back|hadn't synced/, "it promises nothing the merge won't do");
+  await settle(400);
+  const after = await Store.get("jobSO");
+  assert.deepEqual(after.receipts.map((r) => `${r.id}:${r.amount}`).sort(), ["r1:100", "r2:42"], "the new receipt comes back; the job's amount stays");
+  assert.equal(after.claimNo, "CLM-1");
+  assert.equal(after.notes, "office: adjuster visit Tue");
 });
 
 await test("a work authorization tapped open blank, then restored, comes back as signed: its dates, scope and text opt-in", async () => {
