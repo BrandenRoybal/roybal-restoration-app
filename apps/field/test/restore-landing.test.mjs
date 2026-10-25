@@ -73,13 +73,14 @@ globalThis.fetch = window.fetch = (url, opts = {}) => {
 const quiet = { error: console.error, warn: console.warn };
 console.error = () => {}; console.warn = () => {};   // sync and the media queue find no network
 
-/* moments inside a restore where a read can land: its backup's transaction
+/* moments inside a restore where a read can land: its read of the stored copy
+   going out (onJobRead, the next job read), its backup's transaction
    opening (onBackupTx) or committing (onBackupDone), and the restore's own
    save opening its transaction (onRestorePut, the first job write after a backup).
    failJobWrites: the next N job writes fail as a lost connection does */
 const P = globalThis.IDBDatabase.prototype;
 const origTx = P.transaction;
-let onBackupTx = null, onBackupDone = null, onRestorePut = null, sawBackup = false, failJobWrites = 0;
+let onBackupTx = null, onBackupDone = null, onRestorePut = null, onJobRead = null, sawBackup = false, failJobWrites = 0;
 P.transaction = function (names, mode, ...rest) {
   const n = [].concat(names).join();
   if (mode === "readwrite" && n === "projects" && failJobWrites > 0) {
@@ -87,6 +88,7 @@ P.transaction = function (names, mode, ...rest) {
     throw new DOMException("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.", "InvalidStateError");
   }
   if (mode === "readwrite" && n === "projects" && sawBackup && onRestorePut) { const f = onRestorePut; onRestorePut = null; sawBackup = false; f(); }
+  if (mode !== "readwrite" && n === "projects" && onJobRead) { const f = onJobRead; onJobRead = null; queueMicrotask(f); }
   const t = origTx.call(this, names, mode, ...rest);
   if (mode === "readwrite" && n === "backups") {
     sawBackup = true;
@@ -98,7 +100,7 @@ P.transaction = function (names, mode, ...rest) {
 
 const { Store, onProjectSaved, autosave, unsavedProject, flushPending } = await import("../js/core.js");
 await import("../js/app.js");
-const { newWorkAuth } = await import("../js/model.js");
+const { newWorkAuth, newCertCompletion } = await import("../js/model.js");
 
 const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
 async function until(ok, ms = 4000) {
@@ -739,6 +741,57 @@ await test("a work authorization tapped open blank, then restored, comes back as
   assert.deepEqual([wa.date, wa.ownerDate, wa.repDate], [SIGNED, SIGNED, SIGNED], "the signed dates, not today's");
   assert.deepEqual([wa.scope[4], wa.scope[5]], [false, false], "the scope the owner declined stays unchecked");
   assert.equal(wa.smsConsent, true, "the owner's text opt-in is kept");
+});
+
+await test("an AI timeline draft that lands on the page's copy while Restore's read of the stored copy is out is kept", async () => {
+  // the read comes back without the draft and stamped older: the page's copy, which moved, is the newer side
+  const job = { id: "jobRD", jobType: "construction", constructionType: "remodel", customer: "Rosie Creek", address: "3 Rosie Creek Rd",
+    updatedAt: "2026-10-22T00:00:00.000Z", receipts: [],
+    boardPlan: { phases: [{ name: "Old guess", estimatedHours: 2, lagDays: 0, confidence: 0.4 }], notBefore: "", notBeforeLabel: "",
+      assumptions: [], generatedAt: "2026-10-01T00:00:00.000Z", status: "dismissed" } };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, updatedAt: "2026-10-19T00:00:00.000Z", receipts: [{ id: "lost", vendor: "Rental Zone", amount: 42, items: [] }] });
+  await nav("#/p/jobRD");
+  await until(() => buttons(/Estimate timeline/).length > 0 && buttons(/⏪ Restore/).length > 0);
+  holdDraft = [];
+  buttons(/Estimate timeline/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const draftBack = holdDraft[0];
+  holdDraft = null;
+  // the stored row differs from the page's copy, so Restore unions its read in
+  await Store.put({ ...(await Store.get("jobRD")), photos: [{ id: "ph1", caption: "from the office" }] }, { quiet: true });
+  let drafted = null;
+  onJobRead = () => { draftBack(); drafted = true; };
+  tap(buttons(/⏪ Restore/)[0]);
+  await recovered();
+  await settle(400);
+  assert.ok(drafted, "the draft came back while the read was out");
+  const after = await Store.get("jobRD");
+  assert.deepEqual(after.receipts.map((r) => r.id), ["lost"]);
+  assert.deepEqual((after.photos || []).map((p) => p.id), ["ph1"], "the write around the page's copy is kept");
+  assert.equal(`${after.boardPlan.status}:${after.boardPlan.phases.map((p) => p.name).join("+")}`, "draft:Demo+Drywall", "the new draft is kept");
+});
+
+await test("a certificate of completion tapped open blank, then restored, comes back as signed", async () => {
+  const SIGNED = "2026-10-20";
+  const signed = { ...newCertCompletion(), issueDate: SIGNED, completionDate: "2026-10-19", scopeSummary: "Kitchen remodel", warrantyWorkmanship: "2 years",
+    sigContractor: "data:image/png;base64,QlI=", sigContractorName: "Branden", sigContractorDate: SIGNED,
+    sigOwner: "data:image/png;base64,T1dORVI=", sigOwnerName: "Dana Two Rivers", sigOwnerDate: SIGNED };
+  const job = { id: "jobCO", jobType: "construction", constructionType: "remodel", customer: "Two Rivers", address: "8 Two Rivers Rd", updatedAt: new Date().toISOString(), receipts: [] };
+  await Store.put(job, { bump: false, quiet: true });
+  await Store.backup({ ...job, updatedAt: "2026-10-21T00:00:00.000Z", certCompletion: signed });
+  await nav("#/p/jobCO/f/certCompletion");           // a blank, with an id of its own
+  const blank = (await Store.get("jobCO")).certCompletion;
+  assert.ok(blank && blank.id && blank.id !== signed.id, "opening the form saved a blank with its own id");
+  await nav("#/p/jobCO");
+  await until(() => buttons(/⏪ Restore/).length > 0);
+  tap(buttons(/⏪ Restore/)[0]);
+  await until(() => toasted(/Recovered 1 form from the backup\./));
+  await settle(400);
+  const cc = (await Store.get("jobCO")).certCompletion;
+  assert.equal(cc.sigOwnerName, "Dana Two Rivers");
+  assert.deepEqual([cc.issueDate, cc.sigContractorDate, cc.sigOwnerDate], [SIGNED, SIGNED, SIGNED], "the signed dates, not today's");
+  assert.equal(cc.warrantyWorkmanship, "2 years", "the warranty that was signed");
 });
 
 quiet.error.call(console, `\n${pass} passed`);
