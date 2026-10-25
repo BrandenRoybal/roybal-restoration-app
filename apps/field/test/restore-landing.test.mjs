@@ -42,20 +42,26 @@ window.scrollTo = () => {};
 const ctxStub = new Proxy({}, { get: () => () => {} });
 window.HTMLCanvasElement.prototype.getContext = () => ctxStub;
 window.HTMLCanvasElement.prototype.toDataURL = () => "data:image/png;base64,stub";
-// each receipt read waits here until the test answers it; so does a timeline draft while holdTimeline is set
+// each receipt read waits here until the test answers it; so does an AI draft while holdDraft is set,
+// and the board's answer to "site visit done" while holdBoard is
 const asks = [];
-let holdTimeline = null;
+let holdDraft = null, holdBoard = null;
+const held = (hold, body) => hold ? new Promise((resolve) => hold.push(() => resolve(body()))) : Promise.resolve(body());
 globalThis.fetch = window.fetch = (url, opts = {}) => {
   let body = {};
   try { body = JSON.parse(opts.body || "{}"); } catch {}
   if (/roybal-ai-office/.test(String(url)) && body.action === "receiptRead")
     return new Promise((resolve) => asks.push((receipt) => resolve({ ok: true, status: 200, json: async () => ({ ok: true, receipt }) })));
-  if (/roybal-ai-office/.test(String(url)) && body.action === "timelineDraft") {
-    const reply = () => ({ ok: true, status: 200, json: async () => ({ ok: true, draft: {
+  if (/roybal-ai-office/.test(String(url)) && body.action === "timelineDraft")
+    return held(holdDraft, () => ({ ok: true, status: 200, json: async () => ({ ok: true, draft: {
       phases: [{ name: "Demo", estimatedHours: 8, lagDays: 0, confidence: 0.9 }, { name: "Drywall", estimatedHours: 16, lagDays: 1, confidence: 0.9 }],
-      notBefore: "", assumptions: [] } }) });
-    return holdTimeline ? new Promise((resolve) => holdTimeline.push(() => resolve(reply()))) : Promise.resolve(reply());
-  }
+      notBefore: "", assumptions: [] } }) }));
+  if (/roybal-ai-office/.test(String(url)) && body.action === "rebuildDraft")
+    return held(holdDraft, () => ({ ok: true, status: 200, json: async () => ({ ok: true, draft: {
+      scopeAreas: [{ area: "Kitchen", items: [{ desc: "Hang and finish drywall", qty: 96, unit: "SF", trade: "Drywall", confidence: 0.9 }] }],
+      tradeSequence: [{ trade: "Drywall", confidence: 0.9 }], selections: [] } }) }));
+  if (holdBoard && /coordination_jobs\?select=id,data/.test(String(url)))
+    return held(holdBoard, () => ({ ok: true, status: 200, json: async () => [] }));
   return Promise.reject(new TypeError("offline in this test"));
 };
 const quiet = { error: console.error, warn: console.warn };
@@ -330,11 +336,11 @@ await test("an AI timeline draft that comes back after the crew moved to another
   await Store.put(job, { bump: false, quiet: true });
   await nav("#/p/jobT2");
   await until(() => buttons(/Estimate timeline/).length > 0);
-  holdTimeline = [];
+  holdDraft = [];
   buttons(/Estimate timeline/)[0].click();
-  await until(() => holdTimeline.length === 1);
-  const answer = holdTimeline[0];
-  holdTimeline = null;
+  await until(() => holdDraft.length === 1);
+  const answer = holdDraft[0];
+  holdDraft = null;
   await nav("#/p/jobT2/edit");
   await until(() => /Edit job/.test(document.getElementById("topbarSub").textContent));
   toasts.length = 0;
@@ -345,6 +351,98 @@ await test("an AI timeline draft that comes back after the crew moved to another
   const after = await Store.get("jobT2");
   assert.equal(after.claimNo, "CLM-2");
   assert.deepEqual(after.boardPlan && after.boardPlan.phases.map((p) => p.name), ["Demo", "Drywall"], "the draft survives the edit page's save");
+});
+
+await test("a rebuild draft that comes back after the crew moved to another page of the job lands on that page's copy", async () => {
+  const rest = { id: "jobRs", jobType: "restoration", customer: "Salcha", address: "4 Salcha St", updatedAt: "2026-10-20T00:00:00.000Z", receipts: [] };
+  const job = { id: "jobRc", jobType: "construction", constructionType: "remodel", customer: "Salcha", address: "4 Salcha St",
+    linkedRestorationId: "jobRs", updatedAt: "2026-10-20T00:00:00.000Z", receipts: [] };
+  await Store.put(rest, { bump: false, quiet: true });
+  await Store.put(job, { bump: false, quiet: true });
+  await nav("#/p/jobRc");
+  await until(() => buttons(/Draft rebuild plan/).length > 0);
+  holdDraft = [];
+  buttons(/Draft rebuild plan/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const answer = holdDraft[0];
+  holdDraft = null;
+  await nav("#/p/jobRc/edit");
+  await until(() => /Edit job/.test(document.getElementById("topbarSub").textContent));
+  toasts.length = 0;
+  answer();
+  await until(() => toasted(/Rebuild plan drafted/));
+  type(input("Claim #"), "CLM-3");                   // the edit page saves its own copy
+  await settle(300);
+  const after = await Store.get("jobRc");
+  assert.equal(after.claimNo, "CLM-3");
+  assert.ok(after.rebuildDraft && after.rebuildDraft.status === "draft", "the draft survives the edit page's save");
+  assert.equal(after.rebuildDraft.chips.length, 2);
+});
+
+await test("an AI draft that comes back while the job's last edit is stuck in the save queue rides that edit", async () => {
+  const job = { id: "jobU", jobType: "construction", constructionType: "remodel", customer: "Usibelli", address: "6 Usibelli Way",
+    updatedAt: "2026-10-20T00:00:00.000Z", receipts: [{ id: "R1", photo, extraPages: [], vendor: "", amount: "", items: [] }] };
+  await Store.put(job, { bump: false, quiet: true });
+  await nav("#/p/jobU");
+  await until(() => buttons(/Estimate timeline/).length > 0);
+  holdDraft = [];
+  buttons(/Estimate timeline/)[0].click();
+  await until(() => holdDraft.length === 1);
+  const answer = holdDraft[0];
+  holdDraft = null;
+  // the crew types on a receipt while this job can't save (a full disk on a big job), then goes to the job list
+  const OS = globalThis.IDBObjectStore.prototype, put = OS.put;
+  OS.put = function (v, ...rest) {
+    if (this.name === "projects" && v && v.id === "jobU") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+    return put.call(this, v, ...rest);
+  };
+  try {
+    await nav("#/p/jobU/f/receipts/R1");
+    await until(() => view().querySelector('input[placeholder^="Home Depot"]'));
+    type(view().querySelector('input[placeholder^="Home Depot"]'), "Fairbanks Lumber");
+    await until(() => /Not saved/.test(view().querySelector(".saved-pill").textContent));
+    await nav("#/");
+    toasts.length = 0;
+    answer();                                        // its own save fails too: the draft waits on the queued copy
+    await until(() => toasts.length > 0);
+  } finally { OS.put = put; }
+  await flushPending();
+  const after = await Store.get("jobU");
+  assert.equal(after.receipts[0].vendor, "Fairbanks Lumber");
+  assert.deepEqual(after.boardPlan && after.boardPlan.phases.map((p) => p.name), ["Demo", "Drywall"], "the draft lands with the queued edit");
+});
+
+await test("a job home redrawn late from an old copy doesn't become where background writes land", async () => {
+  const job = { id: "jobH", jobType: "restoration", customer: "Huffman", address: "5 Huffman Rd", bidOf: "tile-1",
+    updatedAt: "2026-10-20T00:00:00.000Z", receipts: [{ id: "R1", photo, extraPages: [], vendor: "", amount: "", items: [] }] };
+  await Store.put(job, { bump: false, quiet: true });
+  // the home's "✓ Site visit done" waits on the board, then redraws the home from the copy it was drawn with
+  await nav("#/p/jobH");
+  await until(() => buttons(/Site visit done/).length > 0);
+  holdBoard = [];
+  buttons(/Site visit done/)[0].click();
+  await until(() => holdBoard.length >= 1);
+  const release = holdBoard;
+  holdBoard = null;
+  // meanwhile: a receipt read goes out, and the crew saves a claim number on the edit page
+  await nav("#/p/jobH/f/receipts/R1");
+  await until(() => buttons(/Read receipt/).length > 0);
+  const before = asks.length;
+  buttons(/Read receipt/)[0].click();
+  await until(() => asks.length === before + 1);
+  await nav("#/p/jobH/edit");
+  type(input("Claim #"), "CLM-77");
+  await settle(300);
+  assert.equal((await Store.get("jobH")).claimNo, "CLM-77");
+  release.forEach((f) => f());
+  await settle(300);
+  toasts.length = 0;
+  asks[before](spenard);                             // the read lands on the page's copy and saves it
+  await until(() => toasted(/Read Spenard/));
+  await settle(300);
+  const after = await Store.get("jobH");
+  assert.equal(after.receipts[0].vendor, "Spenard Builders Supply");
+  assert.equal(after.claimNo, "CLM-77", "the saved claim number is kept");
 });
 
 await test("a write that went around the page's copy to the store (sync's, before its graft) is kept by a Restore", async () => {
@@ -372,8 +470,23 @@ await test("a backup stamped while the phone's clock ran ahead says its time is 
   await Store.backup({ ...job, customer: "Kodiak 3" });   // …set right: stamped just after it
   await nav("#/p/jobK");
   await until(() => buttons(/⏪ Restore/).length === 3);
-  const rows = buttons(/⏪ Restore/).map((b) => b.parentNode.textContent);
-  assert.deepEqual(rows.map((t) => /clock was ahead/.test(t)), [true, true, false], rows.join(" / "));
+  const marked = () => buttons(/⏪ Restore/).map((b) => /time may be off/.test(b.parentNode.textContent));
+  // newest first: stamped just after the fast one, the fast one (still in the future), the one before
+  assert.deepEqual(marked(), [true, true, false], buttons(/⏪ Restore/).map((b) => b.parentNode.textContent).join(" / "));
+  let asked = "";
+  globalThis.confirm = window.confirm = (m) => { asked = m; return false; };
+  buttons(/⏪ Restore/)[0].click();
+  await until(() => asked);
+  globalThis.confirm = window.confirm = () => true;
+  assert.match(asked, /backup \(time may be off: the phone's clock was set wrong\)\?/, "the Restore question says so too");
+  // two days on, the fast one's time has passed; the one stamped after it still says so
+  Date.now = () => realNow() + 2 * 864e5;
+  try {
+    await nav("#/");
+    await nav("#/p/jobK");
+    await until(() => buttons(/⏪ Restore/).length === 3);
+    assert.deepEqual(marked(), [true, false, false]);
+  } finally { Date.now = realNow; }
 });
 
 quiet.error.call(console, `\n${pass} passed`);

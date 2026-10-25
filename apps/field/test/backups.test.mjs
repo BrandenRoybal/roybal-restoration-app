@@ -175,13 +175,27 @@ await test("a clock that ran ahead and was set back never leaves old copies sort
 });
 
 await test("two backups of one job on a full disk at once each land, in the order they were taken", async () => {
+  // a sync's backup and a Restore's together, both first tries out of room, in one millisecond:
+  // the first tries get one stamp, so each retry must stamp again
+  const realNow = Date.now;
+  const both = async (id, a, b) => {
+    const t = realNow();
+    Date.now = () => t;
+    quotaFailures = 2;
+    try { await Promise.all([Store.backup(a), Store.backup(b)]); } finally { Date.now = realNow; }
+    assert.equal(quotaFailures, 0);
+    return (await Store.backups(id)).map((s) => s.data.customer);
+  };
   await Store.backup(job("c2", 1));
-  // a sync's backup and a Restore's together, the same size (one number differs), both first tries out of room
-  quotaFailures = 2;
-  await Promise.all([Store.backup(job("c2", 2)), Store.backup(job("c2", 3))]);
-  assert.equal(quotaFailures, 0);
-  assert.deepEqual((await Store.backups("c2")).map((s) => s.data.customer), ["Job 3", "Job 2", "Job 1"]);
+  // the same size (one number differs): a reused stamp makes the same key, and the second copy was dropped
+  assert.deepEqual(await both("c2", job("c2", 2), job("c2", 3)), ["Job 3", "Job 2", "Job 1"]);
   assert.equal((await Store.latestBackup("c2")).customer, "Job 3");
+  // the later copy bigger, 99 bytes against 100: a reused stamp left the order to the size, compared as text
+  await Store.backup(job("c3", 1));
+  const sized = (n, bytes) => { const p = job("c3", n, { note: "" }); p.note = "x".repeat(bytes - approxBytes(p)); return p; };
+  const [a, b] = [sized(2, 99), sized(3, 100)];
+  assert.deepEqual([approxBytes(a), approxBytes(b)], [99, 100]);
+  assert.deepEqual(await both("c3", a, b), ["Job 3", "Job 2", "Job 1"]);
 });
 
 await test("a job that can't even be measured is skipped, never thrown at the sync that asked", async () => {

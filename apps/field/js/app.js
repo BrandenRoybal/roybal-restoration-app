@@ -1283,7 +1283,9 @@ function backupsCard(project) {
   const box = h("div");
   Promise.all([Store.snapshots(project.id), Store.hasOlderBackups(project.id)]).then(([snaps, older]) => {
     if (!snaps.length && !older) return;
-    const rows = snaps.map((s) => backupRow(project, s.takenAt, `about ${sizeLabel(s.bytes)}`, () => Store.snapshot(s.key), s.key));
+    // stamped 1 ms after the next older one: saved while the clock read earlier (core.js backup)
+    const pushed = (i) => i + 1 < snaps.length && Date.parse(snaps[i].takenAt) - Date.parse(snaps[i + 1].takenAt) === 1;
+    const rows = snaps.map((s, i) => backupRow(project, s.takenAt, `about ${sizeLabel(s.bytes)}`, () => Store.snapshot(s.key), s.key, pushed(i)));
     const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
       h("div", { style: "font-weight:700" }, "⏪ Backups on this device"),
       h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" },
@@ -1340,17 +1342,19 @@ const sizeLabel = (bytes) => bytes >= 1048576
    queue, which retries on its own, like any other edit.
 
    Snapshots sort in the order they were saved, not by the clock (core.js
-   backup), so after a phone's clock ran ahead the later ones carry times
-   just past that one: a time still in the future says so. */
-function backupRow(project, takenAt, line, load, keep) {
+   backup): one saved while the clock read earlier than the newest stamp is
+   stamped just after it (`pushed`), so after a clock that ran ahead is set
+   right the later ones all carry that one's time. Those, and a time still in
+   the future, say the time may be off. */
+function backupRow(project, takenAt, line, load, keep, pushed = false) {
   const when = String(takenAt || "").replace("T", " ").slice(0, 16);
-  const ahead = Date.parse(takenAt) > Date.now() + 60e3 ? " (time is off: this phone's clock was ahead)" : "";
+  const off = pushed || Date.parse(takenAt) > Date.now() + 60e3 ? " (time may be off: the phone's clock was set wrong)" : "";
   const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     const data = await Promise.resolve().then(load).catch(() => null);
     if (!data) { btn.disabled = false; toast("That backup is no longer on this device."); return; }
-    if (!confirm(`Bring back anything missing from the ${when} backup?\n\nIt holds ${backupCounts(data)}.\n\nNothing on the job is removed — this only adds back what the backup has and the current copy doesn't. The current copy is saved as a backup first either way.`)) {
+    if (!confirm(`Bring back anything missing from the ${when} backup${off}?\n\nIt holds ${backupCounts(data)}.\n\nNothing on the job is removed — this only adds back what the backup has and the current copy doesn't. The current copy is saved as a backup first either way.`)) {
       btn.disabled = false;
       return;
     }
@@ -1403,7 +1407,7 @@ function backupRow(project, takenAt, line, load, keep) {
     showIt();
   });
   return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
-    h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}${ahead}`), btn);
+    h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}${off}`), btn);
 }
 
 /* ---------- "take the cloud's copy" card ----------
@@ -1522,8 +1526,6 @@ function messageLogCard(project) {
 }
 
 function projectHome(project) {
-  // a re-render with another copy (a draft landing, a Restore) binds the page to it
-  liveProject = project;
   setChrome(project.customer || "Job", "#/");
   const body = clear(view);
   // keep the unified-job spine in step with this field job (fire-and-forget, never blocks UI)
