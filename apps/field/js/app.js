@@ -1353,8 +1353,8 @@ const sizeLabel = (bytes) => bytes >= 1048576
    otherwise count as newer and put its old values back over the crew's
    corrections. The copy "Take the cloud's copy" set aside ("set-aside") is
    this phone's own work, not an older copy, so it keeps its stamp and, where
-   it is newer than the job, its values come back too (its Restore question
-   says which, from the same stamps). So does a backup saved
+   it is newer than the job, its values come back too (the toast says which
+   way it went). So does a backup saved
    before records said which they are, as every backup always did: it may be
    a set-aside copy. A form on either side that was only tapped open (a factory
    blank, nothing typed) never stands in for the other side's: its dates and
@@ -1399,18 +1399,12 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
     const data = got && got.data;
     if (!data) { btn.disabled = false; toast("That backup is no longer on this device."); return; }
     const replaced = got.kind === "replaced", setAside = got.kind === "set-aside";
-    // a set-aside copy's changes come back only as the merge's newer side, which
-    // is by the stamps: the cloud's copy can be stamped after this phone's edits.
-    // The job's side carries the stored copy's stamp (the union below gives it
-    // to the page's copy when a write went around that copy)
-    const seen = Store.stampOf(project.id);
-    const jobAt = seen !== undefined ? seen : (liveCopy(project.id) || project).updatedAt;
-    const ahead = String(data.updatedAt || "") > String(jobAt || "");
-    const kept = !setAside
-      ? "Nothing on the job is removed — this only adds back what the backup has and the current copy doesn't."
-      : ahead
-        ? "This is the copy this phone set aside when it took the cloud's copy, and it is newer than the job: its changes come back, and nothing on the job is removed."
-        : "This is the copy this phone set aside when it took the cloud's copy. The job's copy is at least as new, so where both have a value the job's stays; anything the backup has that the job doesn't comes back.";
+    // which side a set-aside copy lands on is the merge's to decide, by the
+    // stamps the job carries when it runs: the question gives the rule, and
+    // the toast says how it came out
+    const kept = setAside
+      ? "This is the copy this phone set aside when it took the cloud's copy. Nothing on the job is removed: anything it has that the job doesn't comes back, and where both have a value, the copy saved last keeps its own."
+      : "Nothing on the job is removed — this only adds back what the backup has and the current copy doesn't.";
     if (!confirm(`Bring back anything missing from the ${when} backup${off}?\n\nIt holds ${backupCounts(data)}.\n\n${kept} The current copy is saved as a backup first either way.`)) {
       btn.disabled = false;
       return;
@@ -1479,10 +1473,11 @@ function backupRow(project, takenAt, line, load, keep, pushed = false) {
       return;
     }
     // a backup newer than the job is the merge's newer side, so its counts are of the job's side
+    const jobKept = setAside ? " Where both had a value, the job's copy, saved at least as recently, kept its own." : "";
     toast(backNewer ? (setAside ? "Brought back this phone's changes from before it took the cloud's copy." : "Brought back what that backup had.")
-      : bits.length ? `Recovered ${bits.join(" and ")} from the backup.`
-      : setAside ? "Nothing was missing — the job already has everything in that backup, or a newer value in its place."
-      : "Nothing was missing — the job already has everything in that backup.");
+      : bits.length ? `Recovered ${bits.join(" and ")} from the backup.${jobKept}`
+      : setAside ? `Nothing was missing from the job.${jobKept}`
+      : "Nothing was missing — the job already has everything in that backup.", !backNewer && jobKept ? 6000 : undefined);
     showIt();
   });
   return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
