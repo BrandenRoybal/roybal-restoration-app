@@ -242,7 +242,6 @@ export function approxBytes(node) {
   return n;
 }
 const isQuotaError = (e) => !!e && (e.name === "QuotaExceededError" || e.code === 22);
-let lastSnapMs = 0;   // two snapshots of one job in the same millisecond still get two keys
 
 /* save/delete listeners — the sync engine subscribes to push changes up */
 const _savedFns = [], _deletedFns = [];
@@ -370,25 +369,38 @@ export const Store = {
 
      opts.keep: a snapshot key (or the bare job id, for the pre-split record)
      this backup must not prune — the one a Restore is reading from, so the
-     backup of the current copy taken just before can't delete it. */
+     backup of the current copy taken just before can't delete it.
+     opts.discarded: this copy is this phone's own work being thrown away
+     ("Take the cloud's copy"), not an older copy that sync or a Restore
+     replaced. The record says which (kind "set-aside" or "replaced"), and
+     Restore reads it back (snapshotEntry); one saved by a build before
+     records said is neither. */
   async backup(project, opts = {}) {
     if (!project || !project.id) return;
     const id = project.id;
-    const ms = Math.max(Date.now(), lastSnapMs + 1);
-    lastSnapMs = ms;
-    const takenAt = new Date(ms).toISOString();
-    const bytes = approxBytes(project);
-    const rec = { id: snapKey(id, takenAt, bytes), jobId: id, takenAt, bytes, data: project };
     const keep = opts.keep;
+    let rec;
     /* one transaction, all or nothing: read the job's keys, drop what the new
-       copy pushes out of retention, write the new copy */
+       copy pushes out of retention, write the new copy.
+       The new copy is stamped after the job's newest stored one, whatever the
+       clock says: key order IS snapshot order, and a clock that ran ahead and
+       was set back would otherwise leave its stamps sorting as newest for
+       good — retention pruning the real newest copies, latestBackup handing
+       out a stale one. The stamp is read inside the transaction, so two
+       backups of one job in the same millisecond still get two keys, and set
+       once, so run()'s retry looks for the same key. */
     const save = () => run(BACKUPS, "readwrite", (t) => {
       const os = t.objectStore(BACKUPS);
       const keys = os.getAllKeys(snapRange(id));
       keys.onsuccess = () => {
+        const mine = ownSnapKeys(id, keys.result);
+        if (!rec.id) {
+          const after = mine.length ? Date.parse(parseSnapKey(mine[0]).takenAt) + 1 : 0;
+          rec.takenAt = new Date(Math.max(Date.now(), after || 0)).toISOString();
+          rec.id = snapKey(id, rec.takenAt, rec.bytes);
+        }
         // run()'s retry after a lost connection may find this copy already
         // written (the first try committed, the page just never heard)
-        const mine = ownSnapKeys(id, keys.result);
         const older = mine.filter((k) => k !== rec.id);
         const victims = snapVictims([rec.id, ...older]).filter((k) => k !== keep);
         for (const k of victims) os.delete(k);
@@ -397,6 +409,8 @@ export const Store = {
       };
     });
     try {
+      rec = { jobId: id, bytes: approxBytes(project), data: project };
+      rec.kind = opts.discarded ? "set-aside" : "replaced";
       try {
         await save();
       } catch (e) {
@@ -413,6 +427,8 @@ export const Store = {
           };
           if (keep !== id) os.delete(id);
         });
+        // the failed try wrote nothing: stamp again, after any copy saved meanwhile
+        rec.id = undefined;
         await save();
       }
     } catch (e) {
@@ -429,6 +445,12 @@ export const Store = {
   async snapshot(key) {
     const rec = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(key), set));
     return (rec && rec.data) || null;
+  },
+  /** One snapshot as { data, kind }, or null when it is gone (kind is ""
+      for a record saved before records said what they hold). */
+  async snapshotEntry(key) {
+    const rec = await run(BACKUPS, "readonly", (t, set) => req1(t.objectStore(BACKUPS).get(key), set));
+    return rec && rec.data ? { data: rec.data, kind: typeof rec.kind === "string" ? rec.kind : "" } : null;
   },
   /** The newest snapshot's copy of the job (one record loaded), or null. */
   async latestBackup(id) {

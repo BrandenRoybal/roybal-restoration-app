@@ -162,6 +162,50 @@ await test("a disk that stays full skips the snapshot and never throws", async (
   assert.deepEqual((await Store.backups("j7")).map((s) => s.data.customer), ["Job 3"], "room was made; the new copy didn't fit");
 });
 
+await test("a clock that ran ahead and was set back never leaves old copies sorting as newest", async () => {
+  const realNow = Date.now;
+  Date.now = () => realNow() + 864e5;                               // a day fast…
+  try { await Store.backup(job("c1", 1)); await Store.backup(job("c1", 2)); } finally { Date.now = realNow; }
+  // …then set right, and the app relaunched (a fresh module, as a reload is)
+  const { Store: Relaunched } = await import("../js/core.js?relaunch");
+  for (let n = 3; n <= 14; n++) await Relaunched.backup(job("c1", n));
+  assert.equal((await Relaunched.latestBackup("c1")).customer, "Job 14", "the copy taken last is the newest");
+  assert.deepEqual((await Relaunched.backups("c1")).map((s) => s.data.customer).slice(0, 3), ["Job 14", "Job 13", "Job 12"]);
+  assert.equal((await Relaunched.snapshots("c1")).length, 10, "and the fast-clock copies aged out like any other");
+});
+
+await test("two backups of one job on a full disk at once each land, in the order they were taken", async () => {
+  // a sync's backup and a Restore's together, both first tries out of room, in one millisecond:
+  // the first tries get one stamp, so each retry must stamp again
+  const realNow = Date.now;
+  const both = async (id, a, b) => {
+    const t = realNow();
+    Date.now = () => t;
+    quotaFailures = 2;
+    try { await Promise.all([Store.backup(a), Store.backup(b)]); } finally { Date.now = realNow; }
+    assert.equal(quotaFailures, 0);
+    return (await Store.backups(id)).map((s) => s.data.customer);
+  };
+  await Store.backup(job("c2", 1));
+  // the same size (one number differs): a reused stamp makes the same key, and the second copy was dropped
+  assert.deepEqual(await both("c2", job("c2", 2), job("c2", 3)), ["Job 3", "Job 2", "Job 1"]);
+  assert.equal((await Store.latestBackup("c2")).customer, "Job 3");
+  // the later copy bigger, 99 bytes against 100: a reused stamp left the order to the size, compared as text
+  await Store.backup(job("c3", 1));
+  const sized = (n, bytes) => { const p = job("c3", n, { note: "" }); p.note = "x".repeat(bytes - approxBytes(p)); return p; };
+  const [a, b] = [sized(2, 99), sized(3, 100)];
+  assert.deepEqual([approxBytes(a), approxBytes(b)], [99, 100]);
+  assert.deepEqual(await both("c3", a, b), ["Job 3", "Job 2", "Job 1"]);
+});
+
+await test("a job that can't even be measured is skipped, never thrown at the sync that asked", async () => {
+  const odd = job("j9", 1); odd.self = odd;                            // no real job does this; backup() still must not throw
+  const warn = console.warn; let warned = 0; console.warn = () => { warned++; };
+  try { await Store.backup(odd); } finally { console.warn = warn; }
+  assert.equal(warned, 1);
+  assert.deepEqual(await Store.snapshots("j9"), []);
+});
+
 await test("a failed backup that isn't a full disk rolls back whole — no snapshot is lost to it", async () => {
   for (let n = 1; n <= 10; n++) await Store.backup(job("j8", n));
   const warn = console.warn; console.warn = () => {};
@@ -184,6 +228,38 @@ await test("a failed backup that isn't a full disk rolls back whole — no snaps
   assert.equal(kept.length, 10, "the delete of the oldest rolled back with the failed write");
   assert.equal(kept[0].data.customer, "Job 10");
   assert.equal(kept[9].data.customer, "Job 1");
+});
+
+await test("a Restore's backup never prunes the copy being restored: an older-format backup outliving retention", async () => {
+  await putOldRecord("k1", [{ takenAt: "2026-10-01T00:00:00.000Z", data: job("k1", 0) }]);
+  for (let n = 1; n <= 10; n++) await Store.backup(job("k1", n));
+  await Store.backup(job("k1", 11), { keep: "k1" });                 // restoring from "Show older backups"
+  assert.equal(await Store.hasOlderBackups("k1"), true, "the older record being restored stays");
+  assert.equal((await Store.snapshots("k1")).length, 10, "the oldest snapshot still made room");
+  await Store.backup(job("k1", 12));                                   // no restore: it ages out as usual
+  assert.equal(await Store.hasOlderBackups("k1"), false);
+});
+
+await test("a Restore's backup on a full disk frees room around the snapshot being restored", async () => {
+  for (let n = 1; n <= 10; n++) await Store.backup(job("k2", n));
+  const oldest = (await Store.snapshots("k2")).at(-1).key;
+  quotaFailures = 1;
+  await Store.backup(job("k2", 11), { keep: oldest });
+  assert.equal(quotaFailures, 0);
+  const kept = (await Store.snapshots("k2")).map((s) => s.key);
+  assert.ok(kept.includes(oldest), "the snapshot being restored survives the free-up");
+  assert.equal((await Store.snapshot(oldest)).customer, "Job 1");
+  assert.equal((await Store.latestBackup("k2")).customer, "Job 11", "and the backup of the current copy landed");
+});
+
+await test("a Restore's backup on a full disk keeps the older-format backup being restored", async () => {
+  await putOldRecord("k3", [{ takenAt: "2026-10-01T00:00:00.000Z", data: job("k3", 0) }]);
+  for (let n = 1; n <= 3; n++) await Store.backup(job("k3", n));
+  quotaFailures = 1;
+  await Store.backup(job("k3", 4), { keep: "k3" });
+  assert.equal(quotaFailures, 0);
+  assert.equal(await Store.hasOlderBackups("k3"), true, "the older record being restored stays");
+  assert.equal((await Store.olderBackups("k3"))[0].data.customer, "Job 0");
 });
 
 console.log(`\n${pass} passed`);
