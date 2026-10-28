@@ -209,17 +209,21 @@ function readPayload(payload, today) {
 }
 
 /** receipt_qbo_links_note for every job in scope: one call, split only past
-    the door's limits (by whole jobs, since it removes per job). */
+    the door's limits (by whole jobs, since it removes per job). The rows go
+    in the matcher's order, not job by job: a row that gives up an expense
+    is written before the one, on any job, that takes it (matchReceipts). */
 async function writeNotes(supa, jobIds, notes) {
   const byJob = new Map(jobIds.map((id) => [id, []]));
   for (const n of notes) {
     if (!byJob.has(n.job_id)) byJob.set(n.job_id, []);
     byJob.get(n.job_id).push(n);
   }
+  const at = new Map(notes.map((n, i) => [n, i]));
   const total = { written: 0, kept: 0, removed: 0 };
   let ids = [], rows = [];
   const flush = async () => {
     if (!ids.length) return;
+    rows.sort((a, b) => at.get(a) - at.get(b));
     const r = await supa.rpc("receipt_qbo_links_note", { p_job_ids: ids, p_rows: rows });
     for (const k of Object.keys(total)) total[k] += Number(r?.[k]) || 0;
     ids = [];

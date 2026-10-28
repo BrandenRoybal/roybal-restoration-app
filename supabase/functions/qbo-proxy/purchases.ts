@@ -18,7 +18,9 @@
    • Never a second expense for something already in QuickBooks. A
      store invoice the app would enter is looked up by its number on
      that store account first, and our own earlier entry is found the
-     same way (plus Intuit's requestid on the create itself).
+     same way (plus Intuit's requestid on the create itself). The same
+     number booked on any other account refuses the entry
+     (entered_elsewhere): it is in the books already, not ours to adopt.
    • Never overwrite a job tag. An expense tagged to another customer,
      or only partly tagged, is refused; one already tagged to this job
      is adopted as done.
@@ -609,18 +611,36 @@ export function createBody(r: CompleteRequest): Q {
     amount. Our own marker wins a tie. */
 export function pickExistingCreate(purchases: Q[], r: CompleteRequest): Q | null {
   const c = r.create!;
-  // the same direction always: a return slip often prints the original
-  // invoice's number, and the purchase is never the return's entry
-  const onAccount = purchases.filter((p) => str(p?.AccountRef?.value) === c.account_id && (p?.Credit === true) === c.credit);
-  const exact = onAccount.filter((p) => str(p?.DocNumber) === c.doc_number);
-  const prefix = onAccount.filter((p) =>
-    str(p?.DocNumber).startsWith(c.doc_number) &&
-    Math.abs(round2(Number(p?.TotalAmt) || 0) - c.amount_abs) <= 0.005);
-  const pool = exact.length ? exact : prefix;
+  const pool = sameInvoice(purchases.filter((p) => str(p?.AccountRef?.value) === c.account_id), c);
   if (!pool.length) return null;
   const mark = receiptMarker(r.receiptId);
   return pool.find((p) => str(p?.PrivateNote).includes(mark)) ??
     [...pool].sort((a, b) => Number(a.Id) - Number(b.Id))[0];
+}
+
+/** The entries of this invoice among some expenses: the same direction
+    always (a return slip often prints the original invoice's number, and
+    the purchase is never the return's entry), and the same number, or else
+    a number that starts with ours at the same amount. */
+function sameInvoice(purchases: Q[], c: Create): Q[] {
+  const same = purchases.filter((p) => (p?.Credit === true) === c.credit);
+  const exact = same.filter((p) => str(p?.DocNumber) === c.doc_number);
+  const prefix = same.filter((p) =>
+    str(p?.DocNumber).startsWith(c.doc_number) &&
+    Math.abs(round2(Number(p?.TotalAmt) || 0) - c.amount_abs) <= 0.005);
+  return exact.length ? exact : prefix;
+}
+
+/** Is this store invoice already in QuickBooks on ANOTHER account (the
+    office booked it to checking, a card, or another store account)? By the
+    same rule as pickExistingCreate, which never adopts it there: an entry
+    on another account is someone's booking, not the store entry. The store
+    entry is refused over it (entered_elsewhere) instead of posting a second
+    expense beside it. The oldest such entry, or null. */
+export function enteredElsewhere(purchases: Q[], r: CompleteRequest): Q | null {
+  const c = r.create!;
+  const pool = sameInvoice(purchases.filter((p) => str(p?.AccountRef?.value) !== c.account_id), c);
+  return pool.length ? [...pool].sort((a, b) => Number(a.Id) - Number(b.Id))[0] : null;
 }
 
 /* ---------- completePurchase: the photo ---------- */
@@ -998,11 +1018,20 @@ async function completeOne(r: CompleteRequest, io: CompleteIO, files: Files, boo
   // 1a. the store entry: theirs, or ours from an earlier try (nothing written yet)
   if (r.create) {
     const c = r.create;
-    const found = pickExistingCreate(await pagedRows(io.query, "Purchase", (start) => docNumberQuery(c.doc_number, start)), r);
+    const rows = await pagedRows(io.query, "Purchase", (start) => docNumberQuery(c.doc_number, start));
+    const found = pickExistingCreate(rows, r);
     if (found) {
       id = str(found.Id);
       adopted.create = true;
       expectSyncToken = "";                          // never seen at filing: nothing to be stale against
+    } else {
+      // the same invoice booked on another account: a second entry would count it twice
+      const there = enteredElsewhere(rows, r);
+      if (there) {
+        const acct = str(there.AccountRef?.name) || `account ${str(there.AccountRef?.value)}`;
+        throw refuse("entered_elsewhere",
+          `invoice ${c.doc_number} is already in QuickBooks as expense ${str(there.Id)} on ${acct}; nothing was written`);
+      }
     }
   }
 

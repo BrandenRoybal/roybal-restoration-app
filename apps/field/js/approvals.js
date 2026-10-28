@@ -788,6 +788,7 @@ export const QBO_REFUSED = {
   upload_refused: "QuickBooks refused the photo", qbo_refused: "QuickBooks refused the change",
   bad_request: "the app sent QuickBooks a bad request",
   relinked: "the job's QuickBooks project changed after approval",
+  entered_elsewhere: "already in QuickBooks on another account",
 };
 const QBO_FAILED = {
   stale_object: "the expense kept changing in QuickBooks", qbo_not_connected: "QuickBooks isn't connected",

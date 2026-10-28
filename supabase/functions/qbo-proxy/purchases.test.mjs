@@ -24,7 +24,7 @@ import {
   parseWindow, attachableSince, attachmentsByPurchase, compactPurchase, compactProject,
   billsQuery, compactBill,
   parseCompleteRequest, tagPlan, staleCheck, tagLines, tagUpdateBody, receiptMarker, requestIdFor, createBody,
-  pickExistingCreate, attachPlan, mediaHash, storageMissing, parseDataUrl, photoFileName, attachMetadata,
+  pickExistingCreate, enteredElsewhere, attachPlan, mediaHash, storageMissing, parseDataUrl, photoFileName, attachMetadata,
   multipartBody, uploadedAttachable, completePurchase, MAX_PHOTO_BYTES,
 } from "./purchases.ts";
 
@@ -580,6 +580,22 @@ test("pickExistingCreate: Sherwin's longer DocNumber matches by prefix only at t
   assert.equal(pickExistingCreate([P10566], sw({ credit: true })), null);
 });
 
+test("enteredElsewhere: the same invoice booked on another account, by pickExistingCreate's rule otherwise", () => {
+  const r = parseCompleteRequest(createPayload({ create: { ...CREATE, doc_number: "700624817", amount_abs: 212.28 } }));
+  const checking = { ...P10563, Id: "10701", AccountRef: { value: "9", name: "8992-MMB- Checking" }, PaymentType: "Check" };
+  assert.equal(enteredElsewhere([checking], r).Id, "10701");
+  assert.equal(enteredElsewhere([{ ...checking, TotalAmt: 21.28 }], r).Id, "10701", "the same number at any amount (a misread total)");
+  assert.equal(enteredElsewhere([P10563], r), null, "on the store account it is adopted, not refused");
+  assert.equal(enteredElsewhere([{ ...checking, Credit: true }], r), null, "never the other direction");
+  assert.equal(enteredElsewhere([{ ...checking, DocNumber: "700624818" }], r), null);
+  // a longer number only at the same amount (Sherwin's suffix)
+  const sw = (o = {}) => parseCompleteRequest(createPayload({ create: { ...CREATE, account_id: "52", vendor_id: "9", doc_number: "80669", amount_abs: 36, ...o } }));
+  const elsewhere = { ...P10566, Id: "10720", AccountRef: { value: "9", name: "8992-MMB- Checking" } };
+  assert.equal(enteredElsewhere([elsewhere], sw()).Id, "10720");
+  assert.equal(enteredElsewhere([elsewhere], sw({ amount_abs: 36.5 })), null);
+  assert.equal(enteredElsewhere([{ ...elsewhere, Id: "10730" }, elsewhere], sw()).Id, "10720", "the oldest");
+});
+
 test("pickExistingCreate: our own earlier entry wins a tie", () => {
   const r = parseCompleteRequest(createPayload());
   const theirs = { ...P10563, Id: "20001", DocNumber: "700665392", TotalAmt: 1146.75, PrivateNote: "Materials purchased" };
@@ -1058,6 +1074,31 @@ test("store entry adopted but untagged: tagged without a staleness test (it was 
   assert.equal(r.tagged, "done");
   assert.equal(r.adopted.create, true);
   assert.equal(w.posts[0].body.Id, "10601");
+});
+
+test("store entry: the same invoice already booked on another account is refused (entered_elsewhere), never posted a second time", async () => {
+  // the duplicate Spenard receipt of 700687087 (Alston, 10/21): the bookkeeper's entry is on checking, not the store account
+  const theirs = { ...structuredClone(P10563), Id: "10690", DocNumber: "700665392", TotalAmt: 1146.75,
+    AccountRef: { value: "9", name: "8992-MMB- Checking" }, PaymentType: "Check" };
+  const w = qbo({ purchases: [theirs] });
+  await fails(completePurchase(createPayload(), w.io), (e) => {
+    assert.equal(e.code, "entered_elsewhere");
+    assert.equal(e.permanent, true);
+    assert.equal(e.status, 409);
+    assert.match(e.message, /invoice 700665392 is already in QuickBooks as expense 10690 on 8992-MMB- Checking; nothing was written/);
+  });
+  assert.equal(w.posts.length, 0, "no second expense");
+  assert.deepEqual(w.calls, ["query"], "refused before the photo is read");
+  // beside an entry on the store account too, the store account's is adopted as before
+  const ours = { ...structuredClone(P10563), Id: "10691", DocNumber: "700665392", TotalAmt: 1146.75 };
+  const both = qbo({ purchases: [theirs, ours] });
+  const r = await completePurchase(createPayload(), both.io);
+  assert.equal(r.purchaseId, "10691");
+  assert.equal(r.adopted.create, true);
+  assert.equal(both.calls.includes("create"), false);
+  // a return of the same number elsewhere is not the purchase's entry: entered as before
+  const credit = qbo({ purchases: [{ ...theirs, Credit: true }] });
+  assert.equal((await completePurchase(createPayload(), credit.io)).purchaseId, "10700");
 });
 
 test("store entry adopted but tagged to another job: refused", async () => {

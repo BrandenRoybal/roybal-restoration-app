@@ -151,12 +151,12 @@ test("the nightly run on the Oct 7 rows: one read of each table, two qbo-proxy r
     assert.ok(c.init.signal, "a hung read cannot hold the queue lane");
   }
 
-  // one note, every job with receipts, exactly the matcher's rows (grouped by job)
+  // one note, every job with receipts, exactly the matcher's rows in its order (not job by job: a row that gives up an
+  // expense goes before the one, on any job, that takes it)
   const want = expected();
-  const byReceipt = (rows) => [...rows].sort((a, b) => (a.receipt_id < b.receipt_id ? -1 : 1));
   assert.equal(noteCalls(supa).length, 1);
   assert.deepEqual(noteCalls(supa)[0].p_job_ids, JOB_IDS);
-  assert.deepEqual(byReceipt(noteCalls(supa)[0].p_rows), want.notes);
+  assert.deepEqual(noteCalls(supa)[0].p_rows, want.notes);
   assert.equal(want.notes.length, 22);
 
   // the door for each job the run looked at: Alston's card, and no input for the four with nothing to approve
@@ -176,6 +176,20 @@ test("the nightly run on the Oct 7 rows: one read of each table, two qbo-proxy r
   assert.deepEqual(ctx.log.lines.filter((l) => l.event === "receipts.filed"),
     [{ event: "receipts.filed", job_id: oct7.JOBS.alston, proposal_id: "p-a628eea5", items: 5, superseded: 0 }]);
   assert.doesNotMatch(JSON.stringify(ctx.log.lines), /Pollen|Home Depot|Spenard|1369/);
+});
+
+test("the note call hands the door a row giving up an expense before the receipt on another job, sorting first, that takes it", async () => {
+  // r15 (Chena) was noted in QuickBooks on 10489 by step 1a's stand-in; tonight r01 (Alston) is 10489's, as on Oct 7
+  const r15 = oct7.RECEIPTS.find((r) => r.id === "r15");
+  const links = [{ receipt_id: "r15", job_id: r15.job_id, state: "in_qbo", qbo_txn_type: "Purchase", qbo_txn_id: "10489", qbo_sync_token: "0",
+    qbo_customer_id: "502", amount: r15.amount, receipt_date: r15.receipt_date, detail: { job_link: "suggested_tagged" } }];
+  const { supa, ctx } = world({ links });
+  await receiptsQboMatch(ctx, nightly());
+  const want = expected({ links });
+  const rows = noteCalls(supa)[0].p_rows;
+  assert.deepEqual([rows[0].receipt_id, rows[0].state], ["r15", "unmatched"]);
+  assert.deepEqual(rows.filter((n) => n.qbo_txn_id === "10489").map((n) => [n.receipt_id, n.state]), [["r01", "in_qbo"]]);
+  assert.deepEqual(rows, want.notes);
 });
 
 test("the job's QuickBooks link, the receipts' rows and the store-entry switch are read and handed to the matcher", async () => {
