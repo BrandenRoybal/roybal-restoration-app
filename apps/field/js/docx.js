@@ -167,7 +167,7 @@ export function estimateDocumentXml(project, inv, { isBuild = false } = {}) {
     }
     for (const it of g.items) {
       rows.push([
-        cell(String(it.desc || "").trim() + (String(it.by || "").trim() ? "\n(" + String(it.by).trim() + ")" : ""), W[0]),
+        cell(String(it.desc || "").trim(), W[0]),   // who performs the line (it.by) is office-only, never on the customer's copy
         cell(qtyText(it.qty), W[1], { align: "right" }),
         cell(String(it.unit || ""), W[2]),
         cell(money(it.price), W[3], { align: "right" }),

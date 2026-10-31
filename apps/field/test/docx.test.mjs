@@ -58,8 +58,8 @@ ok("document carries the letterhead, number, customer and total",
   xml.includes("Roybal Construction, LLC") && xml.includes("RC-KEN-0926") && xml.includes("Pat Kennedy")
   && xml.includes(money(f.total)) && xml.includes("ESTIMATE"));
 ok("user text is escaped inside the document", xml.includes("Kitchen remodel &amp; new flooring &lt;main level&gt;") && !xml.includes("<main level>"));
-ok("area subtotals, performer, alternates, range, duration and notes all print",
-  xml.includes(">Kitchen<") && xml.includes("(Northland Cabinets)") && xml.includes("Quartz counters")
+ok("area subtotals, alternates, range, duration and notes all print; the performer (By) stays off the customer's copy",
+  xml.includes(">Kitchen<") && !xml.includes("Northland Cabinets") && xml.includes("Quartz counters")
   && xml.includes("Expected range at ±15%") && xml.includes("Estimated duration: 3 weeks") && xml.includes("Existing plumbing reused"));
 ok("tags balance (a cheap well-formedness check)",
   ["w:p", "w:r", "w:tbl", "w:tr", "w:tc", "w:t"].every((t) =>

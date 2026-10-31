@@ -1877,8 +1877,12 @@ function pricedTagEl(li) {
    compact qty / unit / price columns — the way adjusters read estimates. */
 function invoiceCharges(inv, onTotals, opts = {}) {
   const tbody = h("tbody");
-  // "By" (who performs the line: Roybal, a named sub, Allowance) shows on
-  // construction estimates and on any estimate a site-visit draft filled in
+  // "By" (who performs the line: Roybal, a named sub, Allowance) is an
+  // office-only column on construction estimates and on any estimate a
+  // site-visit draft filled in. It never prints (Branden, 10/30): the
+  // customer's estimate reads Description / Qty / Unit / Unit Price / Total
+  // with the total at the right edge. On screen it still names each line's
+  // trade and feeds the GC O&P rule (namesSubcontractor).
   const showBy = !!opts.showBy;
 
   function recalc() {
@@ -1944,7 +1948,7 @@ function invoiceCharges(inv, onTotals, opts = {}) {
       cell("unit"),
       cell("price", "", "number"),
       extEl,
-      showBy ? cell("by", "invby") : null,
+      showBy ? cell("by", "invby app-only") : null,
       h("td", { class: "app-only" }, h("button", { type: "button", class: "rowdel", onclick: () => { inv.items.splice(inv.items.indexOf(it), 1); paint(); recalc(); commit(); } }, "✕")));
     return tr;
   }
@@ -2000,11 +2004,11 @@ function invoiceCharges(inv, onTotals, opts = {}) {
         h("colgroup", {},
           h("col", { style: "width:30px" }), h("col", {}), h("col", { style: "width:52px" }),
           h("col", { style: "width:46px" }), h("col", { style: "width:72px" }),
-          h("col", { style: "width:84px" }), showBy ? h("col", { style: "width:92px" }) : null,
+          h("col", { style: "width:84px" }), showBy ? h("col", { class: "app-only", style: "width:92px" }) : null,
           h("col", { class: "app-only", style: "width:32px" })),
         h("thead", {}, h("tr", {},
           h("th", {}, "#"), h("th", { class: "invdesc" }, "Description"), h("th", {}, "Qty"),
-          h("th", {}, "Unit"), h("th", {}, "Unit Price"), h("th", {}, "Total"), showBy ? h("th", {}, "By") : null,
+          h("th", {}, "Unit"), h("th", {}, "Unit Price"), h("th", {}, "Total"), showBy ? h("th", { class: "app-only" }, "By") : null,
           h("th", { class: "app-only" }, ""))),
         tbody)),
     addSection);
@@ -2071,9 +2075,9 @@ export function invoice(project, inv) {
       if (!who.has(k)) { who.set(k, 0); whoOrder.push(k); }
       who.set(k, who.get(k) + ext);
     }
-    // estimates carry no performer recap (Branden, 9/30): the By column
-    // already names each line's trade, and the customer doesn't need a
-    // who-does-what split; invoices keep it
+    // estimates carry no performer recap (Branden, 9/30) and, since 10/30,
+    // no printed By column either: the customer doesn't need a who-does-what
+    // split on an estimate; invoices keep the recap
     const whoRows = !isEst && whoOrder.length > 1 && total
       ? [h("div", { class: "invrecap__title", style: "margin-top:10px" }, "Recap by Performer"),
          ...whoOrder.map((k) => h("div", { class: "invrecap__row" },
