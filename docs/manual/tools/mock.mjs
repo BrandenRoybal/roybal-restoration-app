@@ -9,9 +9,12 @@ function restGet(table, url) {
   const q = url.search;
   switch (table) {
     case "field_projects": return D.fieldRows();
-    case "coordination_jobs":
+    case "coordination_jobs": {
+      const id = url.searchParams.get("id") || "";
+      if (id.startsWith("eq.")) return D.BOARD_JOBS.filter((r) => r.id === id.slice(3));
       if (q.includes("stage=eq.lead")) return D.BOARD_JOBS.filter((r) => r.data.stage === "lead");
       return D.BOARD_JOBS;
+    }
     case "crew_members": return D.CREW;
     case "time_entries": return D.TIME;
     case "pending_actions": return D.PENDING_ACTIONS;
@@ -21,7 +24,12 @@ function restGet(table, url) {
       return D.SMS;
     case "email_messages": return D.EMAILS;
     case "receipt_vendors": return D.VENDORS;
-    case "contacts": return D.CONTACTS;
+    case "contacts": {
+      const id = url.searchParams.get("id") || "";
+      if (id.startsWith("eq.")) return D.CONTACTS.filter((c) => c.id === id.slice(3));
+      if (id.startsWith("in.(")) { const ids = id.slice(4, -1).split(","); return D.CONTACTS.filter((c) => ids.includes(c.id)); }
+      return D.CONTACTS;
+    }
     default: return [];
   }
 }

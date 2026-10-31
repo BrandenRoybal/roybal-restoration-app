@@ -54,6 +54,7 @@ const SHOTS = [
   { name: "admin-today", url: `${F}/admin/`, vp: DESK },
   { name: "admin-approvals", url: `${F}/admin/#/approvals`, vp: DESK, full: 1100 },
   { name: "admin-leads", url: `${F}/admin/#/leads`, vp: DESK },
+  { name: "admin-lead-sheet", url: `${F}/admin/#/leads/demo-lead-2`, vp: DESK, full: 1250 },
   { name: "admin-jobs", url: `${F}/admin/#/jobs`, vp: DESK },
   { name: "admin-receipts", url: `${F}/admin/#/receipts`, vp: DESK },
   { name: "admin-contacts", url: `${F}/admin/#/contacts`, vp: DESK },

@@ -361,8 +361,26 @@ export function digestSupportDoc(project, pages, hint) {
     receiptcalc.js applyReceiptRead lands it on the receipt. A return slip
     comes back isReturn with total null and the refund in `refund` (a reader
     deployed before that sends neither, and drops a negative total). */
-export function readReceipt(project, pages) {
-  return callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }).then((b) => b.receipt || {});
+export const readTuning = { receiptMs: 60000 };   // tests shorten it
+export async function readReceipt(project, pages) {
+  // like readMeter: a phone back from hours offline refreshes first, and a
+  // read that never answers — the refresh included — gives up (the button
+  // comes back) instead of leaving "Reading…" on screen for good
+  const noAnswer = "no answer in a minute — check the signal and tap ✨ Read receipt again";
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  let timer = null;
+  const gaveUp = new Promise((_, reject) => {
+    timer = setTimeout(() => { if (ctl) ctl.abort(); reject(new Error(noAnswer)); }, readTuning.receiptMs);
+  });
+  gaveUp.catch(() => {});
+  try {
+    await Promise.race([ensureFresh().catch(() => { /* the call below reports it */ }), gaveUp]);
+    const b = await Promise.race([callOffice(project, "receiptRead", { pages: pages.slice(0, 4) }, { signal: ctl ? ctl.signal : undefined }), gaveUp]);
+    return b.receipt || {};
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error(noAnswer);
+    throw e;
+  } finally { clearTimeout(timer); }
 }
 
 /** Read the number on a photo of the moisture meter's screen (one photo, a

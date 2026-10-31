@@ -1,7 +1,7 @@
 /* ============================================================
    Roybal Field Forms — app shell + hash router
    ============================================================ */
-import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, downloadFile, csvRow, stripCtrl, likelyOffline } from "./core.js";
+import { h, $, clear, Store, toast, fmtDate, money, fileToDataURL, flushPending, autosave, downloadFile, csvRow, stripCtrl, likelyOffline, unsavedProject, hasUnsaved, onStorageLost, onStorageBack, isConnectionLost } from "./core.js";
 import {
   formByKey, formCount, newProject, isBlankProject, formsFor, jobType,
   CONSTRUCTION_TYPES, constructionTypeLabel,
@@ -23,7 +23,7 @@ import { SYNC_ENABLED, SUPABASE_URL, SUPABASE_KEY, BUILD, SHOW_MY_WEEK } from ".
 import { isSignedIn, signIn, signOut, currentEmail, rest } from "./supa.js";
 import { startSync, syncNow, resetSync, onSyncMerge, onSyncRowChanged, reloadFromCloud } from "./sync.js";
 import { graftProject } from "./graft.js";
-import { mergeProjects, tombstoneItems } from "./merge.js";
+import { mergeProjects, tombstoneItems, FORM_SLOTS } from "./merge.js";
 import { removeMeterPhotos, mapPhotoIds } from "./meterphotos.js";
 import { onMeterLive, readWaitingMeters, readAllWaitingMeters } from "./meterui.js";
 import { panelModel, evaluateProject } from "./completeness.js";
@@ -49,7 +49,7 @@ import { helpPage } from "./help.js";
 import { magicplanPanel, onMagicplanLive } from "./magicplan.js";
 import { mpTileLine, pruneForeignMeasured } from "./magicplancalc.js";
 import { openSiteVisitNext } from "./sitevisit.js";
-import { receiptsPage } from "./receipts.js";
+import { receiptsPage, onReceiptLive } from "./receipts.js";
 import { receiptTileLine } from "./receiptcalc.js";
 
 const view = $("#view");
@@ -87,7 +87,7 @@ function go(hash, opts = {}) {
 }
 backBtn.addEventListener("click", () => go(backTarget));
 
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => { route(); });
 window.addEventListener("load", boot);
 window.addEventListener("roybal-tech-changed", renderTechChip);  // refresh the header chip when tech is set anywhere
 
@@ -172,7 +172,7 @@ function startSyncUI() {
   });
   // a Magicplan write that finishes after the user moved on (the home's
   // auto-create or auto-adopt, a slow Pull) lands on the page now on screen
-  onMagicplanLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
+  onMagicplanLive(liveCopy);
   startSync(updateSyncStatus);
 }
 function boot() {
@@ -180,7 +180,9 @@ function boot() {
   try { navigator.storage?.persist?.().catch(() => {}); } catch { /* best-effort */ }
   setAuthor(currentEmail());   // stamp new captures with who's signed in ("" offline)
   // a meter photo's number that comes back after the user moved on lands on the page now on screen
-  onMeterLive((id) => (liveProject && liveProject.id === id ? liveProject : null));
+  onMeterLive(liveCopy);
+  // a receipt read that comes back after the user moved on lands on the page now on screen
+  onReceiptLive(liveCopy);
   if (SYNC_ENABLED && isSignedIn()) startSyncUI();
   // walk clips captured with no signal upload themselves: on open, on `online`, on the tab coming back
   if (SYNC_ENABLED) startMediaQueue();
@@ -190,9 +192,61 @@ function boot() {
 /* the project object the current page's inputs are bound to (null on the
    list/login screens) — sync grafts merged changes into it, see startSyncUI */
 let liveProject = null;
+/* that object when it is job `id`'s: where a write finishing after the user
+   moved on lands, because the page's next save writes this copy, not the stored one */
+const liveCopy = (id) => (liveProject && liveProject.id === id ? liveProject : null);
 
+/* A route that cannot read or write the store must still leave the screen
+   matching the URL. It used to throw on flushPending (or Store.get) with no
+   catch: the hash moved, the old page stayed, ‹ pointed at the same hash and
+   did nothing, and "Saving…" sat there — the app looked frozen. */
 async function route() {
-  await flushPending();              // persist any in-flight edit before reloading
+  try { await routeInner(); }
+  catch (e) { routeTroublePage(e); }
+}
+/* storage-lost (core.js gave up after a reopen) or any IndexedDB DOMException */
+const isStorageTrouble = (e) => !!e && (e.code === "storage-lost" || isConnectionLost(e) ||
+  (typeof DOMException !== "undefined" && e instanceof DOMException));
+function routeTroublePage(e) {
+  liveProject = null;
+  const storage = isStorageTrouble(e);
+  if (!storage) { try { console.error("route failed:", e); } catch {} }
+  // always a way out: the home-screen app has no address bar (a reload
+  // keeps this URL, so it can't be the only exit from a page that won't open)
+  const away = (location.hash || "#/") !== "#/";
+  setChrome(storage ? "Not saved" : "Couldn't open", away ? "#/" : null);
+  const body = clear(view);
+  body.append(h("div", { class: "card", style: "border-left:4px solid var(--red)" },
+    h("h1", {}, storage ? "⚠ This phone stopped saving" : "⚠ This page couldn't open"),
+    h("p", {}, (storage ? "The phone's storage for this app stopped responding. " : "") +
+      (hasUnsaved() ? "Your last changes are still in the app but NOT saved yet. " : "") +
+      (storage ? "Tap Try again. If it keeps happening, tap Reload app." : "Tap Try again, or go back to the job list.")),
+    h("p", { class: "subtle", style: "font-size:12px" }, String((e && e.message) || e || "")),
+    h("div", { class: "btn-row" },
+      h("button", { class: "btn btn--primary", onclick: () => route() }, "↻ Try again"),
+      storage ? h("button", { class: "btn btn--ghost", onclick: () => reloadApp() }, "Reload app")
+        : away ? h("button", { class: "btn btn--ghost", onclick: () => go("#/") }, "‹ Job list") : null)));
+}
+function reloadApp() {
+  flushPending().catch(() => {}).then(() => {
+    if (hasUnsaved() && !confirm("Some changes haven't saved on this phone yet and will be lost if the app reloads now. Reload anyway?")) return;
+    location.reload();
+  });
+}
+/* the banner: storage failed even after a reopen (core.js onStorageLost) */
+let storageBanner = null;
+onStorageLost(() => {
+  if (storageBanner || typeof document === "undefined") return;
+  storageBanner = h("div", { role: "alert", style: "position:fixed;left:0;right:0;bottom:0;z-index:9999;background:var(--red,#c0392b);color:#fff;padding:10px 14px;display:flex;gap:10px;align-items:center;justify-content:space-between" },
+    h("span", {}, "⚠ This phone stopped saving. Nothing new is being kept."),
+    h("button", { class: "btn btn--sm", style: "width:auto;flex:none", onclick: () => reloadApp() }, "Reload"));
+  document.body.append(storageBanner);
+});
+onStorageBack(() => { if (storageBanner) { storageBanner.remove(); storageBanner = null; } });
+
+async function routeInner() {
+  try { await flushPending(); }      // persist any in-flight edit before reloading
+  catch { /* still queued in core.js; the page below opens THAT copy (unsavedProject) */ }
   renderTechChip();
   liveProject = null;
   if (needsLogin()) return renderLogin();
@@ -211,7 +265,8 @@ async function route() {
     return helpPage(clear(view));
   }
   if (parts[0] === "p" && parts[1]) {
-    const project = await Store.get(parts[1]);
+    // an edit that hasn't reached the disk is the newest copy of this job
+    const project = unsavedProject(parts[1]) || await Store.get(parts[1]);
     if (!project) return go("#/");
     liveProject = project;
     mountAssist(project);   // 💬 job-aware assistant floats over every job page
@@ -888,9 +943,10 @@ function rebuildPanel(project) {
       const qa = (project.rebuildQA || []).filter((x) => x && String(x.a || "").trim());
       if (qa.length) facts.estimatorAnswers = qa.map((x) => ({ question: x.q, answer: x.a }));
       const draft = await draftRebuild(project, facts);
-      // the call can take a while — write onto a FRESH copy (the tech may have
-      // kept editing) and only repaint if they're still on this job home
-      const fresh = (await Store.get(project.id)) || project;
+      // the call can take a while — write onto the job's newest copy (the tech
+      // may have kept editing, or moved on: a page of this job saves its own
+      // copy, so the draft lands there) and only repaint if they're still on this job home
+      const fresh = liveCopy(project.id) || unsavedProject(project.id) || (await Store.get(project.id)) || project;
       fresh.rebuildDraft = { draft, chips: rebuildChips(draft), createdAt: new Date().toISOString(), status: "draft" };
       fresh.updatedAt = new Date().toISOString();
       await Store.put(fresh);
@@ -999,7 +1055,8 @@ function timelinePanel(project) {
       const qa = (project.timelineQA || []).filter((x) => x && String(x.a || "").trim());
       if (qa.length) facts.plannerAnswers = qa.map((x) => ({ assumption: x.q, answer: x.a }));
       const draft = await draftTimeline(project, facts, history);
-      const fresh = (await Store.get(project.id)) || project;
+      // onto the job's newest copy, as the rebuild draft above
+      const fresh = liveCopy(project.id) || unsavedProject(project.id) || (await Store.get(project.id)) || project;
       fresh.boardPlan = {
         phases: planPhases(draft),
         notBefore: isoDateOnly(draft.notBefore),   // never trust model prose as a date
@@ -1214,54 +1271,219 @@ function boardCard(project) {
    back, and nothing anyone else did is touched. That also makes the button
    idempotent — tapping it repeatedly in the field changes nothing after the
    first time. Reverting a bad edit is a different job, and belongs to the
-   admin-side history (blob_history), which can revert wholesale on purpose. */
+   admin-side history (blob_history), which can revert wholesale on purpose.
+
+   LISTED BY KEY, OPENED ON TAP. The card used to load every snapshot just to
+   print what each one held, so opening a photo-heavy job read every copy at
+   once — the same load that crashed an iPhone on every launch from sync (see
+   Store.backup). A row now shows only its time and size, a backup is read
+   when its Restore is tapped, and backups saved before snapshots were split
+   up load only from the "Show older backups" button, with a warning. */
 function backupsCard(project) {
   const box = h("div");
-  Store.backups(project.id).then((snaps) => {
-    if (!snaps.length) return;
-    const rows = snaps.map((s) => {
-      const d = s.data || {};
-      const when = String(s.takenAt || "").replace("T", " ").slice(0, 16);
-      const desc = `${when} — ${(d.photos || []).length} photos, ${(d.moistureMaps || []).length} moisture maps, ` +
-        `${(d.dryingLogs || []).length} drying logs, ${(d.constructionLogs || []).length} field reports`;
-      const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
-      btn.addEventListener("click", async () => {
-        if (!confirm(`Bring back anything missing from the ${when} backup?\n\nNothing on the job is removed — this only adds back what the backup has and the current copy doesn't. The current copy is saved as a backup first either way.`)) return;
-        btn.disabled = true;
-        const current = await Store.get(project.id);
-        if (current) await Store.backup(current);
-        const snap = { ...s.data };
-        delete snap.rev;
-        // UNION, never replace: the current copy is the newer side, so its
-        // scalars win and the snapshot only contributes what went missing.
-        const { merged, added, filledForms } = current
-          ? mergeProjects(current, snap)
-          : { merged: snap, added: 0, filledForms: 0 };
-        merged.id = project.id;
-        delete merged.rev;
-        pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring back what it took off
-        await Store.put(merged);     // fresh updatedAt → re-syncs
-        const bits = [];
-        if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
-        if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
-        toast(bits.length ? `Recovered ${bits.join(" and ")} from the backup.` : "Nothing was missing — the job already has everything in that backup.");
-        setTimeout(() => location.reload(), 600);
-      });
-      return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
-        h("span", { class: "subtle", style: "font-size:13px" }, desc), btn);
-    });
+  Promise.all([Store.snapshots(project.id), Store.hasOlderBackups(project.id)]).then(([snaps, older]) => {
+    if (!snaps.length && !older) return;
+    // stamped 1 ms after the next older one: saved while the clock read earlier (core.js backup)
+    const pushed = (i) => i + 1 < snaps.length && Date.parse(snaps[i].takenAt) - Date.parse(snaps[i + 1].takenAt) === 1;
+    const rows = snaps.map((s, i) => backupRow(project, s.takenAt, `about ${sizeLabel(s.bytes)}`, () => Store.snapshotEntry(s.key), s.key, pushed(i)));
     const head = h("div", { style: "display:flex;align-items:center;gap:8px" },
       h("div", { style: "font-weight:700" }, "⏪ Backups on this device"),
       h("span", { class: "subtle", style: "margin-left:auto;font-weight:600" },
-        `${snaps.length} snapshot${snaps.length === 1 ? "" : "s"}`));
+        `${snaps.length} snapshot${snaps.length === 1 ? "" : "s"}${older ? " + older" : ""}`));
     const bodyBox = h("div", {},
       h("p", { class: "subtle", style: "margin:6px 0 2px;font-size:13px" },
         "Saved automatically right before cloud sync replaced this job with a version from another device. Restoring only ADDS BACK what's missing — it never removes anyone else's work, so it's safe to tap."),
       ...rows);
+    if (older) {
+      const more = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;margin-top:10px" }, "Show older backups");
+      more.addEventListener("click", async () => {
+        if (!confirm("These backups were saved before this app update, all in one piece, so opening them loads every copy at once.\n\nOn a job with lots of photos that can be more than this phone can hold, and the app may crash and reload. Open them?")) return;
+        more.disabled = true; more.textContent = "Opening…";
+        try {
+          const old = await Store.olderBackups(project.id);
+          more.replaceWith(...(old.length
+            ? old.map((s) => backupRow(project, s.takenAt, backupCounts(s.data), async () => ({ data: s.data }), project.id))
+            : [h("p", { class: "subtle", style: "margin:8px 0 0;font-size:13px" }, "No older backups left on this device.")]));
+        } catch {
+          more.disabled = false; more.textContent = "Show older backups";
+          toast("Couldn't open the older backups.");
+        }
+      });
+      bodyBox.append(more);
+    }
     foldable(head, bodyBox, "backups", true);   // rarely needed — starts tucked away
     box.append(h("div", { class: "card app-only" }, head, bodyBox));
   }).catch(() => {});
   return box;
+}
+const backupCounts = (d) => `${(d && d.photos || []).length} photos, ${(d && d.moistureMaps || []).length} moisture maps, ` +
+  `${(d && d.dryingLogs || []).length} drying logs, ${(d && d.constructionLogs || []).length} field reports`;
+/* a form only tapped open: every field still empty or as the factory made it
+   (any freshly minted id, and the dates it fills in, which are all the day it
+   was opened: one the crew set to another day makes it a filled form) — what
+   the form tile saves when a job has none yet */
+function tappedOpen(key, form) {
+  const make = FACTORY[key];
+  const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+  if (typeof make !== "function" || !isObj(form)) return false;
+  const unset = (v) => v == null || v === "" || (Array.isArray(v) && !v.length);
+  const day = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v);
+  const days = new Set();   // the plain dates (a createdAt stamp is UTC and never typed)
+  const same = (v, b, k) => {
+    if (k === "id" && typeof v === "string" && typeof b === "string") return true;
+    if (day(v) && day(b)) { if (v.length === 10) days.add(v); return true; }
+    if (Array.isArray(v)) return Array.isArray(b) && v.length === b.length && v.every((x, i) => same(x, b[i]));
+    if (isObj(v)) return isObj(b) && Object.keys(v).every((kk) => same(v[kk], b[kk], kk));
+    return v === b;
+  };
+  const blank = make();
+  return Object.keys(form).every((k) => unset(form[k]) || same(form[k], blank[k], k)) && days.size <= 1;
+}
+const sizeLabel = (bytes) => bytes >= 1048576
+  ? `${(bytes / 1048576).toFixed(bytes >= 10485760 ? 0 : 1)} MB`
+  : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+/* one backup: its time and a line about it, and a Restore that reads the copy
+   (load, giving { data, kind }) only when tapped, says what it holds,
+   then adds back what the job is missing. `keep` is where the copy lives (its
+   snapshot key, or the job id for a pre-split backup), so the backup of the
+   current copy can't prune it.
+
+   For a copy sync replaced, or one a delete or a Restore saved first (kind
+   "replaced"), the job is the newer side of that union and the backup only
+   fills in what it lacks: a backup
+   taken while the job was stamped by a clock ahead of this phone's would
+   otherwise count as newer and put its old values back over the crew's
+   corrections. The copy "Take the cloud's copy" set aside ("set-aside") is
+   this phone's own work, not an older copy, so it keeps its stamp and, where
+   it is newer than the job, its values come back too (the toast says which
+   way it went). So does a backup saved
+   before records said which they are, as every backup always did: it may be
+   a set-aside copy. A form on either side that was only tapped open (a factory
+   blank, nothing typed) never stands in for the other side's: its dates and
+   pre-checked boxes are defaults, not anyone's answer, and would otherwise
+   win over a signed copy.
+
+   The restore lands IN the copy of the job this page is bound to
+   (liveProject), merged and grafted in one tick, and that copy is what it
+   saves. A receipt read, a meter read or a Magicplan write that finishes
+   meanwhile lands on that same object (receipts.js liveOf) and saves it
+   directly, never through the save queue: one landing before the merge is
+   merged in, and one landing after it adds to the restored copy instead of
+   writing the old one back. A write that went around that copy to the store
+   (sync's, before its graft) is unioned into it first, in the tick Restore's
+   read of the stored copy arrives and before the backup, so whatever lands
+   on that copy while the backup saves goes on top and stands: a read, the
+   crew's own tap (an Unarchive clearing its date), sync's graft of an
+   office edit, an AI draft stamped by a clock behind the job's. In that
+   union the stored copy is the newer side unless the page's copy changed
+   while the read was out: it then holds everything that copy saved plus the
+   write that went around it, whatever their stamps say (a Progress Update
+   regenerated on a job stamped ahead of this phone lands behind it).
+   The page then re-renders from it, with no reload, so an edit still waiting
+   to save on another job is never in the way; so does any other page of this
+   job the crew opened meanwhile, which may hold a copy read before the
+   restore. An edit to this job still in the save queue is the newest copy:
+   the restore waits for it. A save that fails keeps the restore in the
+   queue, which retries on its own, like any other edit.
+
+   Snapshots sort in the order they were saved, not by the clock (core.js
+   backup): one saved while the clock read earlier than the newest stamp is
+   stamped just after it (`pushed`), so after a clock that ran ahead is set
+   right the later ones all carry that one's time. Those, and a time still in
+   the future, say the time may be off. */
+function backupRow(project, takenAt, line, load, keep, pushed = false) {
+  const when = String(takenAt || "").replace("T", " ").slice(0, 16);
+  const off = pushed || Date.parse(takenAt) > Date.now() + 60e3 ? " (time may be off: the phone's clock was set wrong)" : "";
+  const btn = h("button", { class: "btn btn--ghost btn--sm", style: "width:auto;flex:none" }, "⏪ Restore");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const got = await Promise.resolve().then(load).catch(() => null);
+    const data = got && got.data;
+    if (!data) { btn.disabled = false; toast("That backup is no longer on this device."); return; }
+    const replaced = got.kind === "replaced", setAside = got.kind === "set-aside";
+    // which side a set-aside copy lands on is the merge's to decide, by the
+    // stamps the job carries when it runs: the question gives the rule, and
+    // the toast says how it came out
+    const kept = setAside
+      ? "This is the copy this phone set aside when it took the cloud's copy. Nothing on the job is removed: anything it has that the job doesn't comes back, and where both have a value, the copy saved last keeps its own."
+      : "Nothing on the job is removed — this only adds back what the backup has and the current copy doesn't.";
+    if (!confirm(`Bring back anything missing from the ${when} backup${off}?\n\nIt holds ${backupCounts(data)}.\n\n${kept} The current copy is saved as a backup first either way.`)) {
+      btn.disabled = false;
+      return;
+    }
+    const id = project.id;
+    const stillSaving = () => {
+      btn.disabled = false;
+      toast("Your last change to this job is still saving on this phone. It keeps trying by itself; tap Restore again in a moment.", 5000);
+    };
+    // the job on screen once the restore is in, on whichever of its pages:
+    // one opened meanwhile may be bound to a copy read before the restore
+    const showIt = () => { if (location.hash === `#/p/${id}` || location.hash.startsWith(`#/p/${id}/`)) route(); };
+    let target = null, bits = [], backNewer = false;
+    try {
+      await flushPending().catch(() => {});
+      if (unsavedProject(id)) return stillSaving();
+      const before = liveCopy(id), beforeAt = before && before.updatedAt;
+      const current = await Store.get(id);
+      // a write that went around the page's copy (sync's before its graft, or
+      // a page's left before its write landed) is in that read: union it in
+      // now, never by the stamps alone, which a skewed clock puts out of order.
+      // Unless the page's copy changed while the read was out, the read holds
+      // all it saved and is the newer side
+      const early = liveCopy(id);
+      if (early && current && current.updatedAt !== early.updatedAt && !unsavedProject(id)) {
+        const moved = early !== before || early.updatedAt !== beforeAt;
+        graftProject(early, (moved ? mergeProjects(early, current) : mergeProjects(current, { ...early, updatedAt: "" })).merged);
+      }
+      if (current) await Store.backup(current, { keep });
+      const live = liveCopy(id);
+      const base = live || (await Store.get(id));
+      // an edit queued meanwhile on another copy of the job would save over this one
+      const queued = unsavedProject(id);
+      if (queued && queued !== live) return stillSaving();
+      // UNION, never replace: the current copy is the newer side, so its
+      // scalars win and the snapshot only contributes what went missing —
+      // except a set-aside copy, or one saved before records said, which
+      // keeps its stamp (see above)
+      const snap = { ...data, updatedAt: replaced ? "" : data.updatedAt };
+      delete snap.rev;
+      let side = base;
+      for (const key of base ? FORM_SLOTS : []) {
+        if (base[key] == null || snap[key] == null) continue;
+        if (tappedOpen(key, snap[key])) delete snap[key];
+        else if (tappedOpen(key, base[key])) { if (side === base) side = { ...base }; delete side[key]; }
+      }
+      backNewer = !!base && String(snap.updatedAt || "") > String(base.updatedAt || "");
+      const { merged, added, filledForms } = base
+        ? mergeProjects(side, snap)
+        : { merged: snap, added: 0, filledForms: 0 };
+      merged.id = id;
+      delete merged.rev;
+      pruneForeignMeasured(merged);   // a backup from before a Magicplan switch doesn't bring back what it took off
+      // nothing awaited from the merge to here: no landing can fall between them
+      target = live ? graftProject(live, merged) : merged;
+      if (added) bits.push(`${added} item${added === 1 ? "" : "s"}`);
+      if (filledForms) bits.push(`${filledForms} form${filledForms === 1 ? "" : "s"}`);
+      await Store.put(target);     // fresh updatedAt → re-syncs
+    } catch {
+      btn.disabled = false;
+      if (!target) { toast("This phone couldn't run the restore just now. Try again in a moment.", 5000); return; }
+      // the restore is in this job's copy: the save queue keeps it and retries
+      autosave(target, null);
+      toast(`${!backNewer && bits.length ? `Recovered ${bits.join(" and ")} from the backup, but` : "The restore is in, but"} this phone couldn't save it yet. It keeps trying by itself; leave the app open.`, 6000);
+      showIt();
+      return;
+    }
+    // a backup newer than the job is the merge's newer side, so its counts are of the job's side
+    const jobKept = setAside ? " Where both had a value, the job's copy, saved at least as recently, kept its own." : "";
+    toast(backNewer ? (setAside ? "Brought back this phone's changes from before it took the cloud's copy." : "Brought back what that backup had.")
+      : bits.length ? `Recovered ${bits.join(" and ")} from the backup.${jobKept}`
+      : setAside ? `Nothing was missing from the job.${jobKept}`
+      : "Nothing was missing — the job already has everything in that backup.", !backNewer && jobKept ? 6000 : undefined);
+    showIt();
+  });
+  return h("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px" },
+    h("span", { class: "subtle", style: "font-size:13px" }, `${when} — ${line}${off}`), btn);
 }
 
 /* ---------- "take the cloud's copy" card ----------
@@ -2900,20 +3122,37 @@ if ("serviceWorker" in navigator) {
     const a = document.activeElement;
     return !!document.querySelector(".sc") || !!(a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable));
   };
-  // the last edit (autosave waits 350 ms) is saved before the page goes
+  // the last edit (autosave waits 350 ms) is saved before the page goes; an
+  // edit that still can't save (core.js keeps it queued) is never reloaded
+  // away — the update waits for a page change or app switch after it lands
   const doReload = () => {
     if (reloading) return;
     reloading = true;
-    Promise.resolve().then(flushPending).catch(() => {}).then(() => location.reload());
+    Promise.resolve().then(flushPending).catch(() => {}).then(() => {
+      if (!hasUnsaved()) return location.reload();
+      reloading = false;
+      later();
+    });
+  };
+  let waiting = false;
+  const later = () => {
+    if (waiting) return;
+    waiting = true;
+    const fire = () => {
+      waiting = false;
+      window.removeEventListener("hashchange", onHash);
+      document.removeEventListener("visibilitychange", onHide);
+      doReload();
+    };
+    const onHash = () => { if (!typing()) fire(); };
+    const onHide = () => { if (document.hidden) fire(); };
+    window.addEventListener("hashchange", onHash);
+    document.addEventListener("visibilitychange", onHide);
   };
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (hadController && !reloading) {
       if (!typing()) doReload();
-      else {
-        const safe = () => { if (!typing()) doReload(); };
-        window.addEventListener("hashchange", safe, { once: true });
-        document.addEventListener("visibilitychange", () => { if (document.hidden) doReload(); }, { once: true });
-      }
+      else later();
     }
     hadController = true;
   });
